@@ -171,6 +171,12 @@ def test_vocabulary_adapter_dispatches_only_its_bounded_arguments(monkeypatch) -
 
     def record(name: str):
         def leaf(vault_root, **kwargs):
+            if name == "review":
+                from exomem.review_dimensions import ReviewDimensions
+
+                dimensions = kwargs.pop("dimensions")
+                assert isinstance(dimensions, ReviewDimensions)
+                assert dimensions.root == vault_root and not dimensions.filtered
             calls.append((name, {"vault_root": vault_root, **kwargs}))
             return {"leaf": name}
 
@@ -290,7 +296,14 @@ def test_vocabulary_review_context_and_decision_reach_the_real_leaves(
     listed = commands.op_review_memory(tmp_path, mode="vocabulary")
     for row in listed["items"]:
         row.pop("id")  # the command stamps the short review id; the review itself does not
-    assert listed == vocabulary_review.review(tmp_path)
+    expected = vocabulary_review.review(tmp_path)
+    assert len(listed["items"]) == len(expected["items"])
+    for observed, original in zip(listed["items"], expected["items"], strict=True):
+        assert {key: observed[key] for key in original} == original
+        assert observed["dimension_status"] in {"known", "unknown", "not_applicable"}
+    assert {key: listed[key] for key in expected if key != "items"} == {
+        key: value for key, value in expected.items() if key != "items"
+    }
     context = commands.op_review_item_context(tmp_path, ref=item.ref)
     decision = {
         "item_ref": context["item"]["ref"],

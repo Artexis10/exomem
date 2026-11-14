@@ -740,7 +740,8 @@ def build_packet(
         item: LaneItem, reason: str, *, exact_path: bool = False, source_ref: str | None = None,
     ) -> None:
         nonlocal used, promoted_used
-        if _material_capped(item):
+        # Source-bound qualifications add no candidate; pointer and prose caps still apply.
+        if source_ref is None and _material_capped(item):
             capped_material.setdefault(item.role, None)
             return
         if len(pointers) >= MAX_POINTERS:
@@ -757,7 +758,7 @@ def build_packet(
         pointers.append(pointer)
         if source_ref is not None:
             pointer_sources[id(pointer)] = source_ref
-        if item.role in material_roles:
+        if source_ref is None and item.role in material_roles:
             per_role[item.role] = per_role.get(item.role, 0) + 1
             represented.update(item.request_anchors)
         used += cost

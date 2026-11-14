@@ -582,10 +582,13 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         clear_reader_caches(vault)
         # Cache eviction also clears the watcher registry. Restore service readiness before
         # comparing bounded graph reads and complete link answers with the store's current rows.
-        if sample_arguments.get("links") or name == "viewer_map":
+        if sample_arguments.get("links") or name in {"viewer_map", "review_memory"}:
             freshness.seed(vault, "vault", (
                 (str(path), freshness.stat_signature(path)) for path in vaults.walk_vault_md(vault)
             ))
+            if name == "review_memory":
+                # Compare full annotations with the store's current structures, not a stale file catalogue.
+                assert lexstore.ensure_fresh(vault)
             assert epistemic_graph.EpistemicGraphIndex(vault).available()
         if sample_arguments.get("links"):
             assert vaults.prime_inbound_index(vault, eager=True)

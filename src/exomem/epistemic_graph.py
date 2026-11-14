@@ -94,7 +94,8 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-# Generation16 adds authored resolver targets and ordinary-body dependency presence; rebuild old rows before publishing them.
+# Generation16 adds authored resolver targets and ordinary-body dependency presence;
+# rebuild old rows before publishing them.
 SCHEMA_VERSION = 16
 _DEPENDENCY_FORMAT = 2
 UNIT_SEED_MAX_BATCHES = 4
@@ -2498,11 +2499,13 @@ def write_page_graph_rows(
         _insert_edge(conn, edge)
     if body_link_column:
         conn.executemany(
-            "INSERT INTO graph_dependencies(source_path, lookup_key, raw_target, body_link) VALUES (?, ?, ?, ?)",
+            "INSERT INTO graph_dependencies(source_path, lookup_key, raw_target, body_link) "
+            "VALUES (?, ?, ?, ?)",
             [(rel, key, target, body_link) for key, target, body_link in rows.dependencies],
         )
     else:
-        # An owner1 store remains writable before the bounded owner2 pass creates its derived column.
+        # An owner1 store remains writable before the bounded owner2 pass creates
+        # its derived column.
         conn.executemany(
             "INSERT INTO graph_dependencies(source_path, lookup_key, raw_target) VALUES (?, ?, ?)",
             [(rel, key, target) for key, target, _body_link in rows.dependencies],
@@ -2844,9 +2847,13 @@ class EpistemicGraphIndex:
                 PRIMARY KEY(source_path, lookup_key, raw_target)
             )
         """)
-        dependency_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_dependencies)")}
+        dependency_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(graph_dependencies)")
+        }
         if "body_link" not in dependency_columns:
-            conn.execute("ALTER TABLE graph_dependencies ADD COLUMN body_link INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE graph_dependencies ADD COLUMN body_link INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute(
             "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
             (secrets.token_hex(16),),
@@ -3401,7 +3408,8 @@ class EpistemicGraphIndex:
                 and stored_checkpoint == current_checkpoint
             )
             if current and not exact_live_checkpoint:
-                # The first SELECT pins the snapshot; a preceding write cannot borrow an older proof.
+                # The first SELECT pins the snapshot; a preceding write cannot
+                # borrow an older proof.
                 if _sidecar_file_identity(self.path) != sidecar_identity:
                     if outcome_out is not None:
                         outcome_out.append("unproven")
@@ -9396,7 +9404,10 @@ class EpistemicGraphIndex:
             resident, checkpoint, publication = borrowed
             if stored is not None and checkpoint == stored:
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
-            if _resident_topology_fingerprint(self.vault_root, resident, publication, check=check) == topology:
+            if (
+                _resident_topology_fingerprint(self.vault_root, resident, publication, check=check)
+                == topology
+            ):
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
             # A built resolver would describe the same live vault and hash to the same
             # fingerprint: one topology hash decides this read.
@@ -9543,8 +9554,13 @@ class EpistemicGraphIndex:
                             status="temporarily_unavailable", reason="resolver_unavailable"
                         )
                 view = GraphView(
-                    self.vault_root, conn, keep=keep, admitted=allowed_paths, resolver=link_resolver,
-                    reads_placeholders=False, check=check,
+                    self.vault_root,
+                    conn,
+                    keep=keep,
+                    admitted=allowed_paths,
+                    resolver=link_resolver,
+                    reads_placeholders=False,
+                    check=check,
                 )
                 meaning = _relation_meaning(view, anchor=None, registry_scope=None)
                 if meaning is None:
@@ -9563,7 +9579,8 @@ class EpistemicGraphIndex:
                     if pages is None:
                         rederived = view.changed_sources()
                     else:
-                        # Indexed inbound authors include newly resolved edges without enumerating unrelated pages.
+                        # Indexed inbound authors include newly resolved edges
+                        # without enumerating unrelated pages.
                         for page in sorted(pages):
                             view._check()
                             for source in {page, *view.inbound_sources(page)}:
@@ -9580,7 +9597,11 @@ class EpistemicGraphIndex:
                             dst_path = view.node_path(str(authored["dst_key"]))
                             if src_path is None or dst_path is None:
                                 continue
-                            if pages is not None and src_path not in pages and dst_path not in pages:
+                            if (
+                                pages is not None
+                                and src_path not in pages
+                                and dst_path not in pages
+                            ):
                                 continue
                             candidates.append((src_path, dst_path, (page, index), authored))
                 rows = _matched_rows(view, candidates, plan)
@@ -10754,7 +10775,9 @@ def _relation_labels(
             definition = adapter.resolve(label).definition
             if definition is None:
                 continue
-            terminal = adapter.definition(adapter.terminal_replacement(definition.key) or definition.key)
+            terminal = adapter.definition(
+                adapter.terminal_replacement(definition.key) or definition.key
+            )
             # A deprecated authored label can reach a core meaning through its author's replacement.
             for meaning in (definition, terminal):
                 if meaning is None:
@@ -10777,9 +10800,14 @@ def _family_relation_predicate(
                   if registry.family_of(registry.terminal_replacement(key) or key) in families
                   or not registry.behaviours_of(key).isdisjoint(behaviours))
     plan = traversal_profiles.relation_query_plan(registry, keys)
-    labels = _relation_labels(plan, registry, (
-        snapshots["relations"].typed for _instance, snapshots in interpretations.admitted_instances()
-    ))
+    labels = _relation_labels(
+        plan,
+        registry,
+        (
+            snapshots["relations"].typed
+            for _instance, snapshots in interpretations.admitted_instances()
+        ),
+    )
     # A neutral occurrence-to-parent structural edge never supplies dimension membership.
     relation = (
         "NOT (e.dst_key = 'file:' || e.source_path "
@@ -10789,30 +10817,39 @@ def _family_relation_predicate(
         "OR e.parent_relation IN (SELECT value FROM json_each(?)) "
         "OR (e.registry_status = ? AND e.raw_relation IN (SELECT value FROM json_each(?))))"
     )
-    return relation, [json.dumps(sorted(plan.exact_keys | plan.replacement_keys)),
-                      json.dumps(sorted(plan.parent_keys)), CANDIDATE_STATUS, json.dumps(sorted(labels))]
+    return relation, [
+        json.dumps(sorted(plan.exact_keys | plan.replacement_keys)),
+        json.dumps(sorted(plan.parent_keys)),
+        CANDIDATE_STATUS,
+        json.dumps(sorted(labels)),
+    ]
 
 
 def family_proposal(vault_root: Path, families: Collection[str]) -> tuple[str, list[Any]]:
     """Indexed neutral edge/dependency presence over `u` and `p`, before selected interpretation."""
     registry = relation_registry.load_registry(vault_root)
-    relation, bound = _family_relation_predicate(registry, families, semantic_index.Interpretations(vault_root))
+    relation, bound = _family_relation_predicate(
+        registry, families, semantic_index.Interpretations(vault_root)
+    )
     nearby = (
         "EXISTS(SELECT 1 FROM graph_nodes n JOIN graph_edges e ON e.src_key = n.node_key "
         f"WHERE n.path = u.parent_path AND {relation}) OR "
-        f"EXISTS(SELECT 1 FROM graph_edges e WHERE e.dst_page_key = 'file:' || u.parent_path AND {relation})"
+        "EXISTS(SELECT 1 FROM graph_edges e WHERE e.dst_page_key = 'file:' || u.parent_path "
+        f"AND {relation})"
     )
     link = registry.family_of(registry.link_key) in families
     dependencies = (
         "EXISTS(SELECT 1 FROM graph_dependencies d WHERE d.lookup_key IN "
         "(SELECT value FROM json_each(exomem_dependency_keys(u.parent_path, p.title))) "
         f"AND ((d.body_link = 1 AND ?) OR EXISTS(SELECT 1 FROM graph_edges e "
-        "WHERE e.source_path = d.source_path AND json_extract(e.metadata, '$.raw_target') = d.raw_target "
+        "WHERE e.source_path = d.source_path "
+        "AND json_extract(e.metadata, '$.raw_target') = d.raw_target "
         f"AND {relation})))"
     )
     if link:
         dependencies += (
-            " OR EXISTS(SELECT 1 FROM graph_dependencies d WHERE d.source_path = u.parent_path AND d.body_link = 1)"
+            " OR EXISTS(SELECT 1 FROM graph_dependencies d WHERE d.source_path = u.parent_path "
+            "AND d.body_link = 1)"
         )
     return f"({nearby} OR {dependencies})", [*bound, *bound, int(link), *bound]
 
@@ -10833,7 +10870,8 @@ def stored_family_edges(
         raise find_module.RetrievalIndexWarming(site="relation_graph")
     store_read.require_current_parser(conn)
     generation = store_read.derived_registry(conn)
-    # A partial projection can turn a negative predicate into a false complete answer; only its dependent read waits.
+    # A partial projection can turn a negative predicate into a false complete
+    # answer; only its dependent read waits.
     if generation is not None and (
         generation.owner_schema_version is None
         or generation.owner_schema_version < rederive.UNIT_ROW_KEYS_OWNER_VERSION
@@ -10841,22 +10879,29 @@ def stored_family_edges(
         raise find_module.RetrievalIndexWarming(site="relation_graph")
     if not pages:
         return
-    view = view or GraphView(vault_root, conn, keep=egress.edge_view(vault_root, keep), reads_placeholders=False)
+    view = view or GraphView(
+        vault_root, conn, keep=egress.edge_view(vault_root, keep), reads_placeholders=False
+    )
     registry = lookups.relations
-    relation, bound = _family_relation_predicate(registry, lookups.by_family, view.interpretations, behaviours)
+    relation, bound = _family_relation_predicate(
+        registry, lookups.by_family, view.interpretations, behaviours
+    )
     named = conn.execute(
         "SELECT path, title FROM pages WHERE path IN (SELECT value FROM json_each(?))",
         (json.dumps(sorted(pages)),),
     ).fetchall()
-    dependency_keys = sorted({key for path, title in named for key in dependency_keys_for_page(path, title)})
-    plain_links = registry.family_of(registry.link_key) in lookups.by_family or not registry.behaviours_of(
+    dependency_keys = sorted(
+        {key for path, title in named for key in dependency_keys_for_page(path, title)}
+    )
+    plain_links = registry.family_of(
         registry.link_key
-    ).isdisjoint(behaviours)
+    ) in lookups.by_family or not registry.behaviours_of(registry.link_key).isdisjoint(behaviours)
     incoming = conn.execute(
         "SELECT DISTINCT d.source_path FROM graph_dependencies d "
         "WHERE d.lookup_key IN (SELECT value FROM json_each(?)) "
         "AND ((d.body_link = 1 AND ?) OR EXISTS(SELECT 1 FROM graph_edges e "
-        "WHERE e.source_path = d.source_path AND json_extract(e.metadata, '$.raw_target') = d.raw_target "
+        "WHERE e.source_path = d.source_path "
+        "AND json_extract(e.metadata, '$.raw_target') = d.raw_target "
         f"AND {relation}))",
         (json.dumps(dependency_keys), int(plain_links), *bound),
     ).fetchall()
@@ -10890,10 +10935,15 @@ def stored_family_edges(
         view._check()
         target, fragment = _split_target_fragment(raw)
         tokens[author, raw] = author if not target and fragment else target
-    # Retired aliases name removed files; this operation requires ordinary admitted existing endpoint nodes.
+    # Retired aliases name removed files; this operation requires ordinary
+    # admitted existing endpoint nodes.
     try:
         resolutions = lexstore.get_store(vault_root).family_target_resolutions(
-            conn, set(tokens.values()), admit=view.admit, allowed=view.allowed, proofs=view._family_target_proofs,
+            conn,
+            set(tokens.values()),
+            admit=view.admit,
+            allowed=view.allowed,
+            proofs=view._family_target_proofs,
             check=view._check,
         )
     except TimeoutError as error:
@@ -10923,7 +10973,8 @@ def stored_family_edges(
         view._check()
         raw = row["metadata"].get("raw_target")
         if row["origin"] == "wikilink":
-            continue  # Dependencies include unresolved ordinary links and preserve page-level landing.
+            # Dependencies include unresolved ordinary links and preserve page-level landing.
+            continue
         if raw:
             selected = resolutions[tokens[str(row["source_path"]), str(raw)]]
             if selected.status != "resolved":
@@ -10969,14 +11020,27 @@ def _stored_family_edge(
     source, target = view.node_path(src), view.node_path(dst)
     if source is None or target is None or not (source in pages or target in pages):
         return
-    if not view.allowed(source) or not view.allowed(target) or view._nodes.get(src) is None or view._nodes.get(dst) is None:
+    if (
+        not view.allowed(source)
+        or not view.allowed(target)
+        or view._nodes.get(src) is None
+        or view._nodes.get(dst) is None
+    ):
         return
     source_unit = None if src == _file_key(source) else src
     target_unit = None if dst == _file_key(target) else dst
     if src == dst or source == target and (source_unit is None) != (target_unit is None):
         return
-    yield UnitEdge(source, source_unit, target, target_unit, relation, edge.get("parent_relation"), family,
-                   registry.behaviours_of(terminal))
+    yield UnitEdge(
+        source,
+        source_unit,
+        target,
+        target_unit,
+        relation,
+        edge.get("parent_relation"),
+        family,
+        registry.behaviours_of(terminal),
+    )
 
 
 #: One relation-query candidate: (source page, target page, position, edge).
@@ -13348,17 +13412,30 @@ def _structural_edges_for_page(
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination
-            edges.append(candidate_edge(
-                node_key, dst_key, relation.kind, "semantic_relation",
-                source_path=rel, source_anchor=anchor,
-                # Normalized so a reader can look candidates up by label.
-                raw_relation=relation_registry.normalize_relation(relation.raw.split(":", 1)[0]),
-                dst_page_key=dst_page_key, target_kind=target_kind,
-                metadata={
-                    **base, "line": relation.line, "raw": relation.raw, "raw_target": relation.target,
-                    "target_kind": target_kind, **metadata,
-                },
-            ))
+            edges.append(
+                candidate_edge(
+                    node_key,
+                    dst_key,
+                    relation.kind,
+                    "semantic_relation",
+                    source_path=rel,
+                    source_anchor=anchor,
+                    # Normalized so a reader can look candidates up by label.
+                    raw_relation=relation_registry.normalize_relation(
+                        relation.raw.split(":", 1)[0]
+                    ),
+                    dst_page_key=dst_page_key,
+                    target_kind=target_kind,
+                    metadata={
+                        **base,
+                        "line": relation.line,
+                        "raw": relation.raw,
+                        "raw_target": relation.target,
+                        "target_kind": target_kind,
+                        **metadata,
+                    },
+                )
+            )
     # The note grammar admits every grammar-valid row with a target; membership
     # of a legacy row without a colon is the selected interpretation's choice.
     notes = markdown_relations.interpret_markdown_relations(
@@ -13380,18 +13457,31 @@ def _structural_edges_for_page(
             canonical_lines.add(relation.line)
         dst_key, dst_page_key, target_kind, metadata = destination
         dependent = relation.kind not in core_labels
-        edges.append((candidate_edge if dependent else page_edge)(
-            file_key, dst_key, relation.kind,
-            "markdown_relation" if relation.canonical else "semantic_relation",
-            source_path=rel, source_anchor=f"line-{relation.line}", raw_relation=relation.kind,
-            dst_page_key=dst_page_key, source_kind="file", target_kind=target_kind,
-            metadata={
-                "line": relation.raw, "canonical": relation.canonical, "raw_target": relation.target,
-                **({"has_colon": colon.get(relation.line, False), "target_kind": target_kind}
-                   if dependent else {}),
-                **metadata,
-            },
-        ))
+        edges.append(
+            (candidate_edge if dependent else page_edge)(
+                file_key,
+                dst_key,
+                relation.kind,
+                "markdown_relation" if relation.canonical else "semantic_relation",
+                source_path=rel,
+                source_anchor=f"line-{relation.line}",
+                raw_relation=relation.kind,
+                dst_page_key=dst_page_key,
+                source_kind="file",
+                target_kind=target_kind,
+                metadata={
+                    "line": relation.raw,
+                    "canonical": relation.canonical,
+                    "raw_target": relation.target,
+                    **(
+                        {"has_colon": colon.get(relation.line, False), "target_kind": target_kind}
+                        if dependent
+                        else {}
+                    ),
+                    **metadata,
+                },
+            )
+        )
     edges.extend(_page_level_edges(
         vault_root, page, page_edge, body=page.body, canonical_lines=canonical_lines,
         resolver=resolver, visible=visible, check=check,
@@ -14678,7 +14768,9 @@ class GraphView:
         )
 
     def admit(self, paths: Iterable[str]) -> None:
-        """Prepare stored candidates' admission in bounded metadata/body batches before point selection."""
+        """Prepare stored candidates' admission in bounded metadata/body batches
+        before point selection.
+        """
         from . import request_budget
         from .governance import egress
         from .vault_store import read as store_read
