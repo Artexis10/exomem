@@ -240,10 +240,15 @@ class _Terminated(BaseException):
     """SIGTERM, raised where uvicorn sends it again, so the frames above it unwind and close."""
 
 
-def _end_after_teardown(_signum, _frame) -> None:
-    # A second SIGTERM while the teardown runs ends the process at once, as one did before.
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    raise _Terminated
+def _uvicorn_replay():
+    """The code of uvicorn's signal capture, which sends a captured signal again as it ends.
+
+    ``signal.raise_signal`` runs a Python handler before it returns, so a handler whose frame runs
+    this code was called by that replay and by nothing else.
+    """
+    import uvicorn
+
+    return uvicorn.Server.capture_signals.__wrapped__.__code__
 
 
 class ExomemFastMCP(FastMCP):
@@ -351,14 +356,29 @@ class ExomemFastMCP(FastMCP):
         if threading.current_thread() is not threading.main_thread():
             await super().run_http_async(*args, **kwargs)  # only the main thread takes signals
             return
-        previous = signal.signal(signal.SIGTERM, _end_after_teardown)
+        replay = _uvicorn_replay()
+        previous = signal.getsignal(signal.SIGTERM)
+        previous = signal.SIG_DFL if previous is None else previous
+
+        def end_after_teardown(_signum, frame) -> None:
+            if frame is None or frame.f_code is not replay:
+                # Any other SIGTERM, such as one while the lifespan starts, does what it did
+                # before: raised here, it could land in the event loop and end the process with 1.
+                signal.signal(signal.SIGTERM, previous)
+                signal.raise_signal(signal.SIGTERM)
+                return
+            # A second SIGTERM while the teardown runs ends the process at once, as one did before.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            raise _Terminated
+
+        signal.signal(signal.SIGTERM, end_after_teardown)
         try:
             await super().run_http_async(*args, **kwargs)
         except _Terminated:
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.raise_signal(signal.SIGTERM)
         finally:
-            if signal.getsignal(signal.SIGTERM) is _end_after_teardown:
+            if signal.getsignal(signal.SIGTERM) is end_after_teardown:
                 signal.signal(signal.SIGTERM, previous)
 
     async def run_stdio_async(

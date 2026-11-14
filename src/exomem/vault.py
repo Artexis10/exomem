@@ -3752,8 +3752,15 @@ def read_disk_bytes_without_pinning(path: Path) -> bytes:
     POSIX has no equivalent restriction -- `rename(2)` over an open file is
     always permitted -- so there this is exactly `path.read_bytes()`.
     """
+    with open_disk_file_without_pinning(path) as stream:
+        return stream.read()
+
+
+def open_disk_file_without_pinning(path: Path) -> BinaryIO:
+    """Open a file for reading as `read_disk_bytes_without_pinning` reads it, so a caller can
+    stream it: on Windows, the open file does not block a concurrent replacement of it."""
     if os.name != "nt":
-        return path.read_bytes()
+        return path.open("rb")
     import ctypes
     from ctypes import wintypes
 
@@ -3791,8 +3798,7 @@ def read_disk_bytes_without_pinning(path: Path) -> bytes:
     # `open_osfhandle` transfers ownership: closing the descriptor closes the
     # handle, so there is no path here that leaks it.
     descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
-    with os.fdopen(descriptor, "rb") as stream:
-        return stream.read()
+    return os.fdopen(descriptor, "rb")
 
 
 def _is_registered_internal_state_artifact(relative: str) -> bool:

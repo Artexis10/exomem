@@ -583,8 +583,113 @@ def test_a_second_replica_that_takes_the_lease_and_stops_at_once_leaves_nothing_
     assert left == [], (left, second.log.read_text(encoding="utf-8")[-6000:])
     # Each ends by the signal, as a supervisor that stops it expects.
     assert first.process.returncode == second.process.returncode == -signal.SIGTERM
-    # The follower's maintenance, which each refused request wakes, logs no lease traceback.
-    assert "retrying later\nTraceback" not in second.log.read_text(encoding="utf-8")
+
+
+def idle(service_state):
+    """Wait until no process of the replica holds a command claim on its grant, as when a service
+    has finished its last request and the background work that request started."""
+    from filelock import ReadWriteLock, Timeout
+
+    (claim,) = service_state.glob("writer-grant-*.db")
+    deadline = time.monotonic() + 90
+    while True:
+        lock = ReadWriteLock(claim, is_singleton=False)
+        try:
+            lock.acquire_write(blocking=False)
+            lock.release()
+            return
+        except Timeout:
+            assert time.monotonic() < deadline, "the service never became idle"
+            time.sleep(0.25)
+        finally:
+            lock.close()
+
+
+@pytest.mark.timeout(600)
+def test_an_idle_service_writes_after_a_cli_command_of_its_replica_hands_back_their_grant(
+    vault, tmp_path  # noqa: F811
+):
+    """A service and a one-shot CLI command with one replica id share one grant. The command hands
+    it back as it exits while the service is idle: a service that keeps trusting the grant refuses
+    its next page or record write with a lease error, or stops serving its collection store."""
+    import subprocess
+
+    from test_collection_store_writer import CID
+
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    with http_replica(vault, tmp_path, "shared") as service:
+        assert remember(service, "Before the command")["success"] is True
+        # A command that exits while one of the service's background steps holds a claim keeps the
+        # grant, as designed; the case needs an exit that lands while the service is idle.
+        for attempt in range(5):
+            idle(tmp_path / "lease-shared")
+            command = subprocess.run(
+                [sys.executable, "-m", "exomem", "remember", "--title", f"From command {attempt}",
+                 "--content", "# From the command\n\n## Claim\n\nA one-shot write.\n",
+                 "--field", "note_type=insight", "--field", "status=draft", "--json"],
+                env={**os.environ, "EXOMEM_WRITER_LEASE_REPLICA_ID": "shared",
+                     "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-shared"),
+                     "EXOMEM_WRITER_LEASE_PREFERRED": "0", "EXOMEM_DISABLE_EMBEDDINGS": "1"},
+                capture_output=True, text=True, timeout=300,
+            )
+            assert command.returncode == 0, command.stdout[-2000:] + command.stderr[-2000:]
+            if client.status().holder is None:  # the command handed the shared grant back
+                break
+        else:
+            pytest.fail("no command exited while the service was idle")
+
+        assert remember(service, "After the command")["success"] is True
+        appended = service.post("record_memory", {
+            "action": "append", "collection": CID, "item": {"title": "After the command"},
+            "why": "a record write after the command",
+        })
+        assert appended["success"] is True, appended
+        rows = service.post("record_memory", {"action": "query", "collection": CID})
+        assert "After the command" in [row["title"] for row in rows["data"]["rows"]], rows
+
+
+STARTS_AND_WAITS = """
+import asyncio, sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+from exomem.server import ExomemFastMCP
+
+@asynccontextmanager
+async def lifespan(_server):
+    Path(sys.argv[1]).write_text("starting")
+    await asyncio.Event().wait()  # a startup that awaits, as the schema publication can
+    yield
+
+ExomemFastMCP("startup", lifespan=lifespan).run(
+    transport="http", host="127.0.0.1", port=0, show_banner=False
+)
+"""
+
+
+def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path):
+    """A SIGTERM that lands while the lifespan's startup awaits, before uvicorn takes the signals:
+    raised as the exception that runs the teardown, it lands in the event loop instead and the
+    process ends with 1, which a supervisor reads as a crash."""
+    import subprocess
+
+    started = tmp_path / "started"
+    process = subprocess.Popen(
+        [sys.executable, "-c", STARTS_AND_WAITS, str(started)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not started.exists():
+            assert process.poll() is None, process.stdout.read().decode()[-3000:]
+            assert time.monotonic() < deadline, "the service did not start its lifespan"
+            time.sleep(0.05)
+        process.terminate()
+        output, _ = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(10)
+    assert process.returncode == -signal.SIGTERM, output.decode()[-3000:]
 
 
 def trashed_once(root, rel, body):

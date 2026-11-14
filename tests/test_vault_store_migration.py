@@ -70,9 +70,16 @@ def _lease_environment(tmp_path, url):
         "EXOMEM_WRITER_LEASE_TOKEN": "lease",
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-service"),
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
-        # Short, so the crash case waits out a dead owner's lease in seconds.
-        "EXOMEM_WRITER_LEASE_TTL": "3",
+        # Long enough that a loaded runner's late renewal does not let a live owner's lease
+        # expire, which fences the owner's own step with WRITER_FENCED. An owner that a test
+        # kills or breaks takes SHORT_LEASE_TTL instead.
+        "EXOMEM_WRITER_LEASE_TTL": "10",
     }
+
+
+#: The lease of an owner that a test kills or whose hand-back it breaks, so the test waits out the
+#: lease that the owner leaves in seconds.
+SHORT_LEASE_TTL = "3"
 
 
 @pytest.fixture
@@ -284,7 +291,10 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
     objects = store_objects(vault)
     child = multiprocessing.get_context("spawn").Process(
         target=_migrate_and_die,
-        args=({**os.environ, OPERATOR: OPERATOR_SECRET}, RELEASED),
+        args=(
+            {**os.environ, OPERATOR: OPERATOR_SECRET, "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
+            RELEASED,
+        ),
     )
     child.start()
     child.join(180)
@@ -406,18 +416,27 @@ def test_a_person_edit_made_after_the_migration_blocks_the_rollback_until_it_is_
 GAMMA = "Knowledge Base/Notes/Gamma.md"
 
 
-def queue_writes(root, *puts):
-    """Commit pages that no projector writes, as a service that stopped before its drain leaves
-    them."""
+def queue_change(root, **change):
+    """Commit a change that no projector projects, as a service that stopped before its drain
+    leaves it."""
     with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
         write.commit(
             CollectionWriter(root, handle),
-            write.StoreChange(
-                write.Origin.GOVERNED,
-                "queued at a stop",
-                puts=tuple(write.PagePut(rel, body) for rel, body in puts),
-            ),
+            write.StoreChange(write.Origin.GOVERNED, "queued at a stop", **change),
         )
+
+
+def queue_writes(root, *puts):
+    queue_change(root, puts=tuple(write.PagePut(rel, body) for rel, body in puts))
+
+
+def vacate_a_persons_edit(root):
+    """A page that a person edits on disk and the store then deletes: the rollback's projection
+    holds the file as the person's, at a path whose page the store no longer holds."""
+    person = b"# Beta\n\nThe person's own words.\n"
+    (root / BETA).write_bytes(person)
+    queue_change(root, deletes=(write.PageDelete(BETA),))
+    return person
 
 
 def test_a_rollback_projects_what_is_queued_and_its_dry_run_changes_nothing(
@@ -465,6 +484,75 @@ def test_a_persons_edit_at_a_queued_path_is_held_by_the_rollback_and_kept_in_its
     assert (vault / BETA).read_bytes() == store_beta
 
 
+def test_a_rollback_moves_a_vacated_file_into_the_trash_with_every_write_to_it(
+    vault, capsys, tmp_path
+):
+    """A rollback that removes a file whose page the store no longer holds, so a write that lands
+    after its export's copy has no copy anywhere, or that leaves the file where file mode finds
+    it."""
+    assert migrate_apply(vault) == 0
+    person = vacate_a_persons_edit(vault)
+
+    with (vault / BETA).open("ab") as editor:  # an editor that holds the file open throughout
+        assert rollback_apply(vault, tmp_path / "export", "--export-held") == 0, (
+            capsys.readouterr().err
+        )
+        editor.write(b"Saved after the export.\n")
+
+    latest = person + b"Saved after the export.\n"
+    kept = [path for path in vault.rglob("*.md") if path.read_bytes() == latest]
+    assert kept, "the write after the export's copy is in no file"
+    export = json.loads((tmp_path / "export/export.json").read_text(encoding="utf-8"))
+    assert kept == [vault / export["absent_from_store"][BETA]]
+    assert (tmp_path / "export/held" / BETA).read_bytes() == person
+    assert not (vault / BETA).exists() and not mode.store_mode_active(vault)
+
+
+def test_a_rollback_that_cannot_move_a_vacated_file_into_the_trash_stays_in_store_mode(
+    vault, capsys, tmp_path
+):
+    """A rollback that leaves store mode while a file whose page the store no longer holds is
+    still where file mode finds it, or that removes the file when it cannot move it."""
+    assert migrate_apply(vault) == 0
+    person = vacate_a_persons_edit(vault)
+    trash = vault / "Knowledge Base/_trash"
+    if trash.is_dir():
+        trash.rmdir()
+    trash.write_text("A file where the trash folder goes.\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert rollback_apply(vault, tmp_path / "export", "--export-held") == 1
+    refusal = capsys.readouterr().err
+    assert "VAULT_STORE_TRASH_REFUSED" in refusal and BETA in refusal
+    assert mode.store_mode_active(vault) and (vault / BETA).read_bytes() == person
+
+
+def test_a_rollback_and_its_dry_run_settle_a_vacated_folder_that_became_a_link(
+    vault, capsys, tmp_path
+):
+    """A dry run that reads a queued folder intent as a file and fails, or a rollback whose
+    clean-up refuses the link and stops before the projection that drops the folder's intent; or
+    one that removes or empties the link's target."""
+    assert migrate_apply(vault) == 0
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "kept.txt").write_text("outside the vault\n", encoding="utf-8")
+    (vault / "Knowledge Base/Linked").symlink_to(target, target_is_directory=True)
+    gamma = b"# Gamma\n\nA new page.\n"
+    queue_change(
+        vault, puts=(write.PagePut(GAMMA, gamma),), vacated_folders=("Knowledge Base/Linked",)
+    )
+    capsys.readouterr()
+
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["would_project"]["count"] == 2
+    assert rollback_apply(vault, tmp_path / "export") == 0, capsys.readouterr().err
+
+    assert (vault / GAMMA).read_bytes() == gamma and not mode.store_mode_active(vault)
+    assert (vault / "Knowledge Base/Linked").is_symlink()
+    assert (target / "kept.txt").read_text(encoding="utf-8") == "outside the vault\n"
+
+
 def _rollback_and_die(environment, released, export):
     """`rollback --apply` in a fresh interpreter that the operating system kills between two of
     its projections: after a file is written and before its manifest row."""
@@ -500,7 +588,11 @@ def test_a_rollback_killed_while_it_projects_is_finished_by_the_next_run(vault, 
     queue_writes(vault, *bodies.items())
     child = multiprocessing.get_context("spawn").Process(
         target=_rollback_and_die,
-        args=({**os.environ, OPERATOR: OPERATOR_SECRET}, RELEASED, str(tmp_path / "killed")),
+        args=(
+            {**os.environ, OPERATOR: OPERATOR_SECRET, "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
+            RELEASED,
+            str(tmp_path / "killed"),
+        ),
     )
     child.start()
     child.join(180)

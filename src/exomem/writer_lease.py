@@ -9085,6 +9085,8 @@ def hand_back_after_command() -> None:
     release. The lease then outlived the command by up to its TTL, and the owner's next offline
     step refused with a service that was not running. A serving process keeps its lease to its
     own stop; a handback that cannot finish leaves the lease to expire on its TTL, as before.
+    It assumes one command at a time in the process, as the CLI runs them: the close stops the
+    manager's renewer, so a command that another thread runs on it keeps its lease only to its TTL.
     """
     with _MANAGERS_LOCK:
         manager = _MANAGERS.get(LeaseConfig.from_env())

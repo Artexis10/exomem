@@ -348,10 +348,7 @@ class Projector:
         )
 
     def _loop(self) -> None:
-        try:
-            self.sweep_temporaries()
-        except Exception:  # noqa: BLE001 - a failed sweep must not stop projection; the next start sweeps again
-            log.warning("the vault projector's startup sweep failed", exc_info=True)
+        self.sweep_at_start()
         while not self._stopping():
             report = None
             try:
@@ -555,15 +552,17 @@ class Projector:
         is not this removal's to touch: it stays as it is, unheld and unlinked. Returns False only
         when the file was held, and True otherwise, meaning that the removal is settled.
         """
-        if disk is None:
+        verdict = _judge_removal(facts, None if disk is None else disk.sha256)
+        if verdict is Removal.GONE:
             # A retry after a refused flush finds the file gone; its removal is made durable first.
             _flush_folder(filesystem, _split(facts.path)[0])
             return True
-        if disk.sha256 in facts.own_hashes:
+        if verdict is Removal.UNLINK:
+            assert disk is not None
             _unlink(filesystem, facts.path, disk)
             report.removed += 1
             return True
-        if facts.manifest is None:
+        if verdict is Removal.LEAVE:
             return True
         self._hold_edit(filesystem, report, facts, store_revision=store_revision)
         return False
@@ -818,8 +817,22 @@ class Projector:
             raise Deferred(f"the held filesystem route is unavailable ({acquired.error.code})")
         with acquired.require() as filesystem:
             for folder in sorted(folders):
-                removed += self._sweep_folder(filesystem, folder)
+                try:
+                    removed += self._sweep_folder(filesystem, folder)
+                except held_fs.HeldFsError:
+                    # A folder that the held route refuses, such as a link, keeps what it holds;
+                    # the pass judges the intents below it.
+                    continue
         return removed
+
+    def sweep_at_start(self) -> None:
+        """The sweep that comes before the first pass. A failure leaves its temporaries for the
+        next start and does not stop the passes, here or in an offline drain."""
+        try:
+            self.sweep_temporaries()
+        # A failed sweep must not stop projection; the next start sweeps again.
+        except Exception:  # noqa: BLE001
+            log.warning("the vault projector's startup sweep failed", exc_info=True)
 
     def _sweep_folder(self, filesystem: held_fs.HeldFilesystem, folder: str) -> int:
         opened = _parent(filesystem, folder, access="mutate")
@@ -871,14 +884,52 @@ def _judge_write(facts: Facts, sha256: str | None) -> Judgement:
     return Judgement.PUBLISH
 
 
-def would_hold(vault_root: Path, rel: str, sha256: str | None) -> bool:
-    """Whether a pass would hold the file with ``sha256`` at ``rel`` (None: no file) as a person's,
-    where a queued intent writes, removes or moves it: a preview that writes nothing."""
-    facts = read_facts(vault_root, rel)
-    if facts.page is not None:  # a write, or a move's new path (``_project_write``)
-        return _judge_write(facts, sha256) in (Judgement.HOLD_EDIT, Judgement.HOLD_DELETE)
-    # A removal, or a move's old path (``_remove``): only a file of Exomem's goes.
-    return sha256 is not None and sha256 not in facts.own_hashes and facts.manifest is not None
+class Removal(enum.Enum):
+    """What a removal, or a move's old path, does with the file there: the closed set it acts on."""
+
+    GONE = enum.auto()
+    UNLINK = enum.auto()
+    #: A file that Exomem never projected here is not the removal's to touch: unheld and unlinked.
+    LEAVE = enum.auto()
+    HOLD = enum.auto()
+
+
+def _judge_removal(facts: Facts, sha256: str | None) -> Removal:
+    """Whether the file with ``sha256`` at a path (None: no file) that a removal takes away goes,
+    stays, or is a person's, held. Only a file of Exomem's goes."""
+    if sha256 is None:
+        return Removal.GONE
+    if sha256 in facts.own_hashes:
+        return Removal.UNLINK
+    if facts.manifest is None:
+        return Removal.LEAVE
+    return Removal.HOLD
+
+
+def preview_holds(
+    view: read.StoreSnapshot, written: dict[str, str | None], removed: dict[str, str | None]
+) -> set[str]:
+    """The paths whose file a pass would hold as a person's: a preview that writes nothing.
+
+    ``written`` maps each path that a queued intent writes, or a move's new path, and ``removed``
+    each path that one removes, or a move's old path, to its file's hash (None: no file). The facts
+    are read in batches, and each path is judged as ``_project_write`` and ``_remove`` judge it.
+    """
+    # Every path here has a queued intent, or is a queued move's old path, which is all that
+    # ``moves_away`` stands for in a judgement; no listing of the queue's move sources is needed.
+    facts = _facts_for(view, [*written, *removed], moving=set(removed))
+    held = set()
+    for rel, sha256 in written.items():
+        if facts[rel].page is not None:
+            if _judge_write(facts[rel], sha256) in (Judgement.HOLD_EDIT, Judgement.HOLD_DELETE):
+                held.add(rel)
+    for rel, sha256 in removed.items():
+        if facts[rel].page is not None:  # a page stored again here is written, as a pass writes it
+            if _judge_write(facts[rel], sha256) in (Judgement.HOLD_EDIT, Judgement.HOLD_DELETE):
+                held.add(rel)
+        elif _judge_removal(facts[rel], sha256) is Removal.HOLD:
+            held.add(rel)
+    return held
 
 
 # -- store reads ----------------------------------------------------------------------------------
@@ -887,35 +938,146 @@ def would_hold(vault_root: Path, rel: str, sha256: str | None) -> bool:
 def read_facts(vault_root: Path, rel: str) -> Facts:
     """What the store records about ``rel``, read in one snapshot; the importer reads it too."""
     with read.snapshot(vault_root) as view:
-        database = view.connection
-        queued = database.execute(
-            "SELECT path, revision, operation, from_path, queued_at "
-            "FROM store_projection_queue WHERE path = ?",
-            (rel,),
-        ).fetchone()
-        recorded = database.execute(
-            "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?", (rel,)
-        ).fetchone()
-        held = database.execute(
-            "SELECT kind, detected_at, sha256 FROM store_held WHERE path = ?", (rel,)
-        ).fetchone()
-        manifest_revision = None if recorded is None else recorded[3]
-        moving = database.execute(
-            "SELECT 1 FROM store_projection_queue WHERE operation = 'move' AND from_path = ? "
-            "LIMIT 1",
-            (rel,),
-        ).fetchone()
-        return Facts(
-            path=rel,
-            intent=None if queued is None else Intent(*queued),
-            page=view.page_meta(rel),
-            manifest=None if recorded is None else Manifest(*recorded),
-            held_row=None if held is None else write.HeldRow(rel, *held),
-            audited=_audited(database, rel, manifest_revision),
-            removed=_removed_since(database, rel, manifest_revision),
-            binary=view.binary(rel),
-            moves_away=moving is not None,
+        return _facts_for(view, [rel])[rel]
+
+
+def _facts_for(
+    view: read.StoreSnapshot, rels: list[str], *, moving: set[str] | None = None
+) -> dict[str, Facts]:
+    """What the store records about each of ``rels``, read in batches through ``view``.
+
+    ``moving`` names the paths that a queued move leaves, when the caller knows them; otherwise
+    each batch asks the queue.
+    """
+    database = view.connection
+    found: dict[str, Facts] = {}
+    wanted = list(dict.fromkeys(rels))
+    for start in range(0, len(wanted), read.KEYS_PER_QUERY):
+        batch = wanted[start : start + read.KEYS_PER_QUERY]
+        within = f"IN ({', '.join('?' * len(batch))})"
+        queued = {
+            row[0]: Intent(*row)
+            for row in database.execute(
+                "SELECT path, revision, operation, from_path, queued_at "
+                f"FROM store_projection_queue WHERE path {within}",
+                batch,
+            )
+        }
+        recorded = {
+            row[0]: Manifest(*row[1:])
+            for row in database.execute(
+                "SELECT path, sha256, size, mtime_ns, revision FROM store_manifest "
+                f"WHERE path {within}",
+                batch,
+            )
+        }
+        held = {
+            row[0]: write.HeldRow(*row)
+            for row in database.execute(
+                f"SELECT path, kind, detected_at, sha256 FROM store_held WHERE path {within}", batch
+            )
+        }
+        binaries = {
+            row[0]: read.BinaryMeta(*row)
+            for row in database.execute(
+                f"SELECT path, sha256, size, revision FROM store_binaries WHERE path {within}",
+                batch,
+            )
+        }
+        if moving is None:
+            leaving = {
+                row[0]
+                for row in database.execute(
+                    "SELECT DISTINCT from_path FROM store_projection_queue "
+                    f"WHERE operation = 'move' AND from_path {within}",
+                    batch,
+                )
+            }
+        else:
+            leaving = moving & set(batch)
+        pages = view.page_metas(batch)
+        audited = _audited_for(database, batch, recorded)
+        removed = _removed_for(database, [rel for rel in batch if rel in recorded])
+        for rel in batch:
+            found[rel] = Facts(
+                path=rel,
+                intent=queued.get(rel),
+                page=pages.get(rel),
+                manifest=recorded.get(rel),
+                held_row=held.get(rel),
+                audited=frozenset(audited.get(rel, ())),
+                removed=rel in removed,
+                binary=binaries.get(rel),
+                moves_away=rel in leaving,
+            )
+    return found
+
+
+def _audited_for(
+    database: Connection, rels: list[str], manifests: dict[str, Manifest]
+) -> dict[str, set[str]]:
+    """The hashes that ``Facts.audited`` names for each of ``rels``, in three statements.
+
+    A page with a manifest row takes the rows after the manifest's revision. A page with none has no
+    file that the projector recorded, so only its latest life counts: the writes after the last
+    removal that came before the latest write, and after the latest migration or rollback of the
+    vault. A removal after that write may still be queued, and the file that it removes is this
+    life's. The bytes of an earlier life never count, because a person may have restored them. A
+    binary takes its last row.
+    """
+    found: dict[str, set[str]] = {}
+    binaries = [rel for rel in rels if ownership.classify(rel) is not ownership.Ownership.PAGE]
+    recorded = [rel for rel in rels if rel in manifests and rel not in binaries]
+    lives = [rel for rel in rels if rel not in manifests and rel not in binaries]
+    # Each condition is built from the closed audit rules in ``write``, never from a path.
+    statements = (
+        (
+            binaries,
+            "SELECT path, sha256 FROM store_audit WHERE seq IN (SELECT MAX(seq) FROM store_audit "
+            "WHERE path IN ({}) AND sha256 IS NOT NULL GROUP BY path)",
+        ),
+        (
+            recorded,
+            "SELECT DISTINCT a.path, a.sha256 FROM store_audit a "
+            "JOIN store_manifest m ON m.path = a.path "
+            "WHERE a.path IN ({}) AND a.revision > m.revision AND a.sha256 IS NOT NULL",
+        ),
+        (
+            lives,
+            "WITH life AS (SELECT w.path AS path, MAX("
+            "COALESCE((SELECT MAX(e.seq) FROM store_audit e "
+            f"WHERE e.path = w.path AND {write.ENDS_A_LIFE} AND e.seq < "
+            "(SELECT COALESCE(MAX(b.seq), 0) FROM store_audit b "
+            f"WHERE b.path = w.path AND {write.BEGINS_A_LIFE})), 0), "
+            f"(SELECT COALESCE(MAX(r.seq), 0) FROM store_audit r WHERE {write.RESETS_EVERY_LIFE})"
+            ") AS starts_after FROM (SELECT DISTINCT path FROM store_audit WHERE path IN ({})) w) "
+            "SELECT DISTINCT a.path, a.sha256 FROM life JOIN store_audit a ON a.path = life.path "
+            f"WHERE {write.BEGINS_A_LIFE} AND a.sha256 IS NOT NULL AND a.seq > life.starts_after",
+        ),
+    )
+    for paths, statement in statements:
+        if paths:
+            for rel, sha256 in database.execute(
+                statement.format(", ".join("?" * len(paths))), paths
+            ):
+                found.setdefault(rel, set()).add(sha256)
+    return found
+
+
+def _removed_for(database: Connection, rels: list[str]) -> set[str]:
+    """Which of ``rels``, each with a manifest row, Exomem removed or moved away after the
+    manifest's revision."""
+    if not rels:
+        return set()
+    return {
+        row[0]
+        for row in database.execute(
+            "SELECT DISTINCT a.path FROM store_audit a JOIN store_manifest m ON m.path = a.path "
+            f"WHERE a.path IN ({', '.join('?' * len(rels))}) AND a.revision > m.revision "
+            f"AND {write.ENDS_A_LIFE}",
+            rels,
         )
+    }
 
 
 def record_held(
@@ -941,63 +1103,6 @@ def record_held(
         "body = excluded.body",
         (rel, kind, base_revision, store_revision, sha256, body, write.timestamp()),
     )
-
-
-def _audited(database: Connection, rel: str, manifest_revision: int | None) -> frozenset[str]:
-    """The hashes that ``Facts.audited`` names.
-
-    A page with a manifest row takes the rows after the manifest's revision. A page with none has no
-    file that the projector recorded, so only its latest life counts: the writes after the last
-    removal that came before the latest write, and after the latest migration or rollback of the
-    vault. A removal after that write may still be queued, and the file that it removes is this
-    life's. The bytes of an earlier life never count, because a person may have restored them. A
-    binary takes its last row.
-    """
-    if ownership.classify(rel) is not ownership.Ownership.PAGE:
-        rows = database.execute(
-            "SELECT sha256 FROM store_audit WHERE path = ? AND sha256 IS NOT NULL "
-            "ORDER BY seq DESC LIMIT 1",
-            (rel,),
-        )
-    elif manifest_revision is not None:
-        rows = database.execute(
-            "SELECT DISTINCT sha256 FROM store_audit "
-            "WHERE path = ? AND revision > ? AND sha256 IS NOT NULL",
-            (rel, manifest_revision),
-        )
-    else:
-        latest_write = _last_audit(database, f"path = ? AND {write.BEGINS_A_LIFE}", rel)
-        last_end = _last_audit(
-            database, f"path = ? AND {write.ENDS_A_LIFE} AND seq < ?", rel, latest_write
-        )
-        life_starts_after = max(last_end, _last_audit(database, write.RESETS_EVERY_LIFE))
-        rows = database.execute(
-            "SELECT DISTINCT sha256 FROM store_audit "
-            f"WHERE path = ? AND {write.BEGINS_A_LIFE} AND sha256 IS NOT NULL AND seq > ?",
-            (rel, life_starts_after),
-        )
-    return frozenset(row[0] for row in rows)
-
-
-def _last_audit(database: Connection, condition: str, *arguments: object) -> int:
-    """The sequence of the newest audit row that ``condition`` selects, or 0 when none."""
-    # ``condition`` is built from the closed audit rules in ``write``, never from a path.
-    (seq,) = database.execute(
-        f"SELECT COALESCE(MAX(seq), 0) FROM store_audit WHERE {condition}", arguments
-    ).fetchone()
-    return seq
-
-
-def _removed_since(database: Connection, rel: str, manifest_revision: int | None) -> bool:
-    """Whether Exomem removed or moved away ``rel`` after the manifest's revision."""
-    if manifest_revision is None:
-        return False
-    row = database.execute(
-        "SELECT 1 FROM store_audit WHERE path = ? AND revision > ? "
-        f"AND {write.ENDS_A_LIFE} LIMIT 1",
-        (rel, manifest_revision),
-    ).fetchone()
-    return row is not None
 
 
 def record_file(
@@ -1300,21 +1405,22 @@ def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> N
         _flush(filesystem, parent)
 
 
-def remove_if_unchanged(vault_root: Path, rel: str, sha256: str) -> bool:
-    """Remove the file at ``rel`` while it still has the bytes of ``sha256``, following no link;
-    whether it went. A file that changed, a link or a refusal leaves it where it is."""
-    acquired = held_fs.acquire(anchor(Path(vault_root)))
-    if not acquired.ok:
-        return False
-    try:
-        with acquired.require() as filesystem:
-            disk = observe(filesystem, rel)
-            if disk is None or disk.sha256 != sha256:
-                return False
-            _unlink(filesystem, rel, disk)
-    except (Deferred, held_fs.HeldFsError, OSError):
-        return False
-    return True
+def move_into_custody(vault_root: Path, rel: str, custody: str) -> None:
+    """Move the file at ``rel`` to the free path ``custody`` by one rename, whatever its bytes are
+    now, following no link and replacing nothing; a refusal raises.
+
+    Nothing is copied and then removed, so no write is lost: a write through a descriptor that was
+    open before the move lands in the moved file.
+    """
+    old_folder, old_leaf = _split(rel)
+    new_folder, new_leaf = _split(custody)
+    with held_fs.acquire(anchor(Path(vault_root))).require() as filesystem:
+        with _parent(filesystem, old_folder, access="mutate").require() as old_parent:
+            with filesystem.file(old_parent, old_leaf, access="mutate").require() as file:
+                opened, created = _open_creating(filesystem, new_folder)
+                with opened.require() as new_parent:
+                    _retrying(lambda: filesystem.rename(file, new_parent, new_leaf, replace=False))
+                    _flush_above(filesystem, created)
 
 
 def _move_parts(filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str) -> None:
