@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextvars import copy_context
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,9 @@ from exomem import (
     context_catalogue,
     context_pack,
     context_views,
+    epistemic_graph,
     freshness,
+    graph_sync,
     lexstore,
     readiness,
     request_budget,
@@ -419,6 +422,9 @@ def activation(
     A scheduled build or lexical repair never runs, so each catalogue stays behind
     until a test publishes it: the request reports what it can prove about that lag.
     """
+    # The writes below may dispatch a graph rebuild; it stays scheduled rather than racing the
+    # built graph this fixture ends on, as `schedule_build` and `_schedule_repair` stay below.
+    monkeypatch.setattr(epistemic_graph, "schedule_background_rebuild", lambda *a, **k: None)
     _seed_structure(vault)
     _seed_planning(vault)
     hidden = vault / HIDDEN_HUB
@@ -446,6 +452,23 @@ def activation(
     )
     # A real repair worker would converge the catalogue mid-test, so a lag would not stay where the test put it.
     monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: False)
+    # The marks a packet's units carry read their edges through the resolver resident at the
+    # live checkpoint, as a running service holds it; warm both so a graph still building on
+    # a slow host cannot put `display_edges` in one packet's generation and not the next's.
+    # A write above may still hold the rebuild owner, whose claim `rebuild_all` is told to
+    # respect rather than take — wait it out, then build.
+    for _attempt in range(50):
+        try:
+            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        except graph_sync.GraphRebuildInProgress:
+            time.sleep(0.1)
+        else:
+            break
+    else:
+        raise AssertionError("graph rebuild owner never released its claim")
+    find_module.recall_resolver_snapshot(
+        vault, expected_checkpoint=freshness.live_recall_checkpoint(vault, "vault")
+    )
     return SimpleNamespace(vault=vault, scheduled=scheduled)
 
 
