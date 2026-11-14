@@ -11,6 +11,8 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import signal
+import threading
 import time
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from copy import copy
@@ -234,6 +236,21 @@ class RenderedRefusalMiddleware(Middleware):
         )
 
 
+class _Terminated(BaseException):
+    """SIGTERM, raised where uvicorn sends it again, so the frames above it unwind and close."""
+
+
+def _uvicorn_replay():
+    """The code of uvicorn's signal capture, which sends a captured signal again as it ends.
+
+    ``signal.raise_signal`` runs a Python handler before it returns, so a handler whose frame runs
+    this code was called by that replay and by nothing else.
+    """
+    import uvicorn
+
+    return uvicorn.Server.capture_signals.__wrapped__.__code__
+
+
 class ExomemFastMCP(FastMCP):
     """FastMCP with stateless POST plus authenticated GET/SSE compatibility.
 
@@ -325,6 +342,44 @@ class ExomemFastMCP(FastMCP):
             if not endpoint_found:
                 raise RuntimeError("FastMCP stateless endpoint route was not found")
         return app
+
+    async def run_http_async(self, *args, **kwargs) -> None:
+        """Serve HTTP, and on SIGTERM run the Exomem lifespan's teardown before the process ends.
+
+        FastMCP holds its lifespan open around uvicorn as well as inside the app, so the app's
+        shutdown leaves the teardown to that outer hold. uvicorn then sends the captured SIGTERM
+        again, and its default action ended the process before the outer hold closed: no worker
+        stopped, the vault projector left its queue and the writer lease waited out its TTL.
+        Raised as an exception here instead, the signal unwinds through that hold, which runs the
+        teardown; then the process ends by SIGTERM as before.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            await super().run_http_async(*args, **kwargs)  # only the main thread takes signals
+            return
+        replay = _uvicorn_replay()
+        previous = signal.getsignal(signal.SIGTERM)
+        previous = signal.SIG_DFL if previous is None else previous
+
+        def end_after_teardown(_signum, frame) -> None:
+            if frame is None or frame.f_code is not replay:
+                # Any other SIGTERM, such as one while the lifespan starts, does what it did
+                # before: raised here, it could land in the event loop and end the process with 1.
+                signal.signal(signal.SIGTERM, previous)
+                signal.raise_signal(signal.SIGTERM)
+                return
+            # A second SIGTERM while the teardown runs ends the process at once, as one did before.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            raise _Terminated
+
+        signal.signal(signal.SIGTERM, end_after_teardown)
+        try:
+            await super().run_http_async(*args, **kwargs)
+        except _Terminated:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.raise_signal(signal.SIGTERM)
+        finally:
+            if signal.getsignal(signal.SIGTERM) is end_after_teardown:
+                signal.signal(signal.SIGTERM, previous)
 
     async def run_stdio_async(
         self,

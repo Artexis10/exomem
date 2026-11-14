@@ -27,6 +27,7 @@ from test_collection_store_migration import (
     OPERATOR,
     OTHER,
     PLANNING,
+    SHORT_LEASE_TTL,
     WORK,
     X3,
     X3_ID,
@@ -241,7 +242,8 @@ def test_a_backfill_interrupted_before_replication_retries_before_stamping_origi
     monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {
         capability.COLLECTION_VIEWS_V1, capability.RECORDS_SUMMARY_V1})
     child = multiprocessing.get_context("spawn").Process(target=_crash_before_original_replica,
-        args=(dict(os.environ), tmp_path / "coordinator.sqlite", capability.RELEASED))
+        args=({**os.environ, "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
+              tmp_path / "coordinator.sqlite", capability.RELEASED))
     try:
         child.start()
         child.join(30)
@@ -630,7 +632,8 @@ def crash_export(tmp_path, cut, plan_id, *flags):
     import multiprocessing
 
     child = multiprocessing.get_context("spawn").Process(target=_export_and_crash, args=(
-        {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut, plan_id, flags))
+        {**os.environ, OPERATOR: "operator", "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
+        tmp_path / "coordinator.sqlite", cut, plan_id, flags))
     child.start()
     child.join(120)
     assert child.exitcode == 73
@@ -751,6 +754,8 @@ def test_an_apply_whose_lease_lapsed_after_its_intent_refuses_behind_another_hos
     adopted the replica and wrote: going on publishes, renews and exports over that host's head, so its
     row survives only in a store that retire-local later tombstones."""
     root = env
+    # The paused apply's lease lapses.
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", SHORT_LEASE_TTL)
     migrated_and_written(root, capsys)
     plan_id = preview_id(root, capsys)
     with closing(connection.open_reader(connection.store_path(root))) as reader:

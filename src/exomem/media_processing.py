@@ -798,10 +798,15 @@ def reconcile_all_media(
             attempted += 1
             try:
                 reconcile_one(binary)
-            except BoundaryBusy:
+            except BoundaryBusy as busy:
                 # Ordinary contention in a store-mode vault: the cursor stops before this file.
                 if propagate_transient_errors:
-                    raise
+                    raise OpError(
+                        "MUTATION_BUSY",
+                        f"another write holds the vault, so {binary.name} was not reconciled",
+                        "Run this command again once the current write finishes.",
+                        details={"committed": False},
+                    ) from busy
                 held = True
             except OpError as error:
                 if error.code in _TRANSIENT_COORDINATION_CODES:

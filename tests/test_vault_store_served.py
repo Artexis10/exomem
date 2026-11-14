@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import statistics
 import sys
 import threading
@@ -464,6 +465,233 @@ def test_a_stop_drains_no_longer_than_its_bound_and_the_next_start_projects_the_
     assert stopped_in < 4.0 and left and left <= set(created)
     projector.Projector(stored).run_pass()  # the next start
     assert queued(stored) == set()
+
+
+def rollout_override():
+    """The journey's `sitecustomize.py`, which opens the two store-mode rollout fences in a child
+    process, as the store-mode fixtures open them in this one."""
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "e2e_product_loop.py"
+    spec = importlib.util.spec_from_file_location("e2e_product_loop_for_replicas", script)
+    journey = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = journey  # registered before it runs, as its dataclasses need
+    spec.loader.exec_module(journey)
+    return journey._ROLLOUT_OVERRIDE
+
+
+REST_KEY = "replica-rest-key"
+
+
+@contextmanager
+def http_replica(root, tmp_path, name):
+    """One installed-shape HTTP service process on ``root``, with its own lease replica id."""
+    import socket
+    import subprocess
+    import urllib.request
+
+    shim = tmp_path / "rollout"
+    shim.mkdir(exist_ok=True)
+    (shim / "sitecustomize.py").write_text(rollout_override(), encoding="utf-8")
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.close()
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, (str(shim), os.environ.get("PYTHONPATH")))),
+        "EXOMEM_REST_API_KEY": REST_KEY,
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": name,
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / f"lease-{name}"),
+        "EXOMEM_WRITER_LEASE_PREFERRED": "0",
+        "EXOMEM_LOG_DIR": str(tmp_path / f"logs-{name}"),
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
+        "EXOMEM_DISABLE_FILE_WATCHER": "1",
+        "EXOMEM_DISABLE_WARMUP": "1",
+    }
+    log_path = tmp_path / f"{name}.log"
+    script = Path(__file__).resolve().parents[1] / "scripts" / "e2e_http_server.py"
+    with log_path.open("w", encoding="utf-8") as console:
+        process = subprocess.Popen(
+            [sys.executable, str(script), "--host", "127.0.0.1", "--port", str(port)],
+            env=env, stdout=console, stderr=subprocess.STDOUT,
+        )
+        url = f"http://127.0.0.1:{port}"
+        replica = SimpleNamespace(process=process, url=url, log=log_path)
+
+        def post(route, body):
+            request = urllib.request.Request(
+                f"{url}/api/{route}", data=json.dumps(body).encode(), method="POST",
+                headers={"Authorization": f"Bearer {REST_KEY}", "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=60) as answer:
+                    return json.loads(answer.read())
+            except urllib.error.HTTPError as refused:
+                return json.loads(refused.read())
+
+        replica.post = post
+        try:
+            deadline = time.monotonic() + 120
+            while True:
+                assert process.poll() is None, log_path.read_text(encoding="utf-8")[-3000:]
+                try:
+                    urllib.request.urlopen(f"{url}/api/openapi.json", timeout=1).close()
+                    break
+                except OSError:
+                    assert time.monotonic() < deadline, "the replica did not start"
+                    time.sleep(0.1)
+            yield replica
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(60)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(10)
+
+
+def remember(replica, title):
+    return replica.post(
+        "remember",
+        {"content": f"# {title}\n\n## Claim\n\nWriter-lease serialization.\n", "title": title,
+         "note_type": "insight", "status": "draft"},
+    )
+
+
+@pytest.mark.timeout(600)
+def test_a_second_replica_that_takes_the_lease_and_stops_at_once_leaves_nothing_queued(
+    stored, tmp_path
+):
+    """Two services on one vault: the first writes and stops, the second takes the lease over with
+    its own write and stops right after it. A stop that leaves that write's projections queued
+    leaves files behind the store until a service starts again, and an offline rollback refuses."""
+    with http_replica(stored, tmp_path, "replica-a") as first:
+        with http_replica(stored, tmp_path, "replica-b") as second:
+            assert remember(first, "Lease writer A")["success"] is True
+            refused = remember(second, "Lease follower B")
+            assert refused["error"]["code"] == "WRITER_LEASE_REQUIRED", refused
+            first.process.terminate()
+            first.process.wait(60)
+            deadline = time.monotonic() + 30
+            while not (taken := remember(second, "Lease takeover B")).get("success"):
+                assert time.monotonic() < deadline, taken
+                time.sleep(0.25)
+            second.process.terminate()
+            second.process.wait(60)
+    left = store_rows(stored, "SELECT path, revision, queued_at FROM store_projection_queue")
+    assert left == [], (left, second.log.read_text(encoding="utf-8")[-6000:])
+    # Each ends by the signal, as a supervisor that stops it expects.
+    assert first.process.returncode == second.process.returncode == -signal.SIGTERM
+
+
+def idle(service_state):
+    """Wait until no process of the replica holds a command claim on its grant, as when a service
+    has finished its last request and the background work that request started."""
+    from filelock import ReadWriteLock, Timeout
+
+    (claim,) = service_state.glob("writer-grant-*.db")
+    deadline = time.monotonic() + 90
+    while True:
+        lock = ReadWriteLock(claim, is_singleton=False)
+        try:
+            lock.acquire_write(blocking=False)
+            lock.release()
+            return
+        except Timeout:
+            assert time.monotonic() < deadline, "the service never became idle"
+            time.sleep(0.25)
+        finally:
+            lock.close()
+
+
+@pytest.mark.timeout(600)
+def test_an_idle_service_writes_after_a_cli_command_of_its_replica_hands_back_their_grant(
+    vault, tmp_path  # noqa: F811
+):
+    """A service and a one-shot CLI command with one replica id share one grant. The command hands
+    it back as it exits while the service is idle: a service that keeps trusting the grant refuses
+    its next page or record write with a lease error, or stops serving its collection store."""
+    import subprocess
+
+    from test_collection_store_writer import CID
+
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    with http_replica(vault, tmp_path, "shared") as service:
+        assert remember(service, "Before the command")["success"] is True
+        # A command that exits while one of the service's background steps holds a claim keeps the
+        # grant, as designed; the case needs an exit that lands while the service is idle.
+        for attempt in range(5):
+            idle(tmp_path / "lease-shared")
+            command = subprocess.run(
+                [sys.executable, "-m", "exomem", "remember", "--title", f"From command {attempt}",
+                 "--content", "# From the command\n\n## Claim\n\nA one-shot write.\n",
+                 "--field", "note_type=insight", "--field", "status=draft", "--json"],
+                env={**os.environ, "EXOMEM_WRITER_LEASE_REPLICA_ID": "shared",
+                     "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-shared"),
+                     "EXOMEM_WRITER_LEASE_PREFERRED": "0", "EXOMEM_DISABLE_EMBEDDINGS": "1"},
+                capture_output=True, text=True, timeout=300,
+            )
+            assert command.returncode == 0, command.stdout[-2000:] + command.stderr[-2000:]
+            if client.status().holder is None:  # the command handed the shared grant back
+                break
+        else:
+            pytest.fail("no command exited while the service was idle")
+
+        assert remember(service, "After the command")["success"] is True
+        appended = service.post("record_memory", {
+            "action": "append", "collection": CID, "item": {"title": "After the command"},
+            "why": "a record write after the command",
+        })
+        assert appended["success"] is True, appended
+        rows = service.post("record_memory", {"action": "query", "collection": CID})
+        assert "After the command" in [row["title"] for row in rows["data"]["rows"]], rows
+
+
+STARTS_AND_WAITS = """
+import asyncio, sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+from exomem.server import ExomemFastMCP
+
+@asynccontextmanager
+async def lifespan(_server):
+    Path(sys.argv[1]).write_text("starting")
+    await asyncio.Event().wait()  # a startup that awaits, as the schema publication can
+    yield
+
+ExomemFastMCP("startup", lifespan=lifespan).run(
+    transport="http", host="127.0.0.1", port=0, show_banner=False
+)
+"""
+
+
+def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path):
+    """A SIGTERM that lands while the lifespan's startup awaits, before uvicorn takes the signals:
+    raised as the exception that runs the teardown, it lands in the event loop instead and the
+    process ends with 1, which a supervisor reads as a crash."""
+    import subprocess
+
+    started = tmp_path / "started"
+    process = subprocess.Popen(
+        [sys.executable, "-c", STARTS_AND_WAITS, str(started)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not started.exists():
+            assert process.poll() is None, process.stdout.read().decode()[-3000:]
+            assert time.monotonic() < deadline, "the service did not start its lifespan"
+            time.sleep(0.05)
+        process.terminate()
+        output, _ = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(10)
+    assert process.returncode == -signal.SIGTERM, output.decode()[-3000:]
 
 
 def trashed_once(root, rel, body):

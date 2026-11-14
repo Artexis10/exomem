@@ -409,6 +409,14 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
                     if unprojected
                     else ""
                 ),
+                (
+                    "The search or graph index is behind the files, as a service that stopped "
+                    "early leaves it. Run `exomem maintain --reconcile --rebuild-graph` to bring "
+                    "both up to date, then run this command again."
+                    if comparison.differences
+                    else "The store cannot reproduce the named pages' bytes, so keep this vault "
+                    "in file mode and report those pages."
+                ),
                 details={
                     "tables": [difference.describe() for difference in comparison.differences],
                     "unprojected": unprojected[: verify.KEYS_REPORTED],
