@@ -1,6 +1,6 @@
 ## 1. Provider facts (D2)
 
-- [ ] 1.1 On a disposable bucket, with sandbox credentials that the operator authorizes, check six points:
+- [x] 1.1 On a disposable bucket, with sandbox credentials that the operator authorizes, check six points:
   - a superseded version and a hidden version are deleted after N days;
   - a current version survives;
   - deleting the hide marker keeps the version;
@@ -54,4 +54,4 @@
 
 ## 9. Runbook (D4, Rollout)
 
-- [ ] 9.1 Write the runbook for rescue within the grace and for the canary gate. Include the operator steps of the design's Rollout section. Verify: on the disposable bucket from task 1, the runbook returns a hidden version to current. The gate refuses a bucket that holds a repeated name.
+- [x] 9.1 Write the runbook for rescue within the grace and for the canary gate. Include the operator steps of the design's Rollout section. Verify: on the disposable bucket from task 1, the runbook returns a hidden version to current. The gate refuses a bucket that holds a repeated name. (2026-11-09: the `cloud-media-edge.md` rescue steps, run literally with a fresh bucket-only key, returned a hidden version to current with the same version ID. The canary gate counted 1 repeated name and refused.)
