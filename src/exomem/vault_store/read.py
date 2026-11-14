@@ -502,9 +502,21 @@ def scope_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
     with snapshot(_as_path(vault_root)) as view:
         found = view.memo.get(statement)
         if found is None:
-            count, rows = view.connection.execute(statement).fetchone()
-            found = view.memo[statement] = (count, view.revision, f"store:{view.revision}:{rows}")
+            found = view.memo[statement] = _triple(view.connection, statement, view.revision)
         return found
+
+
+def vault_triple(conn: Connection, revision: int) -> tuple[int, int, str]:
+    """The vault scope's ``scope_triple`` that a reader at ``revision`` computes, read on ``conn``.
+
+    A commit reads it on its own transaction, before its writes and after them.
+    """
+    return _triple(conn, _VAULT_PAGES, revision)
+
+
+def _triple(conn: Connection, statement: str, revision: int) -> tuple[int, int, str]:
+    count, rows = conn.execute(statement).fetchone()
+    return (count, revision, f"store:{revision}:{rows}")
 
 
 #: The page rows of each scope, counted through the scope's own index (``pages_kb``,

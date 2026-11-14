@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import datetime as dt
 import inspect
 import json
 import os
 import pickle
 import sqlite3
+import textwrap
 import threading
 import uuid
 from contextlib import contextmanager, nullcontext
@@ -278,18 +280,24 @@ def test_a_path_is_ordinary_exactly_when_no_descriptor_matches_it() -> None:
     leaf, beside lookalikes that only share a first component or a name.
     """
     registry = reserved_paths.internal_state_registry()
+    descriptor_fields = {field.name for field in dataclasses.fields(reserved_paths.InternalStateDescriptor)}
+    # A field that `matches` reads is a matcher field, whatever the prefilter's own lists say.
+    source = textwrap.dedent(inspect.getsource(reserved_paths.InternalStateDescriptor.matches))
+    read = {node.attr for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name) and node.value.id == "self"}
+    assert read & descriptor_fields
+    assert not read & reserved_paths._Prefilter.UNMATCHED_FIELDS, read
+    path_fields, pattern_fields = ("exact", "trees"), ("patterns", "tree_patterns", "leaf_patterns",
+                                                       "component_tree_patterns")
+    unsampled_fields = descriptor_fields - reserved_paths._Prefilter.UNMATCHED_FIELDS - {*path_fields, *pattern_fields}
+    assert not unsampled_fields, f"sample each new matcher field here: {unsampled_fields}"
     patterns = [
-        pattern
-        for descriptor in registry
-        for pattern in (
-            *descriptor.patterns, *descriptor.tree_patterns,
-            *descriptor.leaf_patterns, *descriptor.component_tree_patterns,
-        )
+        pattern for descriptor in registry for name in pattern_fields for pattern in getattr(descriptor, name)
     ]
     unsampled = [pattern.pattern for pattern in patterns if not any(map(pattern.fullmatch, _PATTERN_SAMPLES))]
     assert not unsampled, f"add a name each new pattern accepts to _PATTERN_SAMPLES: {unsampled}"
     names = [
-        *(path for descriptor in registry for path in (*descriptor.exact, *descriptor.trees)),
+        *(path for descriptor in registry for name in path_fields for path in getattr(descriptor, name)),
         *_PATTERN_SAMPLES,
     ]
     reserved = set()
@@ -302,6 +310,21 @@ def test_a_path_is_ordinary_exactly_when_no_descriptor_matches_it() -> None:
             if matched:
                 reserved.add(name)
     assert reserved == set(names)
+
+
+def test_a_descriptor_field_that_the_prefilter_has_no_condition_for_lets_every_path_through() -> None:
+    """Defect: a matcher field added to the descriptor gets no prefilter condition, so a path that
+    only it matches skips every matcher and reads as an ordinary page."""
+
+    @dataclasses.dataclass(frozen=True, slots=True)
+    class Suffixed(reserved_paths.InternalStateDescriptor):
+        suffixes: tuple[str, ...] = ()
+
+    registry = reserved_paths.internal_state_registry()
+    ordinary = ("notes", "page.locked")
+    assert not reserved_paths._Prefilter.of(registry).may_match(ordinary)
+    wider = Suffixed("suffixed", "owner", reserved_paths.StatePlacement.EXTERNAL_STATE, suffixes=(".locked",))
+    assert reserved_paths._Prefilter.of((*registry, wider)).may_match(ordinary)
 
 
 def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> None:

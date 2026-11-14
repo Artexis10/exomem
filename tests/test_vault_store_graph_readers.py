@@ -1188,16 +1188,19 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
         patch.setattr(egress, "content_permits", counted("content_floor_checks", egress.content_permits))
         with library_scope(), request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
             started, cpu_started = time.perf_counter(), time.process_time()
-            if operation == "participants":
-                # The pins that the tool dispatcher holds for a graph read.
-                with state_paths.resolution_scope(), read.request_snapshot(root):
-                    answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
-                        [], anchor=anchor, keep=egress.edge_view(root, find.caller_admission(root)),
-                        resolver=lambda: find.recall_resolver_snapshot(root),
-                    )
-                size = len(answer.paths)
-            else:
-                size = len(GRAPH_CALLS["find relation_of"](root))
+            # The pins that the tool dispatcher holds for a store read, and its ownership finish.
+            with read.request_snapshot(root), collection_ownership.request_status_scope(), \
+                    collection_ownership.read_scope(root) as owned:
+                if operation == "participants":
+                    with state_paths.resolution_scope():
+                        answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
+                            [], anchor=anchor, keep=egress.edge_view(root, find.caller_admission(root)),
+                            resolver=lambda: find.recall_resolver_snapshot(root),
+                        )
+                    size = len(answer.paths)
+                else:
+                    size = len(GRAPH_CALLS["find relation_of"](root))
+                owned.finish()
             elapsed = (time.perf_counter() - started) * 1000
             cpu = (time.process_time() - cpu_started) * 1000
     return {"ms": elapsed, "cpu_ms": cpu, "result_count": size, **counters,
@@ -1212,6 +1215,144 @@ def fitted_slope(samples):
     spread = sum((links - mean_links) ** 2 for links, _ in samples)
     slope = sum((links - mean_links) * (ms - mean_ms) for links, ms in samples) / spread
     return {"us_per_link": slope * 1000, "intercept_ms": mean_ms - slope * mean_links}
+
+
+@pytest.mark.parametrize(("caller", "binding"), [
+    ("owner", "none"), ("few withheld", "none"), ("few withheld", "production writer"),
+])
+def test_a_store_read_request_asks_the_lease_coordinator_at_most_once(
+    stored, writer, caller, binding, monkeypatch  # noqa: F811
+):
+    """Each status read is a coordinator round trip; a request's proof and finish must share one.
+
+    A served graph read binds no writer; a store-routed read binds the production writer, whose
+    proof reads through that writer's connection instead of a reader snapshot.
+    """
+    from exomem import writer_lease
+    from exomem.collection_store import preview
+
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, 20)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    calls = []
+    status = writer_lease.LeaseCoordinatorClient.status
+    monkeypatch.setattr(
+        writer_lease.LeaseCoordinatorClient, "status", lambda client: calls.append(1) or status(client)
+    )
+    command = next(command for command in commands.COMMANDS if command.name == "find")
+    token = preview._BOUND.set((stored.resolve(), writer, True)) if binding != "none" else None
+    try:
+        with request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
+            hits = writer_lease.invoke_command(command, stored, query="lantern", relation_of=CLAIM, limit=15)
+    finally:
+        if token is not None:
+            preview._BOUND.reset(token)
+    assert hits
+    assert len(calls) == (0 if caller == "owner" else 1)
+
+
+def resolver_maps(resolver):
+    return {
+        "full_paths": resolver.full_paths, "kb_stripped": resolver.kb_stripped,
+        "stems": resolver.stems, "titles": resolver.titles,
+        "candidates_by_key": resolver.candidates_by_key,
+    }
+
+
+def test_a_store_commit_advances_the_resident_resolver_to_what_a_rebuild_holds(stored, writer):  # noqa: F811
+    """Defect: the commit's patch of the resident resolver, or of its homonym groups, drifts from a
+    rebuild at the commit's revision, so a link resolves to another page, or a withheld page's name
+    stops changing what a restricted caller's links resolve to."""
+    beacon, twin = "Knowledge Base/Notes/Beacon.md", "Knowledge Base/Entities/Beacon.md"
+    (stored / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Notes/Vault Hidden/\n")
+    for rel in (CLAIM, EVIDENCE, RIVAL, TIDE, TIDE_TWIN):
+        write.commit(writer, put(rel, PAGES[rel].encode()))
+    commit_linked(writer, 20)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+
+    def participants(resolver):
+        with library_scope(), request_scope(EXTERNAL), read.request_snapshot(stored):
+            return epistemic_graph.EpistemicGraphIndex(stored).relation_participants(
+                [], anchor=CLAIM, keep=egress.edge_view(stored, find.caller_admission(stored)),
+                resolver=resolver,
+            )
+
+    def change(**edits):
+        return write.StoreChange(write.Origin.GOVERNED, "test", **edits)
+
+    # A restricted read leaves the resident resolver and its homonym groups.
+    participants(lambda: find.recall_resolver_snapshot(stored))
+    steps = {
+        "create": put(beacon, b"---\ntitle: Beacon\n---\n# Beacon\n\nIt lights [[Lantern Claim]].\n"),
+        "title shared with another page": put(beacon, b"---\ntitle: Rival Theory\n---\n# Beacon\n"),
+        "stem shared with another page": put(twin, b"---\ntitle: Beacon twin\n---\n# Beacon\n"),
+        "stem no longer shared": change(deletes=(write.PageDelete(twin),)),
+        "move": change(moves=(write.PageMove(beacon, f"{INSIGHTS}/Beacon Moved.md"),)),
+        "Unicode name": put(
+            "Knowledge Base/Notes/Café Fähre.md",
+            "---\ntitle: Café Fähre\n---\n# Ferry\n\nSee [[Café Fähre]].\n".encode(),
+        ),
+        "page becomes withheld": put(
+            TIDE, PAGES[TIDE].replace("type: note\n", "type: note\ntags: [cohort-0]\n").encode()
+        ),
+        "move into an excluded folder": change(
+            moves=(write.PageMove(RIVAL, "Knowledge Base/Notes/Vault Hidden/Rival.md"),)
+        ),
+        "delete": change(deletes=(write.PageDelete(EVIDENCE),)),
+    }
+    for step, commit in steps.items():
+        write.commit(writer, commit)
+        resident, checkpoint, token = find.borrow_recall_resolver(stored)
+        assert checkpoint == read.recall_checkpoint(stored, "vault"), step
+        entries = lexstore.get_store(stored).recall_resolver_entries("vault", checkpoint)
+        rebuilt = vaults.WikilinkResolver.from_entries(stored, entries)
+        assert resolver_maps(resident) == resolver_maps(rebuilt), step
+        kept = epistemic_graph._HOMONYM_PATHS[stored]
+        assert kept.publication is token, step
+        assert kept.paths == epistemic_graph._homonym_paths(stored, rebuilt, lambda: None), step
+        assert participants(lambda: find.recall_resolver_snapshot(stored)) == participants(
+            rebuilt.fork
+        ), step
+    with library_scope(), request_scope(EXTERNAL):
+        patched = GRAPH_CALLS["find relation_of"](stored), GRAPH_CALLS["graph_context depth 2"](stored)
+        find.evict_resolver_caches(stored)
+        epistemic_graph._HOMONYM_PATHS.clear()
+        assert patched == (
+            GRAPH_CALLS["find relation_of"](stored), GRAPH_CALLS["graph_context depth 2"](stored)
+        )
+
+
+def test_a_commit_and_the_next_restricted_read_look_up_only_the_names_it_touched(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """Defect: a commit drops the resident resolver's homonym groups, so the first restricted read
+    after it looks up every link name in the vault again, or the commit does it instead.
+
+    A restricted read looks up the names that link to its withheld pages, which a warm read shows, and
+    after a commit at most the one link name that names the changed page. The commit's own lookups
+    must not grow with the vault.
+    """
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    during_commits = []
+    for size in (20, 60):
+        commit_linked(writer, size)
+        admission_sample(stored, "few withheld", "find")
+        warm = admission_sample(stored, "few withheld", "find")
+        during_commit = []
+
+        def counted(*args, found=during_commit, real=epistemic_graph._link_candidates_for_key):
+            found.append(1)
+            return real(*args)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(epistemic_graph, "_link_candidates_for_key", counted)
+            write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\n{size}\n".encode()))
+        after = admission_sample(stored, "few withheld", "find")
+        assert after["result_count"] == warm["result_count"] > 0
+        assert after["name_candidate_lookups"] - warm["name_candidate_lookups"] <= 1, (size, warm, after)
+        during_commits.append(len(during_commit))
+    assert during_commits[0] == during_commits[1], during_commits
 
 
 @pytest.mark.parametrize("caller", ["owner", "few withheld"])

@@ -8972,6 +8972,9 @@ def invoke_command(
             try:
                 if vault_store_mode.store_mode_for_reads(injected[0]):
                     snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0]))
+                    if vault_store_read.request_memo(injected[0]) is not None:
+                        # The read answers for this snapshot, so its ownership proof and finish share one status.
+                        snapshot_scope.enter_context(ownership.request_status_scope())
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()

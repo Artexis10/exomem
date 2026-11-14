@@ -21,7 +21,7 @@ from collections import ChainMap
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from dataclasses import replace as dataclass_replace
 from enum import StrEnum
 from pathlib import Path
@@ -3070,17 +3070,32 @@ class _Prefilter:
     head_patterns: tuple[re.Pattern[str], ...]
     leaf_patterns: tuple[re.Pattern[str], ...]
     component_patterns: tuple[re.Pattern[str], ...]
+    #: True when a descriptor has a field that this filter has no condition for: every path may match.
+    everything: bool = False
+
+    #: The descriptor fields that this filter turns into conditions, and those that ``matches`` never
+    #: reads. Both are field names of ``InternalStateDescriptor``, a closed set that its class fixes.
+    FILTERED_FIELDS = frozenset({"exact", "trees", "patterns", "tree_patterns", "leaf_patterns",
+                                 "component_tree_patterns"})
+    UNMATCHED_FIELDS = frozenset({"id", "owner", "placement", "owning_command", "authority_enabled",
+                                  "migrates_from_vault", "vault_store"})
 
     @classmethod
     def of(cls, descriptors: tuple[InternalStateDescriptor, ...]) -> _Prefilter:
+        known = cls.FILTERED_FIELDS | cls.UNMATCHED_FIELDS
+        # A field without a condition here may be a matcher, and a path that only it matches would read ORDINARY.
+        everything = any(field.name not in known for each in descriptors for field in fields(each))
         return cls(
             frozenset(path.partition("/")[0] for each in descriptors for path in (*each.exact, *each.trees)),
             tuple(pattern for each in descriptors for pattern in (*each.patterns, *each.tree_patterns)),
             tuple(pattern for each in descriptors for pattern in each.leaf_patterns),
             tuple(pattern for each in descriptors for pattern in each.component_tree_patterns),
+            everything,
         )
 
     def may_match(self, parts: tuple[str, ...]) -> bool:
+        if self.everything:
+            return True
         if not parts:
             return False
         # The first component of the joined path, as ``matches`` compares exact paths and trees.

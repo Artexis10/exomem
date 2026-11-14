@@ -191,6 +191,32 @@ def _coordinator_fence(client):
     return cached[client]
 
 
+_REQUEST_STATUS: ContextVar[dict | None] = ContextVar("collection_ownership_request_status", default=None)
+
+
+@contextmanager
+def request_status_scope():
+    """Read the coordinator's status once for one read request that holds a store snapshot.
+
+    The request answers for that snapshot, so its proof and its finish answer for one status: the
+    finish still re-reads the local declarations, but no longer sees a fence that moves meanwhile.
+    """
+    token = _REQUEST_STATUS.set({})
+    try:
+        yield
+    finally:
+        _REQUEST_STATUS.reset(token)
+
+
+def _coordinator_status(client):
+    cached = _REQUEST_STATUS.get()
+    if cached is None:
+        return client.status()
+    if client not in cached:
+        cached[client] = client.status()
+    return cached[client]
+
+
 def _canonical(root, conn, placement, recorded, *, private=False, restored=None, manager=None, status=None):
     meta = legacy_originals.metadata(conn)
     sid, instance = meta[schema.META_STORE_ID], meta[schema.META_INSTANCE_ID]
@@ -211,7 +237,7 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
             fence = _coordinator_fence(manager.client)
         else:
             # Status replaces the fence read; its coordinator transaction can contend briefly.
-            status = manager.client.status() if status is None else status
+            status = _coordinator_status(manager.client) if status is None else status
             required = status.collection_store_head
             if required is not None:
                 fence = CollectionStoreFenceState(status.required_collection_store_capability, True,
@@ -371,7 +397,7 @@ def resolve(root, *, conn=None, private=False, path=None, manager=None):
             manager = manager or _manager(root)
             if manager.client is None:
                 raise unavailable()
-            status = manager.client.status()
+            status = _coordinator_status(manager.client)
         # Ownership declarations use the unchanged metadata wire; payload reads still require the current schema.
         with connection.ownership_reader(path, reader_pool(root, path)) as reader:
             reader.execute("BEGIN")
