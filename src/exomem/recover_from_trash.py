@@ -964,13 +964,13 @@ def _recover_in_store(
     """Recover a trashed page, binary or folder in one store transaction.
 
     The store moves each page back with its rows and drops its record of the sidecar; the projector
-    moves the page files afterwards. Each binary, and each file or folder the store does not own,
-    is renamed back first, and the commit records the binaries at their restored paths
-    (``vault_store.binaries`` names the window); a folder the store holds nothing below is renamed
-    whole. A stored original's reference-only companion is retired in the same commit, and a page's
-    part pages come back with it. The commit binds what it read and that nothing sits at or below
-    the destination, so a page that a commit adds there meanwhile refuses with DEST_EXISTS and every
-    rename is undone. The semantic preflight and commit are file mode's, judged against the stored
+    moves the page files and removes the sidecar afterwards. The commit moves each binary's record
+    back, and the binaries and each file or folder the store does not own are renamed right after
+    it (``vault_store.binaries``); a folder that holds no page and no binary is renamed whole. A
+    stored original's reference-only companion is retired in the same commit, and a page's part
+    pages come back with it. The commit binds what it read and that nothing sits at or below the
+    destination, so a page that a commit adds there meanwhile refuses with DEST_EXISTS and nothing
+    moves. The semantic preflight and commit are file mode's, judged against the stored
     pages; a binary alone has none, as in file mode. A governed item keeps its recovery marker,
     tombstone and receipt around the commit (``vault_store.governed``). The log entry commits with
     the restore, and an active catalog publication publishes after the commit: the semantic commit
@@ -1046,6 +1046,7 @@ def _recover_in_store(
         parts_moves: dict[str, str] = {}
         parts_hashes: dict[str, str] = {}
         entries: list[binaries.Entry] = []
+        vacated: tuple[str, ...] = ()
         expect: dict[str, Expect] = {}
         companion: tuple[str, str] | None = None
         keep_metadata = False
@@ -1065,11 +1066,16 @@ def _recover_in_store(
                     code="PATH_GUARD_LIMIT",
                     reason="trash directory exceeds the bounded recovery census",
                 )
-            if stored or listing.recorded:
+            if stored or listing.recorded or any(
+                store_ownership.classify(rel) is store_ownership.Ownership.BINARY
+                for rel in listing.files
+            ):
                 entries = [
                     *(binaries.Entry(rel, restored(rel)) for rel in listing.files),
                     *(binaries.Entry(rel, restored(rel), folder=True) for rel in listing.folders),
                 ]
+                # The trash slot empties one file at a time; the projector removes its folders.
+                vacated = binaries.vacated(trash_rel, (*stored, *listing.files, *listing.folders))
             else:
                 # The store refers to nothing below the folder, so it moves back whole.
                 entries = [binaries.Entry(trash_rel, restore_rel, folder=True)]
@@ -1219,6 +1225,7 @@ def _recover_in_store(
     sources = {*moves, *parts_moves, *relocation.recorded, trash_rel}
     taken_paths = {*moves.values(), *parts_moves.values(), *destinations, restore_rel}
     failed = "trash recovery could not be published"
+    left: list[str] = []
 
     def restore_in_store() -> None:
         restoring = store_batch.Lifecycle(
@@ -1227,21 +1234,17 @@ def _recover_in_store(
                 for source, destination in (*moves.items(), *parts_moves.items())
             ),
             deletes=() if companion is None else (PageDelete(companion[0]),),
-            binary_deletes=(
-                *relocation.binary_deletes,
-                *((BinaryDelete(sidecar_rel),) if drop_sidecar else ()),
-            ),
+            binary_deletes=(BinaryDelete(sidecar_rel),) if drop_sidecar else (),
             expect=expect,
+            vacated_folders=vacated,
         )
         try:
-            with binaries.relocated(root, relocation) as moved:
+            with binaries.relocated(root, relocation, writer) as moved:
                 store_batch.commit_batch(
                     writer,
                     list(log_plan.writes),
                     vault_root=root,
-                    lifecycle=dataclasses.replace(
-                        restoring, records=moved.records, refresh=moved.refresh
-                    ),
+                    lifecycle=dataclasses.replace(restoring, binary_moves=moved.binary_moves),
                 )
         except StoreConflict as conflict:
             if conflict.path in sources:
@@ -1255,9 +1258,12 @@ def _recover_in_store(
         except PathGuardError as error:
             # The log entry is guarded on the bytes it was planned from.
             raise RecoverError(code=error.code, reason=error.reason) from error
-        except (binaries.Stranded, reserved_paths.ReservedPathLeafError, CreateOnlyConflict) as error:
+        except (
+            binaries.Unreadable, reserved_paths.ReservedPathLeafError, CreateOnlyConflict
+        ) as error:
             # A CreateOnlyConflict is a log rotation's archive that another write created meanwhile.
             raise RecoverError(*binaries.refusal(error, "RECOVER_FAILED", failed)) from error
+        left.extend(moved.left)
 
     semantic: dict | None = None
     # A governed item's receipt intent and recovery marker come last before the commit.
@@ -1281,7 +1287,7 @@ def _recover_in_store(
     if trash_kind == "directory":
         binaries.prune_empty(trash_abs)
 
-    warnings: list[str] = []
+    warnings: list[str] = [f"{rel}: {binaries.LEFT}" for rel in left]
     if keep_metadata:
         warnings.append(
             "recovered bytes; retained the changed or unreadable Trash companion and its "
