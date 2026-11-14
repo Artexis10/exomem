@@ -11263,6 +11263,13 @@ def op_triage_memory(
             if orphan is not None:
                 return orphan
         raise
+    if item.page_changed:
+        # An item from a held pass whose page changed after the pass carries a signal that is
+        # no longer the page's own. A decision on it would lapse at the next pass.
+        raise ValueError(
+            "REVIEW_ITEM_CHANGED: a page of this item changed after the review pass that lists "
+            f"it; a new pass is running, so list the queue again and inspect {item.ref} then"
+        )
     if expected_fingerprint and item.fingerprint != expected_fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "

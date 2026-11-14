@@ -373,6 +373,26 @@ def _load_shared(vault_root: Path) -> dict[str, Any] | None:
     return payload
 
 
+def projected(
+    vault_root: Path, pairs: Iterable[tuple[str, str]]
+) -> frozenset[tuple[str, str]] | None:
+    """The `(category, path)` pairs for which the stored projection holds an entry.
+
+    One read of the projection for the whole set. None when the projection cannot be read: a
+    caller must not read that as "resolved".
+    """
+    payload = _load_shared(vault_root)
+    if payload is None:
+        return None
+    categories = payload.get("categories") or {}
+    return frozenset(
+        (category, path)
+        for category, path in pairs
+        if isinstance(categories.get(category), dict)
+        and _unbucket(categories[category].get(path))
+    )
+
+
 def _remember_written(
     vault_root: Path,
     written: tuple[Any, Any],
