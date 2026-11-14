@@ -1044,13 +1044,15 @@ def _audited_for(
         ),
         (
             lives,
-            "WITH life AS (SELECT w.path AS path, MAX("
-            "COALESCE((SELECT MAX(e.seq) FROM store_audit e "
-            f"WHERE e.path = w.path AND {write.ENDS_A_LIFE} AND e.seq < "
-            "(SELECT COALESCE(MAX(b.seq), 0) FROM store_audit b "
-            f"WHERE b.path = w.path AND {write.BEGINS_A_LIFE})), 0), "
+            # Each path's bounds come from two grouped reads, computed once per path: its latest
+            # write, then its last removal before that write. A correlated bound would be read
+            # again for every audit row that the final join visits.
+            "WITH latest AS (SELECT path, MAX(seq) AS began FROM store_audit "
+            f"WHERE path IN ({{}}) AND {write.BEGINS_A_LIFE} GROUP BY path), "
+            "life AS (SELECT l.path AS path, MAX(COALESCE(MAX(e.seq), 0), "
             f"(SELECT COALESCE(MAX(r.seq), 0) FROM store_audit r WHERE {write.RESETS_EVERY_LIFE})"
-            ") AS starts_after FROM (SELECT DISTINCT path FROM store_audit WHERE path IN ({})) w) "
+            ") AS starts_after FROM latest l LEFT JOIN store_audit e ON e.path = l.path "
+            f"AND {write.ENDS_A_LIFE} AND e.seq < l.began GROUP BY l.path) "
             "SELECT DISTINCT a.path, a.sha256 FROM life JOIN store_audit a ON a.path = life.path "
             f"WHERE {write.BEGINS_A_LIFE} AND a.sha256 IS NOT NULL AND a.seq > life.starts_after",
         ),

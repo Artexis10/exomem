@@ -192,8 +192,8 @@ def start_service(root):
     return service
 
 
-#: The lease of an owner that a test kills or fails, so the test waits out the lease it leaves in
-#: seconds.
+#: The lease of an owner that a test kills, fails or lets lapse on purpose, so the test waits out
+#: that lease in seconds.
 SHORT_LEASE_TTL = "3"
 
 
@@ -214,7 +214,8 @@ def env(tmp_path, monkeypatch):
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
         # Long enough that a loaded runner's late renewal does not let a live owner's lease
         # expire, which fences the owner's own step with WRITER_FENCED. An owner that a test
-        # kills, or whose step fails and leaves its lease, takes SHORT_LEASE_TTL instead.
+        # kills, whose step fails and leaves its lease, or whose lease it lets lapse on purpose
+        # takes SHORT_LEASE_TTL instead.
         "EXOMEM_WRITER_LEASE_TTL": "10",
     }.items():
         monkeypatch.setenv(name, value)

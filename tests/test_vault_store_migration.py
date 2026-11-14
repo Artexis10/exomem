@@ -72,13 +72,13 @@ def _lease_environment(tmp_path, url):
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
         # Long enough that a loaded runner's late renewal does not let a live owner's lease
         # expire, which fences the owner's own step with WRITER_FENCED. An owner that a test
-        # kills or breaks takes SHORT_LEASE_TTL instead.
+        # kills, whose hand-back it breaks or whose lease it lets lapse takes SHORT_LEASE_TTL.
         "EXOMEM_WRITER_LEASE_TTL": "10",
     }
 
 
-#: The lease of an owner that a test kills or whose hand-back it breaks, so the test waits out the
-#: lease that the owner leaves in seconds.
+#: The lease of an owner that a test kills, whose hand-back it breaks or whose lease it lets lapse
+#: on purpose, so the test waits out that lease in seconds.
 SHORT_LEASE_TTL = "3"
 
 

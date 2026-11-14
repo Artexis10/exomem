@@ -692,6 +692,82 @@ def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path)
     assert process.returncode == -signal.SIGTERM, output.decode()[-3000:]
 
 
+SERVES_UNDER_AN_EARLIER_ACTION = """
+import signal, sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+from exomem.server import ExomemFastMCP
+
+marks, port, action = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+
+def mark(word):
+    with marks.open("a", encoding="utf-8") as out:
+        out.write(word + "\\n")
+
+@asynccontextmanager
+async def lifespan(_server):
+    yield
+    mark("torn down")
+
+earlier = {"handler": lambda _signum, _frame: mark("handler"), "ignore": signal.SIG_IGN,
+           "default": signal.SIG_DFL}[action]
+signal.signal(signal.SIGTERM, earlier)
+ExomemFastMCP("earlier", lifespan=lifespan).run(
+    transport="http", host="127.0.0.1", port=port, show_banner=False
+)
+mark("returned")
+"""
+
+
+@pytest.mark.parametrize(
+    ("action", "marks", "status"),
+    [
+        # The handler runs once and the runner returns, as on main; main ran it before the outer
+        # teardown, and here it runs once the teardown has unwound.
+        ("handler", ["torn down", "handler", "returned"], 0),
+        # As on main: the ignored signal is ignored, and the runner returns.
+        ("ignore", ["torn down", "returned"], 0),
+        # Main ends here without the teardown; this change runs it, then ends by the signal.
+        ("default", ["torn down"], -signal.SIGTERM),
+    ],
+)
+def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
+    tmp_path, action, marks, status
+):
+    """A service whose SIGTERM conversion drops the action that its caller installed: the caller's
+    handler never runs and an ignored signal ends the process, or the teardown does not run."""
+    import socket
+    import subprocess
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.close()
+    written = tmp_path / "marks"
+    process = subprocess.Popen(
+        [sys.executable, "-c", SERVES_UNDER_AN_EARLIER_ACTION, str(written), str(port), action],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while True:  # uvicorn listens only once it has taken the signals
+            assert process.poll() is None, process.stdout.read().decode()[-3000:]
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                break
+            except OSError:
+                assert time.monotonic() < deadline, "the service did not start"
+                time.sleep(0.05)
+        process.terminate()
+        output, _ = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(10)
+    found = written.read_text(encoding="utf-8").splitlines() if written.exists() else []
+    assert (found, process.returncode) == (marks, status), output.decode()[-3000:]
+
+
 def trashed_once(root, rel, body):
     """Where a trashed binary's bytes are now: every file under the trash that holds them."""
     return [

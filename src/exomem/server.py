@@ -351,7 +351,9 @@ class ExomemFastMCP(FastMCP):
         again, and its default action ended the process before the outer hold closed: no worker
         stopped, the vault projector left its queue and the writer lease waited out its TTL.
         Raised as an exception here instead, the signal unwinds through that hold, which runs the
-        teardown; then the process ends by SIGTERM as before.
+        teardown. Then the SIGTERM meets the action that was installed before serving, as uvicorn's
+        own replay did: a handler runs, an ignored signal is ignored, and the default action ends
+        the process by the signal.
         """
         if threading.current_thread() is not threading.main_thread():
             await super().run_http_async(*args, **kwargs)  # only the main thread takes signals
@@ -375,10 +377,12 @@ class ExomemFastMCP(FastMCP):
         try:
             await super().run_http_async(*args, **kwargs)
         except _Terminated:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, previous)
             signal.raise_signal(signal.SIGTERM)
         finally:
-            if signal.getsignal(signal.SIGTERM) is end_after_teardown:
+            # This runner's own actions give way to the earlier one on every path, a teardown that
+            # raised included: the replay left the default action in place.
+            if signal.getsignal(signal.SIGTERM) in (end_after_teardown, signal.SIG_DFL):
                 signal.signal(signal.SIGTERM, previous)
 
     async def run_stdio_async(
