@@ -1161,6 +1161,10 @@ def _safe_persisted_markdown_rel(value: object) -> str | None:
 
 def _no_follow_regular_markdown_path(vault_root: Path, rel: str) -> Path | None:
     """Return a regular leaf only after no-follow validation of every segment."""
+    from .vault_store import read
+
+    if read.serves(vault_root, rel):
+        return Path(vault_root) / rel if read.page_exists(vault_root, rel) else None
     current = Path(vault_root)
     try:
         for index, part in enumerate(PurePosixPath(rel).parts):
@@ -1548,6 +1552,10 @@ def _classify_semantic_isolation_row(
         return _SemanticIsolationRow(component, raw, None, edge_column)
     candidate = _no_follow_regular_markdown_path(vault_root, rel)
     if candidate is None:
+        from .vault_store import read
+
+        if read.serves(vault_root, rel):
+            return _SemanticIsolationRow(component, raw, rel, edge_column, missing=True)
         # A valid but missing identity remains ordinary missing-path cleanup;
         # a symlink/reparse leaf is never followed and its sidecar row is
         # handled only as an exact corrupt value.
@@ -1562,24 +1570,40 @@ def _classify_semantic_isolation_row(
     return _SemanticIsolationRow(component, raw, rel, edge_column)
 
 
+def _store_census(vault_root: Path, path: Path) -> bool:
+    from . import epistemic_graph, lexstore
+    from .vault_store import mode
+
+    # These two sidecar paths name tables that migration moves into the canonical store.
+    return path in (
+        lexstore.lexical_path(vault_root), epistemic_graph.sidecar_path(vault_root)
+    ) and mode.store_mode_for_reads(vault_root)
+
+
 def _sidecar_rows(
     vault_root: Path, path: Path, query: str, *, after: str, limit: int
 ) -> tuple[list[tuple[object, ...]], int, str | None, str | None]:
     """Read at most one bounded census page without creating a sidecar."""
-    state, binding = _bind_sidecar(path, writable=False)
-    if state == "absent":
-        return [], 0, None, None
-    if state == "unsupported":
-        return [], 0, None, "sidecar_unsupported"
-    if state != "regular" or binding is None:
-        return [], 0, None, "sidecar_unreadable"
     import sqlite3
 
-    try:
-        conn = sqlite3.connect(f"{binding.path.as_uri()}?mode=ro", uri=True)
-    except (OSError, sqlite3.Error):
-        binding.close()
-        return [], 0, None, "sidecar_unreadable"
+    binding = None
+    if _store_census(vault_root, path):
+        from .vault_store import read
+
+        conn = read.lend(vault_root)
+    else:
+        state, binding = _bind_sidecar(path, writable=False)
+        if state == "absent":
+            return [], 0, None, None
+        if state == "unsupported":
+            return [], 0, None, "sidecar_unsupported"
+        if state != "regular" or binding is None:
+            return [], 0, None, "sidecar_unreadable"
+        try:
+            conn = sqlite3.connect(f"{binding.path.as_uri()}?mode=ro", uri=True)
+        except (OSError, sqlite3.Error):
+            binding.close()
+            return [], 0, None, "sidecar_unreadable"
     try:
         cursor = conn.execute(query, (after,))
         rows: list[tuple[object, ...]] = []
@@ -1600,11 +1624,16 @@ def _sidecar_rows(
         return [], 0, None, "sidecar_schema_unreadable"
     finally:
         conn.close()
-        binding.close()
+        if binding is not None:
+            binding.close()
 
 
 def _sidecar_signature(vault_root: Path, path: Path) -> str | None:
     """Stable-enough revision marker for a bounded SQLite census cursor."""
+    if _store_census(vault_root, path):
+        from .vault_store import read
+
+        return f"store:{read.current_revision(vault_root)}"
     state, binding = _bind_sidecar(path, writable=False)
     if state == "absent":
         return hashlib.sha256(b"absent|absent|absent").hexdigest()
@@ -1623,6 +1652,8 @@ def _sidecar_signature(vault_root: Path, path: Path) -> str | None:
 
 def _graph_dependency_census_signature(vault_root: Path, path: Path) -> str | None:
     """Return the durable DB/WAL revision for one dependency-census page."""
+    if _store_census(vault_root, path):
+        return _sidecar_signature(vault_root, path)
     state, binding = _bind_sidecar(path, writable=False)
     if state == "absent":
         return hashlib.sha256(b"absent|empty-wal").hexdigest()
@@ -2318,21 +2349,17 @@ def _parse_all(
     admitted = (
         egress.restricted_release_filter(vault_root) if keep is _AUDIT_RELEASE_DEFAULT else keep
     )
+    from . import find_corpus
+
     pages: list[find_module.ParsedPage] = []
-    for path in find_module._walk_md(kb):
-        request_budget.checkpoint()
-        rel = path.relative_to(vault_root).as_posix()
-        if not egress.content_permits(vault_root, rel, who):
-            continue
-        if admitted is not None and not admitted(rel):
-            continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        page = find_module._parse_page(path, mtime, vault_root)
+    for page in find_corpus.corpus_pages(
+        vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
+        lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
+        keep=lambda rel, content: egress.content_permits(vault_root, rel, who, snapshot=content)
+        and (admitted is None or admitted(rel)),
+    ):
         # A hidden part page is its Source's own text, so no check counts or flags it as a memory.
-        if page is not None and page.part_of is None:
+        if page.part_of is None:
             pages.append(page)
     return pages
 
@@ -2644,7 +2671,12 @@ def _check_wikilinks(
     kb_stripped_paths: set[str] = set()   # KB-relative, no .md
     names_to_paths: dict[str, list[str]] = {}  # bare filename (no ext) → vault-rel paths
     titles_to_paths: dict[str, list[str]] = {}  # title_key(frontmatter title) → paths
-    for md_path in _walk_vault_md(vault_root):
+    from . import find_corpus
+
+    for source in find_corpus.corpus_sources(
+        vault_root, "vault", lambda **walk: vault_module.walk_vault_md(vault_root, **walk)
+    ):
+        md_path = source.path
         request_budget.checkpoint()
         try:
             rel = md_path.relative_to(vault_root).as_posix()
@@ -2657,7 +2689,7 @@ def _check_wikilinks(
         # Title fallback: lets `[[Test Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
         try:
-            text, _guard = vault_module.read_guarded_text(vault_root, md_path)
+            text = source.read_text()
         except (OSError, UnicodeDecodeError, vault_module.PathGuardError):
             continue
         fm, _, _ = parse_frontmatter(text)
@@ -2884,7 +2916,11 @@ def _walk_vault_md(vault_root: Path):
     Knowledge Base/ only. Compiled notes can link to curated parent trees
     (per SKILL.md rule 1), so we need a full-vault existence set.
     """
-    yield from vault_module.walk_vault_md(vault_root)
+    from . import find_corpus
+
+    yield from find_corpus.corpus_paths(
+        vault_root, "vault", lambda **walk: vault_module.walk_vault_md(vault_root, **walk)
+    )
 
 
 # ---------------- check: orphan_entity ----------------
@@ -7328,10 +7364,11 @@ def _entity_recurrence_resolution_entries(
     # reaches the resolver under two spellings — two stem edges, two title
     # candidates, and a bare name that looks ambiguous because of how it was
     # enumerated rather than because of what the vault holds.
-    vault_resolved = vault_root.resolve()
+    from . import find_corpus
+
     for md_path in _walk_vault_md(vault_root):
         try:
-            entries[md_path.resolve().relative_to(vault_resolved).as_posix()] = None
+            entries[find_corpus.page_relative_path(md_path, vault_root)] = None
         except (OSError, ValueError):
             continue
     for rel_path, title in titles:
@@ -7451,77 +7488,159 @@ def _check_entity_recurrence_from_store(
     return [_entity_recurrence_finding(candidate) for candidate in candidates]
 
 
-#: The last proximity sweep per vault. The sweep multiplies every eligible
-#: page's chunks against every chunk in the vault, and its answer moves only
-#: with the vectors, the eligible set, the authored exclusions and the band.
-#: The matrix is held weakly, so the memo never keeps one resident after the
-#: index or quiet mode releases it.
-_SWEEP_MEMO: dict[str, tuple[tuple[Any, ...], Any, dict[tuple[str, str], float]]] = {}
+@dataclass(frozen=True)
+class _Sweep:
+    """One proximity sweep: what it read, and every in-band pair it found."""
+
+    band: tuple[float, float]
+    matrix: Any  # a weak reference: the memo never keeps a matrix resident
+    vectors: dict[str, bytes]  # eligible page -> digest of its chunk vectors
+    pairs: dict[tuple[str, str], float]
+
+
+#: The last proximity sweep per vault. A pair's score moves only with the chunk
+#: vectors of its two pages and with the band, so the next sweep multiplies
+#: only the pages whose vectors changed.
+_SWEEP_MEMO: dict[str, _Sweep] = {}
 _SWEEP_MEMO_LOCK = threading.Lock()
 _SWEEP_MEMO_CAP = 8
+#: The cells of one product, about 32 MB of cosines. One product per page read
+#: the whole matrix once for each page; a product of several pages against the
+#: eligible chunks reads it once for all of them.
+_SWEEP_PRODUCT_CELLS = 8_000_000
 
 
-def _swept_pairs(
-    vault_root: Path, key: tuple[Any, ...], matrix: Any
-) -> dict[tuple[str, str], float] | None:
-    """The remembered sweep when nothing it read has changed, else None.
+def _band_pairs(
+    row_files: list[str],
+    rows: Any,
+    row_starts: list[int],
+    column_files: list[str],
+    columns: Any,
+    column_starts: list[int],
+    floor: float,
+    ceiling: float,
+    np: Any,
+    *,
+    square: bool = False,
+) -> Iterable[tuple[str, str, float]]:
+    """Each `(row page, column page, score)` that the band admits.
 
-    The vectors are identified by the matrix object alone, with no generation:
-    every catch-up and reload builds a new array (`_splice_path_blocks` is
-    copy-on-write) and nothing writes into a served one.
+    A page's chunks are adjacent, and `*_starts` holds each page's first chunk.
+    Seen from one page, a chunk of the other page scores its best cosine with
+    any chunk of this page. A score outside the band counts for nothing, and
+    the pair takes the best score that counts, seen from either page.
+
+    `square` says that the rows are the columns. A product then starts at its
+    own first row: an earlier product already held each pair before it.
     """
-    with _SWEEP_MEMO_LOCK:
-        held = _SWEEP_MEMO.get(str(vault_root))
-    if held is None or held[0] != key or held[1]() is not matrix:
-        return None
-    return dict(held[2])
-
-
-def _remember_sweep(
-    vault_root: Path, key: tuple[Any, ...], matrix: Any, pairs: dict[tuple[str, str], float]
-) -> None:
-    with _SWEEP_MEMO_LOCK:
-        _SWEEP_MEMO.pop(str(vault_root), None)
-        while len(_SWEEP_MEMO) >= _SWEEP_MEMO_CAP:
-            _SWEEP_MEMO.pop(next(iter(_SWEEP_MEMO)))
-        _SWEEP_MEMO[str(vault_root)] = (key, weakref.ref(matrix), dict(pairs))
+    ends = [*row_starts[1:], len(rows)]
+    first = 0
+    while first < len(row_files):
+        base = row_starts[first]
+        left, page = (base, first) if square else (0, 0)
+        room = max(1, _SWEEP_PRODUCT_CELLS // max(1, len(columns) - left))
+        last = first + 1
+        while last < len(row_files) and ends[last] - base <= room:
+            last += 1
+        products = rows[base : ends[last - 1]] @ columns[left:].T
+        own = [start - base for start in row_starts[first:last]]
+        other = [start - left for start in column_starts[page:]]
+        # From the row page: each column chunk against the page's best chunk.
+        seen = np.maximum.reduceat(products, own, axis=0)
+        seen = np.where((seen >= floor) & (seen < ceiling), seen, -np.inf)
+        score = np.maximum.reduceat(seen, other, axis=1)
+        # From the column page: each row chunk against that page's best chunk.
+        seen = np.maximum.reduceat(products, other, axis=1)
+        seen = np.where((seen >= floor) & (seen < ceiling), seen, -np.inf)
+        score = np.maximum(score, np.maximum.reduceat(seen, own, axis=0))
+        for row, column in zip(*np.nonzero(score > -np.inf), strict=True):
+            yield (
+                row_files[first + int(row)],
+                column_files[page + int(column)],
+                float(score[row, column]),
+            )
+        first = last
 
 
 def _sweep_pairs(
+    vault_root: Path,
     metadata: list[tuple[str, int]],
     matrix: Any,
     eligible: Mapping[str, Any],
-    excluded: set[tuple[str, str]],
     floor: float,
     ceiling: float,
     np: Any,
 ) -> dict[tuple[str, str], float]:
-    """Max chunk-cosine per deduped unordered file pair, both endpoints eligible."""
+    """Max in-band chunk-cosine per unordered pair of eligible pages.
+
+    Only the chunks of eligible pages are multiplied: no other chunk can be an
+    endpoint. The remembered sweep answers for each page whose vectors are the
+    same bytes, so a write costs the products of the pages it changed.
+    """
     rows_by_file: dict[str, list[int]] = {}
     for i, (fp, _cidx) in enumerate(metadata):
-        rows_by_file.setdefault(fp, []).append(i)
-    pair_cos: dict[tuple[str, str], float] = {}
-    for fp, _page in eligible.items():
-        rows = rows_by_file.get(fp)
-        if not rows:
-            continue  # eligible page with no vectors yet (e.g. never embedded)
-        sub = matrix[rows]                       # (m, D) this file's chunk vectors
-        col_max = (sub @ matrix.T).max(axis=0)   # (N,) best cosine file→each chunk
-        in_band = np.nonzero((col_max >= floor) & (col_max < ceiling))[0]
-        for j in in_band:
-            other_fp = metadata[int(j)][0]
-            if other_fp == fp or other_fp not in eligible:
-                continue
-            score = float(col_max[int(j)])
-            a, b = sorted((fp, other_fp))
-            key = (a, b)
-            # Already surfaced as an authored contradiction: the stronger signal
-            # owns the pair, so it is not re-measured, re-counted, or re-capped.
-            if key in excluded:
-                continue
-            if key not in pair_cos or score > pair_cos[key]:
-                pair_cos[key] = score
-    return pair_cos
+        if fp in eligible:
+            rows_by_file.setdefault(fp, []).append(i)
+    band = (float(floor), float(ceiling))
+    with _SWEEP_MEMO_LOCK:
+        held = _SWEEP_MEMO.get(str(vault_root))
+    if held is not None and held.band != band:
+        held = None
+    if (
+        held is not None
+        and held.matrix() is matrix
+        and held.vectors.keys() == rows_by_file.keys()
+    ):
+        # Every catch-up and reload builds a new array (`_splice_path_blocks` is
+        # copy-on-write) and nothing writes into a served one.
+        return held.pairs
+    # An eligible page with no vectors yet (never embedded) has no row here.
+    files = sorted(rows_by_file)
+    digests = {
+        fp: hashlib.blake2b(matrix[rows_by_file[fp]].tobytes(), digest_size=16).digest()
+        for fp in files
+    }
+    known = held.vectors if held is not None else {}
+    changed = [fp for fp in files if known.get(fp) != digests[fp]]
+    pairs = {
+        pair: score
+        for pair, score in (held.pairs.items() if held is not None else ())
+        if all(fp in digests and known[fp] == digests[fp] for fp in pair)
+    }
+    found: Iterable[tuple[str, str, float]] = ()
+    if changed:
+        starts: list[int] = []
+        order: list[int] = []
+        for fp in files:
+            starts.append(len(order))
+            order.extend(rows_by_file[fp])
+        vectors = np.ascontiguousarray(matrix[order])
+        if len(changed) == len(files):
+            found = _band_pairs(
+                files, vectors, starts, files, vectors, starts, floor, ceiling, np, square=True
+            )
+        else:
+            moved_starts: list[int] = []
+            moved_order: list[int] = []
+            for fp in changed:
+                moved_starts.append(len(moved_order))
+                moved_order.extend(rows_by_file[fp])
+            found = _band_pairs(
+                changed, np.ascontiguousarray(matrix[moved_order]), moved_starts,
+                files, vectors, starts, floor, ceiling, np,
+            )
+    for fp, other_fp, score in found:
+        if fp == other_fp:
+            continue
+        pair = (fp, other_fp) if fp < other_fp else (other_fp, fp)
+        if score > pairs.get(pair, -math.inf):
+            pairs[pair] = score
+    with _SWEEP_MEMO_LOCK:
+        _SWEEP_MEMO.pop(str(vault_root), None)
+        while len(_SWEEP_MEMO) >= _SWEEP_MEMO_CAP:
+            _SWEEP_MEMO.pop(next(iter(_SWEEP_MEMO)))
+        _SWEEP_MEMO[str(vault_root)] = _Sweep(band, weakref.ref(matrix), digests, pairs)
+    return pairs
 
 
 @call_spans.timed("audit.corpus_contradictions")
@@ -7642,17 +7761,15 @@ def _proximity_contradictions(
         _enrich_contradiction_polarity(vault_root, [], eligible, sense_scope=sense_scope)
         return []
     excluded = exclude or set()
-
-    sweep_key = (
-        frozenset(eligible),
-        frozenset(excluded),
-        float(floor),
-        float(ceiling),
-    )
-    pair_cos = _swept_pairs(vault_root, sweep_key, matrix)
-    if pair_cos is None:
-        pair_cos = _sweep_pairs(metadata, matrix, eligible, excluded, floor, ceiling, np)
-        _remember_sweep(vault_root, sweep_key, matrix, pair_cos)
+    # Already surfaced as an authored contradiction: the stronger signal owns
+    # the pair, so it is not re-counted or re-capped.
+    pair_cos = {
+        pair: cos
+        for pair, cos in _sweep_pairs(
+            vault_root, metadata, matrix, eligible, floor, ceiling, np
+        ).items()
+        if pair not in excluded
+    }
 
     # Order into a usable review queue: priority = cosine + w · pair_dormancy,
     # same-family pairs demoted, then capped at top-N with an explicit count.
@@ -7754,6 +7871,8 @@ def _rel_kb_path_no_ext(absolute: Path, vault_root: Path) -> str:
 
     Matches the form wikilinks use after the leading 'Knowledge Base/' is stripped.
     """
-    rel = absolute.resolve().relative_to(vault_root.resolve())
+    from . import find_corpus
+
+    rel = PurePosixPath(find_corpus.page_relative_path(absolute, vault_root))
     no_ext = rel.with_suffix("").as_posix()
     return no_ext.removeprefix(kb_prefix()).lstrip("/")

@@ -10,6 +10,8 @@ every other path.
 
 from __future__ import annotations
 
+import os
+import sqlite3
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -24,6 +26,9 @@ from ..collection_store import connection, runtime
 from . import mode, ownership
 
 NOT_ACTIVE = "VAULT_STORE_NOT_ACTIVE"
+#: A reader of derived rows that this build adds, on a store that an older build set up and that no
+#: registry pass has given those rows yet (``rederive.OWNER_SCHEMA``).
+DERIVED_BEHIND = "VAULT_STORE_DERIVED_BEHIND"
 T = TypeVar("T")
 
 # One covering index serves every metadata read, so a point read of a page's hash never walks the
@@ -46,6 +51,12 @@ class PageMeta:
     mtime_ns: int
     #: The stored frontmatter as JSON text, or None when the page has none.
     frontmatter_json: str | None
+
+    @property
+    def mtime(self) -> float:
+        """Modification seconds with the same rounding as the file stat's timestamp."""
+        seconds, nanos = divmod(self.mtime_ns, 1_000_000_000)
+        return seconds + nanos / 1e9
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +101,12 @@ class StoreSnapshot:
 
     def page(self, rel: str) -> StoredPage | None:
         """One page's exact bytes with its metadata, or None when the store holds no such page."""
+        sources = self.memo.get("corpus_sources")
+        if sources is not None:
+            return sources.get(rel)
+        prefetched = self.memo.get("pages", {})
+        if rel in prefetched:
+            return prefetched[rel]
         row = self.connection.execute(
             f"SELECT {_META_COLUMNS}, body FROM store_pages WHERE path = ?", (rel,)
         ).fetchone()
@@ -97,10 +114,56 @@ class StoreSnapshot:
 
     def page_meta(self, rel: str) -> PageMeta | None:
         """One page's path, revision, hash, size, mtime and frontmatter, without its body."""
+        metadata = self.memo.setdefault("page_metadata", {})
+        if rel in metadata:
+            return metadata[rel]
+        if "corpus_sources" in self.memo:
+            return None
+        prefetched = self.memo.get("pages", {})
+        if rel in prefetched:
+            page = prefetched[rel]
+            return None if page is None else page.meta
         row = self.connection.execute(
             f"SELECT {_META_COLUMNS} FROM {_META_FROM} WHERE path = ?", (rel,)
         ).fetchone()
-        return None if row is None else PageMeta(*row)
+        metadata[rel] = None if row is None else PageMeta(*row)
+        return metadata[rel]
+
+    def prime_page_metadata(self, rels: Iterable[str]) -> None:
+        """Read the supplied pages' metadata in batches before checking each page."""
+        metadata = self.memo.setdefault("page_metadata", {})
+        missing = set(rels) - metadata.keys()
+        if "corpus_sources" in self.memo:
+            # The completed corpus read proves absence too, at this same pinned revision.
+            metadata.update(dict.fromkeys(missing))
+            return
+        found = {row[0]: PageMeta(*row) for row in self._each(missing, _META_COLUMNS)}
+        metadata.update((rel, found.get(rel)) for rel in missing)
+
+    def page_sources(self) -> Iterator[StoredPage]:
+        """Each page's bytes and metadata, loaded once when a request scans the whole corpus."""
+        from .. import request_budget
+
+        sources = self.memo.get("corpus_sources")
+        if sources is None:
+            sources = {}
+            for row in self.connection.execute(
+                f"SELECT {_META_COLUMNS}, body FROM store_pages ORDER BY path"
+            ):
+                request_budget.checkpoint()
+                meta = PageMeta(*row[:-1])
+                self.memo.setdefault("page_metadata", {})[meta.path] = meta
+                sources[meta.path] = StoredPage(row[-1], meta)
+            # Audit's parse, link and drift scans share bytes until this pinned snapshot ends.
+            self.memo["corpus_sources"] = sources
+        yield from sources.values()
+
+    def page_metas(self, rels: Iterable[str]) -> dict[str, PageMeta]:
+        """The requested pages' metadata, in bounded reads that avoid body overflow pages."""
+        wanted = tuple(rels)
+        self.prime_page_metadata(wanted)
+        metadata = self.memo["page_metadata"]
+        return {rel: metadata[rel] for rel in wanted if metadata[rel] is not None}
 
     def pages(self, prefix: str = "") -> Iterator[PageMeta]:
         """The metadata of every page whose path starts with ``prefix``, in path order."""
@@ -136,28 +199,39 @@ class StoreSnapshot:
             # "0" is the code point after "/", so every path below "name/" sorts before it.
             lower = prefix + name + ("0" if slash else "\x00")
 
-    def inbound_sources(self, rel: str) -> frozenset[str]:
-        """The pages other than ``rel`` that the graph rows hold a link to ``rel`` from."""
-        return inbound_sources(self.connection, rel)
-
-    def inbound_sources_many(self, rels: Iterable[str]) -> dict[str, frozenset[str]]:
-        """``inbound_sources`` for each page in ``rels``, read in a few queries."""
-        return inbound_sources_many(self.connection, rels)
-
     def held_pages(self, rels: Iterable[str]) -> frozenset[str]:
         """The paths in ``rels`` that the store holds a page at, read in a few queries."""
         return frozenset(path for path, in self._each(rels, "path"))
 
+    def prefetch_pages(self, rels: Iterable[str]) -> None:
+        """Hold a bounded caller-selected batch for repeated parent and target reads in this snapshot."""
+        pages = self.memo.setdefault("pages", {})
+        wanted = {rel for rel in rels if rel not in pages}
+        loaded = {
+            row[0]: StoredPage(row[-1], PageMeta(*row[:-1]))
+            for row in self._each(wanted, f"{_META_COLUMNS}, body")
+        }
+        pages.update(dict.fromkeys(wanted))
+        pages.update(loaded)
+
     def bodies(self, rels: Iterable[str]) -> dict[str, bytes]:
         """The exact bytes of each page in ``rels`` that the store holds, read in a few queries."""
+        sources = self.memo.get("corpus_sources")
+        if sources is not None:
+            return {rel: sources[rel].body for rel in rels if rel in sources}
         return dict(self._each(rels, "path, body"))
 
-    def _each(self, rels: Iterable[str], columns: str) -> Iterator[tuple]:
+    def _each(
+        self, rels: Iterable[str], columns: str, *, source: str | None = None,
+    ) -> Iterator[tuple]:
         wanted = list(dict.fromkeys(rels))
+        # Metadata batches use the same covering index as point metadata reads.
+        if source is None:
+            source = _META_FROM if columns == _META_COLUMNS else "store_pages"
         for start in range(0, len(wanted), KEYS_PER_QUERY):
             chunk = wanted[start : start + KEYS_PER_QUERY]
             yield from self.connection.execute(
-                f"SELECT {columns} FROM store_pages WHERE path IN ({', '.join('?' * len(chunk))})",
+                f"SELECT {columns} FROM {source} WHERE path IN ({', '.join('?' * len(chunk))})",
                 chunk,
             )
 
@@ -261,41 +335,9 @@ def corpus_member(rel: str, scope: str) -> bool:
     return find_corpus.kb_walk_member(rel) if scope == "kb" else walk_member(rel)
 
 
-def inbound_sources(connection: Connection, rel: str) -> frozenset[str]:
-    """The pages other than ``rel`` that the graph rows hold a link to ``rel`` from.
-
-    A commit derives a page's graph rows in its own transaction, so these are current at the
-    revision that ``connection`` sees, which the projector's lag does not change. The page key's
-    ``file:`` prefix is how the graph names a page, as ``epistemic_graph`` writes it.
-    """
-    return inbound_sources_many(connection, (rel,))[rel]
-
-
 #: The most paths or page keys that one keyed store query binds. SQLite allows 32766 parameters;
 #: a smaller chunk keeps each statement short to prepare and each result small.
 KEYS_PER_QUERY = 500
-
-
-def inbound_sources_many(connection: Connection, rels: Iterable[str]) -> dict[str, frozenset[str]]:
-    """``inbound_sources`` for each page in ``rels``, in one query per 500 pages.
-
-    A writer that binds the linking pages of a whole folder would otherwise run one query for each
-    page. Every page in ``rels`` has an entry, empty when nothing links to it.
-    """
-    wanted = list(dict.fromkeys(rels))
-    found: dict[str, set[str]] = {rel: set() for rel in wanted}
-    for start in range(0, len(wanted), KEYS_PER_QUERY):
-        chunk = wanted[start : start + KEYS_PER_QUERY]
-        rows = connection.execute(
-            "SELECT dst_page_key, source_path FROM graph_edges"
-            f" WHERE dst_page_key IN ({', '.join('?' * len(chunk))})",
-            [f"file:{rel}" for rel in chunk],
-        )
-        for key, source in rows:
-            rel = key.removeprefix("file:")
-            if source != rel:
-                found[rel].add(source)
-    return {rel: frozenset(sources) for rel, sources in found.items()}
 
 
 def walk_member(rel: str) -> bool:
@@ -312,6 +354,28 @@ def walk_member(rel: str) -> bool:
         and not reserved_paths.classify_logical(rel).blocked
         and not vault.in_excluded_scan_dir(rel)
     )
+
+
+def derived_behind():
+    """The refusal of a reader whose derived rows the store does not hold yet: never an empty answer."""
+    from ..cli_ops import OpError
+
+    return OpError(
+        DERIVED_BEHIND,
+        "This vault's store was set up by an older Exomem build, and its link rows are not derived "
+        "yet, so Exomem cannot say which pages link here.",
+        "Start the Exomem service: it derives the rows in the background. `exomem store-mode "
+        "status` shows `owner_schema` as current once they are done.",
+    )
+
+
+def require_link_rows(conn: Connection) -> None:
+    """Refuse a read of the store's link rows while a store that an older build set up lacks some:
+    between the batches of its pass the tables exist, but the pages after its cursor lack rows."""
+    from . import rederive
+
+    if rederive.owner_schema_behind(conn, required_version=rederive.LINK_ROWS_VERSION):
+        raise derived_behind()
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,7 +563,7 @@ class _RequestScope:
 
 
 #: The open request scope of this context. A connection cannot cross threads, so a worker thread
-#: that inherits the context still opens its own snapshot (see ``snapshot``).
+#: that inherits the context opens its own snapshot at the same revision (see ``snapshot``).
 _REQUEST: ContextVar[_RequestScope | None] = ContextVar(
     "vault_store_request_snapshot", default=None
 )
@@ -544,8 +608,8 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
     mode answer, at no cost beyond this query: when the row disagrees, the kept answer is dropped,
     so a read that runs again meets the mode the records now show.
 
-    Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned
-    and nothing is opened.
+    Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned.
+    A worker with inherited context must see that revision too, or refuse so the caller can retry the request.
     """
     root = Path(vault_root)
     scope = _REQUEST.get()
@@ -560,10 +624,142 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
             if row is None or row[0] != mode.STORE_MODE:
                 mode.forget_read_mode(vault_root)
                 raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
+            if scope is not None and scope.root == root and row[1] != scope.view.revision:
+                # Mixing revisions corrupts a read; a false refusal costs the caller a fresh request.
+                raise connection.CollectionStoreError(
+                    "VAULT_STORE_SNAPSHOT_CHANGED",
+                    "the worker read a different store revision; retry the request",
+                )
             yield StoreSnapshot(revision=row[1], connection=reader)
         finally:
             if reader.in_transaction:
                 reader.execute("ROLLBACK")
+
+
+class PageBatch:
+    """Reuse one bounded body batch inside the caller's pinned request snapshot."""
+
+    def __init__(self, root: Path, *, max_batch_files: int = KEYS_PER_QUERY) -> None:
+        self.root = root
+        # Cache capacity is distinct from the census's remaining valid-file slots.
+        self._max_batch_files = max(1, max_batch_files)
+        self._candidates: list[PageMeta] = []
+        self._positions: dict[str, int] = {}
+        self._batch_size = 1
+        self._loaded: set[str] = set()
+
+    def prefetch(self, pages: list[PageMeta], *, max_files: int, max_bytes: int) -> None:
+        self._candidates = list(pages)
+        self._positions = {page.path: index for index, page in enumerate(self._candidates)}
+        self._batch_size = min(self._max_batch_files, max(1, max_files))
+        self._prefetch(self._candidates, max_files=min(max_files, self._max_batch_files), max_bytes=max_bytes)
+
+    def _prefetch(self, pages: list[PageMeta], *, max_files: int, max_bytes: int) -> None:
+        wanted = []
+        for page in pages:
+            if max_files <= 0:
+                break
+            if page.size <= max_bytes:
+                wanted.append(page.path)
+                max_bytes -= page.size
+                max_files -= 1
+        with snapshot(self.root) as view:
+            cached = view.memo.setdefault("pages", {})
+            for key in self._loaded:
+                cached.pop(key, None)
+            self._loaded = set(wanted) - cached.keys()
+            view.prefetch_pages(wanted)
+
+    def body(self, page: PageMeta, *, max_files: int, max_bytes: int) -> bytes:
+        with snapshot(self.root) as view:
+            if page.path not in view.memo.get("pages", {}):
+                # One oversized page occupies its own batch, as the scalar read would.
+                self._batch_size = min(self._max_batch_files, self._batch_size * 2)
+                self._prefetch(
+                    self._candidates[self._positions[page.path]:],
+                    max_files=min(self._max_batch_files, max(max_files, self._batch_size)),
+                    max_bytes=max(max_bytes, page.size),
+                )
+            return view.page(page.path).body
+
+    def clear(self) -> None:
+        """Release only this batch's bytes, preserving anything another reader prefetched."""
+        with snapshot(self.root) as view:
+            for path in self._loaded:
+                view.memo.get("pages", {}).pop(path, None)
+        self._loaded.clear()
+
+
+class _Lend:
+    """The connection of a store snapshot, lent to a reader that treats it as its own and closes it.
+
+    The graph readers open a private connection, install a deadline handler or SQL functions on it,
+    and close it when they are done. Inside a request the lend is the request's own connection, so
+    ``close`` ends only what lends opened: when the last open lend of the snapshot closes, it clears
+    the progress handler and releases each SQL function registered through any of them (SQLite
+    keeps the name, and a later call fails), and outside a request it ends the pooled snapshot. A lend that a reader opens while another is open (a nested
+    read) leaves the outer reader's handler and functions in place. ``commit`` and ``rollback``
+    raise, because either would end the snapshot that the rest of the request reads. Everything
+    else delegates.
+    """
+
+    __slots__ = ("_view", "_scope")
+
+    def __init__(self, view: StoreSnapshot, scope: ExitStack) -> None:
+        self._view = view
+        self._scope: ExitStack | None = scope
+        view.memo["lends"] = view.memo.get("lends", 0) + 1
+
+    def __getattr__(self, name: str):
+        return getattr(self._view.connection, name)
+
+    def __enter__(self):
+        raise TypeError("a lent store snapshot is not a context manager; call close()")
+
+    def __exit__(self, *exc):
+        raise TypeError("a lent store snapshot is not a context manager; call close()")
+
+    def create_function(self, name: str, narg: int, func, **options) -> None:
+        self._view.connection.create_function(name, narg, func, **options)
+        self._view.memo.setdefault("lent_functions", set()).add((name, narg))
+
+    def commit(self) -> None:
+        raise sqlite3.ProgrammingError("a lent store snapshot cannot commit; it is read-only")
+
+    def rollback(self) -> None:
+        raise sqlite3.ProgrammingError("a lent store snapshot cannot roll back the request's view")
+
+    def close(self) -> None:
+        scope, self._scope = self._scope, None
+        if scope is None:
+            return
+        with scope:
+            memo = self._view.memo
+            memo["lends"] -= 1
+            if memo["lends"]:
+                return
+            # A deadline handler or a function left on a shared or pooled connection would outlive
+            # the read: it aborts the request's later reads and holds the reader's objects.
+            connection = self._view.connection
+            connection.set_progress_handler(None, 0)
+            for name, narg in memo.pop("lent_functions", ()):
+                connection.create_function(name, narg, None)
+
+
+def lend(vault_root: Path) -> _Lend | None:
+    """The connection of this request's snapshot (or of a pooled one), for a reader to close.
+
+    None when the records no longer say store mode: the caller reads as file mode does.
+    """
+    scope = ExitStack()
+    try:
+        view = scope.enter_context(snapshot(_as_path(vault_root)))
+    except connection.CollectionStoreError as error:
+        scope.close()
+        if error.code != NOT_ACTIVE:
+            raise
+        return None
+    return _Lend(view, scope)
 
 
 def current_revision(vault_root: Path) -> int:
@@ -571,6 +767,26 @@ def current_revision(vault_root: Path) -> int:
     registry pass (``rederive.settle``), which changes derived rows without a page commit."""
     with snapshot(vault_root) as view:
         return view.revision
+
+
+def snapshot_identity(reader, keys: tuple[str, ...]) -> dict[str, str]:
+    """The open graph reader's identity: its store revision, or file mode's graph metadata.
+
+    Graph generations advance on graph writes, but cannot identify every store commit.
+    A lend already holds its revision. Static graph metadata retains the projection's identity;
+    the copied recall checkpoint never describes a store snapshot.
+    """
+    values = {}
+    if isinstance(reader, _Lend):
+        values["generation"] = str(reader._view.revision)
+        # These are graph metadata fields: the store revision replaces both volatile witnesses.
+        keys = tuple(key for key in keys if key not in ("generation", "recall_projection_identity"))
+    if keys:
+        values.update(reader.execute(
+            f"SELECT key, value FROM graph_meta WHERE key IN ({', '.join('?' for _ in keys)})",
+            keys,
+        ).fetchall())
+    return values
 
 
 def _as_path(value: Path | str) -> Path:
@@ -606,6 +822,14 @@ def from_store(vault_root: Path, rel: str, store_read: Callable[[], T]) -> T | N
         if error.code != NOT_ACTIVE:
             raise
     return store_read() if serves(root, rel) else None
+
+
+def prefetch_pages(vault_root: Path, rels: Iterable[str]) -> None:
+    """Batch a request's upcoming page reads; unowned paths keep their file-mode readers."""
+    root = _as_path(vault_root)
+    if mode.store_mode_for_reads(root):
+        with snapshot(root) as view:
+            view.prefetch_pages(rel for rel in rels if ownership.classify(rel) is ownership.Ownership.PAGE)
 
 
 def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
@@ -649,6 +873,64 @@ def page_exists(vault_root: Path, rel: str) -> bool:
     return (root / rel).exists()
 
 
+def prime_page_metadata(vault_root: Path, rels: Iterable[str]) -> None:
+    """Prime only the supplied store-owned pages in the current request snapshot."""
+    if mode.store_mode_for_reads(vault_root):
+        with snapshot(vault_root) as view:
+            view.prime_page_metadata(
+                rel for rel in rels if ownership.classify(rel) is ownership.Ownership.PAGE
+            )
+
+
+def holds_file(vault_root: Path, rel: str) -> bool:
+    """``(root / rel).is_file()`` as the store sees it: for a path that the store serves, whether it
+    holds the page, with no look at the projection; for any other path, the disk's answer."""
+    root = _as_path(vault_root)
+    try:
+        return owned_meta(root, rel) is not None or (root / rel).is_file()
+    except FileNotFoundError:
+        return False
+
+
+def page_source(reader: Connection, vault_root: Path, rel: str) -> tuple[bytes, int] | None:
+    """The exact bytes and modification time that a commit derives the page at ``rel`` from, or
+    None when it has none: the store's page when ``reader``'s snapshot holds one, else the file.
+
+    A page path the store holds no row for is a file like any unowned one: the disk is its source
+    until a governed write holds it. A graph reader that re-derives a page's links reads here, so
+    it derives them from the bytes that its rows came from.
+    """
+    if ownership.classify(rel) is ownership.Ownership.PAGE:
+        row = reader.execute(
+            "SELECT body, mtime_ns FROM store_pages WHERE path = ?", (rel,)
+        ).fetchone()
+        if row is not None:
+            return bytes(row[0]), row[1]
+    path = _as_path(vault_root) / rel
+    try:
+        raw = vault.read_disk_bytes_without_pinning(path)
+        return raw, os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def link_target_exists(reader: Connection, vault_root: Path, rel: str) -> bool:
+    """Whether a typed link to ``rel`` lands on a page, as a commit derives the graph rows: for a
+    page path, whether ``reader``'s snapshot holds the page; for any other path, the file.
+
+    A page path that the store holds no row for is no target, as every reader treats it: its file
+    may be one that a commit just removed and the projector has not yet deleted, and nothing
+    re-derives the linking page when the file goes. A graph reader that re-derives a page's links
+    asks here, so they land as its rows did.
+    """
+    if ownership.classify(rel) is ownership.Ownership.PAGE:
+        return (
+            reader.execute("SELECT 1 FROM store_pages WHERE path = ?", (rel,)).fetchone()
+            is not None
+        )
+    return (_as_path(vault_root) / rel).exists()
+
+
 def served_lookup(vault_root: Path) -> Callable[[str], bool | None]:
     """``owned_meta``'s question for one pass over many paths: one query, not one per path.
 
@@ -662,6 +944,38 @@ def served_lookup(vault_root: Path) -> Callable[[str], bool | None]:
         held = frozenset(row[0] for row in view.connection.execute("SELECT path FROM store_pages"))
     page = ownership.Ownership.PAGE
     return lambda rel: rel in held if ownership.classify(rel) is page else None
+
+
+def held_lookup(vault_root: Path, rels: Iterable[str]) -> Callable[[str], bool | None]:
+    """``served_lookup`` for the paths ``rels`` alone: a few keyed reads, not a read of every page.
+
+    The lookup answers None for a path that the store does not serve, and whether the store holds
+    each served path in ``rels``.
+    """
+    root = _as_path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return _not_served
+    page = ownership.Ownership.PAGE
+    classified = {rel: ownership.classify(rel) is page for rel in rels}
+    owned = frozenset(rel for rel, served in classified.items() if served)
+    with snapshot(root) as view:
+        held = view.held_pages(owned)
+
+    def lookup(rel: str) -> bool | None:
+        served = classified.get(rel)
+        if served is None:
+            served = ownership.classify(rel) is page
+        return rel in held if served else None
+
+    return lookup
+
+
+def request_memo(vault_root: Path) -> dict | None:
+    """The current thread's pinned store request memo, or None outside that request."""
+    scope = _REQUEST.get()
+    if scope is None or scope.thread != threading.get_ident() or scope.root != Path(vault_root):
+        return None
+    return scope.view.memo
 
 
 def _not_served(_rel: str) -> None:

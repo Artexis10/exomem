@@ -89,10 +89,18 @@ def write_keys(plan: Plan, catalogue: Catalogue) -> tuple[Key, ...]:
     for thread in plan.threads:
         oracle = Oracle(plan.thread_world(thread, thread.variant), plan.validity())
         entry = catalogue.entries[thread.entry]
+        prover = Prover(oracle)
         for form in entry.probes:
             try:
                 keys.append(
-                    write_key(oracle, thread, catalogue, form, twin=thread.variant == MUTATION)
+                    write_key(
+                        oracle,
+                        thread,
+                        catalogue,
+                        form,
+                        twin=thread.variant == MUTATION,
+                        prover=prover,
+                    )
                 )
             except KeyRefused as refused:
                 refusals += refused.refusals
@@ -109,7 +117,13 @@ def key_spec(catalogue: Catalogue, thread: Thread, form: str) -> Mapping[str, An
 
 
 def write_key(
-    oracle: Oracle, thread: Thread, catalogue: Catalogue, form: str, *, twin: bool = False
+    oracle: Oracle,
+    thread: Thread,
+    catalogue: Catalogue,
+    form: str,
+    *,
+    twin: bool = False,
+    prover: Prover | None = None,
 ) -> Key:
     """The key of one probe form of a thread, read from ``oracle``, which holds the thread's world.
 
@@ -120,7 +134,7 @@ def write_key(
     spec = key_spec(catalogue, thread, form)
     at = thread.slots[spec["at"]]
     world = oracle.record.world
-    prover = Prover(oracle)
+    prover = prover or Prover(oracle)
     where = f"probe {thread.id} {form}"
 
     def refuse(code: str, detail: str) -> KeyRefused:
@@ -143,7 +157,11 @@ def write_key(
             raise refuse("unbuilt-reading", f"`{reading}` is not built")
         try:
             answer = oracle.read(reading, of=subject, at=when, **arguments(part))
-            basis = prover.basis(reading, of=subject, at=when, **arguments(part)) if rests else None
+            basis = (
+                prover.basis(reading, of=subject, at=min(when, at), **arguments(part))
+                if rests
+                else None
+            )
         except NotUnique as unique:
             raise refuse("not-unique", unique.detail) from unique
         except NoBasis as none:
@@ -188,7 +206,7 @@ def write_key(
     proof_refs = [ref for b in bases for ref in b.proof]
     ended = [ref for b in bases for ref in b.aside]
     carriers = [ref for held in (*traps, *stale) for ref in _carriers(oracle, held, at)]
-    proof = artefacts(world, proof_refs)
+    proof = artefacts(world, proof_refs, at=at)
     if _rests_on_stated_norm(entry.norms, catalogue) and not any(
         _states_a_norm(world, a) for a in proof
     ):
@@ -196,7 +214,7 @@ def write_key(
             "no-norm-document",
             "the entry names a stated norm and no document of the proof trace states one",
         )
-    contest = artefacts(world, [*proof_refs, *ended, *carriers])
+    contest = artefacts(world, [*proof_refs, *ended, *prover.expand(carriers, at=at)], at=at)
     return Key(
         thread.id,
         thread.entry,

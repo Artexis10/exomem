@@ -1413,12 +1413,13 @@ def test_a_service_started_with_the_dreamer_off_starts_it_when_switched_on(
         assert not dreamer.running()
         assert not dreamer_store.sidecar_path(vault).exists()
 
+        initial_ticks = dreamer.status()["ticks"]
         dreamer.write_setting("on")
         deadline = time.monotonic() + 15
-        while dreamer.status()["ticks"] < 1 and time.monotonic() < deadline:
+        while dreamer.status()["ticks"] <= initial_ticks and time.monotonic() < deadline:
             time.sleep(0.05)
 
-        assert dreamer.status()["ticks"] >= 1
+        assert dreamer.status()["ticks"] > initial_ticks
         assert dreamer_store.sidecar_path(vault).is_file()
     finally:
         mode.stop_config_watch()

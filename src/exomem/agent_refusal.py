@@ -26,7 +26,7 @@ import math
 from collections.abc import Collection, Mapping
 from typing import Any
 
-from . import capabilities
+from . import capabilities, mutation_lock
 
 MAX_CANDIDATES = 5
 MAX_FIELDS = 3
@@ -142,15 +142,21 @@ def _after_seconds(refusal: Mapping[str, Any]) -> int | None:
     return max(1, math.ceil(wait / 1000))
 
 
-def _busy_message(refusal: Mapping[str, Any]) -> str:
-    waited = refusal.get("waited_ms")
-    seconds = round(waited / 1000) if isinstance(waited, (int, float)) and waited >= 0 else 0
-    held = (
-        f"Another write held memory for {seconds} seconds"
-        if seconds >= 2
-        else "Memory was busy with another write"
-    )
-    return f"{held}, so this was not saved. Retry the same call."
+def _busy_diagnostics(refusal: Mapping[str, Any]) -> dict[str, Any]:
+    holder = _mapping(refusal.get("holder")) or {}
+    diagnostics = {}
+    if (operation := holder.get("operation")) and operation != mutation_lock.UNKNOWN_LABEL:
+        diagnostics["holder_operation"] = operation
+    # An unverified holder is the lock's placeholder for another process's hold: its age is not measured.
+    age = holder.get("age_seconds") if holder.get("verified", True) is not False else None
+    # These fields and units belong to the mutation-lock diagnostics contract.
+    for name, value, scale in (
+        ("holder_age_seconds", age, 1),
+        ("caller_wait_seconds", refusal.get("waited_ms", refusal.get("wait_ms")), 1000),
+    ):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+            diagnostics[name] = round(value / scale, 1)
+    return diagnostics
 
 
 def _relation_decision(parameters: Collection[str], called: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -303,7 +309,9 @@ def reply(
     fate = _sentence(refusal.get("fate")) or _fate(refusal, write=write)
     fix = _sentence(refusal.get("remediation"))
     if code == _BUSY_CODE:
-        message, fate, fix = _busy_message(refusal), None, ""
+        message, fate, fix = (
+            "Memory was busy with another write, so this was not saved. Retry the same call.", None, ""
+        )
     retry = (
         _retry_call(command, called, patch=patch, call=call)
         if patch is not None or call is not None
@@ -324,6 +332,8 @@ def reply(
         fix = ""
     sentences = (message, _at_fault(message, refusal), fix, fate)
     body: dict[str, Any] = {"code": code, "message": " ".join(filter(None, sentences))}
+    if code == _BUSY_CODE and (diagnostics := _busy_diagnostics(refusal)):
+        body["diagnostics"] = diagnostics
     if retry is not None:
         body["retry"] = retry
     if candidates := _candidates(refusal):

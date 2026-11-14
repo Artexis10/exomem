@@ -273,6 +273,7 @@ def test_record_cli_uses_the_real_checkout_tree(tmp_path):
         ).strip()
         assert receipt[key] == expected
     assert receipt["scope"] == "full"
+    assert receipt["package_checks"] == evidence.PACKAGE_CHECKS
 
 
 @pytest.mark.parametrize(
@@ -320,244 +321,111 @@ def test_refresh_fails_loudly_without_a_trusted_successful_full_run(
     )
 
 
-def test_merge_cli_stops_when_current_main_moved(tmp_path):
-    """The real command must stop before gh merge after a failed current-main preflight."""
-    log = tmp_path / "gh.jsonl"
-    gh = tmp_path / "gh"
-    gh.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, sys\n"
-        "args = sys.argv[1:]\n"
-        "with open(os.environ['CALLS'], 'a') as output:\n"
-        "    output.write(json.dumps(args) + '\\n')\n"
-        "if args[:2] == ['api', 'repos/example/project/commits/main']:\n"
-        "    print(json.dumps({'sha': 'b' * 40}))\n"
-        "else:\n"
-        "    sys.exit('unexpected call after failed preflight')\n"
-    )
-    gh.chmod(0o755)
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts/release_evidence.py"),
-            "merge",
-            "--pr",
-            "42",
-            "--expected-base",
-            "a" * 40,
-            "--expected-head",
-            "c" * 40,
-        ],
-        env={
-            **os.environ,
-            "GH_REPO": "example/project",
-            "CALLS": str(log),
-            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-        },
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode != 0
-    assert "main moved" in result.stderr
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert calls == [["api", "repos/example/project/commits/main"]]
-
-
-def _intent_archive(record: dict) -> bytes:
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w") as files:
-        files.writestr(evidence.INTENT_FILE, json.dumps(record))
-    return archive.getvalue()
-
-
 BASE, HEAD = "a" * 40, "c" * 40
-RELEASE = {
-    "number": 42,
-    "state": "open",
-    "merged": False,
-    "base": {"ref": "main", "sha": BASE},
-    "head": {
-        "ref": evidence.RELEASE_BRANCH,
-        "sha": HEAD,
-        "repo": {"full_name": "example/project"},
-    },
-}
 
 
-def _ci_run(status: str) -> dict:
-    return {"event": "pull_request", "head_sha": HEAD, "status": status}
+def test_fixed_cut_does_not_follow_advancing_main(monkeypatch):
+    """Unrelated main changes must not invalidate the source on a frozen cut branch."""
+    branch = f"release-cuts/{BASE}"
+    pr = {
+        "number": 42,
+        "state": "open",
+        "base": {"ref": branch, "sha": BASE},
+        "head": {
+            "sha": HEAD,
+            "repo": {"full_name": "example/project"},
+            "ref": f"release-please--branches--{branch}",
+        },
+    }
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(
+        evidence, "api", lambda path, **kw: pr if path == "pulls/42" else {"sha": "d" * 40}
+    )
+    assert evidence.release_pr(42, BASE, HEAD) == pr
 
 
-@pytest.mark.parametrize(
-    "intent_head,merged",
-    [(HEAD, True), ("d" * 40, False), (None, False)],
-    ids=["intent-names-this-head", "head-changed-after-intent", "no-intent-nightly-full"],
-)
-def test_land_merges_only_the_head_a_release_intent_named(monkeypatch, intent_head, merged):
-    """A nightly Full or a stale intent must never release; the named head merges with the App token."""
-    intent_runs = (
-        [
+@pytest.mark.parametrize("missing", [True, False], ids=["missing-gate", "wrong-app"])
+def test_inherited_policy_cannot_accept_partial_or_foreign_checks(monkeypatch, missing):
+    """Cut branches have no protection: the main policy and App identity still apply."""
+    policy = [{"context": "required CI gate", "app_id": 15368}]
+    checks = (
+        []
+        if missing
+        else [
             {
-                "id": 7,
-                "path": evidence.AUTOMATION,
-                "event": "workflow_dispatch",
-                "head_branch": "main",
+                "name": "required CI gate",
+                "app": {"id": 7},
+                "status": "completed",
                 "conclusion": "success",
-                "head_repository": {"full_name": "example/project"},
             }
         ]
-        if intent_head
-        else []
     )
+    monkeypatch.setattr(
+        evidence,
+        "api",
+        lambda path, **kw: [{"check_runs": checks}] if "check-runs" in path else [{"statuses": []}],
+    )
+    assert evidence.inherited_checks(HEAD, policy) is None
 
-    def api(path, *, pages=False):
-        if path.startswith("pulls?state=open"):
-            return [RELEASE]
-        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
-            return {"workflow_runs": intent_runs}
-        if path == "actions/runs/7/artifacts?name=release-intent":
-            return {"artifacts": [{"id": 70, "expired": False}]}
-        if path.startswith(f"actions/workflows/ci.yml/runs?head_sha={HEAD}"):
-            return [{"workflow_runs": [_ci_run("completed")]}]
-        if path == "commits/main":
-            return {"sha": BASE}
-        if path == "pulls/42":
-            return RELEASE
-        raise AssertionError(path)
 
-    calls = []
+def test_empty_main_check_policy_cannot_authorize_a_cut(monkeypatch):
+    monkeypatch.setattr(evidence, "api", lambda path, **kw: {"protection": {}})
+    with pytest.raises(ValueError, match="required-check policy"):
+        evidence.main_check_policy()
 
-    def command(*args, env=None):
-        calls.append((args, (env or {}).get("GH_TOKEN")))
-        if args[:3] == ("gh", "api", "repos/example/project/actions/artifacts/70/zip"):
-            return _intent_archive({"pr": 42, "expected_base": BASE, "expected_head": intent_head})
+
+def test_retry_keeps_selected_full_producer():
+    """Once the intent binds a producer, a newer run must not replace it."""
+    selected = {"source_commit": BASE, "tested_tree": HEAD, "run_id": "12", "run_attempt": "1"}
+    assert evidence.bind_evidence({"evidence": selected}, selected) == selected
+    with pytest.raises(ValueError, match="producer"):
+        evidence.bind_evidence({"evidence": selected}, {**selected, "run_id": "13"})
+
+
+@pytest.mark.parametrize("stale", ["version", "ancestry"])
+def test_old_source_cannot_skip_predecessor_reconciliation(monkeypatch, stale):
+    """A second cut must contain the previous metadata merge and its published version."""
+
+    def command(*args, **kwargs):
+        if stale == "ancestry":
+            raise subprocess.CalledProcessError(1, args)
         return b""
 
-    monkeypatch.setenv("GH_REPO", "example/project")
-    monkeypatch.setattr(evidence, "api", api)
     monkeypatch.setattr(evidence, "command", command)
+    with pytest.raises(ValueError, match="preceding reconciliation"):
+        evidence.validate_predecessor(
+            BASE,
+            "1.0.0" if stale == "version" else "1.1.0",
+            {"version": "1.1.0", "reconciliation_commit": HEAD},
+        )
+
+
+def test_pending_identical_source_pr_full_prevents_duplicate_fallback(monkeypatch):
+    """A squash changes the commit SHA while its source PR's Full producer is still running."""
+    repository, source, head, tree = "example/project", "a" * 40, "b" * 40, "c" * 40
+    monkeypatch.setattr(evidence, "evidence_sources", lambda source, repo: (tree, {source, head}))
     monkeypatch.setattr(
         evidence,
-        "required_checks",
-        lambda number: [
-            {"name": "Conventional Commit title", "bucket": "pass"},
-            {"name": "required CI gate", "bucket": "pass"},
-        ],
+        "api",
+        lambda path: {"id": 8} if path.endswith("ci.yml") else {"commit": {"tree": {"sha": tree}}},
     )
-    monkeypatch.setattr(evidence, "check_release_files", lambda number: None)
-    monkeypatch.setattr(
-        evidence, "require_evidence", lambda source, repository: {"tested_commit": source}
-    )
-    monkeypatch.setattr("time.sleep", lambda seconds: None)
-
-    evidence.land("example/project", None, "app-token")
-
-    merges = [(args, token) for args, token in calls if args[:3] == ("gh", "pr", "merge")]
-    if merged:
-        assert merges == [
-            (("gh", "pr", "merge", "42", "--squash", "--match-head-commit", HEAD), "app-token")
-        ]
-    else:
-        assert merges == []
-
-
-def test_land_waits_for_the_gate_check_that_appears_only_when_ci_finishes(tmp_path, monkeypatch):
-    """Before CI exists or finishes, gh lists the title check alone; landing must not take that as green."""
-    intent = tmp_path / "release-intent.json"
-    intent.write_text(json.dumps({"pr": 42, "expected_base": BASE, "expected_head": HEAD}))
-    polls = {"count": 0}
-
-    def api(path, *, pages=False):
-        if path.startswith("pulls?state=open"):
-            return [RELEASE]
-        if path.startswith(f"actions/workflows/ci.yml/runs?head_sha={HEAD}"):
-            polls["count"] += 1
-            # Poll 1: GitHub has not created the CI run yet; poll 2: it is running.
-            ci = (
-                []
-                if polls["count"] == 1
-                else [_ci_run("in_progress" if polls["count"] < 3 else "completed")]
-            )
-            return [{"workflow_runs": ci}]
-        if path == "commits/main":
-            return {"sha": BASE}
-        if path == "pulls/42":
-            return RELEASE
-        raise AssertionError(path)
-
-    def required_checks(number):
-        listed = [{"name": "Conventional Commit title", "bucket": "pass"}]
-        if polls["count"] >= 3:
-            listed.append({"name": "required CI gate", "bucket": "pass"})
-        return listed
-
-    merges = []
-    monkeypatch.setenv("GH_REPO", "example/project")
-    monkeypatch.setattr(evidence, "api", api)
     monkeypatch.setattr(
         evidence,
-        "command",
-        lambda *args, env=None: (
-            merges.append(polls["count"]) if args[:3] == ("gh", "pr", "merge") else b""
+        "runs",
+        lambda commit: (
+            [
+                {
+                    "head_sha": head,
+                    "status": "in_progress",
+                    "event": "workflow_dispatch",
+                    "path": evidence.WORKFLOW,
+                    "workflow_id": 8,
+                    "repository": {"full_name": repository},
+                    "head_repository": {"full_name": repository},
+                }
+            ]
+            if commit == head
+            else []
         ),
     )
-    monkeypatch.setattr(evidence, "required_checks", required_checks)
-    monkeypatch.setattr(evidence, "check_release_files", lambda number: None)
-    monkeypatch.setattr(
-        evidence, "require_evidence", lambda source, repository: {"tested_commit": source}
-    )
-    monkeypatch.setattr("time.sleep", lambda seconds: None)
-
-    evidence.land("example/project", intent, "app-token")
-
-    assert merges == [3]
-
-
-def test_land_leaves_the_release_unmerged_when_a_required_check_fails(tmp_path, monkeypatch):
-    """A failed release check must stop the automated merge and turn its run red."""
-    intent = tmp_path / "release-intent.json"
-    intent.write_text(json.dumps({"pr": 42, "expected_base": BASE, "expected_head": HEAD}))
-
-    def api(path, *, pages=False):
-        if path.startswith("pulls?state=open"):
-            return [RELEASE]
-        if path.startswith(f"actions/workflows/ci.yml/runs?head_sha={HEAD}"):
-            return [{"workflow_runs": [_ci_run("completed")]}]
-        raise AssertionError(path)
-
-    calls = []
-    monkeypatch.setenv("GH_REPO", "example/project")
-    monkeypatch.setattr(evidence, "api", api)
-    monkeypatch.setattr(evidence, "command", lambda *args, env=None: calls.append(args) or b"")
-    monkeypatch.setattr(
-        evidence,
-        "required_checks",
-        lambda number: [
-            {"name": "Conventional Commit title", "bucket": "pass"},
-            {"name": "required CI gate", "bucket": "fail"},
-        ],
-    )
-    monkeypatch.setattr("time.sleep", lambda seconds: None)
-
-    with pytest.raises(ValueError, match="required CI gate"):
-        evidence.land("example/project", intent, "app-token")
-
-    assert not any(args[:3] == ("gh", "pr", "merge") for args in calls)
-
-
-def test_a_failed_check_read_raises_with_the_gh_error(tmp_path, monkeypatch):
-    """A failed read must name gh's error; reporting it as checks still running hides the cause."""
-    gh = tmp_path / "gh"
-    gh.write_text(
-        f"#!{sys.executable}\n"
-        "import sys\n"
-        "sys.stderr.write('HTTP 403: Resource not accessible by integration')\n"
-        "sys.exit(1)\n"
-    )
-    gh.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
-
-    with pytest.raises(ValueError, match="Resource not accessible by integration"):
-        evidence.required_checks(42)
+    assert evidence.full_inflight(source, repository)

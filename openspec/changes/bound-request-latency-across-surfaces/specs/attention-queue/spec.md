@@ -29,3 +29,25 @@ The two scopes SHALL retain separate emission history. A local block MUST NOT su
 
 - **WHEN** a delivered row's fingerprint differs from a later projection
 - **THEN** first-surfaced recording uses the delivered fingerprint
+
+### Requirement: The id of a stored due entry binds from the entry
+
+A decision that names a review item by its id SHALL bind the id before writer admission. For the owner, when a stored due-state entry has exactly this id, the entry SHALL bind the decision, and the service SHALL NOT read a review queue to bind it. Any other id SHALL bind from the review queues.
+
+A restricted audience is served fingerprints recomposed over what it may see. Its ids SHALL bind only from the queues that this audience can read. A stored entry SHALL NOT answer a restricted audience.
+
+#### Scenario: The keep-whole call of a note-cohesion question is decided
+
+- **WHEN** a compiled write returns a note-cohesion question on a vault that holds its due-state projection, and the agent sends the dismissal that the response spells out
+- **THEN** the service saves the decision, and the next write within the same step asks nothing
+- **AND** the decision reads no page other than the item's own
+
+#### Scenario: An id that no stored entry has binds from the review queues
+
+- **WHEN** a decision names an id, and no stored entry has exactly this id
+- **THEN** the review queues decide the id, as they did before this requirement
+
+#### Scenario: A restricted caller names the id of a withheld page
+
+- **WHEN** a restricted caller names the id of a stored entry whose page is withheld from it
+- **THEN** the service gives the same refusal as for an id that does not exist

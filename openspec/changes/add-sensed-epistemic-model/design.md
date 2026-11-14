@@ -98,9 +98,9 @@ A production choice needs measured sharing and contention under its configured n
 The spike does not choose a new numeric production memory ceiling.
 
 **Input contract for the next instruments.** `mention.same_referent` compares two explicit mention contexts, with labels `same`, `different`, and `abstain`.
-`relation.applies` measures one proposed relation from source to target, with labels `fits`, `does_not_fit`, and `abstain`.
-Its third data slot holds the canonical relation key and definition from the active vocabulary registry.
-The instrument does not enumerate relation keys in code or choose a relation on the agent's behalf.
+Relation typing is specified by `add-relation-sensor`, which replaces the earlier one-relation-at-a-time `relation.applies` contract with `relation.type`.
+`relation.type` reads the ordered pair's registry menu in one evaluation and proposes one relation or `none`; checking each option separately would cost up to 12 evaluations per link.
+The instrument still does not enumerate relation keys in code, and the agent still chooses: the proposal reaches canon only through the agent's governed accept.
 Producers supply mention candidates and proposed relations; these instruments add no candidate-discovery mechanism.
 
 The new questions bind their input identities to named, ordered slots, extractor versions, and exact text hashes.

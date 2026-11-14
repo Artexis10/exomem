@@ -104,12 +104,14 @@ def _names_a_file(root: Path, raw: str, visible: Callable[[str], bool] | None) -
     the caller may not see counts as no file, so that a title shaped like its path is judged as it
     would be in a vault without the file.
     """
+    from .vault_store import read
+
     stem = raw.removesuffix(".md")
     with egress.decide_without_receipt():
         for base in ("", kb_prefix()):
             for candidate in (f"{base}{raw}", f"{base}{stem}.md"):
                 try:
-                    if (root / candidate).is_file() and (visible is None or visible(candidate)):
+                    if read.holds_file(root, candidate) and (visible is None or visible(candidate)):
                         return True
                 except (OSError, ValueError):
                     return False

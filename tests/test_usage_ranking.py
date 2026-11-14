@@ -106,6 +106,15 @@ def test_surfaced_events_carry_zero_weight(logs_dir: Path) -> None:
     assert amap == {}
 
 
+def test_a_log_whose_events_carry_no_weight_is_not_read(logs_dir: Path) -> None:
+    """The query log is the largest of the three and the default weights give its rows none.
+    These bytes cannot be decoded, so a reader that opens the log fails here."""
+    _log_read(logs_dir, "Knowledge Base/Notes/read-once.md", dt.datetime.now().isoformat(timespec="seconds"))
+    (logs_dir / "queries.jsonl").write_bytes(b"\xff\xfe\n")
+    amap = usage.activation_map(find_module.RankingConfig(), logs_dir=logs_dir)
+    assert "notes/read-once" in amap
+
+
 def test_audit_delegation_parity(logs_dir: Path) -> None:
     """audit._stale_access_events must equal usage.access_events with audit's
     weights (the extraction is behavior-preserving)."""

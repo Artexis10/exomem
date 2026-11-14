@@ -212,6 +212,39 @@ The world, its statements and its rendered text SHALL carry no product's ontolog
 
 Each statement's content SHALL be fixed before rendering. A renderer SHALL choose an implicitness level from the declared set and a registered surface form, and SHALL record both in the manifest. Only a bridge declared as entailing SHALL yield a computed key for an implied statement, and that bridge SHALL name the stated rule or the registered background norm that makes it entail. A computed entry at the `silent` level SHALL name a stated norm. A probe SHALL NOT share a surface form with the artefact that answers it. An artefact rendered below the `stated` level SHALL NOT contain the explicit form of its statement.
 
+Artefacts SHALL support optional typed references to canonical context parents and support or defeat edges. A source snapshot SHALL add no operation or authoritative graph. An edge snapshot SHALL NOT publish before either endpoint statement or its unambiguous original document is available. The planner SHALL file originals on their statement dates and publish the snapshot at the later endpoint date. A directory snapshot SHALL publish in the first source session without claiming a membership start date. Its sentence SHALL name only the parent and child. An edge sentence SHALL contain only opaque endpoint-statement references and relation wording. Serialization SHALL place each full-width SHA-256 source-record citation beside its original statement line. Distinct endpoint statements SHALL keep distinct citations when one original document carries both. Original line text, authors and dates SHALL remain unchanged. Document headers SHALL carry no redundant citation. Pack data SHALL define the document kinds and natural wording. Rendering and hashing SHALL use the same validated original-document resolution. Missing or ambiguous originals SHALL fail before rendering or hashing. The manifest SHALL hash resolved canonical facts, chosen original documents, carrier text and provenance. A source repair SHALL advance the generator version without rewriting previous generated worlds.
+
+#### Scenario: A source relation has endpoints on different dates
+
+- **WHEN** a source edge connects statements with different dates, in either recipe call order
+- **THEN** its unsigned snapshot publishes at the later endpoint date
+- **AND** filing it changes no operation sequence or recipe binding
+
+#### Scenario: An endpoint has no unambiguous original document
+
+- **WHEN** an edge endpoint has no original document or more than one original document
+- **THEN** validation, rendering and hashing reject its snapshot with an actionable reference diagnostic
+- **AND** a later second original does not redirect an earlier snapshot
+
+#### Scenario: Both endpoints share one original document
+
+- **WHEN** one valid original document carries both distinct endpoint statements
+- **THEN** the edge sentence cites two distinct source-record references in the correct direction
+- **AND** each reference resolves to its corresponding original statement line
+- **AND** validation accepts the shared original without requiring separate documents
+
+#### Scenario: A snapshot predates an endpoint or its original document
+
+- **WHEN** an edge snapshot predates either endpoint statement or its chosen original document
+- **THEN** validation, rendering and hashing name the earliest available date
+- **AND** backdating an original does not allow a future statement reference
+
+#### Scenario: A relation sentence is removed but its anchors remain
+
+- **WHEN** a rendered snapshot keeps its opaque references or context names but loses its relation sentence
+- **THEN** the source coverage check fails
+- **AND** anchor presence alone does not pass the check
+
 #### Scenario: The same thread is rendered at two levels
 
 - **WHEN** one thread is rendered at the `stated` level and again at the `implied` level
@@ -330,6 +363,38 @@ A generated world SHALL serve development rounds without registration. Before a 
 ### Requirement: Projections feed the existing instruments
 
 The generator SHALL write a project in the epistemic task suite's case format, with its split file and digests, so that the suite's runner and case check read it. The generator SHALL write store seeds in three forms: a plain folder of the neutral artefacts, a product vault with typed structure and a product vault without it. Code that writes into a product SHALL live outside the world generator's package. The product's projection SHALL list the display marks that each seeded unit should carry, and a model-free check SHALL read the marks back from the product and compare them with that list.
+
+Proof and contest evidence SHALL close over actual source edges and context ancestor chains from the reading's subjects, requested context and selected evidence. Closure SHALL include contrary and ended links, both original endpoint documents, and dated corrections, withdrawals and replacements. It SHALL include a requested context even when only its sibling occurs in statements. It SHALL exclude records after the reading or probe date. Closure SHALL use indexes built once per thread world and SHALL visit selected connected evidence rather than every thread. The existing session mapping SHALL carry these documents to G and H without runner selection or prompt changes. A model-free inventory SHALL check each required canonical relation through its rendered sentence, session file and reconstructed G and H prompts. Evidence repairs SHALL preserve semantic keys and projected rubrics while evidence references expand.
+
+One data-owned frame SHALL give each generated task its rendered probe date and SHALL define relative time against that simulated date. The rendered date SHALL equal the key date. Each arm and the judge SHALL receive the same framed task, with no separate clock instruction. A premise surface form SHALL ask ordinary work. The projection SHALL insert a source-derived stale value as a presupposition rather than an instruction to use earlier information. A mutation probe with no premise SHALL remain neutral. These repairs SHALL change future task and instruction digests without rewriting prior results.
+
+#### Scenario: A rendered probe and its key have different dates
+
+- **WHEN** a rendered probe date differs from its key date
+- **THEN** the projection refuses the mismatch before framing a task
+
+#### Scenario: Relative time reaches an arm or judge
+
+- **WHEN** any arm or judge receives a generated task with relative time
+- **THEN** the task carries the same data-owned frame and simulated probe date
+- **AND** no arm or judge adds a separate clock instruction
+
+#### Scenario: A requested sibling occurs in no statement
+
+- **WHEN** a reading asks about a context whose sibling alone appears in source statements
+- **THEN** its contest set includes the requested context's parent chain
+- **AND** directory text supplies containment without an oracle conclusion
+
+#### Scenario: A source link survives only as historical evidence
+
+- **WHEN** a selected edge has an ended endpoint by the reading date
+- **THEN** G receives the link, both original endpoints and the dated record that ended the endpoint
+- **AND** G receives no later endpoint or source snapshot
+
+#### Scenario: A relation exists formally but disappears from reference evidence
+
+- **WHEN** a required relation sentence does not reach its session file or either reconstructed reference prompt
+- **THEN** the source inventory check fails and names the missing source
 
 #### Scenario: The task suite loads a generated project
 

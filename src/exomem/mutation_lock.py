@@ -269,11 +269,11 @@ def _note_quiet_hold(
             return
         summary = _HOLD_SUMMARY
         with summary.lock:
-            key = _safe_label(operation, fallback="unknown")
+            key = _safe_label(operation, fallback=UNKNOWN_LABEL)
             entry = summary.operations.get(key)
             if entry is None:
                 entry = summary.operations[key] = {
-                    "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+                    "holder_kind": _safe_label(holder_kind, fallback=UNKNOWN_LABEL),
                     "count": 0,
                     "hold_ms_total": 0.0,
                     "hold_ms_max": 0.0,
@@ -2237,8 +2237,8 @@ def _note_busy_refusal(
                 # process never learns; the sidecar record is content-free labels.
                 "pid": None,
                 "request_id": _safe_label(snapshot.get("request_id"), fallback="untracked"),
-                "operation": _safe_label(snapshot.get("operation"), fallback="unknown"),
-                "holder_kind": _safe_label(snapshot.get("holder_kind"), fallback="unknown"),
+                "operation": _safe_label(snapshot.get("operation"), fallback=UNKNOWN_LABEL),
+                "holder_kind": _safe_label(snapshot.get("holder_kind"), fallback=UNKNOWN_LABEL),
                 "observed_at": time.time(),
                 "source": "refusal",
             }
@@ -2256,8 +2256,8 @@ def _note_release(
         state.last_holder = {
             "pid": os.getpid(),
             "request_id": _safe_label(request_id, fallback="untracked"),
-            "operation": _safe_label(operation, fallback="unknown"),
-            "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+            "operation": _safe_label(operation, fallback=UNKNOWN_LABEL),
+            "holder_kind": _safe_label(holder_kind, fallback=UNKNOWN_LABEL),
             "observed_at": time.time(),
             "source": "release",
         }
@@ -2700,8 +2700,8 @@ class VaultMutationCoordinator:
             state.lent_seconds = 0.0
             with state.metadata_guard:
                 state.request_id = _safe_label(request_id, fallback="untracked")
-                state.operation = _safe_label(operation, fallback="unknown")
-                state.holder_kind = _safe_label(holder_kind, fallback="unknown")
+                state.operation = _safe_label(operation, fallback=UNKNOWN_LABEL)
+                state.holder_kind = _safe_label(holder_kind, fallback=UNKNOWN_LABEL)
                 state.acquired_at = acquired_at
                 state.long_holder_seconds = self.long_holder_seconds
                 state.long_warning_emitted = False
@@ -2732,8 +2732,8 @@ class VaultMutationCoordinator:
                     {
                         "wait_ms": wait_ms,
                         "hold_ms": hold_ms,
-                        "operation": _safe_label(operation, fallback="unknown"),
-                        "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+                        "operation": _safe_label(operation, fallback=UNKNOWN_LABEL),
+                        "holder_kind": _safe_label(holder_kind, fallback=UNKNOWN_LABEL),
                     },
                 )
                 with state.metadata_guard:
@@ -2779,8 +2779,8 @@ class VaultMutationCoordinator:
                         "vault mutation boundary held too long request_id=%s operation=%s "
                         "holder_kind=%s hold_ms=%.2f lent_ms=%.2f",
                         _safe_label(request_id, fallback="untracked"),
-                        _safe_label(operation, fallback="unknown"),
-                        _safe_label(holder_kind, fallback="unknown"),
+                        _safe_label(operation, fallback=UNKNOWN_LABEL),
+                        _safe_label(holder_kind, fallback=UNKNOWN_LABEL),
                         hold_ms,
                         lent_ms,
                     )
@@ -3016,8 +3016,8 @@ class VaultMutationCoordinator:
                                 "schema": _HOLDER_SCHEMA,
                                 "generation": uuid.uuid4().hex,
                                 "request_id": _safe_label(request_id, fallback="untracked"),
-                                "operation": _safe_label(operation, fallback="unknown"),
-                                "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+                                "operation": _safe_label(operation, fallback=UNKNOWN_LABEL),
+                                "holder_kind": _safe_label(holder_kind, fallback=UNKNOWN_LABEL),
                                 "acquired_at": time.time(),
                                 "long_holder_seconds": self.long_holder_seconds,
                             }
@@ -3175,6 +3175,10 @@ def _release_os_lock(
         _flock(handle.fileno(), _lock_unlock_posix)
 
 
+#: The label a holder record carries when its value was not recorded; readers treat it as absent.
+UNKNOWN_LABEL = "unknown"
+
+
 def _safe_label(value: object, *, fallback: str) -> str:
     candidate = str(value or "").strip()
     return candidate if _SAFE_LABEL.fullmatch(candidate) else fallback
@@ -3261,7 +3265,7 @@ def _unknown_external_holder() -> dict[str, object]:
     return {
         "state": "held",
         "request_id": "untracked",
-        "operation": "unknown",
+        "operation": UNKNOWN_LABEL,
         "holder_kind": "external",
         "age_seconds": 0.0,
         "overdue": False,
@@ -3280,8 +3284,8 @@ def _snapshot_state(
         snapshot: dict[str, object] = {
             "state": "held",
             "request_id": state.request_id or "untracked",
-            "operation": state.operation or "unknown",
-            "holder_kind": state.holder_kind or "unknown",
+            "operation": state.operation or UNKNOWN_LABEL,
+            "holder_kind": state.holder_kind or UNKNOWN_LABEL,
             "age_seconds": round(age, 3),
             "overdue": overdue,
             "verified": True,

@@ -20,7 +20,6 @@ from .vault import (
     resolve_under_vault,
 )
 
-
 log = logging.getLogger(__name__)
 
 
@@ -63,8 +62,7 @@ def list_inbound_links(
     raw = str(target).strip()
     if "/" in raw or raw.endswith(".md"):
         try:
-            _abs, rel = resolve_under_vault(vault_root, raw)
-            target_norm = rel
+            _abs, target_norm = resolve_under_vault(vault_root, raw)
         except VaultPathError as e:
             raise ListInboundLinksError(code=e.code, reason=e.reason) from e
     else:

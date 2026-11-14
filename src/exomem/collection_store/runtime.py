@@ -973,11 +973,13 @@ def projection_route(vault_root, path):
     root = Path(vault_root)
     if bound_writer(root) is not None:
         return None
+    # Placement is a test of the path's text alone. It comes before the root is read from disk:
+    # a walk asks this for every page, and most pages lie outside the store's layers.
+    if not ownership.relevant(path):
+        return None
     # Resolve Windows root junctions before no-follow anchoring.
     if os.name == "nt" or root.is_symlink():
         root = root.resolve()
-    if not ownership.relevant(path):
-        return None
     canonical = state_paths.resolved_vault_path(root, expanduser=False)
     if canonical != root:
         # Bind marker bytes to the canonical root, never to the earlier path spelling.

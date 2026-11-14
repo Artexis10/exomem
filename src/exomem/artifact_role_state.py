@@ -34,7 +34,12 @@ _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 def _generation(root: Path, path: str) -> list[int] | None:
+    from .vault_store import read
+
     try:
+        meta = read.owned_meta(root, path)
+        if meta is not None:
+            return [meta.revision, meta.size, meta.mtime_ns]
         info = (root / path).stat()
         return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
     except OSError:
@@ -460,6 +465,9 @@ def _edges(index: dict[str, Any], path: str) -> None:
 
 
 def build(root: Path, parsed_pages: list[Any]) -> dict[str, Any]:
+    from .vault_store import read
+
+    read.prime_page_metadata(root, (page.rel_path for page in parsed_pages))
     index: dict[str, Any] = {
         "support_epoch": 0,
         "pages": {},
@@ -600,6 +608,16 @@ def compose(
         if coverage[family] != "unknown":
             coverage[family] = recomposed["coverage"][family]
     row = recomposed
+
+    if validate:
+        from .vault_store import read
+
+        dependencies = {path}
+        dependencies.update(p for p in index["reverse"].get(path, {}) if authorize(p))
+        for candidate in row["candidates"]:
+            dependencies.update(p for p in candidate["sources"] if authorize(p))
+            dependencies.update(s["path"] for s in candidate["supports"] if authorize(s["path"]))
+        read.prime_page_metadata(root, dependencies)
 
     def current(dependency: str) -> bool:
         desc = index["pages"].get(dependency)

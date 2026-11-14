@@ -14,6 +14,7 @@ from . import (
     vocabulary_provenance,
     vocabulary_review,
 )
+from .vault_store import read as store_read
 from .vocabulary_signals import consider_generic_pair
 from .vocabulary_workflow import Evidence, _hash, make_item
 
@@ -22,11 +23,7 @@ SOURCE_PAGE = 8
 
 
 def _generation(connection) -> str:
-    values = dict(
-        connection.execute(
-            "SELECT key, value FROM graph_meta WHERE key IN ('instance', 'generation')"
-        ).fetchall()
-    )
+    values = store_read.snapshot_identity(connection, ("instance", "generation"))
     if set(values) != {"instance", "generation"} or not all(values.values()):
         raise ValueError("VOCABULARY_EVIDENCE_UNAVAILABLE: projection identity unavailable")
     return _hash(values)

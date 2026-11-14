@@ -47,8 +47,7 @@ def test_committed_plugin_matches_the_packaged_sources(regenerated: dict[str, by
     committed = _tree(PLUGIN_ROOT)
 
     assert set(committed) == set(regenerated), (
-        "plugin tree is out of sync - run: "
-        "exomem package-skills --plugin-root plugins/claude-code"
+        "plugin tree is out of sync - run: exomem package-skills --plugin-root plugins/claude-code"
     )
     drifted = [
         name
@@ -187,3 +186,9 @@ def test_listing_identity_agrees_across_both_plugin_surfaces() -> None:
     assert manifest["homepage"] == cloud["homepage"]
     assert manifest["repository"] == cloud["repository"]
     assert manifest["license"] == cloud["license"]
+
+
+def test_plugin_version_matches_the_selected_release() -> None:
+    """Marketplace installs must pin the same version as the selected package source."""
+    committed = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
+    assert committed["version"] == package_module.release_version()

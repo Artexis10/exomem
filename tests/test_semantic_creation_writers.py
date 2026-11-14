@@ -22,6 +22,7 @@ from exomem import (
     relation_review,
     replace,
     semantic_contract,
+    semantic_units,
     semantic_writes,
     temporal,
 )
@@ -144,6 +145,46 @@ def test_empty_fenced_rich_writer_feedback_uses_shared_evaluator_without_mutatio
     assert findings["empty_rich_unit"]["span"]["text"] == "## Decision"
     assert findings["missing_semantic_unit"]["span"] is None
     assert validation["contract_result"]["rich_unit_count"] == 0
+    assert _tree_bytes(vault) == before
+
+
+
+@pytest.mark.parametrize(
+    ("heading", "rows", "code", "repair"),
+    [
+        ("Beliefs", "", "incomplete_rich_belief", "credence_holder"),
+        ("Belief", "- credence_holder: Platform team\n- credence: likely\n",
+         "missing_rich_assessed_claim", "relations: assesses:"),
+        ("Claim", "- modality: video\n", "invalid_rich_modality", "rename the row"),
+    ],
+)
+def test_strict_governed_rows_block_validation_and_commit_with_the_same_repair(
+    vault: Path, heading: str, rows: str, code: str, repair: str,
+) -> None:
+    """A writer must refuse the formerly tolerated row and leave the source unchanged."""
+    before = _tree_bytes(vault)
+    content = f"# Release outlook\n\n## {heading}\n{rows}\nThe release will slip a week.\n"
+    parsed = semantic_units.parse_semantic_units(content)
+    assert code in {error.code for error in parsed.errors}
+    validation = note.note(
+        vault, content=content, note_type="insight", title="Release outlook",
+        today=TODAY, validate_only=True,
+    )
+    finding = next(item for item in validation.contract_result.findings if item.code == code)
+    assert finding.severity == "error"
+    assert repair in finding.remediation
+    assert _tree_bytes(vault) == before
+    with pytest.raises(note.NoteError) as blocked:
+        note.note(
+            vault, content=content, note_type="insight", title="Release outlook", today=TODAY,
+            draft_id=validation.draft_id, draft_hash=validation.draft_hash,
+            draft_token=validation.draft_token,
+            relation_disposition="reviewed_none", relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest relation exists in this fixture corpus.",
+        )
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert code in blocked.value.reason
+    assert repair in blocked.value.reason
     assert _tree_bytes(vault) == before
 
 

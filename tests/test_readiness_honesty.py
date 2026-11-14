@@ -110,7 +110,7 @@ def test_status_failure_is_unknown_and_keeps_readiness_non_raising(
         )
 
     monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
-    monkeypatch.setattr(writer_lease, "coordination_status", explode)
+    monkeypatch.setattr(writer_lease, "_coordination_readiness_status", explode)
     warm_readiness.reset()
     warm_readiness.mark_ready("retrieval_catalog")
     try:

@@ -120,6 +120,45 @@ def answers(root, generated):
 DAMAGE = ("poisoned", "deleted", "a link into the vault", "a link out of the vault")
 
 
+@pytest.mark.parametrize("managed", [False, True])
+def test_filter_preserves_served_refusal_and_offline_oracle(
+    vault, monkeypatch, warm_managed_cell, managed,  # noqa: F811
+):
+    """An unsupported filter must not send a served store request through the scan oracle."""
+    from exomem import structured_filters
+
+    build_indexes(vault)
+    if managed:
+        warm_managed_cell(vault)
+    arguments = dict(
+        query="lighthouse", mode="keyword", result_level="mixed",
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 3}},
+    )
+    if managed:
+        with pytest.raises(structured_filters.FilterError) as file_error:
+            commands.op_ask_memory(vault, **arguments)
+        assert file_error.value.code == "UNSUPPORTED_FILTER_FIELD"
+    else:
+        expected = commands.op_ask_memory(vault, **arguments)
+    assert migrate_apply(vault) == 0
+    find_module.clear_cache()
+    parsed = []
+    parse = find_module._parse_page
+
+    def counted(*args, **kwargs):
+        parsed.append(args)
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(find_module, "_parse_page", counted)
+    if managed:
+        with pytest.raises(structured_filters.FilterError) as store_error:
+            commands.op_ask_memory(vault, **arguments)
+        assert str(store_error.value) == str(file_error.value)
+        assert parsed == []
+    else:
+        assert commands.op_ask_memory(vault, **arguments) == expected
+
+
 def damage_every_owned_projection(root, damage):
     owned = [
         item.rel

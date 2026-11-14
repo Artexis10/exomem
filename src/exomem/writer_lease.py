@@ -1073,7 +1073,7 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> int:
                 where["stage"] = "signal"
                 derived_receipts.signal_components(session.vault_root, receipt)
             batch.handoff_outcome = proof.outcome
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - acknowledgement failure degrades the persisted terminal
         logger.warning(
             "fast acknowledgement failed; the persisted terminal degrades to "
             "derived_sync=pending (%s)",
@@ -1979,7 +1979,7 @@ class LeaseConfig:
             try:
                 origin = urllib.parse.urlsplit(self.url or "")
                 address = ipaddress.ip_address(origin.hostname or "")
-                origin.port  # Validate the URL parser's port field before using the origin.
+                _ = origin.port  # Validate the URL parser's port field before using the origin.
             except ValueError:
                 origin = None
             if (
@@ -6909,6 +6909,13 @@ class LeaseManager:
         try:
             @contextmanager
             def operation_guard() -> Iterator[None]:
+                nonlocal kwargs
+                wide_hold["timing"] = None
+                prepare = getattr(command, "prepare_arguments", None)
+                if prepare is not None:
+                    # Replay uses the original request identity and skips binding a changed handle.
+                    # A fresh execution resolves handles before either writer guard takes the boundary.
+                    kwargs = prepare(*injected, **kwargs)
                 # Wide guards outlive invoke_leaf; retain the session until
                 # their outer hold has handed off its committed receipts.
                 token = _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
@@ -7564,7 +7571,8 @@ class LeaseManager:
             f"writer lease fencing token {fencing_token} is no longer current",
         )
 
-    def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+    def _readiness_status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+        """Measure the real boundary and lease without waiting on owner diagnostics."""
         # Without a boundary identity there is nothing to probe: the answer can
         # only cover this process, so it is reported as `unknown`, never as a
         # verified `free`.
@@ -7597,35 +7605,7 @@ class LeaseManager:
             "renewer_alive": renewer_alive,
             "last_renew_age_seconds": last_renew_age_seconds,
             "last_coordinator_error": None,
-            "idempotency": self.idempotency.status_summary(),
         }
-        if vault_or_cell is not None:
-            try:
-                from . import epistemic_graph, graph_sync
-
-                vault_root = Path(vault_or_cell)
-                graph_status = graph_sync.status(vault_root)
-                if graph_status["state"] == "current":
-                    # A status probe reports; it never pays the O(corpus)
-                    # source-bytes proof. It reads the remembered verdict, or
-                    # says that nothing has proved the sidecar yet (#1454).
-                    availability = epistemic_graph.EpistemicGraphIndex(
-                        vault_root,
-                        mutation_coordinator=self._mutation_coordinator_for(vault_root),
-                    ).availability_state()
-                    if availability != "available":
-                        graph_status = {
-                            "state": availability,
-                            "generation": graph_status["generation"],
-                        }
-                base["graph_sync"] = graph_status
-            except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
-                base["graph_sync"] = {"state": "unavailable", "generation": 0}
-        if self._collection_store is not None:
-            try:
-                base["collection_store"] = self._collection_store.status()
-            except Exception:  # noqa: BLE001 - a status probe reports, never raises
-                base["collection_store"] = {"status": "unavailable"}
         if not self.config.enabled:
             return base
         assert self.client is not None
@@ -7661,6 +7641,51 @@ class LeaseManager:
                 "age_seconds": round(time.monotonic() - at, 3),
             }
         return base
+
+    def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+        diagnostics: dict[str, Any] = {"idempotency": self.idempotency.status_summary()}
+        if vault_or_cell is not None:
+            store_mode = False
+            try:
+                from . import epistemic_graph, graph_sync
+                from .vault_store import mode, read
+
+                vault_root = Path(vault_or_cell)
+                store_mode = mode.store_mode_for_reads(vault_root)
+                if store_mode:
+                    # Store commits derive graph rows atomically; sidecar sync has no generation here.
+                    graph_status = {"state": "not_applicable", "generation": None}
+                    with read.snapshot(vault_root) as view:
+                        diagnostics["vault_store"] = {"state": "available", "revision": view.revision}
+                else:
+                    graph_status = graph_sync.status(vault_root)
+                if graph_status["state"] == "current":
+                    # A status probe reports; it never pays the O(corpus)
+                    # source-bytes proof. It reads the remembered verdict, or
+                    # says that nothing has proved the sidecar yet (#1454).
+                    availability = epistemic_graph.EpistemicGraphIndex(
+                        vault_root,
+                        mutation_coordinator=self._mutation_coordinator_for(vault_root),
+                    ).availability_state()
+                    if availability != "available":
+                        graph_status = {
+                            "state": availability,
+                            "generation": graph_status["generation"],
+                        }
+                diagnostics["graph_sync"] = graph_status
+            except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
+                if store_mode:
+                    diagnostics["graph_sync"] = {"state": "not_applicable", "generation": None}
+                    diagnostics["vault_store"] = {"state": "unavailable", "revision": None}
+                else:
+                    diagnostics["graph_sync"] = {"state": "unavailable", "generation": 0}
+        if self._collection_store is not None:
+            try:
+                diagnostics["collection_store"] = self._collection_store.status()
+            except Exception:  # noqa: BLE001 - a status probe reports, never raises
+                diagnostics["collection_store"] = {"status": "unavailable"}
+        # Measure authority after diagnostics, so a slow diagnostic cannot age the reported lease.
+        return {**diagnostics, **self._readiness_status(vault_or_cell)}
 
     def start_renewer(self) -> None:
         if not self.config.enabled or self._renewer is not None:
@@ -8888,36 +8913,41 @@ def invoke_command(
         call_spans.meter(call_spans.MOVE_PREFLIGHT_MS, call_spans.MOVE_PREFLIGHTS)
         if command.name == "manage_memory_file" else nullcontext()
     )
+    from .collection_store import ownership
+
     if not read_only:
-        try:
-            # The same fixed phase labels as the read-only path below.
-            with body_meter as measured, call_spans.span("command.body", measured):
-                result = _invoke()
-            with call_spans.span("command.terminal_filter"):
-                try:
-                    return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
-                except Exception as error:
-                    converted = post_leaf_refusal(error)
-                    if converted is error:
-                        raise
-                    raise converted from error
-        except BaseException as error:
-            with call_spans.span("command.terminal_filter"):
-                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
-            raise
+        # Ownership rechecks must see collections committed since preflight, including this mutation's own.
+        with ownership.mutation_fence_scope():
+            try:
+                # The same fixed phase labels as the read-only path below.
+                with body_meter as measured, call_spans.span("command.body", measured):
+                    result = _invoke()
+                with call_spans.span("command.terminal_filter"):
+                    try:
+                        return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
+                    except Exception as error:
+                        converted = post_leaf_refusal(error)
+                        if converted is error:
+                            raise
+                        raise converted from error
+            except BaseException as error:
+                with call_spans.span("command.terminal_filter"):
+                    postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+                raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
     # the way out, so an except-block outside it records credential blocks into
     # a collector that is already gone, and emits no receipt for a governed read
     # that touched withheld items before failing.
     from . import published_admission
-    from .collection_store import ownership
     from .collection_store import preview as store_preview
     from .governance import companions
+    from .vault_store import mode as vault_store_mode
+    from .vault_store import read as vault_store_read
 
     # The command's store-owned pages are decided on one store request per decision shape, dropped
     # with the command; a refused request withholds them together for the rest of it.
-    with ownership.read_scope(injected[0]) as ownership_scope, \
+    with ExitStack() as snapshot_scope, ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector, \
             published_admission.deciding(), companions.request_byte_proofs():
         from .cli_ops import _AuditBudgetExhausted
@@ -8940,6 +8970,8 @@ def invoke_command(
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
             try:
+                if vault_store_mode.store_mode_for_reads(injected[0]):
+                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0]))
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()
@@ -8986,6 +9018,12 @@ def invoke_command(
 
         call_ledger.note_released_items(released_item_count(collector, result))
         return result
+
+
+def _coordination_readiness_status(
+    vault_or_cell: os.PathLike[str] | str | None = None,
+) -> dict[str, Any]:
+    return get_manager()._readiness_status(vault_or_cell)
 
 
 def coordination_status(

@@ -16,8 +16,10 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,204 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 import scratch_root  # noqa: E402
 
 WINDOWS = sys.platform == "win32"
+
+
+class _Journal:
+    """The named steps of this process, appended to a JSON-lines file all harness processes share.
+
+    The plain file-mode journey keeps no journal and raises on its first failure, as it always
+    did. With ``keep_going`` (the store-mode arm) a failed step is recorded and the journey
+    carries on, so that one run reports every defect and not only the first. A step that needs
+    the result of a failed step raises ``NameError`` and is recorded as ``blocked``.
+    """
+
+    def __init__(self, path: Path, *, keep_going: bool, phase: str) -> None:
+        self.path = path
+        self.keep_going = keep_going
+        self.phase = phase
+        #: The last few requests, so that a failure names what was asked before it.
+        self.recent: deque[str] = deque(maxlen=3)
+        #: What the running step wants said about a pass, see `_note`.
+        self.note = ""
+        #: The part of the journey that the next steps belong to, see `_section`.
+        self.section = ""
+        #: Whether an earlier step of this process failed, so a later failure may follow from it.
+        self.failed = False
+
+    def note_request(self, name: str, arguments: dict[str, Any]) -> None:
+        self.recent.append(f"{name} {json.dumps(arguments, default=str)[:700]}")
+
+    def record(self, step: str, outcome: str, detail: str = "", **extra: Any) -> None:
+        entry = {
+            "phase": self.phase, "section": self.section, "step": step,
+            "outcome": outcome, "detail": detail, **extra,
+        }  # fmt: skip
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, default=str) + "\n")
+
+
+_JOURNAL: _Journal | None = None
+
+
+class _Step:
+    """One named step, as a ``with`` or ``async with`` block; see ``_Journal``."""
+
+    def __init__(self, journal: _Journal, name: str, *, fatal: bool = False) -> None:
+        self.journal = journal
+        self.name = name
+        #: A fatal step stops its process after it records the failure, as nothing after it can run.
+        self.fatal = fatal
+
+    def __enter__(self) -> _Step:
+        self.started = time.monotonic()
+        self.journal.note = ""
+        return self
+
+    async def __aenter__(self) -> _Step:
+        return self.__enter__()
+
+    def __exit__(self, error_type, error, trace) -> bool:
+        seconds = round(time.monotonic() - self.started, 1)
+        if error is None:
+            self.journal.record(self.name, "pass", self.journal.note, seconds=seconds)
+            return False
+        if not isinstance(error, Exception):
+            return False
+        self.journal.record(
+            self.name,
+            "blocked" if isinstance(error, NameError) else "fail",
+            f"{type(error).__name__}: {error}"[:4000],
+            seconds=seconds,
+            request=list(self.journal.recent),
+            trace="".join(traceback.format_exception(error)[-4:])[-3000:],
+            after_failure=self.journal.failed,
+        )
+        self.journal.failed = True
+        return self.journal.keep_going and not self.fatal
+
+    async def __aexit__(self, error_type, error, trace) -> bool:
+        return self.__exit__(error_type, error, trace)
+
+
+def _step(name: str, *, fatal: bool = False):
+    """Record the block as step ``name``; with no journal it is a no-op that hides nothing."""
+    return contextlib.nullcontext() if _JOURNAL is None else _Step(_JOURNAL, name, fatal=fatal)
+
+
+def _section(name: str) -> None:
+    """Name the part of the journey that the steps from here on belong to."""
+    if _JOURNAL is not None:
+        _JOURNAL.section = name
+
+
+def _note(text: str) -> None:
+    """Say something about the running step if it passes, such as what a probe observed."""
+    if _JOURNAL is not None:
+        _JOURNAL.note = text[:2000]
+
+
+def _skip_step(name: str, reason: str) -> None:
+    """Record a step that the store-mode arm does not run, with the reason."""
+    if _JOURNAL is not None:
+        _JOURNAL.record(name, "skipped", reason)
+
+
+def _print_step_report(path: Path) -> int:
+    """Print the recorded steps and return how many did not pass or skip."""
+    entries = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    print(f"product-e2e: step report ({len(entries)} steps)", flush=True)
+    for entry in entries:
+        seconds = entry.get("seconds")
+        timing = "" if seconds is None else f" ({seconds}s)"
+        where = f"{entry['phase']}/{entry['section']}" if entry["section"] else entry["phase"]
+        print(f"  {entry['outcome'].upper():8} {where}: {entry['step']}{timing}")
+        if entry["outcome"] != "pass" and entry["detail"]:
+            print("           " + entry["detail"][:400].replace("\n", "\n           "))
+    return sum(entry["outcome"] in {"fail", "blocked"} for entry in entries)
+
+
+@dataclasses.dataclass(frozen=True)
+class _StoreRig:
+    """What the store-mode arm adds to every process it starts."""
+
+    coordinator_url: str
+    #: A directory holding the `sitecustomize.py` that opens the rollout guards, see below.
+    rollout_dir: Path
+
+
+_STORE_RIG: _StoreRig | None = None
+_STORE_OPERATOR_TOKEN = "e2e-store-operator-token"
+
+#: Store mode is fenced twice while it rolls out: `vault-store-v1` is not in
+#: `capability.RELEASED`, so `store-mode migrate` refuses, and `availability.require_servable`
+#: refuses to start a service on a store-mode vault. The 7.4 switch lifts both. This module is
+#: imported at interpreter start through PYTHONPATH and opens them in the harness's own
+#: processes only, without changing the installed wheel, as the repository's store-mode
+#: fixtures do. A fence that is already open is a no-op, so the arm keeps working after 7.4.
+_ROLLOUT_OVERRIDE = '''\
+import importlib.abc
+import importlib.util
+import sys
+
+
+class _Opener(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if name not in _OPENERS:
+            return None
+        sys.meta_path.remove(self)
+        try:
+            spec = importlib.util.find_spec(name)
+        finally:
+            sys.meta_path.insert(0, self)
+        if spec is None or spec.loader is None:
+            return spec
+        loader = spec.loader
+        execute = loader.exec_module
+
+        def exec_module(module):
+            execute(module)
+            _OPENERS[name](module)
+
+        loader.exec_module = exec_module
+        return spec
+
+
+def _release(module):
+    module.RELEASED = module.RELEASED | {module.VAULT_STORE_V1}
+
+
+def _serve(module):
+    module.require_servable = lambda _root: None
+
+
+_OPENERS = {
+    "exomem.collection_store.capability": _release,
+    "exomem.vault_store.availability": _serve,
+}
+sys.meta_path.insert(0, _Opener())
+'''
+
+
+def _store_mode_env(home: Path, rig: _StoreRig) -> dict[str, str]:
+    """The writer lease that store mode needs, on the arm's loopback coordinator."""
+    return {
+        "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+        "EXOMEM_WRITER_LEASE_URL": rig.coordinator_url,
+        "EXOMEM_WRITER_LEASE_VAULT_ID": _LEASE_VAULT_ID,
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "store-journey",
+        "EXOMEM_WRITER_LEASE_TOKEN": _LEASE_TOKEN,
+        "EXOMEM_WRITER_LEASE_TTL": str(_LEASE_TTL),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(home / "lease"),
+        "PYTHONPATH": str(rig.rollout_dir),
+    }
+
+
+def _without_rig(env: dict[str, str]) -> dict[str, str]:
+    """The environment as the shipped product sees it: no writer lease, no rollout override."""
+    if _STORE_RIG is None:
+        return env
+    rigged = _store_mode_env(Path(env["HOME"]), _STORE_RIG)
+    return {name: value for name, value in env.items() if name not in rigged}
 
 
 def _clean_env(home: Path, vault: Path) -> dict[str, str]:
@@ -68,6 +268,8 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
     )
     if WINDOWS:
         env["USERPROFILE"] = str(home)
+    if _STORE_RIG is not None:
+        env.update(_store_mode_env(home, _STORE_RIG))
     return env
 
 
@@ -369,6 +571,8 @@ PUBLIC_TOOLS = frozenset({
 
 
 async def _call(client, name: str, arguments: dict[str, Any], timeout: float) -> Any:
+    if _JOURNAL is not None:
+        _JOURNAL.note_request(name, arguments)
     result = await asyncio.wait_for(client.call_tool(name, arguments), timeout=timeout)
     return _result_data(result)
 
@@ -381,6 +585,8 @@ async def _refused(client, name: str, arguments: dict[str, Any], timeout: float)
     """
     from fastmcp.exceptions import ToolError
 
+    if _JOURNAL is not None:
+        _JOURNAL.note_request(name, arguments)
     try:
         data = _result_data(await asyncio.wait_for(client.call_tool(name, arguments), timeout))
     except ToolError as error:
@@ -562,15 +768,15 @@ def _operator_graph_snapshot(vault: Path) -> dict[str, Any]:
         return {"observation": "unavailable", "error_type": type(error).__name__}
 
 
-def _run_operator_reconcile(
+def _operator_reconcile_process(
     executable: Path,
     env: dict[str, str],
     work: Path,
     *,
     timeout: float,
-) -> dict[str, Any]:
+) -> subprocess.CompletedProcess[str]:
     """Run write-capable maintenance through its host-operator CLI surface."""
-    completed = subprocess.run(
+    return subprocess.run(
         [str(executable), "maintain", "--reconcile", "--json"],
         env=env,
         cwd=work,
@@ -579,12 +785,56 @@ def _run_operator_reconcile(
         timeout=max(120.0, timeout * 6),
         check=False,
     )
+
+
+def _run_operator_reconcile(
+    executable: Path,
+    env: dict[str, str],
+    work: Path,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    """Require the host-operator reconcile to succeed."""
+    completed = _operator_reconcile_process(executable, env, work, timeout=timeout)
     if completed.returncode != 0:
         raise RuntimeError(
             "operator reconcile command failed "
             f"({completed.returncode}): {completed.stderr[-2000:]!r}"
         )
     return _operator_reconcile_data(completed.stdout)
+
+
+def _store_mode_operator_reconcile(
+    executable: Path,
+    env: dict[str, str],
+    work: Path,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    """Run the host reconcile on a store-mode vault; it must succeed or name the service it needs.
+
+    The offline write path is closed on such a vault by design, so a refusal that names the
+    code below is the expected answer. Any other answer is a finding.
+    """
+    completed = _operator_reconcile_process(executable, env, work, timeout=timeout)
+    if completed.returncode == 0:
+        return _operator_reconcile_data(completed.stdout)
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    try:
+        error = json.loads(lines[-1]).get("error")
+    except (IndexError, json.JSONDecodeError, AttributeError):
+        error = None
+    code = error.get("code") if isinstance(error, dict) else None
+    if code != "VAULT_STORE_SERVICE_REQUIRED":
+        raise RuntimeError(
+            f"operator reconcile failed ({completed.returncode}) without the expected refusal: "
+            f"stdout {completed.stdout[-1000:]!r} stderr {completed.stderr[-1000:]!r}"
+        )
+    _note(
+        f"host reconcile refused with {code}: {error.get('message')} "
+        f"(remediation: {error.get('remediation')})"
+    )
+    return {"graph_sync": "not_run", "refused_with": code}
 
 
 async def _call_mutation(
@@ -1482,6 +1732,15 @@ async def _maps_consumption_session(
     fixture.update({"activation_tool": "recall_context", "profile_ref": profile["ref"]})
 
 
+async def _collections_first_session(client, state: dict[str, Any], timeout: float) -> None:
+    async with _step("Records authoring and queries"):
+        await _records_first_session(client, state, timeout)
+    async with _step("manual Records log and template"):
+        await _manual_records_session(client, state, timeout)
+    async with _step("Planning collections"):
+        await _planning_first_session(client, state, timeout)
+
+
 async def _stdio_session(
     executable: Path,
     env: dict[str, str],
@@ -1492,7 +1751,14 @@ async def _stdio_session(
     first_run: bool,
     state: dict[str, Any],
     records_rebaseline: bool = False,
+    part: str = "all",
 ) -> dict[str, Any]:
+    """One stdio server session.
+
+    ``part`` splits the first session for the store-mode arm: ``collections`` runs only the
+    Records and Planning steps, which create collections that a vault with a collection store
+    refuses to create as files, and ``lifecycle`` runs everything else. ``all`` is the journey.
+    """
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
 
@@ -1507,316 +1773,550 @@ async def _stdio_session(
     client = Client(transport, timeout=timeout, init_timeout=timeout)
     async with asyncio.timeout(timeout * 12):
         async with client:
-            tools = {tool.name for tool in await asyncio.wait_for(client.list_tools(), timeout)}
-            if tools != PUBLIC_TOOLS:
-                raise RuntimeError(
-                    "installed stdio server lists the wrong tools: "
-                    f"missing {sorted(PUBLIC_TOOLS - tools)}, extra {sorted(tools - PUBLIC_TOOLS)}"
+            async with _step("tools/list matches the public contract"):
+                tools = {tool.name for tool in await asyncio.wait_for(client.list_tools(), timeout)}
+                if tools != PUBLIC_TOOLS:
+                    raise RuntimeError(
+                        "installed stdio server lists the wrong tools: "
+                        f"missing {sorted(PUBLIC_TOOLS - tools)}, "
+                        f"extra {sorted(tools - PUBLIC_TOOLS)}"
+                    )
+            async with _step("retired tool name is refused"):
+                retired = await _refused(
+                    client, "remember", {"title": "x", "content": "x"}, timeout
                 )
-            retired = await _refused(client, "remember", {"title": "x", "content": "x"}, timeout)
-            if "remember" not in retired:
-                raise RuntimeError(f"installed server did not refuse a retired name: {retired!r}")
+                if "remember" not in retired:
+                    raise RuntimeError(
+                        f"installed server did not refuse a retired name: {retired!r}"
+                    )
 
+            if part == "collections":
+                await _collections_first_session(client, state, timeout)
+                return state
             if first_run:
-                relation_proposal = {
-                    "schema_version": 1,
-                    "extensions": {
-                        "science.replicates": {
-                            "parent": "supports",
-                            "description": "Reports an independent reproduction",
+                async with _step("schema.infer_and_save adds relation extensions"):
+                    relation_proposal = {
+                        "schema_version": 1,
+                        "extensions": {
+                            "science.replicates": {
+                                "parent": "supports",
+                                "description": "Reports an independent reproduction",
+                            },
+                            "records.traces_to": {
+                                "parent": "derived_from",
+                                "description": "Traces a record to its source",
+                            },
+                            "systems.triggers": {
+                                "parent": "causes",
+                                "description": "Triggers a system transition",
+                            },
                         },
-                        "records.traces_to": {
-                            "parent": "derived_from",
-                            "description": "Traces a record to its source",
-                        },
-                        "systems.triggers": {
-                            "parent": "causes",
-                            "description": "Triggers a system transition",
-                        },
-                    },
-                }
-                registry_before = await _inspect(
-                    client, "schema.infer", timeout, subject="relations"
-                )
-                registry_result = await _manage(
-                    client,
-                    "schema.infer_and_save",
-                    timeout,
-                    subject="relations",
-                    expected_hash=registry_before["content_hash"],
-                    proposal=relation_proposal,
-                )
-                if (
-                    registry_result.get("saved", {}).get("previous_hash")
-                    != registry_before["content_hash"]
-                ):
-                    raise RuntimeError(
-                        "installed schema governance did not hash-guard relation registry"
+                    }
+                    registry_before = await _inspect(
+                        client, "schema.infer", timeout, subject="relations"
                     )
-                expected_fact = "Retain the signed release manifest for thirty days."
-                source = await _call_mutation(
-                    client,
-                    "save_source",
-                    {
-                        "content": (
-                            "Project Lantern uses governed references across restarts.\n"
-                            f"{expected_fact}"
-                        ),
-                        "source_kind": "article",
-                        "title": "Lantern architecture source",
-                        "url": "https://example.com/lantern",
-                    },
-                    timeout,
-                )
-                if isinstance(source, dict) and isinstance(source.get("source"), dict):
-                    source = source["source"]
-                if not isinstance(source, dict) or "path" not in source:
-                    raise RuntimeError(f"save_source returned unexpected data: {source!r}")
-                memory = await _call_mutation(
-                    client,
-                    "create_note",
-                    {
-                        "content": (
-                            "# Lantern identity\n\n## Claim\n\n"
-                            "Project Lantern requires stable governed identity.\n"
-                        ),
-                        "title": "Lantern identity",
-                        "type": "insight",
-                        "sources": [source["path"]],
-                    },
-                    timeout,
-                )
-                recalled = await _call(
-                    client,
-                    "search_memory",
-                    {
-                        "query": "Lantern stable governed identity",
-                        "options": {"mode": "keyword"},
-                    },
-                    timeout,
-                )
-                recalled_hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
-                if memory["ref"] not in {hit.get("ref") for hit in recalled_hits}:
-                    raise RuntimeError(
-                        f"fresh memory was not recalled through stdio MCP: {recalled!r}"
+                    registry_result = await _manage(
+                        client,
+                        "schema.infer_and_save",
+                        timeout,
+                        subject="relations",
+                        expected_hash=registry_before["content_hash"],
+                        proposal=relation_proposal,
                     )
-                read = await _call(
-                    client,
-                    "read_page",
-                    {"page": memory["ref"], "part": "history"},
-                    timeout,
-                )
-                if read.get("ref") != memory["ref"]:
-                    raise RuntimeError("canonical memory reference did not round-trip")
-                evidence = await _call_mutation(
-                    client,
-                    "save_evidence",
-                    {
-                        "scope": "Lantern",
-                        "category": "verification",
-                        "name": "restart-proof.txt",
-                        "text": "restart persistence verified by the product E2E",
-                        "description": "Evidence used by the Lantern conclusion.",
-                    },
-                    timeout,
-                )
-                replacement = await _call_mutation(
-                    client,
-                    "supersede_note",
-                    {
-                        "note": memory["ref"],
-                        "content": (
-                            "# Lantern identity v2\n\n## Claim\n\n"
-                            "Project Lantern uses stable references plus governed evidence.\n"
-                        ),
-                        "title": "Lantern identity v2",
-                        "type": "insight",
-                        "why": "add verified evidence and restart persistence",
-                        "sources": [source["path"]],
-                    },
-                    timeout,
-                )
-                new_ref = replacement.get("new_ref")
-                if not new_ref:
-                    raise RuntimeError("replacement did not return a canonical new_ref")
-                await _call_mutation(
-                    client,
-                    "edit_note",
-                    {
-                        "note": new_ref,
-                        "why": "attach proof to the active conclusion",
-                        "action": "set_fields",
-                        "fields": {"evidence": [f"[[{evidence['sidecar_path']}]]"]},
-                    },
-                    timeout,
-                )
-                targets: dict[str, dict[str, Any]] = {}
-                for key, title in (
-                    ("study", "Lantern replication study"),
-                    ("record", "Lantern source record"),
-                    ("event", "Lantern trigger event"),
-                ):
-                    targets[key] = await _call_mutation(
+                    if (
+                        registry_result.get("saved", {}).get("previous_hash")
+                        != registry_before["content_hash"]
+                    ):
+                        raise RuntimeError(
+                            "installed schema governance did not hash-guard relation registry"
+                        )
+                async with _step("save_source"):
+                    expected_fact = "Retain the signed release manifest for thirty days."
+                    source = await _call_mutation(
+                        client,
+                        "save_source",
+                        {
+                            "content": (
+                                "Project Lantern uses governed references across restarts.\n"
+                                f"{expected_fact}"
+                            ),
+                            "source_kind": "article",
+                            "title": "Lantern architecture source",
+                            "url": "https://example.com/lantern",
+                        },
+                        timeout,
+                    )
+                    if isinstance(source, dict) and isinstance(source.get("source"), dict):
+                        source = source["source"]
+                    if not isinstance(source, dict) or "path" not in source:
+                        raise RuntimeError(f"save_source returned unexpected data: {source!r}")
+                async with _step("create_note insight citing the source"):
+                    memory = await _call_mutation(
                         client,
                         "create_note",
                         {
                             "content": (
-                                f"# {title}\n\n## Record\n\nCross-file graph target.\n\n"
-                                "## Relations\n\n"
-                                f"- supports [[{replacement['new_path'].removesuffix('.md')}]]\n"
+                                "# Lantern identity\n\n## Claim\n\n"
+                                "Project Lantern requires stable governed identity.\n"
                             ),
-                            "title": title,
+                            "title": "Lantern identity",
+                            "type": "insight",
+                            "sources": [source["path"]],
+                        },
+                        timeout,
+                    )
+                async with _step("search_memory recalls the new note"):
+                    recalled = await _call(
+                        client,
+                        "search_memory",
+                        {
+                            "query": "Lantern stable governed identity",
+                            "options": {"mode": "keyword"},
+                        },
+                        timeout,
+                    )
+                    recalled_hits = (
+                        recalled.get("hits", []) if isinstance(recalled, dict) else recalled
+                    )
+                    if memory["ref"] not in {hit.get("ref") for hit in recalled_hits}:
+                        raise RuntimeError(
+                            f"fresh memory was not recalled through stdio MCP: {recalled!r}"
+                        )
+                async with _step("read_page round-trips the canonical ref"):
+                    read = await _call(
+                        client,
+                        "read_page",
+                        {"page": memory["ref"], "part": "history"},
+                        timeout,
+                    )
+                    if read.get("ref") != memory["ref"]:
+                        raise RuntimeError("canonical memory reference did not round-trip")
+                async with _step("save_evidence"):
+                    evidence = await _call_mutation(
+                        client,
+                        "save_evidence",
+                        {
+                            "scope": "Lantern",
+                            "category": "verification",
+                            "name": "restart-proof.txt",
+                            "text": "restart persistence verified by the product E2E",
+                            "description": "Evidence used by the Lantern conclusion.",
+                        },
+                        timeout,
+                    )
+                async with _step("supersede_note"):
+                    replacement = await _call_mutation(
+                        client,
+                        "supersede_note",
+                        {
+                            "note": memory["ref"],
+                            "content": (
+                                "# Lantern identity v2\n\n## Claim\n\n"
+                                "Project Lantern uses stable references plus governed evidence.\n"
+                            ),
+                            "title": "Lantern identity v2",
+                            "type": "insight",
+                            "why": "add verified evidence and restart persistence",
+                            "sources": [source["path"]],
+                        },
+                        timeout,
+                    )
+                    new_ref = replacement.get("new_ref")
+                    if not new_ref:
+                        raise RuntimeError("replacement did not return a canonical new_ref")
+                async with _step("edit_note attaches the evidence"):
+                    await _call_mutation(
+                        client,
+                        "edit_note",
+                        {
+                            "note": new_ref,
+                            "why": "attach proof to the active conclusion",
+                            "action": "set_fields",
+                            "fields": {"evidence": [f"[[{evidence['sidecar_path']}]]"]},
+                        },
+                        timeout,
+                    )
+                async with _step("create_note x3 graph targets"):
+                    targets: dict[str, dict[str, Any]] = {}
+                    for key, title in (
+                        ("study", "Lantern replication study"),
+                        ("record", "Lantern source record"),
+                        ("event", "Lantern trigger event"),
+                    ):
+                        targets[key] = await _call_mutation(
+                            client,
+                            "create_note",
+                            {
+                                "content": (
+                                    f"# {title}\n\n## Record\n\nCross-file graph target.\n\n"
+                                    "## Relations\n\n"
+                                    "- supports "
+                                    f"[[{replacement['new_path'].removesuffix('.md')}]]\n"
+                                ),
+                                "title": title,
+                                "type": "insight",
+                            },
+                            timeout,
+                        )
+                async with _step("create_note with governed relation extensions"):
+                    relation_memory = await _call_mutation(
+                        client,
+                        "create_note",
+                        {
+                            "content": (
+                                "# Lantern governed relations\n\n"
+                                "## Finding\n"
+                                "- relations: science.replicates: "
+                                f"[[{targets['study']['path']}]]\n\n"
+                                "The study independently reproduced the result.\n\n"
+                                f"- records.traces_to: [[{targets['record']['path']}]]\n"
+                                f"- systems.triggers: [[{targets['event']['path']}]]\n"
+                            ),
+                            "title": "Lantern governed relations",
                             "type": "insight",
                         },
                         timeout,
                     )
-                relation_memory = await _call_mutation(
-                    client,
-                    "create_note",
-                    {
-                        "content": (
-                            "# Lantern governed relations\n\n"
-                            "## Finding\n"
-                            f"- relations: science.replicates: [[{targets['study']['path']}]]\n\n"
-                            "The study independently reproduced the result.\n\n"
-                            f"- records.traces_to: [[{targets['record']['path']}]]\n"
-                            f"- systems.triggers: [[{targets['event']['path']}]]\n"
-                        ),
-                        "title": "Lantern governed relations",
-                        "type": "insight",
-                    },
-                    timeout,
-                )
-                context = await _inspect(
-                    client, "connections.context", timeout, path=new_ref, depth=2
-                )
-                provenance = context["provenance"][0]
-                if not provenance["sources"] or not provenance["evidence"]:
-                    raise RuntimeError("unified context lost source/evidence provenance")
-                evolution = await _inspect(
-                    client, "review.evolution", timeout, query="Lantern identity", limit=10
-                )
-                if not evolution:
-                    raise RuntimeError("evolution review returned no lifecycle data")
-                preview_handle = await _preview_maintenance(
-                    client, "maintenance.reconcile", timeout, dry_run=True
-                )
-                reconcile_preview = _remote_maintenance_preview(
-                    preview_handle,
-                    await _await_maintenance_job(client, preview_handle["run_id"], timeout),
-                )
-                plan_id = reconcile_preview["plan_id"]
-                job_handle = await _manage_maintenance(
-                    client,
-                    "maintenance.reconcile",
-                    timeout,
-                    dry_run=False,
-                    plan_id=plan_id,
-                    why="product e2e: prove the remote job route",
-                )
-                _remote_maintenance_job(
-                    job_handle,
-                    await _await_maintenance_job(client, job_handle["run_id"], timeout),
-                    plan_id=plan_id,
-                )
-                await _assert_relation_contexts(
-                    client,
-                    relation_ref=relation_memory["ref"],
-                    timeout=timeout,
-                )
-                state.update(
-                    {
-                        "source_ref": source["ref"],
-                        "old_ref": memory["ref"],
-                        "new_ref": new_ref,
-                        "evidence_ref": evidence["ref"],
-                        "new_path": replacement["new_path"],
-                        "references_status": reconcile_preview.get("references_status"),
-                        "relation_ref": relation_memory["ref"],
-                        "relation_path": relation_memory["path"],
-                        "registry_hash": registry_result["saved"]["content_hash"],
-                    }
-                )
-                maps_memory = await _call_mutation(
-                    client, "create_note",
-                    {
-                        "title": "Project Alpha release retention",
-                        "type": "insight",
-                        "projects": ["project-alpha"],
-                        "sources": [source["path"]],
-                        "content": (
-                            f"# Release retention\n\n- [constraint] {expected_fact} ^retention\n\n"
-                            "## Relations\n\n"
-                            f"- supports [[{replacement['new_path'].removesuffix('.md')}]]\n"
-                        ),
-                    },
-                    timeout,
-                )
-                state["maps"] = {
-                    "ref": maps_memory["ref"], "path": maps_memory["path"],
-                    "expected_fact": expected_fact,
-                }
-                await _records_first_session(client, state, timeout)
-                await _manual_records_session(client, state, timeout)
-                await _planning_first_session(client, state, timeout)
-            else:
-                operator_reconcile = state.get("operator_reconcile")
-                if not isinstance(operator_reconcile, dict):
-                    raise RuntimeError("restart session is missing host operator reconcile proof")
-                active = await _call(
-                    client,
-                    "read_page",
-                    {"page": state["new_ref"], "part": "history"},
-                    timeout,
-                )
-                old = await _call(
-                    client,
-                    "read_page",
-                    {"page": state["old_ref"], "part": "history"},
-                    timeout,
-                )
-                context = await _inspect(
-                    client, "connections.context", timeout, path=state["new_ref"], depth=2
-                )
-                if active["path"] != state["new_path"]:
-                    raise RuntimeError("active reference resolved to the wrong path after restart")
-                if old["frontmatter"].get("status") != "superseded":
-                    raise RuntimeError("superseded conclusion lost lifecycle status after restart")
-                if not old["frontmatter"].get("superseded_by"):
-                    raise RuntimeError("supersession link did not survive restart")
-                if not context["history"] or not context["provenance"][0]["evidence"]:
-                    raise RuntimeError("context history/provenance did not survive restart")
-                await _assert_relation_contexts(
-                    client,
-                    relation_ref=state["relation_ref"],
-                    timeout=timeout,
-                )
-                if records_rebaseline:
-                    await _records_rebaseline_session(client, state, timeout)
-                else:
-                    await _records_restart_session(client, state, timeout)
-                await _manual_records_session(client, state, timeout)
-                await _planning_restart_session(client, state, timeout)
-                if operator_reconcile.get("graph_sync") == "failed":
-                    raise RuntimeError(
-                        "host operator reconcile reported graph synchronization failure: "
-                        f"{operator_reconcile!r}"
+                async with _step("connections.context keeps source and evidence"):
+                    context = await _inspect(
+                        client, "connections.context", timeout, path=new_ref, depth=2
                     )
-                # The host reconcile ran before this server session, and the
-                # records/manual/planning sessions above write repeatedly.
-                # Availability is vault-global, so every one of those clears it
-                # until the rebuild republishes -- and rebuilds no longer finish
-                # inside the write that caused them. The CLI exit and the
-                # sidecar existence checks in `_installed_stdio` prove the
-                # deleted indexes were rebuilt; the only honest proof that the
-                # later writes also converge is to poll the server doing it.
-                await _await_graph_convergence(
-                    client,
-                    relation_ref=state["relation_ref"],
-                    timeout=timeout,
-                )
-            await _maps_consumption_session(client, state, timeout=timeout)
+                    provenance = context["provenance"][0]
+                    if not provenance["sources"] or not provenance["evidence"]:
+                        raise RuntimeError("unified context lost source/evidence provenance")
+                async with _step("review.evolution returns lifecycle data"):
+                    evolution = await _inspect(
+                        client, "review.evolution", timeout, query="Lantern identity", limit=10
+                    )
+                    if not evolution:
+                        raise RuntimeError("evolution review returned no lifecycle data")
+                async with _step("maintenance.reconcile preview job"):
+                    preview_handle = await _preview_maintenance(
+                        client, "maintenance.reconcile", timeout, dry_run=True
+                    )
+                    reconcile_preview = _remote_maintenance_preview(
+                        preview_handle,
+                        await _await_maintenance_job(client, preview_handle["run_id"], timeout),
+                    )
+                    plan_id = reconcile_preview["plan_id"]
+                async with _step("maintenance.reconcile apply job"):
+                    job_handle = await _manage_maintenance(
+                        client,
+                        "maintenance.reconcile",
+                        timeout,
+                        dry_run=False,
+                        plan_id=plan_id,
+                        why="product e2e: prove the remote job route",
+                    )
+                    _remote_maintenance_job(
+                        job_handle,
+                        await _await_maintenance_job(client, job_handle["run_id"], timeout),
+                        plan_id=plan_id,
+                    )
+                async with _step("relation contexts after the reconcile job"):
+                    await _assert_relation_contexts(
+                        client,
+                        relation_ref=relation_memory["ref"],
+                        timeout=timeout,
+                    )
+                async with _step("journey state recorded"):
+                    state.update(
+                        {
+                            "source_ref": source["ref"],
+                            "old_ref": memory["ref"],
+                            "new_ref": new_ref,
+                            "evidence_ref": evidence["ref"],
+                            "new_path": replacement["new_path"],
+                            "references_status": reconcile_preview.get("references_status"),
+                            "relation_ref": relation_memory["ref"],
+                            "relation_path": relation_memory["path"],
+                            "registry_hash": registry_result["saved"]["content_hash"],
+                        }
+                    )
+                async with _step("create_note with a constraint claim"):
+                    maps_memory = await _call_mutation(
+                        client, "create_note",
+                        {
+                            "title": "Project Alpha release retention",
+                            "type": "insight",
+                            "projects": ["project-alpha"],
+                            "sources": [source["path"]],
+                            "content": (
+                                "# Release retention\n\n"
+                                f"- [constraint] {expected_fact} ^retention\n\n"
+                                "## Relations\n\n"
+                                f"- supports [[{replacement['new_path'].removesuffix('.md')}]]\n"
+                            ),
+                        },
+                        timeout,
+                    )
+                    state["maps"] = {
+                        "ref": maps_memory["ref"], "path": maps_memory["path"],
+                        "expected_fact": expected_fact,
+                    }
+                if part == "all":
+                    await _collections_first_session(client, state, timeout)
+            else:
+                async with _step("host reconcile proof reached the restart session"):
+                    operator_reconcile = state.get("operator_reconcile")
+                    if not isinstance(operator_reconcile, dict):
+                        raise RuntimeError(
+                            "restart session is missing host operator reconcile proof"
+                        )
+                async with _step("read_page active and superseded conclusions"):
+                    active = await _call(
+                        client,
+                        "read_page",
+                        {"page": state["new_ref"], "part": "history"},
+                        timeout,
+                    )
+                    old = await _call(
+                        client,
+                        "read_page",
+                        {"page": state["old_ref"], "part": "history"},
+                        timeout,
+                    )
+                async with _step("connections.context after restart"):
+                    context = await _inspect(
+                        client, "connections.context", timeout, path=state["new_ref"], depth=2
+                    )
+                async with _step("lifecycle and provenance survive the restart"):
+                    if active["path"] != state["new_path"]:
+                        raise RuntimeError(
+                            "active reference resolved to the wrong path after restart"
+                        )
+                    if old["frontmatter"].get("status") != "superseded":
+                        raise RuntimeError(
+                            "superseded conclusion lost lifecycle status after restart"
+                        )
+                    if not old["frontmatter"].get("superseded_by"):
+                        raise RuntimeError("supersession link did not survive restart")
+                    if not context["history"] or not context["provenance"][0]["evidence"]:
+                        raise RuntimeError("context history/provenance did not survive restart")
+                async with _step("relation contexts after restart"):
+                    await _assert_relation_contexts(
+                        client,
+                        relation_ref=state["relation_ref"],
+                        timeout=timeout,
+                    )
+                async with _step(
+                    "Records re-baseline after outside edits"
+                    if records_rebaseline
+                    else "Records after restart"
+                ):
+                    if records_rebaseline:
+                        await _records_rebaseline_session(client, state, timeout)
+                    else:
+                        await _records_restart_session(client, state, timeout)
+                async with _step("manual Records after restart"):
+                    await _manual_records_session(client, state, timeout)
+                async with _step("Planning after restart"):
+                    await _planning_restart_session(client, state, timeout)
+                if operator_reconcile.get("graph_sync") == "not_run":
+                    _skip_step(
+                        "host reconcile reported no graph sync failure",
+                        "the store-mode vault refused the offline reconcile; nothing was reported",
+                    )
+                else:
+                    async with _step("host reconcile reported no graph sync failure"):
+                        if operator_reconcile.get("graph_sync") == "failed":
+                            raise RuntimeError(
+                                "host operator reconcile reported graph synchronization "
+                                f"failure: {operator_reconcile!r}"
+                            )
+                async with _step("graph converges after the restart writes"):
+                    # The host reconcile ran before this server session, and the
+                    # records/manual/planning sessions above write repeatedly.
+                    # Availability is vault-global, so every one of those clears it
+                    # until the rebuild republishes -- and rebuilds no longer finish
+                    # inside the write that caused them. The CLI exit and the
+                    # sidecar existence checks in `_installed_stdio` prove the
+                    # deleted indexes were rebuilt; the only honest proof that the
+                    # later writes also converge is to poll the server doing it.
+                    await _await_graph_convergence(
+                        client,
+                        relation_ref=state["relation_ref"],
+                        timeout=timeout,
+                    )
+            async with _step("maps consumption"):
+                await _maps_consumption_session(client, state, timeout=timeout)
     return state
+
+
+#: The store-mode arm enrols the vault's collection store with one summary collection of its own,
+#: as a vault owner does before a first migration; the journey's other collections are unaffected.
+_STORE_ENROLMENT_ID = "6b2f9d1e-3c47-4a58-8e0d-71c4a9b5f326"
+_STORE_ENROLMENT_PATH = "Knowledge Base/Records/Store Mode/Enrolment/_collection.md"
+_STORE_ENROLMENT_MANIFEST = f"""---
+type: collection
+exomem_id: {_STORE_ENROLMENT_ID}
+title: Store mode enrolment
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+view_mode: summary
+storage:
+  strategy: sqlite
+  source: Items
+  format_version: 1
+item_schema:
+  natural_key: [item_id]
+  fields:
+    item_id: {{type: string, required: true}}
+---
+"""
+
+
+def _owner_cli(
+    executable: Path,
+    env: dict[str, str],
+    work: Path,
+    *arguments: str,
+    timeout: float,
+    operator: bool = False,
+    stdin: int | None = None,
+    wait_for_lease: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run an offline owner command; ``operator`` adds the credential that owner commands need.
+
+    A command that ran before this one leaves its writer lease to expire, and an owner apply
+    refuses with the named code until then, so ``wait_for_lease`` retries on that code for
+    three lease terms. The wait is noted on the step; it is not hidden.
+    """
+    run_env = dict(env)
+    if operator:
+        run_env["EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"] = _STORE_OPERATOR_TOKEN
+    deadline = time.monotonic() + _LEASE_TTL * 3 + 10
+    retries = 0
+    while True:
+        done = subprocess.run(
+            [str(executable), *arguments],
+            env=run_env,
+            cwd=work,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            stdin=stdin,
+        )
+        # The coordinator documents this code for a lease that another holder has not released.
+        held = "COLLECTION_STORE_SERVICE_ACTIVE" in done.stderr
+        if not (wait_for_lease and held and time.monotonic() < deadline):
+            break
+        retries += 1
+        time.sleep(1.0)
+    if retries:
+        done.stderr += f"\n[journey: retried {retries} times while the lease expired]"
+    return done
+
+
+def _owner_json(done: subprocess.CompletedProcess[str], what: str) -> dict[str, Any]:
+    """The JSON result of an owner command, or the command's own words when it refused."""
+    if done.returncode != 0:
+        raise RuntimeError(
+            f"{what} exited {done.returncode}\nstdout:\n{done.stdout[-2000:]}\n"
+            f"stderr:\n{done.stderr[-3000:]}"
+        )
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    if not isinstance(result, dict):
+        raise RuntimeError(f"{what} answered {result!r}, not an object")
+    return result
+
+
+def _prepare_store_mode(
+    executable: Path, env: dict[str, str], vault: Path, work: Path, *, timeout: float
+) -> None:
+    """Move the journey's vault into store mode the way its owner does, each step on record.
+
+    The two release fences are probed first, with the shipped wheel and no override: a probe
+    passes when the fence refuses with its named code, or when the fence is already open.
+    Every later step runs with the override that the rig adds to ``env``.
+    """
+    _section("store-mode preparation")
+    shipped = {name: value for name, value in env.items() if name != "PYTHONPATH"}
+    vault_args = ("--vault", str(vault))
+    slow = max(120.0, timeout * 6)
+    # The fences answer with these product error codes, a closed set the CLI documents.
+    with _step("as shipped: store-mode status"):
+        done = _owner_cli(executable, shipped, work, "store-mode", "status", *vault_args,
+                          timeout=timeout)
+        _note(f"{_owner_json(done, 'store-mode status')}")
+    with _step("as shipped: store-mode migrate --dry-run meets the release fence or passes"):
+        done = _owner_cli(executable, shipped, work, "store-mode", "migrate", "--dry-run",
+                          *vault_args, timeout=timeout)
+        if done.returncode != 0 and "VAULT_STORE_NOT_RELEASED" not in done.stderr:
+            raise RuntimeError(
+                f"preflight refused for another reason ({done.returncode}): {done.stderr[-2000:]}"
+            )
+        _note(f"exit {done.returncode}: {(done.stderr or done.stdout).strip()[-600:]}")
+    with _step("owner enrols the collection store: exomem collections create"):
+        manifest = work / "store-enrolment.md"
+        manifest.write_text(_STORE_ENROLMENT_MANIFEST, encoding="utf-8")
+        done = _owner_cli(
+            executable, shipped, work, "collections", "create",
+            "--manifest-path", _STORE_ENROLMENT_PATH, "--manifest-file", str(manifest),
+            "--why", "enrol the vault's collection store", *vault_args,
+            timeout=slow, operator=True, wait_for_lease=True,
+        )  # fmt: skip
+        result = _owner_json(done, "collections create")
+        if result.get("status") != "marker_admitted":
+            raise RuntimeError(f"enrolment did not admit the store: {result!r}")
+    with _step("owner builds the sidecars: exomem maintain --reconcile"):
+        done = _owner_cli(
+            executable, shipped, work, "maintain", "--reconcile", "--json", timeout=slow
+        )
+        result = _owner_json(done, "maintain --reconcile")
+        if not result.get("success"):
+            raise RuntimeError(f"maintain --reconcile did not succeed: {result!r}")
+    with _step("store-mode migrate --dry-run passes the preflight"):
+        done = _owner_cli(executable, env, work, "store-mode", "migrate", "--dry-run",
+                          *vault_args, timeout=slow)
+        _note(f"{_owner_json(done, 'store-mode migrate --dry-run')}")
+    with _step("store-mode migrate --apply moves the vault into the store", fatal=True):
+        done = _owner_cli(
+            executable, env, work, "store-mode", "migrate", "--apply", "--why",
+            "run the installed product journey in store mode", *vault_args,
+            timeout=max(slow, 300.0), operator=True, wait_for_lease=True,
+        )  # fmt: skip
+        result = _owner_json(done, "store-mode migrate --apply")
+        if result.get("status") != "migrated":
+            raise RuntimeError(f"migration did not report migrated: {result!r}")
+        _note(f"{result} {done.stderr.strip()[-200:]}")
+    with _step("store-mode status reports store mode", fatal=True):
+        done = _owner_cli(executable, env, work, "store-mode", "status", *vault_args,
+                          timeout=timeout)
+        result = _owner_json(done, "store-mode status")
+        if result.get("mode") != "store":
+            raise RuntimeError(f"the vault is not in store mode after migration: {result!r}")
+        _note(f"{result}")
+    with _step("as shipped: a service start on the store-mode vault meets the serve fence"):
+        # With stdin closed, a service that starts reads end-of-file and exits cleanly.
+        done = _owner_cli(executable, shipped, work, "--transport", "stdio",
+                          timeout=slow, stdin=subprocess.DEVNULL)
+        if done.returncode != 0 and "VAULT_STORE_NOT_SERVED" not in done.stderr:
+            raise RuntimeError(
+                f"service start failed for another reason ({done.returncode}): "
+                f"{done.stderr[-2000:]}"
+            )
+        _note(f"exit {done.returncode}: {done.stderr.strip()[-600:]}")
+
+
+def _require_store_mode(args: argparse.Namespace, env: dict[str, str]) -> None:
+    """Record that the vault this phase serves is in store mode, or stop the phase."""
+    if _STORE_RIG is None:
+        return
+    with _step("the vault is in store mode", fatal=True):
+        done = _owner_cli(
+            Path(args.python), env, Path(args.work), "-m", "exomem", "store-mode", "status",
+            "--vault", args.vault, timeout=args.request_timeout,
+        )  # fmt: skip
+        result = _owner_json(done, "store-mode status")
+        if result.get("mode") != "store":
+            raise RuntimeError(f"the vault is not in store mode: {result!r}")
+        _note(f"{result}")
 
 
 def _installed_stdio(args: argparse.Namespace) -> int:
@@ -1833,86 +2333,132 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     state["manual_records"] = _write_manual_records_fixture(vault)
     state["planning"] = _write_planning_fixtures(vault)
     _insert_manual_x3_session(vault, state["manual_records"])
-    asyncio.run(
-        _stdio_session(
-            executable,
-            env,
-            work,
-            work / "stdio-first.log",
-            timeout=args.request_timeout,
-            first_run=True,
-            state=state,
+    part = "all"
+    if _STORE_RIG is not None:
+        # A vault with a collection store refuses to create file collections, so the journey
+        # builds them first, in file mode. The vault then moves into store mode with everything
+        # it holds, as an owner's populated vault does, and the rest of the journey runs there.
+        _section("first session, collections part (file mode, before the migration)")
+        with _step("the server starts, serves the session and closes"):
+            asyncio.run(
+                _stdio_session(
+                    executable,
+                    _without_rig(env),
+                    work,
+                    work / "stdio-collections.log",
+                    timeout=args.request_timeout,
+                    first_run=True,
+                    state=state,
+                    part="collections",
+                )
+            )
+        _prepare_store_mode(executable, env, vault, work, timeout=args.request_timeout)
+        part = "lifecycle"
+    _section("first session" if part == "all" else "first session, lifecycle part (store mode)")
+    with _step("the server starts, serves the session and closes"):
+        asyncio.run(
+            _stdio_session(
+                executable,
+                env,
+                work,
+                work / "stdio-first.log",
+                timeout=args.request_timeout,
+                first_run=True,
+                state=state,
+                part=part,
+            )
         )
-    )
     from exomem import epistemic_graph, memory_refs
 
-    reconcile_snapshots = {"before_deletion": _operator_graph_snapshot(vault)}
+    _section("host work between sessions")
+    reconcile_snapshots: dict[str, Any] = {}
     refs_sidecar = memory_refs.sidecar_path(vault)
-    refs_sidecar.unlink(missing_ok=True)
     graph_sidecar = epistemic_graph.sidecar_path(vault)
-    graph_sidecar.unlink(missing_ok=True)
-    record_item = vault / state["records"]["item_path"]
-    item_text = record_item.read_text(encoding="utf-8")
-    updated_item_text = item_text.replace(
-        "title: Push corrected", "title: Push corrected (human edit)", 1
-    )
-    if updated_item_text == item_text:
-        raise RuntimeError("installed Records item did not preserve a direct-editable title")
-    record_item.write_text(updated_item_text, encoding="utf-8")
-    planning_item = vault / state["planning"]["software"]["work_item_path"]
-    planning_item.write_text(
-        planning_item.read_text(encoding="utf-8").replace(
-            "title: Ship Planning query surface",
-            "title: Ship Planning query surface (human edit)",
-            1,
-        ),
-        encoding="utf-8",
-    )
+    with _step("delete the reference and graph sidecars"):
+        reconcile_snapshots["before_deletion"] = _operator_graph_snapshot(vault)
+        refs_sidecar.unlink(missing_ok=True)
+        graph_sidecar.unlink(missing_ok=True)
+    with _step("edit a Records item and a Planning item file directly"):
+        record_item = vault / state["records"]["item_path"]
+        item_text = record_item.read_text(encoding="utf-8")
+        updated_item_text = item_text.replace(
+            "title: Push corrected", "title: Push corrected (human edit)", 1
+        )
+        if updated_item_text == item_text:
+            raise RuntimeError("installed Records item did not preserve a direct-editable title")
+        record_item.write_text(updated_item_text, encoding="utf-8")
+        planning_item = vault / state["planning"]["software"]["work_item_path"]
+        planning_item.write_text(
+            planning_item.read_text(encoding="utf-8").replace(
+                "title: Ship Planning query surface",
+                "title: Ship Planning query surface (human edit)",
+                1,
+            ),
+            encoding="utf-8",
+        )
     reconcile_snapshots["before_operator"] = _operator_graph_snapshot(vault)
-    try:
-        state["operator_reconcile"] = _run_operator_reconcile(
-            executable,
-            env,
-            work,
-            timeout=args.request_timeout,
-        )
-        if not refs_sidecar.exists() or not graph_sidecar.exists():
-            raise RuntimeError(
-                "host operator reconcile did not rebuild the deleted reference and graph sidecars"
+    if _STORE_RIG is not None:
+        # An offline write is closed on a store-mode vault, so the deleted sidecars are left for
+        # the restart session's service to rebuild; the file-mode proof below stays as it is.
+        with _step("host operator reconcile on a store-mode vault"):
+            state["operator_reconcile"] = _store_mode_operator_reconcile(
+                executable, env, work, timeout=args.request_timeout
             )
-    except Exception:
-        reconcile_snapshots["after_failure"] = _operator_graph_snapshot(vault)
-        try:
-            diagnostic = home / "logs" / "operator-reconcile-state.json"
-            diagnostic.parent.mkdir(parents=True, exist_ok=True)
-            diagnostic.write_text(json.dumps(reconcile_snapshots) + "\n", encoding="utf-8")
-        except OSError:  # The existing failure-log collector owns artifact publication.
-            pass
-        raise
-    asyncio.run(
-        _stdio_session(
-            executable,
-            env,
-            work,
-            work / "stdio-restart.log",
-            timeout=args.request_timeout,
-            first_run=False,
-            records_rebaseline=True,
-            state=state,
+    else:
+        with _step("host operator reconcile rebuilds the sidecars"):
+            try:
+                state["operator_reconcile"] = _run_operator_reconcile(
+                    executable,
+                    env,
+                    work,
+                    timeout=args.request_timeout,
+                )
+                if not refs_sidecar.exists() or not graph_sidecar.exists():
+                    raise RuntimeError(
+                        "host operator reconcile did not rebuild the deleted reference and graph "
+                        "sidecars"
+                    )
+            except Exception:
+                reconcile_snapshots["after_failure"] = _operator_graph_snapshot(vault)
+                try:
+                    diagnostic = home / "logs" / "operator-reconcile-state.json"
+                    diagnostic.parent.mkdir(parents=True, exist_ok=True)
+                    diagnostic.write_text(
+                        json.dumps(reconcile_snapshots) + "\n", encoding="utf-8"
+                    )
+                except OSError:  # The existing failure-log collector owns artifact publication.
+                    pass
+                raise
+    _section("restart session")
+    with _step("the server starts, serves the session and closes"):
+        asyncio.run(
+            _stdio_session(
+                executable,
+                env,
+                work,
+                work / "stdio-restart.log",
+                timeout=args.request_timeout,
+                first_run=False,
+                records_rebaseline=True,
+                state=state,
+            )
         )
-    )
-    asyncio.run(
-        _stdio_session(
-            executable,
-            env,
-            work,
-            work / "stdio-readback-restart.log",
-            timeout=args.request_timeout,
-            first_run=False,
-            state=state,
+    _section("readback session")
+    with _step("the server starts, serves the session and closes"):
+        asyncio.run(
+            _stdio_session(
+                executable,
+                env,
+                work,
+                work / "stdio-readback-restart.log",
+                timeout=args.request_timeout,
+                first_run=False,
+                state=state,
+            )
         )
-    )
-    print(json.dumps({"success": True, "transport": "stdio", "state": state}))
+    _section("")
+    failed = _JOURNAL is not None and _JOURNAL.failed
+    print(json.dumps({"success": not failed, "transport": "stdio", "state": state}))
     return 0
 
 
@@ -1929,6 +2475,8 @@ def _http_json(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    if _JOURNAL is not None:
+        _JOURNAL.note_request(f"{method} {url.split('?')[0]}", body or {})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, _decode_json(response.read(), url=url, status=response.status)
@@ -2334,6 +2882,7 @@ def _installed_http(args: argparse.Namespace) -> int:
     home = Path(args.home)
     env = _clean_env(home, vault)
     env["EXOMEM_REST_API_KEY"] = "e2e-rest-key"
+    _require_store_mode(args, env)
     port = _reserve_port()
     base_url = f"http://127.0.0.1:{port}"
     server_log = work / "http-server.log"
@@ -2355,67 +2904,78 @@ def _installed_http(args: argparse.Namespace) -> int:
         )
         clean_shutdown = False
         try:
-            deadline = time.monotonic() + args.request_timeout
-            while True:
-                if proc.poll() is not None:
+            with _step("HTTP server starts and serves OpenAPI", fatal=True):
+                deadline = time.monotonic() + args.request_timeout
+                while True:
+                    if proc.poll() is not None:
+                        raise RuntimeError(
+                            f"HTTP server exited during startup ({proc.returncode}):\n"
+                            + server_log.read_text(encoding="utf-8")[-4000:]
+                        )
+                    try:
+                        status, openapi = _http_json(
+                            f"{base_url}/api/openapi.json",
+                            timeout=1.0,
+                        )
+                        if status == 200:
+                            break
+                    except (OSError, ValueError, json.JSONDecodeError):
+                        pass
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("HTTP server did not become ready before timeout")
+                    time.sleep(0.1)
+
+            with _step("OpenAPI lists the traversal, subject and proposal parameters"):
+                serialized_openapi = json.dumps(openapi, sort_keys=True)
+                for parameter in ("traversal_profile", "subject", "proposal"):
+                    if f'"{parameter}"' not in serialized_openapi:
+                        raise RuntimeError(f"installed OpenAPI omitted {parameter}")
+
+            with _step("REST refuses a wrong key with 401"):
+                wrong_status, _ = _http_json(
+                    f"{base_url}/api/bootstrap",
+                    method="POST",
+                    body={},
+                    token="wrong",
+                    timeout=args.request_timeout,
+                )
+                if wrong_status != 401:
                     raise RuntimeError(
-                        f"HTTP server exited during startup ({proc.returncode}):\n"
-                        + server_log.read_text(encoding="utf-8")[-4000:]
+                        f"REST wrong-key request returned {wrong_status}, expected 401"
                     )
-                try:
-                    status, openapi = _http_json(
-                        f"{base_url}/api/openapi.json",
-                        timeout=1.0,
-                    )
-                    if status == 200:
-                        break
-                except (OSError, ValueError, json.JSONDecodeError):
-                    pass
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("HTTP server did not become ready before timeout")
-                time.sleep(0.1)
-
-            serialized_openapi = json.dumps(openapi, sort_keys=True)
-            for parameter in ("traversal_profile", "subject", "proposal"):
-                if f'"{parameter}"' not in serialized_openapi:
-                    raise RuntimeError(f"installed OpenAPI omitted {parameter}")
-
-            wrong_status, _ = _http_json(
-                f"{base_url}/api/bootstrap",
-                method="POST",
-                body={},
-                token="wrong",
-                timeout=args.request_timeout,
-            )
-            if wrong_status != 401:
-                raise RuntimeError(f"REST wrong-key request returned {wrong_status}, expected 401")
-            status, payload = _http_json(
-                f"{base_url}/api/bootstrap",
-                method="POST",
-                body={},
-                token="e2e-rest-key",
-                timeout=args.request_timeout,
-            )
-            if status != 200 or not payload.get("success"):
-                raise RuntimeError(f"authenticated REST read failed: {status} {payload}")
-            status, payload = _http_json(
-                f"{base_url}/api/remember",
-                method="POST",
-                body={
-                    "content": "# HTTP lifecycle\n\n## Claim\n\nHTTP writes complete cleanly.\n",
-                    "title": "HTTP lifecycle",
-                    "note_type": "insight",
-                    "status": "draft",
-                },
-                token="e2e-rest-key",
-                timeout=args.request_timeout,
-            )
-            if status != 200 or not payload.get("success"):
-                raise RuntimeError(f"authenticated REST write failed: {status} {payload}")
-            _studio_and_review_checks(
-                base_url, token="e2e-rest-key", timeout=args.request_timeout
-            )
-            asyncio.run(_initialize_http_mcp(base_url, args.request_timeout))
+            with _step("REST read: bootstrap"):
+                status, payload = _http_json(
+                    f"{base_url}/api/bootstrap",
+                    method="POST",
+                    body={},
+                    token="e2e-rest-key",
+                    timeout=args.request_timeout,
+                )
+                if status != 200 or not payload.get("success"):
+                    raise RuntimeError(f"authenticated REST read failed: {status} {payload}")
+            with _step("REST write: remember"):
+                status, payload = _http_json(
+                    f"{base_url}/api/remember",
+                    method="POST",
+                    body={
+                        "content": (
+                            "# HTTP lifecycle\n\n## Claim\n\nHTTP writes complete cleanly.\n"
+                        ),
+                        "title": "HTTP lifecycle",
+                        "note_type": "insight",
+                        "status": "draft",
+                    },
+                    token="e2e-rest-key",
+                    timeout=args.request_timeout,
+                )
+                if status != 200 or not payload.get("success"):
+                    raise RuntimeError(f"authenticated REST write failed: {status} {payload}")
+            with _step("Studio, review context and triage checks"):
+                _studio_and_review_checks(
+                    base_url, token="e2e-rest-key", timeout=args.request_timeout
+                )
+            with _step("MCP over HTTP initializes"):
+                asyncio.run(_initialize_http_mcp(base_url, args.request_timeout))
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -2427,13 +2987,16 @@ def _installed_http(args: argparse.Namespace) -> int:
                     proc.wait(timeout=5)
             else:
                 clean_shutdown = proc.returncode == 0
-        if not clean_shutdown:
-            raise RuntimeError(
-                "HTTP server did not shut down cleanly:\n"
-                + server_log.read_text(encoding="utf-8")[-4000:]
-            )
-    _installed_auth_required_records_refusal(args)
-    print(json.dumps({"success": True, "transport": "http", "clean_shutdown": True}))
+        with _step("HTTP server shuts down cleanly"):
+            if not clean_shutdown:
+                raise RuntimeError(
+                    "HTTP server did not shut down cleanly:\n"
+                    + server_log.read_text(encoding="utf-8")[-4000:]
+                )
+    with _step("an auth-required HTTP start refuses unauthenticated Records and Planning"):
+        _installed_auth_required_records_refusal(args)
+    failed = _JOURNAL is not None and _JOURNAL.failed
+    print(json.dumps({"success": not failed, "transport": "http", "clean_shutdown": True}))
     return 0
 
 
@@ -2497,10 +3060,14 @@ def _installed_lease(args: argparse.Namespace) -> int:
     coord_port = int(coordinator_reservation.getsockname()[1])
     port_a = int(replica_a_reservation.getsockname()[1])
     port_b = int(replica_b_reservation.getsockname()[1])
-    coord_url = f"http://127.0.0.1:{coord_port}"
+    # The store-mode arm's vault is bound to its one coordinator, so both replicas use that one.
+    coord_url = (
+        f"http://127.0.0.1:{coord_port}" if _STORE_RIG is None else _STORE_RIG.coordinator_url
+    )
     url_a = f"http://127.0.0.1:{port_a}"
     url_b = f"http://127.0.0.1:{port_b}"
 
+    _require_store_mode(args, _clean_env(home, vault))
     coord_env = _clean_env(home, vault)
     coord_env["EXOMEM_LEASE_COORDINATOR_DB"] = str(work / "writer-leases.sqlite")
     coord_env["EXOMEM_LEASE_COORDINATOR_TOKEN"] = _LEASE_TOKEN
@@ -2517,61 +3084,67 @@ def _installed_lease(args: argparse.Namespace) -> int:
     procs: list[subprocess.Popen] = []
     handles = []
     try:
-        coord_handle = coord_log.open("w", encoding="utf-8")
-        handles.append(coord_handle)
-        coordinator_reservation.close()
-        coordinator = subprocess.Popen(
-            [
-                args.python,
-                "-m",
-                "exomem.lease_coordinator",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(coord_port),
-                "--database",
-                str(work / "writer-leases.sqlite"),
-            ],
-            cwd=work,
-            env=coord_env,
-            stdout=coord_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        procs.append(coordinator)
-        lease_status_url = f"{coord_url}/v1/vaults/{_LEASE_VAULT_ID}/lease"
-        _wait_http_ready(
-            lambda: _http_json(lease_status_url, token=_LEASE_TOKEN, timeout=1.0)[0] == 200,
-            proc=coordinator,
-            deadline=time.monotonic() + timeout,
-            log=coord_log,
-            label="lease coordinator",
-        )
+        coordinator: subprocess.Popen | None = None
+        with _step("coordinator and two replicas start and serve", fatal=True):
+            if _STORE_RIG is None:
+                coord_handle = coord_log.open("w", encoding="utf-8")
+                handles.append(coord_handle)
+                coordinator_reservation.close()
+                coordinator = subprocess.Popen(
+                    [
+                        args.python,
+                        "-m",
+                        "exomem.lease_coordinator",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        str(coord_port),
+                        "--database",
+                        str(work / "writer-leases.sqlite"),
+                    ],
+                    cwd=work,
+                    env=coord_env,
+                    stdout=coord_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                procs.append(coordinator)
+                lease_status_url = f"{coord_url}/v1/vaults/{_LEASE_VAULT_ID}/lease"
+                _wait_http_ready(
+                    lambda: _http_json(lease_status_url, token=_LEASE_TOKEN, timeout=1.0)[0] == 200,
+                    proc=coordinator,
+                    deadline=time.monotonic() + timeout,
+                    log=coord_log,
+                    label="lease coordinator",
+                )
 
-        for url, env, log, handle_label, reservation in (
-            (url_a, env_a, log_a, port_a, replica_a_reservation),
-            (url_b, env_b, log_b, port_b, replica_b_reservation),
-        ):
-            handle = log.open("w", encoding="utf-8")
-            handles.append(handle)
-            reservation.close()
-            replica = subprocess.Popen(
-                [args.python, args.http_server, "--host", "127.0.0.1", "--port", str(handle_label)],
-                cwd=work,
-                env=env,
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            procs.append(replica)
-            _wait_http_ready(
-                lambda u=url: _http_json(f"{u}/api/openapi.json", timeout=1.0)[0] == 200,
-                proc=replica,
-                deadline=time.monotonic() + timeout,
-                log=log,
-                label=f"lease replica on {handle_label}",
-            )
-        replica_a, replica_b = procs[1], procs[2]
+            for url, env, log, handle_label, reservation in (
+                (url_a, env_a, log_a, port_a, replica_a_reservation),
+                (url_b, env_b, log_b, port_b, replica_b_reservation),
+            ):
+                handle = log.open("w", encoding="utf-8")
+                handles.append(handle)
+                reservation.close()
+                replica = subprocess.Popen(
+                    [
+                        args.python, args.http_server,
+                        "--host", "127.0.0.1", "--port", str(handle_label),
+                    ],
+                    cwd=work,
+                    env=env,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                procs.append(replica)
+                _wait_http_ready(
+                    lambda u=url: _http_json(f"{u}/api/openapi.json", timeout=1.0)[0] == 200,
+                    proc=replica,
+                    deadline=time.monotonic() + timeout,
+                    log=log,
+                    label=f"lease replica on {handle_label}",
+                )
+            replica_a, replica_b = procs[-2], procs[-1]
 
         def _remember(url: str, title: str) -> tuple[int, dict[str, Any]]:
             return _http_json(
@@ -2588,75 +3161,88 @@ def _installed_lease(args: argparse.Namespace) -> int:
             )
 
         # Replica A acquires the lease lazily on its first mutation and becomes writer.
-        a_status, a_payload = _remember(url_a, "Lease writer A")
-        if a_status != 200 or not a_payload.get("success"):
-            raise RuntimeError(f"first writer was refused the lease: {a_status} {a_payload}")
+        with _step("replica A is granted the lease on its first write"):
+            a_status, a_payload = _remember(url_a, "Lease writer A")
+            if a_status != 200 or not a_payload.get("success"):
+                raise RuntimeError(f"first writer was refused the lease: {a_status} {a_payload}")
 
         # Replica B is a readable follower: its write is refused before the leaf runs.
-        b_status, b_payload = _remember(url_b, "Lease follower B")
-        b_code = (b_payload.get("error") or {}).get("code")
-        if b_payload.get("success") or b_code != "WRITER_LEASE_REQUIRED":
-            raise RuntimeError(f"follower write was not lease-gated: {b_status} {b_payload}")
+        with _step("replica B is refused with WRITER_LEASE_REQUIRED"):
+            b_status, b_payload = _remember(url_b, "Lease follower B")
+            b_code = (b_payload.get("error") or {}).get("code")
+            if b_payload.get("success") or b_code != "WRITER_LEASE_REQUIRED":
+                raise RuntimeError(f"follower write was not lease-gated: {b_status} {b_payload}")
 
         # Coordination status reports the single holder and each replica's role.
-        _, status_a = _http_json(
-            f"{url_a}/api/coordination_status",
-            method="POST",
-            body={},
-            token="e2e-rest-key",
-            timeout=timeout,
-        )
-        _, status_b = _http_json(
-            f"{url_b}/api/coordination_status",
-            method="POST",
-            body={},
-            token="e2e-rest-key",
-            timeout=timeout,
-        )
-        if (
-            status_a["data"].get("role") != "writer"
-            or status_a["data"].get("holder") != "replica-a"
-        ):
-            raise RuntimeError(f"writer replica misreported coordination status: {status_a}")
-        if (
-            status_b["data"].get("role") != "follower"
-            or status_b["data"].get("holder") != "replica-a"
-        ):
-            raise RuntimeError(f"follower replica misreported coordination status: {status_b}")
+        with _step("coordination status reports one writer and one follower"):
+            _, status_a = _http_json(
+                f"{url_a}/api/coordination_status",
+                method="POST",
+                body={},
+                token="e2e-rest-key",
+                timeout=timeout,
+            )
+            _, status_b = _http_json(
+                f"{url_b}/api/coordination_status",
+                method="POST",
+                body={},
+                token="e2e-rest-key",
+                timeout=timeout,
+            )
+            if (
+                status_a["data"].get("role") != "writer"
+                or status_a["data"].get("holder") != "replica-a"
+            ):
+                raise RuntimeError(f"writer replica misreported coordination status: {status_a}")
+            if (
+                status_b["data"].get("role") != "follower"
+                or status_b["data"].get("holder") != "replica-a"
+            ):
+                raise RuntimeError(f"follower replica misreported coordination status: {status_b}")
 
         # Followers still serve reads while another replica holds the lease.
-        read_status, read_payload = _http_json(
-            f"{url_b}/api/bootstrap", method="POST", body={}, token="e2e-rest-key", timeout=timeout
-        )
-        if read_status != 200 or not read_payload.get("success"):
-            raise RuntimeError(f"follower could not serve a read: {read_status} {read_payload}")
+        with _step("the follower serves reads"):
+            read_status, read_payload = _http_json(
+                f"{url_b}/api/bootstrap",
+                method="POST",
+                body={},
+                token="e2e-rest-key",
+                timeout=timeout,
+            )
+            if read_status != 200 or not read_payload.get("success"):
+                raise RuntimeError(f"follower could not serve a read: {read_status} {read_payload}")
 
         # Release/expiry: once A stops, B acquires the lease and takes over writing.
-        _terminate(replica_a, timeout)
-        deadline = time.monotonic() + _LEASE_TTL * 3 + 5
-        takeover: tuple[int, dict[str, Any]] | None = None
-        while time.monotonic() < deadline:
-            status, payload = _remember(url_b, "Lease takeover B")
-            if status == 200 and payload.get("success"):
-                takeover = (status, payload)
-                break
-            time.sleep(0.25)
-        if takeover is None:
-            raise RuntimeError("second replica never acquired the lease after the writer stopped")
+        with _step("replica B takes over writing after replica A stops"):
+            _terminate(replica_a, timeout)
+            deadline = time.monotonic() + _LEASE_TTL * 3 + 5
+            takeover: tuple[int, dict[str, Any]] | None = None
+            while time.monotonic() < deadline:
+                status, payload = _remember(url_b, "Lease takeover B")
+                if status == 200 and payload.get("success"):
+                    takeover = (status, payload)
+                    break
+                time.sleep(0.25)
+            if takeover is None:
+                raise RuntimeError(
+                    "second replica never acquired the lease after the writer stopped"
+                )
 
         # The serialized writes left the vault consistent (both reads succeed via B).
-        verify_status, verify_payload = _http_json(
-            f"{url_b}/api/ask_memory",
-            method="POST",
-            body={"query": "Lease writer takeover", "mode": "keyword"},
-            token="e2e-rest-key",
-            timeout=timeout,
-        )
-        if verify_status != 200 or not verify_payload.get("success"):
-            raise RuntimeError(f"post-takeover read failed: {verify_status} {verify_payload}")
+        with _step("a read through replica B succeeds after the takeover"):
+            verify_status, verify_payload = _http_json(
+                f"{url_b}/api/ask_memory",
+                method="POST",
+                body={"query": "Lease writer takeover", "mode": "keyword"},
+                token="e2e-rest-key",
+                timeout=timeout,
+            )
+            if verify_status != 200 or not verify_payload.get("success"):
+                raise RuntimeError(f"post-takeover read failed: {verify_status} {verify_payload}")
 
         _terminate(replica_b, timeout)
-        _terminate(coordinator, timeout)
+        if coordinator is not None:
+            _terminate(coordinator, timeout)
     finally:
         for proc in procs:
             _terminate(proc, 5)
@@ -2664,7 +3250,8 @@ def _installed_lease(args: argparse.Namespace) -> int:
             handle.close()
         for reservation in reservations:
             reservation.close()
-    print(json.dumps({"success": True, "transport": "lease", "takeover": True}))
+    failed = _JOURNAL is not None and _JOURNAL.failed
+    print(json.dumps({"success": not failed, "transport": "lease", "takeover": True}))
     return 0
 
 
@@ -2815,9 +3402,57 @@ def _publish_parent_phase_timings(
         pass
 
 
+@contextlib.contextmanager
+def _store_mode_rig(tmp: Path, home: Path, vault: Path, python: Path, work: Path, timeout: float):
+    """Start the loopback writer-lease coordinator that store mode needs, and stop it on exit.
+
+    Yields the rig that every child process of the arm receives.
+    """
+    rollout = tmp / "rollout"
+    rollout.mkdir()
+    (rollout / "sitecustomize.py").write_text(_ROLLOUT_OVERRIDE, encoding="utf-8")
+    reservation = _reserve_port_reservations(1)[0]
+    port = int(reservation.getsockname()[1])
+    url = f"http://127.0.0.1:{port}"
+    env = _clean_env(home, vault)
+    env["EXOMEM_LEASE_COORDINATOR_DB"] = str(work / "store-leases.sqlite")
+    env["EXOMEM_LEASE_COORDINATOR_TOKEN"] = _LEASE_TOKEN
+    env["EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"] = _STORE_OPERATOR_TOKEN
+    log_path = work / "store-coordinator.log"
+    with log_path.open("w", encoding="utf-8") as log:
+        reservation.close()
+        coordinator = subprocess.Popen(
+            [
+                str(python), "-m", "exomem.lease_coordinator",
+                "--host", "127.0.0.1", "--port", str(port),
+                "--database", str(work / "store-leases.sqlite"),
+            ],
+            cwd=work,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )  # fmt: skip
+        try:
+            lease_url = f"{url}/v1/vaults/{_LEASE_VAULT_ID}/lease"
+            _wait_http_ready(
+                lambda: _http_json(lease_url, token=_LEASE_TOKEN, timeout=1.0)[0] == 200,
+                proc=coordinator,
+                deadline=time.monotonic() + timeout,
+                log=log_path,
+                label="store-mode lease coordinator",
+            )
+            yield _StoreRig(coordinator_url=url, rollout_dir=rollout)
+        finally:
+            _terminate(coordinator, timeout)
+
+
 def _orchestrate(args: argparse.Namespace) -> int:
     started = time.monotonic()
     phases: list[dict[str, object]] = []
+    if args.step_report:
+        Path(args.step_report).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.step_report).write_text("", encoding="utf-8")
 
     def run_phase(phase: str, command: list[str], **options: Any):
         # These labels name fixed harness steps, never command text or vault content.
@@ -2917,54 +3552,57 @@ def _orchestrate(args: argparse.Namespace) -> int:
             branch_started = time.monotonic()
             try:
                 print("product-e2e: stdio governed lifecycle + restart")
-                run_phase(
-                    "stdio journey",
-                    [
-                        str(python),
-                        str(Path(__file__).resolve()),
-                        "--installed-stdio",
-                        "--executable",
-                        str(executable),
-                        *common,
-                    ],
-                    env=env,
-                    cwd=work,
-                    timeout=child_timeout,
-                )
+                with _step("stdio journey process"):
+                    run_phase(
+                        "stdio journey",
+                        [
+                            str(python),
+                            str(Path(__file__).resolve()),
+                            "--installed-stdio",
+                            "--executable",
+                            str(executable),
+                            *common,
+                        ],
+                        env=env,
+                        cwd=work,
+                        timeout=child_timeout,
+                    )
                 print("product-e2e: HTTP auth + Studio + review context + triage + shutdown")
-                run_phase(
-                    "HTTP journey",
-                    [
-                        str(python),
-                        str(Path(__file__).resolve()),
-                        "--installed-http",
-                        "--python",
-                        str(python),
-                        "--http-server",
-                        str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
-                        *common,
-                    ],
-                    env=env,
-                    cwd=work,
-                    timeout=max(30.0, args.request_timeout * 6),
-                )
+                with _step("HTTP journey process"):
+                    run_phase(
+                        "HTTP journey",
+                        [
+                            str(python),
+                            str(Path(__file__).resolve()),
+                            "--installed-http",
+                            "--python",
+                            str(python),
+                            "--http-server",
+                            str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
+                            *common,
+                        ],
+                        env=env,
+                        cwd=work,
+                        timeout=max(30.0, args.request_timeout * 6),
+                    )
                 print("product-e2e: writer-lease coordination (two replicas)")
-                run_phase(
-                    "writer lease journey",
-                    [
-                        str(python),
-                        str(Path(__file__).resolve()),
-                        "--installed-lease",
-                        "--python",
-                        str(python),
-                        "--http-server",
-                        str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
-                        *common,
-                    ],
-                    env=env,
-                    cwd=work,
-                    timeout=max(60.0, args.request_timeout * 8),
-                )
+                with _step("writer lease journey process"):
+                    run_phase(
+                        "writer lease journey",
+                        [
+                            str(python),
+                            str(Path(__file__).resolve()),
+                            "--installed-lease",
+                            "--python",
+                            str(python),
+                            "--http-server",
+                            str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
+                            *common,
+                        ],
+                        env=env,
+                        cwd=work,
+                        timeout=max(60.0, args.request_timeout * 8),
+                    )
             finally:
                 print(
                     "product-e2e: generic branch wall seconds="
@@ -2981,67 +3619,95 @@ def _orchestrate(args: argparse.Namespace) -> int:
                     "product-e2e: S1 Records summary journey "
                     "(capability, enrolment, import, fields, copy, adoption, rollback, migration)"
                 )
-                s1_journey = run_phase(
-                    "records summary journey",
-                    [
-                        str(python),
-                        str(REPO_ROOT / "scripts" / "e2e_s1_summary_journey.py"),
-                        "--python",
-                        str(python),
-                        "--executable",
-                        str(executable),
-                        "--older-python",
-                        args.older_python,
-                        *(
-                            ["--compatible-python", args.compatible_python]
-                            if args.compatible_python
-                            else []
-                        ),
-                        "--vault",
-                        str(s1 / "vault"),
-                        "--work",
-                        str(s1 / "work"),
-                        "--home",
-                        str(s1 / "home"),
-                        "--request-timeout",
-                        str(args.request_timeout),
-                    ],
-                    env=_clean_env(s1 / "home", s1 / "vault"),
-                    cwd=s1,
-                    # The compatible-application rollback step adds about 14 s, and the
-                    # slowest recorded branch without it took 258 s of the earlier 280 s.
-                    timeout=max(240.0, args.request_timeout * 18),
-                )
-                print(s1_journey.stdout.strip())
+                with _step("records summary journey process"):
+                    s1_journey = run_phase(
+                        "records summary journey",
+                        [
+                            str(python),
+                            str(REPO_ROOT / "scripts" / "e2e_s1_summary_journey.py"),
+                            "--python",
+                            str(python),
+                            "--executable",
+                            str(executable),
+                            "--older-python",
+                            args.older_python,
+                            *(
+                                ["--compatible-python", args.compatible_python]
+                                if args.compatible_python
+                                else []
+                            ),
+                            "--vault",
+                            str(s1 / "vault"),
+                            "--work",
+                            str(s1 / "work"),
+                            "--home",
+                            str(s1 / "home"),
+                            "--request-timeout",
+                            str(args.request_timeout),
+                        ],
+                        env=_clean_env(s1 / "home", s1 / "vault"),
+                        cwd=s1,
+                        # The compatible-application rollback step adds about 14 s, and the
+                        # slowest recorded branch without it took 258 s of the earlier 280 s.
+                        timeout=max(240.0, args.request_timeout * 18),
+                    )
+                    print(s1_journey.stdout.strip())
             finally:
                 print(
                     f"product-e2e: S1 branch wall seconds={time.monotonic() - branch_started:.1f}",
                     flush=True,
                 )
 
-        if initially_enabled:
-            # ON branches share immutable installed bytes and use separate vaults and process state.
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = [executor.submit(generic_branch), executor.submit(summary_branch)]
-                failures = []
-                for future in futures:
-                    try:
-                        future.result()
-                    except Exception as error:  # noqa: BLE001 - await and retain both branch failures
-                        failures.append(error)
-                if failures:
-                    raise ExceptionGroup("installed product acceptance failed", failures)
-        else:
-            # OFF acceptance finishes on the original bytes before S1 rewrites
-            # the test installation.
-            generic_branch()
-            summary_branch()
+        rig_manager = (
+            _store_mode_rig(tmp, home, vault, python, work, args.request_timeout)
+            if args.store_mode
+            else contextlib.nullcontext(None)
+        )
+        with rig_manager as rig:
+            if args.step_report:
+                common.extend(["--step-report", args.step_report])
+            if rig is not None:
+                common.extend([
+                    "--store-mode",
+                    "--coordinator-url", rig.coordinator_url,
+                    "--rollout-dir", str(rig.rollout_dir),
+                ])  # fmt: skip
+            if args.store_mode:
+                generic_branch()
+                _skip_step(
+                    "records summary journey process",
+                    "the S1 journey drives its own vaults, copies, adoption and collection-store "
+                    "rollbacks; the store-mode arm covers the generic branch only",
+                )
+            elif initially_enabled:
+                # ON branches share immutable installed bytes and use separate vaults and
+                # process state.
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(generic_branch), executor.submit(summary_branch)]
+                    failures = []
+                    for future in futures:
+                        try:
+                            future.result()
+                        except Exception as error:  # noqa: BLE001 - await and retain both branch failures
+                            failures.append(error)
+                    if failures:
+                        raise ExceptionGroup("installed product acceptance failed", failures)
+            else:
+                # OFF acceptance finishes on the original bytes before S1 rewrites
+                # the test installation.
+                generic_branch()
+                summary_branch()
 
     elapsed = time.monotonic() - started
     print(
         f"product-e2e: total wall seconds={elapsed:.1f} budget seconds={args.budget_seconds:.1f}",
         flush=True,
     )
+    if args.step_report:
+        unfinished = _print_step_report(Path(args.step_report))
+        if unfinished:
+            print(f"product-e2e: FAIL ({unfinished} steps failed or blocked, {elapsed:.1f}s)")
+            return 1
     if elapsed > args.budget_seconds:
         _publish_parent_phase_timings(phases, elapsed=elapsed, budget=args.budget_seconds)
         raise TimeoutError(
@@ -3077,7 +3743,34 @@ def main() -> int:
     parser.add_argument("--vault", default="")
     parser.add_argument("--work", default="")
     parser.add_argument("--home", default="")
+    parser.add_argument(
+        "--store-mode",
+        action="store_true",
+        help="run the generic branch on a vault migrated into store mode, and carry on past "
+        "failed steps; needs --step-report (off by default)",
+    )
+    parser.add_argument(
+        "--step-report",
+        default="",
+        help="append every named step and its outcome to this JSON-lines file, print the table "
+        "at the end, and exit 1 when a step failed or was blocked",
+    )
+    parser.add_argument("--coordinator-url", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--rollout-dir", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.store_mode and not args.step_report:
+        parser.error("--store-mode needs --step-report, which holds its results")
+    global _JOURNAL, _STORE_RIG
+    if args.step_report:
+        phase = (
+            "stdio" if args.installed_stdio
+            else "HTTP" if args.installed_http
+            else "lease" if args.installed_lease
+            else "orchestrator"
+        )  # fmt: skip
+        _JOURNAL = _Journal(Path(args.step_report), keep_going=args.store_mode, phase=phase)
+    if args.coordinator_url:
+        _STORE_RIG = _StoreRig(args.coordinator_url, Path(args.rollout_dir))
     if args.installed_stdio:
         return _installed_stdio(args)
     if args.installed_http:

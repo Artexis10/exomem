@@ -253,8 +253,16 @@ def project(
         entry = catalogue.entries[thread.entry]
         words = reader.bound(Oracle(plan.thread_world(thread, thread.variant), plan.validity()))
         spec = key_spec(catalogue, thread, key.form)
-        task = tasks[(key.thread, key.form)].text
+        source = tasks[(key.thread, key.form)]
+        task = source.text
         about = f"probe {thread.id} {key.form}"
+        if source.at != key.at:
+            refusals.append(
+                Refusal(
+                    "probe-date-mismatch", about, "use the same world date for the task and key"
+                )
+            )
+            continue
 
         states = spec["value"].get("read") not in data["f38"]["property_readings"]
         one = states and _is_one(key.value)
@@ -266,6 +274,7 @@ def project(
         )
         if premise is not None and not occurs(premise, task):
             task = f"{task} {data['f38']['premise_line'].format(premise=premise)}"
+        task = data["f38"]["task_frame"].format(date=source.at.isoformat(), task=task)
         if one and not singles:
             refusals.append(
                 Refusal("no-answer-name", about, "every name of the answer is in the task")

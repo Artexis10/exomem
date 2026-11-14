@@ -73,7 +73,8 @@ def _dimensions(unit, relations=None, language=None, edges=()) -> frozenset[str]
 
 def test_a_unit_belongs_to_the_dimensions_that_list_its_kind() -> None:
     belief = _unit(
-        "# T\n\n## Belief\n- credence_holder: Finance lead\n- credence: likely\n\nIt slips.\n"
+        "# T\n\n## Belief\n- credence_holder: Finance lead\n- credence: likely\n"
+        "- relations: assesses: [[Release date]]\n\nIt slips.\n"
     )
     claim = _unit("# T\n\n## Claim\n\nThe launch slips.\n")
 
