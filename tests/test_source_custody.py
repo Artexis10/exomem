@@ -17,7 +17,6 @@ from exomem import (
     curation,
     curation_witness,
     memory_refs,
-    reserved_paths,
     source_closure,
     source_custody,
     writer_lease,
@@ -28,12 +27,8 @@ from exomem.governance.principal import owner_principal, request_scope
 
 @pytest.fixture
 def registered_custody(monkeypatch):
-    # Exact prospective descriptor for integration proof; production registration remains owner work.
-    descriptor = reserved_paths.InternalStateDescriptor(
-        "source-custody", "source_custody", reserved_paths.StatePlacement.VAULT_CANONICAL,
-        vault_store=True, trees=("_sources/custody",),
-    )
-    monkeypatch.setattr(reserved_paths, "_REGISTRY", (*reserved_paths.internal_state_registry(), descriptor))
+    assert source_custody.available()
+    monkeypatch.setenv("EXOMEM_SOURCE_ERASURE_POLICY", '{"enabled_systems":["archive"]}')
 
 
 def test_capture_publishes_canonical_custody_before_a_lost_terminal(vault, attempts, registered_custody, monkeypatch):
@@ -55,7 +50,8 @@ def test_capture_publishes_canonical_custody_before_a_lost_terminal(vault, attem
         manifest, _ = source_custody.read_manifest(vault, target["source_ref"])
     assert manifest.publication == "published"
     assert manifest.allocated_hash == target["source_hash"]
-    assert (vault / manifest.allocated_path).exists()
+    assert any(memory_refs.ref_from_markdown(path.read_text()) == target["source_ref"]
+               for path in (vault / "Knowledge Base/Sources").rglob("*.md"))
     assert manifest.coverage_complete is False
 
 
@@ -76,7 +72,8 @@ def test_failure_after_allocation_keeps_absent_target_and_gc_recovery_link(vault
     target = settled["owned_targets"][0]
     with request_scope(owner_principal(surface="mcp")):
         manifest, _ = source_custody.read_manifest(vault, target["source_ref"])
-    assert not (vault / manifest.allocated_path).exists()
+    assert not any(memory_refs.ref_from_markdown(path.read_text()) == target["source_ref"]
+                   for path in (vault / "Knowledge Base/Sources").rglob("*.md"))
     assert settled["past_outcome"] == "unknown"
     assert settled["custody_state"] == "unknown"
     monkeypatch.setattr(manager.idempotency, "clock", lambda: 10**15)
@@ -97,13 +94,23 @@ def test_reused_source_is_observed_without_ownership(vault, attempts, registered
     assert (vault / captured["source"]["path"]).exists()
 
 
-def test_unregistered_capture_stays_available_without_publishing_private_metadata(vault, attempts):
+def test_unreserved_capture_under_default_policy_stays_unenrolled(vault, attempts):
+    _, call = attempts
+    args = authored()
+    assert call("capture_source", **args)["capture_outcome"] == "created"
+    assert not source_custody.manifest_root(vault).exists()
+
+
+def test_issued_capture_keeps_custody_when_erasure_policy_becomes_unavailable(vault, attempts, registered_custody, monkeypatch):
     _, call = attempts
     args = authored()
     ticket = reserve(call, args)
-    assert call("capture_source", **args, capture_reservation=ticket)["capture_outcome"] == "created"
-    assert not source_custody.manifest_root(vault).exists()
-    assert call("settle_source_capture", reservation=ticket)["custody_state"] == "unknown"
+    monkeypatch.setenv("EXOMEM_SOURCE_ERASURE_POLICY", "{")
+    captured = call("capture_source", **args, capture_reservation=ticket)
+    settled = call("settle_source_capture", reservation=ticket)
+    assert settled["custody_state"] == "complete"
+    source = (vault / captured["source"]["path"]).read_text()
+    assert settled["owned_targets"][0]["source_ref"] == memory_refs.ref_from_markdown(source)
 
 
 def test_settlement_closes_and_reports_owned_allocation_without_canonical_readers(vault, attempts, registered_custody, monkeypatch):
@@ -213,7 +220,7 @@ def test_metadata_scope_rejects_unbound_payload_before_service_authority(vault, 
     manager, _ = attempts
     reference = memory_refs.memory_ref(memory_refs.new_id())
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
-        write = source_custody.prepare_enrollment(vault, reference=reference, path="Knowledge Base/Sources/original.md", source_hash="1" * 64).writes[0]
+        write = source_custody.prepare_enrollment(vault, reference=reference, source_hash="1" * 64).writes[0]
         if invalid == "wrong-reference":
             other_ref = memory_refs.memory_ref(memory_refs.new_id())
             write.content = write.content.replace(reference, other_ref)
@@ -236,7 +243,7 @@ def test_auxiliary_custody_batch_leaves_parent_witness_for_its_native_batch(vaul
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         with curation_witness.atomic_witness(vault, witness_path, '{"version":1}') as pending:
             source_custody.publish(vault, source_custody.prepare_enrollment(
-                vault, reference=reference, path="Knowledge Base/Sources/original.md", source_hash="1" * 64,
+                vault, reference=reference, source_hash="1" * 64,
             ))
             assert curation_witness.pending_for(vault) is pending
             assert not pending.consumed and not witness_path.exists()
@@ -251,9 +258,9 @@ def test_restricted_semantic_commit_tracks_a_skipped_back_reference(vault, citin
     manager = writer_lease.active_manager()
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         source_custody.publish(vault, source_custody.prepare_enrollment(
-            vault, reference=reference, path=READABLE_SOURCE, source_hash=vault_module.content_hash(source_before.decode()),
+            vault, reference=reference, source_hash=vault_module.content_hash(source_before.decode()),
         ))
-        assert source_custody.observe_capture(vault, reference)
+        assert source_custody.observe_capture(vault, reference, path=READABLE_SOURCE)
     result = _remember(vault, citing, "Derived from a readable original", sources=[READABLE_SOURCE.removesuffix(".md")])
     assert "__error__" not in result, result
     assert any("back-ref skipped" in warning for warning in result["warnings"])
@@ -278,9 +285,9 @@ def test_semantic_origin_without_sources_field_reserves_its_exact_input_root(vau
     with request_scope(owner_principal(surface="mcp")):
         with manager.mutation_guard(vault):
             source_custody.publish(vault, source_custody.prepare_enrollment(
-                vault, reference=reference, path=READABLE_SOURCE, source_hash=vault_module.content_hash(source),
+                vault, reference=reference, source_hash=vault_module.content_hash(source),
             ))
-            source_custody.observe_capture(vault, reference)
+            source_custody.observe_capture(vault, reference, path=READABLE_SOURCE)
         arguments = {"title": "Origin-bound conclusion", "note_type": "insight", "status": "active",
                      "content": origin + "\n\n## Observations\n\n- [finding] Exact conclusion ^claim\n"}
         prepared = note.note(vault, **arguments, validate_only=True)

@@ -601,6 +601,7 @@ def add(
                 raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
             from . import capture_attempts, source_custody
 
+            source_custody.require_publishable(vault_root, reference)
             if source_custody.available():
                 capture_attempts.record_observed(vault_root, reference)
             return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
@@ -900,9 +901,9 @@ def add(
         from . import source_custody
 
         source_reference = memory_refs.memory_ref(exomem_id)
-        source_custody.begin_capture(
+        custody_started = source_custody.begin_capture(
             vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
-            source_hash=content_hash(writes[0].content),
+            source_hash=content_hash(writes[0].content), identity=source_identity,
         )
         def validate_bindings() -> None:
             if _validate_inputs is not None:
@@ -977,7 +978,8 @@ def add(
             vault_root, committed, created_paths=created_paths, publication_intents=publication_intents
         )
 
-    source_custody.finish_capture(vault_root, source_reference)
+    if custody_started:
+        source_custody.finish_capture(vault_root, source_reference, path=source_path.relative_to(vault_root).as_posix())
 
     if checks_duplicates or artifact is not None:
         # The next acquisition of the mutation boundary finds this payload, whatever other indexes have caught up.

@@ -64,7 +64,6 @@ class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     version: Literal[1] = 1
     source_ref: _Opaque
-    allocated_path: Annotated[str, Field(min_length=1)]
     allocated_hash: _Hash
     publication: Literal["allocated", "published"] = "allocated"
     dependency: DependencyLatch = Field(default_factory=DependencyLatch)
@@ -168,14 +167,14 @@ def publish(root: Path, plan: PlannedCustody) -> None:
             vault.batch_atomic_write(checked, vault_root=root)
 
 
-def prepare_enrollment(root: Path, *, reference: str, path: str, source_hash: str) -> PlannedCustody:
+def prepare_enrollment(root: Path, *, reference: str, source_hash: str) -> PlannedCustody:
     current, guard = read_manifest(root, reference)
     if current is not None:
-        if current.allocated_path != path or current.allocated_hash != source_hash:
+        if current.allocated_hash != source_hash:
             raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "Source allocation differs from canonical custody")
         require_publishable(root, reference)
         return PlannedCustody(())
-    value = Manifest(source_ref=reference, allocated_path=path, allocated_hash=source_hash)
+    value = Manifest(source_ref=reference, allocated_hash=source_hash)
     return PlannedCustody((_write(root, manifest_path(root, reference), value, guard, MAX_MANIFEST_BYTES),))
 
 
@@ -199,11 +198,11 @@ def _exact_primary(root: Path, *, path: str, reference: str | None, source_hash:
     return exact
 
 
-def observe_capture(root: Path, reference: str) -> bool:
+def observe_capture(root: Path, reference: str, *, path: str) -> bool:
     """An exact Source after-image proves that Source, independently of its caller's terminal."""
     _boundary(root)
     manifest, guard = read_manifest(root, reference)
-    if manifest is None or not _exact_primary(root, path=manifest.allocated_path, reference=reference, source_hash=manifest.allocated_hash):
+    if manifest is None or not _exact_primary(root, path=path, reference=reference, source_hash=manifest.allocated_hash):
         return False
     if manifest.publication != "published":
         updated = manifest.model_copy(update={"publication": "published"})
@@ -211,20 +210,30 @@ def observe_capture(root: Path, reference: str) -> bool:
     return True
 
 
-def begin_capture(root: Path, *, reference: str, path: str, source_hash: str) -> None:
-    from . import capture_attempts
+def begin_capture(root: Path, *, reference: str, path: str, source_hash: str,
+                  identity: source_capture.SourceIdentity | None) -> bool:
+    from . import capture_attempts, source_erasure
 
-    if not available():
-        return
+    if not available() or identity is None:
+        return False
+    # Explicit attempts retain custody independently of erasure admission or later policy errors.
+    attempt_owned = capture_attempts.record_allocation(root, reference=reference, source_hash=source_hash, path=path)
+    if not attempt_owned:
+        try:
+            policy = source_erasure.SourceErasurePolicy.from_env()
+        except OpError:
+            return False  # Erasure configuration cannot gate an ordinary unreserved capture.
+        if identity["system"] not in policy.enabled_systems:
+            return False
     _boundary(root)
-    capture_attempts.record_allocation(root, reference=reference, source_hash=source_hash, path=path)
-    publish(root, prepare_enrollment(root, reference=reference, path=path, source_hash=source_hash))
+    publish(root, prepare_enrollment(root, reference=reference, source_hash=source_hash))
+    return True
 
 
-def finish_capture(root: Path, reference: str) -> None:
+def finish_capture(root: Path, reference: str, *, path: str) -> None:
     from . import capture_attempts
 
-    if available() and observe_capture(root, reference):
+    if available() and observe_capture(root, reference, path=path):
         capture_attempts.record_published(root, reference)
 
 

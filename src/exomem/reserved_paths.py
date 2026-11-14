@@ -446,6 +446,11 @@ _REGISTRY = (
         trees=("_sources/corrections",),
     ),
     InternalStateDescriptor(
+        "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/custody",),
+    ),
+    InternalStateDescriptor(
         "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
         vault_store=True,
         trees=("_compiled",),

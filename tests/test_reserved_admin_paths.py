@@ -342,6 +342,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         procedure_approval,
         review_state,
         served_context,
+        source_custody,
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
@@ -390,6 +391,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "refs-store",
         "review-state",
         "source-corrections",
+        "source-custody",
         "served-context",
         "voice-profile-store",
     }
@@ -407,6 +409,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     token32 = "1" * 32
     claims_from_owners = [
         (root / compiled_history.history_root(), "compiled-history"),
+        (source_custody.manifest_root(root) / "6b1f2c3e-0d4a-4e5f-8a9b-1c2d3e4f5a6b.json", "source-custody"),
         (governance_policy.governance_root(root), "governance-tree"),
         (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),

@@ -461,10 +461,12 @@ def _custody_attempt(root):
     return None
 
 
-def record_allocation(root, *, reference: str, source_hash: str, path: str) -> None:
+def record_allocation(root, *, reference: str, source_hash: str, path: str) -> bool:
     active = _custody_attempt(root)
     if active is not None:
         active[0].record_allocation(active[1], {"source_ref": reference, "source_hash": source_hash, "canonical_path": path})
+        return True
+    return False
 
 
 def record_observed(root, reference: str) -> None:
