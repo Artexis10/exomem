@@ -5,7 +5,10 @@
   "passage_words": 40,
   "queries": 40,
   "repeats": 3,
-  "callers": [1, 4],
+  "callers": [
+    1,
+    4
+  ],
   "limit": 30,
   "reference_cpus": 2,
   "cpu_threads": 2,
@@ -16,11 +19,15 @@
   "source": "../recall-latency/profile.json",
   "boundary": "mcp-worker-socket-v1",
   "observer": "exomem.recall_canary.measure_call",
-  "modes": ["disk"],
+  "modes": [
+    "disk"
+  ],
   "resident_condition": "Design and compare a bounded resident mode only if disk scoring fails qualification",
   "decision": {
-    "one_caller_p95_ms_below": 200,
-    "four_caller_p95_ms_below": 500,
+    "bars": [
+      "passage-single",
+      "passage-four"
+    ],
     "all_terminals_required": true,
     "busy_refusals_allowed": 0
   }
