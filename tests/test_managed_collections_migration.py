@@ -72,7 +72,8 @@ S1_RELEASED = MIGRATE | {capability.RECORDS_SUMMARY_V1}
 @pytest.fixture
 def coordinator_url(tmp_path):
     """The shipped coordinator app on a loopback port, reachable from child processes."""
-    listener = socket.socket()
+    # Match host/port listeners so asyncio enables TCP_NODELAY for this socket.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
     listener.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(
         create_app(database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token=OPERATOR_SECRET),

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from exomem import __main__ as cli
 from exomem import commands, doctor, server_runtime, state_migration, state_paths
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
@@ -105,6 +106,28 @@ def test_startup_on_a_single_host_store_mode_vault_names_the_rollback(store_mode
         server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     assert refused.value.code == availability.NOT_SERVED
     assert "exomem store-mode rollback" in refused.value.reason
+
+
+@pytest.mark.parametrize("entry", ["cli", "terminal_ui"])
+def test_the_cli_and_the_terminal_ui_refuse_the_vault_that_the_service_refuses(
+        store_mode_vault, monkeypatch, capsys, entry):
+    """Defect: the service refuses a store-mode vault that this build cannot serve, while a CLI command
+    or a terminal UI session starts on the same vault and serves it."""
+    _coordinator(monkeypatch, "http://127.0.0.1:8765", topology="single-host")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(store_mode_vault))
+    if entry == "cli":
+        assert cli.main(["bootstrap", "--json"]) == 1
+        refusal = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert refusal["error"]["code"] == availability.NOT_SERVED
+        return
+    from exomem.tui.backend import ExomemBackend
+
+    monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
+    backend = ExomemBackend(str(store_mode_vault))
+    assert backend.resolve_vault().initialized
+    with pytest.raises(CollectionStoreError) as refused:
+        backend.start_runtime()
+    assert refused.value.code == availability.NOT_SERVED
 
 
 def test_a_file_mode_vault_starts_without_a_lease(vault, monkeypatch):

@@ -53,7 +53,7 @@ from exomem.governance.principal import (
     owner_principal,
     request_scope,
 )
-from exomem.published_admission import deciding
+from exomem.published_admission import Admission, AdmittedPredicate, deciding
 
 SHARED = "Knowledge Base/Notes/Shared/quorvel-tansid-survey.md"
 TURN = "What did the quorvel tansid survey conclude?"
@@ -282,21 +282,25 @@ def floors(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every page the request itself decides for the connector content floors.
 
     Counted at the admission, not at `egress.content_permits`: releasing the few
-    pages a request returns decides them again by design.
+    pages a request returns decides them again by design. A page reaches the
+    admission through `decide` or through the batch `decide_many`, and the batch
+    never calls `decide`, so each decided page is counted once on either route.
     """
     decided: list[str] = []
     real = egress.content_admission
 
     def counting(vault_root, who):
-        predicate = real(vault_root, who)
-        decide = predicate.admission.decide
+        offered = real(vault_root, who).admission
 
-        def counted(rel_path, publish):
+        def decide(rel_path, publish):
             decided.append(rel_path)
-            return decide(rel_path, publish)
+            return offered.decide(rel_path, publish)
 
-        predicate.admission.decide = counted
-        return predicate
+        def decide_many(paths, publish):
+            decided.extend(paths)
+            return offered.decide_many(paths, publish)
+
+        return AdmittedPredicate(Admission(offered.identity, decide, decide_many))
 
     monkeypatch.setattr(egress, "content_admission", counting)
     return decided

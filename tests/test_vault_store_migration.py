@@ -70,9 +70,16 @@ def _lease_environment(tmp_path, url):
         "EXOMEM_WRITER_LEASE_TOKEN": "lease",
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-service"),
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
-        # Short, so the crash case waits out a dead owner's lease in seconds.
-        "EXOMEM_WRITER_LEASE_TTL": "3",
+        # Long enough that a loaded runner's late renewal does not let a live owner's lease
+        # expire, which fences the owner's own step with WRITER_FENCED. An owner that a test
+        # kills or breaks takes SHORT_LEASE_TTL instead.
+        "EXOMEM_WRITER_LEASE_TTL": "10",
     }
+
+
+#: The lease of an owner that a test kills or whose hand-back it breaks, so the test waits out the
+#: lease that the owner leaves in seconds.
+SHORT_LEASE_TTL = "3"
 
 
 @pytest.fixture
@@ -284,7 +291,10 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
     objects = store_objects(vault)
     child = multiprocessing.get_context("spawn").Process(
         target=_migrate_and_die,
-        args=({**os.environ, OPERATOR: OPERATOR_SECRET}, RELEASED),
+        args=(
+            {**os.environ, OPERATOR: OPERATOR_SECRET, "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
+            RELEASED,
+        ),
     )
     child.start()
     child.join(180)

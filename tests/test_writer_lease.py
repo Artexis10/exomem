@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import pickle
 import pprint
+import socket
 import sqlite3
 import stat
 import threading
@@ -962,6 +963,8 @@ def _loopback_coordinator(*, close_after_answer):
     restarts or drops an idle connection.
     """
     connections = []
+    requests = []
+    sockets = []
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -969,9 +972,13 @@ def _loopback_coordinator(*, close_after_answer):
         def setup(self):
             connections.append(self.client_address)
             super().setup()
+            sockets.append(self.connection)
 
         def do_GET(self):
-            body = b'{"holder":null,"expires_at":null,"fencing_token":0}'
+            requests.append(self.path)
+            body = json.dumps({
+                "holder": None, "expires_at": None, "fencing_token": len(requests),
+            }).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -991,16 +998,22 @@ def _loopback_coordinator(*, close_after_answer):
             "EXOMEM_WRITER_LEASE_VAULT_ID": "main", "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
             "EXOMEM_WRITER_LEASE_TOKEN": "writer-secret",
         })
-        yield writer_lease_module.LeaseCoordinatorClient(config), connections
+        yield writer_lease_module.LeaseCoordinatorClient(config), connections, requests
     finally:
         server.shutdown()
+        for connection in sockets:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
         thread.join()
         server.server_close()
 
 
 def test_single_host_status_reads_share_one_connection_to_the_coordinator():
     """Defect: every status read opens a new TCP connection, which costs the store thread a handshake per read."""
-    with _loopback_coordinator(close_after_answer=False) as (client, connections):
+    with _loopback_coordinator(close_after_answer=False) as (client, connections, _requests):
         assert client.status().holder is None
         assert client.status().holder is None
     assert len(connections) == 1
@@ -1009,10 +1022,28 @@ def test_single_host_status_reads_share_one_connection_to_the_coordinator():
 def test_single_host_status_read_reconnects_once_when_the_coordinator_dropped_the_connection():
     """Defect: a coordinator restart leaves the kept connection dead, so the next status read refuses as
     unavailable until a later one happens to open a new connection."""
-    with _loopback_coordinator(close_after_answer=True) as (client, connections):
+    with _loopback_coordinator(close_after_answer=True) as (client, connections, _requests):
         assert client.status().holder is None
         assert client.status().holder is None
     assert len(connections) == 2
+
+
+def test_readiness_measures_each_status_over_one_kept_coordinator_connection(tmp_path: Path):
+    """Fresh readiness threads discarded the client's thread-local connection after every poll."""
+    from exomem import runtime_readiness
+
+    with _loopback_coordinator(close_after_answer=False) as (client, connections, requests):
+        def probe(_vault):
+            return {"fencing_token": client.status().fencing_token}
+
+        measured = [
+            runtime_readiness._bounded_coordination_status(tmp_path, probe)
+            for _ in range(3)
+        ]
+
+    assert measured == [{"fencing_token": 1}, {"fencing_token": 2}, {"fencing_token": 3}]
+    assert len(requests) == 3
+    assert len(connections) == 1
 
 
 def test_record_replay_receipt_has_a_noop_terminal(tmp_path: Path) -> None:

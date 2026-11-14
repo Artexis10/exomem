@@ -10,7 +10,7 @@ from pathlib import Path
 
 from exomem import commands, dataset_values, find, preserve
 from exomem.governance import egress, membership, policy
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, local_owner_principal, request_scope
 
 ACCOUNT = "EE81 7700 1234 5678 9012"
 PROFILE = json.dumps(
@@ -24,7 +24,7 @@ def _preserve(vault: Path, filename: str, data: bytes):
     )
 
 
-def _find(vault: Path, query: str, limit: int = 15) -> list[dict]:
+def _find_response(vault: Path, query: str, limit: int = 15):
     # Indexing a batch of fresh pages can still be warming; retry the exact recall briefly.
     for _ in range(80):
         try:
@@ -32,8 +32,13 @@ def _find(vault: Path, query: str, limit: int = 15) -> list[dict]:
         except find.RetrievalIndexWarming:
             time.sleep(0.25)
             continue
-        return found["hits"] if isinstance(found, dict) else found
+        return found
     raise AssertionError("recall index still warming after 20s")
+
+
+def _find(vault: Path, query: str, limit: int = 15) -> list[dict]:
+    found = _find_response(vault, query, limit)
+    return found["hits"] if isinstance(found, dict) else found
 
 
 def _note(vault: Path, rel: str, text: str, *, updated: str, number: int) -> None:
@@ -98,6 +103,43 @@ def test_governed_reader_at_full_level_finds_the_value(vault):
         hits = [hit for hit in _find(vault, ACCOUNT) if hit["path"] == result.path]
     assert hits
     assert ACCOUNT in hits[0]["passage"]["text"]
+
+
+def test_raw_protected_dataset_stays_private_after_owner_warms_value_search(vault):
+    owner = local_owner_principal(surface="mcp")
+    with request_scope(owner):
+        result = preserve.preserve_stream(
+            vault, scope="Test", category="exports", filename="protected-profile.json",
+            stream=io.BytesIO(PROFILE), raw_protection=True,
+        )
+    _note(vault, "Notes/shared/control.md", "Brightwater account number directory", updated="2026-11-01", number=91)
+    reader = _as_external(vault, selector='paths: ["**"]', ceiling=egress.LEVEL_FULL)
+    reader = RequestPrincipal(
+        audience_id=reader.audience_id, surface="mcp", issuer_family="mcp-oauth:synthetic-reader",
+    )
+    original_before = (vault / result.path).read_bytes()
+    card_before = (vault / result.sidecar_path).read_bytes()
+    with request_scope(owner):
+        owner_hits = _find(vault, "Brightwater account number")
+        assert result.path in _paths(owner_hits)
+        assert ACCOUNT in json.dumps(owner_hits, ensure_ascii=False)
+
+    with request_scope(reader):
+        response = _find_response(vault, "Brightwater account number")
+    rendered = json.dumps(response, ensure_ascii=False)
+    assert "Knowledge Base/Notes/shared/control.md" in rendered
+    for protected in (
+        result.path, result.sidecar_path, "protected-profile.json", ACCOUNT,
+        "Brightwater Haulage", "bank.account_number", "account_number",
+    ):
+        assert protected not in rendered
+
+    with request_scope(owner):
+        repeated = _find(vault, "Brightwater account number")
+    assert result.path in _paths(repeated)
+    assert ACCOUNT in json.dumps(repeated, ensure_ascii=False)
+    assert (vault / result.path).read_bytes() == original_before == PROFILE
+    assert (vault / result.sidecar_path).read_bytes() == card_before
 
 
 def test_reader_below_full_level_gets_no_value_hit_while_the_card_is_found(vault, monkeypatch):

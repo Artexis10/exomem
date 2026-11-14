@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -502,9 +502,21 @@ def scope_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
     with snapshot(_as_path(vault_root)) as view:
         found = view.memo.get(statement)
         if found is None:
-            count, rows = view.connection.execute(statement).fetchone()
-            found = view.memo[statement] = (count, view.revision, f"store:{view.revision}:{rows}")
+            found = view.memo[statement] = _triple(view.connection, statement, view.revision)
         return found
+
+
+def vault_triple(conn: Connection, revision: int) -> tuple[int, int, str]:
+    """The vault scope's ``scope_triple`` that a reader at ``revision`` computes, read on ``conn``.
+
+    A commit reads it on its own transaction, before its writes and after them.
+    """
+    return _triple(conn, _VAULT_PAGES, revision)
+
+
+def _triple(conn: Connection, statement: str, revision: int) -> tuple[int, int, str]:
+    count, rows = conn.execute(statement).fetchone()
+    return (count, revision, f"store:{revision}:{rows}")
 
 
 #: The page rows of each scope, counted through the scope's own index (``pages_kb``,
@@ -801,9 +813,33 @@ def serves(vault_root: Path, rel: str) -> bool:
     first, so a path that the store never owns costs no read of the mode records. The mode answer
     is the reader's: it holds until the manifest changes.
     """
-    return (
-        ownership.classify(rel) is ownership.Ownership.PAGE and mode.store_mode_for_reads(vault_root)
-    )
+    return owned_as_page(vault_root, rel) and mode.store_mode_for_reads(vault_root)
+
+
+def owned_as_pages(vault_root: Path, rels: Iterable[str]) -> Mapping[str, bool]:
+    """Whether ownership makes each path of ``rels`` a page, by path.
+
+    Inside this thread's store request each path is classified once for the whole request.
+    Ownership is a pure function of the path, the Knowledge Base folder name, the collection layers
+    and the reserved registry, none of which a request changes; the folder name is part of the key.
+    """
+    wanted = list(rels)
+    memo = request_memo(vault_root)
+    page = ownership.Ownership.PAGE
+    if memo is None:
+        return {rel: owner is page for rel, owner in ownership.classify_many(wanted).items()}
+    known = memo.setdefault((__name__, "page", vault.kb_dirname()), {})
+    missing = [rel for rel in wanted if rel not in known]
+    if missing:
+        known.update((rel, owner is page) for rel, owner in ownership.classify_many(missing).items())
+    return known
+
+
+def owned_as_page(vault_root: Path, rel: str) -> bool:
+    """``owned_as_pages`` for one path; outside a store request it costs one context read beyond the rule."""
+    if request_memo(vault_root) is None:
+        return ownership.classify(rel) is ownership.Ownership.PAGE
+    return owned_as_pages(vault_root, (rel,))[rel]
 
 
 def from_store(vault_root: Path, rel: str, store_read: Callable[[], T]) -> T | None:
@@ -828,8 +864,10 @@ def prefetch_pages(vault_root: Path, rels: Iterable[str]) -> None:
     """Batch a request's upcoming page reads; unowned paths keep their file-mode readers."""
     root = _as_path(vault_root)
     if mode.store_mode_for_reads(root):
+        wanted = list(rels)
+        pages = owned_as_pages(root, wanted)
         with snapshot(root) as view:
-            view.prefetch_pages(rel for rel in rels if ownership.classify(rel) is ownership.Ownership.PAGE)
+            view.prefetch_pages(rel for rel in wanted if pages[rel])
 
 
 def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
@@ -876,10 +914,10 @@ def page_exists(vault_root: Path, rel: str) -> bool:
 def prime_page_metadata(vault_root: Path, rels: Iterable[str]) -> None:
     """Prime only the supplied store-owned pages in the current request snapshot."""
     if mode.store_mode_for_reads(vault_root):
+        wanted = list(rels)
+        pages = owned_as_pages(vault_root, wanted)
         with snapshot(vault_root) as view:
-            view.prime_page_metadata(
-                rel for rel in rels if ownership.classify(rel) is ownership.Ownership.PAGE
-            )
+            view.prime_page_metadata(rel for rel in wanted if pages[rel])
 
 
 def holds_file(vault_root: Path, rel: str) -> bool:
@@ -955,17 +993,22 @@ def held_lookup(vault_root: Path, rels: Iterable[str]) -> Callable[[str], bool |
     root = _as_path(vault_root)
     if not mode.store_mode_for_reads(root):
         return _not_served
-    page = ownership.Ownership.PAGE
-    classified = {rel: ownership.classify(rel) is page for rel in rels}
-    owned = frozenset(rel for rel, served in classified.items() if served)
-    with snapshot(root) as view:
-        held = view.held_pages(owned)
+    wanted = list(dict.fromkeys(rels))
+    classified = owned_as_pages(root, wanted)
+    # Inside a store request the pinned snapshot cannot change, so each path is read once per request.
+    memo = request_memo(root)
+    held = {} if memo is None else memo.setdefault((__name__, "held"), {})
+    unread = [rel for rel in wanted if classified[rel] and rel not in held]
+    if unread:
+        with snapshot(root) as view:
+            found = view.held_pages(unread)
+        held.update((rel, rel in found) for rel in unread)
 
     def lookup(rel: str) -> bool | None:
         served = classified.get(rel)
         if served is None:
-            served = ownership.classify(rel) is page
-        return rel in held if served else None
+            served = owned_as_page(root, rel)
+        return held.get(rel, False) if served else None
 
     return lookup
 

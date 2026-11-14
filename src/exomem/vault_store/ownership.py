@@ -7,7 +7,7 @@ walk only through ``iter_owned``, so none of them takes another's files for crea
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -107,6 +107,11 @@ def classify(rel: str) -> Ownership:
     if is_markdown(rel):
         return Ownership.PAGE
     return Ownership.BINARY
+
+
+def classify_many(rels: Iterable[str]) -> dict[str, Ownership]:
+    """``classify`` for each distinct path of ``rels``, by the same rule: a path costs one classification."""
+    return {rel: classify(rel) for rel in dict.fromkeys(rels)}
 
 
 def owns_folder(rel: str) -> bool:

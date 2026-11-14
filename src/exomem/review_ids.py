@@ -10,10 +10,11 @@ queues are read for any other id (`bind`).
 from __future__ import annotations
 
 import functools
+import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from . import page_ids, relation_queue
+from . import attention, page_ids, relation_queue
 from .cli_ops import OpError
 from .public_tools import REVIEW_QUEUES
 
@@ -21,7 +22,8 @@ from .public_tools import REVIEW_QUEUES
 #: listing gave is found where it came from. One source: the listing's own queue table.
 QUEUE_MODES: tuple[str, ...] = tuple(dict.fromkeys(REVIEW_QUEUES.values()))
 RELATION_QUEUE_MODES: tuple[str, ...] = (REVIEW_QUEUES["relation_suggestions"],)
-_SCAN_LIMIT = 200
+#: The limit of a whole read: each queue lists every item, or clamps to its own maximum page.
+_WHOLE = sys.maxsize
 
 
 def item_id(item: Mapping[str, Any]) -> str | None:
@@ -72,15 +74,17 @@ def bind(
 ) -> dict[str, str]:
     """The `ref`, `expected_fingerprint` and `source_path` (a relation suggestion's page) that `item` stands for.
 
-    `read(mode=..., limit=..., [state=...])` is the review reader. The first queue of `modes` that
-    holds the id's head decides; a held head with another version is stale.
+    `read(mode=..., limit=..., [state=...])` is the review reader. It reads each queue whole, so
+    an item ranked anywhere binds, and records no surfacing. The first queue of `modes` that holds
+    the id's head decides; a held head with another version is stale.
     """
     head = item.partition(".")[0]
     for mode in modes:
         try:
             # `state="all"` lets a dismissed or snoozed item be found to reopen; a queue without
             # states ignores it.
-            reply = read(mode=mode, limit=_SCAN_LIMIT, state="all")
+            with attention.lookup():
+                reply = read(mode=mode, limit=_WHOLE, state="all")
         except (ValueError, OpError):
             # A queue this principal or vault cannot read holds no item to bind; the next one may.
             continue
