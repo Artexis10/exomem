@@ -76,6 +76,7 @@ _OPTIONAL_COMMANDS = frozenset(
         "reserve_source_capture",
         "settle_source_capture",
         "inspect_captured_sources",
+        "inspect_capture_erasure_policy",
         "compile_source",
         "connect_memory",
         "configure_memory",

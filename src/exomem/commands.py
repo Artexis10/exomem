@@ -14407,6 +14407,16 @@ def op_inspect_captured_sources(
     return inventory(vault_root, system=system, record_id=record_id, cursor=cursor, limit=limit)
 
 
+def op_inspect_capture_erasure_policy(
+    vault_root: Path,
+    system: Annotated[str, Field(min_length=1)],
+) -> dict:
+    """Read whether current host policy enables erasure for one opaque identity system."""
+    from .source_erasure import inspect_policy
+
+    return inspect_policy(vault_root, system=system)
+
+
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
@@ -14995,6 +15005,12 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC, ("inspect_captured_sources",),
         {"public_title": "Inspect captured Source inventory", "surface": "advanced", "actions": (), "first_run_safe": True,
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_inventory",)}},
+    ),
+    (
+        "inspect_capture_erasure_policy", op_inspect_capture_erasure_policy, 1, False, False, None,
+        _MCRC, (),
+        {"public_title": "Inspect Source erasure policy", "surface": "advanced", "actions": (), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure_policy",)}},
     ),
     (
         "coordination_status",

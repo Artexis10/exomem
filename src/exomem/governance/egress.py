@@ -6132,7 +6132,7 @@ def _postfilter(
         return None
     inventory_projection = result if command_name == "inspect_captured_sources" and isinstance(result, dict) else None
     capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
-    if inventory_projection is not None or capture_attempt:
+    if inventory_projection is not None or capture_attempt or command_name == "inspect_capture_erasure_policy":
         from ..source_capture import require_authority
 
         # Reuse whole-namespace authority at release; revocation cannot become a partial identity leak.
@@ -6452,6 +6452,8 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         # Attempt receipts require whole-namespace authority at lookup and release.
         "reserve_source_capture",
         "settle_source_capture",
+        # Host policy metadata contains no Source content; namespace authority still gates lookup and release.
+        "inspect_capture_erasure_policy",
         "preserve_evidence",
         "preserve_artifacts",
         "compile_source",

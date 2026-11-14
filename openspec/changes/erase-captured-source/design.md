@@ -1,0 +1,180 @@
+## Context
+
+Ordinary deletion preserves originals and trash. `index_sync.delete_after_remove` dispatches derived cleanup but does not prove every component finished.
+Private history can retain cited text after the current citation disappears. Source back-references can also be skipped under restricted write authority.
+Capture staging can retain bytes before a Source reference exists. Canonical inventory cannot prove that these copies disappeared.
+
+The closest maintained mechanisms are the canonical writer boundary, private mutation database, producer ownership descriptors and index-removal fan-out.
+Their gap is explicit retention ownership and complete, resumable erasure for one Source incarnation.
+Reuse these mechanisms. The added maintenance cost is one small custody ledger, producer hooks and bounded cleanup acknowledgements.
+
+## Goals / Non-Goals
+
+Prove logical erasure of an independent captured incarnation through the existing governed operation surfaces.
+Keep each persistence owner responsible for its own retained copies and publication fences.
+Keep ordinary preservation, capture activity and navigation behavior.
+
+Earlier backups, downloaded exports, caller-held responses, external synchronization history and forensic remnants remain outside the guarantee.
+Restoring those copies can reintroduce the Source. Erasure does not infer semantic dependence from prose or ask a model for permission.
+
+## Decisions
+
+### D1. Bind one operation to one incarnation
+
+Expose `erase_captured_source` through the shared command registry as `sources.erase_capture`.
+Accept `operation_id`, `source_identity`, `expected_source_ref` and `expected_source_hash`.
+Require the existing whole-namespace content authority before lookup, replay or disclosure, and recheck authority at commit and terminal release.
+Host configuration explicitly enables identity systems; its default enables none.
+The policy is configuration data, without a product-specific vocabulary in code.
+`EXOMEM_SOURCE_ERASURE_POLICY` is a typed JSON object whose `enabled_systems` array defaults empty.
+Disabling admission does not stop already-admitted cleanup or custody tracking for enrolled Sources.
+
+Validate identity, immutable reference and current hash under the actual canonical writer boundary.
+An operation identifier binds that target permanently for its retained lifetime; retries cannot substitute another reference or hash.
+Hash drift preserves the target and returns a stale precondition. A fresh checked operation can continue the same incarnation.
+An absent canonical page remains eligible when closed-attempt custody proves its allocated reference and hash.
+Missing custody is unknown, never proof of successful erasure.
+
+Return `target_source_ref`, `status` and `target_retired`, with bounded component progress and a revision-qualified failure when available.
+Statuses are `complete`, `pending`, `failed` and `unknown`. Only complete acknowledged retirement returns `target_retired=true`.
+No path or logical identity lookup can redirect delayed cleanup to a replacement Source.
+Fresh capture uses a fresh reference. Completed cleanup needs no permanent identity tombstone.
+
+### D2. Retain canonical custody before bytes can survive
+
+Register one reserved, Source-owned structured manifest with the existing canonical persistence owner.
+Publish its enrollment, dependency latch, owned-artifact locators and retirement fence in each producer's actual canonical batch.
+This metadata follows the Source across replicas in both storage modes.
+It contains no duplicate Source bodies or identity catalogue. P4 remains the published identity inventory.
+Keep the manifest bounded by producer families; each opaque locator addresses producer-owned, paged retention evidence.
+Do not embed an ever-growing fragment or version list in the manifest or public progress response.
+
+Keep attempt-local pre-reference residue and bounded erase cursors beside the existing private attempt ledger.
+Reuse its protected connections without changing generic mutation replay or its tables.
+Local cursors accelerate progress; they never supply canonical independence or completion authority.
+Another replica can reconcile owner acknowledgements from canonical custody without trusting the previous replica's cursor.
+
+Begin attempt custody at `(ledger_id, boundary_id, ticket)` before surviving staging bytes are written.
+Bind newly allocated Source references and rendered hashes before staging complete Source bytes.
+Record a reused Source as an observed result, never an allocation owned by that attempt.
+Each trusted producer reserves its opaque locator and version before persistence, then resolves it with its existing commit witness.
+Interruption leaves visible uncertain custody until that producer resolves the witness.
+File batches can partially publish after process loss. Persist custody reservations before staging and do not infer all-or-nothing publication from a returned path list.
+An exact primary post-image can prove that file published; it does not prove the rest of its batch completed.
+
+Attempt residue remains replica-local. Scope changes or missing attempt ownership cannot prove that residue absent.
+Existing handoff and recovery must preserve that custody or route cleanup to its owner.
+An invocation-local commit generation cannot qualify canonical dependency coverage: it can reset and permits persistence failure.
+Store reconciliation binds its checkpoint to the physical store instance and canonical revision.
+No new global ledger, scheduler or cell-wide refusal is added.
+
+### D3. Use one dependency latch instead of a reverse history graph
+
+Track `clear`, `present` or `uncertain`, coverage completeness and the first producer commit witness for each Source reference.
+Before the first dependent knowledge commit, reserve an uncertain latch under the canonical boundary.
+Successful publication marks it present. Proven no-effect or complete rollback restores its previous state.
+Interrupted publication stays uncertain until existing producer recovery resolves the exact publication identity.
+Resolving one no-effect reservation cannot clear another unresolved publication; any successful dependency makes present sticky.
+
+Semantic writes include resolved claims whose Source back-reference was skipped, retained origin bindings and historical before-images.
+Restricted writers still publish service-owned custody in the same batch when they cannot write the Source back-reference.
+Collection writes include item versions, imports and bulk operations. Both correction endpoints refuse erasure through existing correction facts.
+Removing a current citation does not clear retained historical dependence.
+Clearing a positive latch requires complete producer reconciliation, rather than disappearance of its first witness.
+
+Reuse existing watcher ingress to invalidate coverage for unexplained external changes.
+A bounded, caller-driven producer census can establish legacy coverage from structured references and exact ownership evidence.
+Age alone neither proves independence nor prevents erasure. Ambiguous ownership reports the actual missing evidence.
+The erasure request never scans all history or runs a semantic text search.
+
+Under one actual writer-boundary step, recheck coverage, independence and the expected hash, then persist retirement and unpublish or fence the target.
+Perform no auxiliary destruction before that cutoff.
+Dependent writes and deferred publishers check the target's retirement fence before publication.
+
+### D4. Keep cleanup with each persistence owner
+
+Owned artifacts include canonical pages and originals, generated navigation and activity entries, capture guidance, replay and recovery records, staging and rollback copies.
+Owner locators identify exact entries or versions. Cleanup never removes text by matching a title, URL or record identifier globally.
+Shared navigation and rotated logs need ownership-aware removal or regeneration that also retires their retained versions.
+Generated fragments carry exact producer identity through trimming, copying, rotation and batch before-images.
+A dropped activity excerpt copied into another Source's log entry keeps its original fragment ownership.
+Bound both named log segments and bytes processed in each invocation.
+Do not omit existing capture prose as an incidental shortcut.
+
+Store mode also requires page rows, held content, identifying audit material, projection intents/files and recovery copies to retire through its owner.
+Its purge contract and historical-provenance seam require agreement with the canonical store owner before store-owned implementation.
+File-mode custody and producer work can proceed independently. Store completeness remains unproved until that integration finishes.
+
+Reuse index-removal fan-out, but obtain completion acknowledgements from every required component.
+Registered, accepted or deferred work is pending. It is not a purge acknowledgement.
+Fence deferred publishers by Source reference and expected incarnation at publication, including path reuse and rollback.
+Each derived owner compares its retained identity, hash or generation inside the same transaction that deletes its rows.
+A canonical path check before dispatch cannot authorize a later path-only delete.
+Each owner checks its bounded target set; database work does not grow with unrelated Sources.
+
+### D4a. Qualify configured erasure policy separately from discovery
+
+Static operation features prove implementation, not that a configured identity system is enabled.
+Expose authenticated `inspect_capture_erasure_policy` through `sources.erasure_policy`, accepting one identity system.
+Return observed `enabled` and `policy_revision`, or explicit unknown values when configuration cannot be read.
+Require whole-namespace authority before inspecting this service policy.
+The consumer uses this read for registration and background readiness, without adding it to each passage query.
+Every erase still checks current policy before admission.
+After a stale hash, the consumer can issue a new checked operation for its existing target reference; its durable retirement intent never retargets.
+
+### D5. Preserve snapshot reads and fence reusable publication
+
+An overlapping read can finish from its existing snapshot or detached invocation bytes.
+After complete retirement, new reads cannot reach that incarnation through managed storage or reusable caches.
+This requires no new general reader pin, global reader drain or process-retirement prerequisite.
+
+Each reusable cache owner advances its relevant generation and invalidates affected entries under its owner lock.
+A builder captures that generation and checks it inside the same lock before publishing its result for reuse.
+An obsolete builder can finish its overlapping invocation but cannot republish retained Source bytes.
+Where dependencies are unavailable cheaply, invalidate that vault's cache namespace.
+Existing retained projection pins still constrain their owner's collection; they do not become a general Source barrier.
+
+### D6. Close attempt residue separately from admission
+
+Extend settlement with `custody_state`, `owned_targets` and `attempt_residue` without changing `past_outcome`.
+Each owned target reports allocated reference, retained hash, canonical path and observed canonical state.
+Unknown capture outcome can coexist with a known allocation; neither proves canonical publication.
+
+Ordinary settlement only closes admission and reports custody. An explicit `retire_owned` continuation requests cleanup of pre-reference residue.
+The caller first closes admission, retires allocated incarnations, then continues residue cleanup.
+It declares withdrawal complete only after every target and residue acknowledges retirement.
+Keep uncertain current capture visible until the caller chooses recovery or withdrawal; ordinary settlement never destroys its preserved original.
+P2 collection retains the last recovery link while residue or retention reservations remain unresolved.
+After producer acknowledgements, normal bounded receipt retention can collect the attempt.
+
+### D7. Reuse bounded caller-driven progress
+
+Persist a target-qualified operation and component cursors before the first destructive step.
+Each invocation performs a bounded unit through the existing writer and owner APIs, then returns progress.
+The caller's existing durable job queue retries pending work. Add no daemon, workflow engine or global sweep.
+Never hold a database connection while waiting on another component or network operation.
+
+Use the repository's 20,000-Source generated reference and existing public warm-call budget: p95 below one second for a bounded progress invocation.
+Record terminal failures and pending outcomes, component work bounds, query count, lock contention and resources with the maintained instrument.
+Whole-retirement duration is a separate observed value. A new operation has no earlier latency baseline or measured improvement claim.
+
+[Writing effective tools](https://www.anthropic.com/research/writing-tools-for-agents) supports one operation that exposes useful progress.
+[Containment](https://www.anthropic.com/research/how-we-contain-claude) supports enforcing effects at the existing runtime boundary.
+These principles require no additional agent machinery or human approval gate.
+
+## Risks / Trade-offs
+
+- Missing ownership delays only the affected target; retain its obligation and identify missing evidence.
+- A positive dependency latch favors preservation; exceptional clearing costs a producer census.
+- Shared logs and recovery records require precise ownership; an untracked copy prevents complete retirement.
+- Path reuse can race delayed cleanup; every owner must fence by incarnation and retire only the old version.
+- Replica loss can lose custody evidence; preserve it through supported recovery and keep unknown visible otherwise.
+
+## Migration Plan
+
+1. Ship the reviewed operation with identity-system policy disabled; verify ordinary capture and deletion remain available.
+2. Prove generated capture, lost-response recovery, dependency refusal and complete managed cleanup in isolated file and store cells.
+3. Qualify bounded public progress and new-reader absence on the delivered candidate; retain target and component receipts.
+4. Enable a cell only under its existing operational authority; stop new erasure admission to roll back policy.
+
+Policy rollback cannot restore erased bytes. Restoration requires separately authorized retained backups and can reintroduce the Source.
