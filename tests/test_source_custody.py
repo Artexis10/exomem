@@ -66,7 +66,7 @@ def test_failure_after_allocation_keeps_absent_target_and_gc_recovery_link(vault
         raise RuntimeError("parent batch unavailable")
 
     monkeypatch.setattr(add, "batch_atomic_write", fail_source_batch)
-    with pytest.raises(writer_lease._PostCommitOutcomeUncertain):
+    with pytest.raises(RuntimeError, match="^parent batch unavailable$"):
         call("capture_source", **args, capture_reservation=ticket)
     settled = call("settle_source_capture", reservation=ticket)
     target = settled["owned_targets"][0]

@@ -173,7 +173,9 @@ def publish(root: Path, plan: PlannedCustody) -> None:
             checked.append(vault.PlannedWrite(path, content, create_only=write.create_only, guard=guard, expected_hash=write.expected_hash))
         # Shared retention metadata uses service authority only after every immutable target and payload is bound.
         with curation_witness.suspended(), owner_local_producer(root, OWNER):
-            vault.batch_atomic_write(checked, vault_root=root)
+            # A reservation survives failure without claiming the parent's Source or semantic body committed.
+            vault.batch_atomic_write(checked, vault_root=root,
+                                     commit_point=False, post_commit_fanout=False)
 
 
 def prepare_enrollment(root: Path, *, reference: str, source_hash: str) -> PlannedCustody:
