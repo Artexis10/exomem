@@ -10,6 +10,8 @@ Build a catalogue beside the serving cell before its upgrade attempt, so a ready
 
 The feature SHALL default off. When enabled, `cellctl` SHALL schedule a build Job for each running rollout candidate when its upgrade window opens, subject to capacity and skip rules. The build Job SHALL use the target image and share the serving pod's node through scheduler-enforced placement, mounting the live claim read-write.
 
+A running build Job has a pod Running, including image pull after binding to a node. Pending for node capacity is not running.
+
 Before the final force minutes, `cellctl` SHALL count a running build Job as activity in the due rule, like an in-flight request. The force period SHALL retain its existing default of 10 minutes and override build activity. A build Job waiting for node capacity SHALL NOT defer the attempt. When the build Job ends, `cellctl` SHALL use ordinary request idleness to determine whether the cell is due. Attempts SHALL retain their existing hold clocks and deadlines.
 
 #### Scenario: A candidate gets a build Job during its window
@@ -99,9 +101,9 @@ The namespace quota SHALL add exactly one pod and the build profile's requests a
 - **WHEN** one build Job occupies the node's build slot
 - **THEN** cellctl schedules no second build Job there
 
-### Requirement: Tenant-locked and non-running cells skip the build Job
+### Requirement: Tenant-locked, non-running and store-mode cells skip the build Job
 
-Tenant-locked cells SHALL receive no build Job, even while unlocked. The build Job SHALL NOT join the custody key channel. Non-running cells SHALL receive no build Job. These cells SHALL retain their ordinary cold-rebuild behavior.
+Tenant-locked cells SHALL receive no build Job, even while unlocked. The build Job SHALL NOT join the custody key channel. Non-running cells SHALL receive no build Job. These cells SHALL retain their existing boot path. Builds SHALL run only for file-mode cells. Until cellctl can observe vault mode, the cell-side build entrypoint SHALL exit successfully without building in store mode.
 
 #### Scenario: A tenant-locked cell becomes a candidate
 
@@ -115,6 +117,13 @@ Tenant-locked cells SHALL receive no build Job, even while unlocked. The build J
 - **THEN** cellctl creates no build Job for it
 - **AND** the cell rebuilds cold on boot when its catalogue requires it
 
+
+#### Scenario: A vault uses store mode
+
+- **WHEN** a build entrypoint finds that the vault uses store mode
+- **THEN** it exits successfully without building or changing the vault
+- **AND** the replacement keeps its existing boot path
+
 ### Requirement: The build Job removes superseded staged copies
 
 At startup, the build Job SHALL remove every completed staged copy except a valid staged copy of its own computed identity. Cleanup SHALL preserve active build Jobs using their locks. Startup cleanup of `.building` families SHALL also check every SQLite family member's age and open connections. File age alone SHALL NOT prove a build Job inactive.
@@ -127,7 +136,7 @@ At startup, the build Job SHALL remove every completed staged copy except a vali
 
 ### Requirement: Backups exclude staged copies and temporary families
 
-Restic SHALL exclude staged copies and `.building` families by their fixed filename patterns, including SQLite sidecars. These exclusions SHALL apply to both hourly and pre-upgrade backups. Backups SHALL retain the live catalogue and unrelated files under the existing backup paths.
+Restic SHALL exclude staged copies and `.building` families by their fixed filename patterns, including SQLite sidecars. These exclusions SHALL apply to every restic backup cellctl runs. D1 defines the closed filename families: `.lexical-staged-<identity-prefix>.sqlite` and `.lexical.sqlite.rebuild-<uuid32>.tmp`, including `-wal`, `-shm` and `-journal` sidecars. Exclusions SHALL be anchored to vault state directories under `/data/host/.local/state/exomem/state/`, never `/data/vault`. Backups SHALL retain the live catalogue and unrelated files under the existing backup paths.
 
 #### Scenario: A backup sees a staged copy and an unfinished build
 

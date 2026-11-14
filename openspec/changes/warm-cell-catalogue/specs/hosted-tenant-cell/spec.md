@@ -4,7 +4,7 @@
 
 ### Requirement: A cell adopts a staged copy at boot instead of rebuilding
 
-After cellctl confirms the build Job's pods ended, the booting cell SHALL check any staged copy against its computed identity. It SHALL validate a match through a read-only connection. Under the publication lock, it SHALL handle the live main, WAL and SHM as one set before installing the staged copy. It SHALL use ordinary restart reconcile for freshness drift. The cell SHALL rebuild cold when no staged copy passes validation.
+Cellctl SHALL delete the build Job and wait for its pods to end before stopping the serving pod. No build Job pod therefore exists when the replacement boots. The booting cell SHALL check any staged copy against its computed identity. It SHALL validate a match through a read-only connection. Under the publication lock, it SHALL handle the live main, WAL and SHM as one set before installing the staged copy. It SHALL use ordinary restart reconcile for freshness drift. The cell SHALL rebuild cold when no staged copy passes validation.
 
 #### Scenario: The cell adopts a valid staged copy
 
@@ -43,7 +43,7 @@ After cellctl confirms the build Job's pods ended, the booting cell SHALL check 
 
 ### Requirement: A booting cell removes every unadopted staged copy
 
-At boot, the cell SHALL remove every completed staged copy it did not adopt, regardless of identity. Once cellctl confirms the build Job's pods ended, a released `_RebuildTempLock` SHALL suffice to remove a `.building` family without an age guard. Cleanup SHALL preserve temporary files while their locks remain held.
+At boot, the cell SHALL remove every completed staged copy it did not adopt, regardless of identity. At replacement boot, a released `_RebuildTempLock` SHALL suffice to remove a `.building` family without an age guard. Cleanup SHALL preserve temporary files while their locks remain held.
 
 #### Scenario: A duplicate matches the live identity
 
@@ -53,6 +53,6 @@ At boot, the cell SHALL remove every completed staged copy it did not adopt, reg
 
 #### Scenario: Cancellation leaves a recent temporary family
 
-- **WHEN** cellctl confirms the build Job's pods ended and the remaining `.building` family's `_RebuildTempLock` is released
+- **WHEN** the replacement boots and the remaining `.building` family's `_RebuildTempLock` is released
 - **THEN** boot removes the family without waiting for its files to age
 - **AND** held locks still protect any active temporary files
