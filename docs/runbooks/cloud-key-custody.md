@@ -42,9 +42,12 @@ Actions secret `KEY_WATCHER_PINNED_SET` in environment `key-watcher`. GitHub nev
 so the current document is the copy that you keep from the last time you wrote it. The set is live state.
 Never replace it from a template; read the current value, change it and write it back.
 
-1. Apply the durability root with the operator's approval. Expect the media bucket and four new keys:
-   `cloud_media_edge`, `cloud_media_edge_list`, `cellctl_media_list` and `key_watcher_media_list`.
-   The apply needs `cloud_media_condemned_days`, because the bucket's lifecycle rule deletes hidden and
+1. Plan the durability root for the media resources only, then apply that plan with the operator's approval:
+   `infra/scripts/plan.sh durability <plan file> -target='b2_bucket.cloud_media[0]' -target='b2_application_key.cloud_media_edge[0]' -target='b2_application_key.cloud_media_edge_list[0]' -target='b2_application_key.cellctl_media_list[0]' -target='b2_application_key.key_watcher_media_list[0]'`
+   Expect five adds: the media bucket and the keys `cloud_media_edge`, `cloud_media_edge_list`,
+   `cellctl_media_list` and `key_watcher_media_list`. If the plan holds any other change, stop.
+   A full durability plan can hold other changes. Apply: `infra/scripts/apply_saved_plan.sh durability <plan file>`
+   The plan needs `cloud_media_condemned_days`, because the bucket's lifecycle rule deletes hidden and
    superseded versions after that grace. Choose it as "Turn on collection" in `cloud-media-edge.md` says.
 2. Open your copy of the current pinned set. In the `founder` account, add the IDs from the four outputs
    `cloud_media_edge_application_key_id`, `cloud_media_edge_list_application_key_id`,
@@ -92,9 +95,10 @@ Do this before the purge is turned on, after "Pin the media watch". Agree the ch
    For step 3, also map the durability root's bootstrap key to `TF_VAR_b2_application_key_id` and `TF_VAR_b2_application_key`.
 2. Plan the cell-data root: `infra/scripts/plan.sh cell-data <plan file>`
    Expect one add, `key_watcher_backup_list`, and no other change.
-3. If the platform has the media watch, plan the durability root for the one key only:
-   `infra/scripts/plan.sh durability <plan file> -target='b2_application_key.cloud_media_edge_list[0]'`
-   Expect one add. A full durability plan can hold other changes.
+3. If the media bucket was applied before Terraform defined `cloud_media_edge_list`, plan the durability root
+   for that key only: `infra/scripts/plan.sh durability <plan file> -target='b2_application_key.cloud_media_edge_list[0]'`
+   Expect one add. A full durability plan can hold other changes. A media bucket applied with all four keys,
+   as "Pin the media keys" step 1 does, needs no plan here.
 4. With the operator's approval, apply each saved plan: `infra/scripts/apply_saved_plan.sh <root> <plan file>`
 5. Store the watcher's backup list key ID in BWS prod:
    `terraform -chdir=infra/terraform/cell-data output -raw key_watcher_backup_list_application_key_id | bwsx-secret set --project prod EXOMEM_KEY_WATCHER_BACKUP_LIST_B2_KEY_ID --format opaque-line`
@@ -107,6 +111,7 @@ Do this before the purge is turned on, after "Pin the media watch". Agree the ch
 9. Open your copy of the current pinned set.
 10. In the `cell-data` account, add the ID from `key_watcher_backup_list_application_key_id` to `pinned_key_ids`.
 11. If you planned step 3, add the ID from `cloud_media_edge_list_application_key_id` to `pinned_key_ids` in the `founder` account.
+   Skip an ID that the list already holds.
 12. Add the deletion watch at the top level, with the skew margin that you chose (the design proposes 60 minutes):
    `"deletions": {"account": "cell-data", "media_account": "founder", "backup_key_id_env": "B2_WATCHER_BACKUP_LIST_KEY_ID", "backup_key_env": "B2_WATCHER_BACKUP_LIST_KEY", "purge_capabilities": ["listFiles", "writeFiles"], "skew_margin_minutes": <minutes>}`
    On a platform without the media watch, set `media_account` to `null`.
