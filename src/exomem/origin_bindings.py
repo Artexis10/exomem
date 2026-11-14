@@ -81,6 +81,8 @@ class PreparedOriginInputs:
         document = provenance.parse_origin(self.source, managed=True, authoring=True, strict=True)
         if document.payload is None:
             raise _unavailable()
+        from . import source_custody
+        from .cli_ops import OpError
         from .governance import policy
 
         bindings = document.payload["inputs"]
@@ -91,6 +93,10 @@ class PreparedOriginInputs:
                     current = resolve_origin_input(vault_root, bindings[label])
                     if current.root != prior.root:
                         raise provenance.OriginError("ORIGIN_INPUT_STALE", "retained input root changed")
+                    try:
+                        source_custody.require_publishable(vault_root, current.root)
+                    except OpError as error:
+                        raise provenance.OriginError(error.code, error.message) from error
             except provenance.OriginError as error:
                 failure = error
         # Frozen domain errors cannot cross a generator context manager's traceback assignment.

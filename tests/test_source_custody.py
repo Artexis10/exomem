@@ -322,6 +322,41 @@ def test_retirement_fence_rejects_a_prepared_source_closure(vault, attempts, reg
                 source_closure.enforce_source_closure(vault, primary.content, destination=primary.path.relative_to(vault).as_posix(), prepared=prepared)
 
 
+def test_retirement_fence_rejects_prepared_origin_inputs_while_source_bytes_remain(vault, attempts, registered_custody):
+    """An origin-only record must not commit after retirement while canonical deletion is pending."""
+    from exomem import origin_bindings, provenance
+
+    manager, _ = attempts
+    source = _original(vault, READABLE_SOURCE).decode()
+    reference = memory_refs.ref_from_markdown(source)
+    origin = provenance.encode_origin({
+        "inputs": {"original": {"reference": reference, "version": provenance.evidence_version(source)}},
+        "assessments": [],
+        "bindings": [{"inputs": ["original"], "scope": {"kind": "unit", "unit_ref": "#claim"}}],
+    }, authoring=True)
+    with request_scope(owner_principal(surface="mcp")):
+        prepared = origin_bindings.prepare_origin_inputs(
+            vault, origin + "\n\n## Observations\n\n- [finding] Exact conclusion ^claim\n",
+        )
+        assert prepared is not None
+        prepared.revalidate(vault)
+        with manager.mutation_guard(vault):
+            source_custody.publish(vault, source_custody.prepare_enrollment(
+                vault, reference=reference, source_hash=vault_module.content_hash(source),
+            ))
+            manifest, guard = source_custody.read_manifest(vault, reference)
+            retired = manifest.model_copy(update={"retirement": source_custody.RetirementFence(
+                operation_id="withdrawal", source_hash=manifest.allocated_hash,
+            )})
+            source_custody.publish(vault, source_custody.PlannedCustody((source_custody._write(
+                vault, source_custody.manifest_path(vault, reference), retired, guard,
+                source_custody.MAX_MANIFEST_BYTES,
+            ),)))
+            assert (vault / READABLE_SOURCE).read_text() == source
+            with pytest.raises(provenance.OriginError, match="SOURCE_RETIRED"):
+                prepared.revalidate(vault)
+
+
 def test_pre_reference_residue_survives_settlement_and_gc_until_owner_ack(vault, attempts, registered_custody, monkeypatch, tmp_path):
     manager, call = attempts
     args = authored()
