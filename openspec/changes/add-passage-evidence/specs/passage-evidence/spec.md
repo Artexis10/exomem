@@ -25,8 +25,20 @@ The embedding index SHALL keep its stored structure, and a Source captured witho
 ### Requirement: Passage keys are stored in the Source page and in no index
 
 The passage keys of a Source SHALL be stored in the Source page, in declared order, so that the page's bytes hold the whole declaration in every storage mode.
-No lexical or vector index SHALL contain a passage key.
+The keys SHALL be stored in the page's body, outside the captured text and outside the frontmatter.
+The Source's frontmatter SHALL hold the number of declared passages, and its size SHALL NOT grow with that number.
+No lexical or vector index SHALL contain a passage key, and no search field SHALL read the keys.
 Exomem SHALL store and return a passage key unchanged and SHALL NOT read meaning from it.
+
+#### Scenario: Frontmatter does not grow with the passages
+
+- **WHEN** two Sources are captured with 3 and with 300 declared passages
+- **THEN** their frontmatter differs only in the passage count
+
+#### Scenario: Readers of the captured text see passages only
+
+- **WHEN** a reader takes the text that follows the Capture heading of a Source with declared passages
+- **THEN** that text holds the passage texts and no key
 
 #### Scenario: Keys give no search signal
 
@@ -46,6 +58,18 @@ More than one passage of one Source MAY appear.
 The passage level SHALL honour `limit` up to 200 and SHALL refuse a larger value with an error that names the bound.
 The passage path SHALL NOT run the lexical lane, graph expansion, page fusion, rerank or usage boosts.
 A request that combines the passage level with an option that changes ranking SHALL be refused before retrieval, with an error that names the option to remove.
+A passage request SHALL read at most `limit` Source pages and SHALL NOT read a page or the frontmatter of a Source that is not in its results.
+When the cell cannot admit a passage request's model work at once, it SHALL refuse the request with a busy outcome and a retry hint, and SHALL NOT queue it.
+
+#### Scenario: Page reads do not grow with the vault
+
+- **WHEN** a passage request with `limit` 5 runs against a vault with 200 Sources that have declared passages
+- **THEN** the request reads at most 5 Source pages
+
+#### Scenario: The cell is busy
+
+- **WHEN** a passage request arrives while the cell's model admission is full
+- **THEN** the request is refused at once with a busy outcome and a retry hint
 
 #### Scenario: Two passages of one Source both rank
 
@@ -75,7 +99,7 @@ A passage result SHALL NOT contain passage text.
 
 The passage path SHALL derive a result's passage and span from the Source's current bytes.
 It SHALL withhold a selected chunk whose stored text differs from the text of that chunk derived from the current page.
-It SHALL withhold every chunk of a Source whose number of passage keys differs from the number of passages in its body.
+It SHALL withhold every chunk of a Source whose passage count, number of keys and number of passages in its body are not all equal.
 The reply SHALL state the number of withheld chunks.
 
 #### Scenario: A stale chunk is withheld

@@ -61,31 +61,34 @@ The original authored inputs include each passage's key and text, in order.
 The same identity with the same passages reuses the Source. The same identity with different passages is a conflict, as it is for different text today.
 A caller that must change a key captures a new revision.
 
-### D3. Passage keys live in the Source page
+### D3. Passage keys live in a block of the Source body
 
-The Source's frontmatter holds `passage_keys`, the ordered list of keys.
-The body holds the passage texts. Together the page's bytes hold the whole declaration, so store mode carries it with no new column, table or side file.
-No search field reads frontmatter as text, so no index holds a key.
+The Source body holds the ordered keys in a block of its own, before the `## Capture` section. The frontmatter holds only the number of declared passages.
+The page's bytes hold the whole declaration, so store mode carries it with no new column, table or side file.
+Every reader of the captured text reads what follows `## Capture` and sees passage texts only.
+
+The search body leaves the block out, by one rule that applies only to a Source whose frontmatter holds a passage count. The existing rule for withheld OCR text has the same shape.
+So no lexical or vector index holds a key, and only the passage reader parses the block.
 
 A key is short on purpose. It names the caller's record; everything else about that record stays with the caller, where it can change without a new capture.
 
 Rejected homes:
 
+- the frontmatter. Read paths that never use the passages decode frontmatter for each candidate page. One decode of a Source page measured 0.04 ms with no keys, 0.13 to 0.19 ms with 100 keys and 6.7 ms with 2,000 keys of 128 bytes, so a request over a few hundred such pages would lose seconds;
 - a side file beside the Source, because store mode derives its rows from page bytes;
-- the body, because a Source's body is searched in full, and every text reader would see the keys;
 - a Records collection, because collections keep append-only versions and prohibit item deletion;
 - a structured object for each passage, because it copies caller state that goes stale.
 
 ### D4. Spans and ordinals are derived from the page, not stored
 
-For a Source with `passage_keys`, the chunker makes the chunks from the declared passages: one for each passage, split at the cap.
+For a Source whose frontmatter holds a passage count, the chunker makes the chunks from the declared passages: one for each passage, split at the cap.
 The same function gives each chunk its passage ordinal and its span in the body.
 The passage path calls that function on the Source's current bytes when it builds a result.
 
 The embedding sidecar does not change. Its `chunk_text` is the binding: a selected chunk is returned only when its stored text equals the text of the same chunk derived from the current page.
 A chunk that fails this check is withheld and counted.
 
-A Source whose number of `passage_keys` differs from the number of passages in its body is withheld in the same way.
+A Source whose passage count, number of keys and number of passages in its body are not all equal is withheld in the same way.
 
 The alternative was to store ordinal, span and a body hash in new sidecar columns. It adds a schema change, a second copy of what the page already says, and a risk for every reader of chunk rows.
 A Source is append-only, so the derived table for a page is cached in memory against the page's identity and costs one derivation for each Source.
@@ -96,7 +99,7 @@ A Source is append-only, so the derived table for a page is cached in memory aga
 
 1. Resolve eligibility as today. Filters, governance scope and relation scope produce the allowed paths.
 2. Embed the query once.
-3. Select the top chunks over the allowed Sources that have declared passages, with `EmbeddingIndex.select_chunks` and without the collapse to one chunk for each file.
+3. Select the top chunks over the allowed Sources that have declared passages, with `EmbeddingIndex.select_chunks` and without the collapse to one chunk for each file. The set of Sources with declared passages is derived once for each published state of the corpus, not on each request.
 4. Derive each selected chunk's passage and span from its page, and check the binding of D4.
 5. Return the results in score order.
 
@@ -108,6 +111,9 @@ The passage hash is SHA-256 of the passage text as UTF-8. Because of D1 it equal
 
 The path runs no lexical lane, no graph, no fusion, no rerank and no usage boost.
 A request that combines the passage level with an option that changes ranking is refused with an error that names the option to remove. A silent ignore would let a caller believe that the option took effect.
+
+A passage request reads at most `limit` Source pages, the ones in its results. It reads no page and no frontmatter of any other Source.
+When the cell cannot admit the request's model work at once, it refuses the request with a busy outcome and a retry hint. It does not queue the request.
 
 The passage path lives in its own module. `find.py` gets only the dispatch to it.
 
@@ -131,7 +137,7 @@ The implementation measures both modes on the reference before it chooses.
 ## Risks / Trade-offs
 
 - **Deriving spans at read time costs a page read for each Source in the results.** → At most `limit` Sources for each request, cached against the page's identity; the latency bar of D7 includes it.
-- **A long list in frontmatter.** → At most 2,000 keys of 128 bytes; a transcript of 100 passages adds about 2 KiB. The reference of D7 measures a catalogue of such pages.
+- **One more rule in the search body.** → It applies only to a Source with a passage count in its frontmatter, and a test proves that a key gives no search signal in both storage modes.
 - **Dense-only ranking can miss an exact term.** → One measurement on a production-sized corpus showed no difference from another dense engine; a lexical signal enters only on a measured gain.
 - **A resident matrix costs memory in each cell.** → About 137 MiB for 33,000 passages at 1,024 dimensions; admission goes through the resource policy, and the disk mode stays as the fallback.
 - **`find.py` and `commands.py` have other open work.** → The passage path is a new module; the two shared files get a dispatch and a registration only.
