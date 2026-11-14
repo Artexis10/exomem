@@ -151,6 +151,29 @@ def _declarations(root, sid, rows, generation, planning_values):
     return marker, tuple(declarations)
 
 
+_MUTATION_FENCES: ContextVar[dict | None] = ContextVar("collection_ownership_mutation_fences", default=None)
+
+
+@contextmanager
+def mutation_fence_scope():
+    """Reuse coordinator fences for one invocation, while local ownership decisions stay live."""
+    # A fence transition revokes the token that commit validates live; declarations cannot use this cache.
+    token = _MUTATION_FENCES.set({})
+    try:
+        yield
+    finally:
+        _MUTATION_FENCES.reset(token)
+
+
+def _coordinator_fence(client):
+    cached = _MUTATION_FENCES.get()
+    if cached is None:
+        return client.collection_store_fence()
+    if client not in cached:
+        cached[client] = client.collection_store_fence()
+    return cached[client]
+
+
 def _canonical(root, conn, placement, recorded, *, private=False, restored=None, manager=None, status=None):
     meta = legacy_originals.metadata(conn)
     sid, instance = meta[schema.META_STORE_ID], meta[schema.META_INSTANCE_ID]
@@ -168,7 +191,7 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
         if manager.client is None:
             raise unavailable()
         if private:
-            fence = manager.client.collection_store_fence()
+            fence = _coordinator_fence(manager.client)
         else:
             # Status replaces the fence read; its coordinator transaction can contend briefly.
             status = manager.client.status() if status is None else status
@@ -177,7 +200,7 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
                 fence = CollectionStoreFenceState(status.required_collection_store_capability, True,
                                                   required.store_id, status.collection_store_fence_generation)
             else:
-                fence = manager.client.collection_store_fence()
+                fence = _coordinator_fence(manager.client)
                 if ((status.required_collection_store_capability is not None
                      and status.required_collection_store_capability != fence.capability)
                         or (status.collection_store_fence_generation is not None
@@ -188,7 +211,7 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
         if not fence.enrolled:
             from .export import completed_retirement_binding
 
-            completed = completed_retirement_binding(root, manager.client, sid)
+            completed = completed_retirement_binding(root, manager.client, sid, fence=fence)
             if completed is not None:
                 return Proof((placement, sid, instance, "exported", completed), None)
             if not private and intent is not None and intent["kind"] == authority.EXPORT:

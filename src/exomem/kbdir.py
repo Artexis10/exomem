@@ -78,3 +78,20 @@ def kb_page_target(vault_root: Path, path: str) -> tuple[Path, str]:
 
     rel = kb_page_relative_form(path)
     return Path(vault_root) / rel, rel
+
+
+def resolve_stored_page_target(vault_root: Path, rel: str) -> tuple[Path, str] | None:
+    """Resolve an existing authoring parent from the store, or leave file-mode resolution alone."""
+    from . import vault
+    from .vault_store import read
+
+    if not read.serves(vault_root, rel):
+        return None
+    try:
+        return vault.resolve_under_vault(
+            vault_root, rel, must_exist=True, must_be_under_kb=True, refuse_withheld=True,
+        )
+    except vault.VaultPathError as error:
+        if error.code == "NOT_FOUND":
+            raise vault.VaultPathError("NOT_FOUND", f"file does not exist: {rel}") from None
+        raise

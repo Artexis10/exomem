@@ -472,6 +472,7 @@ jobs:
           uv run --frozen --python 3.13 python -m pytest -q
           tests/test_held_fs_contract.py
           tests/test_held_fs_windows.py
+          tests/test_cloud_import.py::test_success_is_flushed_to_disk_before_it_is_reported
           tests/test_reserved_admin_paths.py
           tests/test_mutation_concurrency.py
           tests/test_windows_idempotency_trust.py
@@ -1076,6 +1077,8 @@ jobs:
         with: *setup-uv-inputs
       - name: Verify lockfile is current
         run: uv lock --check
+      - name: Verify committed plugin content and selected version
+        run: uv run --frozen python -m pytest -q tests/test_plugin_sync.py::test_committed_plugin_matches_the_packaged_sources tests/test_plugin_sync.py::test_manifest_matches_apart_from_the_version tests/test_plugin_sync.py::test_plugin_version_matches_the_selected_release
       - name: Validate public build inputs before packaging
         run: python scripts/validate-public-artifacts.py --repository
       - name: Prove the pinned pre-v4 binary is externally fenced
@@ -1204,8 +1207,12 @@ jobs:
           sparse-checkout: |
             scripts/check_release_pr_files.py
             scripts/release_evidence.py
+            scripts/release_metadata.cjs
             release-please-config.json
           sparse-checkout-cone-mode: false
+      - name: Install the pinned release metadata updaters
+        if: needs.scope.outputs.release == 'true'
+        run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
       - name: Require that the release PR changes only what release-please writes
         # The release PR runs no test job, which is sound only while its diff
         # is release-please's own work (scripts/check_release_pr_files.py).
@@ -1217,6 +1224,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NODE_PATH: ${{ runner.temp }}/release-please/node_modules
         run: |
           if test "$HEAD_REPO" != "$GH_REPO"; then
             echo "a release PR must come from $GH_REPO, not $HEAD_REPO" >&2
@@ -1224,7 +1234,8 @@ jobs:
           fi
           gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" --jq '.[] | tojson' \
             > "$RUNNER_TEMP/pr-files.jsonl"
-          python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl"
+          git fetch --quiet origin "$BASE_SHA" "$HEAD_SHA"
+          python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl" --base "$BASE_SHA" --head "$HEAD_SHA"
       - name: Require complete Full evidence for the release source tree
         if: needs.scope.outputs.release == 'true'
         env:
@@ -1355,7 +1366,7 @@ jobs:
   release-evidence-landed:
     name: signal release evidence landed
     needs: gate
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release-cuts/')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

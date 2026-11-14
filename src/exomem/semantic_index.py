@@ -28,7 +28,8 @@ from .vocabulary import instances
 # v7 reserves typed validity rows and projects their calendar dates.
 # v8 parses the belief kind, reserves the belief, attribution, modality, event-time, quantity
 # and inference rows, and projects their values.
-PARSER_VERSION = 8
+# v9 rejects metadata-only rich bodies after the reserved-row migration release.
+PARSER_VERSION = 9
 _GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v5"
 _ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = ContextVar(
     "exomem_semantic_parent_states", default=None
@@ -121,18 +122,30 @@ def reset_parent_states(
     _ACTIVE_PARENT_STATES.reset(token)
 
 
+def _parent_relative_path(root: Path, path: Path | str) -> str:
+    """Resolve a parent's folders while leaving a stored page's projection untouched."""
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return PurePosixPath(str(path).replace("\\", "/")).as_posix().lstrip("/")
+    from .vault_store import read
+
+    try:
+        lexical = vault.relative_posix(candidate, root)
+    except ValueError:
+        lexical = ""
+    if lexical and read.serves(root, lexical):
+        return vault.resolve_under_vault(root, lexical)[1]
+    return candidate.resolve().relative_to(
+        state_paths.resolved_vault_path(root, expanduser=False)
+    ).as_posix()
+
+
 def parent_state_for_path(vault_root: Path, path: Path | str) -> SemanticParentIndexState | None:
     states = _ACTIVE_PARENT_STATES.get()
     if not states:
         return None
-    root = Path(vault_root)
-    candidate = Path(path)
     try:
-        rel_path = (
-            candidate.resolve().relative_to(root.resolve()).as_posix()
-            if candidate.is_absolute()
-            else PurePosixPath(str(path).replace("\\", "/")).as_posix().lstrip("/")
-        )
+        rel_path = _parent_relative_path(Path(vault_root), path)
     except (OSError, ValueError):
         return None
     return states.get(rel_path)
@@ -179,6 +192,13 @@ def validate_parent_record(
 ) -> SemanticIndexFreshness:
     """Validate one derived record against current canonical Markdown bytes."""
     root = Path(vault_root)
+    from .vault_store import read
+
+    if read.serves(root, parent_path):
+        return StoredParentRecords(root).validate(
+            parent_path=parent_path, parent_generation_value=parent_generation_value,
+            parent_source_hash=parent_source_hash, parser_version=parser_version,
+        )
     # This seam is ordinary semantic recall validation, not structured-record
     # parsing.  Refuse raw Records before a guarded read can hydrate a stale
     # vector/lexical parent into the semantic path.
@@ -202,6 +222,59 @@ def validate_parent_record(
         parent_source_hash=parent_source_hash, parser_version=parser_version,
         current_source_hash=vault.content_hash(source), current_ref=memory_refs.ref_from_markdown(source),
     )
+
+
+class StoredParentRecords:
+    """One request's canonical parent stamps, prefetched in keyed batches from its snapshot."""
+
+    def __init__(self, vault_root: Path) -> None:
+        self.root = Path(vault_root)
+        self._current: dict[str, tuple[str, str | None] | None] = {}
+        self._not_admitted: set[str] = set()
+
+    def prefetch(self, paths: Iterable[str]) -> None:
+        from . import recall_policy
+        from .vault_store import read
+
+        wanted = {path for path in paths if path not in self._current and read.serves(self.root, path)}
+        if not wanted:
+            return
+        admitted = recall_policy.admitted_among(self.root, wanted)
+        with read.snapshot(self.root) as view:
+            metadata = view.page_metas(wanted)
+        self._not_admitted.update(path for path in wanted - admitted if path in metadata)
+        for path in wanted:
+            meta = metadata.get(path)
+            if meta is None or path not in admitted:
+                self._current[path] = None
+                continue
+            frontmatter = json.loads(meta.frontmatter_json or "{}")
+            identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
+            self._current[path] = (meta.sha256, memory_refs.memory_ref(identity) if identity else None)
+
+    def validate(
+        self, *, parent_path: str, parent_generation_value: str,
+        parent_source_hash: str, parser_version: int,
+    ) -> SemanticIndexFreshness:
+        from .vault_store import read
+
+        if not read.serves(self.root, parent_path):
+            return validate_parent_record(
+                self.root, parent_path=parent_path, parent_generation_value=parent_generation_value,
+                parent_source_hash=parent_source_hash, parser_version=parser_version,
+            )
+        self.prefetch([parent_path])
+        current = self._current[parent_path]
+        if current is None:
+            return SemanticIndexFreshness(
+                False, "recall_parent_not_admitted" if parent_path in self._not_admitted else "missing_parent",
+                parent_path,
+            )
+        return validate_parent_snapshot(
+            parent_path=parent_path, parent_generation_value=parent_generation_value,
+            parent_source_hash=parent_source_hash, parser_version=parser_version,
+            current_source_hash=current[0], current_ref=current[1],
+        )
 
 
 def validate_parent_snapshot(
@@ -269,9 +342,7 @@ def build_parent_index_state(
     candidate = Path(path)
     if candidate.is_absolute():
         # The vault root is configuration, so a scope may reuse it; the candidate resolves live.
-        rel_path = candidate.resolve().relative_to(
-            state_paths.resolved_vault_path(root, expanduser=False)
-        ).as_posix()
+        rel_path = _parent_relative_path(root, candidate)
         source_path = candidate
     else:
         rel_path = PurePosixPath(str(path).replace("\\", "/")).as_posix().lstrip("/")
@@ -315,7 +386,7 @@ def selected_parent_index_state(
 
     root = Path(vault_root)
     candidate = Path(path)
-    rel_path = candidate.resolve().relative_to(root.resolve()).as_posix() if candidate.is_absolute() else candidate.as_posix()
+    rel_path = _parent_relative_path(root, candidate) if candidate.is_absolute() else candidate.as_posix()
     # A stale sidecar is no authority to read a parent or its private definitions.
     if not egress.quick_page_visible(root, rel_path):
         raise ValueError("REGISTRY_UNAVAILABLE: parent is unavailable")
@@ -491,9 +562,21 @@ class Interpretations:
 
     def __init__(self, vault_root: Path) -> None:
         self.root = Path(vault_root)
-        self.selection = instances.DefinitionsSelection(self.root, INTERPRETATION_SUBJECTS)
+        try:
+            self._configuration = instances.configuration(self.root)
+        except (ValueError, OSError) as error:
+            self._configuration = error
+        self.selection = instances.DefinitionsSelection(
+            self.root, INTERPRETATION_SUBJECTS, configured=self.configuration,
+        )
         self._snapshots: dict[str | None, Mapping[str, Any] | None] = {}
         self._parents: dict[tuple[str, str], SelectedParent] = {}
+
+    def configuration(self) -> dict[str, Any] | None:
+        """One binding read per interpretation; other definition selections keep their live reads."""
+        if isinstance(self._configuration, (ValueError, OSError)):
+            raise self._configuration.with_traceback(None)
+        return self._configuration
 
     def snapshots(self, scope: str | None) -> Mapping[str, Any] | None:
         """One instance's admitted snapshots, or None when this caller cannot use it."""
@@ -530,7 +613,7 @@ class Interpretations:
         shared core meaning; each page still keeps its own selected meaning.
         """
         try:
-            document = instances.configuration(self.root)
+            document = self.selection.configuration()
         except (ValueError, OSError):
             return ()
         scopes = [None, *sorted((document or {}).get("private", {}))]
@@ -543,7 +626,9 @@ class Interpretations:
     def definitions(self, path: str, frontmatter: Mapping[str, Any]) -> instances.PageDefinitions | None:
         """The page's admitted definitions, or None when its instance is unavailable."""
         try:
-            scope = instances.page_scope(self.root, path, dict(frontmatter))
+            scope = instances.page_scope(
+                self.root, path, dict(frontmatter), configured=self.selection.configuration,
+            )
         except (ValueError, OSError):
             return None
         selected = self.snapshots(scope)
@@ -604,11 +689,14 @@ class AdmittedParents:
         allowed: Callable[[str], bool],
         interpretations: Interpretations,
         admitted: dict[str, bool] | None = None,
+        allowed_many: Callable[[list[str]], Mapping[str, bool]] | None = None,
     ) -> None:
         self.interpretations = interpretations
         self.unavailable: set[str] = set()
         self._load = load
         self._allowed = allowed
+        #: ``allowed`` for many pages in one pass, so a prefetch decides them with one store read.
+        self._allowed_many = allowed_many
         #: Admission verdicts per page. A caller that already checked pages by
         #: the same rule shares its map, so no page is checked twice.
         self._admitted = admitted if admitted is not None else {}
@@ -628,14 +716,26 @@ class AdmittedParents:
             self._stored[path] = summary
 
     def prefetch(self, paths: Iterable[str]) -> None:
+        asked = {str(path) for path in paths if path}
+        self.admit(asked)
         wanted = sorted({
-            str(path) for path in paths
-            if path and path not in self._parents and path not in self._stored
-            and self.allowed(str(path))
+            path for path in asked
+            if path not in self._parents and path not in self._stored and self.allowed(path)
         })
         if wanted:
             self._stored.update(dict.fromkeys(wanted))
             self._stored.update(self._load(wanted))
+
+    def admit(self, paths: Iterable[str]) -> None:
+        """Decide a batch's admission without loading its structural summaries."""
+        if self._allowed_many is not None:
+            unknown = [
+                path for path in set(paths)
+                if path not in self._admitted and path not in self._parents
+                and path not in self._stored
+            ]
+            if unknown:
+                self._admitted.update(self._allowed_many(unknown))
 
     def parent(self, path: str) -> SelectedParent | None:
         """The admitted page's selected interpretation, or None when unavailable."""

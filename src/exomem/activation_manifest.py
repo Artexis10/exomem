@@ -34,6 +34,7 @@ from .vault import (
     content_hash,
     parse_frontmatter,
     read_guarded_text,
+    resolve_under_vault,
     vault_creation_lock,
 )
 
@@ -252,7 +253,13 @@ def reset_manifest_cache() -> None:
         _MANIFEST_CACHE.clear()
 
 
-def _manifest_cache_key(path: Path) -> str:
+def _manifest_cache_key(path: Path, *, vault_root: Path | None = None) -> str:
+    if vault_root is not None:
+        from .vault_store import read
+
+        relative = path.relative_to(vault_root).as_posix()
+        if read.serves(vault_root, relative):
+            return os.path.normcase(str(resolve_under_vault(vault_root, relative)[0]))
     return os.path.normcase(str(path.resolve(strict=False)))
 
 
@@ -304,7 +311,7 @@ def _manifest_from_bytes(key: str, path: Path, raw_bytes: bytes) -> ActivationMa
 def load_manifest(vault_root: Path) -> ActivationManifest | None:
     """Load and validate an existing manifest without changing its bytes."""
     path = manifest_path(vault_root)
-    key = _manifest_cache_key(path)
+    key = _manifest_cache_key(path, vault_root=vault_root)
     from .vault_store import read
 
     try:
@@ -807,6 +814,14 @@ def _normalize_page_path(vault_root: Path, path: Path | str) -> tuple[str | None
     candidate = Path(path)
     absolute = candidate if candidate.is_absolute() else vault_root / candidate
     try:
+        from .vault_store import read
+
+        try:
+            relative = absolute.relative_to(vault_root).as_posix()
+        except ValueError:
+            relative = ""
+        if relative and read.serves(vault_root, relative):
+            return resolve_under_vault(vault_root, relative)[1], absolute
         rel_path = absolute.resolve().relative_to(vault_root.resolve()).as_posix()
     except (OSError, ValueError):
         return None, absolute

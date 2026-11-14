@@ -30,7 +30,7 @@ from . import layout
 from .cases import STORE_NAMES, behaviours, holds_store_name, is_harm, is_stable
 from .judge import HISTORY_ARM, behaviours_asked, scored
 from .projection import load_projection
-from .readings import background_norms, lineage_shares, section
+from .readings import background_norms, lineage_shares, probe_kind, section
 
 BOOTSTRAP_SEED = 20261108
 #: Agreement of a judge with its own second judgement on ``correct``, below which a run is incomplete. Final for the run.
@@ -303,8 +303,8 @@ def gate_row(
 def dev_gates(outcomes: list[dict], meta: dict) -> dict:
     """Solvable (arm N with the whole history) and memory needed (arm N without it), each with the probes that fail it.
 
-    The memory-needed gate skips a probe whose key reads it as harm: N is expected to pass it, and the report
-    gives it as harm against N (``harm_read_probes``). The skipped probes are listed.
+    The memory-needed gate counts position probes only. Harm probes and stable recall controls
+    have their own readings; neither changes this gate's denominator. Both skipped sets are listed.
     """
     result = {}
     for name, arm in (("solvable", HISTORY_ARM), ("memory_needed", "N")):
@@ -316,14 +316,14 @@ def dev_gates(outcomes: list[dict], meta: dict) -> dict:
             result[name] = {"status": f"not run: {what}"}
             continue
         skipped: list[str] = []
+        skipped_stable: list[str] = []
         if name == "memory_needed":
-            harm_keys = {
-                (o["project"], o["probe_id"])
-                for o in rows
-                if is_harm(meta[(o["project"], o["probe_id"])])
-            }
-            skipped = sorted(f"{project}:{probe_id}" for project, probe_id in harm_keys)
-            rows = [o for o in rows if (o["project"], o["probe_id"]) not in harm_keys]
+            by_reading: dict[str, list[dict]] = defaultdict(list)
+            for row in rows:
+                by_reading[probe_kind(meta[(row["project"], row["probe_id"])])].append(row)
+            skipped = sorted(f"{o['project']}:{o['probe_id']}" for o in by_reading["harm"])
+            skipped_stable = sorted(f"{o['project']}:{o['probe_id']}" for o in by_reading["stable"])
+            rows = by_reading["position"]
         judged = [o for o in rows if o["verdict"] is not None]
         correct = [o for o in judged if o["verdict"]["correct"]]
         unknown = len(rows) - len(judged)
@@ -342,6 +342,7 @@ def dev_gates(outcomes: list[dict], meta: dict) -> dict:
             result[name] = {
                 **gate_row(rate, MEMORY_NEEDED_FLOOR, failing, len(judged), unknown, below=True),
                 "skipped_as_harm": skipped,
+                "skipped_as_stable": skipped_stable,
             }
     return result
 

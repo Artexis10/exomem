@@ -448,14 +448,24 @@ def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled:
                                 proposed_companion=proposed_companion, artifact_copy=artifact_copy)
     except _ADMISSION_REFUSALS:
         return False
-    return bool(sets) and all(not denied.intersection(scopes) for scopes in sets)
+    return bool(sets) and all(permits_scopes(denied, scopes) for scopes in sets)
+
+
+def permits_scopes(denied: frozenset[str], scopes: frozenset[str]) -> bool:
+    """Apply the connector ceiling to an already established scope set."""
+    return not denied.intersection(scopes)
 
 
 def _unwritten_capture_slot(root: Path, path: str, who: RequestPrincipal | None) -> bool:
     """Whether `path` is a free slot in this restricted writer's own inbox."""
     # An existing path is never a free slot. Ask that first: every disclosure of an existing page
     # passes here, and the ceiling and inbox checks re-read host state on each call.
-    if who is None or os.path.lexists(Path(root) / path):
+    if who is None:
+        return False
+    from ..vault_store import read
+
+    exists = read.page_exists(root, path) if read.serves(root, path) else os.path.lexists(Path(root) / path)
+    if exists:
         return False
     ceiling = write_ceiling(root, who)
     return ceiling is not None and _in_inbox(root, path, ceiling)
@@ -534,8 +544,10 @@ def _in_inbox(root: Path, path: str, ceiling: WriteCeiling, *, directory: bool =
 
 def _is_writable_page(root: Path, path: str, ceiling: WriteCeiling) -> bool:
     """Whether `path` is an existing page that the writer reads in full inside its writable scopes."""
+    from ..vault_store import read
+
     try:
-        if not (Path(root) / path).exists():
+        if not read.page_exists(root, path):
             return False
         sets = _membership_sets(Path(root), path, ceiling.compiled, who=ceiling.who)
     except _ADMISSION_REFUSALS:

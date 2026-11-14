@@ -3848,9 +3848,14 @@ def _detach_auxiliaries(
                 )
             value.guard.recheck(root)
         else:
-            leaf_policy = "stable" if os.path.lexists(absolute) else "absent"
             try:
-                vault.PathGuard.capture(root, relative, leaf_policy=leaf_policy)
+                from .vault_store import read as store_read
+
+                if store_read.serves(root, relative):
+                    vault.PathGuard.capture_store(root, relative)
+                else:
+                    leaf_policy = "stable" if os.path.lexists(absolute) else "absent"
+                    vault.PathGuard.capture(root, relative, leaf_policy=leaf_policy)
             except vault.PathGuardError as error:
                 raise RelationReviewError(
                     "INVALID_AUXILIARY_WRITE", "auxiliary target is unsafe"
@@ -4360,23 +4365,26 @@ def commit_prepared_creation_draft(
                     guarded_auxiliaries.append(auxiliary)
                     continue
                 relative = auxiliary.path.relative_to(root).as_posix()
-                policy = "content" if os.path.lexists(auxiliary.path) else "absent"
-                expected_hash = None
-                if policy == "content":
-                    stable = vault.PathGuard.capture(root, relative, leaf_policy="stable")
-                    assert stable.leaf_identity is not None
-                    expected_hash = vault._leaf_hash(auxiliary.path, stable.leaf_identity)
+                from .vault_store import read as store_read
+
+                if store_read.serves(root, relative):
+                    guard = vault.PathGuard.capture_store(root, relative)
+                else:
+                    policy = "content" if os.path.lexists(auxiliary.path) else "absent"
+                    expected_hash = None
+                    if policy == "content":
+                        stable = vault.PathGuard.capture(root, relative, leaf_policy="stable")
+                        assert stable.leaf_identity is not None
+                        expected_hash = vault._leaf_hash(auxiliary.path, stable.leaf_identity)
+                    guard = vault.PathGuard.capture(
+                        root, relative, leaf_policy=policy, expected_content_hash=expected_hash,
+                    )
                 guarded_auxiliaries.append(
                     vault.PlannedWrite(
                         auxiliary.path,
                         auxiliary.content,
                         create_only=auxiliary.create_only,
-                        guard=vault.PathGuard.capture(
-                            root,
-                            relative,
-                            leaf_policy=policy,
-                            expected_content_hash=expected_hash,
-                        ),
+                        guard=guard,
                         expected_hash=auxiliary.expected_hash,
                         ensure_directories=auxiliary.ensure_directories,
                     )

@@ -15,6 +15,7 @@ directory tree; refuses if any exist unless `force_orphan=true`.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import itertools
@@ -715,21 +716,22 @@ def _delete_in_store(
     """Trash a folder in one store transaction.
 
     The store moves each page under one trash folder with its rows; the projector moves the page
-    files afterwards, and no Markdown is written. Each binary, and each file or folder the store
-    does not own, is renamed into the trash folder first, and the commit records the binaries there
-    (``vault_store.binaries`` names the window). A folder the store holds nothing below is renamed
-    whole. The commit binds every page and record it read and the folder's counts, so a page that
-    changed or that a commit added, or a link from a page that the inbound check did not see,
-    refuses the whole commit and every rename is undone. The sidecar lands on disk inside the same
-    rollback window. A folder that holds a governed item keeps its tombstone and receipt around the
-    commit (``vault_store.governed``), with file mode's limit on a receipt's items. The log entry
-    commits with the trash, and an active catalog publication publishes after the commit.
+    files afterwards, and no Markdown is written. The commit moves each binary's record into the
+    trash folder and records the sidecar there, and the binaries, the sidecar and each file or
+    folder the store does not own are renamed right after it (``vault_store.binaries``). A folder
+    that holds no page and no binary is renamed whole. The commit binds every page and record it
+    read and the folder's counts, so a page that changed or that a commit added, or a link from a
+    page that the inbound check did not see, refuses the whole commit and nothing moves. A folder
+    that holds a governed item keeps its tombstone and receipt around the commit
+    (``vault_store.governed``), with file mode's limit on a receipt's items. The log entry commits
+    with the trash, and an active catalog publication publishes after the commit.
     """
-    from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
+    from .vault import CreateOnlyConflict, PathGuardError
     from .vault_store import availability as store_availability
     from .vault_store import batch as store_batch
     from .vault_store import binaries, governed
     from .vault_store import media as store_media
+    from .vault_store import ownership as store_ownership
     from .vault_store import read as store_read
     from .vault_store.write import Expect, PageMove, StoreConflict
 
@@ -814,14 +816,21 @@ def _delete_in_store(
         def trashed(source: str) -> str:
             return f"{trash_rel}/{source[len(rel_path) + 1:]}"
 
-        if pages or listing.recorded:
+        if pages or listing.recorded or any(
+            store_ownership.classify(rel) is store_ownership.Ownership.BINARY
+            for rel in listing.files
+        ):
             entries = [
                 *(binaries.Entry(rel, trashed(rel)) for rel in listing.files),
                 *(binaries.Entry(rel, trashed(rel), folder=True) for rel in listing.folders),
             ]
+            # Its contents move one by one, so the commit names the folders that file mode's
+            # rename of the folder takes away, and the projector removes them once emptied.
+            vacated = binaries.vacated(rel_path, (*pages, *listing.files, *listing.folders))
         else:
             # The store refers to nothing below the folder, so it moves as file mode moves it.
             entries = [binaries.Entry(rel_path, trash_rel, folder=True)]
+            vacated = ()
         with store_read.snapshot(root) as view:
             relocation = binaries.plan(view, entries)
         counts = {"files": file_count, "md_files": len(pages), "inbound": inbound_total}
@@ -853,8 +862,9 @@ def _delete_in_store(
             ),
         )
     meta_rel = f"{trash_rel}{METADATA_SUFFIX}"
-    sidecar = PlannedWrite(
-        root / meta_rel,
+    # The sidecar is a file that the commit records, so it waits in a temporary until the commit.
+    sidecar = binaries.Placement(
+        meta_rel,
         _trash_metadata(
             rel_path,
             now,
@@ -862,9 +872,9 @@ def _delete_in_store(
             recursive=recursive,
             force_orphan=force_orphan,
             curated=bool(curated and allow_curated),
-        ).decode("utf-8"),
-        create_only=True,
+        ),
     )
+    relocation = dataclasses.replace(relocation, placements=(sidecar,))
     moves = {page: trashed(page) for page in pages}
     expect = {
         page: Expect(sha256=hashes[page], linked_from=checks[page].bound) for page in pages
@@ -884,17 +894,19 @@ def _delete_in_store(
             deletion = governed.begin_deletion(
                 root, source_rel=rel_path, trash_rel=trash_rel, error_class=DeleteDirectoryError
             )
-            with governed.committing(deletion), binaries.relocated(root, relocation) as moved:
+            with (
+                governed.committing(deletion),
+                binaries.relocated(root, relocation, writer) as moved,
+            ):
                 store_batch.commit_batch(
                     writer,
-                    [sidecar, *log_plan.writes],
+                    list(log_plan.writes),
                     vault_root=root,
                     lifecycle=store_batch.Lifecycle(
                         moves=tuple(PageMove(source, moves[source]) for source in pages),
-                        binary_deletes=relocation.binary_deletes,
+                        binary_moves=moved.binary_moves,
                         expect=expect,
-                        records=moved.records,
-                        refresh=moved.refresh,
+                        vacated_folders=vacated,
                     ),
                 )
     except StoreConflict as conflict:
@@ -907,13 +919,14 @@ def _delete_in_store(
             ) from conflict
         raise DeleteDirectoryError("DELETE_FAILED", failed) from conflict
     except (
-        binaries.Stranded,
+        binaries.Unreadable,
         reserved_paths.ReservedPathLeafError,
         CreateOnlyConflict,
         PathGuardError,
         OSError,
     ) as error:
         raise DeleteDirectoryError(*binaries.refusal(error, "DELETE_FAILED", failed)) from error
+    warnings.extend(f"{rel}: {binaries.LEFT}" for rel in moved.left)
     binaries.prune_empty(abs_path)
     store_media.after_removal(root, listing.files)
 

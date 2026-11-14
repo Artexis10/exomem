@@ -77,6 +77,21 @@ def test_tag_selector_resolves_membership(vault: Path) -> None:
     assert "01ARZ3NDEKTSV4RRFFQ69G5FB1" in membership.evaluate(parsed, pol)
 
 
+def test_unbound_membership_does_not_recheck_assignment_under_the_old_memo_key(vault, monkeypatch):
+    """A binding that changes during evaluation must not be cached as an unbound result."""
+    scope = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+    _write_scope(vault, "secret", f"governance_version: 1\nid: {scope}\ntags: [secret]\n")
+    path = "Knowledge Base/Notes/Unbound.md"
+    _write_page(vault, path, "type: insight")
+    parsed = _parse(vault, path)
+    compiled = policy.load(vault)
+    assignments = iter((None, frozenset({scope}), None))
+    monkeypatch.setattr(membership, "_registry_assignment", lambda *args: next(assignments))
+    assert membership.evaluate(parsed, compiled) == frozenset()
+    assert membership.evaluate(parsed, compiled) == frozenset({scope})
+    assert membership.evaluate(parsed, compiled) == frozenset()
+
+
 def test_malformed_markdown_frontmatter_is_unresolved_for_semantic_scope(
     vault: Path,
 ) -> None:

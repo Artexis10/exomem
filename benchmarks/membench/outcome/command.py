@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -91,13 +92,18 @@ def refuse(message: str) -> SystemExit:
 
 @contextmanager
 def waits_for_room() -> Iterator[None]:
-    """A rejected subscription limit ends the command with one line; the run then reads as incomplete."""
+    """A rejected account limit ends the command with one line; the run then reads as incomplete."""
     try:
         yield
     except LimitRejected as stop:
+        resume = (
+            "run the same command again after funding the account"
+            if stop.info.get("limit") == "credits"
+            else "run the same command again when there is room"
+        )
         raise refuse(
             f"{stop}. The run stopped at once and waits for room as an incomplete run: "
-            "run the same command again when there is room"
+            f"{resume}"
         ) from stop
 
 
@@ -137,6 +143,11 @@ def write_record(run_dir: Path, entry: dict) -> dict:
         order = suite_arms(entry["suite"])
         entry = {
             **have,
+            **(
+                {"estimated_cost_usd": entry["estimated_cost_usd"]}
+                if "estimated_cost_usd" in entry
+                else {}
+            ),
             "arms": [a for a in order if a in {*have["arms"], *entry["arms"]}],
             "seeds": sorted({*(have["seeds"] or []), *(entry["seeds"] or [])}) or None,
             # f38 plays one project per call under --project: its case checks add up like its arms.
@@ -325,8 +336,11 @@ def run_suite(
     window: int | None = None,
     project: str | None = None,
     history: str | None = None,
+    estimated_cost_usd: float | None = None,
 ) -> Path:
     """Play ``suite``'s arms on ``split``. A held-out run passes the gate before any session starts."""
+    if estimated_cost_usd is not None:
+        estimated_cost_usd = _estimated_cost_usd(estimated_cost_usd)
     if suite != "epistemic" and (window or project or history):
         raise refuse("--window, --project and --history belong to the epistemic suite")
     if split not in SPLITS:
@@ -377,7 +391,7 @@ def run_suite(
     # Refuses a credits declaration without a key before the record or any session exists.
     billing.require_billing_env(os.environ)
     run_dir = runs_dir() / run_id
-    write_record(
+    stored = write_record(
         run_dir,
         {
             "suite": suite,
@@ -390,6 +404,7 @@ def run_suite(
             "effort": effort,
             # The billing source every session of this run must report (``billing.py``).
             "billing": billing.declared(),
+            **({"estimated_cost_usd": estimated_cost_usd} if estimated_cost_usd is not None else {}),
             "gate": verdict,
             **record.checkout_state(),
             "cli": record.cli_version(),
@@ -398,6 +413,8 @@ def run_suite(
             ),
         },
     )
+    if (estimate := stored.get("estimated_cost_usd")) is not None:
+        print(f"owner estimate: USD {estimate:g} for this run", flush=True)
     if suite == "clbench":
         run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort)
     elif suite == "lab":
@@ -604,6 +621,16 @@ def _csv(text: str | None) -> list[str] | None:
     return [part for part in text.split(",") if part] if text else None
 
 
+def _estimated_cost_usd(value: str | float) -> float:
+    try:
+        estimate = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("the owner estimate must be finite nonnegative USD") from error
+    if not math.isfinite(estimate) or estimate < 0:
+        raise argparse.ArgumentTypeError("the owner estimate must be finite nonnegative USD")
+    return estimate
+
+
 def _cmd_fetch(args: argparse.Namespace) -> int:
     from .fetch import fetch
 
@@ -626,6 +653,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             window=args.window,
             project=args.project,
             history=args.history,
+            estimated_cost_usd=args.estimated_cost_usd,
         )
     print(
         f"{args.suite} {args.split} run in {run_dir}; next: membench outcome report {args.suite} --run-id {args.run_id}"
@@ -742,6 +770,11 @@ def register(sub) -> None:
     p_run = commands.add_parser("run", help="play a suite's arms end to end")
     p_run.add_argument("suite", choices=SUITES)
     p_run.add_argument("--run-id", required=True)
+    p_run.add_argument(
+        "--estimated-cost-usd",
+        type=_estimated_cost_usd,
+        help="optional owner estimate in USD, recorded and printed before actors launch",
+    )
     p_run.add_argument(
         "--split",
         choices=("dev", "heldout"),

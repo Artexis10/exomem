@@ -12,7 +12,8 @@ A form lists what it ``serves``, and each entry names a family and an item of a 
 * ``operation.<name>``: the document that announces an operation that the pack gives a document;
 * ``qualifier.scope``, ``qualifier.hedge.<word>``, ``qualifier.basis.<value>``: a wrapper that takes
   the sentence as ``{text}``;
-* ``probe.<form>``: the task of a probe form.
+* ``probe.<form>``: the task of a probe form;
+* ``relation.<form>``: a source snapshot of a canonical context parent, support or defeat edge.
 
 A form fits an item when every slot of the form is one that the item can fill, and the form holds
 every slot that the item fills only some of the time. A statement that has a value therefore gets a
@@ -40,11 +41,11 @@ LEVELS = ("stated", "paraphrased", "unmarked")
 STATED, PARAPHRASED = LEVELS[:2]
 # The slots that a text may hold. A document frame takes `by` and `date`.
 SLOTS = frozenset(
-    "by subject about value quoting as scope old name former holder absorbed audience until text where".split()
+    "by subject about value quoting as scope old name former holder absorbed audience until text where source target child parent".split()
 )
 FRAME_SLOTS = frozenset({"by", "date"})
-# The families of what a form serves, each with the registry that its item is read from.
-FAMILIES = ("statement", "rule", "operation", "qualifier", "probe")
+# Closed families of surface-form keys, each with the registry that its item is read from.
+FAMILIES = ("statement", "rule", "operation", "qualifier", "probe", "relation")
 _QUALIFIER_TEXT = "text"
 
 _FIELDS = {
@@ -210,6 +211,7 @@ class _Checker:
             self.pack.artefact_default,
             *self.pack.artefact_kinds.values(),
             *self.pack.operation_kinds.values(),
+            *self.pack.relation_kinds.values(),
         }
         for kind in sorted(carried - set(frames)):
             self.refuse(
@@ -260,6 +262,7 @@ class _Checker:
             "rule": self.vocabulary.rule_shapes,
             "operation": self.pack.operation_kinds,
             "probe": self.vocabulary.probe_forms,
+            "relation": self.pack.relation_kinds,
         }
         if family == "qualifier":
             kind, _, word = name.partition(".")

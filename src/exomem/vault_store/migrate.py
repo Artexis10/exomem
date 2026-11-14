@@ -32,6 +32,7 @@ from .. import (
 )
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
+from ..governance import page_admission
 from . import availability, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
@@ -56,11 +57,13 @@ class Staged:
     pages: int = 0
     binaries: int = 0
     skipped: list[ownership.Skipped] = field(default_factory=list)
-    #: Each object the lexical, then the graph, then the references, owner created: name -> type, in creation order.
+    #: Each object the lexical, the graph, the references, then the inbound-link owner created: name -> type, in creation order.
     objects: dict[str, str] = field(default_factory=dict)
     lexical_tables: list[str] = field(default_factory=list)
     graph_tables: list[str] = field(default_factory=list)
     refs_tables: list[str] = field(default_factory=list)
+    #: The tables that no sidecar holds, so staging derives their rows from the files.
+    link_tables: list[str] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -99,8 +102,8 @@ def schema_objects(conn: sqlite3.Connection) -> dict[str, str]:
 
 def create_owner_schema(
     conn: sqlite3.Connection,
-) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """Create the lexical, graph, then references tables with their owners' DDL; return what each created."""
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Create the lexical, graph, references, then inbound-link tables with their owners' DDL; return what each created."""
     before = schema_objects(conn)
     lexstore.create_catalogue_schema(conn)
     middle = schema_objects(conn)
@@ -108,11 +111,15 @@ def create_owner_schema(
     epistemic_graph.create_row_schema(conn, publication=False)
     graph_done = schema_objects(conn)
     memory_refs.create_identity_schema(conn)
+    refs_done = schema_objects(conn)
+    vault.create_inbound_schema(conn)
+    page_admission.create_schema(conn)
     after = schema_objects(conn)
     return (
         {n: t for n, t in middle.items() if n not in before},
         {n: t for n, t in graph_done.items() if n not in middle},
-        {n: t for n, t in after.items() if n not in graph_done},
+        {n: t for n, t in refs_done.items() if n not in graph_done},
+        {n: t for n, t in after.items() if n not in refs_done},
     )
 
 
@@ -120,17 +127,33 @@ def stage(vault_root: Path, conn: sqlite3.Connection, *, revision: int = 1) -> S
     """Load the exact bytes of every owned file and copy the sidecars' rows into ``conn``, a staged store."""
     staged = Staged()
     started = time.perf_counter()
-    lexical, graph, refs = create_owner_schema(conn)
-    staged.objects = {**lexical, **graph, **refs}
+    lexical, graph, refs, links = create_owner_schema(conn)
+    staged.objects = {**lexical, **graph, **refs, **links}
     staged.lexical_tables = [n for n, t in lexical.items() if t in ("table", "virtual")]
     staged.graph_tables = [n for n, t in graph.items() if t in ("table", "virtual")]
     staged.refs_tables = [n for n, t in refs.items() if t in ("table", "virtual")]
+    staged.link_tables = [n for n, t in links.items() if t in ("table", "virtual")]
     _load_files(vault_root, conn, staged, revision)
     staged.timings["load_files_s"] = time.perf_counter() - started
     started = time.perf_counter()
     _copy_sidecars(vault_root, conn, staged)
     staged.timings["copy_sidecars_s"] = time.perf_counter() - started
+    started = time.perf_counter()
+    _derive_links(vault_root, conn)
+    staged.timings["derive_links_s"] = time.perf_counter() - started
     return staged
+
+
+def _derive_links(vault_root: Path, conn: sqlite3.Connection) -> None:
+    """Derive the inbound-link rows from the files: no sidecar holds them to copy."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        vault.derive_inbound_rows(vault_root, conn)
+        page_admission.derive_files(vault_root, conn)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revision: int) -> None:
@@ -322,10 +345,34 @@ def apply_route(vault_root: Path, *, why: str) -> dict:
         "store-mode migrate",
         lambda session, token, writer: _cutover(root, session, token, writer, why=why),
     )
+    refresh_review_advice(root, result)
     # What the replica says once the hand-back ran: "store" means that a file-mode start on another
     # state root now refuses.
     return {**result, "vault_marker": marker.read_replica(root).state}
 
+
+def refresh_review_advice(root: Path, result: dict) -> None:
+    """Refresh existing review state after an offline mode change, outside its mutation guard."""
+    from .. import due_state
+    from . import read
+
+    started = time.monotonic()
+    try:
+        # Persisted review fingerprints must name the canonical owner after either mode change.
+        # Recompute outside the mutation critical section, after the mode change commits.
+        with read.request_snapshot(root):
+            if (due_state.load(root) or {}).get("role_state"):
+                due_state.reconcile(root)
+    except Exception as error:  # noqa: BLE001 - advisory refresh cannot undo a committed mode change
+        # The transition protocol fixes this outcome independently of the committed mode change.
+        result["review_advice"] = {"state": "refresh_failed"}
+        result.setdefault("warnings", []).append(
+            "The mode change committed. Run maintain_memory(mode='reconcile') to refresh review advice."
+        )
+        result.setdefault("diagnostics", {})["review_advice"] = {
+            "error": type(error).__name__, "reason": str(error),
+        }
+    result.setdefault("timings", {})["review_advice_s"] = round(time.monotonic() - started, 3)
 
 def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
     """Stage, verify, then install under the lease; the report carries each phase's seconds."""
@@ -545,8 +592,8 @@ def _install_rows(
             "VAULT_STORE_OBJECTS_EXIST",
             f"the store already holds {len(present)} of the tables store mode creates, e.g. {', '.join(present[:5])}",
         )
-    lexical, graph, refs = create_owner_schema(conn)
-    if {**lexical, **graph, **refs} != staged.objects:
+    lexical, graph, refs, links = create_owner_schema(conn)
+    if {**lexical, **graph, **refs, **links} != staged.objects:
         raise OpError(
             "VAULT_STORE_SCHEMA_DRIFT",
             "the owners' schema differs from the one that was staged and proved",
@@ -557,6 +604,7 @@ def _install_rows(
             *staged.lexical_tables,
             *staged.graph_tables,
             *staged.refs_tables,
+            *staged.link_tables,
             "store_pages",
             "store_binaries",
         ):

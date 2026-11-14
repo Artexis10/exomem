@@ -182,6 +182,7 @@ STORE_FIGURES = (
     "registry_revision",
     "registry_target_revision",
     "registry_waiting_on_paths",
+    "owner_schema",
     "unowned_rows_as_of",
 )
 
@@ -199,6 +200,8 @@ def status(vault_root: Path) -> dict:
     toward ``registry_target_revision`` (``rebuilding``) or have no record (``unknown``).
     ``registry_waiting_on_paths`` counts the overlay paths that the projector has not put on disk or
     that a person's edit holds: the job waits for each, so a held path keeps a vault ``rebuilding``.
+    ``owner_schema`` is ``behind`` while the store lacks derived objects that this build adds, which
+    the registry pass creates and fills (``registry`` is then ``unknown``), else ``current``.
     ``unowned_rows_as_of`` is when the importer's last complete sweep began to read the files that
     the store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
     ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
@@ -279,5 +282,7 @@ def _store_figures(vault_root: Path) -> dict:
         "registry_revision": registry.revision if registry.revision is not None else UNKNOWN,
         "registry_target_revision": registry.target if registry.target is not None else UNKNOWN,
         "registry_waiting_on_paths": waiting,
+        # Whether the store holds the derived objects of this build, or a pass still creates them.
+        "owner_schema": "behind" if registry.owner_schema_behind else "current",
         "unowned_rows_as_of": unowned.get("at"),
     }

@@ -17,7 +17,7 @@ on:
 
 # Prefer the same GitHub App-token pattern as the Endstate repos. A non-GITHUB_TOKEN
 # credential lets Release Please PRs and releases trigger normal CI/release events.
-# The release App owns tag creation. The two jobs that mint its token run in the
+# The release App owns tag creation. The main controller mints its token in the
 # `release` environment. Restricting that environment to `main`, holding the App
 # key there and a `v*` tag ruleset are operator settings; source alone
 # establishes no live protection.
@@ -41,96 +41,13 @@ env:
   IMAGE_CACHE_CELLCTL: cellctl
 
 jobs:
-  release-please:
-    if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    environment: release
-    env:
-      HAS_RELEASE_APP: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
-    outputs:
-      release_branch: ${{ steps.release.outputs.pr && fromJson(steps.release.outputs.pr).headBranchName }}
-    steps:
-      - name: Require the release App for tag creation
-        if: env.HAS_RELEASE_APP != 'true'
-        run: |
-          echo "::error::Configure the release App before creating a release tag"
-          exit 1
-
-      - name: Mint GitHub App installation token
-        if: env.HAS_RELEASE_APP == 'true'
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-
-      - uses: googleapis/release-please-action@v5
-        id: release
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-  # Cloud packages bind the current version, skill contract and corpus digest;
-  # rebuild them on every release update. No `extra-files` updater can
-  # recompute these archive bytes and hash locks.
-  #
-  # Without the GitHub App token this push uses GITHUB_TOKEN, which does not
-  # retrigger the PR's checks -- the amended branch is correct but shows the
-  # pre-amendment run, so re-run checks before merging.
-  sync-cloud-artifacts:
-    needs: release-please
-    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_branch != '' }}
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: write
-    env:
-      HAS_RELEASE_APP: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
-    steps:
-      - name: Mint GitHub App installation token
-        if: env.HAS_RELEASE_APP == 'true'
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release-please.outputs.release_branch }}
-          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          enable-cache: true
-          # v10 no longer prunes by default; keep v5's small, pruned uv cache in the shared cache budget.
-          prune-cache: true
-
-      - name: Regenerate current Cloud packages for the source release
-        run: uv run --frozen python scripts/cloud-plugin.py build
-
-      - name: Commit the resync onto the release PR
-        run: |
-          if git diff --quiet; then
-            echo "Cloud packages already current for this release"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add plugins/cloud/generated
-          git commit -m "chore(cloud): regenerate Cloud packages for the release"
-          git push
-
   # Every run finds the release it serves and checks which of its artifacts are
   # present. Only a run on the release tag publishes, so every attestation
   # names the tag's ref and commit. Any other run hands the publish to a run on
   # the tag: a push heals a release whose own run never published, and a
   # dispatch from main reaches the tag.
   plan:
-    needs: release-please
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release-please.result == 'success') }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -214,12 +131,13 @@ jobs:
           fi
           git fetch --quiet --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
           source_commit=$(git rev-parse "refs/tags/$tag^{commit}")
-          # This guards mistakes only; the operator's tag ruleset and App key custody, where configured, address hostile refs.
+          # Read the origin from an explicitly fetched main revision, never from the tag.
           git fetch --quiet --no-tags origin main
-          if ! git merge-base --is-ancestor "$source_commit" FETCH_HEAD; then
-            echo "::error::Release source must be contained in main"
-            exit 1
-          fi
+          trusted_main=$(git rev-parse FETCH_HEAD)
+          git show "$trusted_main:scripts/release_cuts.py" > "$RUNNER_TEMP/release_cuts.py"
+          git show "$trusted_main:scripts/release_evidence.py" > "$RUNNER_TEMP/release_evidence.py"
+          git show "$trusted_main:scripts/check_release_pr_files.py" > "$RUNNER_TEMP/check_release_pr_files.py"
+          GH_REPO="$GITHUB_REPOSITORY" python3 "$RUNNER_TEMP/release_cuts.py" verify-tag --tag "$tag" --trusted-main "$trusted_main"
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
           package=$(git show "$tag:pyproject.toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["name"])')
           server=$(git show "$tag:server.json" | jq -er .name)
@@ -1099,3 +1017,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: python3 .release-tools/infra/scripts/release_recovery.py finish-images --tag "$TAG" --directory image-evidence
+
+  deploy-cells:
+    # automate-cloud-releases D1: start cloud-deploy on main once the tag's images
+    # and attestations are published. A dispatch is the only start that works:
+    # this run began from a github.token dispatch, so its completion fires no
+    # workflow_run. cloud-deploy reads the newest release itself.
+    needs: [plan, publish-image]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.dry_run != 'true' && needs.publish-image.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch cloud-deploy on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run cloud-deploy.yml --ref main --repo "$GITHUB_REPOSITORY"

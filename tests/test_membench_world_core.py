@@ -353,3 +353,147 @@ def test_no_module_of_the_world_package_imports_the_product() -> None:
             )
             offenders += [f"{path.name}: {n}" for n in names if n.split(".")[0] == "exomem"]
     assert offenders == []
+
+
+def test_a_context_snapshot_refuses_a_context_with_no_canonical_parent_before_hashing() -> None:
+    from benchmarks.membench.world.core import ContextParentRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+
+    world = sound_world()
+    world.add_artefact("directory", week_date(1), relations=(ContextParentRef("everywhere"),))
+    assert ("unknown-reference", "directory") in faults(world)
+    with pytest.raises(WorldInvalid, match="recorded parent"):
+        artefact_hashes(world)
+
+
+def test_an_edge_snapshot_refuses_unrecorded_links_before_rendering_or_hashing() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+    from benchmarks.membench.world.render import Reader
+
+    world = sound_world()
+    for ref in ("first", "second"):
+        world.op_state(ref, by="lead", about="approvals", kind="fact", at=week_date(1), value=1)
+    world.add_artefact("register", week_date(1), relations=(EdgeRef("first", "second", None),))
+    assert ("unknown-reference", "register") in faults(world)
+    with pytest.raises(WorldInvalid, match="recorded edge"):
+        artefact_hashes(world)
+    with pytest.raises(WorldInvalid, match="recorded edge"):
+        Reader(None, world)
+
+
+def test_a_snapshot_with_an_unsupported_defeat_mode_names_the_schema_error() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+
+    world = sound_world()
+    world.add_artefact(
+        "register", week_date(1), relations=(EdgeRef("first", "second", "invented"),)
+    )
+    assert ("undeclared-value", "register") in faults(world)
+
+
+def test_an_untyped_relation_payload_has_an_actionable_error_instead_of_a_lookup_failure() -> None:
+    from benchmarks.membench.world.manifest import artefact_hashes
+
+    world = sound_world()
+    world.add_artefact("directory", week_date(1), relations=({"child": "quay"},))
+    assert ("invalid-value", "directory") in faults(world)
+    with pytest.raises(WorldInvalid, match="typed relation reference"):
+        artefact_hashes(world)
+
+
+def test_an_edge_snapshot_requires_an_original_document_for_each_endpoint() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+    from benchmarks.membench.world.render import Reader
+
+    world = sound_world()
+    world.op_state("basis", by="lead", about="approvals", kind="fact", at=week_date(1), value=1)
+    world.op_state("claim", by="clerk", about="approvals", kind="fact", at=week_date(3), value=1)
+    world.op_support(None, **{"from": "basis", "to": "claim"})
+    world.add_artefact("claim-note", week_date(3), carries=("claim",))
+    world.add_artefact("link", week_date(3), relations=(EdgeRef("basis", "claim", None),))
+    assert ("unresolved-artefact", "link") in faults(world)
+    with pytest.raises(WorldInvalid, match="exactly one original document"):
+        artefact_hashes(world)
+    with pytest.raises(WorldInvalid, match="exactly one original document"):
+        Reader(None, world)
+
+
+def test_a_later_second_original_cannot_redirect_a_historical_snapshot() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+    from benchmarks.membench.world.render import Reader
+
+    world = sound_world()
+    world.op_state("basis", by="lead", about="approvals", kind="fact", at=week_date(1), value=1)
+    world.op_state("claim", by="clerk", about="approvals", kind="fact", at=week_date(3), value=1)
+    world.op_support(None, **{"from": "basis", "to": "claim"})
+    world.add_artefact("basis-original", week_date(1), carries=("basis",))
+    world.add_artefact("claim-note", week_date(3), carries=("claim",))
+    world.add_artefact("link", week_date(3), relations=(EdgeRef("basis", "claim", None),))
+    world.add_artefact("basis-later-original", week_date(5), carries=("basis",))
+    assert world.resolve_artefact("basis") is None
+    assert ("unresolved-artefact", "link") in faults(world)
+    with pytest.raises(WorldInvalid, match="exactly one original document"):
+        artefact_hashes(world)
+    with pytest.raises(WorldInvalid, match="exactly one original document"):
+        Reader(None, world)
+
+
+def test_backdated_originals_do_not_allow_a_snapshot_to_cite_a_future_statement() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+    from benchmarks.membench.world.render import Reader
+
+    world = sound_world()
+    world.op_state("basis", by="lead", about="approvals", kind="fact", at=week_date(1), value=1)
+    world.op_state("claim", by="clerk", about="approvals", kind="fact", at=week_date(3), value=1)
+    world.op_support(None, **{"from": "basis", "to": "claim"})
+    world.add_artefact("basis-note", week_date(1), carries=("basis",))
+    world.add_artefact("claim-backdated-note", week_date(1), carries=("claim",))
+    world.add_artefact("link", week_date(1), relations=(EdgeRef("basis", "claim", None),))
+    assert ("acts-before-target", "link") in faults(world)
+    with pytest.raises(WorldInvalid, match="date the snapshot on or after"):
+        artefact_hashes(world)
+    with pytest.raises(WorldInvalid, match="date the snapshot on or after"):
+        Reader(None, world)
+
+
+def test_a_snapshot_waits_for_its_original_document_even_when_the_statement_is_older() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+
+    world = sound_world()
+    world.op_state("basis", by="lead", about="approvals", kind="fact", at=week_date(1), value=1)
+    world.op_state("claim", by="clerk", about="approvals", kind="fact", at=week_date(1), value=1)
+    world.op_support(None, **{"from": "basis", "to": "claim"})
+    world.add_artefact("basis-note", week_date(3), carries=("basis",))
+    world.add_artefact("claim-note", week_date(1), carries=("claim",))
+    world.add_artefact("link", week_date(1), relations=(EdgeRef("basis", "claim", None),))
+    assert ("acts-before-target", "link") in faults(world)
+    with pytest.raises(WorldInvalid, match="date the snapshot on or after"):
+        artefact_hashes(world)
+
+
+def test_distinct_edge_endpoints_keep_distinct_tokens_when_short_digest_prefixes_collide() -> None:
+    from membench.ids import sentinel, stable_id
+
+    from benchmarks.membench.world.core import EdgeRef, source_ref
+    from benchmarks.membench.world.render import Reader
+
+    world = sound_world()
+    source, target = "dev-00.t67103.statement", "dev-00.t69809.statement"
+    for ref in (source, target):
+        world.op_state(ref, by="lead", about="approvals", kind="fact", at=week_date(1), value=1)
+        world.add_artefact(f"{ref}.doc", week_date(1), carries=(ref,))
+    world.op_support(None, **{"from": source, "to": target})
+    edge = EdgeRef(source, target, None)
+    world.add_artefact("link", week_date(1), relations=(edge,))
+    # The short default remains compatible with existing callers and exposes the collision.
+    assert stable_id("DOC", f"{source}.doc") == stable_id("DOC", f"{target}.doc")
+    item = Reader(None, world).relation(edge, week_date(1), "link")
+    assert item.fills["source"] == source_ref(source)
+    assert item.fills["target"] == source_ref(target)
+    assert item.fills["source"] != item.fills["target"]
+    assert source_ref(source) == sentinel(stable_id("SRC", source, digest_chars=64))

@@ -30,17 +30,30 @@ class Admission:
     page proves it still holds. A verdict that reads another page, collection
     state or live state is returned, never kept. A caller that only needs the
     verdict leaves `publish` unset and pays nothing for the proof.
+
+    `decide_many(paths, publish)` returns the same pairs by path. A supplied
+    set rule can reuse byte-bound facts; otherwise it calls `decide` for each
+    path. Single-page release consumers keep calling the scalar predicate.
     """
 
-    __slots__ = ("decide", "identity")
+    __slots__ = ("decide", "identity", "_many")
 
     def __init__(
         self,
         identity: Callable[[], Hashable | None],
         decide: Callable[[str, bool], tuple[bool, bool]],
+        decide_many: Callable[[list[str], bool], dict[str, tuple[bool, bool]]] | None = None,
     ) -> None:
         self.identity = identity
         self.decide = decide
+        self._many = decide_many
+
+    def decide_many(self, paths: Iterable[str], publish: bool = False) -> dict[str, tuple[bool, bool]]:
+        """Decide a candidate set; predicates without a set rule retain the scalar chain."""
+        wanted = list(dict.fromkeys(paths))
+        if self._many is None:
+            return {path: self.decide(path, publish) for path in wanted}
+        return self._many(wanted, publish)
 
 
 class AdmittedPredicate:

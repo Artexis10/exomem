@@ -126,20 +126,22 @@ def access_events(
     singularity); events beyond `horizon_days` are ignored (bounds log-parse
     cost and makes log rotation explicitly safe). A zero-weight source is
     skipped entirely — a w=0 event adds nothing to the activation sum but
-    would make a page look "accessed".
+    would make a page look "accessed". Its log is not parsed either: the
+    query log is the largest of the three, and the default weights give it
+    none.
 
     Returns None when the signal is UNAVAILABLE — gated for tests
-    (`EXOMEM_DISABLE_RELEVANCE_CHECK`) or all three logs empty — so callers
-    fall back rather than fabricate activation.
+    (`EXOMEM_DISABLE_RELEVANCE_CHECK`) or every log that carries weight empty
+    — so callers fall back rather than fabricate activation.
     """
     if os.environ.get("EXOMEM_DISABLE_RELEVANCE_CHECK"):
         return None
     logs_dir = logs_dir or query_log.current_log_dir()
     today = today or dt.date.today()
 
-    queries = read_jsonl(logs_dir / "queries.jsonl")
-    reads = read_jsonl(logs_dir / "reads.jsonl")
-    writes = read_jsonl(logs_dir / "writes.jsonl")
+    queries = read_jsonl(logs_dir / "queries.jsonl") if w_surfaced else []
+    reads = read_jsonl(logs_dir / "reads.jsonl") if w_read else []
+    writes = read_jsonl(logs_dir / "writes.jsonl") if w_cited else []
     if not queries and not reads and not writes:
         return None
 

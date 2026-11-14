@@ -58,7 +58,7 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError
-from .kbdir import kb_page_target, kb_prefix
+from .kbdir import kb_page_target, kb_prefix, resolve_stored_page_target
 from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
@@ -468,6 +468,21 @@ def _write_target_withheld(vault_root: Path, rel: str) -> bool:
     return egress.write_target_withheld(vault_root, rel)
 
 
+def _missing_page_error(vault_root: Path, path: str, rel: str) -> EditError:
+    """Distinguish a missing governed page from a real page outside the governed root."""
+    outside = _existing_page_outside_kb(vault_root, path)
+    if outside is not None:
+        return EditError(
+            code="OUTSIDE_GOVERNED_ROOT", missing=["path"],
+            reason=(
+                f"page exists at {outside} but is outside {kb_prefix()}"
+                f" — exomem only edits governed content under {kb_prefix()};"
+                " move it under the governed root or address it there"
+            ),
+        )
+    return EditError(code="NOT_FOUND", missing=["path"], reason=f"file does not exist: {rel}")
+
+
 def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     if not path or not path.strip():
         raise EditError(code="INVALID_PATH", missing=["path"], reason="path is empty")
@@ -475,8 +490,13 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # guard. See `kbdir.kb_relative_form` for why this must not be inlined.
     candidate, rel = kb_page_target(vault_root, path)
     try:
+        stored = resolve_stored_page_target(vault_root, rel)
+        if stored is not None:
+            return stored
         admit_write_target(vault_root, rel)
     except VaultPathError as refusal:
+        if refusal.code == "NOT_FOUND":
+            raise _missing_page_error(vault_root, path, rel) from None
         raise EditError(code=refusal.code, missing=[], reason=refusal.reason) from None
     # The literal (NFKC) spelling may be absent because the on-disk name is a
     # different Unicode normalization -- a macOS-origin NFD name on a
@@ -519,22 +539,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
         # outside-the-root refusal become indistinguishable (issue #599). Detect
         # that case and refuse honestly; the governance model is intentional, so
         # we still don't write outside the root.
-        outside = _existing_page_outside_kb(vault_root, path)
-        if outside is not None:
-            raise EditError(
-                code="OUTSIDE_GOVERNED_ROOT",
-                missing=["path"],
-                reason=(
-                    f"page exists at {outside} but is outside {kb_prefix()}"
-                    f" — exomem only edits governed content under {kb_prefix()};"
-                    " move it under the governed root or address it there"
-                ),
-            )
-        raise EditError(
-            code="NOT_FOUND",
-            missing=["path"],
-            reason=f"file does not exist: {rel}",
-        )
+        raise _missing_page_error(vault_root, path, rel)
     # Return the rel-form re-spelled to the real on-disk casing, reusing the
     # `resolved` already computed for the escape check above (no extra
     # syscalls). On a case-insensitive filesystem a caller addressing

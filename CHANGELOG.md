@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.178.0](https://github.com/Artexis10/exomem/compare/v0.177.1...v0.178.0) (2026-11-13)
+
+
+### Features
+
+* **vault-store:** decide restricted relation reads from stored page facts ([#2790](https://github.com/Artexis10/exomem/issues/2790)) ([7446e35](https://github.com/Artexis10/exomem/commit/7446e35f75f7cd08c6899d306084e53ea3b65fec))
+
+
+### Bug Fixes
+
+* **release:** qualify fixed sources while main advances ([#2786](https://github.com/Artexis10/exomem/issues/2786)) ([d50d3bd](https://github.com/Artexis10/exomem/commit/d50d3bd8a0f844a3e845ff2dcaa8b9d9b21a1342))
+* **review:** bind a review item id from its stored due entry ([#2795](https://github.com/Artexis10/exomem/issues/2795)) ([4a8a8a5](https://github.com/Artexis10/exomem/commit/4a8a8a517a63e5f7b2111da13991f2b22156823b))
+
+## [0.177.1](https://github.com/Artexis10/exomem/compare/v0.177.0...v0.177.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **benchmarks:** preserve statement provenance and calibration gates ([#2787](https://github.com/Artexis10/exomem/issues/2787)) ([3396b59](https://github.com/Artexis10/exomem/commit/3396b5906d1ac786bb5fef407d49f8a5e5a385f3))
+* **semantic:** enforce selected kinds and strict governed rows ([#2784](https://github.com/Artexis10/exomem/issues/2784)) ([e6d48b8](https://github.com/Artexis10/exomem/commit/e6d48b8737d8d5225c796caff987fcb2bab410fa))
+
+
+### Performance
+
+* **graph:** filter relations on a hub without interpreting every linking page ([#2789](https://github.com/Artexis10/exomem/issues/2789)) ([9a976be](https://github.com/Artexis10/exomem/commit/9a976bec7a25d885ca968b0565d503bef784fc1a))
+
+## [0.177.0](https://github.com/Artexis10/exomem/compare/v0.176.0...v0.177.0) (2026-11-13)
+
+
+### Features
+
+* **vault-store:** answer store-mode graph and link reads from derived inbound tables ([#2753](https://github.com/Artexis10/exomem/issues/2753)) ([64992e5](https://github.com/Artexis10/exomem/commit/64992e5fcee0f604dedbc277564d712405538cfa))
+
+
+### Bug Fixes
+
+* **readiness:** measure lease proof without owner diagnostics ([#2782](https://github.com/Artexis10/exomem/issues/2782)) ([c79559b](https://github.com/Artexis10/exomem/commit/c79559b83745537aac3709ac475bb3ce2c6ed20a))
+* **review:** resolve a review item before taking the vault write boundary ([#2780](https://github.com/Artexis10/exomem/issues/2780)) ([6ce4e18](https://github.com/Artexis10/exomem/commit/6ce4e1853d26830cc127b2ba1e18d006d399ac8d))
+
+## [0.176.0](https://github.com/Artexis10/exomem/compare/v0.175.1...v0.176.0) (2026-11-12)
+
+
+### Features
+
+* **sensing:** add a disabled pipeline for relation proposals ([#2730](https://github.com/Artexis10/exomem/issues/2730)) ([3cf084b](https://github.com/Artexis10/exomem/commit/3cf084baa4937b6528d71d326d2066eeb810246e))
+
+## [0.175.1](https://github.com/Artexis10/exomem/compare/v0.175.0...v0.175.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **bench:** preserve billing and context replay conditions ([#2778](https://github.com/Artexis10/exomem/issues/2778)) ([3211d11](https://github.com/Artexis10/exomem/commit/3211d115653fc2b22a629ac7532503d5a2d22a17))
+* **find:** keep a restricted caller's relation filter unchanged by writes it may not see ([#2766](https://github.com/Artexis10/exomem/issues/2766)) ([79b8b35](https://github.com/Artexis10/exomem/commit/79b8b35faa6a34b64620f982202cbf2fadfee604))
+* **graph:** reuse resident topology digests across checkpointless reads ([#2775](https://github.com/Artexis10/exomem/issues/2775)) ([c7889bd](https://github.com/Artexis10/exomem/commit/c7889bd57efa1898867f4cbfb6559da9fb0c0fae))
+
+## [0.175.0](https://github.com/Artexis10/exomem/compare/v0.174.0...v0.175.0) (2026-11-12)
+
+
+### Features
+
+* **cloud:** one-command platform upgrade, and release tags start cell rollout ([#2760](https://github.com/Artexis10/exomem/issues/2760)) ([9eec48b](https://github.com/Artexis10/exomem/commit/9eec48b8cf8437d1cc3a010059afafeafa92268f))
+* **vault-store:** tombstone, receipt and publish governed writes around a store-mode commit ([#2742](https://github.com/Artexis10/exomem/issues/2742)) ([33417c0](https://github.com/Artexis10/exomem/commit/33417c0f872d69a40685263784c5f18d97fe3a98))
+
+
+### Bug Fixes
+
+* **cloud:** pin shipped skill install lines to the release they ship ([#2768](https://github.com/Artexis10/exomem/issues/2768)) ([cc22bd3](https://github.com/Artexis10/exomem/commit/cc22bd33bfdbb50ff4b4ca49c99ec6d648d81205))
+* **find:** corroborate BM25-only candidates by word majority, not lane absence ([#2762](https://github.com/Artexis10/exomem/issues/2762)) ([3e6d41e](https://github.com/Artexis10/exomem/commit/3e6d41eb835397053f820d62758cfda31ba2a5eb))
+* **records:** report unreflected observations under a partial claims census ([#2769](https://github.com/Artexis10/exomem/issues/2769)) ([f447ce9](https://github.com/Artexis10/exomem/commit/f447ce9b995a6955a8a223f7e2efd76a85355d47))
+* restore Windows import durability and bound warm sweep CPU ([#2773](https://github.com/Artexis10/exomem/issues/2773)) ([6597852](https://github.com/Artexis10/exomem/commit/659785217869b07aec92ec82bd227da9a2f75a04))
+
 ## [0.174.0](https://github.com/Artexis10/exomem/compare/v0.173.0...v0.174.0) (2026-11-11)
 
 

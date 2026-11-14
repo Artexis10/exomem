@@ -1734,7 +1734,7 @@ def test_one_photo_handed_into_two_families_is_stored_once_and_found_in_both(
     ]
     assert tripod["duplicate_of"] == {"path": studio["path"], "ref": studio["ref"]}
     evidence = vault / "Knowledge Base" / "Evidence"
-    assert [path.name for path in evidence.rglob("*") if path.is_file()] == [
+    assert sorted(path.name for path in evidence.rglob("*") if path.is_file()) == [
         "lens.bin", "lens.bin.md",
     ]
     assert not (evidence / "work" / "tripod").exists()

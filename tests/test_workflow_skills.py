@@ -376,7 +376,9 @@ def test_core_skill_reference_routes_resolve_inside_every_distribution() -> None
     payload = package_skills._core_payload(None)
     for target in targets:
         assert (root / target).is_file(), target
-        assert payload[target] == (root / target).read_text(encoding="utf-8")
+        assert payload[target] == package_skills.render_shipped_markdown(
+            (root / target).read_text(encoding="utf-8")
+        )
 
 
 def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() -> None:
