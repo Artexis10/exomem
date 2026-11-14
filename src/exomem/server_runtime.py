@@ -405,7 +405,13 @@ class LocalRuntimeActivation:
             if not callable(stop):
                 continue
             try:
-                stop()
+                if worker is self.vault_projector:
+                    from .vault_store import projector
+
+                    # Last of the writers to stop, it first works through the queue, bounded.
+                    stop(drain=projector.DRAIN_ON_STOP_SECONDS)
+                else:
+                    stop()
             except Exception as error:  # noqa: BLE001 - shutdown still has to join activation
                 if label == "semantic drain":
                     semantic_failure = error
