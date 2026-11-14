@@ -141,9 +141,9 @@ def test_the_owner_file_tools_refuse_view_paths_from_canonical_ownership(vault):
             _call(vault, "move_file", old_path=plain, new_path=f"{ITEMS}/plain.md"),
             _call(vault, "recover_from_trash", trash_path=in_trash.as_posix(), restore_path=f"{ITEMS}/trashed.md"),
         ]
-    # Bound previews retain the existing whole-folder floor; production ownership is covered by the service workflow.
-    assert [str(answer).split(":")[0] for answer in refusals] == [
-        "COLLECTION_VIEW_PATH", "AUDIENCE_RESTRICTED", "COLLECTION_VIEW_PATH", "COLLECTION_VIEW_PATH"]
+    # A bound preview filters the owner's walk too, but the owner is not a restricted caller, so its
+    # recursive folder delete reaches the view-path refusal as every other owner call does.
+    assert [str(answer).split(":")[0] for answer in refusals] == ["COLLECTION_VIEW_PATH"] * 4
     assert _files(vault) == views
 
 

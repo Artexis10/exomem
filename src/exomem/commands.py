@@ -6447,8 +6447,9 @@ def op_delete(
     # declared recursive delete is refused before anything is read. A folder
     # holding only pages withheld from the writer does not exist for it, as
     # its listing says, and is answered as a missing path.
-    keep = egress_module.restricted_release_filter(vault_root)
-    restricted = keep is not None and not egress_module.caller_is_owner(vault_root)
+    from .vault_store import read as store_read_module
+
+    restricted = egress_module.caller_restricted(vault_root)
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
@@ -6457,7 +6458,8 @@ def op_delete(
         # A restricted writer's path is decided before it is probed, so a folder it may not
         # write answers as an absent path does.
         admit_write_target(vault_root, rel)
-        is_dir = abs_path.is_dir()
+        # A store-mode folder exists while the store holds a page below it, projected or not.
+        is_dir = abs_path.is_dir() or store_read_module.holds_folder(vault_root, rel)
     except VaultPathError as refusal:
         if refusal.code == "WRITE_REFUSED":
             raise ValueError(f"{refusal.code}: {refusal.reason}") from None
@@ -6465,6 +6467,7 @@ def op_delete(
     if restricted and is_dir:
         from . import list_directory as list_directory_module
 
+        keep = egress_module.restricted_release_filter(vault_root)
         if not list_directory_module._withheld_target(
             vault_root, rel, keep, True, {}, is_dir=True
         ):
@@ -6667,10 +6670,12 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     # elsewhere, so only this answer could disclose which of the two exists.
     governed = not egress_module.gate_state(Path(vault_root))[0].empty
     pages = _link_target_pages(vault_root, target) if governed else []
-    unseen = (
-        governed
-        and visible is not None
-        and (not pages or not all(visible(page) for page in pages))
+    # Only a restricted caller hears a missing target as a withheld one; the filter, which a bound
+    # store applies to every caller, decides the target pages that exist.
+    restricted = egress_module.caller_restricted(vault_root)
+    unseen = governed and (
+        (restricted and not pages)
+        or (visible is not None and not all(visible(page) for page in pages))
     )
     if unseen or (
         governed and not all(_link_target_released(vault_root, page) for page in pages)
@@ -6685,7 +6690,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
             row for row in payload["inbound"] if visible(str(row.get("path") or ""))
         ]
         payload["count"] = len(payload["inbound"])
-    if visible is not None:
+    if restricted:
         # The echoed `target` is the normalised form, which can be strictly
         # more specific than the input (a bare basename resolves to a full
         # vault path), and the terminal filter strips it only for a withheld
@@ -6697,7 +6702,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         # knowledge, so it is not held.
         if unseen:
             projection_timing_module.floor_restricted_outcome()
-    registry_lag = _store_registry_lag(vault_root, visible is not None)
+    registry_lag = _store_registry_lag(vault_root, restricted)
     if registry_lag is not None:
         payload.update(registry_lag)
     return payload
@@ -8972,7 +8977,7 @@ def op_observe_memory(
     try:
         if raw_path.lower().startswith(
             memory_refs_module.REF_PREFIX
-        ) and egress_module.restricted_release_filter(vault_root) is not None:
+        ) and egress_module.caller_restricted(vault_root):
             # A reference only a page withheld from the caller holds resolves as
             # an unknown one, before anything is loaded or validated.
             resolved_path = egress_module.resolve_visible_identifier(vault_root, path)
@@ -11085,7 +11090,7 @@ def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]
         def read(**kw: Any) -> Any:
             return op_review_memory(vault_root, **kw)
 
-        if egress_module.visible_page_filter(vault_root) is None:
+        if not egress_module.caller_restricted(vault_root):
             bound = review_ids_module.bind_decision(
                 read,
                 item=item_id,

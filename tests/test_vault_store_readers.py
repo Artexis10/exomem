@@ -42,6 +42,7 @@ from exomem import (
     lexstore,
     list_directory,
     memory_refs,
+    observe_memory,
     project_keys,
     reconcile,
     reserved_paths,
@@ -1069,6 +1070,99 @@ def test_a_bound_store_lets_the_owner_delete_a_folder_and_still_refuses_a_restri
         preview._BOUND.reset(token)
 
     assert not any(read.holds_file(stored, rel) for rel in pages)
+
+
+def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_yet(
+    stored, writer  # noqa: F811
+):
+    """A folder delete that asks the disk whether the folder exists answers NOT_FOUND for a folder
+    whose pages the store holds and whose files the projector has not written yet."""
+    folder = "Knowledge Base/Notes/Unprojected"
+    pages = [f"{folder}/{name}.md" for name in ("One", "Two")]
+    body = b"---\ntitle: U\ntype: note\n---\n# U\n\nNot projected yet.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
+        write.PagePut(rel, body) for rel in pages
+    )))
+    assert not (stored / folder).exists()
+    token = preview._BOUND.set((stored.resolve(), writer, False))
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            deleted = commands.op_delete(stored, path=folder, confirm=True, recursive=True)
+    finally:
+        preview._BOUND.reset(token)
+
+    assert deleted["file_count"] == len(pages)
+    assert not any(read.holds_file(stored, rel) for rel in pages)
+
+
+#: Who asks, and whether an active policy withholds a page from the external audience. A caller
+#: other than the owner is restricted on an ungoverned vault too: RAW still withholds from it.
+RESTRICTION_CALLERS = {
+    "the owner": (owner_principal(surface="mcp"), False),
+    "the owner under an active policy": (owner_principal(surface="mcp"), True),
+    "an external caller on an ungoverned vault": (EXTERNAL, False),
+    "an external caller under an active policy": (EXTERNAL, True),
+}
+#: A link target that no page holds; a visible page links it.
+NOWHERE = "Knowledge Base/Notes/Nowhere.md"
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("caller", RESTRICTION_CALLERS)
+def test_a_bound_store_decides_whether_a_caller_is_restricted_as_file_mode_does(
+    request, vault, caller  # noqa: F811
+):
+    """A bound store filters every caller's walk, the owner's too, so a site that reads "a filter
+    exists" as "the caller is restricted" withholds from the owner what file mode gives it: the
+    folder delete, the unit ids of a page, the links into a missing target and their echo."""
+    who, governed = RESTRICTION_CALLERS[caller]
+    if governed:
+        restrict_external(vault, 'paths: ["Knowledge Base/Notes/Secret/**"]')
+        (vault / "Knowledge Base/Notes/Secret").mkdir(parents=True)
+        (vault / "Knowledge Base/Notes/Secret/S.md").write_text(
+            "---\ntitle: S\ntype: note\n---\n# S\n\nThe keeper's private log.\n"
+        )
+    (vault / "Knowledge Base/Notes/Linker.md").write_text(
+        "---\ntitle: Linker\ntype: note\n---\n# Linker\n\nSee [[Knowledge Base/Notes/Nowhere]] for the tide.\n"
+    )
+    folders = {mode: f"Knowledge Base/Notes/Retired {mode}" for mode in ("file", "store")}
+    for folder in folders.values():
+        (vault / folder).mkdir(parents=True)
+        (vault / folder / "One.md").write_text("---\ntitle: One\ntype: note\n---\n# One\n\nRetired.\n")
+    build_indexes(vault)
+
+    def answers(root, folder):
+        with request_scope(who):
+            restricted = egress.caller_restricted(root)
+            units = observe_memory.page_units(root, {"path": ALPHA})
+            inbound = commands.op_list_inbound_links(root, target=NOWHERE)
+            try:
+                commands.op_delete(root, path=folder, confirm=True, recursive=True)
+                deleted = "deleted"
+            except ValueError as refusal:
+                deleted = str(refusal)
+            if preview.bound_writer(root) is None:  # file mode's own definition, unchanged
+                assert restricted is (egress.restricted_release_filter(root) is not None)
+        return {"restricted": restricted, "units": units, "inbound": inbound, "delete": deleted}
+
+    in_file_mode = answers(vault, folders["file"])
+    restricted = who is EXTERNAL
+    assert in_file_mode["restricted"] is restricted
+    assert isinstance(in_file_mode["units"], list) is not restricted
+    assert (in_file_mode["delete"] == "deleted") is not restricted
+    # A restricted caller under a policy hears a missing target as a withheld one: no links.
+    assert in_file_mode["inbound"]["count"] == (0 if restricted and governed else 1)
+    build_indexes(vault)  # the file-mode delete's derived rows, as the watcher settles them
+
+    store_root = request.getfixturevalue("stored")
+    bound = request.getfixturevalue("writer")
+    token = preview._BOUND.set((store_root.resolve(), bound, False))
+    try:
+        in_a_bound_store = answers(store_root, folders["store"])
+    finally:
+        preview._BOUND.reset(token)
+
+    assert in_a_bound_store == in_file_mode
 
 
 @pytest.mark.timeout(300)

@@ -897,7 +897,7 @@ def _move_file_local(
     # see, so its answer is the same with and without hidden linkers. A hidden
     # linker keeps its old link; the owner's audit reports it as a broken
     # reference (named debt in the vault-consolidation change).
-    limited_mover = visible is not None and not connector_boundary.unrestricted(
+    limited_mover = egress.caller_restricted(vault_root) and not connector_boundary.unrestricted(
         vault_root, effective_principal()
     )
     # Scan inbound links BEFORE the move, while the old path still exists.

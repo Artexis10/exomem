@@ -448,3 +448,63 @@ def test_planning_query_refuses_an_invalid_post_assembly_egress_shape(
 
     with pytest.raises(CollectionError, match="PLAN_RESPONSE_TOO_LARGE"):
         planning.query(tmp_path, collection, hierarchy_mode="descendants")
+
+
+
+
+
+#: The activity log's scope; a create by a writer appends its event to the log.
+LOG_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5F03"
+
+
+@pytest.mark.parametrize("log_released", (False, True), ids=("log withheld", "log released and writable"))
+def test_a_writer_validates_a_create_against_the_activity_log_as_the_create_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, log_released: bool
+) -> None:
+    """A create appends its event to the activity log, so its validation authorizes the log as
+    the commit does. Validation that names the log by a path no scope selects refuses a writer
+    the log is released to as absent; validation that skips the log tells a writer it is
+    withheld from that a create is valid which the commit refuses as absent."""
+    from granted_writer import grant_writer
+
+    from exomem.planning import create_collection, validate
+    from exomem.structured_collections import CollectionError
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    (vault / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir(parents=True)
+    (governance / "scopes" / "log.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {LOG_SCOPE_ID}\n"
+        "name: Activity log\n"
+        'paths: ["log.md"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "log-external.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5F04\n"
+        f'scope_ids: ["{LOG_SCOPE_ID}"]\n'
+        "audience: external\n"
+        f"ceiling: {6 if log_released else 5}\n",
+        encoding="utf-8",
+    )
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch,
+        writable_paths=["Planning/**"], capture_paths=["Knowledge Base/Planning"],
+        writable_scopes=[LOG_SCOPE_ID] if log_released else [],
+    )("external")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+
+    with request_scope(writer):
+        if log_released:
+            assert validate(vault, mode="create", manifest_text=_manifest(), manifest_path=collection)["valid"]
+            created = create_collection(vault, collection, _manifest(), why="create planning collection")
+            assert created["outcome"] == "committed", created
+        else:
+            with pytest.raises(CollectionError, match="^COLLECTION_NOT_FOUND:"):
+                validate(vault, mode="create", manifest_text=_manifest(), manifest_path=collection)
+            with pytest.raises(CollectionError, match="^COLLECTION_NOT_FOUND:"):
+                create_collection(vault, collection, _manifest(), why="create planning collection")

@@ -665,7 +665,7 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     A principal that sees a released view of the page gets `unavailable`: the unit refs and
     fingerprints come from the full page, so listing them would name what the view withholds.
     """
-    if not egress.caller_is_owner(vault_root) and egress.restricted_release_filter(vault_root) is not None:
+    if egress.caller_restricted(vault_root):
         return {
             "status": "unavailable",
             "reason": "this principal sees a released view of the page",
@@ -696,7 +696,7 @@ def _bind_unit_id(
     as unknown to it, and a stale-id refusal cannot name the current id of a withheld unit.
     """
     head, _, version = str(unit).partition(".")
-    visible = egress.caller_is_owner(vault_root) or egress.restricted_release_filter(vault_root) is None
+    visible = not egress.caller_restricted(vault_root)
     found = [
         u for u in document.units
         if visible and u.unit_ref and page_ids.part_head(u.unit_ref) == head

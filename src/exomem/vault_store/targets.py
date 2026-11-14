@@ -143,12 +143,13 @@ def caller_is_owner(vault_root: Path) -> bool:
 
     A store-mode writer asks this, not whether ``restricted_release_filter`` returned a filter: a
     bound store filters every caller, the owner too. The principal and its authority decide it, as
-    they do in file mode. Only the owner hears of a file that the store has not imported, and only
-    the owner reads a row report that may name a page withheld from others.
+    they do in file mode (``egress.caller_restricted``). Only the owner hears of a file that the
+    store has not imported, and only the owner reads a row report that may name a page withheld
+    from others.
     """
     from ..governance import egress
 
-    return egress.caller_is_owner(vault_root)
+    return not egress.caller_restricted(vault_root)
 
 
 #: The reasons a store form refuses, each named once for the page and the folder forms.
