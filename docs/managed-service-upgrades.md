@@ -245,14 +245,17 @@ runtime directory have a 104-byte limit.
 12. Wait until `curl http://127.0.0.1:PORT/health/ready` answers 200 and the latest repair event is `lexical_repair_finished`.
 13. Run `/tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --status` and confirm `phase: ready` with no pending transition.
 14. In a second terminal, start the probe loop below.
-15. Note the time, then switch with the `service_upgrade` command below.
-16. Read `last_transition.handoff` in the printed result.
-17. Poll `/health/ready` and read the log events below for 45 minutes after the noted time.
-18. Count failed reads and failed writes with the check command below; expect 0 and 0.
-19. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
-20. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
+15. Note the log-selection time, then switch with the `service_upgrade` command below.
+16. Read `last_transition.handoff` in the printed result; expect the completed handoff record.
+17. After handoff completes and target readiness returns 200, record the observation start; expect both conditions to hold.
+18. Poll `/health/ready` and read subsequent repair events for 2700 seconds from that start; expect all four checks to pass.
+19. Create `/tmp/xr/stop-probes` and let the current pair finish; expect the caller loop to stop after the window.
+20. Count failed reads and writes with the check command below; expect 0 and 0.
+21. Stop the unit: `systemctl --user stop exomem-rehearsal.service`.
+22. To rehearse the next release from this one, keep `/tmp/xr`. Otherwise remove it: `rm -rf /tmp/xr`.
 
-Expect all four checks to pass in the 45 minutes after the noted time.
+Use the pre-switch time only to select handoff logs. The fixed 45-minute
+observation window starts after the completed handoff and target readiness.
 
 ```sh
 /tmp/xr/launcher/bin/python -c 'from pathlib import Path; from exomem.state_paths import vault_state_key; print(vault_state_key(Path("/tmp/xr/vault")))'
@@ -343,16 +346,18 @@ The issue command runs in a subshell from the empty working directory, so a
 ( cd /tmp/xr/cwd && set -a && . /tmp/xr/rehearsal.env && /tmp/xr/launcher/bin/exomem auth issue-local --client rehearsal --output /tmp/xr/home/local-token )
 ```
 
-The probe loop sends one MCP read and one MCP write every 30 seconds for 50
-minutes, which covers the 45 minutes after a switch made within 5 minutes of
-its start. It writes one line per call, `TIME read|write RESPONSE`, and each
-write records a disposable episode in the copy. The `save_episode` tool
+The probe loop sends one MCP read and one MCP write, then waits 30 seconds.
+It continues through staging and the full 45-minute observation window. Create
+the stop marker only after that window ends; the loop finishes its current pair.
+It writes one line per call, `TIME read|write RESPONSE`, and each write records
+a disposable episode in the copy. The `save_episode` tool
 ships in 0.149.0 and later, so rehearse from 0.149.0 or a newer release.
 Run the loop:
 
 ```sh
-TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
-while [ "$(date +%s)" -lt "$END" ]; do
+rm -f /tmp/xr/stop-probes
+TOKEN=$(cat /tmp/xr/home/local-token); : > /tmp/xr/calls.log
+while [ ! -e /tmp/xr/stop-probes ]; do
   NOW=$(date -u +%H:%M:%S)
   for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"save_episode\",\"arguments\":{\"subject\":\"Rehearsal probe\",\"summary\":\"Disposable rehearsal write at $NOW UTC.\",\"worked_on\":[\"rehearsal probe\"]}}"; do
     BODY=$(curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
