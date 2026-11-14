@@ -123,6 +123,7 @@ The request SHALL NOT wait for an admission slot. Admitted requests MAY await th
 ### Requirement: A passage result identifies the caller's record
 
 Each passage result SHALL carry the Source reference, the Source's `source_identity`, the passage key, the passage ordinal, the SHA-256 hash of the whole passage's text as UTF-8, the span of the matched chunk in the Source body and the similarity score.
+The response SHALL also return an opaque `recall_space_id` derived from its reported space identity, matching content-free cell discovery.
 The reply SHALL name the recall space of the scores.
 A passage result SHALL NOT contain passage text.
 

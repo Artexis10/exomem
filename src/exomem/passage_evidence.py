@@ -28,6 +28,7 @@ from .source_coverage import CAPTURE_HEADING
 # This heading and fence are the fixed declaration format, never a vocabulary of key meanings.
 _KEY_BLOCK_START = "## Passage keys\n\n```json\n"
 _KEY_BLOCK_END = "\n```\n\n"
+MAX_RESULTS = 200
 
 
 @dataclass(frozen=True)
@@ -242,8 +243,8 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
     """Resolve eligibility first, select chunks once, then verify their byte binding."""
     _require_authority(vault_root)
     limit = request["limit"]
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
-        raise ValueError("INVALID_PASSAGE_LIMIT: set limit to an integer from 1 to 200")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESULTS:
+        raise ValueError(f"INVALID_PASSAGE_LIMIT: set limit to an integer from 1 to {MAX_RESULTS}")
     scope = request["scope"]
     if scope not in ("kb", "kb-only", "vault"):
         raise ValueError("INVALID_PASSAGE_SCOPE: set scope to kb, kb-only, or vault")
@@ -366,6 +367,7 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         "user_summary": summary,
         "hits": hits,
         "recall_space": asdict(space),
+        "recall_space_id": space.identity_digest,
         "scoring_mode": selection.scoring_mode,
         "withheld_chunks": withheld,
     }

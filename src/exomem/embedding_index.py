@@ -894,6 +894,22 @@ def _top_admitted(
     return [(metadata[row][0], metadata[row][1], float(scores[row])) for row in picked]
 
 
+def read_published_identity(vault_root: Path) -> recall_space.SpaceIdentity | None:
+    """Read only the serving space record; never initialize or migrate a sidecar."""
+    try:
+        path = index_paths.sidecar_path(vault_root, nonblocking=True)
+        with contextlib.closing(sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0
+        )) as conn:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+        if identity is None or identity.dim <= 0:
+            return None
+        return identity if index_paths.sidecar_path(vault_root, nonblocking=True) == path else None
+    except (OSError, sqlite3.DatabaseError, ValueError):
+        return None
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 

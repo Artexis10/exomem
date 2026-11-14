@@ -14979,7 +14979,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "query",
         _MCRC,
         ("search", "find"),
-        {"public_title": "Search saved knowledge", "preferred_name": "search_memory", "surface": "primary", "actions": ("ask",), "first_run_safe": True},
+        {"public_title": "Search saved knowledge", "preferred_name": "search_memory", "surface": "primary", "actions": ("ask",), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("passage_results",)}},
     ),
     (
         "activate_context",
@@ -15089,7 +15090,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
             "surface": "primary",
             "actions": ("save",),
             "first_run_safe": False,
-            "mcp_meta": {"openai/fileParams": ("files",)},
+            "mcp_meta": {"openai/fileParams": ("files",),
+                         capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("declared_passages",)},
         },
     ),
     (

@@ -27,6 +27,8 @@ class SourceIdentity(TypedDict):
 
 CaptureOutcome = Literal["created", "reused"]
 _IDENTITY = TypeAdapter(SourceIdentity)
+MAX_PASSAGES = 2000
+MAX_PASSAGE_KEY_BYTES = 128
 
 
 class SourceCaptureError(ValueError):
@@ -42,8 +44,8 @@ def validate_passages(value: object) -> list[DeclaredPassage]:
     """Keep caller text exact; reject declarations the Source cannot preserve."""
     if not isinstance(value, list) or not value:
         raise SourceCaptureError("INVALID_PASSAGES: passage 1 field passages must be a nonempty list of key/text objects")
-    if len(value) > 2000:
-        raise SourceCaptureError("INVALID_PASSAGES: passage 2001 field passages exceeds the limit of 2000; split the capture")
+    if len(value) > MAX_PASSAGES:
+        raise SourceCaptureError(f"INVALID_PASSAGES: passage {MAX_PASSAGES + 1} field passages exceeds the limit of {MAX_PASSAGES}; split the capture")
     seen: dict[str, int] = {}
     result: list[DeclaredPassage] = []
     for ordinal, passage in enumerate(value, 1):
@@ -54,8 +56,8 @@ def validate_passages(value: object) -> list[DeclaredPassage]:
             size = len(key.encode("utf-8")) if isinstance(key, str) else 0
         except UnicodeError:
             size = 0
-        if not 1 <= size <= 128:
-            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field key must be a string of 1 to 128 UTF-8 bytes")
+        if not 1 <= size <= MAX_PASSAGE_KEY_BYTES:
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field key must be a string of 1 to {MAX_PASSAGE_KEY_BYTES} UTF-8 bytes")
         if key in seen:
             raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field key repeats passage {seen[key]}; supply a unique key")
         seen[key] = ordinal

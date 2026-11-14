@@ -1000,6 +1000,11 @@ def build_server(
             for exclusion in commands_module.cloud_surface_exclusions(upload_bridge=upload_bridge)
         ) if cloud else (),
     )
+    if cloud:
+        from .cell_identity import register_identity_route
+
+        register_identity_route(mcp, cell_id=credentials.cell_id, vault_root=runtime.vault_root,
+                                surface=surface_descriptor)
     for cmd in product_commands:
         if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
             continue

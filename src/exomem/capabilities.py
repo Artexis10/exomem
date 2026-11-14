@@ -12,6 +12,9 @@ from typing import Any
 
 from . import operation_entries
 
+# This vendor metadata key declares fixed service protocol features on their command owner.
+SERVICE_CAPABILITIES_META_KEY = "io.exomem/service-capabilities"
+
 
 @dataclass(frozen=True, slots=True)
 class ActiveSurfaceDescriptor:
