@@ -402,6 +402,77 @@ def test_verified_temporary_preserves_a_replacement_that_arrives_during_install(
 
 
 @_requires_native_route
+def test_partial_publish_retains_custody_when_native_temporary_cleanup_fails(tmp_path, monkeypatch):
+    """A full-disk copy plus refused cleanup must leave a known outstanding copy, never clean custody."""
+    import json
+
+    held_fs = _module()
+    receipt = tmp_path / "custody.json"
+    evidence = {}
+
+    def reserve(name):
+        assert not (tmp_path / name).exists()
+        evidence.update(name=name, state="reserved")
+        receipt.write_text(json.dumps(evidence))
+
+    def bind(name, file):
+        evidence.update(state="bound", inode=file.identity.inode)
+        receipt.write_text(json.dumps(evidence))
+
+    def release(name, identity, outcome):
+        evidence.update(state="closed", outcome=outcome)
+        receipt.write_text(json.dumps(evidence))
+
+    def interrupted_bytes():
+        durable = json.loads(receipt.read_text())
+        assert durable["state"] == "bound"
+        assert (tmp_path / durable["name"]).stat().st_ino == durable["inode"]
+        yield b"retained fragment"
+        raise OSError(errno.ENOSPC, "copy interrupted")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        monkeypatch.setattr(fs, "unlink", lambda file: held_fs.HeldResult(
+            error=held_fs.HeldFsError("IO_REFUSED", "temporary cleanup refused"),
+        ))
+        result = held_fs.publish_bytes(
+            fs, parent, "destination.md", held_fs.Chunks(interrupted_bytes),
+            custody=held_fs.TemporaryCustody(reserve, bind, release),
+        )
+        assert not result.ok
+    durable = json.loads(receipt.read_text())
+    assert durable["state"] == "bound"
+    assert (tmp_path / durable["name"]).read_bytes() == b"retained fragment"
+    assert not (tmp_path / "destination.md").exists()
+
+
+@_requires_native_route
+def test_copy_acknowledgement_failure_preserves_durable_reservation_after_publication(tmp_path):
+    """An unavailable custody acknowledgement cannot turn an installed file into an unrecorded copy."""
+    held_fs = _module()
+    outstanding = tmp_path / "reserved-copy"
+
+    def reserve(name):
+        outstanding.write_text(name)
+
+    def bind(name, file):
+        assert outstanding.read_text() == name
+
+    def release(name, identity, outcome):
+        assert outcome == "installed"
+        raise held_fs.CustodyAcknowledgementPending("acknowledgement unavailable")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        result = held_fs.publish_bytes(
+            fs, parent, "destination.md", b"retained fragment",
+            custody=held_fs.TemporaryCustody(reserve, bind, release),
+        )
+        assert result.ok
+    assert outstanding.exists()
+    assert (tmp_path / "destination.md").read_bytes() == b"retained fragment"
+    assert not (tmp_path / outstanding.read_text()).exists()
+
+
+@_requires_native_route
 def test_publish_bytes_is_no_replace_or_expected_identity_replace(tmp_path: Path) -> None:
     held_fs = _module()
     with held_fs.acquire(tmp_path).require() as filesystem:

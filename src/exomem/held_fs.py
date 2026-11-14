@@ -17,7 +17,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 T = TypeVar("T")
 _MISSING = object()
@@ -44,6 +44,10 @@ class HeldFsError(Exception):
 
     def __str__(self) -> str:
         return f"{self.code}: {self.detail}"
+
+
+class CustodyAcknowledgementPending(RuntimeError):
+    """The owner retained its reservation because it could not persist a release acknowledgement."""
 
 
 def vault_name_key(name: str, *, form: str = "NFC") -> str:
@@ -182,6 +186,21 @@ class HeldFile:
 
     def version(self) -> FileVersion:
         raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class TemporaryCustody:
+    """Trusted owner hooks: reserve before create, bind before bytes, acknowledge actual closure.
+
+    ``bind`` borrows the file and must not mutate or close it. A failed release leaves the
+    owner's durable reservation outstanding. ``release`` reports that case with
+    ``CustodyAcknowledgementPending``; publication success does not promise collection.
+    """
+
+    reserve: Callable[[str], None]
+    bind: Callable[[str, HeldFile], None]
+    # This closed protocol names the native facts that can discharge a temporary's copy obligation.
+    release: Callable[[str, StableIdentity | None, Literal["not_written", "removed", "installed"]], None]
 
 
 class HeldFilesystem:
@@ -593,6 +612,7 @@ def publish_bytes(
     expected_sha256: str | None = None,
     validate_existing: Callable[[HeldFile], None] | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
+    custody: TemporaryCustody | None = None,
 ) -> HeldResult[StableIdentity]:
     """Atomically publish bytes, or `Chunks` of them, under one held parent.
 
@@ -613,6 +633,9 @@ def publish_bytes(
     staged: HeldFile | None = None
     temporary = publish_temporary_name()
     temporary_identity: StableIdentity | None = None
+    custody_reserved = False
+    copy_started = False
+    installed = False
 
     def publication_error(error: HeldFsError | None) -> HeldResult[StableIdentity]:
         bounded = error or HeldFsError("IO_REFUSED", "publish was refused")
@@ -653,6 +676,9 @@ def publish_bytes(
             if validate_existing is not None:
                 validate_existing(existing)
 
+        if custody is not None:
+            custody.reserve(temporary)
+            custody_reserved = True
         created = filesystem.file(
             parent,
             temporary,
@@ -665,6 +691,9 @@ def publish_bytes(
         with created.require() as writable:
             # Known before the copy, so a copy that stops part-way still removes the temporary.
             temporary_identity = writable.identity
+            if custody is not None:
+                custody.bind(temporary, writable)
+            copy_started = True
             written = filesystem.write(writable, data)
             if not written.ok:
                 return HeldResult(error=written.error)
@@ -684,6 +713,7 @@ def publish_bytes(
             failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
             if failure is not None:
                 return failure
+            installed = True
         else:
             if expected_sha256 is not None:
                 assert existing is not None
@@ -704,6 +734,7 @@ def publish_bytes(
             replaced = filesystem.rename(staged, parent, leaf, replace=True)
             if not replaced.ok:
                 return publication_error(replaced.error)
+            installed = True
 
         return _published_identity(filesystem, parent, leaf)
     finally:
@@ -711,11 +742,19 @@ def publish_bytes(
             existing.close()
         if staged is not None:
             staged.close()
+        released = "installed" if installed else "not_written" if not copy_started else None
         cleanup = filesystem.file(parent, temporary, access="mutate")
         if cleanup.ok:
             with cleanup.require() as residue:
                 if temporary_identity is not None and residue.identity == temporary_identity:
-                    filesystem.unlink(residue)
+                    if filesystem.unlink(residue).ok:
+                        released = "removed"
+        if custody is not None and custody_reserved and released is not None:
+            try:
+                custody.release(temporary, temporary_identity, released)
+            except CustodyAcknowledgementPending:
+                # Acknowledgement failure preserves the durable reservation for owner reconciliation.
+                pass
 
 
 def publish_sqlite_identities(
