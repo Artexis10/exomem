@@ -1933,6 +1933,47 @@ def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
     assert pending.read_bytes() == b"pending-old"
 
 
+def test_held_batch_unlink_leaves_a_different_file_that_replaced_the_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback that removes whichever file sits at the leaf once it has checked the one it created."""
+    created = tmp_path / "created.txt"
+    pending = tmp_path / "pending.txt"
+    pending.write_bytes(b"pending-old")
+    with vault_module.held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+    real_unlink = filesystem_type.unlink
+    rolling_back = False
+    replaced = False
+
+    def fail_pending(destination: Path, *, restoring: bool) -> None:
+        nonlocal rolling_back
+        if destination == pending:
+            rolling_back = True
+            raise OSError("forward publication stopped")
+
+    def replace_the_leaf_then_unlink(self, file):  # noqa: ANN001
+        nonlocal replaced
+        if rolling_back and file.name == created.name:
+            other = tmp_path / "other.tmp"
+            other.write_bytes(b"a different file")
+            os.replace(other, created)
+            replaced = True
+        return real_unlink(self, file)
+
+    monkeypatch.setattr(vault_module, "_before_batch_destination_published", fail_pending)
+    monkeypatch.setattr(filesystem_type, "unlink", replace_the_leaf_then_unlink)
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, "installed"), vault_module.PlannedWrite(pending, "pending-new")],
+            vault_root=tmp_path, post_commit_fanout=False,
+        )
+    assert replaced
+    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert created.read_bytes() == b"a different file"
+    assert pending.read_bytes() == b"pending-old"
+
+
 @pytest.mark.parametrize("guarded", [False, True])
 def test_held_batch_inverse_refuses_a_replaced_ancestor_above_its_retained_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guarded: bool,
