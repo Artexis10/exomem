@@ -514,6 +514,33 @@ def ten_stage_b_runs(tmp_path: Path) -> Path:
     return write_rows(tmp_path / "b.jsonl", rows)
 
 
+def test_prepared_workflow_entries_keep_prior_turns_and_unavailable_slots_blind(tmp_path: Path) -> None:
+    """A fresh workflow study must not lose earlier answers or discard an interrupted slot."""
+    completed = "Turn 1: review the schedule. Answer: the ferry leaves at eight.\nTurn 2: check again. Answer: correction, it leaves at seven."
+    unavailable = "Turn 1: review the schedule. No answer: transport interrupted."
+    entries = [
+        ({"case": "complete", "arm": "base"}, tuple(RUBRIC), completed),
+        ({"case": "interrupted", "arm": "cand", "error": "transport_interrupted"}, tuple(RUBRIC), unavailable),
+    ]
+    out = tmp_path / "workflow-batch"
+    schema = {"type": "object", "properties": {"status": {"enum": ["judged", "failed"]}}, "required": ["status"]}
+
+    assert judge_batch.prepare_entries(entries, out=out, seed=42, answer_schema=schema) == 3
+
+    items = judge_batch.read_views(out)
+    mapping = json.loads((out / "private" / "judge-map.json").read_text())
+    originals = [item for item in mapping["items"].values() if item["twin_of"] is None]
+    assert {item["prompt"] for item in items} == {completed, unavailable}
+    assert sorted(item["run"]["case"] for item in originals) == ["complete", "interrupted"]
+    assert all("run" not in item and "arm" not in item for item in items)
+    assert all(item["answer_schema"] == schema for item in items)
+    assert mapping["seed"] == 42
+    twins = {item_id: row["twin_of"] for item_id, row in mapping["items"].items() if row["twin_of"]}
+    prompts = {item["id"]: item["prompt"] for item in items}
+    assert len(twins) == 1
+    assert all(prompts[twin] == prompts[original] for twin, original in twins.items())
+
+
 def test_a_seeded_fifth_of_the_items_appears_twice_and_low_agreement_reads_incomplete(tmp_path: Path) -> None:
     """Catches a judge batch with no noise check: two judgments of the same answer that disagree would go unseen."""
     scenarios = [invented_scenario(f"c{n}") for n in range(5)]
