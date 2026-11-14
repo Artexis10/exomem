@@ -197,6 +197,22 @@ def require_publishable(root: Path, reference: str) -> None:
         raise OpError("SOURCE_RETIRED", "the Source incarnation is retired")
 
 
+def register_owner(root: Path, reference: str, owner: OwnerLocator) -> None:
+    """Retain one canonical owner locator per family before its payload can survive."""
+    _boundary(root)
+    manifest, guard = read_manifest(root, reference)
+    if manifest is None:
+        raise OpError("SOURCE_CUSTODY_UNAVAILABLE", "Source allocation custody is unavailable")
+    require_publishable(root, reference)
+    previous = manifest.owners.get(owner.owner)
+    if previous is not None:
+        if previous != owner:
+            raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "Source custody belongs to another owner instance")
+        return
+    value = Manifest.model_validate({**manifest.model_dump(), "owners": {**manifest.owners, owner.owner: owner}})
+    publish(root, PlannedCustody((_write(root, manifest_path(root, reference), value, guard, MAX_MANIFEST_BYTES),)))
+
+
 def _exact_primary(root: Path, *, path: str, reference: str | None, source_hash: str) -> bool:
     if reference is None:
         return False

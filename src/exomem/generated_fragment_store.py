@@ -94,6 +94,7 @@ class ImageHeader(_Record):
     image_size: Annotated[int, Field(ge=0)]
     catalogue_id: _Id
     unknown_through_epoch: _Epoch
+    whole_source_ref: Annotated[str, AfterValidator(lambda value: SourceRef(value).value)] | None = None
     # These states distinguish incomplete construction from immutable usable pages and collection.
     state: Literal["building", "ready", "collecting"] = "building"
     page_count: Annotated[int, Field(ge=0)]
@@ -104,6 +105,9 @@ class ImageHeader(_Record):
 
     @model_validator(mode="after")
     def consistent_pages(self):
+        if self.whole_source_ref is not None and (self.page_count != 0 or self.written_pages != 0
+                or self.last_page_hash is not None or self.expected_last_page_hash is not None):
+            raise ValueError("whole_source_image_cannot_have_fragment_pages")
         if (self.written_pages > self.page_count
                 or (self.page_count == 0) != (self.expected_last_page_hash is None)
                 or (self.written_pages == 0) != (self.last_page_hash is None)):
@@ -783,7 +787,8 @@ class GeneratedFragmentStore:
 
     def begin_verified_image(self, *, image_sha256: str, image_size: int, page_count: int,
                              expected_last_page_hash: str | None,
-                             unknown_through_epoch: int, image_id: str | None = None) -> ImageHeader:
+                             unknown_through_epoch: int, image_id: str | None = None,
+                             whole_source_ref: str | None = None) -> ImageHeader:
         """Begin an image after its native owner verified the byte hash and planned page chain.
 
         Large producers can prepare that evidence across invocations without loading the body here.
@@ -798,10 +803,23 @@ class GeneratedFragmentStore:
         header = ImageHeader(image_id=image_id, image_sha256=image_sha256,
                              image_size=image_size, catalogue_id=head.catalogue_id,
                              unknown_through_epoch=unknown_through_epoch, page_count=page_count,
-                             expected_last_page_hash=expected_last_page_hash, revision=_id())
+                             expected_last_page_hash=expected_last_page_hash,
+                             whole_source_ref=whole_source_ref, revision=_id())
         item = ObjectChange(kind="image", object_id=image_id, image_id=image_id, after_revision=header.revision)
         self._run("image_begin", ((item, header),))
         return header
+
+    def begin_whole_image(self, *, whole_source_ref: str, image_sha256: str,
+                          image_size: int) -> ImageHeader:
+        """Bind whole bytes after the producer proves allocation, Manifest and sealed-original ownership.
+
+        This trusted seam accepts binary metadata; neither text parsing nor byte equality establishes ownership.
+        """
+        header = self.begin_verified_image(whole_source_ref=whole_source_ref,
+                                           image_sha256=image_sha256, image_size=image_size,
+                                           page_count=0, expected_last_page_hash=None,
+                                           unknown_through_epoch=0)
+        return self.seal_image(header.image_id)
 
     def _image(self, image_id: str, *, guards: list[vault.PathGuard] | None = None) -> ImageHeader:
         _opaque(image_id)
@@ -1161,8 +1179,9 @@ class GeneratedFragmentStore:
             old = conn.execute("SELECT header,seen FROM images WHERE image_id=?", (value.image_id,)).fetchone()
             if old is not None:
                 previous = ImageHeader.model_validate_json(old[0])
-                if (previous.image_sha256, previous.image_size, previous.expected_last_page_hash) != (
-                        value.image_sha256, value.image_size, value.expected_last_page_hash):
+                if (previous.image_sha256, previous.image_size, previous.expected_last_page_hash,
+                    previous.whole_source_ref) != (value.image_sha256, value.image_size,
+                                                  value.expected_last_page_hash, value.whole_source_ref):
                     self._cache_uncertainty(conn, Uncertainty(unit_id=_id(), catalogue_id=value.catalogue_id,
                                             unknown_through_epoch=epoch, image_id=value.image_id, revision=_id()), canonical=False)
             conn.execute("INSERT INTO images(image_id,header,horizon,seen) VALUES (?,?,?,?) ON CONFLICT(image_id) "
@@ -1170,6 +1189,9 @@ class GeneratedFragmentStore:
                          (value.image_id, encode(value).decode(), value.unknown_through_epoch, seen))
             if self._census_epoch == epoch and (old is None or old[1] != seen):
                 conn.execute("UPDATE images SET next_page=0,chain_hash=NULL,exact=0 WHERE image_id=?", (value.image_id,))
+            if value.whole_source_ref is not None:
+                # Explicit whole ownership uses the same positive-membership index as fragment ownership.
+                conn.execute("INSERT OR IGNORE INTO members VALUES (?,?)", (value.whole_source_ref, value.image_id))
         elif item.kind == "page":
             row = conn.execute("SELECT next_page,chain_hash FROM images WHERE image_id=?", (value.image_id,)).fetchone()
             if row is None or row[0] != value.page_number or row[1] != value.previous_page_hash:
@@ -1450,8 +1472,8 @@ class GeneratedFragmentStore:
             if (checkpoint["catalogue_id"] != head.catalogue_id or checkpoint["applied_epoch"] != head.epoch
                     or not checkpoint["ready"]):
                 return Lookup("pending", head.catalogue_id, head.epoch)
-            if birth is None or birth.catalogue_id != head.catalogue_id or birth.birth_epoch > head.epoch:
-                return Lookup("unknown", head.catalogue_id, head.epoch)
+            birth_qualified = (birth is not None and birth.catalogue_id == head.catalogue_id
+                               and 0 < birth.birth_epoch <= head.epoch)
             image_cursor, copy_cursor = cursor or ("", "")
             # Materialize one indexed image and a bounded copy slice before sorting the join.
             rows = conn.execute("WITH member AS MATERIALIZED (SELECT image_id FROM members "
@@ -1466,26 +1488,28 @@ class GeneratedFragmentStore:
                                 "ON 1 ORDER BY c.copy_id",
                                 (source_ref, image_cursor, image_cursor, copy_cursor, image_cursor,
                                  copy_cursor, limit + 1, source_ref)).fetchall()
-            uncertainty_after = uncertainty_cursor or (-1, "")
-            uncertainty_rows = conn.execute(
-                "WITH image_uncertainty AS MATERIALIZED (SELECT horizon,image_id FROM images "
-                "WHERE horizon>=? AND (horizon,image_id)>(?,?) ORDER BY horizon,image_id LIMIT ?),"
-                "scoped_uncertainty AS MATERIALIZED (SELECT horizon,image_id FROM uncertainties "
-                "WHERE horizon>=? AND (horizon,image_id)>(?,?) ORDER BY horizon,image_id LIMIT ?),"
-                "bounded AS MATERIALIZED (SELECT * FROM image_uncertainty UNION SELECT * FROM scoped_uncertainty "
-                "ORDER BY horizon,image_id LIMIT ?) SELECT b.horizon,b.image_id,"
-                "EXISTS(SELECT 1 FROM images WHERE horizon>=? LIMIT 1) OR "
-                "EXISTS(SELECT 1 FROM uncertainties WHERE horizon>=? LIMIT 1) AS has_unknown "
-                "FROM (SELECT 1) LEFT JOIN bounded b ON 1 ORDER BY b.horizon,b.image_id",
-                (birth.birth_epoch, *uncertainty_after, limit + 1, birth.birth_epoch,
-                 *uncertainty_after, limit + 1, limit + 1, birth.birth_epoch, birth.birth_epoch),
-            ).fetchall()
-            uncertain = [(row[0], row[1]) for row in uncertainty_rows if row[0] is not None]
-            has_unknown = any(row[2] for row in uncertainty_rows)
+            uncertain, has_unknown = [], False
+            if birth_qualified:
+                uncertainty_after = uncertainty_cursor or (-1, "")
+                uncertainty_rows = conn.execute(
+                    "WITH image_uncertainty AS MATERIALIZED (SELECT horizon,image_id FROM images "
+                    "WHERE horizon>=? AND (horizon,image_id)>(?,?) ORDER BY horizon,image_id LIMIT ?),"
+                    "scoped_uncertainty AS MATERIALIZED (SELECT horizon,image_id FROM uncertainties "
+                    "WHERE horizon>=? AND (horizon,image_id)>(?,?) ORDER BY horizon,image_id LIMIT ?),"
+                    "bounded AS MATERIALIZED (SELECT * FROM image_uncertainty UNION SELECT * FROM scoped_uncertainty "
+                    "ORDER BY horizon,image_id LIMIT ?) SELECT b.horizon,b.image_id,"
+                    "EXISTS(SELECT 1 FROM images WHERE horizon>=? LIMIT 1) OR "
+                    "EXISTS(SELECT 1 FROM uncertainties WHERE horizon>=? LIMIT 1) AS has_unknown "
+                    "FROM (SELECT 1) LEFT JOIN bounded b ON 1 ORDER BY b.horizon,b.image_id",
+                    (birth.birth_epoch, *uncertainty_after, limit + 1, birth.birth_epoch,
+                     *uncertainty_after, limit + 1, limit + 1, birth.birth_epoch, birth.birth_epoch),
+                ).fetchall()
+                uncertain = [(row[0], row[1]) for row in uncertainty_rows if row[0] is not None]
+                has_unknown = any(row[2] for row in uncertainty_rows)
             page, unknown_page = rows[:limit], uncertain[:limit]
             copies = tuple(Copy.model_validate_json(row[4]) for row in page if row[4] is not None)
             state = "ready"
-            if has_unknown or any(not row[1] or row[2] >= birth.birth_epoch for row in page):
+            if not birth_qualified or has_unknown or any(not row[1] or row[2] >= birth.birth_epoch for row in page):
                 state = "unknown"
             elif (len(rows) > limit or len(uncertain) > limit or any(row[5] for row in page)
                   or any(copy.outcome == "reserved" for copy in copies)):

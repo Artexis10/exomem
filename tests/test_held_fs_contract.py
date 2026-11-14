@@ -402,6 +402,65 @@ def test_verified_temporary_preserves_a_replacement_that_arrives_during_install(
 
 
 @_requires_native_route
+@pytest.mark.parametrize("replace", [False, True])
+def test_publication_revoked_during_copy_preserves_the_destination(tmp_path, replace):
+    """A retired publication right must stop bytes that were already being copied."""
+    held_fs = _module()
+    allowed = True
+
+    def copied_then_retired():
+        nonlocal allowed
+        yield b"obsolete source bytes"
+        allowed = False
+
+    def check_publication():
+        if not allowed:
+            raise RuntimeError("publication retired")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        expected = None
+        if replace:
+            with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+                fs.write(current, b"before").require()
+                expected = current.identity
+        with pytest.raises(RuntimeError, match="publication retired"):
+            held_fs.publish_bytes(
+                fs, parent, "current.md", held_fs.Chunks(copied_then_retired),
+                expected_identity=expected, before_install=check_publication,
+            )
+    assert (tmp_path / "current.md").read_bytes() == b"before" if replace else not (tmp_path / "current.md").exists()
+    assert not any(held_fs.is_publish_temporary(path.name) for path in tmp_path.iterdir())
+
+
+@_requires_native_route
+@pytest.mark.parametrize("replace", [False, True])
+def test_revoked_verified_install_keeps_its_owned_temporary(tmp_path, replace):
+    """A cancelled rewrite keeps its known temporary for cleanup without overwriting current bytes."""
+    held_fs = _module()
+
+    def check_publication():
+        raise RuntimeError("publication retired")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        destination = None
+        if replace:
+            with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+                fs.write(current, b"before").require()
+                destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"obsolete source bytes").require()
+            verified = stage.version()
+        with pytest.raises(RuntimeError, match="publication retired"):
+            held_fs.install_temporary(
+                fs, parent, "rewritten.tmp", "current.md",
+                expected_identity=verified.identity, expected_version=verified,
+                expected_destination=destination, before_install=check_publication,
+            )
+    assert (tmp_path / "rewritten.tmp").read_bytes() == b"obsolete source bytes"
+    assert (tmp_path / "current.md").read_bytes() == b"before" if replace else not (tmp_path / "current.md").exists()
+
+
+@_requires_native_route
 def test_partial_publish_retains_custody_when_native_temporary_cleanup_fails(tmp_path, monkeypatch):
     """A full-disk copy plus refused cleanup must leave a known outstanding copy, never clean custody."""
     import json

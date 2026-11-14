@@ -532,6 +532,7 @@ def install_temporary(
     expected_identity: StableIdentity,
     expected_version: FileVersion | None = None,
     expected_destination: FileVersion | None = None,
+    before_install: Callable[[], None] | None = None,
 ) -> HeldResult[StableIdentity]:
     """Install a temporary that the caller already wrote and verified, without copying its bytes.
 
@@ -539,6 +540,7 @@ def install_temporary(
     refused. The caller owns the temporary until this succeeds; afterwards its name is gone.
     A replacement requires the destination's exact retained version. The caller holds its
     writer boundary and binds a completed content verification to both supplied versions.
+    ``before_install`` rechecks the owner's publication right at the native effect boundary.
     """
 
     def publication_error(error: HeldFsError | None) -> HeldResult[StableIdentity]:
@@ -577,6 +579,8 @@ def install_temporary(
             if staged.identity != expected_identity or (expected_version is not None and staged.version() != expected_version):
                 return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "temporary version changed"))
             if expected_destination is None:
+                if before_install is not None:
+                    before_install()
                 failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
                 if failure is not None:
                     return failure
@@ -590,6 +594,8 @@ def install_temporary(
                 with named.require() as destination:
                     if destination.version() != expected_destination or staged.identity.link_count != 1:
                         return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "destination version changed"))
+                if before_install is not None:
+                    before_install()
                 replaced = filesystem.rename(staged, parent, leaf, replace=True)
                 if not replaced.ok:
                     return publication_error(replaced.error)
@@ -613,6 +619,7 @@ def publish_bytes(
     validate_existing: Callable[[HeldFile], None] | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
     custody: TemporaryCustody | None = None,
+    before_install: Callable[[], None] | None = None,
 ) -> HeldResult[StableIdentity]:
     """Atomically publish bytes, or `Chunks` of them, under one held parent.
 
@@ -625,6 +632,7 @@ def publish_bytes(
     stays held while a native relative replacement installs the staged bytes.
     ``validate_existing`` checks that borrowed handle before and after staging;
     the callback must neither close nor mutate it.
+    ``before_install`` rechecks the owner's publication right after copying, before native installation.
     """
 
     if not isinstance(data, bytes | Chunks):
@@ -710,6 +718,8 @@ def publish_bytes(
             )
 
         if expected_identity is None:
+            if before_install is not None:
+                before_install()
             failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
             if failure is not None:
                 return failure
@@ -731,6 +741,8 @@ def publish_bytes(
             if validate_existing is not None:
                 assert existing is not None
                 validate_existing(existing)
+            if before_install is not None:
+                before_install()
             replaced = filesystem.rename(staged, parent, leaf, replace=True)
             if not replaced.ok:
                 return publication_error(replaced.error)

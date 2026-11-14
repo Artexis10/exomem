@@ -1996,6 +1996,7 @@ class _BatchReplaceContext:
     published_metadata: _BatchSnapshot | None = None
     inverse_recheck: Callable[[], None] | None = None
     expected_content_hash: str | None = None
+    custody: _ArtifactCustody | None = None
 
 
 _BATCH_REPLACE_CONTEXT: ContextVar[_BatchReplaceContext | None] = ContextVar(
@@ -2011,19 +2012,38 @@ def _batch_replace_context(
     *,
     inverse_recheck: Callable[[], None] | None = None,
     expected_content_hash: str | None = None,
+    custody: _ArtifactCustody | None = None,
 ) -> Iterator[None]:
     """Carry held-publication inputs without widening the legacy test seam."""
 
     token = _BATCH_REPLACE_CONTEXT.set(
         _BatchReplaceContext(
             vault_root, expected_destination, published_metadata,
-            inverse_recheck, expected_content_hash,
+            inverse_recheck, expected_content_hash, custody,
         )
     )
     try:
         yield
     finally:
         _BATCH_REPLACE_CONTEXT.reset(token)
+
+
+@dataclass(frozen=True)
+class _ArtifactCustody:
+    """Trusted producer hooks for one exclusive native allocation and verified copy."""
+
+    temporary: held_fs.TemporaryCustody
+    verified: Callable[[held_fs.HeldFile, str], None]
+    before_install: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True)
+class _BatchPayloadCustody:
+    """One trusted payload owner binds native stages, publication copies and inverse removal."""
+
+    stage: Callable[[PlannedWrite, _BatchWorkspace, bool], _ArtifactCustody | None]
+    publication: Callable[[PlannedWrite, _WorkspaceArtifact, bool], _ArtifactCustody | None]
+    removed: Callable[[PlannedWrite, PathIdentity], None]
 
 
 @dataclass(slots=True)
@@ -2042,6 +2062,7 @@ class _WorkspaceArtifact:
     #: The same triple for the destination this stage was copied to, read from the handle
     #: that proved the published identity; `None` when the copy cannot vouch for it.
     installed_generation: tuple[int, int, int] | None = None
+    custody: _ArtifactCustody | None = None
 
     @property
     def path(self) -> Path:
@@ -2113,6 +2134,16 @@ class _WorkspaceArtifact:
         self.content_hash = _descriptor_hash(self.descriptor, self.identity)
         self.content_bound = True
         self.recheck()
+
+    def acknowledge_removed(self) -> None:
+        if self.custody is None:
+            return
+        assert self.held_file is not None
+        try:
+            self.custody.temporary.release(self.name, self.held_file.identity, "removed")
+        except held_fs.CustodyAcknowledgementPending:
+            # Native absence is known; failed owner acknowledgement retains its durable reservation.
+            pass
 
     def close(self) -> None:
         if not self.closed:
@@ -2604,8 +2635,14 @@ class _BatchWorkspace:
             if iterator is not None:
                 iterator.close()
 
-    def create_artifact(self, name: str, content: bytes) -> _WorkspaceArtifact:
+    def create_artifact(
+        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None,
+    ) -> _WorkspaceArtifact:
         self.recheck()
+        if custody is not None:
+            if self.held_filesystem is None or self.held_directory is None:
+                raise PathGuardError("PATH_GUARD_UNSAFE", "payload custody requires a held allocation")
+            custody.temporary.reserve(name)
         held_file: held_fs.HeldFile | None = None
         if self.held_filesystem is not None and self.held_directory is not None:
             opened = self.held_filesystem.file(
@@ -2649,13 +2686,19 @@ class _BatchWorkspace:
                 identity,
                 digest,
                 held_file=held_file,
+                custody=custody,
             )
             self.artifacts[name] = artifact
+            if custody is not None:
+                assert held_file is not None
+                custody.temporary.bind(name, held_file)
             _write_all(descriptor, content)
             if _descriptor_hash(descriptor, identity) != digest:
                 raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
             artifact.content_bound = True
             artifact.recheck()
+            if custody is not None:
+                custody.verified(held_file, digest)
             self.recheck()
             return artifact
         except Exception:
@@ -2673,6 +2716,7 @@ class _BatchWorkspace:
         *,
         expected_size: int,
         expected_hash: str,
+        custody: _ArtifactCustody | None = None,
     ) -> _WorkspaceArtifact:
         """Copy a reviewed seekable stream into one held private stage."""
 
@@ -2695,6 +2739,10 @@ class _BatchWorkspace:
             ) from error
 
         self.recheck()
+        if custody is not None:
+            if self.held_filesystem is None or self.held_directory is None:
+                raise PathGuardError("PATH_GUARD_UNSAFE", "payload custody requires a held allocation")
+            custody.temporary.reserve(name)
         held_file: held_fs.HeldFile | None = None
         if self.held_filesystem is not None and self.held_directory is not None:
             opened = self.held_filesystem.file(
@@ -2741,8 +2789,12 @@ class _BatchWorkspace:
                 identity,
                 expected_hash,
                 held_file=held_file,
+                custody=custody,
             )
             self.artifacts[name] = artifact
+            if custody is not None:
+                assert held_file is not None
+                custody.temporary.bind(name, held_file)
             digest = hashlib.sha256()
             written = 0
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -2770,6 +2822,8 @@ class _BatchWorkspace:
             artifact.recheck(verify_content=False)
             artifact.generation = artifact.current_generation(os.fstat(descriptor))
             artifact.content_bound = True
+            if custody is not None:
+                custody.verified(held_file, expected_hash)
             self.recheck()
             return artifact
         except Exception:
@@ -2799,6 +2853,7 @@ class _BatchWorkspace:
         vault_root: Path | None = None,
         expected_destination: PathIdentity | None = None,
         published_metadata: _BatchSnapshot | None = None,
+        custody: _ArtifactCustody | None = None,
     ) -> PathIdentity:
         context = _BATCH_REPLACE_CONTEXT.get()
         inverse_recheck = context.inverse_recheck if context is not None else None
@@ -2810,6 +2865,8 @@ class _BatchWorkspace:
                 expected_destination = context.expected_destination
             if published_metadata is None:
                 published_metadata = context.published_metadata
+            if custody is None:
+                custody = context.custody
         if inverse_recheck is not None:
             inverse_recheck()
         self.recheck()
@@ -2913,11 +2970,18 @@ class _BatchWorkspace:
                             nonlocal temporary_witness
                             if published_metadata is not None:
                                 _apply_held_snapshot_metadata(file, published_metadata)
+                            if custody is not None:
+                                custody.verified(file, artifact.content_hash)
                             if witnessed:
                                 # Link and rename keep size and mtime, so the installed file
                                 # must still show what the verified copy left in the temporary.
                                 temporary = file.version()
                                 temporary_witness = (temporary.size, temporary.mtime_ns)
+
+                        def before_install() -> None:
+                            if custody is not None and custody.before_install is not None:
+                                custody.before_install()
+                            recheck_publish_precondition()
 
                         _before_batch_destination_published(
                             final, restoring=published_metadata is not None
@@ -2932,6 +2996,8 @@ class _BatchWorkspace:
                             expected_identity=expected_stable,
                             expected_sha256=expected_content_hash,
                             prepare=prepare_published,
+                            custody=custody.temporary if custody is not None else None,
+                            before_install=before_install if custody is not None or inverse_recheck is not None else None,
                         )
                         if (
                             not published.ok
@@ -3215,11 +3281,15 @@ class _BatchWorkspace:
                         or not _same_identity(expected, os.fstat(descriptor))
                     ):
                         return False
+                    if artifact.custody is not None and current.identity != artifact.held_file.identity:
+                        # A new alias keeps payload bytes alive; one removed name cannot retire that copy.
+                        return False
                     removed = self.held_filesystem.unlink(current)
                     if not removed.ok:
                         return False
                 self.artifacts.pop(artifact.name)
                 self.recheck()
+                artifact.acknowledge_removed()
                 return True
             if os.name == "nt":  # Windows cannot unlink an open CRT file
                 artifact.close()
@@ -3232,6 +3302,7 @@ class _BatchWorkspace:
             artifact.close()
             self.artifacts.pop(artifact.name)
             self.recheck()
+            artifact.acknowledge_removed()
             return True
         except (OSError, PathGuardError):
             return False
@@ -5604,6 +5675,7 @@ def batch_atomic_write(
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
+    _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -5628,6 +5700,9 @@ def batch_atomic_write(
 
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
+            if _payload_custody is not None:
+                # A file-owner contract cannot silently lose its custody in another persistence owner.
+                raise ValueError("file payload custody requires its native writer")
             return store_batch.commit_batch(
                 writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
                 completion_guards=completion_guards, index_reports=index_reports,
@@ -5654,6 +5729,7 @@ def batch_atomic_write(
                     defer_graph_completion=defer_graph_completion,
                     _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                     _validate_prepared_bindings=_validate_prepared_bindings, _prepare=_prepare,
+                    _payload_custody=_payload_custody,
                 )
         from . import curation_witness
 
@@ -5685,6 +5761,7 @@ def batch_atomic_write(
                 publication_intents_out=publication_intents_out,
                 _validate_prepared_bindings=_validate_prepared_bindings,
                 _before_first_install=curation_witness.publication_hook(curation_witness_state),
+                _payload_custody=_payload_custody,
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -5747,6 +5824,7 @@ def _batch_atomic_write_locked(
     _before_first_install: Callable[[], None] | None = None,
     _graph_epoch: bool = True,
     _before_commit_point: Callable[[], None] | None = None,
+    _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -6004,9 +6082,11 @@ def _batch_atomic_write_locked(
                     leaf_policy="stable" if os.path.lexists(write.path) else "absent",
                 )
             rollback_ancestry.append((ancestry_root, ancestry_guard))
+            custody = _payload_custody.stage(write, workspace, False) if _payload_custody is not None else None
+            custody_options = {"custody": custody} if custody is not None else {}
             if isinstance(write.content, str):
                 artifact = workspace.create_artifact(
-                    f"stage-{index}.tmp", write.content.encode("utf-8")
+                    f"stage-{index}.tmp", write.content.encode("utf-8"), **custody_options,
                 )
             elif isinstance(write.content, PreparedBinaryContent):
                 if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
@@ -6019,6 +6099,7 @@ def _batch_atomic_write_locked(
                     write.content.stream,
                     expected_size=write.content.size,
                     expected_hash=write.content.sha256,
+                    **custody_options,
                 )
             else:  # pragma: no cover - the public union is closed
                 raise PathGuardError(
@@ -6300,6 +6381,7 @@ def _batch_atomic_write_locked(
             with _batch_replace_context(
                 Path(vault_root) if vault_root is not None else None,
                 expected_destination,
+                custody=_payload_custody.publication(writes[index], artifact, False) if _payload_custody is not None else None,
             ):
                 try:
                     installed_identity = workspace.replace_artifact(artifact, final)
@@ -6407,9 +6489,13 @@ def _batch_atomic_write_locked(
                 recheck_inverse()
                 if snapshot is None:
                     workspace.unlink_installed(final, final_guard, inverse_recheck=recheck_inverse)
+                    if _payload_custody is not None:
+                        _payload_custody.removed(writes[replaced_index], final_guard.identity)
                 else:
+                    custody = _payload_custody.stage(writes[replaced_index], workspace, True) if _payload_custody is not None else None
                     restore = workspace.create_artifact(
-                        f"restore-{replaced_index}.tmp", snapshot.content
+                        f"restore-{replaced_index}.tmp", snapshot.content,
+                        **({"custody": custody} if custody is not None else {}),
                     )
                     _apply_snapshot_metadata(restore, snapshot)
                     restore.recheck(verify_content=False)
@@ -6420,6 +6506,7 @@ def _batch_atomic_write_locked(
                         snapshot,
                         inverse_recheck=recheck_inverse,
                         expected_content_hash=final_guard.content_hash,
+                        custody=_payload_custody.publication(writes[replaced_index], restore, True) if _payload_custody is not None else None,
                     ):
                         restored_identity = workspace.replace_artifact(restore, final)
                     _BatchArtifactGuard.capture(

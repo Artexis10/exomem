@@ -17,10 +17,10 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import hashlib
+import io
 import logging
 import os
 import stat
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -510,9 +510,13 @@ def add(
                 slug=slug, raw_protection=raw_protection, passages=passages,
             )
     if raw_protection and artifact is None:
-        with tempfile.TemporaryDirectory(prefix="exomem-raw-source-") as staging:
-            original = Path(staging) / "source.txt"
-            original.write_bytes(content.encode("utf-8"))
+        def prepare_raw(value: dict) -> None:
+            assert _prepare is not None
+            normalized = {**value["normalized_native_args"], "content": content}
+            _prepare({**value, "normalized_native_args": normalized})
+
+        # The artifact API already accepts a seekable stream; no unowned pre-allocation disk copy is needed.
+        with io.BytesIO(content.encode("utf-8")) as original:
             return add(
                 vault_root, source_schema, content="", title=title, source_type=source_type,
                 slug=slug, url=url, tags=tags, why_captured=why_captured, domain=domain,
@@ -524,6 +528,9 @@ def add(
                 passages=passages,
                 expected_sha256=expected_sha256,
                 correction=correction,
+                _allocation=_allocation,
+                _prepare=prepare_raw if _prepare is not None else None,
+                _validate_inputs=_validate_inputs,
             )
     # An artifact's identity is read before validation, because the page body
     # is synthesized from it when the caller supplied no text — and
@@ -898,13 +905,17 @@ def add(
             vault_root, primary=writes[0],
             derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
         )
-        from . import source_custody
+        from . import source_custody, source_payload_custody
 
         source_reference = memory_refs.memory_ref(exomem_id)
         custody_started = source_custody.begin_capture(
             vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
             source_hash=content_hash(writes[0].content), identity=source_identity,
         )
+        payload_custody = container_stack.enter_context(source_payload_custody.capture(
+            vault_root, reference=source_reference, primary=writes[0], writes=writes,
+            auxiliaries=bound_outputs, enabled=custody_started,
+        ))
         def validate_bindings() -> None:
             if _validate_inputs is not None:
                 _validate_inputs()
@@ -938,12 +949,14 @@ def add(
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
                 _prepare=prepare_final if _prepare is not None else None,
+                **({"_payload_custody": payload_custody} if payload_custody is not None else {}),
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
                                _vocabulary_auxiliaries=bound_outputs,
                                _validate_prepared_bindings=validate_bindings,
-                               _prepare=prepare_final if _prepare is not None else None)
+                               _prepare=prepare_final if _prepare is not None else None,
+                               **({"_payload_custody": payload_custody} if payload_custody is not None else {}))
     except _NativePrepared:
         raise
     except source_capture.SourceCaptureError:

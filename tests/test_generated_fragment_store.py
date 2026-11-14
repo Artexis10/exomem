@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import uuid
 from contextlib import contextmanager
@@ -9,11 +10,11 @@ from contextlib import contextmanager
 import pytest
 
 from exomem import generated_fragment_store as generated
-from exomem import memory_refs, reserved_paths, writer_lease
+from exomem import memory_refs, reserved_paths, vocabulary_auxiliaries, writer_lease
 from exomem import vault as vault_module
 from exomem.generated_fragments import Fragment, FragmentMap, FragmentPlan
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.source_custody import OwnerLocator
+from exomem.source_custody import OwnerLocator, ProducerBirth
 
 
 def reference():
@@ -744,3 +745,136 @@ def test_slot_references_pin_closed_current_and_pending_maps_after_replica_censu
     with pytest.raises(ValueError, match="superseded"):
         replica.check_slot(token)
     replica.close()
+
+
+def test_whole_binary_original_copy_survives_replica_without_fragment_decoding(store, monkeypatch, tmp_path):
+    birth = store.allocate_birth()
+    ref = reference()
+    binary = b"\x00\xff\xfe\x80sealed binary original\x00"
+    digest = hashlib.sha256(binary).hexdigest()
+    primary_path = store.root / "Knowledge Base/Sources/whole-binary.bin.md"
+    original_path = primary_path.with_suffix("")
+    primary = vault_module.PlannedWrite(primary_path,
+        f"---\ntype: source\nexomem_id: {memory_refs.parse_memory_ref(ref)}\n---\n# Binary original\n",
+        create_only=True, expected_hash=vault_module.MISSING_CONTENT_HASH)
+    original = vault_module.PlannedWrite(original_path,
+        vault_module.PreparedBinaryContent(io.BytesIO(binary), len(binary), digest),
+        create_only=True, expected_hash=vault_module.MISSING_CONTENT_HASH)
+    sealed = vocabulary_auxiliaries.seal(store.root, primary=primary,
+                                         derived=[(vocabulary_auxiliaries.SOURCE_ORIGINAL, original)])
+    vault_module.batch_atomic_write((primary, original), vault_root=store.root,
+                                    _vocabulary_auxiliaries=sealed, commit_point=False, post_commit_fanout=False)
+
+    def no_text_map(*args, **kwargs):
+        pytest.fail("whole binary image entered FragmentMap validation")
+
+    monkeypatch.setattr(FragmentMap, "validate_image", no_text_map)
+    header = store.begin_whole_image(whole_source_ref=ref, image_sha256=digest, image_size=len(binary))
+    assert header.whole_source_ref == ref and header.state == "ready" and header.page_count == 0
+    assert header.last_page_hash is None and header.expected_last_page_hash is None
+    assert store.image_page(header.image_id, 0).state == "missing"
+    owner = OwnerLocator(owner="binary-original-owner", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
+    copy = store.reserve_copy(header.image_id, owner=owner,
+                              origin_ledger=writer_lease.active_manager().idempotency.capture_attempts.ledger_id,
+                              expected_header=header, expected_root=store.root)
+    store.close()
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "whole-binary-replica"))
+    replica = generated.GeneratedFragmentStore(store.root)
+    assert replica.lookup(ref, birth).state == "pending"
+    for _ in range(20):
+        if replica.census(limit=1).state == "ready":
+            break
+    found = replica.lookup(ref, birth)
+    assert found.image_ids == (header.image_id,) and found.copies == (copy,)
+    # Canonical reservation stays outstanding until its native owner supplies an acknowledgement.
+    assert found.state == "pending" and found.copies[0].outcome == "reserved"
+    assert original_path.read_bytes() == binary
+    assert replica.image_header(header.image_id).value.whole_source_ref == ref
+    replica.close()
+
+
+def test_equal_whole_bytes_for_different_sources_have_distinct_immutable_images(store):
+    first, second = reference(), reference()
+    binary = b"\xff\x00same opaque original"
+    digest = hashlib.sha256(binary).hexdigest()
+    left = store.begin_whole_image(whole_source_ref=first, image_sha256=digest, image_size=len(binary))
+    right = store.begin_whole_image(whole_source_ref=second, image_sha256=digest, image_size=len(binary))
+    assert left.image_id != right.image_id
+    assert left.image_sha256 == right.image_sha256 and left.image_size == right.image_size
+    assert store.lookup(first, None).image_ids == (left.image_id,)
+    assert store.lookup(second, None).image_ids == (right.image_id,)
+    with pytest.raises(ValueError, match="revision_changed"):
+        store.begin_verified_image(image_id=left.image_id, whole_source_ref=second,
+                                   image_sha256=digest, image_size=len(binary), page_count=0,
+                                   expected_last_page_hash=None, unknown_through_epoch=0)
+    assert store.image_header(left.image_id).value.whole_source_ref == first
+
+
+@pytest.mark.parametrize("birth_state", ("missing", "mismatched", "future"))
+def test_unknown_birth_preserves_explicit_whole_and_fragment_copy_obligations(store, birth_state):
+    birth = store.allocate_birth()
+    ref = reference()
+    fragment_id = ready(store, ref)
+    whole = store.begin_whole_image(whole_source_ref=ref, image_sha256=hashlib.sha256(b"\xff").hexdigest(), image_size=1)
+    unrelated = store.begin_whole_image(whole_source_ref=reference(), image_sha256=whole.image_sha256, image_size=1)
+    expected = set()
+    for image_id in (fragment_id, whole.image_id):
+        owner = OwnerLocator(owner="exact-copy-owner", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
+        copy = store.reserve_copy(image_id, owner=owner, origin_ledger="native-owner-ledger",
+                                  expected_header=store.image_header(image_id).value, expected_root=store.root)
+        expected.add(copy.copy_id)
+    if birth_state == "missing":
+        evidence = None
+    elif birth_state == "mismatched":
+        evidence = ProducerBirth(catalogue_id=uuid.uuid4().hex, birth_epoch=birth.birth_epoch)
+    else:
+        evidence = ProducerBirth(catalogue_id=birth.catalogue_id, birth_epoch=store.head().epoch + 1)
+    cursor, copies, images = None, set(), set()
+    for _ in range(4):
+        found = store.lookup(ref, evidence, limit=1, cursor=cursor)
+        assert found.state == "unknown"
+        assert found.uncertain_images == () and found.uncertainty_cursor is None
+        copies.update(copy.copy_id for copy in found.copies)
+        images.update(found.image_ids)
+        cursor = found.cursor
+        if cursor is None:
+            break
+    assert copies == expected and images == {fragment_id, whole.image_id}
+    assert unrelated.image_id not in images
+
+
+@pytest.mark.parametrize("damage", ("corrupt", "reassociated"))
+def test_whole_header_evidence_loss_keeps_prior_positive_copy_membership(store, damage):
+    birth = store.allocate_birth()
+    ref = reference()
+    header = store.begin_whole_image(whole_source_ref=ref, image_sha256=hashlib.sha256(b"\xff").hexdigest(), image_size=1)
+    owner = OwnerLocator(owner="binary-original-owner", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
+    copy = store.reserve_copy(header.image_id, owner=owner, origin_ledger="native-owner-ledger",
+                              expected_header=header, expected_root=store.root)
+    path = generated.canonical_root(store.root) / "images" / header.image_id[:2] / header.image_id / "head.json"
+    if damage == "corrupt":
+        path.write_bytes(b"broken image header")
+    else:
+        changed = header.model_copy(update={"whole_source_ref": reference(), "revision": uuid.uuid4().hex})
+        path.write_bytes(generated.encode(changed))
+    for _ in range(30):
+        if store.census(limit=2).state == "ready":
+            break
+    found = store.lookup(ref, birth)
+    assert found.state == "unknown"
+    assert found.image_ids == (header.image_id,) and found.copies == (copy,)
+    assert header.image_id in found.uncertain_images
+    assert store.lookup(ref, None).copies == (copy,)
+
+
+def test_whole_image_rejects_fragment_pages_and_old_headers_default_to_no_whole_owner(store):
+    ref = reference()
+    digest = hashlib.sha256(b"\xff").hexdigest()
+    with pytest.raises(ValueError, match="whole_source_image_cannot_have_fragment_pages"):
+        store.begin_verified_image(whole_source_ref=ref, image_sha256=digest, image_size=1,
+                                   page_count=1, expected_last_page_hash=digest, unknown_through_epoch=0)
+    with pytest.raises(ValueError, match="fragment_source_ref_invalid"):
+        store.begin_whole_image(whole_source_ref="unallocated-record", image_sha256=digest, image_size=1)
+    old = store.image_header(ready(store, ref)).value.model_dump(mode="json")
+    old.pop("whole_source_ref")
+    assert generated.ImageHeader.model_validate(old).whole_source_ref is None

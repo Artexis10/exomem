@@ -94,6 +94,135 @@ def test_reused_source_is_observed_without_ownership(vault, attempts, registered
     assert (vault / captured["source"]["path"]).exists()
 
 
+def test_capture_retains_canonical_copy_when_the_native_binding_disappears(vault, attempts, registered_custody):
+    """An empty local table cannot turn a published Source payload into completed cleanup."""
+    from exomem import generated_fragment_store, source_native_custody
+
+    manager, call = attempts
+    args = authored()
+    ticket = reserve(call, args)
+    captured = call("capture_source", **args, capture_reservation=ticket)
+    target = call("settle_source_capture", reservation=ticket)["owned_targets"][0]
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        native = source_native_custody.NativeCustody(vault)
+        try:
+            lookup = store.lookup(target["source_ref"], None)
+            assert lookup.state == "unknown" and len(lookup.copies) == 1
+            copy = lookup.copies[0]
+            assert copy.outcome == "present" and copy.origin_ledger == native.ledger_id
+            assert native.observe(copy.owner.locator, destination=True).matching is True
+            image = store.image_header(copy.image_id).value
+            assert image.whole_source_ref == target["source_ref"]
+            assert image.image_sha256 == target["source_hash"]
+            with manager.idempotency._connect() as conn:
+                conn.execute("DELETE FROM source_native_bindings WHERE binding_id=?", (copy.owner.locator,))
+            assert native.lookup(source_ref=target["source_ref"]).reservations == ()
+            assert native.observe(copy.owner.locator, destination=True).state == "unknown"
+            retained = store.lookup(target["source_ref"], None)
+            assert retained.state == "unknown" and retained.copies == (copy,)
+            assert not copy.closed
+        finally:
+            store.close()
+    assert (vault / captured["source"]["path"]).exists()
+
+
+def test_sealed_binary_original_uses_whole_source_custody(vault, source_schema, attempts, registered_custody):
+    """Opaque original bytes receive canonical copy obligations without a textual fragment map."""
+    import hashlib
+    import io
+
+    from exomem import add, generated_fragment_store, source_native_custody
+
+    manager, _ = attempts
+    original = b"\x00\xffopaque original bytes"
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        saved = add.add(
+            vault, source_schema, title="Attached record", content="", source_type="session",
+            artifact=add.SourceArtifact(io.BytesIO(original), "record.bin", "application/octet-stream"),
+            source_identity={"system": "archive", "record_id": "attached-record", "revision": "one"},
+        )
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        native = source_native_custody.NativeCustody(vault)
+        try:
+            copies, cursor = [], None
+            for _ in range(3):
+                page = store.lookup(saved.ref, None, cursor=cursor)
+                copies.extend(page.copies)
+                cursor = page.cursor
+                if cursor is None:
+                    break
+            assert cursor is None and len(copies) == 2
+            originals = []
+            for copy in copies:
+                image = store.image_header(copy.image_id).value
+                assert image.whole_source_ref == saved.ref and image.page_count == 0
+                assert copy.outcome == "present"
+                assert native.observe(copy.owner.locator, destination=True).matching is True
+                if image.image_sha256 == hashlib.sha256(original).hexdigest():
+                    originals.append(copy)
+            assert len(originals) == 1
+            assert (vault / saved.artifact_path).read_bytes() == original
+        finally:
+            store.close()
+
+
+def test_capture_rollback_closes_its_exact_source_payload_copies(vault, attempts, registered_custody, monkeypatch):
+    """Caught failure after installation removes the fresh Source and closes its retained copy obligations."""
+    from exomem import generated_fragment_store, source_native_custody
+
+    manager, call = attempts
+    args = authored()
+    ticket = reserve(call, args)
+
+    def fail_after_source(path):
+        if path.suffix == ".md" and memory_refs.ref_from_markdown(path.read_text()):
+            raise RuntimeError("Source installation interrupted")
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", fail_after_source)
+    with pytest.raises(RuntimeError, match="Source installation interrupted"):
+        call("capture_source", **args, capture_reservation=ticket)
+    target = call("settle_source_capture", reservation=ticket)["owned_targets"][0]
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        try:
+            retained = store.lookup(target["source_ref"], None)
+            assert retained.image_ids and retained.copies == ()
+            assert source_native_custody.NativeCustody(vault).lookup(source_ref=target["source_ref"]).reservations == ()
+        finally:
+            store.close()
+    assert not any(memory_refs.ref_from_markdown(path.read_text()) == target["source_ref"]
+                   for path in (vault / "Knowledge Base/Sources").rglob("*.md"))
+
+
+def test_protected_source_preparation_preserves_input_without_publishing(vault, source_schema, attempts):
+    """Private text must stay a preparation, with its original input available for exact replay."""
+    from exomem import add, vocabulary_gate
+
+    class Prepared(Exception):
+        def __init__(self, value):
+            self.value = value
+
+    def stop(value):
+        raise Prepared(value)
+
+    manager, _ = attempts
+    before = {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    original = "Confidential text with café and exact line endings.\r\n"
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with memory_refs._allocated_ids() as identities, vocabulary_gate.preparation_context(vault):
+            with pytest.raises(Prepared) as prepared:
+                add.add(vault, source_schema, title="Private account", content=original,
+                        source_type="session", raw_protection=True, _prepare=stop)
+        snapshot = prepared.value.value
+        assert snapshot["normalized_native_args"]["content"] == original
+        assert {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+        with memory_refs._allocated_ids(identities):
+            saved = add.add(vault, source_schema, **snapshot["normalized_native_args"], _allocation=snapshot["allocation"])
+    assert saved.ref == snapshot["ref"]
+    assert (vault / saved.artifact_path).read_bytes() == original.encode("utf-8")
+
+
 def test_unreserved_capture_under_default_policy_stays_unenrolled(vault, attempts):
     _, call = attempts
     args = authored()

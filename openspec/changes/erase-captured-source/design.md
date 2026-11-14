@@ -82,15 +82,31 @@ Copy reservations bind the image, actual owner, origin ledger, opaque locator an
 The private owner retains native paths and filesystem identities; canonical locators expose neither.
 Keep only one generated-owner locator in each Source manifest, rather than rewriting every Source manifest for every shared image.
 
+A whole Source page or sealed original uses an immutable `whole_source_ref` on its image header, without textual fragment pages.
+The allocation and sealed original declaration establish that ownership; matching bytes, Markdown markers and nearby paths do not.
+Binary originals therefore reuse image and copy custody without passing through UTF-8 fragment validation.
+Canonical copies define the expected obligations, including when a private native binding disappears.
+An empty local lookup never proves completion. Missing birth coverage preserves known positive copies while leaving completeness unknown.
+
+The native owner uses one protected table in the existing idempotency database, without storing bodies or rollback bytes there.
+It seals root, parent, allocation identity and verified version before publication, then supplies exact cleanup and installation witnesses.
+This follows [How we contain Claude](https://www.anthropic.com/research/how-we-contain-claude): native capabilities bound destruction while canonical records preserve obligations.
+
 Keep one canonical slot for each generated-file locator and physical owner scope.
 Its deterministic opaque key selects the current copy directly, with at most one pending candidate copy and publication identifier.
 Read its copy records and image headers directly when rendering; a cold local index cannot block capture or erase healthy ownership evidence.
 Reserve the candidate copy before preparing the slot, and prepare the slot before native publication.
-Settle the slot from the native owner's exact installation witness after the rollback-capable batch finishes.
+Normal success settles the slot from the native owner's exact installation witness after the rollback-capable batch finishes.
 Equal content hashes cannot select between different ownership maps without that witness.
 A takeover changes the slot revision and cancels delayed forward or inverse publication rights.
 Displacing a copy does not retire its physical obligation; slot references also pin its image until the owner closes them.
 Missing canonical custody remains different from a missing derived cache.
+
+An inverse publication creates a fresh native file, even when it restores the before-image bytes.
+First settle the exactly observed installed candidate to consume its forward publication right, without claiming batch success.
+Reserve a fresh restore copy on the before-image, then prepare and install it under a new slot publication right.
+Never bind the earlier before-copy identity to the newly created restore file.
+A crash between these steps retains truthful current custody and every unresolved physical obligation.
 
 Qualify the derived SQLite membership index against the canonical catalogue identity and ordered checkpoint.
 Advance canonical evidence before changing tracked ownership or publishing bytes; interrupted publication remains unresolved.

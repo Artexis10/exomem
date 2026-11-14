@@ -84,10 +84,24 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **THEN** it reads the current generated-file binding directly and preserves its ownership map and uncertainty horizon
 - **AND** ordinary capture does not require a whole-catalogue rebuild
 
+#### Scenario: A binary original outlives its private native binding
+- **WHEN** canonical whole-Source image and copy records retain the original but its private binding disappears
+- **THEN** lookup retains the obligation and retirement remains unknown until the native owner resolves it
+- **AND** the binary original needs no UTF-8 fragment map
+
+#### Scenario: Birth coverage is unavailable for a known copy
+- **WHEN** an explicit canonical Source association retains a copy but its birth evidence cannot qualify historical completeness
+- **THEN** lookup returns the known copy with unknown completeness instead of hiding the obligation
+
 #### Scenario: A prior generated publisher resumes after takeover
 - **WHEN** another native publication has taken over the current slot with a new revision
 - **THEN** the old forward publication and rollback cannot reuse their cancelled publication right
 - **AND** displaced physical copies remain outstanding until their owners acknowledge them
+
+#### Scenario: Rollback creates a fresh copy of the before-image
+- **WHEN** an inverse publication restores earlier bytes through a newly created native file
+- **THEN** it binds a fresh copy and publication right instead of reusing the earlier file's identity
+- **AND** an interrupted handoff retains the observed current binding and every unresolved physical obligation
 
 #### Scenario: Store audit retains the target's earlier paths
 - **WHEN** target projection and vector cleanup have finished for an incarnation with exact move lineage
