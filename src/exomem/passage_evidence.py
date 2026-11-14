@@ -318,7 +318,10 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     with runtime_resources.model_execution(), recall_space.encoding_for(index):
         query_vector = embeddings.embed_texts([query], is_query=True)[0]
     recall_space.require_same_space(index, identity, query_vector)
-    selected = index.select_chunks(query_vector, limit, allowed_paths=allowed, encoded_for=identity)
+    selection = index.select_passage_chunks(
+        query_vector, limit, allowed_paths=allowed, encoded_for=identity
+    )
+    selected = selection.hits
     pages = {
         path: find_module._resolve_page(vault_root, path)
         for path in dict.fromkeys(path for path, _number, _stored, _score in selected)
@@ -363,6 +366,6 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         "user_summary": summary,
         "hits": hits,
         "recall_space": asdict(space),
-        "scoring_mode": index.chunk_scoring_mode,
+        "scoring_mode": selection.scoring_mode,
         "withheld_chunks": withheld,
     }

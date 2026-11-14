@@ -30,6 +30,7 @@ from exomem import (
     schema,
     semantic_contract,
     server,
+    server_runtime,
 )
 from exomem import vault as vault_module
 
@@ -68,7 +69,10 @@ def passage_tools(vault, monkeypatch):
     readiness.reset()
 
 
-def test_two_records_of_one_source_rank_with_verifiable_hashes_and_spans(vault, passage_tools):
+@pytest.mark.parametrize("scoring_mode", ["disk", "resident"])
+def test_two_records_of_one_source_rank_with_verifiable_hashes_and_spans(
+    vault, passage_tools, monkeypatch, scoring_mode
+):
     """Page-level collapse loses the second record even when both are the best matches."""
     call, encoder = passage_tools
     passages = [
@@ -89,6 +93,13 @@ def test_two_records_of_one_source_rank_with_verifiable_hashes_and_spans(vault, 
     assert "error" not in captured, captured
     embeddings.index_incremental(vault)
     publish_reference(vault)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_PASSAGE_MATRIX_BYTES", str(1024 * 1024) if scoring_mode == "resident" else "0")
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    server_runtime._warm_embedding_matrix(vault)
+    if scoring_mode == "resident":
+        assert embeddings.get_embedding_index(vault)._cache is not None
     before = len(encoder.texts)
     reply = call(
         "search_memory",
@@ -120,6 +131,8 @@ def test_two_records_of_one_source_rank_with_verifiable_hashes_and_spans(vault, 
         assert "text" not in hit and "excerpt" not in hit
     assert reply["recall_space"]["dim"] == embeddings.VECTOR_DIM
     assert reply["withheld_chunks"] == 0
+    assert reply["scoring_mode"] == scoring_mode
+    embeddings.get_embedding_index(vault).unload_cache()
 
 
 def test_four_admitted_public_requests_all_complete(vault, passage_tools, monkeypatch):
@@ -346,9 +359,7 @@ def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     vault, passage_tools, monkeypatch, anchor_state
 ):
     """An unselected Source anchor must not add a canonical read to the result limit."""
-    from exomem import epistemic_graph
-
-    from exomem import source_capture
+    from exomem import epistemic_graph, source_capture
     from exomem.governance import lifecycle
 
     monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
