@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import builtins
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -39,16 +40,18 @@ from test_vault_store_rederive import PROFILES, project, settle_to_the_end
 from exomem import (
     access,
     commands,
+    delete_directory,
     epistemic_graph,
     find,
     graph_read_publication,
     lexstore,
+    recover_from_trash,
     semantic_index,
 )
 from exomem import vault as vaults
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection
-from exomem.governance import egress
+from exomem.collection_store import connection, preview
+from exomem.governance import egress, lifecycle
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
@@ -1300,8 +1303,8 @@ def test_a_store_commit_advances_the_resident_resolver_to_what_a_rebuild_holds(s
         ),
         "delete": change(deletes=(write.PageDelete(EVIDENCE),)),
     }
-    for step, commit in steps.items():
-        write.commit(writer, commit)
+
+    def holds_what_a_rebuild_holds(step):
         resident, checkpoint, token = find.borrow_recall_resolver(stored)
         assert checkpoint == read.recall_checkpoint(stored, "vault"), step
         entries = lexstore.get_store(stored).recall_resolver_entries("vault", checkpoint)
@@ -1313,6 +1316,46 @@ def test_a_store_commit_advances_the_resident_resolver_to_what_a_rebuild_holds(s
         assert participants(lambda: find.recall_resolver_snapshot(stored)) == participants(
             rebuilt.fork
         ), step
+
+    for step, commit in steps.items():
+        write.commit(writer, commit)
+        holds_what_a_rebuild_holds(step)
+    # A folder trash moves several pages and a binary out of the vault scope in one commit. A
+    # governed page in the folder makes it a governed deletion, and its `Tide` is a third `Tide`.
+    harbour = "Knowledge Base/Notes/Harbour"
+    (stored / harbour).mkdir(parents=True)
+    (stored / harbour / "chart.bin").write_bytes(b"chart")
+    write.commit(writer, change(
+        puts=(
+            write.PagePut(f"{harbour}/Tide.md", b"---\ntitle: Harbour Tide\n---\n# Tide\n\n[[Lantern Claim]]\n"),
+            write.PagePut(f"{harbour}/Ledger.md", b"---\ntitle: Harbour Tide\ntags: [cohort-0]\n---\n# Ledger\n"),
+        ),
+        binaries=(write.BinaryRecord(f"{harbour}/chart.bin", hashlib.sha256(b"chart").hexdigest(), 5),),
+    ))
+
+    @contextlib.contextmanager
+    def bound_writer():
+        # The lifecycle writers commit through the writer that the service binds for a request.
+        token = preview._BOUND.set((stored.resolve(), writer, False))
+        try:
+            yield
+        finally:
+            preview._BOUND.reset(token)
+
+    with bound_writer():
+        trashed = delete_directory.delete_directory(
+            stored, path=harbour, confirm=True, recursive=True, force_orphan=True
+        )
+    assert lifecycle.is_tombstoned(stored, f"{harbour}/Ledger.md")
+    assert not (stored / harbour / "chart.bin").exists()
+    holds_what_a_rebuild_holds("governed folder trash")
+    # Its recovery brings the pages back in one commit, two of them one title's homonyms.
+    with bound_writer():
+        recover_from_trash.recover_from_trash(stored, trash_path=trashed.trash_path)
+    assert not lifecycle.is_tombstoned(stored, f"{harbour}/Ledger.md")
+    with read.snapshot(stored) as view:
+        assert view.page_meta(f"{harbour}/Ledger.md") is not None
+    holds_what_a_rebuild_holds("governed folder recovery")
     with library_scope(), request_scope(EXTERNAL):
         patched = GRAPH_CALLS["find relation_of"](stored), GRAPH_CALLS["graph_context depth 2"](stored)
         find.evict_resolver_caches(stored)
