@@ -1046,32 +1046,6 @@ def test_a_write_door_withholds_a_stored_page_that_has_no_projection(stored, wri
     assert withheld == (True, False)
 
 
-def test_a_bound_store_lets_the_owner_delete_a_folder_and_still_refuses_a_restricted_caller(
-    stored, writer  # noqa: F811
-):
-    """A bound store filters every caller's walk, the owner's too, so a folder delete that reads
-    "a filter exists" as "the caller is restricted" refuses the owner a recursive delete."""
-    folder = "Knowledge Base/Notes/Retired"
-    pages = [f"{folder}/{name}.md" for name in ("One", "Two")]
-    body = b"---\ntitle: R\ntype: note\n---\n# R\n\nRetired.\n"
-    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
-        write.PagePut(rel, body) for rel in pages
-    )))
-    for rel in pages:  # as the projector writes them
-        (stored / rel).parent.mkdir(parents=True, exist_ok=True)
-        (stored / rel).write_bytes(body)
-    token = preview._BOUND.set((stored.resolve(), writer, False))
-    try:
-        with request_scope(EXTERNAL), pytest.raises(ValueError, match="AUDIENCE_RESTRICTED"):
-            commands.op_delete(stored, path=folder, confirm=True, recursive=True)
-        with request_scope(owner_principal(surface="mcp")):
-            commands.op_delete(stored, path=folder, confirm=True, recursive=True)
-    finally:
-        preview._BOUND.reset(token)
-
-    assert not any(read.holds_file(stored, rel) for rel in pages)
-
-
 def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_yet(
     stored, writer  # noqa: F811
 ):
@@ -1163,6 +1137,7 @@ def test_a_bound_store_decides_whether_a_caller_is_restricted_as_file_mode_does(
         preview._BOUND.reset(token)
 
     assert in_a_bound_store == in_file_mode
+    assert read.holds_file(store_root, f"{folders['store']}/One.md") is restricted
 
 
 @pytest.mark.timeout(300)

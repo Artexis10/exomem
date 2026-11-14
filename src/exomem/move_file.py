@@ -897,7 +897,10 @@ def _move_file_local(
     # see, so its answer is the same with and without hidden linkers. A hidden
     # linker keeps its old link; the owner's audit reports it as a broken
     # reference (named debt in the vault-consolidation change).
-    limited_mover = egress.caller_restricted(vault_root) and not connector_boundary.unrestricted(
+    # Whether this mover is restricted. `visible` only applies a view: a bound store gives the
+    # owner one too.
+    restricted = egress.caller_restricted(vault_root)
+    limited_mover = restricted and not connector_boundary.unrestricted(
         vault_root, effective_principal()
     )
     # Scan inbound links BEFORE the move, while the old path still exists.
@@ -1033,9 +1036,9 @@ def _move_file_local(
         # The activity log is readable by other audiences: for a mover other
         # than the owner it carries the figures that mover may see.
         logged_updated, logged_files = (
-            (wikilinks_updated, len(files_touched))
-            if visible is None
-            else (reported_updated, len(reported_touched))
+            (reported_updated, len(reported_touched))
+            if restricted
+            else (wikilinks_updated, len(files_touched))
         )
         body = (
             f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
@@ -1715,7 +1718,7 @@ def _move_file_local(
         semantic=semantic,
         # The index outcome covers every rewritten page, so a mover other
         # than the owner receives none.
-        index=index_feedback if visible is None else None,
+        index=None if restricted else index_feedback,
     )
 
 

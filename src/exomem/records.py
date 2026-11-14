@@ -2347,6 +2347,11 @@ def _validate_collection_create_for_profile(
         for path in (manifest.path, manifest.storage.source, f"{vault.kb_prefix()}log.md")
     ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    if manifest.storage.strategy != collections.SQLITE_STORAGE:
+        # Only a file create appends its event to the log; the store creates a sqlite collection.
+        # The event's text never decides write authority: an event keeps the log's metadata.
+        audit = _plan_required_audit(root, manifest, "collection", "", "validate")
+        _require_audit_writable(root, audit)
     from .collection_store import summary
 
     # The store's create receipt names the same paths: the manifest, its summary pages, then the source.
@@ -5589,6 +5594,23 @@ def _plan_required_audit(
             "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
         )
     return plan
+
+
+def _require_audit_writable(root: Path, plan: vault.LogWritePlan) -> None:
+    """Refuse an audit event the caller may not write, by the publication batch's own check.
+
+    A preflight calls this after the log passed its release check, so the refusal may name it.
+    """
+    for write in plan.writes:
+        try:
+            vault._validate_batch_write_access(root, (write,), proposed=plan.writes)
+        except ValueError as error:
+            target = vault.relative_posix(write.path, root)
+            raise collections.CollectionError(
+                "WRITE_REFUSED",
+                f"this change appends its event to {target}, which this caller may not write: "
+                f"grant the caller write access to {target}",
+            ) from error
 
 
 def _audit_body(

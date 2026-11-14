@@ -2656,19 +2656,22 @@ _PRE_ADMISSION_SIGNALS = (
 _Tool = TypeVar("_Tool", bound=Callable[..., Any])
 
 
-def _store_registry_lag(vault_root: Path, restricted: bool) -> dict | None:
+def _store_registry_lag(vault_root: Path, restricted: bool | None = None) -> dict | None:
     """The registry notice (``notice`` and ``lag``) that a store-mode reader's result carries, or None.
 
     A store-mode vault serves its search, graph and link rows while a registry pass re-derives them,
     and every reader says so in the same words. The revisions count the vault's writes, which a
-    restricted caller is not shown.
+    restricted caller is not shown. ``restricted`` is the reader's own decision when it has one;
+    otherwise the caller is decided here, and only when there is a notice to trim.
     """
     from .vault_store import read as store_read
 
     found = store_read.request_registry_notice(vault_root)
-    if found is not None and restricted:
-        return {"notice": found["notice"]}
-    return found
+    if found is None:
+        return None
+    if restricted is None:
+        restricted = egress_module.caller_restricted(vault_root)
+    return {"notice": found["notice"]} if restricted else found
 
 
 def _reads_one_store_snapshot(operation: _Tool) -> _Tool:
@@ -3894,7 +3897,7 @@ def op_graph_context(
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
     guarded = egress_module.guard_graph_context(vault_root, context, purpose=purpose)
-    registry_lag = _store_registry_lag(vault_root, egress_module.caller_restricted(vault_root))
+    registry_lag = _store_registry_lag(vault_root)
     if registry_lag is not None:
         guarded.update(registry_lag)
     return guarded
@@ -8415,10 +8418,12 @@ def read_memory_stored(
                 "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
                 "unit_ref, frontmatter_only, include_history, links, include_raw, or offset"
             )
-        view = context_views_module.read_view(vault_root, path, continuation=continuation, purpose=purpose)
+        view = context_views_module.read_view(
+            vault_root, path, continuation=continuation, purpose=purpose
+        )
         # A store-mode view is compiled over rows that a registry pass may still re-derive: a view
         # that would read ready and current says so, in the words every store-mode reader uses.
-        registry_lag = _store_registry_lag(vault_root, egress_module.caller_restricted(vault_root))
+        registry_lag = _store_registry_lag(vault_root)
         if registry_lag is not None:
             view = {**view, **registry_lag}
             if view.get("state") == context_views_module.READY:

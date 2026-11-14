@@ -291,6 +291,7 @@ OWNER_REFUSALS = {
     "observe_transfer": "CLOUD_GATEWAY_REQUIRED:",
 }
 
+
 class ReadSurfaceViolation(AssertionError):
     """A recorded store contract failure, distinct from a bad sample or setup."""
 
@@ -299,6 +300,8 @@ def _sub_selector(command_name, selector_value, adapter):
     """A further registry that the classifier reads for one selector value, as (argument path, values).
 
     `invocation_is_read_only` reads three: governance operations, curation actions and import modes.
+    The classifier does not expose them as data, so a fourth fails
+    `test_the_inventory_knows_each_registry_that_the_classifier_reads` until it is listed here.
     """
     if command_name == "maintain_memory" and selector_value == "curation":
         return ("curation_action",), sorted(curation.READ_ONLY_ACTIONS)
@@ -363,6 +366,47 @@ def test_every_registered_read_invocation_has_a_read_only_sample():
         command = READ_INVOCATIONS[key]
         assert invocation_key(command, arguments) == key
         assert commands.invocation_is_read_only(command, arguments), key
+
+
+class _RecordedArguments(dict):
+    """Invocation arguments that record each name the classifier reads."""
+
+    def __init__(self, values):
+        super().__init__(values)
+        self.read = set()
+
+    def get(self, key, default=None):
+        self.read.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self.read.add(key)
+        return super().__contains__(key)
+
+
+#: The arguments that the classifier's selector adapters read (`invocation_is_read_only`). The
+#: adapters are a closed set that the selector registry declares; a new one names its flag here.
+ADAPTER_ARGUMENTS = frozenset({"validate_only", "save", "dry_run", "apply", "path", "query", "family"})
+
+
+def test_the_inventory_knows_each_registry_that_the_classifier_reads():
+    """A selector value whose classification reads a further argument splits by a registry that
+    the inventory must list, or it samples one of that registry's values and skips the rest."""
+    selectors = egress.selector_registry()
+    for command in (*commands.COMMANDS, *commands.PRODUCT_COMMANDS):
+        selector = egress.selector_for_command(command.name)
+        if selector is None or command.name == "govern_memory":  # its operations are enumerated
+            continue
+        for value, adapter in selectors[(command.name, selector)].items():
+            arguments = _RecordedArguments({selector: value})
+            commands.invocation_is_read_only(command, arguments)
+            further = arguments.read - {selector} - ADAPTER_ARGUMENTS
+            listed = _sub_selector(command.name, value, adapter)
+            assert further == ({listed[0][0]} if listed else set()), f"{command.name}:{value} reads {further}"
 
 
 def clear_reader_caches(root):
@@ -547,8 +591,10 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
             assert vaults.prime_inbound_index(vault, eager=True)
         with scope():
             before[caller] = comparable(answer(command, vault, arguments, source_schema), inbound_links=links)
-    if "refusal" in before["owner"]:
-        assert sample in OWNER_REFUSALS, f"invalid file-mode sample: {before['owner']}"
+    # Exactly the listed samples refuse the owner, so the list counts the samples that prove only
+    # an equal refusal.
+    assert ("refusal" in before["owner"]) is (sample in OWNER_REFUSALS), f"file-mode sample: {before['owner']}"
+    if sample in OWNER_REFUSALS:
         assert before["owner"]["reason"].startswith(OWNER_REFUSALS[sample])
 
     owned = {

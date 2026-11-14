@@ -1153,13 +1153,9 @@ def test_a_blocked_edit_names_the_one_call_fix_and_no_other_route(tmp_path: Path
     assert "fix: Fix:" not in message
 
 
-def test_a_principal_on_a_released_view_cannot_bind_a_unit_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_principal_on_a_released_view_cannot_bind_a_unit_id(tmp_path: Path) -> None:
     """A stale-id refusal names a unit's current id, so a released view reads each id as unknown."""
     from types import SimpleNamespace
-
-    from exomem.governance import egress
 
     unit = SimpleNamespace(unit_ref="exomem://unit/one", fingerprint="f1")
     document = SimpleNamespace(units=[unit])
@@ -1169,8 +1165,7 @@ def test_a_principal_on_a_released_view_cannot_bind_a_unit_id(
     with pytest.raises(observe_memory.ObserveMemoryError, match="STALE_UNIT_REFERENCE"):
         observe_memory._bind_unit_id(tmp_path, document, stale)
 
-    # A released view is a non-owner's: a bound store gives the owner a filter too.
-    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda _path: False)
+    # A released view is a restricted caller's.
     with request_scope(RequestPrincipal(audience_id="external", surface="mcp", resolved=True)):
         for given in (current, stale):
             with pytest.raises(observe_memory.ObserveMemoryError, match="UNIT_NOT_FOUND"):

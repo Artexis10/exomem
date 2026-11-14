@@ -89,7 +89,7 @@ def append_to_file(
     from .vault_store import read as store_read
 
     try:
-        # A stored page's bytes come from the store, so its projection's file identity decides nothing.
+        # A stored page's bytes come from the store: its projection's file identity decides nothing.
         if not store_read.serves(vault_root, rel_path):
             inspect_generic_file(vault_root, rel_path)
     except ReservedPathLeafError as error:

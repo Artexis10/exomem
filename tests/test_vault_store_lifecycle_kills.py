@@ -662,8 +662,8 @@ def test_a_lifecycle_write_killed_between_its_renames_and_its_commit_converges(
     split between its source and the trash, a binary that a sweep records at a path its queued move
     leaves, a trash slot with no sidecar to recover it by, a governed tombstone left pending, or a
     moved artifact's page that names a binary no longer at that path. A folder trash killed before
-    its commit, and a recovery killed after it, retry or undo with a recursive folder trash, so they
-    are in the two tests that the served door's refusal of that trash holds back."""
+    its commit, and a recovery killed after it, are in their own two tests, which also retry or undo
+    them with a recursive folder trash through the served door."""
     plan = [
         ("trash folder", "rename 1", False),
         ("trash folder", "rename 2", False),
