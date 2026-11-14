@@ -11,14 +11,13 @@ from __future__ import annotations
 import hashlib
 import multiprocessing
 import os
-import signal
 import sqlite3
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from contextvars import copy_context
 
 import pytest
+from hard_kill import KILLED, kill_self
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
     ALPHA,
@@ -35,10 +34,6 @@ from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import ownership, read, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 LIMIT = 1 << 20
 NEW = "Knowledge Base/Notes/Gamma.md"
@@ -650,7 +645,7 @@ def _commit_and_die(environment, root, log):
             with open(log, "a") as record:
                 record.write(statement.split("(")[0].strip() + "\n")
             if statement.startswith("UPDATE store_mode SET revision"):
-                os.kill(os.getpid(), signal.SIGKILL)
+                kill_self()
 
         handle.connection.set_trace_callback(trace)
         write.commit(
@@ -682,7 +677,7 @@ def test_a_kill_inside_a_commit_leaves_the_pages_audit_intents_and_revision_all_
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
     ran = log.read_text().splitlines()
     assert any(line.startswith("INSERT INTO store_pages") for line in ran) and any(
         line.startswith("INSERT INTO store_audit") for line in ran

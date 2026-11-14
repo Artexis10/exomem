@@ -12,13 +12,12 @@ import hashlib
 import json
 import multiprocessing
 import os
-import signal
 import sqlite3
-import sys
 import time
 from contextlib import closing
 
 import pytest
+from hard_kill import KILLED, kill_self
 from test_collection_store_migration import (
     MIGRATE,
     OPERATOR,
@@ -46,10 +45,6 @@ from exomem.collection_store import capability, connection, custody, replica, sc
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 from exomem.vault_store import migrate, mode, ownership, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -266,7 +261,7 @@ def _migrate_and_die(environment, released):
     capability.RELEASED = released
 
     def die(*arguments, **keywords):
-        os.kill(os.getpid(), signal.SIGKILL)
+        kill_self()
 
     migrate._recheck_files = die  # runs after the rows are copied and before the commit
     with library_scope():
@@ -288,7 +283,7 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
     assert not mode.store_mode_active(vault)
     assert store_objects(vault) == objects
     assert state_migration.VAULT_STORE_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(

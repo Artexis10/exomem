@@ -13,9 +13,7 @@ import hashlib
 import logging
 import multiprocessing
 import os
-import signal
 import sqlite3
-import sys
 import time
 import zlib
 from contextlib import closing
@@ -27,6 +25,7 @@ import pytest
 import test_vault_store_migration as migration
 import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
+from hard_kill import KILLED, kill_self
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, BETA
 
@@ -56,10 +55,6 @@ stored = read_write.stored
 writer = read_write.writer
 put = read_write.put
 served = write_path.served
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 MOVED = "Knowledge Base/Notes/Moved.md"
 HARBOUR = (
@@ -387,7 +382,7 @@ def drain_and_die(environment, publications):
         token = upsert(self, *arguments, **keywords)
         published.append(token)
         if len(published) == publications:
-            os.kill(os.getpid(), signal.SIGKILL)
+            kill_self()
         return token
 
     EmbeddingIndex.upsert_batch = upsert_then_die
@@ -413,7 +408,7 @@ def test_a_drain_killed_between_publications_resumes_with_the_rows_of_an_uninter
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
     done_before_the_kill = set(index_of(stored).store_stamps())
     assert len(done_before_the_kill) == 2 and len(done_before_the_kill) < pages
     assert index_of(stored).store_cursor() is None, "the census was not finished"

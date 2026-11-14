@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import statistics
-import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -46,10 +45,7 @@ from exomem.vault_store import importer, projector, read, rederive, write
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(300),
-]
+pytestmark = pytest.mark.timeout(300)
 
 stored = read_write.stored
 

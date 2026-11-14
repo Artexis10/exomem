@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 
 import pytest
 from test_artifact_role_projection import write as write_role
@@ -22,10 +21,7 @@ from exomem import audit, commands, due_state, find_corpus, get_page, lexstore
 from exomem.vault import kb_root
 from exomem.vault_store import directory, mode, ownership, read
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(180),
-]
+pytestmark = pytest.mark.timeout(180)
 
 
 def test_audit_reads_stored_corpus_in_one_query(vault, monkeypatch):  # noqa: F811

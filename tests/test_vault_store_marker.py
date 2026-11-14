@@ -12,7 +12,6 @@ import json
 import logging
 import shutil
 import sqlite3
-import sys
 import time
 from contextlib import closing
 
@@ -37,10 +36,6 @@ from exomem import (
 )
 from exomem.collection_store import admission, connection, replica, schema
 from exomem.vault_store import availability, marker, mode
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 
 @pytest.fixture

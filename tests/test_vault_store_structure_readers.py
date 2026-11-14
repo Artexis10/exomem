@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import sys
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
@@ -15,10 +14,7 @@ from exomem import commands, find, overview, semantic_census
 from exomem.vault_store import read, write
 from exomem.writer_lease import invoke_command
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(900),
-]
+pytestmark = pytest.mark.timeout(900)
 
 
 def test_structure_reads_unprojected_subtrees_without_opening_oversized_pages(

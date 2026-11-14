@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-import sys
 import threading
 import types
 
@@ -47,10 +46,6 @@ coordinator_url = importer_suite.coordinator_url
 vault = importer_suite.vault
 stored = importer_suite.stored
 selected_store = media_store_suite.selected_store
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 PICTURE = f"{NOTES}/plain.png"
 PICTURE_BYTES = b"\x89PNG plain"

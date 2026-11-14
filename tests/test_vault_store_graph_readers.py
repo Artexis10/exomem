@@ -53,10 +53,6 @@ from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
-
 INSIGHTS = "Knowledge Base/Notes/Insights"
 CLAIM = f"{INSIGHTS}/Lantern Claim.md"
 EVIDENCE = f"{INSIGHTS}/Tide Evidence.md"

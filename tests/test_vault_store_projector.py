@@ -13,7 +13,6 @@ import json
 import multiprocessing
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tarfile
@@ -23,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from hard_kill import KILLED, kill_self
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
     ALPHA,
@@ -33,13 +33,14 @@ from test_vault_store_migration import (  # noqa: F401
     vault,
 )
 
-from exomem import _held_fs_posix, held_fs, lexstore, server_runtime
+from exomem import held_fs, lexstore, server_runtime
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import mode, projector, read, write
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
+#: The two folder-flush trials wrap the POSIX filesystem class and name each folder through /proc/self/fd.
+posix_only_spy = pytest.mark.skipif(
+    sys.platform != "linux", reason="the spy names each flushed folder through /proc/self/fd"
 )
 
 NOTES = "Knowledge Base/Notes"
@@ -543,6 +544,7 @@ def test_a_refused_rename_leaves_no_new_folder_behind(stored, writer, projecting
     assert not (stored / NOTES / "Fresh").exists()
 
 
+@posix_only_spy
 def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_records_it(
     stored, writer, projecting, monkeypatch
 ):
@@ -550,6 +552,8 @@ def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_record
     unlink, or of a folder that the projection made is still only in the page cache."""
     deep = f"{NOTES}/Fresh/Deeper/Page.md"
     flushed = []
+    from exomem import _held_fs_posix
+
     flush_directory = _held_fs_posix.PosixHeldFilesystem.flush_directory
 
     def spy(self, directory):
@@ -577,6 +581,7 @@ def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_record
     assert [folder for folder, _ in flushed] == [str(root / NOTES / "Fresh" / "Deeper")]
 
 
+@posix_only_spy
 def test_a_retry_that_finds_the_file_in_place_flushes_its_folder_and_every_folder_above(
     stored, writer, projecting, monkeypatch
 ):
@@ -588,6 +593,8 @@ def test_a_retry_that_finds_the_file_in_place_flushes_its_folder_and_every_folde
     (stored / deep).parent.mkdir(parents=True)
     (stored / deep).write_bytes(body)  # the first attempt installed it and died before a flush
     flushed = []
+    from exomem import _held_fs_posix
+
     flush_directory = _held_fs_posix.PosixHeldFilesystem.flush_directory
 
     def spy(self, directory):
@@ -728,7 +735,7 @@ def _project_and_die(environment, root, where, countdown):
     seen = {"count": 0}
 
     def die():
-        os.kill(os.getpid(), signal.SIGKILL)
+        kill_self()
 
     if where == "publication":
         publish = held_fs.publish_bytes
@@ -770,7 +777,7 @@ def die_in_a_child(root, where, countdown):
     started = time.monotonic()
     child.start()
     child.join(300)
-    assert child.exitcode == -signal.SIGKILL, "the child must be killed where the trial says"
+    assert child.exitcode == KILLED, "the child must be killed where the trial says"
     return time.monotonic() - started
 
 

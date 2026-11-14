@@ -60,10 +60,6 @@ from exomem.vault_store import importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
-
 SENTINEL = b"POISONED PROJECTION: a reader served this file instead of the store\n"
 #: How many pages only the store holds; the drill at scale sets it from the environment.
 GENERATED = int(os.environ.get("EXOMEM_READERS_DRILL_PAGES", "40"))

@@ -15,13 +15,12 @@ import hashlib
 import json
 import multiprocessing
 import os
-import signal
 import sqlite3
-import sys
 from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import pytest
+from hard_kill import KILLED, kill_self
 from test_collection_store_runtime import Client
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
@@ -37,10 +36,6 @@ from exomem import writer_lease
 from exomem.collection_store import connection, preview, runtime
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import derive, mode, projection, rederive, verify, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 POLICY = "Knowledge Base/_access.yaml"
 PROFILES = "Knowledge Base/_Schema/traversal-profiles.yaml"
@@ -347,7 +342,7 @@ def _settle_and_die(environment, root, nth):
         if statement.startswith("INSERT INTO store_meta"):
             seen.append(statement)
             if len(seen) == nth:
-                os.kill(os.getpid(), signal.SIGKILL)
+                kill_self()
 
     with store_writer(root) as batch_writer:
         batch_writer.handle.connection.set_trace_callback(trace)
@@ -369,7 +364,7 @@ def test_a_kill_inside_a_batch_leaves_the_rows_behind_the_store_and_the_next_sta
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
 
     status = mode.status(stored)
     assert status["registry"] == rederive.REBUILDING
