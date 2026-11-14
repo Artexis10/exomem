@@ -232,6 +232,23 @@ Unknown past outcomes stay unknown after collection; a later capture uses a fres
 The attempt protocol prevents a withdrawn capture from committing after scoped closure.
 A false pending result delays convergence while the consumer keeps its existing backing; it adds no human approval.
 
+The version-one wire names are fixed:
+
+- Reservation arguments: `source_identity`, `request_sha256` and `capture_wire_version=1`.
+- Reservation result: `reservation` with `protocol_version`, `ticket`, `source_identity`, `request_sha256`, `admission_expires_at` and `scope`.
+- Scope: `cell_id`, `replica_id`, `ledger_id` and `boundary_id`; ordinary mode can report an unavailable cell identifier explicitly.
+- Ticketed capture argument: `capture_reservation`, carrying the unchanged reservation object.
+- Settlement argument: `reservation`, carrying that same object.
+- Settlement result: `state`, `admission_closed_here`, `past_outcome`, `observed_scope` and nullable `capture_receipt`.
+
+`admission_expires_at` is Unix time in seconds, not a latest commit time.
+Settlement states are `closed`, `pending` and `unknown`.
+Past outcomes are `created`, `reused`, `not_started` and `unknown`; nullable closure means proof is unavailable.
+No process identifier or issuer nonce is needed: the guarded row transition supplies execution authority across restart.
+An unused unexpired reservation may survive restart; accepted execution is never recreated after a missing terminal.
+Each implemented command advertises its own feature: `capture_attempt_reservation`, `capture_attempt_settlement` or `capture_attempt_commit`.
+The consumer requires all three, so a filtered command cannot create a false composite capability.
+
 ### D7. Reuse the existing operation and authority model
 
 The primary-source roster's tool-interface and containment rows guide this boundary.
