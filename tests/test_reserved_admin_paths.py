@@ -369,6 +369,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "due-state",
         "embeddings-store",
         "freshness-store",
+        "generated-fragments",
+        "generated-fragments-index",
         "governance-store",
         "governance-tree",
         "graph-handoff",
