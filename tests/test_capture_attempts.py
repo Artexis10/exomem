@@ -56,6 +56,8 @@ def test_delayed_body_cannot_write_after_closure_and_reservation_never_replays(v
     result = call("settle_source_capture", reservation=ticket)
     assert result["state"] == "closed" and result["admission_closed_here"] is True
     assert result["past_outcome"] == "not_started" and result["capture_receipt"] is None
+    assert result["custody_state"] == "complete" and result["owned_targets"] == []
+    assert result["attempt_residue"]["state"] == "clear" and result["attempt_residue"]["owners"] == []
     before = set(vault.rglob("*.md"))
     with pytest.raises(ValueError, match="CAPTURE_ATTEMPT_CLOSED"):
         call("capture_source", **args, capture_reservation=ticket)

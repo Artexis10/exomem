@@ -350,7 +350,8 @@ def canonical_pages(root: Path) -> CanonicalCapturePages:
             for target, _digest, _size, valid in item.bindings:
                 if valid and target in guards:
                     guards[target].recheck(root)
-        if incomplete or canonical & errors:
+        # A failed read supplies no classifier input; that omission cannot prove noncanonical membership.
+        if incomplete or errors.difference(inputs) or canonical & errors:
             unavailable()
         return CanonicalCapturePages(canonical, snapshots, parsed, frozenset(frontmatter_free))
     except (OSError, UnicodeError, vault.PathGuardError, vault.FrontmatterError, ValidationError):

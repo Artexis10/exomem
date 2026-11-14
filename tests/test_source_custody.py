@@ -334,10 +334,11 @@ def test_pre_reference_residue_survives_settlement_and_gc_until_owner_ack(vault,
     assert settled["owned_targets"] == [] and settled["attempt_residue"]["state"] == "pending"
     assert original.exists()
     monkeypatch.setattr(manager.idempotency, "clock", lambda: 10**15)
+    withdrawn = call("settle_source_capture", reservation=ticket, retire_owned=True)
+    assert withdrawn["attempt_residue"]["state"] == "pending" and original.exists()
+    assert withdrawn["attempt_residue"]["retirement_requested"] is True
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         assert manager.idempotency.capture_attempts.collect(manager._mutation_coordinator_for(vault)) == 0
-        withdrawn = manager.idempotency.capture_attempts.settle(manager, vault, capture_attempts.CaptureReservation.model_validate(ticket), retire_owned=True)
-        assert withdrawn["attempt_residue"]["state"] == "pending" and original.exists()
         # This test owner acknowledges only after its own bytes were removed.
         original.unlink()
         capture_attempts.acknowledge_residue(vault, ticket, owner)

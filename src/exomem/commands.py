@@ -9168,9 +9168,10 @@ def op_reserve_source_capture(
 def op_settle_source_capture(
     vault_root: Path,
     reservation: capture_attempts_module.CaptureReservation,
+    retire_owned: bool = False,
 ) -> dict:
     """Close local capture admission or observe its retained receipt under the canonical boundary."""
-    return capture_attempts_module.settle(vault_root, reservation)
+    return capture_attempts_module.settle(vault_root, reservation, retire_owned=retire_owned)
 
 
 def op_capture_source(

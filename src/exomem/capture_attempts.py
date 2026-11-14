@@ -370,6 +370,10 @@ class CaptureAttemptLedger:
             with self.store._connect() as conn:
                 conn.execute("UPDATE capture_attempt_residue SET state='retire_requested' WHERE ticket=? AND state='pending'", (reservation.ticket,))
         result.update(self.custody(reservation.ticket))
+        if result["past_outcome"] == "not_started":
+            # Only accepted admissions can enter producers; a closed unused ticket never owned bytes.
+            result.update(custody_state="complete", owned_targets=[],
+                          attempt_residue={"state": "clear", "owners": [], "retirement_requested": False})
         self.collect(boundary)
         source_capture.require_authority(root)
         return result
