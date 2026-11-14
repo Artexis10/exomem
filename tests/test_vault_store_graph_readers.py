@@ -37,7 +37,6 @@ from test_vault_store_readers import (
 from test_vault_store_rederive import PROFILES, project, settle_to_the_end
 
 from exomem import (
-    _held_fs_posix,
     access,
     commands,
     epistemic_graph,
@@ -175,6 +174,9 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
     Keep the graph test and the registry surface test on the same instrument. Repair seams
     record intent without starting a background repair against deliberately damaged files.
     """
+    # The POSIX backend imports `posix`, so a module-level import would stop collection on Windows.
+    from exomem import _held_fs_posix
+
     events = {name: [] for name in (
         "page_io", "sidecars", "snapshots", "snapshot_threads", "request_threads", "machinery",
     )}

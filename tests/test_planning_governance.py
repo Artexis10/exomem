@@ -549,12 +549,15 @@ def _rotation_due_with_its_archive_withheld(vault: Path, monkeypatch: pytest.Mon
         )
 
 
+@pytest.mark.parametrize("due", ("before the event", "by the event"))
 def test_a_writer_validates_a_create_whose_log_rotation_is_due_as_the_create_commits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, due: str
 ) -> None:
     """A due rotation adds the log archive to the create's writes. The commit authorizes every
     planned write before it publishes, so validation that authorizes only the live log names an
-    archive withheld from the caller where the commit answers that the collection is absent."""
+    archive withheld from the caller where the commit answers that the collection is absent.
+    Validation that planned an empty event missed the rotation that only the commit's event makes
+    due."""
     from granted_writer import grant_writer
 
     from exomem.planning import create_collection, validate
@@ -568,6 +571,9 @@ def test_a_writer_validates_a_create_whose_log_rotation_is_due_as_the_create_com
         writable_scopes=[LOG_SCOPE_ID],
     )("external")
     collection = "Knowledge Base/Planning/Work/_collection.md"
+    if due == "by the event":
+        log_bytes = (vault / "Knowledge Base" / "log.md").stat().st_size
+        monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", str(log_bytes + 500))
 
     with request_scope(writer):
         with pytest.raises(CollectionError) as validated:
@@ -583,11 +589,13 @@ def test_a_writer_validates_a_create_whose_log_rotation_is_due_as_the_create_com
     assert not (vault / collection).exists()
 
 
+@pytest.mark.parametrize("due", ("before the event", "by the event"))
 def test_a_writer_validates_a_revision_whose_log_rotation_is_due_as_the_revision_commits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, due: str
 ) -> None:
     """A revision appends its event to the log too, so a due rotation adds the archive to its
-    writes. Validation that authorizes no log write calls valid a revision the commit refuses."""
+    writes. Validation that authorizes no log write calls valid a revision the commit refuses, and
+    so does validation that plans an empty event when only the commit's event makes it due."""
     from granted_writer import grant_writer
 
     from exomem.planning import create_collection, revise, validate
@@ -611,7 +619,8 @@ def test_a_writer_validates_a_revision_whose_log_rotation_is_due_as_the_revision
         guards = validate(vault, mode="revision", collection=collection, manifest_text=proposal)[
             "lifecycle_guards"
         ]
-    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "64")
+    log_bytes = (vault / "Knowledge Base" / "log.md").stat().st_size
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "64" if due == "before the event" else str(log_bytes + 500))
 
     with request_scope(writer):
         with pytest.raises(CollectionError) as committed:

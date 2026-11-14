@@ -1078,6 +1078,73 @@ def test_the_terminal_filter_withholds_a_stored_page_under_each_spelling_whateve
     assert released == {"entries": [{"path": visible}]}
 
 
+@pytest.mark.parametrize("store", (False, True), ids=("file", "store"))
+def test_a_spelling_that_two_pages_share_once_case_is_folded_is_released_only_when_both_are(
+    vault, store  # noqa: F811
+):
+    """The terminal filter decided a case-folded spelling against one matching page, the first in
+    the directory's order on disk and in name order in the store. With `secret/Ledger.md` withheld
+    and `Secret/Ledger.md` released, the store released the entry that file mode withheld."""
+    notes = "Knowledge Base/Notes"
+    # The first pair is created withheld first, the second released first; each pair withholds
+    # the other letter case, so no listing order can pick the released page for both.
+    created = ("secret", "Secret", "vault", "Vault")
+    page = b"---\ntitle: Ledger\ntype: note\n---\n# Ledger\n\nFigures.\n"
+    for folder in created:
+        (vault / notes / folder).mkdir(parents=True, exist_ok=True)
+        (vault / notes / folder / "Ledger.md").write_bytes(page)
+    restrict_external(vault, f'paths: ["{notes}/secret/**", "{notes}/Vault/**"]')
+    if store:
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+    exact = {folder: f"{notes}/{folder}/Ledger.md" for folder in created}
+    folded = (f"{notes}/SECRET/LEDGER.MD", f"{notes}/vault/ledger.md".upper())
+
+    with request_scope(EXTERNAL):
+        kept = egress.filter_withheld_entries(
+            vault, {"entries": [{"path": name, "body": "Figures."} for name in (*exact.values(), *folded)]}
+        )
+
+    assert kept == {"entries": [
+        {"path": exact["Secret"], "body": "Figures."}, {"path": exact["vault"], "body": "Figures."},
+    ]}
+
+
+def test_a_case_folded_reference_reads_a_folder_of_two_hundred_pages_in_as_many_statements_as_one_of_twenty(
+    stored, writer  # noqa: F811
+):
+    """The terminal filter listed a folder's stored names with one statement per page, so the
+    statements of a single case-folded reference grew with the pages beside it."""
+    folder = "Knowledge Base/Notes/Crowd"
+    restrict_external(stored, f'paths: ["{folder}/**"]')
+    page = b"---\ntitle: P\ntype: note\n---\n# P\n\nA page.\n"
+
+    def statements():
+        seen = []
+        with read.request_snapshot(stored), read.snapshot(stored) as view:
+            view.connection.set_trace_callback(seen.append)
+            try:
+                with request_scope(EXTERNAL):
+                    kept = egress.filter_withheld_entries(
+                        stored, {"entries": [{"path": f"{folder}/PAGE-0000.MD"}]}
+                    )
+            finally:
+                view.connection.set_trace_callback(None)
+        assert kept == {"entries": []}
+        return len(seen)
+
+    counts = []
+    for first, last in ((0, 20), (20, 200)):
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
+            write.PagePut(f"{folder}/Page-{number:04d}.md", page) for number in range(first, last)
+        )))
+        if not counts:
+            statements()  # the first filter reads the page's body once more than later ones
+        counts.append(statements())
+
+    assert counts[0] == counts[1]
+
+
 def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_yet(
     stored, writer  # noqa: F811
 ):

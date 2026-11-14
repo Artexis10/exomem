@@ -20,6 +20,12 @@ def is_dir(root: Path, rel: str) -> bool:
     return (root / rel).is_dir()
 
 
+def stored_children(root: Path, rel: str) -> dict[str, Entry]:
+    """A folder's stored children by name, its pages and the folders that hold pages, read in one
+    statement."""
+    return Reader(root)._stored_entries(rel, None)
+
+
 @dataclass(frozen=True)
 class Entry:
     """A directory child, with stored metadata or its original filesystem entry."""
