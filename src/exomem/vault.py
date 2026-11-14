@@ -8932,6 +8932,10 @@ class WikilinkResolver:
       whose title matches.
     """
 
+    #: The token of the resident publication whose maps these are, so a reader may keep what it
+    #: derives from them beside that token. Every patch drops it; only the publisher sets it.
+    publication: object | None = None
+
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
         self.full_paths: set[str] = set()
@@ -9024,7 +9028,7 @@ class WikilinkResolver:
         Writers may add their pending primary to the copy without polluting the
         graph lane's process-shared resolver when validation later fails.
         """
-        return self.from_maps(
+        copy = self.from_maps(
             self.vault_root,
             full_paths=self.full_paths,
             kb_stripped=self.kb_stripped,
@@ -9032,6 +9036,8 @@ class WikilinkResolver:
             titles=self.titles,
             candidates_by_key=self.candidates_by_key,
         )
+        copy.publication = self.publication
+        return copy
 
     def title_key_for_path(self, rel_path: str) -> str | None:
         """Return the normalized resolver title contributed by one path.
@@ -9063,6 +9069,7 @@ class WikilinkResolver:
         """
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
+        self.publication = None
         self.candidates_by_key[no_ext] = tuple(
             sorted(
                 (
@@ -9084,6 +9091,7 @@ class WikilinkResolver:
         previous = self.candidates_by_key.get(no_ext, ())
         if not any(candidate.path == rel_path for candidate in previous):
             return
+        self.publication = None
         remaining = tuple(candidate for candidate in previous if candidate.path != rel_path)
         if remaining:
             self.candidates_by_key[no_ext] = remaining

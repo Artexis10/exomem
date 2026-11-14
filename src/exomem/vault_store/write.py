@@ -18,10 +18,10 @@ from enum import StrEnum
 from sqlite3 import Connection
 from typing import TYPE_CHECKING
 
-from .. import vault
+from .. import find, vault
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, mode, ownership, rederive
+from . import derive, mode, ownership, read, rederive
 from .read import AFTER, NOT_ACTIVE
 
 if TYPE_CHECKING:
@@ -325,6 +325,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         if row is None or row[0] != mode.STORE_MODE:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
         revision = row[1] + 1
+        before = read.vault_triple(tx, row[1])
         check(tx, change.expect)
         for rel in change.refresh:
             if tx.execute(
@@ -347,7 +348,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             _delete_binary(tx, binary, audit)
         for move in change.binary_moves:
             _move_binary(tx, move, revision, audit)
-        derive.apply(tx, writer.root, change, existing)
+        delta = derive.apply(tx, writer.root, change, existing)
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
@@ -357,6 +358,9 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for seen in change.files_seen:
             _record_seen(tx, seen, revision)
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
+        after = read.vault_triple(tx, revision)
+    # After the transaction: a reader that meets the advanced resolver must see this revision.
+    find.on_store_commit(writer.root, before, after, delta.entries, delta.deleted)
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
 

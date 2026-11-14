@@ -372,31 +372,37 @@ def test_a_governed_page_moves_through_the_store_with_no_tombstone_or_receipt(se
     assert receipts.event_records(served) == []
 
 
-@pytest.mark.parametrize(
-    ("caller", "warnings"),
-    [
-        (
-            library_scope,
-            ["1 file(s) that the store has not imported yet keep their link to the old path"],
-        ),
-        (lambda: request_scope(most_restrictive_principal(surface="rest")), []),
-    ],
-    ids=["owner", "restricted"],
-)
-def test_only_the_owner_hears_that_an_unimported_note_keeps_its_link_after_a_move(
-    served, caller, warnings
-):
-    """A move that hides from the owner a link it left pointing at the old path, or tells a
-    restricted mover about a file that no policy covers yet."""
+def test_the_owner_hears_that_an_unimported_note_keeps_its_link_after_a_move(served):
+    """A move that hides from the owner a link it left pointing at the old path."""
     store_gamma(served)
     unimported_note(served)
 
-    with caller():
+    with library_scope():
         result = move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
 
-    assert result.warnings == warnings
+    assert result.warnings == [
+        "1 file(s) that the store has not imported yet keep their link to the old path"
+    ]
     mine = served / "Knowledge Base/Notes/Mine.md"
     assert "[[Gamma]]" in mine.read_text(encoding="utf-8"), "the move rewrites no file"
+
+
+def test_a_restricted_mover_hears_of_a_withheld_stored_page_only_that_it_does_not_exist(served):
+    """A move that judges whether its source exists from the projection, so a restricted mover
+    moves a page withheld from it while the projector has not written the file yet. File mode
+    answers that caller as for a missing page, and so does the store; the mover hears nothing
+    of the unimported note either."""
+    store_gamma(served)
+    unimported_note(served)
+
+    with request_scope(most_restrictive_principal(surface="rest")):
+        with pytest.raises(move_file.MoveFileError) as refused:
+            move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
+
+    assert (refused.value.code, refused.value.reason) == (
+        "NOT_FOUND", vault_module.missing_path_reason(GAMMA)
+    )
+    assert read.page_exists(served, GAMMA) and not read.page_exists(served, MOVED)
 
 
 def test_a_recovery_after_a_delete_restores_the_page_and_its_rows_and_drops_the_sidecar(
