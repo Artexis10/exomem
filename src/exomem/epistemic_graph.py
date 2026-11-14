@@ -14216,7 +14216,8 @@ def _names_a_patch_reaches(
 ) -> tuple[set[str], set[str]]:
     """The names that a patch of ``rels`` reaches through the path maps and the stems, and the
     title keys of the touched keys' candidates, in ``resolver``'s maps."""
-    names, titles = set(), set()
+    names: set[str] = set()
+    titles: set[str] = set()
     for rel in rels:
         path_key = vault_module._wikilink_path_key(str(rel).replace("\\", "/").lstrip("/"))
         names.update((path_key, path_key.removeprefix(prefix), path_key.rsplit("/", 1)[-1]))
@@ -15012,6 +15013,7 @@ class GraphView:
         resolver = self._shared_resolver()
         if self.keep is None:
             return set()
+        paths: Collection[str]
         if not store_mode.store_mode_for_reads(self.vault_root) or self.reads_placeholders:
             paths = {f"{path}.md" for path in resolver.full_paths}
         else:
