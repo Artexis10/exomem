@@ -166,14 +166,71 @@ This is a target until measured, not a reported result.
 Use the same public boundary instrument before and after, with generated data and both storage modes where supported.
 The count of database calls must not grow with the page length.
 
-### D6. Capture settlement remains a separate blocked dependency
+### D6. Close explicit capture attempts under the shared writer boundary
 
-Current accepted mutations may commit after the caller's deadline, and keyed replay returns their outcome.
-Keep that contract.
-P2 cannot advertise a latest commit deadline under the existing writer implementation.
-Its dependent tasks remain not ready until a primitive excludes delayed pre-admission requests and proves terminal settlement under the canonical writer boundary.
-That decision must update `durable-source-capture` and the consuming convergence contract before implementation.
-Identity and inventory implementation can proceed independently.
+Current accepted mutations may finish after the caller's deadline. Keep that contract and ordinary capture behavior.
+The optional attempt protocol proves local admission closure instead of advertising a latest commit deadline.
+
+Register `reserve_source_capture` and `settle_source_capture` as the write-door operations `sources.reserve_capture` and `sources.settle_capture`.
+The existing `capture_source` accepts an optional reservation for identity-bearing text or declared-passage capture.
+Require whole-namespace authority before protocol lookup, replay or disclosure, and recheck it at terminal release.
+Do not change ordinary capture or generic invocation replay semantics.
+
+A reservation allocates a fresh opaque handle without retaining content.
+Bind it to Source identity, a versioned exact authored-input digest, admission expiry and authenticated principal scope.
+Its observed scope includes cell, replica, persistent ledger instance and actual canonical-boundary identity.
+Derive the opaque boundary identity from the coordinator's resolved state root and canonical mutation identity, which select its OS lock.
+Do not derive it from a display cell name or reconstruct it from a path alone.
+Create one opaque ledger-instance identifier in the existing private database.
+A new empty replacement database must not look like the previous ledger.
+Live ledger replacement and hot rollback remain outside the existing supported custody contract.
+
+Use verified audience and client binding when present.
+Direct authenticated Cloud bearer holders share the existing cell-service owner identity and issuer family.
+That stable identity works without a gateway origin key and survives bearer rotation.
+Never use a caller-supplied client name, bearer hash or changing session token as the binding.
+
+Define `capture-wire-v1` through one typed representation before passage joining or taxonomy normalization.
+Preserve exact UTF-8 strings and list order, including canonically equivalent Unicode strings.
+Include identity, content or passages, title, kind aliases, requested slug, URL, tags, reason, domain, projects and raw protection.
+Define nullable defaults and the false raw-protection default once in that representation.
+Serialize its fixed ASCII field names as sorted compact JSON with unescaped Unicode, then hash its UTF-8 bytes.
+The ticket and transport, response-detail and optional guidance fields do not identify authored canonical input.
+Reject file, adoption and correction combinations under this protocol.
+Neither the taxonomy-resolved capture digest nor generic replay's Unicode-normalized digest supplies this wire binding.
+
+Keep attempt state in the existing private per-vault/replica database, with its own lifecycle rather than generic claim reclamation.
+Commit performs lookup-only validation inside the actual non-borrowed canonical mutation guard.
+It never allocates or recreates a missing, expired, cancelled or consumed attempt.
+Admission expiry closes new admission only; it does not cancel accepted execution.
+Retain the guard through canonical completion and protocol terminal persistence.
+Keep accepted store work on the store thread; no protocol hook hops threads or waits on a network/coordinator inside the boundary.
+The added hooks perform bounded ledger work; settlement reads no Source and performs no recovery capture.
+
+Settlement acquires that same boundary and cancels unused admission or observes a retained terminal.
+A contended boundary reports pending. A changed ledger or boundary scope remains unknown.
+An exception after acceptance without a retained terminal closes admission with unknown past outcome.
+The caller obtains current Source state separately from complete inventory.
+A missing collected row can therefore prove local admission closed without claiming that its capture never committed.
+Return the actually observed scope; never copy a caller's claimed scope into a global closure result.
+
+The same-guard proof covers earlier issuers without process-retirement checks.
+If commit runs first, settlement cannot pass it. If settlement closes first, delayed commit fails fresh validation.
+A newer lease token supplies no settlement proof and is not used as one.
+Reject reentrant settlement of an active ancestor ticket: a real guard can still be reentrant.
+Use a small immutable active-ticket context scoped by ledger, boundary and handle through execution and terminal persistence.
+Check every ancestor only when the executing thread owns the exact boundary; copied thread context alone proves no ownership.
+Nested garbage collection observes the same exclusion.
+
+All three protocol operations bypass explicit and implicit generic replay before key derivation or saved-terminal lookup.
+Reservation must allocate a fresh attempt, settlement must observe current state, and ticketed capture owns its own terminal semantics.
+The credential-issuance carve-out provides the existing dispatch seam; retain authority, fencing and terminal filtering around it.
+
+Collect terminal and expired-unused attempts with an indexed bounded batch.
+Do not expire accepted execution because its admission timer elapsed or retain permanent identity tombstones.
+Unknown past outcomes stay unknown after collection; a later capture uses a fresh handle.
+The attempt protocol prevents a withdrawn capture from committing after scoped closure.
+A false pending result delays convergence while the consumer keeps its existing backing; it adds no human approval.
 
 ### D7. Reuse the existing operation and authority model
 
