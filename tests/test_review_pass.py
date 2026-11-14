@@ -1,13 +1,15 @@
 """Review listings and decisions read one held review pass.
 
-A listing that follows a completed pass reads no vault page, and it lists what a pass computed in
-the request would list. A caller that something is withheld from never reads a held pass. A stale
-answer never offers an item that a write resolved, moved or deleted, and it marks an item whose
-page changed. Background passes keep their pace.
+A listing that follows a completed pass reads no vault page, and it lists what an audit in the
+request would list. Only the refresh worker runs a pass. A caller that something is withheld from
+never reads a held pass. A stale answer never offers an item that a write resolved, moved or
+deleted, and it marks an item whose page changed. Background passes keep their pace.
 """
 
 from __future__ import annotations
 
+import json
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -37,16 +39,20 @@ CLIENT = RequestPrincipal(audience_id="client-a", surface="mcp")
 
 
 class _Passes:
-    """Each whole-vault pass the review queues run: `(kind, start, end)`, in monotonic seconds."""
+    """Each audit and scan the review queues run: `(kind, start, end, thread)`, in monotonic seconds."""
 
     def __init__(self) -> None:
-        self.runs: list[tuple[str, float, float]] = []
+        self.runs: list[tuple[str, float, float, str]] = []
         self.failures = 0
         self.delay = 0.0
         self.fail = False
 
-    def audits(self) -> list[tuple[str, float, float]]:
-        return [run for run in self.runs if run[0] == "audit"]
+    def background(self) -> list[tuple[str, float, float, str]]:
+        """The whole review audits that the refresh worker ran."""
+        return [run for run in self.runs if run[0] == "audit" and run[3] == "exomem-review-pass"]
+
+    def in_requests(self) -> list[tuple[str, float, float, str]]:
+        return [run for run in self.runs if run[3] != "exomem-review-pass"]
 
 
 @pytest.fixture
@@ -61,7 +67,7 @@ def passes(monkeypatch: pytest.MonkeyPatch) -> _Passes:
                 raise RuntimeError("a check failed")
             time.sleep(record.delay)
             result = real(*args, **kwargs)
-            record.runs.append((kind, start, time.monotonic()))
+            record.runs.append((kind, start, time.monotonic(), threading.current_thread().name))
             return result
 
         return run
@@ -143,10 +149,9 @@ def _item(reply: dict, rel: str) -> dict:
     return next(item for item in reply["items"] if item["path"] == rel)
 
 
-def _keep_stale_passes(monkeypatch: pytest.MonkeyPatch, vault: Path) -> None:
-    """Serve stale passes from a running refresh worker that never gets to refresh them."""
-    monkeypatch.setenv("EXOMEM_REVIEW_PASS_GAP_FACTOR", "1000000")
-    review_pass.start(vault)
+def _from_held(reply: dict) -> bool:
+    """Whether a listing read a held pass: its reply then names the pass time."""
+    return '"as_of"' in json.dumps(reply)
 
 
 def _wait_for(condition: Callable[[], bool], timeout: float = 30.0) -> None:
@@ -154,6 +159,18 @@ def _wait_for(condition: Callable[[], bool], timeout: float = 30.0) -> None:
     while not condition():
         assert time.monotonic() < deadline, "timed out"
         time.sleep(0.05)
+
+
+def _hold(vault: Path) -> None:
+    """Start the refresh worker, and wait until the owner's listings read its two held passes."""
+    review_pass.start(vault)
+    with request_scope(OWNER):
+        _wait_for(lambda: _from_held(_list(vault)) and _from_held(_list(vault, mode="activation")))
+
+
+def _keep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the worker start no further pass, so a stale pass stays the held one."""
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_GAP_FACTOR", "1000000")
 
 
 def _withhold_from(vault: Path, audience: str) -> None:
@@ -178,7 +195,7 @@ def _withhold_from(vault: Path, audience: str) -> None:
 
 @pytest.mark.parametrize("caller", [OWNER, CLIENT], ids=["owner", "restricted"])
 def test_a_held_listing_equals_a_listing_computed_in_the_request(
-    vault: Path, warm_managed_cell, passes: _Passes, caller: RequestPrincipal
+    vault: Path, warm_managed_cell, caller: RequestPrincipal
 ) -> None:
     _unlinked_notes(vault, 3)
     # Two predictions on one page: two items on one path, and each fused with the page's
@@ -192,25 +209,22 @@ def test_a_held_listing_equals_a_listing_computed_in_the_request(
         _note(vault, linker, f"# Citing\n\nSee [[{old.removesuffix('.md')}]].\n")
     _withhold_from(vault, "client-a")
     _serve(vault, warm_managed_cell)
+    _hold(vault)
     with request_scope(OWNER):
-        listed = _list(vault)
-        dismissed = _dismiss(vault, _item(listed, f"{NOTES}/fact-1.md")["id"])
+        dismissed = _dismiss(vault, _item(_list(vault), f"{NOTES}/fact-1.md")["id"])
     with request_scope(caller):
-        _list(vault)
-        computed = len(passes.runs)
         held = _list(vault)
-        repeated = len(passes.runs) - computed
-        # Drop the held passes, so the next listing computes its pass in the request.
-        review_pass._HELD.clear()
+        # With no worker, nothing reads a held pass: the next listing runs its own audit.
+        review_pass.stop()
         fresh = _list(vault)
-
-    # Nothing is withheld from the owner, so its second listing reads the held pass. The client
-    # runs its own pass each time, while the owner's pass is held.
-    assert (repeated == 0) is (caller is OWNER)
 
     def listing(reply: dict) -> dict:
         return {key: value for key, value in reply.items() if key not in ("as_of", "refreshing")}
 
+    # Nothing is withheld from the owner, so its listing reads the held pass. The client's
+    # listing runs its own audit, while the owner's pass is held.
+    assert _from_held(held) is (caller is OWNER)
+    assert not _from_held(fresh)
     assert listing(held) == listing(fresh)
     assert _paths(fresh).count(f"{NOTES}/forecast.md") == 2
     assert _item(fresh, f"{NOTES}/fact-1.md")["item_id"] == dismissed["item_id"]
@@ -224,8 +238,8 @@ def test_a_warm_listing_and_decision_open_no_page(
 ) -> None:
     _unlinked_notes(vault, notes)
     _serve(vault, warm_managed_cell)
+    _hold(vault)
     with request_scope(OWNER):
-        _list(vault)
         with pages_opened(vault) as listing_opened:
             listed = _list(vault)
         with pages_opened(vault) as decision_opened:
@@ -237,19 +251,35 @@ def test_a_warm_listing_and_decision_open_no_page(
     assert decision_opened == set()
 
 
+def test_a_listing_with_no_held_pass_runs_only_its_own_audit(
+    vault: Path, warm_managed_cell, passes: _Passes
+) -> None:
+    _unlinked_notes(vault, 3)
+    _serve(vault, warm_managed_cell)
+    passes.runs.clear()  # the due-state projection's own audit
+    passes.delay = 0.5   # the worker's pass is still running when the listing returns
+    review_pass.start(vault)
+    with request_scope(OWNER):
+        listed = _list(vault, mode="relation-debt")
+
+    assert len(listed["items"]) >= 3
+    assert not _from_held(listed)
+    assert len(passes.in_requests()) == 1
+    _wait_for(lambda: len(passes.background()) == 1)
+
+
 def test_a_stale_listing_marks_an_edited_page(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     edited, untouched = _unlinked_notes(vault, 2)
     _serve(vault, warm_managed_cell)
-    _keep_stale_passes(monkeypatch, vault)
+    _hold(vault)
+    _keep(monkeypatch)
     with request_scope(OWNER):
         before = _list(vault)
         _edit(vault, edited)
-        computed = len(passes.runs)
         after = _list(vault)
 
-    assert len(passes.runs) == computed, "the listing must answer from the stale pass"
     assert after["as_of"] == before["as_of"]
     assert after["refreshing"] is True
     assert _item(after, edited)["page_changed"] is True
@@ -257,12 +287,13 @@ def test_a_stale_listing_marks_an_edited_page(
 
 
 def test_a_stale_listing_drops_a_deleted_or_moved_page(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     deleted, kept = _unlinked_notes(vault, 2)
     moved = _source(vault, "moved-import")
     _serve(vault, warm_managed_cell)
-    _keep_stale_passes(monkeypatch, vault)
+    _hold(vault)
+    _keep(monkeypatch)
     with request_scope(OWNER):
         before = _list(vault)
         writer_lease.invoke_command(
@@ -273,10 +304,9 @@ def test_a_stale_listing_drops_a_deleted_or_moved_page(
             _command("manage_memory_file"), vault,
             operation="move", old_path=moved, new_path=moved.replace("Articles", "Books"),
         )
-        computed = len(passes.runs)
         after = _list(vault)
 
-    assert len(passes.runs) == computed, "the listing must answer from the stale pass"
+    assert after["as_of"] == before["as_of"]
     assert {deleted, moved, kept} <= set(_paths(before))
     assert deleted not in _paths(after)
     assert moved not in _paths(after)
@@ -284,11 +314,12 @@ def test_a_stale_listing_drops_a_deleted_or_moved_page(
 
 
 def test_a_stale_listing_drops_a_source_that_a_note_compiled(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     compiled, waiting = _source(vault, "compiled-import"), _source(vault, "waiting-import")
     _serve(vault, warm_managed_cell)
-    _keep_stale_passes(monkeypatch, vault)
+    _hold(vault)
+    _keep(monkeypatch)
     with request_scope(OWNER):
         before = _list(vault)
         arguments = {
@@ -305,30 +336,29 @@ def test_a_stale_listing_drops_a_source_that_a_note_compiled(
             relation_disposition="reviewed_none", relation_review_hash=draft.draft_hash,
             relation_review_reason="No relation exists in this fixture.",
         )
-        computed = len(passes.runs)
         after = _list(vault)
 
-    assert len(passes.runs) == computed, "the listing must answer from the stale pass"
+    assert after["as_of"] == before["as_of"]
     assert {compiled, waiting} <= set(_paths(before))
     assert compiled not in _paths(after)
     assert waiting in _paths(after)
 
 
 def test_a_stale_listing_keeps_due_items_when_the_projection_cannot_be_read(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     waiting = _source(vault, "waiting-import")
     edited = _unlinked_notes(vault, 1)[0]
     _serve(vault, warm_managed_cell)
-    _keep_stale_passes(monkeypatch, vault)
+    _hold(vault)
+    _keep(monkeypatch)
     with request_scope(OWNER):
         before = _list(vault)
         _edit(vault, edited)
         due_state.state_path(vault).unlink()
-        computed = len(passes.runs)
         after = _list(vault)
 
-    assert len(passes.runs) == computed, "the listing must answer from the stale pass"
+    assert after["as_of"] == before["as_of"]
     assert waiting in _paths(before)
     assert waiting in _paths(after)
 
@@ -347,6 +377,7 @@ def test_a_serving_vault_holds_a_pass_before_the_first_listing(
         _list(vault, mode="activation")
 
     assert len(listed["items"]) >= 3
+    assert _from_held(listed)
     assert sorted(run[0] for run in passes.runs) == ["audit", "scan"]
 
 
@@ -356,19 +387,17 @@ def test_an_aged_pass_is_renewed_only_when_a_listing_reads_it(
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
     _unlinked_notes(vault, 3)
     _serve(vault, warm_managed_cell)
-    with request_scope(OWNER):
-        _list(vault)
-    computed = len(passes.audits())
+    _hold(vault)
+    held = len(passes.background())
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_MAX_AGE_SECONDS", "0.2")
-    review_pass.start(vault)
     # The pass ages past its maximum, the vault stays quiet, and the gap after the pass ends.
     time.sleep(1.5)
-    unread = len(passes.audits())
+    unread = len(passes.background())
     with request_scope(OWNER):
         _list(vault)
-    _wait_for(lambda: len(passes.audits()) == computed + 1)
+    _wait_for(lambda: len(passes.background()) == held + 1)
 
-    assert unread == computed
+    assert unread == held
 
 
 def test_many_stale_listings_start_one_background_pass(
@@ -377,19 +406,18 @@ def test_many_stale_listings_start_one_background_pass(
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
     edited = _unlinked_notes(vault, 3)[0]
     _serve(vault, warm_managed_cell)
-    passes.runs.clear()  # the due-state projection's own audit
+    _hold(vault)
+    held = len(passes.background())
     passes.delay = 0.3
     with request_scope(OWNER):
-        _list(vault)
-        review_pass.start(vault)
         _edit(vault, edited)
         for _ in range(5):
             _list(vault)
-    _wait_for(lambda: len(passes.audits()) == 2)
-    # A second refresh would start one gap (three pass durations) after the first one ends.
+    _wait_for(lambda: len(passes.background()) == held + 1)
+    # A further pass would start one gap (three pass durations) after this one ends.
     time.sleep(4 * passes.delay + 0.5)
 
-    assert len(passes.audits()) == 2
+    assert len(passes.background()) == held + 1
 
 
 def test_two_background_passes_keep_the_minimum_gap(
@@ -398,16 +426,14 @@ def test_two_background_passes_keep_the_minimum_gap(
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
     edited = _unlinked_notes(vault, 3)[0]
     _serve(vault, warm_managed_cell)
-    passes.runs.clear()  # the due-state projection's own audit
     passes.delay = 0.3
+    _hold(vault)
     with request_scope(OWNER):
-        _list(vault)
-        review_pass.start(vault)
         _edit(vault, edited)
         _list(vault)
-    _wait_for(lambda: len(passes.audits()) == 2)
+    _wait_for(lambda: len(passes.background()) == 2)
 
-    (_, first_start, first_end), (_, second_start, _) = passes.audits()
+    (_, first_start, first_end, _), (_, second_start, _, _) = passes.background()
     assert second_start - first_end >= review_pass.gap_factor() * (first_end - first_start)
 
 
@@ -417,9 +443,9 @@ def test_a_failed_background_pass_keeps_the_held_pass(
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
     edited = _unlinked_notes(vault, 3)[0]
     _serve(vault, warm_managed_cell)
+    _hold(vault)
     with request_scope(OWNER):
         before = _list(vault)
-        review_pass.start(vault)
         passes.fail = True
         _edit(vault, edited)
         _list(vault)
@@ -439,22 +465,23 @@ def test_a_failing_check_fails_only_the_queues_that_run_it(
 
     def one_check_fails(root, *, categories=None, **kwargs):
         if "stale_review" in (categories or ()):
-            time.sleep(0.3)
-            failed.append(tuple(categories))
+            failed.append(threading.current_thread().name)
             raise RuntimeError("a check failed")
         return real(root, categories=categories, **kwargs)
 
     monkeypatch.setattr(audit, "audit", one_check_fails)
+    review_pass.start(vault)
     with request_scope(OWNER):
         first = _list(vault, mode="relation-debt")
+        # The worker's pass runs every check, so it fails; the listing ran its own audit.
+        _wait_for(lambda: "exomem-review-pass" in failed)
         second = _list(vault, mode="relation-debt")
         with pytest.raises(RuntimeError):
             _list(vault, mode="stale")
 
     assert len(first["items"]) >= 3
+    assert not _from_held(second)
     assert _paths(second) == _paths(first)
-    # The whole pass was tried once; the listings inside its gap ran their own audit only.
-    assert len([run for run in failed if "relation_debt" in run]) == 1
 
 
 def test_an_item_ranked_past_two_hundred_binds(vault: Path, warm_managed_cell) -> None:
@@ -487,17 +514,15 @@ def test_a_decision_stamps_no_item_as_surfaced(vault: Path, warm_managed_cell) -
     assert surfaced() == before
 
 
-def test_an_unknown_id_is_refused_without_a_pass(
+def test_an_unknown_id_is_refused_without_an_audit(
     vault: Path, warm_managed_cell, passes: _Passes
 ) -> None:
     _unlinked_notes(vault, 3)
     _serve(vault, warm_managed_cell)
-    with request_scope(OWNER):
-        _list(vault)
-        _list(vault, mode="activation")
-        computed = len(passes.runs)
-        with pytest.raises(OpError) as refused:
-            _dismiss(vault, "missing.version")
+    _hold(vault)
+    ran = len(passes.runs)
+    with request_scope(OWNER), pytest.raises(OpError) as refused:
+        _dismiss(vault, "missing.version")
 
     assert refused.value.code == "ITEM_NOT_FOUND"
-    assert len(passes.runs) == computed
+    assert len(passes.runs) == ran

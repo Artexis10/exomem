@@ -1,33 +1,32 @@
-"""The review queues' whole-vault passes, held in process memory for the unrestricted caller.
+"""The review queues' whole-vault passes, run in the background and held in process memory.
 
 A review listing ranks the findings of two whole-vault passes: the review audit (`audit.audit`
 over every category a review item can come from) and the activation scan (`activation.scan`).
 On a large vault each pass takes tens of seconds, and every listing paid for them again, as did
-every decision that names an item by id. This module runs each pass once and holds the result.
-Nothing is stored: a restart starts empty.
+every decision that names an item by id. The serving runtime's refresh worker runs each pass and
+this module holds the result. Nothing is stored: a restart starts empty.
 
 The held pass holds findings and their coverage only. Everything that decides what a caller sees
 (release decisions, review state, ranking) runs on copies, in the caller's own request.
 
+- Only the refresh worker runs a pass. A request never runs one: it reads the held pass, or it
+  runs its own audit of its own categories, as before. So no request does more work than before.
 - A pass is held only for a caller from whom nothing can be withheld, and only such a caller
-  reads it. Any other caller, a bound collection writer and a call with no principal bound run
-  their own pass in the request, so what they learn and what their request records do not
-  change. A release verdict can depend on live state that no key names, so no pass is held for
-  them.
+  reads it. Any other caller, a bound collection writer and a call with no principal bound keep
+  the request path, so what they learn and what their request records do not change. A release
+  verdict can depend on live state that no key names, so no pass is held for them.
 - A held pass is current while the vault's change generation is the one the pass started at,
   the day is the day it ran, and it is younger than the maximum age.
-- A read with no held pass computes the pass in its request and holds the result. A reader that
-  arrives meanwhile waits for that one pass.
+- A read with no held pass keeps the request path and asks the worker for a pass.
+- A read of a stale pass answers at once, and asks the worker for one refresh. The stale answer
+  drops a finding whose page is gone and a due finding that the due-state projection no longer
+  holds, and it names the pages that changed.
+- The worker also runs a pass when the vault has been quiet and no pass is held, a page changed
+  or the day changed. Age alone starts no pass: a pass that nobody reads is not renewed.
 - A pass runs every review category in one audit, so one failing check fails the pass. A failed
-  pass holds nothing and replaces nothing: the read runs its own audit of its own categories, as
-  before, and no read tries the pass again until the gap after the failure has passed.
-- A read of a stale pass answers at once, and one background refresh replaces the pass. The
-  stale answer drops a finding whose page is gone and a due finding that the due-state
-  projection no longer holds, and it names the pages that changed. A process with no refresh
-  worker computes instead.
-- The refresh worker also runs a pass when the vault has been quiet and no pass is held, a page
-  changed or the day changed. Age alone starts no pass: a pass that nobody reads is not renewed.
-- A vault with no live change generation holds nothing.
+  pass replaces nothing, and the worker tries again after the gap.
+- A process with no refresh worker (a stdio server, the CLI, a standby) and a vault with no live
+  change generation hold nothing.
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import call_spans, foreground_activity, foreground_priority, freshness, request_budget
+from . import call_spans, foreground_activity, foreground_priority, freshness
 
 if TYPE_CHECKING:
     from .audit import AuditFinding
@@ -126,17 +125,12 @@ class View:
 
 
 @dataclass
-class _Flight:
-    done: threading.Event = field(default_factory=threading.Event)
-
-
-@dataclass
 class _Worker:
     vault_root: Path
     stop: threading.Event = field(default_factory=threading.Event)
     wake: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
-    #: Keys that a stale read asked to refresh, and the key being refreshed now.
+    #: Keys that a read asked the worker to run, and the key it runs now.
     requested: set[tuple] = field(default_factory=set)
     running: tuple | None = None
     cancel: threading.Event | None = None
@@ -147,71 +141,38 @@ class _Worker:
 
 _LOCK = threading.Lock()
 _HELD: dict[tuple, _Pass] = {}
-_FLIGHTS: dict[tuple, _Flight] = {}
-#: `(end, duration, failed)` of the last pass of each key. A background pass waits a gap after
-#: it, and so does a pass in a request after a failure.
-_LAST: dict[tuple, tuple[float, float, bool]] = {}
+#: `(end, duration)` of the last pass of each key, failed or not: the next one waits a gap after it.
+_LAST: dict[tuple, tuple[float, float]] = {}
 _WORKERS: dict[str, _Worker] = {}
 
 
 def view(
     vault_root: Path, part: str, *, categories: Collection[str] | None = None
 ) -> View | None:
-    """The findings of the held `part` pass for this caller, or None to compute in the request.
+    """The findings of the held `part` pass for this caller, or None to keep the request path.
 
-    `categories` keeps the findings of those categories only.
+    `categories` keeps the findings of those categories only. This never runs a pass: with no
+    pass held it asks the worker for one, and the request runs its own audit as before.
     """
-    if request_budget.current_checkpoint() is not None:
-        # A read checkpoint can cut a pass short, and a partial pass must never be held.
-        return None
     if not _unrestricted(vault_root):
         return None
+    generation = freshness.generation(vault_root, _SCOPE)
+    if generation is None:
+        return None
     key = (_canonical(vault_root), part)
-    wanted = None if categories is None else frozenset(categories)
-    while True:
-        generation = freshness.generation(vault_root, _SCOPE)
-        if generation is None:
-            return None
-        with _LOCK:
-            held = _HELD.get(key)
-            flight = _FLIGHTS.get(key)
-            worker = _WORKERS.get(key[0])
-        if held is not None:
-            if _current(held, generation):
-                return _view(vault_root, key, held, wanted, generation)
-            if worker is not None and worker.serving():
-                _ask(worker, key)
-                return _view(vault_root, key, held, wanted, generation)
-        if flight is not None:
-            if not flight.done.wait(limit_seconds()):
-                # The pass outlived the limit a background pass gets: compute in the request.
-                return None
-            continue
-        if _failed_lately(key):
-            return None
-        flight = _Flight()
-        with _LOCK:
-            if key in _FLIGHTS:
-                continue
-            _FLIGHTS[key] = flight
-        try:
-            fresh = _compute(vault_root, key, generation)
-        except Exception:  # noqa: BLE001 - the read runs its own audit, which reports its own failure
-            log.warning("review pass failed; this read computes its own", exc_info=True)
-            return None
-        finally:
-            with _LOCK:
-                _FLIGHTS.pop(key, None)
-            flight.done.set()
-        _hold(key, fresh)
-        return _view(vault_root, key, fresh, wanted, freshness.generation(vault_root, _SCOPE))
-
-
-def _failed_lately(key: tuple) -> bool:
-    """Whether the last pass of this key failed and its gap has not passed."""
     with _LOCK:
-        last = _LAST.get(key)
-    return last is not None and last[2] and time.monotonic() - last[0] < gap_factor() * last[1]
+        held = _HELD.get(key)
+        worker = _WORKERS.get(key[0])
+    if worker is None or not worker.serving():
+        # Nothing keeps a pass current in this process.
+        return None
+    if held is None:
+        _ask(worker, key)
+        return None
+    if not _current(held, generation):
+        _ask(worker, key)
+    wanted = None if categories is None else frozenset(categories)
+    return _view(vault_root, key, held, wanted, generation)
 
 
 def _unrestricted(vault_root: Path) -> bool:
@@ -242,12 +203,11 @@ def _current(held: _Pass, generation: int) -> bool:
 
 
 def _compute(vault_root: Path, key: tuple, generation: int) -> _Pass:
-    """Run one pass under the bound principal, and record what a stale read compares with it."""
+    """Run one pass under the worker's principal, and record what a stale read compares with it."""
     part = key[1]
     started = time.monotonic()
     now = dt.datetime.now(dt.UTC)
     live = freshness.live_entries(vault_root, _SCOPE) or {}
-    failed = True
     try:
         with call_spans.span("review_pass.compute", {"part": part}):
             if part == AUDIT:
@@ -265,10 +225,9 @@ def _compute(vault_root: Path, key: tuple, generation: int) -> _Pass:
 
                 scan = activation.scan(vault_root)
                 findings, coverage = scan.findings, scan.coverage
-        failed = False
     finally:
         with _LOCK:
-            _LAST[key] = (time.monotonic(), time.monotonic() - started, failed)
+            _LAST[key] = (time.monotonic(), time.monotonic() - started)
     root = Path(vault_root)
     pages: dict[str, tuple[str, Any]] = {}
     for finding in findings:
@@ -408,7 +367,10 @@ def stop(timeout: float = 2.0, *, worker: threading.Thread | None = None) -> Non
             item for item in list(_WORKERS.values()) if worker is None or item.thread is worker
         ]
         for item in stopping:
-            _WORKERS.pop(_canonical(item.vault_root), None)
+            canonical = _canonical(item.vault_root)
+            _WORKERS.pop(canonical, None)
+            for part in (AUDIT, ACTIVATION):
+                _HELD.pop((canonical, part), None)
             item.stop.set()
             item.wake.set()
             if item.cancel is not None:
@@ -440,9 +402,8 @@ def _run(worker: _Worker) -> None:
 def _due(worker: _Worker, key: tuple) -> bool:
     """Whether the worker should run this pass now.
 
-    A read of a stale pass asked for it. Or the vault has been quiet, and no pass is held, a page
-    changed or the day changed. Either way no request is computing the pass, and the last pass
-    ended at least the gap ago.
+    A read asked for it. Or the vault has been quiet, and no pass is held, a page changed or the
+    day changed. Either way the last pass ended at least the gap ago.
     """
     generation = freshness.generation(worker.vault_root, _SCOPE)
     if generation is None:
@@ -455,9 +416,6 @@ def _due(worker: _Worker, key: tuple) -> bool:
             worker.requested.discard(key)
             return False
         asked = key in worker.requested
-        computing = key in _FLIGHTS
-    if computing:
-        return False
     if last is not None and time.monotonic() - last[0] < gap_factor() * last[1]:
         return False
     if asked:
