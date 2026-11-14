@@ -16,7 +16,7 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -185,6 +185,8 @@ class LegacyAuditSpool:
         self._token = secrets.token_hex(16)
         self._path = self._staging_directory / f"{_PREFIX}{self._token}.sqlite"
         self._connection = None
+        # The cursors that row generators hold open; see `_rows`.
+        self._streaming = set()
         self._filesystem = self._parent = self._owned_file = None
         self._owns_companions = False
         self._failed = False
@@ -232,13 +234,21 @@ class LegacyAuditSpool:
             raise self._interruption or _invalid() from error
 
     def _rows(self, statement: str, parameters=()):
+        cursor = None
         try:
-            for row in self._sql(statement, parameters):
+            cursor = self._sql(statement, parameters)
+            self._streaming.add(cursor)
+            for row in cursor:
                 self._check()
                 yield row
         except sqlite3.DatabaseError as error:
             self._failed = True
             raise self._interruption or _invalid() from error
+        finally:
+            if cursor is not None:
+                self._streaming.discard(cursor)
+                with suppress(sqlite3.Error):
+                    cursor.close()
 
     def __enter__(self) -> LegacyAuditSpool:
         if self._entered:
@@ -281,6 +291,12 @@ class LegacyAuditSpool:
 
     def __exit__(self, *_exc) -> None:
         try:
+            # A row generator that a reference cycle keeps suspended holds its cursor, and so the file open:
+            # Windows cannot delete an open file, so the cursors close here rather than when the cycle is collected.
+            for cursor in self._streaming:
+                with suppress(sqlite3.Error):
+                    cursor.close()
+            self._streaming.clear()
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
