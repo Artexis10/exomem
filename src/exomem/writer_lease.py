@@ -9078,6 +9078,32 @@ def stop_server_lifecycle() -> None:
                 del _MANAGERS[manager.config]
 
 
+def hand_back_after_command() -> None:
+    """Hand back the writer lease that a one-shot command took, as its process ends.
+
+    Nothing else does: a command process has no lifespan, and it ends before the renewer's idle
+    release. The lease then outlived the command by up to its TTL, and the owner's next offline
+    step refused with a service that was not running. A serving process keeps its lease to its
+    own stop; a handback that cannot finish leaves the lease to expire on its TTL, as before.
+    """
+    with _MANAGERS_LOCK:
+        manager = _MANAGERS.get(LeaseConfig.from_env())
+    if manager is None or not manager.config.enabled or manager._serves_collection_store:
+        return
+    with manager._lock:
+        if manager._fencing_token is None:
+            return
+    try:
+        manager.close()
+    except OpError as error:
+        logger.warning("the command's writer lease expires on its TTL: %s", error.code)
+    finally:
+        # A closed manager is not reusable; a later command in this process builds a fresh one.
+        with _MANAGERS_LOCK:
+            if _MANAGERS.get(manager.config) is manager:
+                del _MANAGERS[manager.config]
+
+
 def reset_managers_for_tests() -> None:
     """Close and clear process globals; intentionally public for deterministic tests."""
     with _MANAGERS_LOCK:

@@ -11,6 +11,8 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import signal
+import threading
 import time
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from copy import copy
@@ -234,6 +236,16 @@ class RenderedRefusalMiddleware(Middleware):
         )
 
 
+class _Terminated(BaseException):
+    """SIGTERM, raised where uvicorn sends it again, so the frames above it unwind and close."""
+
+
+def _end_after_teardown(_signum, _frame) -> None:
+    # A second SIGTERM while the teardown runs ends the process at once, as one did before.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    raise _Terminated
+
+
 class ExomemFastMCP(FastMCP):
     """FastMCP with stateless POST plus authenticated GET/SSE compatibility.
 
@@ -325,6 +337,29 @@ class ExomemFastMCP(FastMCP):
             if not endpoint_found:
                 raise RuntimeError("FastMCP stateless endpoint route was not found")
         return app
+
+    async def run_http_async(self, *args, **kwargs) -> None:
+        """Serve HTTP, and on SIGTERM run the Exomem lifespan's teardown before the process ends.
+
+        FastMCP holds its lifespan open around uvicorn as well as inside the app, so the app's
+        shutdown leaves the teardown to that outer hold. uvicorn then sends the captured SIGTERM
+        again, and its default action ended the process before the outer hold closed: no worker
+        stopped, the vault projector left its queue and the writer lease waited out its TTL.
+        Raised as an exception here instead, the signal unwinds through that hold, which runs the
+        teardown; then the process ends by SIGTERM as before.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            await super().run_http_async(*args, **kwargs)  # only the main thread takes signals
+            return
+        previous = signal.signal(signal.SIGTERM, _end_after_teardown)
+        try:
+            await super().run_http_async(*args, **kwargs)
+        except _Terminated:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.raise_signal(signal.SIGTERM)
+        finally:
+            if signal.getsignal(signal.SIGTERM) is _end_after_teardown:
+                signal.signal(signal.SIGTERM, previous)
 
     async def run_stdio_async(
         self,

@@ -1,8 +1,9 @@
 """Return a store-mode vault to file mode (OpenSpec make-vault-store-canonical D8, task 1.5).
 
-Rollback runs offline, as the owner. The store holds data that no file has: the audit trail, queued projections and
-held corrections. Rollback therefore refuses while a projection is queued, refuses while a person's edit would be
-overwritten unless the owner exports it, and exports the audit trail before it drops anything.
+Rollback runs offline, as the owner. The store holds data that no file has: the audit trail, queued
+projections and held corrections. Rollback therefore projects what is queued first, as the
+service's projector does, refuses while a person's edit would be overwritten unless the owner
+exports it, and exports the audit trail before it drops anything.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pathlib import Path
 from .. import epistemic_graph, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
-from . import marker, migrate, mode, projection, rederive
+from . import marker, migrate, mode, ownership, projection, projector, rederive
 from .write import Origin
 
 #: The store-mode tables a rollback keeps: the mode row that it sets back to file, and the audit trail, which is append-only history.
@@ -33,49 +34,95 @@ _PATHS_REPORTED = 5
 class Findings:
     """What stands between a store-mode vault and file mode."""
 
-    queued: int = 0
+    #: Queued intents at paths that nothing holds, oldest first: what a projection writes,
+    #: removes or moves before the rollback goes on.
+    queued: list[str] = field(default_factory=list)
     #: Paths whose bytes on disk differ from the store's page: a person's edit that no import took in,
-    #: or the file beside a held item.
+    #: or the file beside a held item. A file of Exomem's that a queued intent replaces is not one.
     edited: list[str] = field(default_factory=list)
     #: Paths the store holds that the vault lacks: an outside delete.
     deleted: list[str] = field(default_factory=list)
     #: ``store_held`` rows: edits and deletes that an importer already set aside.
     held: list[tuple[str, str, bytes | None]] = field(default_factory=list)
+    #: Files at paths whose page the store no longer holds, which a person changed after Exomem
+    #: removed or moved the page: held, or held once the queue is projected.
+    vacated: list[str] = field(default_factory=list)
 
     @property
     def unexported(self) -> int:
-        return len({*self.edited, *self.deleted, *(path for path, _, _ in self.held)})
-
-    def refusal(self) -> OpError | None:
-        if self.queued:
-            return OpError(
-                "VAULT_STORE_PROJECTION_PENDING",
-                f"{self.queued} projection(s) are still queued, so some files lack the store's latest bytes",
-                "Let the projector drain its queue, then run this command again.",
-            )
-        return None
+        return len(
+            {*self.edited, *self.deleted, *self.vacated, *(path for path, _, _ in self.held)}
+        )
 
 
 def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
-    """Read the queue, the held rows and every stored page's file; it writes nothing."""
-    found = Findings(
-        queued=conn.execute("SELECT COUNT(*) FROM store_projection_queue").fetchone()[0]
-    )
+    """Read the queue, the held rows and every stored page's file; it writes nothing.
+
+    A queued path's file counts as a person's only when the projector would hold it, so a file
+    that still has Exomem's earlier bytes is what the projection replaces, not an edit.
+    """
+    unheld = conn.execute(
+        "SELECT path, operation, from_path FROM store_projection_queue q "
+        f"WHERE {mode.UNHELD_INTENT} ORDER BY queued_at, path"
+    ).fetchall()
+    found = Findings(queued=[path for path, _, _ in unheld])
     found.held = [
         (path, kind, body)
         for path, kind, body in conn.execute(
             "SELECT path, kind, body FROM store_held ORDER BY path"
         )
     ]
+    queued = set(found.queued)
     for rel, sha256 in conn.execute("SELECT path, sha256 FROM store_pages ORDER BY path"):
-        try:
-            on_disk = vault.read_disk_bytes_without_pinning(vault_root / rel)
-        except FileNotFoundError:
-            found.deleted.append(rel)
+        on_disk = _disk_sha256(vault_root, rel)
+        if on_disk == sha256 or (
+            rel in queued and not projector.would_hold(vault_root, rel, on_disk)
+        ):
             continue
-        if hashlib.sha256(on_disk).hexdigest() != sha256:
-            found.edited.append(rel)
+        (found.deleted if on_disk is None else found.edited).append(rel)
+    stored = {rel for (rel,) in conn.execute("SELECT path FROM store_pages")}
+    leaving = {  # a removal's path, or a move's old one, that the projection would hold
+        rel
+        for path, operation, from_path in unheld
+        if (rel := path if operation == "delete" else from_path) is not None
+        and (on_disk := _disk_sha256(vault_root, rel)) is not None
+        and projector.would_hold(vault_root, rel, on_disk)
+    }
+    held_away = {
+        path
+        for path, _, _ in found.held
+        if path not in stored and _disk_sha256(vault_root, path) is not None
+    }
+    found.vacated = sorted(
+        rel
+        for rel in leaving | held_away
+        if ownership.classify(rel) is ownership.Ownership.PAGE
+    )
     return found
+
+
+def _disk_sha256(vault_root: Path, rel: str) -> str | None:
+    try:
+        return hashlib.sha256(vault.read_disk_bytes_without_pinning(vault_root / rel)).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def _drain(root: Path, writer) -> dict[str, str]:
+    """Project every queued intent as the service's projector does, under this step's lease.
+
+    It first removes the temporaries that a killed publication left, a killed rollback's
+    included, so a second run continues where a kill stopped the first. It ends when a pass
+    settles nothing, and returns each intent left unsettled with the projector's reason.
+    """
+    loop = projector.Projector(root, run=lambda work: work(writer))
+    try:
+        loop.sweep_temporaries()
+        while (report := loop.run_pass()).settled:
+            pass
+    except projector.Deferred as refusal:
+        return {"*": str(refusal)}
+    return report.deferred
 
 
 def dry_run(vault_root: Path) -> dict:
@@ -100,14 +147,16 @@ def dry_run(vault_root: Path) -> dict:
     reader, _ = connection._open_read_only(connection.store_path(root), connection.BUSY_TIMEOUT_MS)
     with closing(reader):
         found = inspect(root, reader)
-    refusal = found.refusal()
     return {
         "status": "dry-run",
-        "queued_projections": found.queued,
+        # The apply projects these first; a file system that refuses one stops it there.
+        "queued_projections": len(found.queued),
+        "would_project": _named(found.queued),
         "held": len(found.held),
         "edited_on_disk": _named(found.edited),
         "deleted_on_disk": _named(found.deleted),
-        "refusal": None if refusal is None else refusal.code,
+        "changed_after_removal": _named(found.vacated),
+        "refusal": "VAULT_STORE_HELD_ITEMS" if found.unexported else None,
         "needs_export_held": bool(found.unexported),
     }
 
@@ -155,22 +204,35 @@ def _rollback(
     row = conn.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
     if row is None or row[0] != mode.STORE_MODE:
         return _rerun(root, writer, authority_check, committed=row is not None)
+    if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
+        raise OpError("VAULT_STORE_EXPORT_DESTINATION", "the export directory must be new or empty")
     timings: dict[str, float] = {}
+    started = time.perf_counter()
+    unsettled = _drain(root, writer)
+    timings["project_s"] = time.perf_counter() - started
     started = time.perf_counter()
     found = inspect(root, conn)
     timings["inspect_s"] = time.perf_counter() - started
-    refusal = found.refusal()
-    if refusal is not None:
-        raise refusal
+    if found.queued:
+        named = [f"{path}: {unsettled.get(path, unsettled.get('*', 'not projected'))}"
+                 for path in found.queued[:_PATHS_REPORTED]]
+        raise OpError(
+            "VAULT_STORE_PROJECTION_PENDING",
+            f"{len(found.queued)} queued file(s) could not be projected, so their files lack the "
+            f"store's bytes: {'; '.join(named)}",
+            "Make each named file or folder writable by Exomem, or move away what stands in its "
+            "place, then run this command again. Nothing was rolled back.",
+        )
     if found.unexported and not export_held:
+        paths = sorted(
+            {*found.edited, *found.deleted, *found.vacated, *(p for p, _, _ in found.held)}
+        )
         raise OpError(
             "VAULT_STORE_HELD_ITEMS",
             f"{found.unexported} file(s) hold a person's edit or delete that the store has not taken in, e.g. "
-            f"{', '.join(sorted({*found.edited, *found.deleted, *(p for p, _, _ in found.held)})[:_PATHS_REPORTED])}",
+            f"{', '.join(paths[:_PATHS_REPORTED])}",
             "Run again with --export-held to keep those edits in the export and project the store's version.",
         )
-    if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
-        raise OpError("VAULT_STORE_EXPORT_DESTINATION", "the export directory must be new or empty")
     started = time.perf_counter()
     exported = _export(root, conn, destination, found, why=why, revision=row[1])
     timings["export_s"] = time.perf_counter() - started
@@ -229,7 +291,8 @@ def _export(
 
     A held edit's body goes to ``held/<path>``. A file whose bytes differ from the store's page and from its
     held body goes to ``on-disk/<path>`` (or to ``held/<path>`` when nothing is held for it), so each version
-    that the projection overwrites stays in the export.
+    that the projection overwrites stays in the export. A vacated file, whose page the store no
+    longer holds, is exported the same way and then removed: the store's version of it is no file.
     ``export.json`` is written before the first file is projected, so it lists every edit about to be overwritten.
     A crash during the projection leaves those bytes listed only in that first export directory: a rerun finds
     the files already projected, so its own export names none of them.
@@ -259,7 +322,7 @@ def _export(
     )
     kept: dict[str, bytes] = {path: body for path, _, body in found.held if body is not None}
     beside: dict[str, bytes] = {}
-    for rel in found.edited:
+    for rel in (*found.edited, *found.vacated):
         on_disk = vault.read_disk_bytes_without_pinning(root / rel)
         if rel not in kept:
             kept[rel] = on_disk
@@ -279,6 +342,7 @@ def _export(
         "held_deletes": sorted(
             {*found.deleted, *(path for path, kind, _ in found.held if kind == "delete")}
         ),
+        "absent_from_store": found.vacated,
     }
     projection.write_file(
         destination,
@@ -290,12 +354,20 @@ def _export(
     for rel in (*found.edited, *found.deleted):
         (body,) = conn.execute("SELECT body FROM store_pages WHERE path = ?", (rel,)).fetchone()
         projection.write_file(root, rel, body, durable=True)
+    removed = [
+        rel
+        for rel in found.vacated
+        if projector.remove_if_unchanged(
+            root, rel, hashlib.sha256(beside.get(rel, kept[rel])).hexdigest()
+        )
+    ]
     return {
         "directory": str(destination),
         "audit_rows": len(audit),
         "held_edits": len(kept),
         "on_disk_beside_held": len(beside),
         "held_deletes": len(summary["held_deletes"]),
+        "removed_after_export": len(removed),
     }
 
 

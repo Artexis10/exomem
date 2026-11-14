@@ -81,6 +81,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **WHEN** the service stops cleanly with projection intents queued
 - **THEN** the projector works through the queue for a bounded time before the service releases the vault
 - **AND** an intent that it did not reach in that time stays queued, and the next start projects it
+- **AND** a service that its supervisor stops with SIGTERM does the same and hands back the writer lease, whichever transport it serves
 
 #### Scenario: A lifecycle write leaves the folders that file mode leaves
 - **WHEN** a store-mode trash, move or recovery has committed and the projector has drained
@@ -223,6 +224,13 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **WHEN** an operator reverts a store-mode vault that holds an unreviewed outside edit
 - **THEN** the revert refuses and names the held items
 - **AND** no file-mode rebuild applies the held bytes
+
+#### Scenario: Reverting projects what a stopped service left queued
+- **WHEN** an operator reverts a store-mode vault whose projection queue holds intents that no service projected
+- **THEN** the revert projects them offline, with no service, before it exports or drops anything
+- **AND** a dry run lists them, counts no file of Exomem's earlier bytes as a person's edit, and changes no file
+- **AND** a file that a person changed at a queued path is held, so the revert refuses until it is exported
+- **AND** a revert killed while it projects is finished by the next run
 
 ### Requirement: Knowledge writes share the store's availability
 In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to start or activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical or graph tables; the Markdown projection is the in-vault copy of pages.

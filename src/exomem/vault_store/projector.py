@@ -29,7 +29,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -360,7 +360,11 @@ class Projector:
             except Exception as error:  # noqa: BLE001 - a store that cannot answer now is asked again next pass
                 failure = f"{type(error).__name__}: {error}"
                 if failure != self._last_failure:
-                    log.warning("a vault projection pass failed: %s", failure, exc_info=True)
+                    # A replica without the writer lease is refused until it takes the lease over.
+                    expected = getattr(error, "code", None) == "WRITER_LEASE_REQUIRED"
+                    log.warning(
+                        "a vault projection pass failed: %s", failure, exc_info=not expected
+                    )
                     self._last_failure = failure
             if report is not None:
                 self._note_deferred(report)
@@ -483,7 +487,8 @@ class Projector:
         if page is None:
             raise Deferred("a write intent names a path with no stored page")
         disk = observe(filesystem, intent.path)
-        self._apply_write(filesystem, facts, disk, _judge_write(facts, disk), report)
+        verdict = _judge_write(facts, None if disk is None else disk.sha256)
+        self._apply_write(filesystem, facts, disk, verdict, report)
 
     def _apply_write(
         self,
@@ -592,7 +597,7 @@ class Projector:
             report.projected += 1
             _move_parts(filesystem, old.path, intent.path)
             return
-        verdict = _judge_write(facts, new_disk)
+        verdict = _judge_write(facts, None if new_disk is None else new_disk.sha256)
         if verdict in (Judgement.HOLD_DELETE, Judgement.HOLD_EDIT):
             # A person's file at the new path is held before the old file goes: the old one stays.
             self._apply_write(filesystem, facts, new_disk, verdict, report)
@@ -611,8 +616,10 @@ class Projector:
 
         The folder waits, quietly, while any queued intent below it is still to move or remove a
         file: its own subfolders' intents included, so the deepest folder goes first. Then the
-        folder goes when it is empty, and its intent is dropped when it holds something that no
-        queued intent will move, which stays where it is, as anything a person put there does.
+        folder goes when it is empty. The removal only tidies, so any other state drops the
+        intent and leaves the folder as it is: one that holds something no queued intent will
+        move, as anything a person put there stays, and one that is a link, unreadable or refuses
+        its removal, which no later pass could settle.
         """
         folder = rel[:-1]
         below, end = f"{folder}/", f"{folder}0"  # "0" sorts right after "/": the folder's range
@@ -629,16 +636,9 @@ class Projector:
             return
         opened = _parent(filesystem, folder, access="mutate")
         removed = False
-        if not _missing(opened):
+        if opened.ok:
             with opened.require() as directory:
-                unlinked = filesystem.unlink_directory(directory)
-                if unlinked.ok:
-                    removed = True
-                else:
-                    with closing(filesystem.iter_names(directory)) as names:
-                        holds = next(names, None) is not None
-                    if not holds:
-                        unlinked.require()  # an empty folder that refuses: the intent stays
+                removed = filesystem.unlink_directory(directory).ok
         if removed:
             _flush_folder(filesystem, _split(folder)[0])
         self._run(lambda writer: _drop_intent(writer, rel, queued[0]))
@@ -851,11 +851,12 @@ class Judgement(enum.Enum):
     HOLD_DELETE = enum.auto()
 
 
-def _judge_write(facts: Facts, disk: OnDisk | None) -> Judgement:
-    """Whether the file at a path may be left, replaced or written, or is a person's, held."""
+def _judge_write(facts: Facts, sha256: str | None) -> Judgement:
+    """Whether the file with ``sha256`` at a path (None: no file) may be left, replaced or
+    written, or is a person's, held."""
     page, manifest = facts.page, facts.manifest
     assert page is not None
-    if disk is None:
+    if sha256 is None:
         # A projected file that is gone is an outside delete, unless Exomem removed it and a kill
         # came before the manifest heard of it. A person's delete while a store delete or move-away
         # is queued, followed by a store put, is therefore not held; no bytes are lost, because the
@@ -863,11 +864,21 @@ def _judge_write(facts: Facts, disk: OnDisk | None) -> Judgement:
         if manifest is not None and not facts.removed:
             return Judgement.HOLD_DELETE
         return Judgement.PUBLISH
-    if disk.sha256 == page.sha256:
+    if sha256 == page.sha256:
         return Judgement.IN_PLACE
-    if disk.sha256 not in facts.own_hashes:
+    if sha256 not in facts.own_hashes:
         return Judgement.HOLD_EDIT
     return Judgement.PUBLISH
+
+
+def would_hold(vault_root: Path, rel: str, sha256: str | None) -> bool:
+    """Whether a pass would hold the file with ``sha256`` at ``rel`` (None: no file) as a person's,
+    where a queued intent writes, removes or moves it: a preview that writes nothing."""
+    facts = read_facts(vault_root, rel)
+    if facts.page is not None:  # a write, or a move's new path (``_project_write``)
+        return _judge_write(facts, sha256) in (Judgement.HOLD_EDIT, Judgement.HOLD_DELETE)
+    # A removal, or a move's old path (``_remove``): only a file of Exomem's goes.
+    return sha256 is not None and sha256 not in facts.own_hashes and facts.manifest is not None
 
 
 # -- store reads ----------------------------------------------------------------------------------
@@ -1287,6 +1298,23 @@ def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> N
                 raise Deferred("the file changed before it was removed")
             _retrying(lambda: filesystem.unlink(file))
         _flush(filesystem, parent)
+
+
+def remove_if_unchanged(vault_root: Path, rel: str, sha256: str) -> bool:
+    """Remove the file at ``rel`` while it still has the bytes of ``sha256``, following no link;
+    whether it went. A file that changed, a link or a refusal leaves it where it is."""
+    acquired = held_fs.acquire(anchor(Path(vault_root)))
+    if not acquired.ok:
+        return False
+    try:
+        with acquired.require() as filesystem:
+            disk = observe(filesystem, rel)
+            if disk is None or disk.sha256 != sha256:
+                return False
+            _unlink(filesystem, rel, disk)
+    except (Deferred, held_fs.HeldFsError, OSError):
+        return False
+    return True
 
 
 def _move_parts(filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str) -> None:

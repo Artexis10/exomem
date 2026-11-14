@@ -403,6 +403,118 @@ def test_a_person_edit_made_after_the_migration_blocks_the_rollback_until_it_is_
     assert not mode.store_mode_active(vault)
 
 
+GAMMA = "Knowledge Base/Notes/Gamma.md"
+
+
+def queue_writes(root, *puts):
+    """Commit pages that no projector writes, as a service that stopped before its drain leaves
+    them."""
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+        write.commit(
+            CollectionWriter(root, handle),
+            write.StoreChange(
+                write.Origin.GOVERNED,
+                "queued at a stop",
+                puts=tuple(write.PagePut(rel, body) for rel, body in puts),
+            ),
+        )
+
+
+def test_a_rollback_projects_what_is_queued_and_its_dry_run_changes_nothing(
+    vault, capsys, tmp_path
+):
+    """A rollback that refuses while projections are queued, which no offline step drains, or a
+    dry run that calls Exomem's own earlier bytes a person's edit, or that writes a file."""
+    assert migrate_apply(vault) == 0
+    alpha, gamma = b"# Alpha\n\nThe store's newer Alpha.\n", b"# Gamma\n\nA new page.\n"
+    queue_writes(vault, (ALPHA, alpha), (GAMMA, gamma))
+    before = vault_bytes(vault)
+    capsys.readouterr()
+
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    preview = printed(capsys)
+    assert preview["edited_on_disk"]["count"] == preview["deleted_on_disk"]["count"] == 0
+    assert (preview["refusal"], preview["needs_export_held"]) == (None, False)
+    assert preview["would_project"] == {"count": 2, "first": [ALPHA, GAMMA]}
+    assert vault_bytes(vault) == before
+
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    assert (vault / ALPHA).read_bytes() == alpha and (vault / GAMMA).read_bytes() == gamma
+    assert not mode.store_mode_active(vault)
+
+
+def test_a_persons_edit_at_a_queued_path_is_held_by_the_rollback_and_kept_in_its_export(
+    vault, capsys, tmp_path
+):
+    """A rollback whose projection writes the store's bytes over a file a person edited after
+    the last projection, before anyone exported it."""
+    assert migrate_apply(vault) == 0
+    store_beta, person_beta = b"# Beta\n\nThe store's Beta.\n", b"# Beta\n\nThe person's Beta.\n"
+    queue_writes(vault, (BETA, store_beta))
+    (vault / BETA).write_bytes(person_beta)
+    capsys.readouterr()
+
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["edited_on_disk"] == {"count": 1, "first": [BETA]}
+    assert rollback_apply(vault, tmp_path / "refused") == 1
+    assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+    assert (vault / BETA).read_bytes() == person_beta and mode.store_mode_active(vault)
+
+    assert rollback_apply(vault, tmp_path / "export", "--export-held") == 0
+    assert (tmp_path / "export/held" / BETA).read_bytes() == person_beta
+    assert (vault / BETA).read_bytes() == store_beta
+
+
+def _rollback_and_die(environment, released, export):
+    """`rollback --apply` in a fresh interpreter that the operating system kills between two of
+    its projections: after a file is written and before its manifest row."""
+    os.environ.clear()
+    os.environ.update(environment)
+    records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
+    capability.RELEASED = released
+    from exomem.vault_store import projector
+
+    record = projector.Projector._record_projected
+    recorded = []
+
+    def die_on_the_second(self, *arguments):
+        if recorded:
+            os.kill(os.getpid(), signal.SIGKILL)
+        recorded.append(arguments)
+        return record(self, *arguments)
+
+    projector.Projector._record_projected = die_on_the_second
+    with library_scope():
+        cli._store_mode_main([
+            "rollback", "--vault", environment["EXOMEM_VAULT_PATH"], "--apply",
+            "--export-to", export, "--why", "kill",
+        ])
+    os._exit(0)
+
+
+def test_a_rollback_killed_while_it_projects_is_finished_by_the_next_run(vault, capsys, tmp_path):
+    """A kill inside the rollback's projection that leaves a state the next run refuses or
+    projects wrongly, so the vault stays in store mode with files behind the store."""
+    assert migrate_apply(vault) == 0
+    bodies = {rel: f"# {rel}\n\nQueued before the kill.\n".encode() for rel in (ALPHA, BETA, GAMMA)}
+    queue_writes(vault, *bodies.items())
+    child = multiprocessing.get_context("spawn").Process(
+        target=_rollback_and_die,
+        args=({**os.environ, OPERATOR: OPERATOR_SECRET}, RELEASED, str(tmp_path / "killed")),
+    )
+    child.start()
+    child.join(180)
+    assert child.exitcode == -signal.SIGKILL
+    assert mode.store_mode_active(vault)
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    _until(lambda: (client.status().expires_at or 0) < time.time(), seconds=30)
+    capsys.readouterr()
+
+    assert rollback_apply(vault, tmp_path / "export") == 0, capsys.readouterr().err
+    assert {rel: (vault / rel).read_bytes() for rel in bodies} == bodies
+    assert not mode.store_mode_active(vault)
+
+
 def test_a_damaged_manifest_refuses_every_command_and_names_it_instead_of_reading_as_file_mode(
     vault, capsys
 ):
@@ -413,6 +525,22 @@ def test_a_damaged_manifest_refuses_every_command_and_names_it_instead_of_readin
         capsys.readouterr()
         assert store_mode(vault, *command, operator=False) == 1
         assert "STATE_MIGRATION_MANIFEST_INVALID" in capsys.readouterr().err
+
+
+def test_an_offline_step_right_after_a_cli_write_command_starts_at_once(vault, capsys):
+    """A one-shot CLI command that took the writer lease and exits without handing it back: the
+    owner's next offline step refuses with a service that is not running, until the lease's TTL
+    runs out."""
+    import subprocess
+
+    reconciled = subprocess.run(
+        [sys.executable, "-m", "exomem", "maintain", "--reconcile", "--json"],
+        env=os.environ.copy(), capture_output=True, text=True, timeout=300,
+    )
+    assert reconciled.returncode == 0, reconciled.stdout[-2000:] + reconciled.stderr[-2000:]
+    capsys.readouterr()
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+    assert mode.store_mode_active(vault)
 
 
 def test_a_migration_without_a_single_host_lease_refuses_before_it_takes_any_lease(

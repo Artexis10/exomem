@@ -157,6 +157,25 @@ def test_a_vacated_folder_goes_once_its_files_moved_and_stays_while_it_holds_a_p
     assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
 
 
+def test_a_vacated_folder_that_became_a_link_drops_its_intent_and_stays(
+    stored, writer, projecting, tmp_path
+):
+    """A folder intent that no pass can settle, because the folder is now a link: it stays queued
+    for ever, keeps an offline rollback refusing, or removes or empties the link's target."""
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (stored / "Knowledge Base/Linked").symlink_to(target, target_is_directory=True)
+    commit(
+        writer, **put("Knowledge Base/Beside.md", b"# Beside\n"),
+        vacated_folders=("Knowledge Base/Linked",),
+    )
+
+    projecting.run_pass()
+
+    assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
+    assert (stored / "Knowledge Base/Linked").is_symlink() and target.is_dir()
+
+
 def test_a_persons_edit_is_held_and_kept_while_newer_store_bytes_wait(stored, writer, projecting):
     """A projector that replaces the file a person edited with the store's newer bytes, projects a
     later revision of a held path, or lets one held path stop the projection of the others."""
