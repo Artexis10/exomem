@@ -207,7 +207,6 @@ def test_a_folder_that_another_owner_holds_is_not_entered_so_its_unreadable_part
     assert skipped == [Skipped(f"{KB}/Notes/locked", SkipReason.UNREADABLE)]
 
 
-@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
 def test_a_symlinked_page_is_left_out_and_reported(tmp_path):
     """Defect: migration stores a symlink's target under the link's path, so the projection later writes a copy.
 

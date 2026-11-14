@@ -85,6 +85,21 @@ jobs:
         with:
           enable-cache: true
           prune-cache: true
+      # The protected-media tests skip without the real age and age-keygen. The archive is
+      # pinned by version and SHA-256, as scripts/ci-install-age.sh pins the Linux one.
+      - name: Install age
+        shell: pwsh
+        env:
+          AGE_VERSION: v1.2.1
+          AGE_SHA256: 46db0db71f146061f7c8fffa912cb806aef1bc8450e27a3abc1744f0591b89fb
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "age.zip"
+          $url = "https://github.com/FiloSottile/age/releases/download/$env:AGE_VERSION/age-$env:AGE_VERSION-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive -MaximumRetryCount 5 -RetryIntervalSec 10
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:AGE_SHA256) { throw "age archive checksum mismatch" }
+          $target = Join-Path $env:RUNNER_TEMP "age-tools"
+          Expand-Archive -Path $archive -DestinationPath $target
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $target "age")
       - name: Run the store-mode suites
         shell: bash
         env:

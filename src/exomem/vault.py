@@ -6432,6 +6432,7 @@ def _batch_atomic_write_locked(
                 final_guards.pop(final, None)
                 restored_paths.add(final)
             except Exception as rollback_error:  # noqa: BLE001 - report every restore failure
+                log.warning("TEMPDIAG batch rollback error for %s", final, exc_info=rollback_error)
                 rollback_errors.append(rollback_error)
                 if all(workspace is not item for item in implicated_workspaces):
                     implicated_workspaces.append(workspace)

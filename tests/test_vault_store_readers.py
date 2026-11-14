@@ -856,6 +856,10 @@ def test_a_file_that_the_store_does_not_own_is_answered_from_the_rows_that_its_s
 CLAIMED = "Knowledge Base/Notes/Gen/Claimed.md"
 
 
+@pytest.mark.skipif(
+    not vault_module.STAT_GENERATION_TRUSTED,
+    reason="ctime does not move on a write here, so a file-mode read is never remembered",
+)
 @pytest.mark.timeout(300)
 def test_a_container_claim_is_read_from_the_stored_page_though_a_file_mode_read_remembered_none(
     vault, monkeypatch  # noqa: F811

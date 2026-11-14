@@ -429,7 +429,8 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
                                        "max": ms(q_busy, max)},
         "create_ms_without_drain": [ms([t], max) for t in baseline],
         "create_ms_during_drain": [ms([t], max) for t in during],
-        "load_average": [round(x, 1) for x in os.getloadavg()],
+        # Windows has no load average: the figure is unknown there, not zero.
+        "load_average": [round(x, 1) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
     }
     print(json.dumps(figures))
     if report := os.environ.get("EXOMEM_SERVED_DRILL_REPORT"):
