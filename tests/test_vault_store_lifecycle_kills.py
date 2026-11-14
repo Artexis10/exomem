@@ -637,13 +637,6 @@ def test_a_lifecycle_write_killed_at_or_after_its_commit_converges_in_a_fresh_pr
     assert judged == dict.fromkeys(judged, [])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="a served store-mode process refuses the owner's recursive folder delete with "
-    "AUDIENCE_RESTRICTED (`op_delete`: `egress.restricted_release_filter` filters every caller "
-    "while a writer is bound), so the undo of a recovery refuses",
-)
 @pytest.mark.timeout(600)
 def test_a_folder_recovery_killed_after_its_commit_converges_and_can_be_undone(stored, tmp_path):
     """A recovery killed after its store commit that a fresh process leaves split or pending, or
@@ -669,8 +662,8 @@ def test_a_lifecycle_write_killed_between_its_renames_and_its_commit_converges(
     split between its source and the trash, a binary that a sweep records at a path its queued move
     leaves, a trash slot with no sidecar to recover it by, a governed tombstone left pending, or a
     moved artifact's page that names a binary no longer at that path. A folder trash killed before
-    its commit, and a recovery killed after it, retry or undo with a recursive folder trash, so they
-    are in the two tests that the served door's refusal of that trash holds back."""
+    its commit, and a recovery killed after it, are in their own two tests, which also retry or undo
+    them with a recursive folder trash through the served door."""
     plan = [
         ("trash folder", "rename 1", False),
         ("trash folder", "rename 2", False),
@@ -687,13 +680,6 @@ def test_a_lifecycle_write_killed_between_its_renames_and_its_commit_converges(
     assert judged == dict.fromkeys(judged, [])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="a served store-mode process refuses the owner's recursive folder delete with "
-    "AUDIENCE_RESTRICTED (`op_delete`: `egress.restricted_release_filter` filters every caller "
-    "while a writer is bound), so the retry of a folder trash refuses",
-)
 @pytest.mark.parametrize("order", ORDERS)
 @pytest.mark.timeout(600)
 def test_a_folder_trash_killed_before_its_commit_converges_and_its_retry_succeeds(

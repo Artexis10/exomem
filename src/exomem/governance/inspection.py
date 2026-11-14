@@ -26,6 +26,13 @@ def _canonical_vault_path(vault_root: Path, raw_path: object) -> str:
     if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
         raise InspectionError("INVALID_INSPECTION_PATH", "path must be canonical")
     root = Path(vault_root)
+    from ..vault_store import read as store_read
+
+    if store_read.serves(root, candidate.as_posix()):
+        # The store's page is the identity: its projection is no evidence, and no link reaches it.
+        if not store_read.holds_file(root, candidate.as_posix()):
+            raise InspectionError("INVALID_INSPECTION_PATH", "path must be canonical")
+        return candidate.as_posix()
     target = root / candidate
     current = root
     try:

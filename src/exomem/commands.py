@@ -2656,19 +2656,22 @@ _PRE_ADMISSION_SIGNALS = (
 _Tool = TypeVar("_Tool", bound=Callable[..., Any])
 
 
-def _store_registry_lag(vault_root: Path, restricted: bool) -> dict | None:
+def _store_registry_lag(vault_root: Path, restricted: bool | None = None) -> dict | None:
     """The registry notice (``notice`` and ``lag``) that a store-mode reader's result carries, or None.
 
     A store-mode vault serves its search, graph and link rows while a registry pass re-derives them,
     and every reader says so in the same words. The revisions count the vault's writes, which a
-    restricted caller is not shown.
+    restricted caller is not shown. ``restricted`` is the reader's own decision when it has one;
+    otherwise the caller is decided here, and only when there is a notice to trim.
     """
     from .vault_store import read as store_read
 
     found = store_read.request_registry_notice(vault_root)
-    if found is not None and restricted:
-        return {"notice": found["notice"]}
-    return found
+    if found is None:
+        return None
+    if restricted is None:
+        restricted = egress_module.caller_restricted(vault_root)
+    return {"notice": found["notice"]} if restricted else found
 
 
 def _reads_one_store_snapshot(operation: _Tool) -> _Tool:
@@ -3894,7 +3897,7 @@ def op_graph_context(
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
     guarded = egress_module.guard_graph_context(vault_root, context, purpose=purpose)
-    registry_lag = _store_registry_lag(vault_root, egress_module.caller_restricted(vault_root))
+    registry_lag = _store_registry_lag(vault_root)
     if registry_lag is not None:
         guarded.update(registry_lag)
     return guarded
@@ -6447,8 +6450,9 @@ def op_delete(
     # declared recursive delete is refused before anything is read. A folder
     # holding only pages withheld from the writer does not exist for it, as
     # its listing says, and is answered as a missing path.
-    keep = egress_module.restricted_release_filter(vault_root)
-    restricted = keep is not None
+    from .vault_store import read as store_read_module
+
+    restricted = egress_module.caller_restricted(vault_root)
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
@@ -6457,7 +6461,8 @@ def op_delete(
         # A restricted writer's path is decided before it is probed, so a folder it may not
         # write answers as an absent path does.
         admit_write_target(vault_root, rel)
-        is_dir = abs_path.is_dir()
+        # A store-mode folder exists while the store holds a page below it, projected or not.
+        is_dir = abs_path.is_dir() or store_read_module.holds_folder(vault_root, rel)
     except VaultPathError as refusal:
         if refusal.code == "WRITE_REFUSED":
             raise ValueError(f"{refusal.code}: {refusal.reason}") from None
@@ -6465,6 +6470,7 @@ def op_delete(
     if restricted and is_dir:
         from . import list_directory as list_directory_module
 
+        keep = egress_module.restricted_release_filter(vault_root)
         if not list_directory_module._withheld_target(
             vault_root, rel, keep, True, {}, is_dir=True
         ):
@@ -6667,10 +6673,12 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     # elsewhere, so only this answer could disclose which of the two exists.
     governed = not egress_module.gate_state(Path(vault_root))[0].empty
     pages = _link_target_pages(vault_root, target) if governed else []
-    unseen = (
-        governed
-        and visible is not None
-        and (not pages or not all(visible(page) for page in pages))
+    # Only a restricted caller hears a missing target as a withheld one; the filter, which a bound
+    # store applies to every caller, decides the target pages that exist.
+    restricted = egress_module.caller_restricted(vault_root)
+    unseen = governed and (
+        (restricted and not pages)
+        or (visible is not None and not all(visible(page) for page in pages))
     )
     if unseen or (
         governed and not all(_link_target_released(vault_root, page) for page in pages)
@@ -6685,7 +6693,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
             row for row in payload["inbound"] if visible(str(row.get("path") or ""))
         ]
         payload["count"] = len(payload["inbound"])
-    if visible is not None:
+    if restricted:
         # The echoed `target` is the normalised form, which can be strictly
         # more specific than the input (a bare basename resolves to a full
         # vault path), and the terminal filter strips it only for a withheld
@@ -6697,7 +6705,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         # knowledge, so it is not held.
         if unseen:
             projection_timing_module.floor_restricted_outcome()
-    registry_lag = _store_registry_lag(vault_root, visible is not None)
+    registry_lag = _store_registry_lag(vault_root, restricted)
     if registry_lag is not None:
         payload.update(registry_lag)
     return payload
@@ -8410,7 +8418,17 @@ def read_memory_stored(
                 "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
                 "unit_ref, frontmatter_only, include_history, links, include_raw, or offset"
             )
-        return context_views_module.read_view(vault_root, path, continuation=continuation, purpose=purpose)
+        view = context_views_module.read_view(
+            vault_root, path, continuation=continuation, purpose=purpose
+        )
+        # A store-mode view is compiled over rows that a registry pass may still re-derive: a view
+        # that would read ready and current says so, in the words every store-mode reader uses.
+        registry_lag = _store_registry_lag(vault_root)
+        if registry_lag is not None:
+            view = {**view, **registry_lag}
+            if view.get("state") == context_views_module.READY:
+                view["stale"] = True
+        return view
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
     # (which has no `purpose` parameter of its own) see the declared purpose.
@@ -8964,7 +8982,7 @@ def op_observe_memory(
     try:
         if raw_path.lower().startswith(
             memory_refs_module.REF_PREFIX
-        ) and egress_module.restricted_release_filter(vault_root) is not None:
+        ) and egress_module.caller_restricted(vault_root):
             # A reference only a page withheld from the caller holds resolves as
             # an unknown one, before anything is loaded or validated.
             resolved_path = egress_module.resolve_visible_identifier(vault_root, path)
@@ -11077,7 +11095,7 @@ def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]
         def read(**kw: Any) -> Any:
             return op_review_memory(vault_root, **kw)
 
-        if egress_module.visible_page_filter(vault_root) is None:
+        if not egress_module.caller_restricted(vault_root):
             bound = review_ids_module.bind_decision(
                 read,
                 item=item_id,

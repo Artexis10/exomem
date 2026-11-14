@@ -868,7 +868,8 @@ def suggest_related(
             query=query,
             limit=wanted if keep is None else egress.pool_limit(wanted),
             mode="hybrid",
-            graph=keep is None,
+            # The graph lane's hops and in-degree are computed before admission (`op_find`).
+            graph=not egress.caller_restricted(vault_root),
             scope=scope,
             prefer_compiled=True,
         )

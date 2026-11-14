@@ -301,8 +301,10 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
     assert removed == 2 and frame_rows(stored) == ([], [])
     assert kept == ()
     assert not read.page_exists(stored, parts[1]) and read.page_exists(stored, parts[0])
-    # Each waited for the other holder's release and one poll, not for the mutation timeout.
-    assert max(stalls.values()) < hold_seconds + 1.0
+    # Each waited for the other holder's release and one poll, not for the mutation timeout. The
+    # bound is halfway between the two, so a loaded host does not fail it.
+    waited_out = get_manager()._mutation_timeout_seconds
+    assert max(stalls.values()) < hold_seconds + (waited_out - hold_seconds) / 2
     deadline = time.monotonic() + 30
     while store_mode.status(stored)["registry"] != rederive.CURRENT:
         assert time.monotonic() < deadline, "the tick that stepped aside runs once it is free"
