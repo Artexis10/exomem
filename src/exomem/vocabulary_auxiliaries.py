@@ -102,9 +102,9 @@ def seal(
             from . import compiled_history
 
             compiled_history.validate_new_write(write, path=path)
-        if guard.leaf_policy == "absent":
+        if guard.expects_absence:
             before = None
-        elif guard.leaf_policy == "content" and isinstance(guard.expected_content_hash, str):
+        elif guard.binds_bytes and isinstance(guard.expected_content_hash, str):
             before = guard.expected_content_hash
         else:
             raise ValueError("VOCABULARY_AUXILIARY_GUARD_INVALID")
@@ -117,7 +117,7 @@ def seal(
     if len({item.path for item in entries}) != len(entries):
         raise ValueError("VOCABULARY_AUXILIARY_DUPLICATE")
     guard = getattr(primary, "guard", None)
-    before = guard.expected_content_hash if guard is not None and guard.leaf_policy == "content" else None
+    before = guard.expected_content_hash if (guard is not None and guard.binds_bytes) else None
     before_source = None
     if before is not None:
         from . import vault
@@ -152,7 +152,7 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
             after=write.content.encode("utf-8"),
             before_sha256=(
                 guard.expected_content_hash
-                if guard is not None and guard.leaf_policy == "content" else None
+                if (guard is not None and guard.binds_bytes) else None
             ),
             after_sha256=_hash(write.content),
         )
@@ -272,7 +272,7 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
                 claim.before_sha256 is not None
                 or not isinstance(manifest.primary_before_source, str)
                 or not isinstance(guard, vault.PathGuard)
-                or guard.target != manifest.primary_path or guard.leaf_policy != "content"
+                or guard.target != manifest.primary_path or not guard.binds_bytes
                 or guard.expected_content_hash != manifest.primary_before_sha256
                 or _hash(manifest.primary_before_source) != manifest.primary_before_sha256
             ):

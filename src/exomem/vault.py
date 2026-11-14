@@ -13,10 +13,12 @@ import contextlib
 import errno
 import functools
 import hashlib
+import io
 import json
 import logging
 import operator
 import os
+import posixpath
 import re
 import secrets
 import stat
@@ -1400,6 +1402,19 @@ class PathGuard:
     expected_content_size: int | None = field(default=None, init=False)
     expected_generation: tuple[int, int, int] | None = field(default=None, init=False)
 
+    @property
+    def expects_absence(self) -> bool:
+        """Whether this guard binds a missing leaf in its canonical backend."""
+        return self.leaf_policy == "absent" or (
+            self.leaf_policy == "store" and self.expected_content_hash is None
+        )
+
+    @property
+    def binds_bytes(self) -> bool:
+        """Whether this guard binds existing bytes by their canonical SHA-256."""
+        # nosemgrep: ep-word-membership -- PathGuard defines these two hash-bearing leaf policies.
+        return self.leaf_policy in ("content", "store") and self.expected_content_hash is not None
+
     @classmethod
     def capture_store(cls, vault_root: Path, target: str) -> PathGuard:
         """Guard a path that the store serves: bind its stored hash, or its absence there."""
@@ -1455,6 +1470,24 @@ class PathGuard:
                 "PATH_GUARD_INVALID", "content size requires a content leaf policy"
             )
         root = Path(vault_root)
+        from .vault_store import read
+
+        if read.serves(root, target):
+            with read.snapshot(root) as view:
+                stored = view.page_meta(target)
+            if leaf_policy == "absent" and stored is not None:
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must be absent")
+            if leaf_policy != "absent" and stored is None:
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must exist")
+            if leaf_policy == "generation":
+                # A filesystem stat cannot witness a stored page; its hash guards the canonical bytes.
+                raise PathGuardError("PATH_GUARD_INVALID", "use a content guard for a stored page")
+            if stored is not None and leaf_policy == "content" and (
+                stored.sha256 != expected_content_hash
+                or expected_content_size is not None and stored.size != expected_content_size
+            ):
+                raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+            return _store_guard(target, stored.sha256 if stored is not None else None)
         try:
             root_info = root.lstat()
         except OSError as error:
@@ -6814,8 +6847,12 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     """
     try:
         root = Path(vault_root)
+        from .vault_store import read
+
+        if read.serves(root, rel):
+            return resolve_under_vault(root, rel)[1]
         canonical = (root / rel).resolve().relative_to(root.resolve()).as_posix()
-    except (OSError, ValueError):
+    except (OSError, ValueError, VaultPathError):
         return rel
     if not canonical or canonical == ".":
         return rel
@@ -7065,9 +7102,14 @@ def admit_write_target(vault_root: Path, lexical: str, resolved: Path | None = N
     forms = {lexical}
     try:
         if resolved is None:
-            resolved = (vault_root / lexical).resolve()
+            from .vault_store import read
+
+            resolved = (
+                resolve_under_vault(vault_root, lexical)[0] if read.serves(vault_root, lexical)
+                else (vault_root / lexical).resolve()
+            )
         forms.add(_canonical_kb_segment(resolved.relative_to(vault_root.resolve()).as_posix()))
-    except (ValueError, OSError):
+    except (ValueError, OSError, VaultPathError):
         pass
     try:
         for form in forms:
@@ -7094,6 +7136,9 @@ def resolve_under_vault(
     same containment resolution. The ordinary relative form remains lexical
     across symlinks so downstream no-follow guards still see the path the
     caller supplied.
+
+    In store mode, a stored leaf never follows its projection. The tuple names
+    its store key; details retain both the caller's spelling and that key.
 
     `must_be_under_kb` additionally refuses any target that resolves OUTSIDE
     `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
@@ -7136,16 +7181,38 @@ def resolve_under_vault(
         if first.casefold() != kb_dirname().casefold() and first != "..":
             rel = f"{kb_dirname()}/{rel}"
 
-    candidate = vault_root / rel
+    normalized = posixpath.normpath(rel)
+    if normalized == ".." or normalized.startswith("../"):
+        raise VaultPathError(code="INVALID_PATH", reason=f"path escapes vault root: {raw!r}")
+    candidate = vault_root / normalized
     try:
-        resolved = candidate.resolve()
         vault_resolved = vault_root.resolve()
-        resolved.relative_to(vault_resolved)
+        parent = candidate.parent.resolve() if normalized != "." else vault_resolved
+        parent.relative_to(vault_resolved)
     except (ValueError, OSError) as e:
         raise VaultPathError(
-            code="INVALID_PATH",
-            reason=f"path escapes vault root: {raw!r} ({e})",
+            code="INVALID_PATH", reason=f"path escapes vault root: {raw!r} ({e})",
         ) from None
+    from .vault_store import read as store_read
+
+    # Classify only a contained spelling; a stored leaf's projection cannot redirect its key.
+    stored = store_read.serves(vault_root, normalized)
+    try:
+        resolved = parent / candidate.name if stored else (vault_root / rel).resolve()
+        resolved.relative_to(vault_resolved)
+        if stored and not store_read.serves(
+            vault_root, resolved.relative_to(vault_resolved).as_posix()
+        ):
+            stored = False
+            resolved = (vault_root / rel).resolve()
+            resolved.relative_to(vault_resolved)
+    except (ValueError, OSError) as e:
+        raise VaultPathError(
+            code="INVALID_PATH", reason=f"path escapes vault root: {raw!r} ({e})",
+        ) from None
+
+    if not stored:
+        candidate = vault_root / rel
 
     if must_be_under_kb:
         kb_resolved = (vault_root / kb_dirname()).resolve()
@@ -7162,17 +7229,28 @@ def resolve_under_vault(
 
     if refuse_withheld:
         admit_write_target(vault_root, rel, resolved)
+    if stored and (must_exist or must_be_file or must_be_dir):
+        key = resolved.relative_to(vault_resolved).as_posix()
+        with store_read.snapshot(vault_root) as view:
+            metadata = view.page_meta(key) or view.binary_records((key,)).get(key)
+            is_file = metadata is not None
+            is_dir = not is_file and view.holds_below(key)
+        exists = is_file or is_dir
     if must_exist and (
-        not candidate.exists()
+        not (exists if stored else candidate.exists())
         or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
     ):
         raise VaultPathError(code="NOT_FOUND", reason=missing_path_reason(rel))
-    if must_be_file and candidate.exists() and not candidate.is_file():
+    if must_be_file and (exists if stored else candidate.exists()) and not (
+        is_file if stored else candidate.is_file()
+    ):
         raise VaultPathError(
             code="NOT_A_FILE",
             reason=f"path is not a regular file: {rel}",
         )
-    if must_be_dir and candidate.exists() and not candidate.is_dir():
+    if must_be_dir and (exists if stored else candidate.exists()) and not (
+        is_dir if stored else candidate.is_dir()
+    ):
         raise VaultPathError(
             code="NOT_A_DIR",
             reason=f"path is not a directory: {rel}",
@@ -7205,7 +7283,7 @@ def resolve_under_vault(
             resolved=resolved,
             resolved_relative=resolved_rel,
         )
-    return candidate, rel
+    return (resolved, resolved_rel) if stored else (candidate, rel)
 
 
 def in_curated_tree(rel_path: str) -> str | None:
@@ -10007,12 +10085,13 @@ def plan_log_entries(
     """
     log_file = kb_root(vault_root) / "log.md"
     from .governance import connector_boundary
+    from .vault_store import read as store_read
 
     if not required and not connector_boundary.effect_admission(vault_root)(log_file):
         # A restricted writer's entry is skipped like every effect outside its ceiling, so the
         # plan neither reads the log nor reports a rotation that would not happen.
         return LogWritePlan(())
-    if not log_file.is_file():
+    if not store_read.holds_file(vault_root, relative_posix(log_file, vault_root)):
         return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
     updated = current
@@ -10069,8 +10148,25 @@ def plan_log_writes(
 def _operation_log_paths(vault_root: Path) -> list[Path]:
     """The live log, then the rotated archives oldest first."""
     root = kb_root(vault_root)
+    from .vault_store import ownership
+    from .vault_store import read as store_read
+
     # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
-    return [root / "log.md", *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+    archives = set((root / "_archive" / "logs").glob("log-*.md"))
+    live = root / "log.md"
+    if store_read.serves(vault_root, relative_posix(live, vault_root)):
+        archives = {
+            path for path in archives
+            if ownership.classify(relative_posix(path, vault_root)) is not ownership.Ownership.PAGE
+        }
+        prefix = f"{kb_prefix()}_archive/logs/"
+        with store_read.snapshot(vault_root) as view:
+            archives.update(
+                vault_root / meta.path for meta in view.pages(prefix)
+                if "/" not in meta.path[len(prefix):]
+                and Path(meta.path).match("log-*.md")
+            )
+    return [live, *sorted(archives)]
 
 
 def _operation_log_entries(text: str, parser: MarkdownIt) -> list[dict[str, Any]]:
@@ -10105,14 +10201,28 @@ def _operation_log_entries(text: str, parser: MarkdownIt) -> list[dict[str, Any]
 
 def read_operation_log(vault_root: Path) -> dict[str, Any]:
     """Read activity sections and structured provenance from live and rotated logs."""
+    from .vault_store import read as store_read
+
     paths = _operation_log_paths(vault_root)
+    def stored_bodies():
+        with store_read.snapshot(vault_root) as view:
+            return view.bodies(relative_posix(path, vault_root) for path in paths)
+
+    bodies = store_read.from_store(vault_root, relative_posix(paths[0], vault_root), stored_bodies)
     entries: list[dict[str, Any]] = []
     failed = 0
     read = 0
     parser = MarkdownIt("commonmark")
     for path in paths:
         try:
-            text, _guard = read_guarded_text(vault_root, path)
+            rel = relative_posix(path, vault_root)
+            if bodies is not None and store_read.serves(vault_root, rel):
+                raw = bodies.get(rel)
+                if raw is None:
+                    raise FileNotFoundError(rel)
+                text = raw.decode("utf-8")
+            else:
+                text, _guard = read_guarded_text(vault_root, path)
         except (OSError, UnicodeError, ValueError):
             failed += 1
             continue
@@ -10120,7 +10230,7 @@ def read_operation_log(vault_root: Path) -> dict[str, Any]:
         entries.extend(_operation_log_entries(text, parser))
     return {
         "entries": entries,
-        "live_log_present": paths[0].is_file(),
+        "live_log_present": store_read.holds_file(vault_root, relative_posix(paths[0], vault_root)),
         "files_read": read,
         "files_unreadable": failed,
     }
@@ -10304,6 +10414,8 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
     surfacing history is best-effort. Each entry is
     ``{"date": "2026-06-23", "op": "edit", "summary": "<rationale + what changed>"}``.
     """
+    from .vault_store import read as store_read
+
     title = rel_path_no_ext
     if title.endswith(".md"):
         title = title[: -len(".md")]
@@ -10311,9 +10423,14 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
         title = title[len(kb_prefix()) :]
 
     log_file = kb_root(vault_root) / "log.md"
-    if not log_file.exists():
+    if not store_read.page_exists(vault_root, relative_posix(log_file, vault_root)):
         return []
-    text = log_file.read_text(encoding="utf-8")
+    raw = store_read.owned_bytes(vault_root, relative_posix(log_file, vault_root))
+    # Preserve Path.read_text's universal-newline handling for stored log bytes.
+    text = (
+        io.StringIO(raw.decode("utf-8"), newline=None).read()
+        if raw is not None else log_file.read_text(encoding="utf-8")
+    )
 
     matches = list(_LOG_ENTRY_HEADER_RE.finditer(text))
     entries: list[dict[str, str]] = []

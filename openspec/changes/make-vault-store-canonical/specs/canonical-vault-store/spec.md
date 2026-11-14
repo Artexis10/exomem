@@ -13,10 +13,20 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **THEN** the file stays on disk and is durable before the transaction that records its path and content hash commits
 - **AND** the store records that path and hash in the same transaction as the page that cites it
 
-#### Scenario: A governed move of a binary renames it, then records it
+#### Scenario: A governed move of a binary records it, then renames it
 - **WHEN** a delete, a move or a recovery in store mode moves a binary file
-- **THEN** the file is renamed on disk first, and one transaction records it at its new path and removes its old record, bound to the old record as read and to an empty new path
-- **AND** a refused transaction renames the file back, and a kill before the transaction leaves the old record to the next sweep, which pairs it with the moved file by its hash
+- **THEN** one transaction moves the binary's record to its new path, bound to the old record as read and to an empty new path, and queues a move intent there that names the old path
+- **AND** the writer renames the file right after the transaction, so the caller finds it at its new path on return
+- **AND** a refused transaction moves no file
+
+#### Scenario: A lifecycle write killed around its transaction converges
+- **WHEN** the process is killed while a store-mode trash, move or recovery runs, before its transaction, inside it, or after it and before the writer's last rename
+- **THEN** a fresh start finds every page and binary of the write on one side, its old paths or its new ones, with each binary's record naming the file at its path, whether the projector or the importer runs first
+- **AND** the projector renames each binary whose move is queued, and never unlinks or replaces a binary to finish a move
+- **AND** the importer records no file at the old path of a queued binary move
+- **AND** once the projector has drained, the folders on disk are those that file mode leaves: a folder trash or recovery has removed the moved folder's own tree and nothing above it, a single file's write has removed no folder, and no folder that holds anything has gone
+- **AND** a file or folder that the store does not own may stay at its old path, with none of its bytes lost
+- **AND** the next write through the served door succeeds
 
 ### Requirement: One transaction per governed write
 A governed write in store mode SHALL commit every file it changes, the lexical catalogue rows, the graph nodes, edges and dependencies derived from those files, one audit row per file and one projection intent per file in one `BEGIN IMMEDIATE` transaction. The write SHALL acknowledge only after that transaction is durable. Derivation SHALL run from the bytes being written, before the transaction, with the same derivation code that file mode uses. When a write adds a title that makes links on other pages resolve, the same transaction SHALL update those pages' graph rows.
@@ -66,6 +76,17 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 #### Scenario: Projection lag is visible
 - **WHEN** projection intents are queued
 - **THEN** status reports the number of queued files and the age of the oldest one
+
+#### Scenario: A clean stop projects the queue, bounded
+- **WHEN** the service stops cleanly with projection intents queued
+- **THEN** the projector works through the queue for a bounded time before the service releases the vault
+- **AND** an intent that it did not reach in that time stays queued, and the next start projects it
+
+#### Scenario: A lifecycle write leaves the folders that file mode leaves
+- **WHEN** a store-mode trash, move or recovery has committed and the projector has drained
+- **THEN** a single file moved or trashed out of a folder has removed no folder, not even its emptied parent
+- **AND** a folder trash or recovery has removed the moved folder's own tree at its source, and nothing above it
+- **AND** a folder that holds something no queued intent moved stays
 
 ### Requirement: Outside edits return through a base-revision check
 In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete of a page SHALL become a held deletion, never a silent delete of canonical content. A binary file is canonical on disk and the store records only its hash and size, so an outside change, delete or rename of a binary SHALL import as an audited record change; Exomem SHALL hold a binary only when an Exomem delete of it is queued and the file differs.

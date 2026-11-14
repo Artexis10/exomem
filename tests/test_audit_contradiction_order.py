@@ -333,9 +333,9 @@ def test_noop_when_embeddings_disabled(
 def test_a_remembered_sweep_is_dropped_when_the_vectors_change(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sweep is reused while the index serves the same matrix, and every
-    write makes the index serve a new one. Keyed on anything less, a page
-    rewritten into a near-duplicate kept reporting its old contradiction."""
+    """A page's remembered pairs hold only while its vectors are the same bytes.
+    Kept for longer, a page rewritten into a near-duplicate kept reporting its
+    old contradiction."""
     planted = _install(vault, monkeypatch, [("Notes/Insights/memo-a.md", "Notes/Insights/memo-b.md", 0.8)])
     pair = next(iter(planted))
     keys = list(planted[pair])
@@ -350,6 +350,83 @@ def test_a_remembered_sweep_is_dropped_when_the_vectors_change(
     )
 
     assert pair not in {_pair_key(f) for f in _pair_findings(_run(vault))}
+
+
+def _toward(page: int, cosine: float, fresh: int) -> np.ndarray:
+    """A unit vector with `cosine` to the chunks of `page` and none to any other chunk."""
+    vector = np.zeros(16, dtype=np.float32)
+    vector[page] = cosine
+    vector[fresh] = (1.0 - cosine * cosine) ** 0.5
+    return vector
+
+
+def _chunked_pages(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[list[np.ndarray]]]:
+    """Eight pages of 1,400 chunks down to one. A page's plain chunks equal each other and have
+    cosine 0 with every other page. The band is 0.55 to 0.7, and the pages are large enough for
+    the sweep to need more than one product. Five chunks are planted:
+
+    - Page 0 holds one chunk at 0.6 to page 5 and one at 0.95. Seen from page 0, each chunk of
+      page 5 scores 0.95, which is outside the band. Seen from page 5, the first chunk scores 0.6.
+    - Page 6 holds the same two chunks toward page 1, so that pair counts only from page 1.
+    - The first chunk of page 2 and the first chunk of page 3 are at 0.6 and 0.65 to page 7.
+    """
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_FLOOR", "0.55")
+    monkeypatch.setenv("EXOMEM_DUP_THRESHOLD", "0.7")
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_TOP_N", "0")
+    keys = [_seed(vault, f"Notes/Insights/chunked-{page}.md") for page in range(8)]
+    chunks = [
+        [np.eye(16, dtype=np.float32)[page]] * count
+        for page, count in enumerate((1400, 900, 500, 150, 40, 3, 2, 1))
+    ]
+    chunks[0][-2:] = [_toward(5, 0.6, 8), _toward(5, 0.95, 9)]
+    chunks[6][:] = [_toward(1, 0.6, 12), _toward(1, 0.95, 13)]
+    chunks[2][0] = _toward(7, 0.6, 10)
+    chunks[3][0] = _toward(7, 0.65, 11)
+    find_module.clear_cache()
+    return keys, chunks
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, keys: list[str], chunks: list[list[np.ndarray]]) -> None:
+    metadata = [
+        (key, index) for key, page in zip(keys, chunks, strict=True) for index in range(len(page))
+    ]
+    matrix = np.array([chunk for page in chunks for chunk in page], dtype=np.float32)
+    monkeypatch.setattr(embeddings.EmbeddingIndex, "all_vectors", lambda self: (metadata, matrix))
+
+
+def _reported(vault: Path, keys: list[str]) -> set[tuple[int, int]]:
+    return {
+        tuple(sorted(keys.index(path) for path in finding.paths))
+        for finding in _pair_findings(_run(vault))
+    }
+
+
+def test_a_sweep_in_several_products_gives_each_chunk_to_its_own_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One product holds several pages and is split by page, along both of its sides. A wrong
+    split gives a page's first chunk to its neighbour. A sweep that reads a product from one
+    side only loses a pair that counts from the other."""
+    keys, chunks = _chunked_pages(vault, monkeypatch)
+    _serve(monkeypatch, keys, chunks)
+
+    assert _reported(vault, keys) == {(0, 5), (1, 6), (2, 7), (3, 7)}
+
+
+def test_a_sweep_after_one_page_changed_follows_its_new_vectors(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep keeps the pairs of the pages whose vectors did not change and multiplies only the
+    changed page. The pair that the page left must go, and the pair that it joined must come."""
+    keys, chunks = _chunked_pages(vault, monkeypatch)
+    _serve(monkeypatch, keys, chunks)
+    _reported(vault, keys)
+
+    chunks[3][0] = _toward(4, 0.6, 14)  # page 3 rewritten: away from page 7, toward page 4
+    _serve(monkeypatch, keys, chunks)
+
+    assert _reported(vault, keys) == {(0, 5), (1, 6), (2, 7), (3, 4)}
 
 
 def test_audit_queues_snapshot_claims_and_drops_a_label_after_claim_edit(

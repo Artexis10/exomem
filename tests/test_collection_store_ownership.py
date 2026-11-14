@@ -97,6 +97,22 @@ def test_later_collection_cannot_return_to_files_after_hint_loss_and_restart(ser
         restarted.stop()
 
 
+def test_page_store_descriptor_cannot_release_managed_collections_to_files(service, monkeypatch):
+    """A partial host-manifest restore must still honor the coordinator's live collection authority."""
+    load = state_migration._load_manifest
+
+    def restored(*args, **kwargs):
+        manifest = load(*args, **kwargs)
+        physical, _optional = state_migration.partition_state_descriptor_ids(manifest["descriptors"])
+        return {**manifest, "descriptors": [*physical, state_migration.VAULT_STORE_COMPATIBILITY_ID]}
+
+    monkeypatch.setattr(state_migration, "_load_manifest", restored)
+    proof = ownership.resolve(service.root)
+    assert proof.marker is not None
+    assert CID in proof.admitted
+    assert titles(service.root, CID) == ["Canonical"]
+
+
 def test_first_admission_invalidates_a_whole_overview_without_holding_its_creator(tmp_path, monkeypatch):
     root = _served_vault(tmp_path, monkeypatch)
     captured, resume = threading.Event(), threading.Event()

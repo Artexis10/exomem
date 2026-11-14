@@ -460,6 +460,29 @@ def test_a_binary_delete_that_the_disk_already_made_queues_no_removal(stored, wr
     ) == [("write",), ("delete",)]
 
 
+def test_a_change_to_a_binary_whose_move_is_queued_refuses_and_keeps_its_only_copy(
+    stored, writer  # noqa: F811
+):
+    """A change that touches a binary's queued move before its file moved, and so splits the move
+    into a write that no projector can make and a delete that removes the only copy of the bytes."""
+    moved = "Knowledge Base/Notes/moved.bin"
+    digest = hashlib.sha256(DIAGRAM_BYTES).hexdigest()
+    move = write.BinaryMove(DIAGRAM, moved, digest, len(DIAGRAM_BYTES))
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", binary_moves=(move,)))
+
+    with pytest.raises(write.StoreConflict):
+        write.commit(
+            writer,
+            write.StoreChange(
+                write.Origin.GOVERNED, "test", binary_deletes=(write.BinaryDelete(moved),)
+            ),
+        )
+
+    queued = "SELECT operation, from_path FROM store_projection_queue WHERE path = ?"
+    assert store_rows(stored, queued, moved) == [("move", DIAGRAM)]
+    assert (stored / DIAGRAM).read_bytes() == DIAGRAM_BYTES
+
+
 def test_a_folder_and_a_name_that_only_the_store_holds_are_taken_not_new(served):
     """A page named over a stored page whose file is not written, or a second folder spelling."""
     stored_only = "Knowledge Base/Stored Only/Gamma.md"

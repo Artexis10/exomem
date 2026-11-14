@@ -42,6 +42,7 @@ from exomem import (
     lexstore,
     list_directory,
     memory_refs,
+    observe_memory,
     project_keys,
     reconcile,
     reserved_paths,
@@ -51,12 +52,12 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
-from exomem.collection_store import connection
+from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
-from exomem.governance.principal import RequestPrincipal, request_scope
-from exomem.vault_store import importer, ownership, read, write
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.vault_store import availability, importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
@@ -118,6 +119,45 @@ def answers(root, generated):
 
 #: The states a projected file takes when the store is the page: wrong bytes, none, or a link.
 DAMAGE = ("poisoned", "deleted", "a link into the vault", "a link out of the vault")
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_filter_preserves_served_refusal_and_offline_oracle(
+    vault, monkeypatch, warm_managed_cell, managed,  # noqa: F811
+):
+    """An unsupported filter must not send a served store request through the scan oracle."""
+    from exomem import structured_filters
+
+    build_indexes(vault)
+    if managed:
+        warm_managed_cell(vault)
+    arguments = dict(
+        query="lighthouse", mode="keyword", result_level="mixed",
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 3}},
+    )
+    if managed:
+        with pytest.raises(structured_filters.FilterError) as file_error:
+            commands.op_ask_memory(vault, **arguments)
+        assert file_error.value.code == "UNSUPPORTED_FILTER_FIELD"
+    else:
+        expected = commands.op_ask_memory(vault, **arguments)
+    assert migrate_apply(vault) == 0
+    find_module.clear_cache()
+    parsed = []
+    parse = find_module._parse_page
+
+    def counted(*args, **kwargs):
+        parsed.append(args)
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(find_module, "_parse_page", counted)
+    if managed:
+        with pytest.raises(structured_filters.FilterError) as store_error:
+            commands.op_ask_memory(vault, **arguments)
+        assert str(store_error.value) == str(file_error.value)
+        assert parsed == []
+    else:
+        assert commands.op_ask_memory(vault, **arguments) == expected
 
 
 def damage_every_owned_projection(root, damage):
@@ -982,6 +1022,124 @@ def test_a_stored_page_in_a_paths_scope_is_withheld_whatever_its_projection_is_l
         assert "Secret/S.md" not in json.dumps(answer, default=str)
 
 
+def test_a_write_door_withholds_a_stored_page_that_has_no_projection(stored, writer):  # noqa: F811
+    """A withheld check that asks the disk whether the page exists reads a stored page that has no
+    projection as no page and never withholds it: a write door then serves a page that its caller
+    may not see, once the store answers that the page exists."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Sources/Secret/**"]')
+    secret = "Knowledge Base/Sources/Secret/Ledger.md"
+    visible = "Knowledge Base/Sources/Open/Notice.md"
+    page = b"---\ntitle: Ledger\ntype: source\ncreated: 2025-01-01\n---\n# Ledger\n\nFigures.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(secret, page), write.PagePut(visible, page),
+    )))
+    for rel in (secret, visible):
+        (stored / rel).unlink(missing_ok=True)
+
+    proposal = commands.op_manage_memory_file(
+        stored, operation="propose-reclassification", path=secret, source_kind="article"
+    )
+    with request_scope(EXTERNAL):
+        withheld = (egress.write_target_withheld(stored, secret), egress.write_target_withheld(stored, visible))
+
+    assert proposal["path"] == secret  # the owner's door finds the stored source
+    assert withheld == (True, False)
+
+
+def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_yet(
+    stored, writer  # noqa: F811
+):
+    """A folder delete that asks the disk whether the folder exists answers NOT_FOUND for a folder
+    whose pages the store holds and whose files the projector has not written yet."""
+    folder = "Knowledge Base/Notes/Unprojected"
+    pages = [f"{folder}/{name}.md" for name in ("One", "Two")]
+    body = b"---\ntitle: U\ntype: note\n---\n# U\n\nNot projected yet.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
+        write.PagePut(rel, body) for rel in pages
+    )))
+    assert not (stored / folder).exists()
+    token = preview._BOUND.set((stored.resolve(), writer, False))
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            deleted = commands.op_delete(stored, path=folder, confirm=True, recursive=True)
+    finally:
+        preview._BOUND.reset(token)
+
+    assert deleted["file_count"] == len(pages)
+    assert not any(read.holds_file(stored, rel) for rel in pages)
+
+
+#: Who asks, and whether an active policy withholds a page from the external audience. A caller
+#: other than the owner is restricted on an ungoverned vault too: RAW still withholds from it.
+RESTRICTION_CALLERS = {
+    "the owner": (owner_principal(surface="mcp"), False),
+    "the owner under an active policy": (owner_principal(surface="mcp"), True),
+    "an external caller on an ungoverned vault": (EXTERNAL, False),
+    "an external caller under an active policy": (EXTERNAL, True),
+}
+#: A link target that no page holds; a visible page links it.
+NOWHERE = "Knowledge Base/Notes/Nowhere.md"
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("caller", RESTRICTION_CALLERS)
+def test_a_bound_store_decides_whether_a_caller_is_restricted_as_file_mode_does(
+    request, vault, caller  # noqa: F811
+):
+    """A bound store filters every caller's walk, the owner's too, so a site that reads "a filter
+    exists" as "the caller is restricted" withholds from the owner what file mode gives it: the
+    folder delete, the unit ids of a page, the links into a missing target and their echo."""
+    who, governed = RESTRICTION_CALLERS[caller]
+    if governed:
+        restrict_external(vault, 'paths: ["Knowledge Base/Notes/Secret/**"]')
+        (vault / "Knowledge Base/Notes/Secret").mkdir(parents=True)
+        (vault / "Knowledge Base/Notes/Secret/S.md").write_text(
+            "---\ntitle: S\ntype: note\n---\n# S\n\nThe keeper's private log.\n"
+        )
+    (vault / "Knowledge Base/Notes/Linker.md").write_text(
+        "---\ntitle: Linker\ntype: note\n---\n# Linker\n\nSee [[Knowledge Base/Notes/Nowhere]] for the tide.\n"
+    )
+    folders = {mode: f"Knowledge Base/Notes/Retired {mode}" for mode in ("file", "store")}
+    for folder in folders.values():
+        (vault / folder).mkdir(parents=True)
+        (vault / folder / "One.md").write_text("---\ntitle: One\ntype: note\n---\n# One\n\nRetired.\n")
+    build_indexes(vault)
+
+    def answers(root, folder):
+        with request_scope(who):
+            restricted = egress.caller_restricted(root)
+            units = observe_memory.page_units(root, {"path": ALPHA})
+            inbound = commands.op_list_inbound_links(root, target=NOWHERE)
+            try:
+                commands.op_delete(root, path=folder, confirm=True, recursive=True)
+                deleted = "deleted"
+            except ValueError as refusal:
+                deleted = str(refusal)
+            if preview.bound_writer(root) is None:  # file mode's own definition, unchanged
+                assert restricted is (egress.restricted_release_filter(root) is not None)
+        return {"restricted": restricted, "units": units, "inbound": inbound, "delete": deleted}
+
+    in_file_mode = answers(vault, folders["file"])
+    restricted = who is EXTERNAL
+    assert in_file_mode["restricted"] is restricted
+    assert isinstance(in_file_mode["units"], list) is not restricted
+    assert (in_file_mode["delete"] == "deleted") is not restricted
+    # A restricted caller under a policy hears a missing target as a withheld one: no links.
+    assert in_file_mode["inbound"]["count"] == (0 if restricted and governed else 1)
+    build_indexes(vault)  # the file-mode delete's derived rows, as the watcher settles them
+
+    store_root = request.getfixturevalue("stored")
+    bound = request.getfixturevalue("writer")
+    token = preview._BOUND.set((store_root.resolve(), bound, False))
+    try:
+        in_a_bound_store = answers(store_root, folders["store"])
+    finally:
+        preview._BOUND.reset(token)
+
+    assert in_a_bound_store == in_file_mode
+    assert read.holds_file(store_root, f"{folders['store']}/One.md") is restricted
+
+
 @pytest.mark.timeout(300)
 def test_a_stored_page_with_an_invalid_container_claim_is_refused_as_in_file_mode(
     vault, monkeypatch  # noqa: F811
@@ -1098,6 +1256,8 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
 
     started = []
     monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
+    # The session past the rollout fence, which refuses a store-mode vault on this build.
+    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     # The lean fallback sets process-wide environment variables, which this test must not leak.
     monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
     backend = ExomemBackend(str(stored))

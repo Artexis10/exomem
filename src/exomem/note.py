@@ -366,14 +366,14 @@ def _plan_navigation(root: Path, entries: Sequence[_NavigationEntry]) -> _Naviga
     files end as they do after one commit per note. The counts and the log rotation are
     decided once for the whole update.
     """
-    from .relation_census import operation_provenance
-
     from .governance import connector_boundary
+    from .relation_census import operation_provenance
+    from .vault_store import read as store_read
 
     writes: list[PlannedWrite] = []
     warnings: list[str] = []
     top_index = kb_root(root) / "index.md"
-    if not top_index.is_file():
+    if not store_read.holds_file(root, top_index.relative_to(root).as_posix()):
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
     elif connector_boundary.effect_admission(root)(top_index):
         top_text, top_guard = read_guarded_text(root, top_index)

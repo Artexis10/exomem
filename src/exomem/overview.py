@@ -31,6 +31,9 @@ from . import access, reserved_paths
 from .collection_store.ownership import reader
 from .governance.policy import GOVERNANCE_DIRNAME, is_governance_path
 from .kbdir import kb_dirname
+from .vault_store import directory as store_directory
+from .vault_store import mode as store_mode
+from .vault_store import read as store_read
 
 DEFAULT_MAX_DEPTH = 3
 BREADTH_CAP = 12           # tree entries per parent folder
@@ -38,6 +41,8 @@ JUNK_LIST_CAP = 20         # listed junk paths per category (counts stay exact)
 TOP_FILES_CAP = 5          # largest / oldest-unmodified entries
 PATTERN_CAP = 3            # dominant name patterns per folder
 CONTENT_READ_CAP = 512 * 1024  # bytes; larger md files are counted, not read
+CONTENT_BATCH_FILES = 32
+CONTENT_BATCH_BYTES = CONTENT_BATCH_FILES * CONTENT_READ_CAP
 
 #: `_Governance/` is the policy tree, not vault content, and it is skipped for
 #: EVERY audience including the owner — the same reasoning that keeps it out of
@@ -106,6 +111,17 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
         # ``.``.  Normalize that selector before the closed path classifier;
         # dot components remain forbidden everywhere below the root.
         rel = ""
+    if store_mode.store_mode_for_reads(root) and rel and (
+        store_read.serves(root, rel) or store_read.holds_folder(root, rel)
+    ):
+        if (is_governance_path(rel) or reserved_paths.classify_logical(rel).blocked
+                or access.refuse_if_excluded(root, rel)):
+            raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
+        if store_read.holds_folder(root, rel):
+            return root / rel, rel
+        if not store_read.page_exists(root, rel):
+            raise OverviewError("NOT_FOUND", f"no such vault path: {rel}")
+        raise OverviewError("NOT_A_DIR", f"not a directory: {rel}")
     if rel:
         if Path(rel).is_absolute() or rel.startswith(".."):
             raise OverviewError("INVALID_PATH", f"path escapes the vault: {path!r}")
@@ -157,6 +173,23 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
     return scan, rel
 
 
+def _walk(root: Path, scan: Path):
+    if not store_mode.store_mode_for_reads(root):
+        for directory, dirs, files in os.walk(scan):
+            yield directory, dirs, files, {}, None
+        return
+    source = store_directory.Reader(root, max_batch_files=CONTENT_BATCH_FILES)
+    pending = [scan]
+    while pending:
+        directory = pending.pop()
+        entries = source.entries(directory)
+        dirs = [entry.name for entry in entries if entry.directory]
+        files = [entry.name for entry in entries if not entry.directory]
+        stored = {entry.name: entry for entry in entries if entry.disk is None}
+        yield str(directory), dirs, files, stored, source
+        pending.extend(directory / name for name in reversed(dirs))
+
+
 @reader
 def overview(
     root: Path | str,
@@ -198,7 +231,7 @@ def overview(
     total_bytes = 0
     max_depth_seen = 0
 
-    for dirpath, dirnames, filenames in os.walk(scan):
+    for dirpath, dirnames, filenames, stored_entries, source in _walk(root, scan):
         dirnames.sort()
         filenames.sort()
 
@@ -229,14 +262,15 @@ def overview(
             if reserved_paths.classify_logical(child_rel).blocked:
                 continue
             child_path = Path(dirpath) / d
-            try:
-                child_info = child_path.lstat()
-            except OSError:
-                continue
-            if stat.S_ISLNK(child_info.st_mode) or bool(
-                getattr(os.path, "isjunction", lambda _path: False)(child_path)
-            ):
-                continue
+            if d not in stored_entries:
+                try:
+                    child_info = child_path.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISLNK(child_info.st_mode) or bool(
+                    getattr(os.path, "isjunction", lambda _path: False)(child_path)
+                ):
+                    continue
             if access.access_tier(root, child_rel) == access.TIER_EXCLUDED:
                 continue
             kept.append(d)
@@ -248,6 +282,7 @@ def overview(
         st.children = [f"{rp}/{d}" if rp else d for d in dirnames]
 
         name_set = set(filenames)
+        kept_files = []
         for fn in filenames:
             if not include_hidden and fn.startswith("."):
                 continue
@@ -263,31 +298,47 @@ def overview(
             if release_keep is not None and not release_keep(child_rel):
                 st.pruned_direct += 1
                 continue
+            kept_files.append(fn)
+        if source is not None:
+            source.prefetch(
+                [stored_entries[fn] for fn in kept_files
+                 if fn in stored_entries and stored_entries[fn].meta is not None
+                 and stored_entries[fn].meta.size <= CONTENT_READ_CAP],
+                max_files=CONTENT_BATCH_FILES, max_bytes=CONTENT_BATCH_BYTES,
+            )
+        for fn in kept_files:
+            child_rel = f"{root_rp}/{fn}" if root_rp else fn
             fpath = Path(dirpath) / fn
-            try:
-                fst = fpath.lstat()
-            except OSError:
-                continue
-            if (
-                not stat.S_ISREG(fst.st_mode)
-                or fst.st_nlink != 1
-                or bool(getattr(os.path, "isjunction", lambda _path: False)(fpath))
-            ):
-                continue
+            entry = stored_entries.get(fn)
+            meta = entry.meta if entry is not None else None
+            if meta is not None:
+                fst_size, fst_mtime = meta.size, meta.mtime
+            else:
+                try:
+                    fst = fpath.lstat()
+                except OSError:
+                    continue
+                if (
+                    not stat.S_ISREG(fst.st_mode)
+                    or fst.st_nlink != 1
+                    or bool(getattr(os.path, "isjunction", lambda _path: False)(fpath))
+                ):
+                    continue
+                fst_size, fst_mtime = fst.st_size, fst.st_mtime
             frel = f"{rp}/{fn}" if rp else fn
             text: str | None = None
-            if fn.lower().endswith(".md") and fst.st_size <= CONTENT_READ_CAP:
+            if fn.lower().endswith(".md") and fst_size <= CONTENT_READ_CAP:
                 try:
-                    snapshot = reserved_paths.read_generic_bytes(root, child_rel)
+                    if meta is not None:
+                        raw = source.body(entry, max_files=CONTENT_BATCH_FILES, max_bytes=CONTENT_BATCH_BYTES)
+                    else:
+                        snapshot = reserved_paths.read_generic_bytes(root, child_rel)
+                        raw, fst_mtime = snapshot.data, snapshot.mtime
                 except reserved_paths.ReservedPathLeafError:
                     continue
-                fst_size = len(snapshot.data)
-                fst_mtime = snapshot.mtime
+                fst_size = len(raw)
                 if fst_size <= CONTENT_READ_CAP:
-                    text = snapshot.data.decode("utf-8", errors="replace")
-            else:
-                fst_size = fst.st_size
-                fst_mtime = fst.st_mtime
+                    text = raw.decode("utf-8", errors="replace")
             st.files_direct += 1
             st.names.append(fn)
             total_bytes += fst_size
@@ -400,7 +451,7 @@ def overview(
         )
 
     kb: dict = {"present": False}
-    if (root / kb_dirname()).is_dir():
+    if store_directory.is_dir(root, kb_dirname()):
         kb = {"present": True, "path": kb_dirname()}
         if not rel:
             kb_stat = dirstats.get(kb_dirname())

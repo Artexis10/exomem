@@ -965,8 +965,10 @@ class _Reader:
         self.connection = connection
         self._keep = keep
         self._verdicts: dict[str, bool] = {}
-        row = connection.execute("SELECT value FROM graph_meta WHERE key = 'generation'").fetchone()
-        self.generation = _int_or_none(row[0] if row else None)
+        from .vault_store import read as store_read
+
+        identity = store_read.snapshot_identity(connection, ("generation",))
+        self.generation = _int_or_none(identity.get("generation"))
         self.pages: dict[str, _Page] = {}
         for path, page_type, status, tags_json, origin_date, tier, entity, scope in (
             connection.execute(

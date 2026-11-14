@@ -345,10 +345,34 @@ def apply_route(vault_root: Path, *, why: str) -> dict:
         "store-mode migrate",
         lambda session, token, writer: _cutover(root, session, token, writer, why=why),
     )
+    refresh_review_advice(root, result)
     # What the replica says once the hand-back ran: "store" means that a file-mode start on another
     # state root now refuses.
     return {**result, "vault_marker": marker.read_replica(root).state}
 
+
+def refresh_review_advice(root: Path, result: dict) -> None:
+    """Refresh existing review state after an offline mode change, outside its mutation guard."""
+    from .. import due_state
+    from . import read
+
+    started = time.monotonic()
+    try:
+        # Persisted review fingerprints must name the canonical owner after either mode change.
+        # Recompute outside the mutation critical section, after the mode change commits.
+        with read.request_snapshot(root):
+            if (due_state.load(root) or {}).get("role_state"):
+                due_state.reconcile(root)
+    except Exception as error:  # noqa: BLE001 - advisory refresh cannot undo a committed mode change
+        # The transition protocol fixes this outcome independently of the committed mode change.
+        result["review_advice"] = {"state": "refresh_failed"}
+        result.setdefault("warnings", []).append(
+            "The mode change committed. Run maintain_memory(mode='reconcile') to refresh review advice."
+        )
+        result.setdefault("diagnostics", {})["review_advice"] = {
+            "error": type(error).__name__, "reason": str(error),
+        }
+    result.setdefault("timings", {})["review_advice_s"] = round(time.monotonic() - started, 3)
 
 def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
     """Stage, verify, then install under the lease; the report carries each phase's seconds."""

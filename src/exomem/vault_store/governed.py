@@ -75,7 +75,8 @@ def committing(operation: Any) -> Iterator[None]:
     placed.
 
     The abort settles the receipt only while every item is still at its source, so a commit that
-    refused after renaming files back aborts, and one whose rename back failed stays pending.
+    refused, which moves nothing, aborts, and a write that raised after its commit and its renames
+    stays pending for reconcile.
     """
     from ..governance import lifecycle
 

@@ -2800,20 +2800,20 @@ def contract_path(vault_root: Path, name: str) -> Path:
 
 
 def _select_pages(vault_root: Path, scope: ContractScope):
+    from . import find_corpus
     from .governance import egress
     from .governance.principal import effective_principal
 
     who = effective_principal()
     kb = Path(vault_root) / kb_dirname()
-    if not kb.is_dir():
+    if not kb.is_dir() and not find_corpus.store_serves(vault_root):
         return []
     pages = []
-    for path in find_module._walk_md(kb):
-        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
-            continue
-        page = find_module._CACHE.get(path, vault_root)
-        if page is None:
-            continue
+    for page in find_corpus.corpus_pages(
+        vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
+        lambda path: find_module._CACHE.get(path, vault_root),
+        keep=lambda rel, content: egress.content_permits(vault_root, rel, who, snapshot=content),
+    ):
         if scope.page_type and page.page_type != scope.page_type:
             continue
         if scope.project and scope.project not in _page_projects(page.frontmatter):

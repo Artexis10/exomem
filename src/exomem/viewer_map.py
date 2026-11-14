@@ -19,6 +19,8 @@ from . import epistemic_graph as graph
 from . import find, freshness, memory_refs, request_budget, traversal_profiles
 from .governance import egress
 from .retrieval_models import ToolFailureEnvelope
+from .vault_store import mode as store_mode
+from .vault_store import read as store_read
 
 # These ceilings bound work and delivery under the viewer bridge's five-second timeout.
 # A false early stop costs the reader a visibly partial map, rather than a failed call.
@@ -150,24 +152,29 @@ def op_viewer_map(
     vocabulary: dict[tuple[str, str], dict[str, Any]] = {}
     try:
         # Interrupt expensive SQLite reads too; Python boundaries alone cannot bound SQL work.
-        metadata = dict(conn.execute(
-            "SELECT key, value FROM graph_meta WHERE key IN "
-            "('schema_version', 'generation', 'instance', 'recall_projection_identity')"
-        ))
+        metadata = store_read.snapshot_identity(
+            conn, ("schema_version", "generation", "instance", "recall_projection_identity"),
+        )
         result["snapshot"] = metadata
         result["available"] = True
         result["reason"] = None
         conn.set_progress_handler(lambda: int(not budget.can_afford(_DELIVERY_SECONDS)), 1000)
         keep = egress.release_walk_filter(vault_root, purpose=purpose)
         # Borrow exact resident topology: a false miss costs partial edges, never a cold corpus walk.
-        checkpoint = freshness.live_recall_checkpoint(vault_root, "vault")
+        stored = store_mode.store_mode_for_reads(vault_root)
+
+        def current_checkpoint():
+            return (store_read.recall_checkpoint(vault_root, "vault") if stored
+                    else freshness.live_recall_checkpoint(vault_root, "vault"))
+
+        checkpoint = current_checkpoint()
         projection = ((checkpoint.triple, checkpoint.policy_version, checkpoint.access_policy_fingerprint)
                       if checkpoint is not None else None)
         resolver = (find.recall_resolver_snapshot_at_checkpoint(vault_root, checkpoint)
                     if checkpoint is not None and projection is not None
-                    and metadata.get("recall_projection_identity") == graph._availability_freshness_value(projection)
+                    and (stored or metadata.get("recall_projection_identity") == graph._availability_freshness_value(projection))
                     else None)
-        if checkpoint != freshness.live_recall_checkpoint(vault_root, "vault"):
+        if checkpoint != current_checkpoint():
             resolver = None
         edge_coverage = keep is None or resolver is not None
         if not edge_coverage:
@@ -405,7 +412,7 @@ def op_viewer_map(
             limit = {"source_work_limit": _SOURCE_BYTES, "summary_work_limit": _SUMMARY_BYTES,
                      "preparation_work_limit": _PREPARATION_BYTES}.get(reason)
             stop("inspection_edges", reason, limit)
-        if resolver is not None and checkpoint != freshness.live_recall_checkpoint(vault_root, "vault"):
+        if resolver is not None and checkpoint != current_checkpoint():
             # Publishers can advance shared topology during a read; withhold mixed edges, retain partial pages.
             stop("inspection_edges", "resolver_checkpoint_changed", None)
             result["edges"] = []

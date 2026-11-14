@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import activation as activation_module
 from . import audit as audit_module
-from . import call_spans, fusion
+from . import call_spans, fusion, review_pass
 from . import contradiction_stance as contradiction_stance_module
 from . import review_state as review_state_module
 from .audit import AuditFinding
@@ -138,6 +141,9 @@ class AttentionItem:
     # When this signal first reached a served surface, from the first-surfaced
     # ledger. Absent until the ledger holds a record — it is never backfilled.
     first_surfaced_at: str | None = None
+    # True when the item's page, or a page a reason relates, changed after the
+    # pass this listing ranks. The item may no longer hold; read the page first.
+    page_changed: bool = False
 
     def as_dict(self) -> dict:
         out = {
@@ -152,6 +158,8 @@ class AttentionItem:
             out["disposition"] = self.disposition
         if self.first_surfaced_at is not None:
             out["first_surfaced_at"] = self.first_surfaced_at
+        if self.page_changed:
+            out["page_changed"] = True
         if self.item_id is not None:
             out.update(
                 {
@@ -186,6 +194,10 @@ class AttentionReport:
     # an offer was armed on THIS surfacing, so a client never has to read an
     # empty list as "nothing to say".
     quiet_offers: list[dict] | None = None
+    # When the whole-vault pass this listing ranks started (UTC), and whether a
+    # newer pass is due or running. Absent when the listing ran its own pass.
+    as_of: str | None = None
+    refreshing: bool = False
 
     def as_dict(self) -> dict:
         out = {
@@ -206,7 +218,44 @@ class AttentionReport:
             out["coverage"] = self.coverage
         if self.quiet_offers:
             out["quiet_offers"] = self.quiet_offers
+        if self.as_of is not None:
+            out["as_of"] = self.as_of
+            out["refreshing"] = self.refreshing
         return out
+
+
+#: True while a caller reads the review surfaces to look an item up rather than to show them.
+_LOOKUP: ContextVar[bool] = ContextVar("attention_lookup", default=False)
+
+
+@contextmanager
+def lookup() -> Iterator[None]:
+    """Read the review surfaces to find one item: nothing read inside records a surfacing.
+
+    A decision that names an item by id reads every queue whole to find it. Stamping that read
+    would record a first surfacing, and arm a quiet offer, for items nobody was shown.
+    """
+    token = _LOOKUP.set(True)
+    try:
+        yield
+    finally:
+        _LOOKUP.reset(token)
+
+
+def _from_pass(report: AttentionReport, held: review_pass.View | None) -> AttentionReport:
+    """Name the held pass a report ranked, and mark each item whose pages changed after it."""
+    if held is None:
+        return report
+    report.as_of = held.as_of
+    report.refreshing = held.refreshing
+    if held.changed:
+        for item in report.items:
+            item.page_changed = item.path in held.changed or any(
+                path in held.changed
+                for reason in item.reasons
+                for path in reason.get("related_paths") or ()
+            )
+    return report
 
 
 def _reason(category: str, rank: int, finding: AuditFinding) -> dict:
@@ -429,32 +478,48 @@ def attention(
         requested=(set(categories) if categories else None),
         state=state,
     )
+    # A pinned day or moment asks for its own pass, and the held pass covers the
+    # triageable queues only.
+    held = (
+        review_pass.view(vault_root, review_pass.AUDIT, categories=resolved)
+        if today is None and now is None and resolved <= set(_TRIAGEABLE_CATEGORIES)
+        else None
+    )
     effective_now = now or dt.datetime.now(dt.UTC)
     if effective_now.tzinfo is None:
         effective_now = effective_now.replace(tzinfo=dt.UTC)
     effective_now = effective_now.astimezone(dt.UTC)
     today = today or effective_now.date()
-    report = audit_module.audit(
-        vault_root, categories=sorted(resolved), today=today, now=effective_now
-    )
+    if held is None:
+        report = audit_module.audit(
+            vault_root, categories=sorted(resolved), today=today, now=effective_now
+        )
+        found, coverage = report.findings, (report.metadata or {}).get("coverage")
+    else:
+        # The held pass ran every triageable queue; its coverage is keyed by queue.
+        found = held.findings
+        coverage = {k: v for k, v in (held.coverage or {}).items() if k in resolved} or None
     # BEFORE fusion, deliberately. Dropping an excluded family's reasons at the
     # report edge would leave its RRF votes in the scores, so an item flagged
     # only by a quiet family would still occupy a row with no reason on it, and
     # a doubly-flagged item would keep a rank it earned from a signal the user
     # asked not to hear about.
-    findings = _reviewable(vault_root, report.findings, excluded=excluded, now=effective_now)
+    findings = _reviewable(vault_root, found, excluded=excluded, now=effective_now)
     ranked = _rank(findings, categories=resolved, limit=0)
-    if (report.metadata or {}).get("coverage") is not None:
-        ranked.meta = {"coverage": report.metadata["coverage"]}
-    return _apply_review_state(
-        vault_root,
-        ranked,
-        state=state,
-        limit=limit,
-        today=today,
-        payload=state_payload,
-        annotations=annotations,
-        record_surfacing=record_surfacing,
+    if coverage is not None:
+        ranked.meta = {"coverage": coverage}
+    return _from_pass(
+        _apply_review_state(
+            vault_root,
+            ranked,
+            state=state,
+            limit=limit,
+            today=today,
+            payload=state_payload,
+            annotations=annotations,
+            record_surfacing=record_surfacing and not _LOOKUP.get(),
+        ),
+        held,
     )
 
 
@@ -607,7 +672,9 @@ def activation(
         requested=(set(categories) if categories else None),
         state=state,
     )
-    scan = activation_module.scan(vault_root)
+    # The scan reads no date, so a pinned `today` still ranks the held pass.
+    held = review_pass.view(vault_root, review_pass.ACTIVATION)
+    scan = activation_module.scan(vault_root) if held is None else held
     findings = [f for f in scan.findings if f.category not in excluded]
     findings = _decided_findings(vault_root, findings)
     ranked = _rank(
@@ -625,16 +692,19 @@ def activation(
 
     refusal = egress.owner_only_aggregate(Path(vault_root), raw_admitted=True)
     ranked.coverage = scan.coverage if refusal is None else refusal
-    return _apply_review_state(
-        vault_root,
-        ranked,
-        state=state,
-        limit=limit,
-        today=today,
-        identity_namespace="activation",
-        payload=state_payload,
-        annotations=annotations,
-        record_surfacing=record_surfacing,
+    return _from_pass(
+        _apply_review_state(
+            vault_root,
+            ranked,
+            state=state,
+            limit=limit,
+            today=today,
+            identity_namespace="activation",
+            payload=state_payload,
+            annotations=annotations,
+            record_surfacing=record_surfacing and not _LOOKUP.get(),
+        ),
+        held,
     )
 
 

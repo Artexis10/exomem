@@ -67,7 +67,7 @@ def validate_new_write(write: Any, *, path: str) -> None:
     guard = getattr(write, "guard", None)
     if (
         not write.create_only or not isinstance(guard, vault.PathGuard)
-        or guard.leaf_policy != "absent" or guard.target != path
+        or not guard.expects_absence or guard.target != path
     ):
         raise ValueError("VOCABULARY_AUXILIARY_GUARD_INVALID")
 

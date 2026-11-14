@@ -1185,9 +1185,10 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
             for frame_dir, video_path in frame_orphans:
                 try:
                     scene_frames.clear_scene_frames(vault_root, video_path)
-                except store_projector.StoreNotServed:
+                except (store_projector.StoreNotServed, store_projector.BoundaryBusy):
                     # A store-mode vault deletes the sidecar pages through its store, which no
-                    # service in this process serves: the run goes on without them.
+                    # service in this process serves, or whose boundary another holder kept: the
+                    # run goes on without them, and names them.
                     report.frame_orphans_kept.append(_rel(frame_dir, vault_root))
                     continue
                 cleared.append((frame_dir, video_path))

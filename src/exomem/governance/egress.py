@@ -2171,9 +2171,12 @@ def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool
             or bound_writer(vault_root) is not None or ownership.relevant(rel_path)):
         return False
     if withheld:
+        from ..vault_store import read
+
         try:
-            with open(Path(vault_root) / rel_path, "rb"):
-                pass
+            if read.owned_meta(vault_root, rel_path) is None:
+                with open(Path(vault_root) / rel_path, "rb"):
+                    pass
         except OSError:
             return False
     return True
@@ -7903,20 +7906,21 @@ def caller_restricted(
 ) -> bool:
     """Could anything, RAW included, be withheld from this caller?
 
-    The question every count, cut or diagnostic computed before admission
-    asks. Policy state (`gate_state`) is a different question: RAW withholds
-    a protected page from a guest on an ungoverned vault too.
+    The one answer to "is this caller restricted": every count, cut, refusal
+    or diagnostic that only the owner may receive asks it. Policy state
+    (`gate_state`) is a different question: RAW withholds a protected page
+    from a guest on an ungoverned vault too.
 
-    It is `restricted_release_filter(...) is not None` without building the
-    filter: a bound preview filters every caller, and in file mode the caller
-    decides it. So it loads no policy and reads no collection ownership, and
-    a receipt can ask it after the read scope has finished.
+    The principal, its RAW authority and the connector ceiling decide it, in
+    file mode and in a bound store alike. Whether a release filter exists is
+    not this answer: a bound store filters every caller's walk, the owner's
+    too, so a site that applies a filter asks `restricted_release_filter` and
+    a site that decides restriction asks this. It loads no policy and reads no
+    collection ownership, so a receipt can ask it after the read scope has
+    finished.
     """
     del purpose  # every purpose gets a filter or none alike
-    return (
-        bound_writer(vault_root) is not None
-        or file_mode_restricted_caller(vault_root, principal) is not None
-    )
+    return file_mode_restricted_caller(vault_root, principal) is not None
 
 
 #: The reason a whole-vault aggregate gives an audience it is not served to;
@@ -8014,12 +8018,19 @@ def write_target_withheld(
     that writer pays, and the owner never does (`False` for the owner and on
     an ungoverned vault).
     """
+    # A bound store filters the owner's walk too (it leaves out the trash, for one); that view
+    # withholds nothing from the owner.
+    if not caller_restricted(vault_root, principal=principal, purpose=purpose):
+        return False
     keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
     if keep is None:
         return False
     rel = str(rel_path or "").replace("\\", "/").strip().lstrip("/")
+    from ..vault_store import read as store_read
+
     try:
-        exists = bool(rel) and (Path(vault_root) / rel).is_file()
+        # A stored page exists while the store holds it, whatever its projection shows.
+        exists = bool(rel) and store_read.holds_file(Path(vault_root), rel)
     except OSError:
         return False
     return exists and not keep(rel)
@@ -8949,10 +8960,20 @@ def filter_withheld_entries(
         different answer per platform -- which is the whole thing this
         resolver exists to remove.
         """
+        from ..vault_store import read as store_read
+
         current = vault_root
         real: list[str] = []
         entry: os.DirEntry[str] | None = None
         for part in parts:
+            # A store-owned page is a leaf even when its projection is absent or is a directory.
+            if real:
+                parent = "/".join(real)
+                if store_read.serves(vault_root, parent) and (
+                    store_read.page_exists(vault_root, parent)
+                    or not store_read.holds_folder(vault_root, parent)
+                ):
+                    return None
             if current not in listings:
                 try:
                     with os.scandir(current) as scanned:

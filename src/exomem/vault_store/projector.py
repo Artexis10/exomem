@@ -13,8 +13,10 @@ left alone, and so is a projected file that has gone missing, unless the audit t
 Exomem removed it. A held path stays unprojected until something resolves the hold. This module
 does not resolve holds.
 
-Every manifest, queue and hold write runs as store-thread work, one short transaction each, and
-the projector thread holds no mutation boundary while it waits for the store thread.
+Every manifest, queue and hold write runs as store-thread work, one short transaction each, inside
+the vault mutation guard that the store thread takes for it (``store_thread_runner``). The
+projector thread holds no mutation boundary while it waits for the store thread. A busy boundary
+leaves the intent queued for the next pass.
 """
 
 from __future__ import annotations
@@ -26,14 +28,15 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from sqlite3 import Connection
 from typing import TYPE_CHECKING, TypeVar
 
-from .. import held_fs, vault
+from .. import held_fs, mutation_lock, vault
 from ..collection_store import preview, runtime
 from . import mode, ownership, read, write
 
@@ -46,6 +49,11 @@ POLL_SECONDS = 1.0
 #: Intents listed per query. A listing carries no bodies, so this bounds only the rows in memory.
 LISTING_PAGE = 128
 STOP_TIMEOUT_SECONDS = 15.0
+#: How long a clean service stop lets the projector work through the queue before it stops
+#: (``Projector.stop``). At about 70 ms an intent that is some 70 intents. It ends inside the stop
+#: timeout above and leaves room in a managed service's 30 s stop for the other workers. What is
+#: still queued then stays queued, and the next start projects it.
+DRAIN_ON_STOP_SECONDS = 5.0
 #: The most that a hold copies into the store. A held edit is one SQLite blob; a file above this
 #: stays on disk, untouched, and is held by its hash alone. The hash, not the size, says whose.
 HELD_BODY_LIMIT = 64 * 1024 * 1024
@@ -68,11 +76,38 @@ class Deferred(Exception):
     """This intent cannot be judged or finished now; it stays queued and the next pass retries."""
 
 
-def store_thread_runner(vault_root: Path) -> Runner:
-    """The runner that sends bookkeeping to the collection store's thread, without a wake-up."""
+class BoundaryBusy(Exception):
+    """Another holder has the vault's mutation boundary, an interactive writer waits for it, or
+    foreground requests kept the store thread for the mutation timeout, so the store thread did not
+    run the bookkeeping. For background work this is ordinary contention: the caller leaves its
+    intent queued, or its path to the next sweep, and logs no error."""
+
+
+class HopUnderBoundary(RuntimeError):
+    """A caller sent bookkeeping to the store thread while its own thread holds a mutation boundary.
+
+    The store thread takes the vault boundary for the work, so it would wait for this caller, which
+    waits for the store thread, until the mutation timeout. Take the boundary inside the hopped work
+    instead (``media.on_store_thread`` runs a whole guarded unit there).
+    """
+
+
+def store_thread_runner(vault_root: Path, *, operation: str = "vault_store_bookkeeping") -> Runner:
+    """The runner that sends bookkeeping to the collection store's thread, without a wake-up.
+
+    The work runs there inside the vault mutation guard, which the store's lease check requires of
+    the thread that writes (``CollectionStoreRuntime._authority``): a manifest record, an import or
+    a media commit orders with every other store mutation. One call is one hold, so the caller
+    bounds what one ``work`` does. ``operation`` names the hold in the boundary's holder record.
+    """
     root = Path(vault_root).resolve()
 
     def run(work: Callable[[CollectionWriter], None]) -> None:
+        if mutation_lock.current_thread_holds_boundary():
+            raise HopUnderBoundary(
+                f"{operation}: this thread holds a mutation boundary, which the store thread "
+                "would wait for; take the boundary inside the hopped work"
+            )
         # The one door to the store thread, as the collection store's own edit-back route uses it.
         server = runtime._server(root)
         if server is None:
@@ -82,11 +117,47 @@ def store_thread_runner(vault_root: Path) -> Runner:
             writer = preview.bound_writer(root)
             if writer is None:
                 raise StoreNotServed("the store thread holds no writer for this vault")
-            work(writer)
+            with _holding_boundary(root, operation):
+                work(writer)
 
-        server.call(on_store_thread, wake_maintenance=False)
+        def not_taken(_completion_deadline: float) -> float | None:
+            # Foreground requests go first, so under their load the store may not take this in the
+            # mutation timeout. The queue drops a request it did not take: nothing of it ran.
+            raise BoundaryBusy(f"{operation}: the store thread did not take it in time")
+
+        server.call(on_store_thread, wake_maintenance=False, extend=not_taken)
 
     return run
+
+
+#: How long one store-thread job of a batch settles units under one hold before it ends that hold,
+#: so a writer that waits for the vault boundary waits for this and one unit at most. The batch's
+#: other units take the next hold (``importer.Importer._in_holds``). The projector records one
+#: intent per hold, so it needs no budget.
+HOLD_BUDGET_SECONDS = 0.25
+
+
+@contextmanager
+def _holding_boundary(root: Path, operation: str) -> Iterator[None]:
+    """Hold the vault mutation guard on the store thread for one unit of bookkeeping, or raise
+    ``BoundaryBusy`` having waited for nothing.
+
+    Bookkeeping is background work. It never waits here, because a wait on the store thread holds
+    back every store request queued behind it, and it goes after an interactive writer that waits
+    (``waiter_count``). The guard re-enters the zero-wait hold, so it adds writer authority and the
+    commit generation bump that every store mutation takes.
+    """
+    from ..writer_lease import active_manager
+
+    manager = active_manager()
+    mutation = manager._mutation_coordinator_for(root)
+    if mutation.waiter_count():
+        raise BoundaryBusy(f"{operation}: a writer waits for the vault boundary")
+    with mutation.try_hold(operation=operation, holder_kind="background") as held:
+        if not held:
+            raise BoundaryBusy(f"{operation}: another holder has the vault boundary")
+        with manager.mutation_guard(root, operation=operation, holder_kind="background"):
+            yield
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +274,9 @@ class PassReport:
     #: Delete intents that removed nothing, because no file of Exomem's was at the path.
     dropped: int = 0
     deferred: dict[str, str] = field(default_factory=dict)
+    #: The pass stopped at a busy vault boundary (``BoundaryBusy``); what it had not recorded stays
+    #: queued, and the next pass retries it.
+    busy: bool = False
 
     @property
     def settled(self) -> int:
@@ -220,11 +294,15 @@ class Projector:
         self, vault_root: Path, *, run: Runner | None = None, poll_seconds: float | None = None
     ) -> None:
         self._root = Path(vault_root)
-        self._run = run or store_thread_runner(self._root)
+        self._run = run or store_thread_runner(self._root, operation="vault_store_projection")
         self._poll_seconds = POLL_SECONDS if poll_seconds is None else poll_seconds
         #: A temporary older than this process belongs to a publication that died with its owner.
         self._born_ns = time.time_ns()
         self._stop = threading.Event()
+        #: Wakes the thread from its poll wait: a stop, or a stop that drains first.
+        self._wake = threading.Event()
+        #: When a stop that drains first ends its drain (``stop``); None while no stop drains.
+        self._drain_until: float | None = None
         self._pass_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._last_failure: str | None = None
@@ -236,27 +314,45 @@ class Projector:
         if self._thread is not None:
             return
         self._stop.clear()
+        self._drain_until = None
         self._thread = threading.Thread(
             target=self._loop, name="exomem-vault-projector", daemon=True
         )
         self._thread.start()
 
-    def stop(self, timeout: float = STOP_TIMEOUT_SECONDS) -> None:
-        """Ask the thread to stop after its current intent and wait for it, bounded."""
-        self._stop.set()
+    def stop(self, timeout: float = STOP_TIMEOUT_SECONDS, *, drain: float = 0.0) -> None:
+        """Ask the thread to stop after its current intent and wait for it, bounded.
+
+        With ``drain`` seconds, the thread first works through the queue: it runs passes back to
+        back while each settles something, and stops after the intent in hand once a pass
+        settles nothing, finds the boundary busy or fails, or ``drain`` seconds have passed. What is
+        left stays queued, and the next start projects it. A clean service stop drains
+        (``DRAIN_ON_STOP_SECONDS``), so the files match the store and an offline rollback can run.
+        """
         thread = self._thread
+        if drain > 0 and thread is not None and thread is not threading.current_thread():
+            self._drain_until = time.monotonic() + drain
+            self._wake.set()
+            thread.join(drain)  # the drain ends by itself, after the intent in hand at the latest
+        self._stop.set()
+        self._wake.set()
         if thread is None or thread is threading.current_thread():
             return
         thread.join(timeout)
         if thread.is_alive():
             log.warning("the vault projector did not stop within %s seconds", timeout)
 
+    def _stopping(self) -> bool:
+        return self._stop.is_set() or (
+            self._drain_until is not None and time.monotonic() >= self._drain_until
+        )
+
     def _loop(self) -> None:
         try:
             self.sweep_temporaries()
         except Exception:  # noqa: BLE001 - a failed sweep must not stop projection; the next start sweeps again
             log.warning("the vault projector's startup sweep failed", exc_info=True)
-        while not self._stop.is_set():
+        while not self._stopping():
             report = None
             try:
                 report = self.run_pass()
@@ -268,9 +364,15 @@ class Projector:
                     self._last_failure = failure
             if report is not None:
                 self._note_deferred(report)
-                if report.settled:
-                    continue  # more may have queued while this pass ran
-            self._stop.wait(self._poll_seconds)
+            settled = report is not None and report.settled and not report.busy
+            if self._drain_until is not None:
+                if not settled:
+                    return  # a stop drains only while a pass still settles something
+                continue
+            if settled:
+                continue  # more may have queued while this pass ran
+            self._wake.wait(self._poll_seconds)
+            self._wake.clear()
 
     def _note_deferred(self, report: PassReport) -> None:
         if report.deferred != self._last_deferred:
@@ -289,14 +391,19 @@ class Projector:
                 raise Deferred(f"the held filesystem route is unavailable ({acquired.error.code})")
             with acquired.require() as filesystem:
                 cursor = ("", "")
-                while not self._stop.is_set():
+                while not self._stopping():
                     batch = self._list(cursor)
                     if not batch:
                         break
                     for intent in batch:
-                        if self._stop.is_set():
+                        if self._stopping():
                             break
-                        self._project(filesystem, intent.path, report)
+                        try:
+                            self._project(filesystem, intent.path, report)
+                        except BoundaryBusy:
+                            # Every later record needs the same boundary, so the pass ends here.
+                            report.busy = True
+                            return report
                     cursor = (batch[-1].queued_at, batch[-1].path)
         return report
 
@@ -332,6 +439,9 @@ class Projector:
 
     def _project(self, filesystem: held_fs.HeldFilesystem, rel: str, report: PassReport) -> None:
         try:
+            if write.is_folder_intent(rel):
+                self._project_folder(filesystem, rel, report)
+                return
             facts = self._facts(rel)
             if facts.intent is None or facts.held:
                 return  # a commit or a hold settled the path after the listing
@@ -349,15 +459,17 @@ class Projector:
         intent = facts.intent
         assert intent is not None
         owner = ownership.classify(intent.path)
-        if intent.operation == "delete":
-            allowed = owner is not ownership.Ownership.NONE
-        else:
-            # A move's destination and a write are text the store holds, so only a page path fits.
+        if intent.operation == "write":
+            # A write is text the store holds, so only a page path fits.
             allowed = owner is ownership.Ownership.PAGE
+        else:
+            allowed = owner is not ownership.Ownership.NONE
         if not allowed:
             raise Deferred("the store does not own this path")
         if intent.operation == "delete":
             self._project_delete(filesystem, facts, report)
+        elif intent.operation == "move" and owner is ownership.Ownership.BINARY:
+            self._project_binary_move(filesystem, facts, report)
         elif intent.operation == "move":
             self._project_move(filesystem, facts, report)
         else:
@@ -478,6 +590,7 @@ class Projector:
             renamed = _rename(filesystem, old.path, intent.path, old_disk)
             self._record_moved(intent, page, old.path, renamed)
             report.projected += 1
+            _move_parts(filesystem, old.path, intent.path)
             return
         verdict = _judge_write(facts, new_disk)
         if verdict in (Judgement.HOLD_DELETE, Judgement.HOLD_EDIT):
@@ -487,7 +600,94 @@ class Projector:
         if not self._remove(filesystem, old, old_disk, report, store_revision=None):
             return
         self._record_move_split(intent, old.path)
+        _move_parts(filesystem, old.path, intent.path)
         self._project(filesystem, intent.path, report)
+
+    def _project_folder(
+        self, filesystem: held_fs.HeldFilesystem, rel: str, report: PassReport
+    ) -> None:
+        """Remove a folder that a folder trash or recovery moved away, as file mode's rename of the
+        folder leaves none at its old path.
+
+        The folder waits, quietly, while any queued intent below it is still to move or remove a
+        file: its own subfolders' intents included, so the deepest folder goes first. Then the
+        folder goes when it is empty, and its intent is dropped when it holds something that no
+        queued intent will move, which stays where it is, as anything a person put there does.
+        """
+        folder = rel[:-1]
+        below, end = f"{folder}/", f"{folder}0"  # "0" sorts right after "/": the folder's range
+        with read.snapshot(self._root) as view:
+            queued = view.connection.execute(
+                "SELECT revision FROM store_projection_queue WHERE path = ?", (rel,)
+            ).fetchone()
+            waiting = view.connection.execute(
+                "SELECT 1 FROM store_projection_queue WHERE (path > ? AND path < ?) "
+                "OR (from_path >= ? AND from_path < ?) LIMIT 1",
+                (below, end, below, end),
+            ).fetchone()
+        if queued is None or waiting is not None:
+            return
+        opened = _parent(filesystem, folder, access="mutate")
+        removed = False
+        if not _missing(opened):
+            with opened.require() as directory:
+                unlinked = filesystem.unlink_directory(directory)
+                if unlinked.ok:
+                    removed = True
+                else:
+                    with closing(filesystem.iter_names(directory)) as names:
+                        holds = next(names, None) is not None
+                    if not holds:
+                        unlinked.require()  # an empty folder that refuses: the intent stays
+        if removed:
+            _flush_folder(filesystem, _split(folder)[0])
+        self._run(lambda writer: _drop_intent(writer, rel, queued[0]))
+        if removed:
+            report.removed += 1
+        else:
+            report.dropped += 1
+
+    def _project_binary_move(
+        self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
+    ) -> None:
+        """Finish a binary's move: rename its file when the old path still holds the recorded bytes
+        and the new path is free, or find that the writer already did.
+
+        The store holds no bytes of a binary, so the projector never unlinks or replaces one. In
+        any other state a person has changed, removed or put a file at one of the paths: the intent
+        is dropped, and the importer judges both paths as the outside changes that they are.
+        """
+        intent, binary = facts.intent, facts.binary
+        assert intent is not None and intent.from_path is not None
+        old_disk = observe(filesystem, intent.from_path)
+        new_disk = observe(filesystem, intent.path)
+        if (
+            binary is not None
+            and old_disk is not None
+            and old_disk.sha256 == binary.sha256
+            and new_disk is None
+        ):
+            try:
+                _rename(filesystem, intent.from_path, intent.path, old_disk)
+            except (Deferred, held_fs.HeldFsError, OSError):
+                # The writer renames the same file right after its commit and may have won.
+                old_disk = observe(filesystem, intent.from_path)
+                new_disk = observe(filesystem, intent.path)
+                if old_disk is not None:
+                    raise
+            else:
+                old_disk, new_disk = None, observe(filesystem, intent.path)
+        moved = (
+            binary is not None
+            and new_disk is not None
+            and new_disk.sha256 == binary.sha256
+            and old_disk is None
+        )
+        self._run(lambda writer: _settle_binary_move(writer, intent))
+        if moved:
+            report.projected += 1
+        else:
+            report.dropped += 1
 
     # -- holds ------------------------------------------------------------------------------------
 
@@ -800,6 +1000,33 @@ def record_file(
     )
 
 
+def drop_binary_move(tx: Connection, dst: str, src: str) -> None:
+    """The file of a binary's move is at ``dst``, or the move was given up: drop its intent.
+
+    The writer calls it after its own rename, and the projector after it finishes a move. An intent
+    that a later commit replaced names another source, or another operation, and stays.
+    """
+    tx.execute(
+        "DELETE FROM store_projection_queue WHERE path = ? AND operation = 'move' "
+        "AND from_path = ?",
+        (dst, src),
+    )
+
+
+def _drop_intent(writer: CollectionWriter, path: str, revision: int) -> None:
+    # A later commit that queued the path again holds a later revision, and its intent stays.
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "DELETE FROM store_projection_queue WHERE path = ? AND revision = ?", (path, revision)
+        )
+
+
+def _settle_binary_move(writer: CollectionWriter, intent: Intent) -> None:
+    assert intent.from_path is not None
+    with writer.handle.transaction() as tx:
+        drop_binary_move(tx, intent.path, intent.from_path)
+
+
 def _turn_into_write(tx: Connection, intent: Intent) -> None:
     """A move whose bytes need a rewrite is a write of its new path, unless a commit changed it."""
     tx.execute(
@@ -1060,6 +1287,34 @@ def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> N
                 raise Deferred("the file changed before it was removed")
             _retrying(lambda: filesystem.unlink(file))
         _flush(filesystem, parent)
+
+
+def _move_parts(filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str) -> None:
+    """Move a page's dot folder of parts beside the page's new path, as the page's move left it.
+
+    The writer renames the folder right after its commit; a kill before that leaves it here. The
+    store owns nothing in a dot folder, so the folder moves only to a free name, and a folder that
+    a person put there stays. A raw-marked page's parts are pages and move by their own intents.
+    """
+    from ..extraction_parts import folder_for
+
+    old_parts = folder_for(Path(old_page)).as_posix()
+    new_parts = folder_for(Path(new_page)).as_posix()
+    if ownership.owns_folder(old_parts):
+        return
+    new_folder, new_leaf = _split(new_parts)
+    source = _parent(filesystem, old_parts, access="mutate")
+    if _missing(source):
+        return
+    with source.require() as held:
+        opened, created = _open_creating(filesystem, new_folder)
+        with opened.require() as new_parent:
+            # A name that is taken refuses the rename: a person's folder there stays, and so does
+            # this one.
+            if not filesystem.rename_directory(held, new_parent, new_leaf).ok:
+                return
+            _flush_above(filesystem, created)
+    _flush_folder(filesystem, _split(old_parts)[0])
 
 
 def _rename(filesystem: held_fs.HeldFilesystem, old: str, new: str, expected: OnDisk) -> OnDisk:

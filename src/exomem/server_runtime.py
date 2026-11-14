@@ -157,6 +157,7 @@ class LocalRuntimeActivation:
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
         self.original_fixity: threading.Thread | None = None
+        self.review_pass: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -295,6 +296,7 @@ class LocalRuntimeActivation:
             ("vocabulary recovery", self._start_vocabulary_recovery),
             ("recall re-embed", self._start_recall_reembed),
             ("original fixity", self._start_original_fixity),
+            ("review pass", self._start_review_pass),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
             ("dreamer", self._start_dreamer),
@@ -387,6 +389,10 @@ class LocalRuntimeActivation:
             from . import original_fixity
 
             original_fixity.stop(worker=self.original_fixity)
+        if self.review_pass is not None:
+            from . import review_pass
+
+            review_pass.stop(worker=self.review_pass)
         semantic_failure = None
         for label, worker in (
             ("semantic drain", self.semantic_drain),
@@ -399,7 +405,13 @@ class LocalRuntimeActivation:
             if not callable(stop):
                 continue
             try:
-                stop()
+                if worker is self.vault_projector:
+                    from .vault_store import projector
+
+                    # Last of the writers to stop, it first works through the queue, bounded.
+                    stop(drain=projector.DRAIN_ON_STOP_SECONDS)
+                else:
+                    stop()
             except Exception as error:  # noqa: BLE001 - shutdown still has to join activation
                 if label == "semantic drain":
                     semantic_failure = error
@@ -466,6 +478,18 @@ class LocalRuntimeActivation:
         from . import original_fixity
 
         self.original_fixity = original_fixity.start(vault_root)
+
+    def _start_review_pass(self, vault_root: Path) -> None:
+        """Keep the owner's review passes current, in the serving HTTP runtime only.
+
+        A stdio server serves one client for a short session, so its listings compute in the
+        request. `serves_upload_sessions` is the flag that marks the HTTP runtime.
+        """
+        if not self.serves_upload_sessions:
+            return
+        from . import review_pass
+
+        self.review_pass = review_pass.start(vault_root)
 
     def _resume_upload_sessions(self, vault_root: Path) -> None:
         """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""

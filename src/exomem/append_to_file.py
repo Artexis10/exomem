@@ -86,8 +86,12 @@ def append_to_file(
     except VaultPathError as e:
         raise AppendError(code=e.code, reason=e.reason) from e
 
+    from .vault_store import read as store_read
+
     try:
-        inspect_generic_file(vault_root, rel_path)
+        # A stored page's bytes come from the store: its projection's file identity decides nothing.
+        if not store_read.serves(vault_root, rel_path):
+            inspect_generic_file(vault_root, rel_path)
     except ReservedPathLeafError as error:
         code = "RESERVED_PATH" if error.code == "RESERVED_PATH" else "UNSAFE_PATH"
         raise AppendError(code=code, reason="generic source is unavailable") from error

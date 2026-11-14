@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TypeVar
 
 from . import (
     access,
@@ -255,6 +256,31 @@ def _defer_until_terminal(work: Callable[[], list[object]]) -> bool:
     return defer_until_terminal_persisted(work)
 
 
+#: What a guarded commit unit returns (``_committing``).
+_Committed = TypeVar("_Committed")
+
+
+def _committing(
+    vault: Path,
+    commit_guard: Callable[[], AbstractContextManager[object]] | None,
+    operation: str,
+    unit: Callable[[], _Committed],
+) -> _Committed:
+    """Run ``unit``, which commits a media sidecar, inside the caller's ``commit_guard``.
+
+    A store-mode vault commits a page only on its store thread, and that thread takes the vault
+    boundary for the commit itself. A caller off that thread that held the boundary around the
+    commit would hop from under it (``projector.HopUnderBoundary``), so there the whole unit runs
+    on the store thread instead (``vault_store.media.holding_boundary``). Without a guard the unit
+    runs here, and its commit hops on its own.
+    """
+    if commit_guard is None:
+        return unit()
+    from .vault_store import media as store_media
+
+    return store_media.holding_boundary(vault, operation, unit, commit_guard)
+
+
 def process_container(
     vault_root: Path, binary_path: str | Path, *, retry: bool = False,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
@@ -289,13 +315,14 @@ def process_container(
                 if rendered != before:
                     writes.append(PlannedWrite(sidecar, rendered, guard=page_guard, expected_hash=content_hash(before)))
                 if writes:
-                    boundary = commit_guard() if commit_guard is not None else nullcontext()
-                    with boundary:
+                    def commit_container() -> None:
                         source.require_current()
                         mutated = {write.path.relative_to(vault).as_posix() for write in writes}
                         guards = tuple(guard for guard in (page_guard, *planned.guards) if guard.target not in mutated)
                         guards = (*guards, PathGuard.capture(vault, relative, leaf_policy="content", expected_content_hash=digest))
                         _preserve_module().commit_media_sidecar_writes(vault, tuple(writes), required_guards=guards)
+
+                    _committing(vault, commit_guard, "media_container_commit", commit_container)
                 children = list(planned.children)
     except MediaProcessingError:
         raise
@@ -525,9 +552,6 @@ def reconcile_media(
             if write.create_only or write.expected_hash == MISSING_CONTENT_HASH:
                 deferred_created.extend(written)
 
-    result: ReconcileResult | None = None
-    boundary = commit_guard() if commit_guard is not None else nullcontext()
-
     def _run_fanout() -> list[object]:
         from . import index_sync
 
@@ -558,8 +582,7 @@ def reconcile_media(
     @contextmanager
     def _commit_scope():
         try:
-            with boundary:
-                yield
+            yield
         finally:
             if not deferred_fanout:
                 _abort_publication_intents()
@@ -586,11 +609,14 @@ def reconcile_media(
                     # this point — and dropping it would not be.
                     _run_fanout()
 
-    with _commit_scope():
+    def _commit_unit() -> tuple[bool, ReconcileResult | None]:
+        """The guarded part: check that nothing changed since the plan, then commit. True with
+        a result when reconcile_media returns it as it is."""
+        result: ReconcileResult | None = None
         commit_tier = access.access_tier(vault, rel_binary)
         if commit_tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
             if not explicit:
-                return None
+                return True, None
             raise MediaProcessingError(
                 "MEDIA_PATH_ACCESS_DENIED",
                 f"media path is {commit_tier} under _access.yaml: {rel_binary}",
@@ -607,7 +633,7 @@ def reconcile_media(
                 == "valid"
             ):
                 _retire_completed_ocr(vault, binary, sidecar, media_type)
-                return ReconcileResult(media_type, "completed", sidecar, None)
+                return True, ReconcileResult(media_type, "completed", sidecar, None)
             raise MediaProcessingError(
                 "MEDIA_CHANGED_DURING_RECONCILIATION",
                 f"media sidecar changed while reconciliation was being planned: {sidecar}",
@@ -705,6 +731,14 @@ def reconcile_media(
                         )
                     state = media_jobs.BLOCKED
             result = ReconcileResult(media_type, state, sidecar, job_id, attached=attached)
+        return False, result
+
+    with _commit_scope():
+        early, result = _committing(
+            vault, commit_guard, "media_reconcile_commit", _commit_unit
+        )
+    if early:
+        return result
 
     assert result is not None
     if originals.binding_for(vault) is not None:
@@ -726,6 +760,8 @@ def reconcile_all_media(
     Each artifact is independent: one unreadable or racing file is logged and
     does not prevent later candidates from converging.
     """
+    from .vault_store.projector import BoundaryBusy
+
     if isinstance(limit, bool) or limit <= 0:
         raise ValueError("media reconciliation limit must be a positive integer")
     vault = Path(vault_root).resolve()
@@ -762,6 +798,11 @@ def reconcile_all_media(
             attempted += 1
             try:
                 reconcile_one(binary)
+            except BoundaryBusy:
+                # Ordinary contention in a store-mode vault: the cursor stops before this file.
+                if propagate_transient_errors:
+                    raise
+                held = True
             except OpError as error:
                 if error.code in _TRANSIENT_COORDINATION_CODES:
                     if propagate_transient_errors:
@@ -1946,49 +1987,56 @@ def mark_processing_unavailable(
             continue
         written: list[Path] = []
         publication_intents: list[object] = []
-        boundary = commit_guard() if commit_guard is not None else nullcontext()
-        try:
-            with boundary:
-                current_job = store.get(job.id)
-                if current_job is None or current_job.state != media_jobs.PENDING:
-                    continue
-                if job.sidecar_path.exists():
-                    _confine_sidecar(vault, job.sidecar_path)
-                    rel_binary = job.binary_path.relative_to(vault).as_posix()
-                    tier = access.access_tier(vault, rel_binary)
-                    if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
-                        continue
-                    content, guard = read_guarded_text(vault, job.sidecar_path)
-                    # A pending reprocess sits over a completed transcript. Marking that sidecar
-                    # blocked would make the next reconcile treat the old text as unfinished, so
-                    # only the job carries the state.
-                    if not has_completed_transcript(content, media_type=job.media_type):
-                        blocked = preserve.render_sidecar_processing_failure(
-                            content,
-                            state=media_jobs.BLOCKED,
-                            attempts=current_job.attempts,
-                            error=reason,
-                            retryable=True,
-                            next_action=next_action,
-                        )
-                        written_result = preserve.commit_media_sidecar_writes(
-                            vault,
-                            (
-                                PlannedWrite(
-                                    path=job.sidecar_path,
-                                    content=blocked,
-                                    expected_hash=content_hash(content),
-                                    guard=guard,
-                                ),
+
+        def block(
+            job: media_jobs.MediaJob = job,
+            written: list[Path] = written,
+            publication_intents: list[object] = publication_intents,
+        ) -> bool:
+            """The guarded part: block one pending job and its sidecar. True when it marked it."""
+            current_job = store.get(job.id)
+            if current_job is None or current_job.state != media_jobs.PENDING:
+                return False
+            if job.sidecar_path.exists():
+                _confine_sidecar(vault, job.sidecar_path)
+                rel_binary = job.binary_path.relative_to(vault).as_posix()
+                tier = access.access_tier(vault, rel_binary)
+                if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
+                    return False
+                content, guard = read_guarded_text(vault, job.sidecar_path)
+                # A pending reprocess sits over a completed transcript. Marking that sidecar
+                # blocked would make the next reconcile treat the old text as unfinished, so
+                # only the job carries the state.
+                if not has_completed_transcript(content, media_type=job.media_type):
+                    blocked = preserve.render_sidecar_processing_failure(
+                        content,
+                        state=media_jobs.BLOCKED,
+                        attempts=current_job.attempts,
+                        error=reason,
+                        retryable=True,
+                        next_action=next_action,
+                    )
+                    written_result = preserve.commit_media_sidecar_writes(
+                        vault,
+                        (
+                            PlannedWrite(
+                                path=job.sidecar_path,
+                                content=blocked,
+                                expected_hash=content_hash(content),
+                                guard=guard,
                             ),
-                            post_commit_fanout=commit_guard is None,
-                            publication_intents_out=publication_intents,
-                            batch_writer=batch_atomic_write,
-                        )
-                        assert isinstance(written_result, list)
-                        written = written_result
-                if store.mark(current_job, media_jobs.BLOCKED, reason):
-                    changed += 1
+                        ),
+                        post_commit_fanout=commit_guard is None,
+                        publication_intents_out=publication_intents,
+                        batch_writer=batch_atomic_write,
+                    )
+                    assert isinstance(written_result, list)
+                    written.extend(written_result)
+            return store.mark(current_job, media_jobs.BLOCKED, reason)
+
+        try:
+            if _committing(vault, commit_guard, "media_unavailable_commit", block):
+                changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup
             if publication_intents:
                 from . import file_watcher

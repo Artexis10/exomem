@@ -22,7 +22,9 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -40,6 +42,15 @@ _Result = TypeVar("_Result")
 #: What ``managed`` answers for a missing file when the media store cannot be read: the importer
 #: cannot tell an eviction from a delete, so it settles nothing and the next sweep looks again.
 UNREADABLE = "unreadable"
+
+#: How long a media commit waits, on its own thread, for a busy vault boundary before it gives up
+#: with ``projector.BoundaryBusy``. Another background holder keeps the boundary for one unit of
+#: work, and the store thread itself never waits for it (``projector._holding_boundary``).
+BUSY_WAIT_SECONDS = 5.0
+BUSY_POLL_SECONDS = 0.05
+
+#: What ``derive`` reports for a binary whose commit met a busy boundary; ``recover`` retries it.
+BOUNDARY_BUSY = "BOUNDARY_BUSY"
 
 
 def governed(rel: str) -> bool:
@@ -67,19 +78,54 @@ def off_store_thread(root: Path) -> bool:
     return server is None or server.thread is not threading.current_thread()
 
 
-def on_store_thread(root: Path, work: Callable[[], _Result]) -> _Result:
-    """Run ``work`` on the store thread and return what it returns, as the importer's jobs run.
+def on_store_thread(
+    root: Path, work: Callable[[], _Result], *, operation: str = "vault_store_media_commit"
+) -> _Result:
+    """Run ``work`` on the store thread, inside the vault mutation guard, and return its result.
 
     The media worker's result arrives on its own thread, and the importer reconciles on its own.
     Their sidecar commit takes this door instead of committing from there, which the store refuses.
+    A caller that would hold the boundary around the commit puts its whole guarded unit in ``work``:
+    the store thread holds the boundary for it, and a hop from a thread that holds one raises
+    ``projector.HopUnderBoundary``. A busy boundary is waited out here, on the caller's thread, for
+    up to ``BUSY_WAIT_SECONDS``; nothing of ``work`` has run when it raises ``BoundaryBusy``.
     """
     outcome: list[_Result] = []
 
     def job(_writer: CollectionWriter) -> None:
         outcome.append(work())
 
-    projector.store_thread_runner(root)(job)
-    return outcome[0]
+    run = projector.store_thread_runner(root, operation=operation)
+    deadline = time.monotonic() + BUSY_WAIT_SECONDS
+    while True:
+        try:
+            run(job)
+        except projector.BoundaryBusy:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(BUSY_POLL_SECONDS)
+            continue
+        return outcome[0]
+
+
+def holding_boundary(
+    root: Path,
+    operation: str,
+    unit: Callable[[], _Result],
+    guard: Callable[[], AbstractContextManager[object]],
+) -> _Result:
+    """Run ``unit`` holding the vault mutation boundary and return what it returns.
+
+    For a background writer whose unit commits a sidecar. In a store-mode vault that commit runs
+    on the store thread, which must hold the boundary itself (``projector.HopUnderBoundary``), so
+    off that thread the whole unit runs there (``on_store_thread``); a boundary that stays busy
+    raises ``projector.BoundaryBusy`` with nothing of the unit run. Otherwise this thread takes
+    ``guard()``, the writer's own mutation guard, as file mode does.
+    """
+    if off_store_thread(root):
+        return on_store_thread(root, unit, operation=operation)
+    with guard():
+        return unit()
 
 
 def derive(root: Path, rels: Iterable[str]) -> tuple[list[str], dict[str, str]]:
@@ -96,6 +142,8 @@ def derive(root: Path, rels: Iterable[str]) -> tuple[list[str], dict[str, str]]:
             continue
         try:
             outcome = media_processing.reconcile_media(root, rel, explicit=False)
+        except projector.BoundaryBusy:
+            failed[rel] = BOUNDARY_BUSY  # ordinary contention: the sweep's recover pass retries it
         except Exception as error:  # noqa: BLE001 - one unreadable binary must not stop the others
             failed[rel] = getattr(error, "code", type(error).__name__)
             log.warning("media derivation failed for %s", rel, exc_info=True)

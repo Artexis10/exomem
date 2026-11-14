@@ -27,6 +27,7 @@ from . import ownership, read
 from . import write as store_write
 from .write import (
     BinaryDelete,
+    BinaryMove,
     BinaryRecord,
     Expect,
     Origin,
@@ -62,18 +63,17 @@ class Lifecycle:
     and the other pages that go with it. ``expect`` holds what each named path must still be when
     the commit runs: a stale source refuses the whole commit with its ``StoreConflict``.
 
-    ``records`` are binaries that the writer already moved on disk (``binaries.relocate``), which
-    the commit records beside the ones the batch publishes. ``refresh`` names files the store does
-    not own that the writer moved before the commit, under their old and new paths: the commit
-    derives their rows again at the new path and drops them at the old one.
+    ``binary_moves`` move binary records whose files the writer renames right after the commit
+    (``binaries.relocated``). ``vacated_folders`` are the folders that a folder trash or recovery
+    moves away as a whole (``StoreChange.vacated_folders``).
     """
 
     moves: tuple[PageMove, ...] = ()
     deletes: tuple[PageDelete, ...] = ()
     binary_deletes: tuple[BinaryDelete, ...] = ()
+    binary_moves: tuple[BinaryMove, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
-    records: tuple[BinaryRecord, ...] = ()
-    refresh: tuple[str, ...] = ()
+    vacated_folders: tuple[str, ...] = ()
 
 
 def commit_batch(
@@ -295,11 +295,9 @@ def _guard_expect(guard: vault.PathGuard) -> Expect:
     A guard that was captured from the disk says what the projection held then, which the store may
     be ahead of; a mismatch refuses the write, and the caller reads the page again from the store.
     """
-    if guard.leaf_policy == "absent" or (
-        guard.leaf_policy == "store" and guard.expected_content_hash is None
-    ):
+    if guard.expects_absence:
         return Expect(absent=True)
-    if guard.leaf_policy in {"store", "content"}:
+    if guard.binds_bytes:
         return Expect(sha256=guard.expected_content_hash)
     return Expect()  # "stable" and "generation" bind a file's identity: the page must exist
 
@@ -407,12 +405,11 @@ def _commit(
             puts=tuple(PagePut(rel, _page_bytes(write)) for rel, write in plan.pages),
             deletes=plan.lifecycle.deletes,
             moves=plan.lifecycle.moves,
-            binaries=(
-                *(_record(rel, write) for rel, write in plan.binaries),
-                *plan.lifecycle.records,
-            ),
+            binaries=tuple(_record(rel, write) for rel, write in plan.binaries),
             binary_deletes=plan.lifecycle.binary_deletes,
-            refresh=(*plan.refresh, *plan.lifecycle.refresh),
+            binary_moves=plan.lifecycle.binary_moves,
+            vacated_folders=plan.lifecycle.vacated_folders,
+            refresh=tuple(plan.refresh),
             expect=plan.expectations(),
         )
         try:

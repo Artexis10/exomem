@@ -1986,12 +1986,25 @@ def commit_media_sidecar_writes(
 
     from .governance import catalog_publication, graph_producer
     from .vault_store import media as store_media
+    from .vault_store import mode as store_mode
 
+    if defer_graph_completion and store_mode.store_mode_active(vault_root):
+        # A store-mode vault commits a page's graph rows in the page's own transaction, so nothing
+        # of the graph is left to complete: the deferral comes back as a handoff with no checkpoint.
+        written = commit_media_sidecar_writes(
+            vault_root,
+            writes,
+            post_commit_fanout=post_commit_fanout,
+            publication_intents_out=publication_intents_out,
+            batch_writer=batch_writer,
+            required_guards=required_guards,
+        )
+        assert isinstance(written, list)
+        return DeferredGraphCompletion(tuple(written), None, None)
     if store_media.off_store_thread(vault_root):
-        # A store-mode vault commits a page only on the store thread, with its graph rows in the
-        # same transaction. A background writer (the media worker) hops there, and nothing of the
-        # graph is left to complete, so its deferral comes back as a handoff with no checkpoint.
-        written = store_media.on_store_thread(
+        # A store-mode vault commits a page only on the store thread. A background writer (the
+        # media worker) hops there.
+        return store_media.on_store_thread(
             vault_root,
             lambda: commit_media_sidecar_writes(
                 vault_root,
@@ -2001,11 +2014,8 @@ def commit_media_sidecar_writes(
                 batch_writer=batch_writer,
                 required_guards=required_guards,
             ),
+            operation="vault_store_media_sidecar_commit",
         )
-        assert isinstance(written, list)
-        if defer_graph_completion:
-            return DeferredGraphCompletion(tuple(written), None, None)
-        return written
     intent_count = len(publication_intents_out) if publication_intents_out is not None else 0
 
     def graph_replacement_provider():

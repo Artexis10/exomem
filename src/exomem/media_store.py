@@ -588,6 +588,23 @@ def _guard(vault: Path, operation: str):
     return get_manager().mutation_guard(vault, operation=operation, holder_kind="background")
 
 
+def _publishing(vault: Path, operation: str, unit: Callable[[], None]) -> None:
+    """Run a unit that publishes a reference (``_publish_reference``) under the vault boundary.
+
+    Its sidecar commit runs on the store thread in a store-mode vault, so the unit runs there
+    (``vault_store.media.holding_boundary``). A boundary that stays busy is ordinary contention,
+    reported as ``STORE_BUSY_CODE``, which returns an offload job to the queue without spending an
+    attempt.
+    """
+    from .vault_store import media as store_media
+    from .vault_store import projector
+
+    try:
+        store_media.holding_boundary(vault, operation, unit, lambda: _guard(vault, operation))
+    except projector.BoundaryBusy as busy:
+        raise MediaStoreError(STORE_BUSY_CODE, "the vault boundary is busy") from busy
+
+
 def _binding_of(vault: Path, snapshot: OriginalSnapshot) -> originals.BinaryBinding:
     assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
     return originals.BinaryBinding(snapshot.path.relative_to(vault).as_posix(),
@@ -860,11 +877,15 @@ def forget_original(vault: Path, path: str | Path) -> None:
     snapshot = original_state(vault, path)
     if snapshot.reference is None:
         return
-    with _guard(vault, "media_store_forget_original"):
+    reference = snapshot.reference
+
+    def forget() -> None:
         if original_state(vault, path) != snapshot:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the deletion binding changed")
-        _release_name(MediaJobStore(vault), snapshot.reference.object)
+        _release_name(MediaJobStore(vault), reference.object)
         _publish_reference(vault, snapshot, None)
+
+    _publishing(vault, "media_store_forget_original", forget)
 
 
 def _durable(store: MediaJobStore, statement: str, parameters: tuple[object, ...]) -> None:
@@ -1098,24 +1119,31 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                               if snapshot.state == "cached" else None)
                     if source is not None and _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
-                    with _guard(vault, "media_store_confirm_reference"):
+                    def confirm() -> None:
                         if source is not None:
                             source.require_current()
                         if original_state(vault, path) != snapshot:
                             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
                         _publish_reference(vault, snapshot, snapshot.reference)
                         _finish_reference(ledger, original_state(vault, path), source)
+
+                    _publishing(vault, "media_store_confirm_reference", confirm)
                 return snapshot.reference
             # Only a definitive missing version permits removal, or a condemned one whose bytes are still here,
             # which then go up again under a new name. Unknown, denied or timed-out HEADs propagate and retain the
             # canonical reference, and so does a condemned version that is the only copy: it still hydrates.
             if head is not None and snapshot.state != "cached":
                 raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the stored version is condemned and the bytes are absent")
-            with _guard(vault, "media_store_absent_version"):
-                if original_state(vault, path) != snapshot:
+            absent = snapshot
+
+            def release() -> None:
+                if original_state(vault, path) != absent:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-                _release_name(ledger, snapshot.reference.object)
-                _publish_reference(vault, snapshot, None)
+                assert absent.reference is not None
+                _release_name(ledger, absent.reference.object)
+                _publish_reference(vault, absent, None)
+
+            _publishing(vault, "media_store_absent_version", release)
             snapshot = original_state(vault, path)
         if snapshot.state != "local":
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original bytes are absent")
@@ -1180,7 +1208,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             if not _confirmed(backend, reference):
                 # A condemned answer here means that a late attempt superseded this one; the retry uploads again.
                 raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
-            with _guard(vault, "media_store_publish"):
+            def publish() -> None:
                 source.require_current()
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
@@ -1194,6 +1222,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                 _seal(ledger, snapshot, reference.object)
                 _publish_reference(vault, snapshot, reference)
                 _finish_reference(ledger, original_state(vault, path), source)
+
+            _publishing(vault, "media_store_publish", publish)
         return reference
 
 
@@ -1471,6 +1501,8 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
 
 # The outcomes of one eviction attempt, a closed set that `evict_to_target` branches on (D3, M3).
 EVICTED, KEPT, PRUNED, UNAVAILABLE = "evicted", "kept", "pruned", "unavailable"
+# A unit that needed the vault boundary found it busy (`STORE_BUSY_CODE`): ordinary contention.
+BUSY = "busy"
 # A claimed job keeps its original until it completes, fails or is blocked (D3, M4).
 _JOB_PINS = "jobs.pinned = 1 AND jobs.state IN ('pending', 'running')"
 _PINNING_JOB = f"SELECT 1 FROM jobs WHERE jobs.binary_rel = ? AND {_JOB_PINS}"
@@ -1563,11 +1595,19 @@ def _evict_one(vault: Path, path: Path) -> str:
         return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
     if not confirmed:
         # An absent or condemned version authorizes no removal: the bytes go up again under a new name.
-        with _guard(vault, "media_store_absent_version"):
+        def release() -> None:
             if original_state(vault, path) == snapshot:
+                assert snapshot.reference is not None
                 _release_name(ledger, snapshot.reference.object)
                 _publish_reference(vault, snapshot, None)
                 enqueue_offload(vault, path)
+
+        try:
+            _publishing(vault, "media_store_absent_version", release)
+        except MediaStoreError as error:
+            if error.code != STORE_BUSY_CODE:
+                raise
+            return BUSY
         return KEPT
     with _guard(vault, "media_store_evict"):
         conn = ledger._connect()
@@ -1919,8 +1959,10 @@ def evict_to_target(vault: Path) -> int:
             if not any(needed(shutil.disk_usage(vault).used)):
                 break
             outcome = _evict_one(vault, vault / relative)
-            if outcome == UNAVAILABLE:
-                return count  # Each later candidate would wait for the same store; the next pass asks again.
+            if outcome in (UNAVAILABLE, BUSY):
+                # Each later candidate would wait for the same store or boundary: the next pass
+                # asks again.
+                return count
             # An evicted or pruned row leaves the candidates; a kept one stays, so the next page starts after it.
             count += outcome == EVICTED
             kept += outcome == KEPT

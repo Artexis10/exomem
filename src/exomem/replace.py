@@ -38,7 +38,7 @@ from . import (
     vocabulary_resolution,
 )
 from . import note as note_module
-from .kbdir import kb_page_target, kb_prefix
+from .kbdir import kb_page_target, kb_prefix, resolve_stored_page_target
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     ContentHashMismatchError,
@@ -325,9 +325,14 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
     # `kbdir.kb_relative_form` for why this must not be inlined.
     candidate, rel = kb_page_target(vault_root, path)
     try:
+        stored = resolve_stored_page_target(vault_root, rel)
+        if stored is not None:
+            return stored
         admit_write_target(vault_root, rel)
     except VaultPathError as refusal:
-        raise ReplaceError(code=refusal.code, missing=[], reason=refusal.reason) from None
+        code = "OLD_NOT_FOUND" if refusal.code == "NOT_FOUND" else refusal.code
+        missing = ["old_path"] if refusal.code == "NOT_FOUND" else []
+        raise ReplaceError(code=code, missing=missing, reason=refusal.reason) from None
     # The literal (NFKC) spelling may be absent because the on-disk name is a
     # different Unicode normalization -- a macOS-origin NFD name on a
     # byte-exact filesystem (Linux ext4) -- or it may sit beside such a twin.

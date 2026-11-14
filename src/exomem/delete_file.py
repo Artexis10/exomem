@@ -845,19 +845,20 @@ def _trash_in_store(
     """Move one stored page, or one binary, to the trash in a single store transaction.
 
     A page keeps its bytes at the trash path and loses its rows at the old one; the projector moves
-    its file afterwards, and no Markdown is written. A binary's file is renamed to the trash first,
-    and the commit records it there (``binaries``). The part pages of a long extraction go with
-    their page: a dot folder of parts is renamed with it, and a raw-marked page's part pages move in
-    the store. The sidecar lands on disk inside the same rollback window. A page is bound to
-    ``judged_hash``, the hash of the bytes whose frontmatter or preview the caller judged; a page
-    that changed since, or a link from a page that the caller's inbound check did not see, refuses
-    the whole commit, and every rename is undone. A binary with ``judged_hash`` (a previewed
-    trash) refuses when the bytes that moved are not the ones the preview hashed. A governed item keeps its tombstone and receipt
-    around the commit (``vault_store.governed``). The log entry commits with the trash, and an
-    active catalog publication, prepared before validation returned, publishes after the commit.
+    its file afterwards, and no Markdown is written. A binary's record moves to the trash in the
+    commit, and its file is renamed right after it (``binaries``); so is the sidecar, which the
+    commit records. The part pages of a long extraction go with their page: a dot folder of parts
+    moves with the page's move, and a raw-marked page's part pages move in the store. A page is
+    bound to ``judged_hash``, the hash of the bytes whose frontmatter or preview the caller judged;
+    a page that changed since, or a link from a page that the caller's inbound check did not see,
+    refuses the whole commit, and nothing moves. A binary with ``judged_hash`` (a previewed trash)
+    refuses when the bytes it would move are not the ones the preview hashed. A governed item keeps
+    its tombstone and receipt around the commit (``vault_store.governed``). The log entry commits
+    with the trash, and an active catalog publication, prepared before validation returned,
+    publishes after the commit.
     """
     from . import extraction_parts
-    from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
+    from .vault import CreateOnlyConflict, PathGuardError
     from .vault_store import batch as store_batch
     from .vault_store import binaries, governed
     from .vault_store import media as store_media
@@ -866,7 +867,8 @@ def _trash_in_store(
 
     root = Path(vault_root)
     page = store_ownership.classify(rel_path) is store_ownership.Ownership.PAGE
-    sidecar = PlannedWrite(root / meta_rel, metadata_bytes.decode("utf-8"), create_only=True)
+    # The sidecar is a file that the commit records, so it waits in a temporary until the commit.
+    sidecar = binaries.Placement(meta_rel, metadata_bytes)
     moves: list[PageMove] = []
     expect: dict[str, Expect] = {}
     entries: list[binaries.Entry] = []
@@ -891,7 +893,7 @@ def _trash_in_store(
                 entries.append(binaries.Entry(parts, trashed_parts, folder=True))
         else:
             entries.append(binaries.Entry(rel_path, trash_rel))
-        relocation = binaries.plan(view, entries)
+        relocation = binaries.plan(view, entries, (sidecar,))
     expect.update(relocation.expect({rel_path: linked_from}))
     failed = "Trash placement could not be published"
     # A governed item's receipt intent and tombstone come last before the commit, as in file mode.
@@ -899,15 +901,14 @@ def _trash_in_store(
         root, source_rel=rel_path, trash_rel=trash_rel, error_class=DeleteFileError
     )
     try:
-        with governed.committing(deletion), binaries.relocated(root, relocation) as moved:
+        with governed.committing(deletion), binaries.relocated(root, relocation, writer) as moved:
             if not page and judged_hash is not None and any(
                 record.rel == trash_rel and record.sha256 != judged_hash for record in moved.records
             ):
                 # The commit binds the store record, which a rewrite on disk leaves as it was, so
-                # the moved bytes answer to the preview here; raising renames them back.
+                # the bytes that would move answer to the preview here, before anything moves.
                 raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
             writes = [
-                sidecar,
                 *_trash_companion(root, trash_rel, stored_original, moved.records),
                 *log_plan.writes,
             ]
@@ -917,10 +918,8 @@ def _trash_in_store(
                 vault_root=root,
                 lifecycle=store_batch.Lifecycle(
                     moves=tuple(moves),
-                    binary_deletes=relocation.binary_deletes,
+                    binary_moves=moved.binary_moves,
                     expect=expect,
-                    records=moved.records,
-                    refresh=moved.refresh,
                 ),
             )
     except StoreConflict as conflict:
@@ -930,13 +929,14 @@ def _trash_in_store(
             ) from conflict
         raise DeleteFileError("DELETE_FAILED", failed) from conflict
     except (
-        binaries.Stranded,
+        binaries.Unreadable,
         reserved_paths.ReservedPathLeafError,
         CreateOnlyConflict,
         PathGuardError,
         OSError,
     ) as error:
         raise DeleteFileError(*binaries.refusal(error, "DELETE_FAILED", failed)) from error
+    warnings.extend(f"{rel}: {binaries.LEFT}" for rel in moved.left)
     if not page:
         from .media_store import forget_original
 

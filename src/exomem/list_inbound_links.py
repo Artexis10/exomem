@@ -61,23 +61,10 @@ def list_inbound_links(
     # may be checking "what links to this file I'm about to delete?").
     raw = str(target).strip()
     if "/" in raw or raw.endswith(".md"):
-        from .vault_store import read as store_read
-
-        # A path that the store serves is the page at its store key: resolving the whole path
-        # would follow a link at the page's own name. A page that the store no longer holds can
-        # still be named by links, so its path stands as given.
         try:
-            key = store_read.served_key(vault_root, raw)
-        except FileNotFoundError:
-            key = raw
-        if key is not None:
-            target_norm = key
-        else:
-            try:
-                _abs, rel = resolve_under_vault(vault_root, raw)
-                target_norm = rel
-            except VaultPathError as e:
-                raise ListInboundLinksError(code=e.code, reason=e.reason) from e
+            _abs, target_norm = resolve_under_vault(vault_root, raw)
+        except VaultPathError as e:
+            raise ListInboundLinksError(code=e.code, reason=e.reason) from e
     else:
         # Bare basename — pass through as-is; find_inbound_wikilinks
         # handles the bare form.

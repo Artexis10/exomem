@@ -72,8 +72,14 @@ STRESS_RECORDS = 50_000
 STRESS_LEDGER_ENTRIES = 150_000
 
 
+# The store's write and reconcile paths read the real clock. A fixed date here aged past the
+# retention windows, and the record that the seeds call fresh was then dropped as lapsed.
+_SESSION_START = dt.datetime.now(dt.UTC).replace(microsecond=0)
+
+
 def _now() -> dt.datetime:
-    return dt.datetime(2026, 8, 20, tzinfo=dt.UTC)
+    """The moment every seeded stamp is relative to: the start of this test session."""
+    return _SESSION_START
 
 
 def _stamp(days_ago: int) -> str:

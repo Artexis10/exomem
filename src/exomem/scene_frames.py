@@ -135,7 +135,9 @@ def _clear_in_store(vault_root: Path, frames: Path, frames_rel: str) -> int:
 
     if store_media.off_store_thread(vault_root):
         return store_media.on_store_thread(
-            vault_root, lambda: _clear_in_store(vault_root, frames, frames_rel)
+            vault_root,
+            lambda: _clear_in_store(vault_root, frames, frames_rel),
+            operation="vault_store_clear_scene_frames",
         )
     writer = availability.page_writer(vault_root)
     with read.snapshot(vault_root) as view:
@@ -376,7 +378,7 @@ def write_scene_frames(
 
     if store_media.off_store_thread(vault_root):
         # A store-mode vault commits the frames and their sidecars on the store thread, as the
-        # media sidecar commit does; the caller's mutation guard stays held across the hop.
+        # media sidecar commit does, inside the vault boundary that the store thread takes.
         return store_media.on_store_thread(
             vault_root,
             lambda: write_scene_frames(
@@ -386,6 +388,7 @@ def write_scene_frames(
                 parent_clip_samples=parent_clip_samples,
                 today=today,
             ),
+            operation="background_media_scene_frame_commit",
         )
     root = Path(os.path.abspath(vault_root))
     try:

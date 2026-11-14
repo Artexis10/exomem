@@ -9,7 +9,6 @@ runs its pass by hand: nothing writes a stored page to disk, so each answer come
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sqlite3
 import sys
@@ -235,16 +234,20 @@ def test_delete_of_a_page_that_a_note_on_disk_in_the_knowledge_base_links_to_ref
 
 
 def test_a_restricted_writers_delete_neither_counts_nor_names_an_unimported_note(served):
-    """A refusal that tells a restricted caller the path of a file that no policy covers yet."""
+    """A refusal that tells a restricted caller the path of a file that no policy covers yet, or a
+    delete of a stored page withheld from that caller because the projector has not written its
+    file. File mode answers that caller as for a missing page, and so does the store."""
     store_gamma(served)
     unimported_note(served)
 
     with request_scope(most_restrictive_principal(surface="rest")):
-        result = delete_file.delete_file(served, path=GAMMA, confirm=True)
+        with pytest.raises(delete_file.DeleteFileError) as refused:
+            delete_file.delete_file(served, path=GAMMA, confirm=True)
 
-    assert result.inbound_link_count == 0
-    assert "Mine" not in json.dumps(result.as_dict())
-    assert "Mine" not in (served / result.trash_meta_path).read_text(encoding="utf-8")
+    assert (refused.value.code, refused.value.reason) == (
+        "NOT_FOUND", vault_module.missing_path_reason(GAMMA)
+    )
+    assert read.page_exists(served, GAMMA)
 
 
 def test_a_note_outside_the_knowledge_base_that_a_batch_committed_counts_once(served):

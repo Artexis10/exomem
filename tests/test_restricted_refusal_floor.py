@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 from _public_call import public_call
+from _vault_backend import backend_writer, delete_page, prepare_vault
+from _vault_backend import coordinator_url as coordinator_url
+from _vault_backend import vault_backend as vault_backend
 
 from exomem import commands, memory_refs, query_log, writer_lease
 from exomem.governance import egress, membership, policy, projection_timing, receipts
@@ -45,6 +48,7 @@ def _restrict_external(vault: Path, *, folder: str, ceiling: int) -> None:
     policy._CACHE.clear()
     membership.clear_memo()
     egress.clear_decision_memo()
+    prepare_vault(vault)
 
 
 def _write_page(vault: Path, relative: str, identity: str) -> None:
@@ -78,7 +82,7 @@ def test_restricted_refusals_complete_at_the_floor_and_read_alike(
         withheld_path = _timed_refusal(vault, page)
         hidden_only_ref = _timed_refusal(vault, ref)
         withheld_unit = _timed_refusal(vault, page, unit_ref=unit)
-    (vault / page).unlink()
+    delete_page(vault, page)
     with request_scope(EXTERNAL):
         missing_path = _timed_refusal(vault, page)
         absent_ref = _timed_refusal(vault, ref)
@@ -273,6 +277,7 @@ def test_a_write_through_a_floored_command_decides_on_the_policy_it_finds(
 ) -> None:
     """Only a read answers from one policy load; a write must see a change made before it decides."""
     connect = next(item for item in commands.PRODUCT_COMMANDS if item.name == "connect_memory")
+    prepare_vault(vault)
     seen: list[tuple[bool, bool]] = []
 
     def leaf(vault_root: Path, **_kwargs: object) -> dict:
@@ -286,7 +291,7 @@ def test_a_write_through_a_floored_command_decides_on_the_policy_it_finds(
             return current.leaf(*injected, **kwargs)
 
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
-    with library_scope():
+    with library_scope(), backend_writer(vault):
         writer_lease.invoke_command(
             replace(connect, leaf=leaf), vault, operation="create-entity", name="Example"
         )

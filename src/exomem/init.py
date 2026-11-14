@@ -474,8 +474,9 @@ def _reclaim_in_store(vault_root: Path, *, apply: bool) -> dict:
 
     The preview and the apply compare the stored bytes with the deployed copy, so a preview names
     exactly what the apply removes. The apply deletes the equal pages in one commit as the offline
-    owner, each bound to the bytes it compared; the projector removes their files, and the folders
-    that empties are left for it.
+    owner, each bound to the bytes it compared, and names every folder under the overlay: the
+    projector removes the pages' files and then each of those folders that is empty, as file mode
+    removes them.
     """
     from .vault_store import read, write
 
@@ -522,11 +523,22 @@ def _reclaim_in_store(vault_root: Path, *, apply: bool) -> dict:
         )
         if not apply or not expect:
             return None
+        # File mode then removes each folder under the overlay that is empty; the projector does
+        # the same once the deleted pages' files are gone.
+        legacy_root = vault_root / legacy
+        folders = tuple(
+            sorted(
+                path.relative_to(vault_root).as_posix()
+                for path in legacy_root.rglob("*")
+                if path.is_dir() and not path.is_symlink()
+            )
+        )
         return write.StoreChange(
             write.Origin.GOVERNED,
             "exomem reclaim-schema --apply",
             deletes=tuple(write.PageDelete(rel) for rel in expect),
             expect=expect,
+            vacated_folders=folders,
         )
 
     if apply:
