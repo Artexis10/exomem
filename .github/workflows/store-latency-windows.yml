@@ -14,6 +14,13 @@ on:
         type: choice
         options: [both, latency, suites]
         default: both
+      pytest_args:
+        description: >-
+          Pytest arguments for the suites part, one path or node id per word (globs
+          expand; a word cannot hold a space, so no -k expression). One suite or one
+          test makes a run of minutes.
+        type: string
+        default: tests/test_vault_store_*.py
 
 permissions:
   contents: read
@@ -86,10 +93,14 @@ jobs:
           EXOMEM_DISABLE_WARMUP: "1"
           EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state
           PYTHONDONTWRITEBYTECODE: "1"
-        run: >-
-          uv run --frozen --python 3.13 pytest tests/test_vault_store_*.py
-          -p no:randomly -q -n 4 --timeout 600 -rfEX
-          --junitxml store-suites-windows.xml
+          # An environment variable, never interpolated into the script text.
+          PYTEST_ARGS: ${{ inputs.pytest_args }}
+        run: |
+          # The unquoted expansion splits the input into words and expands globs; nothing evaluates it.
+          # shellcheck disable=SC2086
+          uv run --frozen --python 3.13 pytest \
+            -p no:randomly -q -n 4 --timeout 600 -rfEX \
+            --junitxml store-suites-windows.xml $PYTEST_ARGS
       - name: Upload the junit report
         if: always()
         uses: actions/upload-artifact@v4
