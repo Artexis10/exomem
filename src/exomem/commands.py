@@ -11263,7 +11263,10 @@ def op_triage_memory(
             if orphan is not None:
                 return orphan
         raise
-    if expected_fingerprint and item.fingerprint != expected_fingerprint:
+    # An item from a held pass whose page changed after the pass carries a signal that is no
+    # longer the page's own. A decision on it would lapse at the next pass, so it is refused
+    # as a changed fingerprint is.
+    if item.page_changed or (expected_fingerprint and item.fingerprint != expected_fingerprint):
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "
             f"and inspect {item.ref} again"

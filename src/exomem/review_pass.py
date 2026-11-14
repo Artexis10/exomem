@@ -21,10 +21,11 @@ The held pass holds findings and their coverage only. Everything that decides wh
 - A read of a stale pass answers at once, and asks the worker for one refresh. The stale answer
   drops a finding whose page is gone and a due finding that the due-state projection no longer
   holds, and it names the pages that changed.
-- The worker also runs a pass when the vault has been quiet and no pass is held, a page changed
-  or the day changed. Age alone starts no pass: a pass that nobody reads is not renewed.
+- The worker runs a pass when a read asks for one. It also runs the first pass of the process
+  once the vault has been quiet. Nothing else starts a pass: a pass that nobody reads is not
+  renewed, and a failed pass is not tried again until a read asks.
 - A pass runs every review category in one audit, so one failing check fails the pass. A failed
-  pass replaces nothing, and the worker tries again after the gap.
+  pass replaces nothing. The gap before the next pass doubles with each failure in a row.
 - A process with no refresh worker (a stdio server, the CLI, a standby) and a vault with no live
   change generation hold nothing.
 """
@@ -34,6 +35,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import logging
+import math
 import os
 import threading
 import time
@@ -57,15 +59,21 @@ ACTIVATION = "activation"
 _SCOPE = "vault"
 #: Held passes per process: two for each vault it serves.
 _HELD_CAP = 16
+#: After a failed pass the gap is counted from at least this duration, so that a check that fails
+#: at once is not tried again at once.
+_FAILED_PASS_SECONDS = 1.0
+#: The gap stops doubling after this many failures in a row.
+_GAP_DOUBLINGS = 6
 
 
 def _setting(name: str, default: float) -> float:
-    """A positive number from the environment, or the default when unset or unusable."""
+    """A positive, finite number from the environment, or the default when unset or unusable."""
     try:
         value = float(os.environ.get(name) or default)
     except ValueError:
         return default
-    return value if value > 0 else default
+    # A timer refuses a longer wait than `threading.TIMEOUT_MAX`.
+    return min(value, threading.TIMEOUT_MAX) if value > 0 and math.isfinite(value) else default
 
 
 def quiet_seconds() -> float:
@@ -141,8 +149,8 @@ class _Worker:
 
 _LOCK = threading.Lock()
 _HELD: dict[tuple, _Pass] = {}
-#: `(end, duration)` of the last pass of each key, failed or not: the next one waits a gap after it.
-_LAST: dict[tuple, tuple[float, float]] = {}
+#: `(end, duration, failures in a row)` of the last pass the worker tried for each key.
+_LAST: dict[tuple, tuple[float, float, int]] = {}
 _WORKERS: dict[str, _Worker] = {}
 
 
@@ -186,7 +194,7 @@ def _unrestricted(vault_root: Path) -> bool:
 
     return (
         principal_module.current_principal() is not None
-        and egress.restricted_release_filter(Path(vault_root)) is None
+        and not egress.caller_restricted(Path(vault_root))
     )
 
 
@@ -208,26 +216,22 @@ def _compute(vault_root: Path, key: tuple, generation: int) -> _Pass:
     started = time.monotonic()
     now = dt.datetime.now(dt.UTC)
     live = freshness.live_entries(vault_root, _SCOPE) or {}
-    try:
-        with call_spans.span("review_pass.compute", {"part": part}):
-            if part == AUDIT:
-                from . import attention, audit
+    with call_spans.span("review_pass.compute", {"part": part}):
+        if part == AUDIT:
+            from . import attention, audit
 
-                report = audit.audit(
-                    vault_root,
-                    categories=sorted(attention._TRIAGEABLE_CATEGORIES),
-                    today=now.date(),
-                    now=now,
-                )
-                findings, coverage = report.findings, (report.metadata or {}).get("coverage")
-            else:
-                from . import activation
+            report = audit.audit(
+                vault_root,
+                categories=sorted(attention._TRIAGEABLE_CATEGORIES),
+                today=now.date(),
+                now=now,
+            )
+            findings, coverage = report.findings, (report.metadata or {}).get("coverage")
+        else:
+            from . import activation
 
-                scan = activation.scan(vault_root)
-                findings, coverage = scan.findings, scan.coverage
-    finally:
-        with _LOCK:
-            _LAST[key] = (time.monotonic(), time.monotonic() - started)
+            scan = activation.scan(vault_root)
+            findings, coverage = scan.findings, scan.coverage
     root = Path(vault_root)
     pages: dict[str, tuple[str, Any]] = {}
     for finding in findings:
@@ -248,21 +252,15 @@ def _compute(vault_root: Path, key: tuple, generation: int) -> _Pass:
 
 
 def _projected(vault_root: Path, findings: list[AuditFinding]) -> frozenset[tuple[str, str]]:
+    """`(category, path)` of each due finding that the due-state projection holds now."""
     from . import due_state
 
-    due = [f for f in findings if f.category in due_state.PROJECTION_CATEGORIES]
-    if not due:
-        return frozenset()
-    payload = due_state._load_shared(vault_root)
-    return frozenset((f.category, f.path) for f in due if _holds(payload, f.category, f.path))
-
-
-def _holds(payload: dict[str, Any] | None, category: str, path: str) -> bool:
-    """Whether the stored due-state projection holds an entry for this page and category."""
-    from . import due_state
-
-    pages = ((payload or {}).get("categories") or {}).get(category)
-    return isinstance(pages, dict) and bool(due_state._unbucket(pages.get(path)))
+    return frozenset(
+        (f.category, f.path)
+        for f in findings
+        if f.category in due_state.PROJECTION_CATEGORIES
+        and due_state.projected(vault_root, f.category, f.path)
+    )
 
 
 def _hold(key: tuple, fresh: _Pass) -> None:
@@ -323,19 +321,14 @@ def _still_true(
     now = dict(zip(rels, live, strict=True))
     gone = {rel for rel in rels if now[rel] is None}
     changed = {rel for rel in rels if now[rel] is not None and now[rel] != held.pages[rel][1]}
-    payload = (
-        due_state._load_shared(vault_root)
-        if any((f.category, f.path) in held.projected for f in findings)
-        else None
-    )
     kept = [
         f
         for f in findings
         if not any(rel in gone for rel in (f.path, *(f.paths or ())))
         and (
-            payload is None
-            or (f.category, f.path) not in held.projected
-            or _holds(payload, f.category, f.path)
+            (f.category, f.path) not in held.projected
+            # None: the projection cannot be read, so it resolves nothing.
+            or due_state.projected(vault_root, f.category, f.path) is not False
         )
     ]
     return kept, changed
@@ -402,8 +395,9 @@ def _run(worker: _Worker) -> None:
 def _due(worker: _Worker, key: tuple) -> bool:
     """Whether the worker should run this pass now.
 
-    A read asked for it. Or the vault has been quiet, and no pass is held, a page changed or the
-    day changed. Either way the last pass ended at least the gap ago.
+    A read asked for it, or the worker has not tried this pass yet and the vault has been quiet.
+    Nothing else starts a pass. The last pass ended at least the gap ago, and the gap doubles
+    with each failure in a row.
     """
     generation = freshness.generation(worker.vault_root, _SCOPE)
     if generation is None:
@@ -416,20 +410,16 @@ def _due(worker: _Worker, key: tuple) -> bool:
             worker.requested.discard(key)
             return False
         asked = key in worker.requested
-    if last is not None and time.monotonic() - last[0] < gap_factor() * last[1]:
-        return False
-    if asked:
-        return True
-    moved = (
-        held is None
-        or held.generation != generation
-        or held.day != dt.datetime.now(dt.UTC).date()
-    )
-    return moved and foreground_activity.idle_seconds(worker.vault_root) >= quiet_seconds()
+    if last is None:
+        return asked or foreground_activity.idle_seconds(worker.vault_root) >= quiet_seconds()
+    end, duration, failures = last
+    if failures:
+        duration = max(duration, _FAILED_PASS_SECONDS) * 2 ** min(failures, _GAP_DOUBLINGS)
+    return asked and time.monotonic() - end >= gap_factor() * duration
 
 
 def _refresh(worker: _Worker, key: tuple) -> None:
-    """Run one pass at background priority; keep it only when it finished in time."""
+    """Run one pass at background priority; hold it only when it finished in time."""
     from .governance import principal as principal_module
 
     cancel = threading.Event()
@@ -439,7 +429,8 @@ def _refresh(worker: _Worker, key: tuple) -> None:
         worker.requested.discard(key)
         worker.running = key
         worker.cancel = cancel
-    timer.start()
+    started = time.monotonic()
+    fresh: _Pass | None = None
     try:
         with (
             principal_module.library_scope(),
@@ -447,19 +438,23 @@ def _refresh(worker: _Worker, key: tuple) -> None:
             foreground_priority.cancellable(cancel),
         ):
             generation = freshness.generation(worker.vault_root, _SCOPE)
-            if generation is None or not _unrestricted(worker.vault_root):
-                return
-            fresh = _compute(worker.vault_root, key, generation)
+            # The worker's own caller must be the caller that a pass is held for.
+            if generation is not None and _unrestricted(worker.vault_root):
+                timer.start()
+                fresh = _compute(worker.vault_root, key, generation)
         if cancel.is_set():
             log.warning("review pass took longer than %.0f s; abandoned", limit_seconds())
-            return
-        _hold(key, fresh)
+            fresh = None
     except foreground_priority.BulkCancelled:
         log.info("review pass abandoned")
-    except Exception:  # noqa: BLE001 - a failed pass keeps the held one; the next refresh runs later
+    except Exception:  # noqa: BLE001 - a failed pass keeps the held one; a read asks for the next
         log.warning("review pass failed; the held pass stays", exc_info=True)
     finally:
         timer.cancel()
         with _LOCK:
+            failures = 0 if fresh is not None else _LAST.get(key, (0.0, 0.0, 0))[2] + 1
+            _LAST[key] = (time.monotonic(), time.monotonic() - started, failures)
             worker.running = None
             worker.cancel = None
+    if fresh is not None:
+        _hold(key, fresh)

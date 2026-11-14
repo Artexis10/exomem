@@ -46,6 +46,7 @@ class _Passes:
         self.failures = 0
         self.delay = 0.0
         self.fail = False
+        self.fail_in_worker = False
 
     def background(self) -> list[tuple[str, float, float, str]]:
         """The whole review audits that the refresh worker ran."""
@@ -62,7 +63,9 @@ def passes(monkeypatch: pytest.MonkeyPatch) -> _Passes:
     def counted(kind: str, real: Callable) -> Callable:
         def run(*args, **kwargs):
             start = time.monotonic()
-            if record.fail:
+            if record.fail or (
+                record.fail_in_worker and threading.current_thread().name == "exomem-review-pass"
+            ):
                 record.failures += 1
                 raise RuntimeError("a check failed")
             time.sleep(record.delay)
@@ -381,16 +384,18 @@ def test_a_serving_vault_holds_a_pass_before_the_first_listing(
     assert sorted(run[0] for run in passes.runs) == ["audit", "scan"]
 
 
-def test_an_aged_pass_is_renewed_only_when_a_listing_reads_it(
+def test_a_stale_pass_is_renewed_only_when_a_listing_reads_it(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
 ) -> None:
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
-    _unlinked_notes(vault, 3)
+    edited = _unlinked_notes(vault, 3)[0]
     _serve(vault, warm_managed_cell)
     _hold(vault)
     held = len(passes.background())
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_MAX_AGE_SECONDS", "0.2")
-    # The pass ages past its maximum, the vault stays quiet, and the gap after the pass ends.
+    with request_scope(OWNER):
+        _edit(vault, edited)
+    # A page changed, the pass aged past its maximum, the vault is quiet, and the gap has passed.
     time.sleep(1.5)
     unread = len(passes.background())
     with request_scope(OWNER):
@@ -398,6 +403,28 @@ def test_an_aged_pass_is_renewed_only_when_a_listing_reads_it(
     _wait_for(lambda: len(passes.background()) == held + 1)
 
     assert unread == held
+
+
+def test_a_failed_pass_is_tried_again_only_when_a_listing_asks(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
+) -> None:
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_GAP_FACTOR", "0.05")
+    _unlinked_notes(vault, 3)
+    _serve(vault, warm_managed_cell)
+    passes.fail_in_worker = True
+    review_pass.start(vault)
+    # The first audit pass and the first activation scan of the process, one failure each.
+    _wait_for(lambda: passes.failures == 2)
+    time.sleep(1.5)
+    unasked = passes.failures
+    with request_scope(OWNER):
+        listed = _list(vault)
+    _wait_for(lambda: passes.failures > unasked)
+
+    assert unasked == 2
+    assert len(listed["items"]) >= 3
+    assert not _from_held(listed)
 
 
 def test_many_stale_listings_start_one_background_pass(
@@ -482,6 +509,24 @@ def test_a_failing_check_fails_only_the_queues_that_run_it(
     assert len(first["items"]) >= 3
     assert not _from_held(second)
     assert _paths(second) == _paths(first)
+
+
+def test_a_decision_on_an_item_whose_page_changed_is_refused(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    edited, untouched = _unlinked_notes(vault, 2)
+    _serve(vault, warm_managed_cell)
+    _hold(vault)
+    _keep(monkeypatch)
+    with request_scope(OWNER):
+        before = _list(vault)
+        _edit(vault, edited)
+        # The held pass still lists the item with the signal of the page before the edit.
+        with pytest.raises((ValueError, OpError), match="REVIEW_ITEM_CHANGED"):
+            _dismiss(vault, _item(before, edited)["id"])
+        decided = _dismiss(vault, _item(before, untouched)["id"])
+
+    assert decided["state"] == "dismissed"
 
 
 def test_an_item_ranked_past_two_hundred_binds(vault: Path, warm_managed_cell) -> None:

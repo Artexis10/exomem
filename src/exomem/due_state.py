@@ -373,6 +373,18 @@ def _load_shared(vault_root: Path) -> dict[str, Any] | None:
     return payload
 
 
+def projected(vault_root: Path, category: str, path: str) -> bool | None:
+    """Whether the stored projection holds an entry of `category` for the page at `path`.
+
+    None when the projection cannot be read: a caller must not read that as "resolved".
+    """
+    payload = _load_shared(vault_root)
+    if payload is None:
+        return None
+    pages = (payload.get("categories") or {}).get(category)
+    return isinstance(pages, dict) and bool(_unbucket(pages.get(path)))
+
+
 def _remember_written(
     vault_root: Path,
     written: tuple[Any, Any],

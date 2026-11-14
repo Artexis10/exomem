@@ -60,7 +60,9 @@ Only the background worker of the serving runtime SHALL run a pass. A request SH
 
 A read of a stale pass SHALL answer from it and ask for one background refresh. The stale answer SHALL drop the items of a page that no longer exists and the due items that the due-state projection no longer holds, and it SHALL mark with `page_changed` the items of a page that changed after the pass. When the due-state projection cannot be read, the stale answer SHALL keep the due items. The listing reply SHALL carry the pass time as `as_of` and SHALL say in `refreshing` whether a pass is due or running.
 
-The worker SHALL also run a pass once the service has been quiet, when no pass is held, a page changed or the day changed. Age alone SHALL start no background pass. Two background passes SHALL start at least a set multiple of the last pass's duration apart. A failed pass SHALL leave the held pass in place.
+The worker SHALL run a pass when a read asks for one, and SHALL run the first pass of the process once the service has been quiet. Nothing else SHALL start a pass. Two passes SHALL start at least a set multiple of the last pass's duration apart, and that gap SHALL double with each failure in a row. A failed pass SHALL leave the held pass in place.
+
+A decision on an item whose page changed after the pass SHALL be refused with `REVIEW_ITEM_CHANGED`.
 
 A restricted caller, a bound collection writer and a call with no principal SHALL never read a held pass and SHALL have no pass held for them. Each SHALL keep the request path. A process with no worker and a vault with no live change generation SHALL hold nothing.
 
@@ -96,10 +98,21 @@ A decision that binds an id from the review queues SHALL read each queue whole a
 - **THEN** the service runs one review audit pass and one activation scan in the background
 - **AND** the first listing by an unrestricted caller runs no pass
 
-#### Scenario: An aged pass is renewed only when a listing reads it
+#### Scenario: A stale pass is renewed only when a listing reads it
 
-- **WHEN** a held pass is older than the maximum age and no page and no day changed
+- **WHEN** a held pass is stale, because a page changed or the pass is older than the maximum age
 - **THEN** the service runs no background pass until a listing reads the held pass
+
+#### Scenario: A failed pass is tried again only when a listing asks
+
+- **WHEN** the worker's pass fails and no listing arrives
+- **THEN** the worker runs no further pass
+- **AND** it runs one after a listing asks, once the gap has passed
+
+#### Scenario: A decision on a changed item is refused
+
+- **WHEN** an unrestricted caller edits a listed page and decides its item before the next pass
+- **THEN** the service refuses the decision with `REVIEW_ITEM_CHANGED`
 
 #### Scenario: A stale answer drops what a write resolved
 
