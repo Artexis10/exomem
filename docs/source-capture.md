@@ -113,7 +113,7 @@ Each passage supplies its own chunks. A long passage splits at the existing chun
 ```
 
 Passage search requires whole-namespace content authority. Restricted callers receive `PASSAGE_AUTHORITY_REQUIRED` and can use ordinary page search.
-The service must first publish its corpus through the maintained warm-up. A cold, contended or invalid publication returns `PASSAGE_INDEX_UNAVAILABLE`.
+The service must first publish its corpus through the maintained warm-up. A cold or invalid publication returns `PASSAGE_INDEX_UNAVAILABLE`.
 The request never builds the corpus. Filters and relations select eligible Sources before dense ranking.
 Passage search accepts limits from 1 to 200 and refuses page-ranking options such as reranking, graph expansion or compilation boosts.
 

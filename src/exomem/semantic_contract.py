@@ -2165,35 +2165,46 @@ def _published_corpus_entry(
 
 
 def borrow_published_corpus(vault_root: Path) -> PublishedCorpusSnapshot | None:
-    """Borrow a proved publication without building, walking or waiting for its publisher."""
+    """Borrow an immutable generation without serializing readers behind its publisher."""
     root = Path(vault_root)
-    if not corpus_context_cache_enabled() or not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
+    if not corpus_context_cache_enabled():
         return None
-    try:
-        owned = _store_census_owns(root)
-        if owned is not None:
-            resident = _resident_corpus_entry(
-                root, _corpus_cache_key(root),
-                relation_registry.core_registry(), semantic_language_registry.core_registry(),
-            )
-            if resident is None:
-                return None
-            entry, _caption = resident
-            return PublishedCorpusSnapshot(entry[1], entry[0], None, owned)
+    owned = _store_census_owns(root)
+    checkpoint = None
+    if owned is None:
         if not freshness.is_live(root, "vault"):
             return None
         checkpoint = freshness.consumer_checkpoint(root, "vault")
         if checkpoint.triple is None:
             return None
-        entry = _published_corpus_entry(
-            root, _corpus_cache_key(root), checkpoint,
-            relation_registry.core_registry(), semantic_language_registry.core_registry(),
-        )
-        if entry is None or freshness.consumer_checkpoint(root, "vault") != checkpoint:
+
+    cache_key = _corpus_cache_key(root)
+    language = semantic_language_registry.core_registry()
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), language)
+    if resident is None:
+        return None
+    entry, caption = resident
+    if owned is None and caption != checkpoint:
+        return None
+    # Publishers replace immutable entries. Readers need only revalidate their selected generation.
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if (
+            _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+            or _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+            != f"{language.schema_version}:{language.content_hash}"
+            or owned is None and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) != caption
+        ):
             return None
-        return PublishedCorpusSnapshot(entry[1], entry[0], checkpoint)
-    finally:
-        _CORPUS_CONTEXT_UPDATE_LOCK.release()
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    # Check after the cache identity: a publisher can advance events before replacing its entry.
+    if owned is None:
+        if (
+            not freshness.is_live(root, "vault")
+            or freshness.consumer_checkpoint(root, "vault") != checkpoint
+        ):
+            return None
+    return PublishedCorpusSnapshot(entry[1], entry[0], checkpoint, owned)
 
 
 def borrow_link_snapshot(

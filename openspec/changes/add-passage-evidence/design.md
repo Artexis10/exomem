@@ -119,7 +119,11 @@ The passage branch retains existing policy and store snapshot scopes and termina
 Its corpus borrower verifies the existing semantic registries and configuration census, plus the event publication caption in file mode.
 In store mode, the pinned store revision proves store-owned pages only; the borrowed view excludes unowned filesystem pages without event proof.
 The borrower adds no publication or stored state.
-Cold, contended or unproved state returns unavailable before encoding or Source reads. The outcome names the publisher or warm-up action needed.
+Cold or unproved state returns unavailable before encoding or Source reads. The outcome names the publisher or warm-up action needed.
+Readers capture an immutable cache entry without taking the publisher lock and validate configuration, registries and the publication caption.
+They recheck entry identity before the final full freshness checkpoint, so an event cannot advance unnoticed before the publisher replaces its entry.
+An unrelated publisher does not prevent a read while that generation remains proved.
+Passage ranking uses the captured generation and verifies selected Source bytes. Authoritative inventory absence needs a separate completeness proof for unpublished external edits.
 It promises retry only when existing publication can progress; an offline caller without a publisher gets an actionable instruction.
 Unrelated pending writes do not by themselves prevent use of a proved published generation; selected-byte verification still applies.
 When the cell cannot admit model work at once, it refuses with a busy outcome and a retry hint, without waiting for admission.

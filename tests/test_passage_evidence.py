@@ -133,6 +133,12 @@ def test_four_admitted_public_requests_all_complete(vault, passage_tools, monkey
     embeddings.index_incremental(vault)
     publish_reference(vault)
     start = threading.Barrier(4)
+    publishing, release = threading.Event(), threading.Event()
+
+    def unrelated_publisher():
+        with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:
+            publishing.set()
+            assert release.wait(10)
 
     def slow_encode(texts, *, is_query=False):
         # Stand in for a nonzero model turn; this is admission proof, not a latency measurement.
@@ -147,8 +153,14 @@ def test_four_admitted_public_requests_all_complete(vault, passage_tools, monkey
             "search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
         )
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        replies = list(pool.map(search, range(4)))
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        publisher = pool.submit(unrelated_publisher)
+        assert publishing.wait(5)
+        try:
+            replies = list(pool.map(search, range(4)))
+        finally:
+            release.set()
+        publisher.result()
     assert all("error" not in reply and len(reply.get("hits", [])) == 1 for reply in replies), replies
 
 
@@ -799,7 +811,7 @@ def test_non_owner_cannot_bypass_passage_authority_with_an_admission_predicate(
     assert len(encoder.texts) == before
 
 
-@pytest.mark.parametrize("state", ["cold", "configuration", "publisher"])
+@pytest.mark.parametrize("state", ["cold", "configuration", "generation"])
 def test_unavailable_publication_reads_no_source_and_encoding_waits_for_publication(
     vault, passage_tools, monkeypatch, state
 ):
@@ -817,12 +829,11 @@ def test_unavailable_publication_reads_no_source_and_encoding_waits_for_publicat
         configured = semantic_contract._config_inputs(vault)[0]
         configured.parent.mkdir(parents=True, exist_ok=True)
         configured.write_text("{}\n")
-    ready, release = threading.Event(), threading.Event()
-
-    def publish_elsewhere():
-        with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:
-            ready.set()
-            assert release.wait(10)
+    elif state == "generation":
+        # A watcher restart keeps file signatures but retires the old publication caption.
+        freshness.seed(vault, "vault", [
+            (str(path), freshness.stat_signature(path)) for path in find._corpus_walk(vault, "vault")
+        ])
 
     parent = Path(saved["source"]["path"]).parent.as_posix() + "/"
     reads = []
@@ -834,20 +845,11 @@ def test_unavailable_publication_reads_no_source_and_encoding_waits_for_publicat
         return original(root, path, **kwargs)
 
     before = len(encoder.texts)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        holder = pool.submit(publish_elsewhere) if state == "publisher" else None
-        if holder is not None:
-            assert ready.wait(5)
-        try:
-            with monkeypatch.context() as patch:
-                patch.setattr(reserved_paths, "read_generic_bytes", counted)
-                reply = call(
-                    "search_memory", {"query": "lantern", "options": {"result_level": "passage"}}
-                )
-        finally:
-            release.set()
-            if holder is not None:
-                holder.result()
+    with monkeypatch.context() as patch:
+        patch.setattr(reserved_paths, "read_generic_bytes", counted)
+        reply = call(
+            "search_memory", {"query": "lantern", "options": {"result_level": "passage"}}
+        )
     assert "PASSAGE_INDEX_UNAVAILABLE" in str(reply), reply
     assert "warm-up" in str(reply), reply
     assert reads == []

@@ -20,7 +20,7 @@
 - [ ] 3.6 Borrow a proved publication without building, walking or waiting; derive declaration membership once per published state. Verify the public request reads at most `limit` distinct selected Sources, including filters, relations, terminal filtering and withheld candidates in both storage modes.
 - [ ] 3.7 Refuse a passage request at once when model admission is full; verify the busy outcome and its retry hint.
 - [ ] 3.8 Require whole-namespace content authority before candidate work; verify refusal before encoding or Source reads, including an internal allow-all admission predicate.
-- [ ] 3.9 Verify cold, contended and stale publications return unavailable without Source reads or encoding; cover store revision changes without Markdown projections and successful normal publication afterward.
+- [ ] 3.9 Verify cold and stale publications return unavailable without Source reads or encoding; prove concurrent borrowing of a current generation, full checkpoint changes, store revision changes without projections, and normal publication afterward.
 
 ## 4. Latency
 

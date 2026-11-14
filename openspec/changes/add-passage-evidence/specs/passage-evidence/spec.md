@@ -62,7 +62,9 @@ A passage request SHALL require whole-namespace content authority before it read
 Eligibility SHALL use one proved published corpus generation and maintained eligibility indexes, without a corpus build, offline scan or unrelated pending-page hydration.
 The request SHALL read at most `limit` distinct canonical Source pages, selected before byte verification, including selected pages whose chunks are later withheld.
 It SHALL NOT read the body or frontmatter of an unselected Source, and SHALL NOT refill the selection after withholding.
-A cold, contended or unproved publication SHALL return a visible unavailable outcome before encoding or Source hydration.
+A cold or unproved publication SHALL return a visible unavailable outcome before encoding or Source hydration.
+Concurrent readers SHALL NOT exclude one another from borrowing a proved immutable generation.
+Publisher activity SHALL NOT prevent borrowing while that generation's configuration and full publication checkpoint remain proved.
 The outcome SHALL name the existing publication or warm-up action that can make the request ready, and SHALL promise a retry only when publication can progress.
 When the cell cannot admit a passage request's model work at once, it SHALL refuse with a busy outcome and a retry hint.
 The request SHALL NOT wait for an admission slot. Admitted requests MAY await the existing serialized model execution turn within their bounded admission capacity.
@@ -81,9 +83,15 @@ The request SHALL NOT wait for an admission slot. Admitted requests MAY await th
 
 #### Scenario: Publication is unavailable
 
-- **WHEN** the published corpus is absent, its proof is stale, or its publication lock is busy
+- **WHEN** the published corpus is absent or its proof is stale
 - **THEN** the request returns unavailable without a corpus build, query encoding or Source reads
 - **AND** ordinary publication can make the same request ready
+
+#### Scenario: Concurrent readers borrow while a publisher works
+
+- **WHEN** four admitted passage requests borrow a generation whose proof remains current while another publisher works
+- **THEN** all four can use that immutable generation without waiting for the publisher
+- **AND** no request returns unavailable solely because another reader is proving that generation
 
 #### Scenario: An offline caller has no publisher
 
