@@ -3160,7 +3160,8 @@ class _BatchWorkspace:
                     raise PathGuardError(
                         "PATH_GUARD_CHANGED", "batch rollback target changed"
                     )
-                inverse_recheck()
+                # No path recheck here: it reopens the leaf by name, which Windows refuses while this
+                # delete-capable handle is open. The identity above and the hash below prove the leaf.
                 if _descriptor_hash(descriptor, expected.identity) != expected.content_hash:
                     raise PathGuardError(
                         "PATH_GUARD_CONTENT", "batch rollback content changed"
@@ -6432,7 +6433,6 @@ def _batch_atomic_write_locked(
                 final_guards.pop(final, None)
                 restored_paths.add(final)
             except Exception as rollback_error:  # noqa: BLE001 - report every restore failure
-                log.warning("TEMPDIAG batch rollback error for %s", final, exc_info=rollback_error)
                 rollback_errors.append(rollback_error)
                 if all(workspace is not item for item in implicated_workspaces):
                     implicated_workspaces.append(workspace)
