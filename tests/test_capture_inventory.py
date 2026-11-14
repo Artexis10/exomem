@@ -476,3 +476,31 @@ def test_receipt_cannot_prove_rows_after_active_space_replacement(vault):
         recall_space.write_identity(connection, replacement)
     result = index.chunk_inventory(expected)[path]
     assert result == ("unknown", None, replacement.identity_digest)
+
+
+def test_public_inventory_cannot_prove_absence_when_raw_lane_becomes_a_file(vault, passage_tools):
+    """A non-directory raw root must withdraw inventory authority instead of erasing its captures."""
+    from exomem import file_watcher
+
+    call, _encoder = passage_tools
+    saved = call("save_source", {"title": "Captured revision", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "record", "revision": "one"},
+                                             "passages": [{"key": "entry", "text": "The lantern burns oil."}]}})
+    assert "error" not in saved, saved
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._raw_witness.activate()  # This test drives the existing watcher synchronously.
+    semantic_contract.warm_corpus_context(vault)
+    try:
+        assert watcher._flush_raw(census=True)
+        before = call("inspect_memory", {"operation": "sources.inventory", "arguments": {"system": "archive"}})
+        assert before["complete"] and len(before["items"]) == 1
+        raw_root = vault / "Knowledge Base/Sources"
+        raw_root.rename(vault / "removed-sources")
+        raw_root.write_text("A file replaced the raw lane directory.\n")
+        watcher._note_directories(str(raw_root))
+        watcher._flush_raw()
+        after = call("inspect_memory", {"operation": "sources.inventory", "arguments": {"system": "archive"}})
+        assert after["state"] == "pending"
+        assert not after["complete"]
+    finally:
+        watcher.stop()

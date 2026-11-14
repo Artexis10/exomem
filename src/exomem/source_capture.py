@@ -290,7 +290,7 @@ def raw_markdown_files(root: Path, *, subtrees: tuple[str, ...] = ()):
                 break
             if stat.S_ISLNK(info.st_mode) or vault._is_reparse(info):
                 unavailable()
-            if current != directory and not stat.S_ISDIR(info.st_mode):
+            if (current != directory or relative in roots) and not stat.S_ISDIR(info.st_mode):
                 unavailable()
         if missing:
             continue
