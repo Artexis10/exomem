@@ -80,13 +80,21 @@ def is_overlay_source(root: Path, rel: str) -> bool:
 
     The schema overlay is the one folder that ownership gives to the store as pages, and the access
     policy is one file beside it; both come from the loaders' own paths, so a new registry file
-    needs no entry here. The kept versions under the history folder are not inputs: the loaders read
-    the live overlay files, and only the registry tools read a kept version, at request time.
+    needs no entry here. Two kinds of overlay file are not inputs. The loaders read the live overlay
+    files, and only the registry tools read a kept version under the history folder, at request
+    time. A door's record of its own work (a relation review; `policy.is_workflow_state_path`) is
+    compiled by no loader, and every create and edit writes one.
     """
+    from ..governance import policy as governance_policy
+
     schema_folder = f"{kb_dirname()}/{vault.SCHEMA_OVERLAY_DIRNAME}/"
     history = f"{registry_history.history_dir(root, '').relative_to(root).as_posix()}/"
-    policy = access.access_config_path(root).relative_to(root).as_posix()
-    return (rel.startswith(schema_folder) and not rel.startswith(history)) or rel == policy
+    access_policy = access.access_config_path(root).relative_to(root).as_posix()
+    return (
+        rel.startswith(schema_folder)
+        and not rel.startswith(history)
+        and not governance_policy.is_workflow_state_path(rel)
+    ) or rel == access_policy
 
 
 def record_overlay_change(tx: Connection, root: Path, paths: Iterable[str], revision: int) -> None:
