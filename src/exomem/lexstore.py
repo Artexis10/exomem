@@ -1940,7 +1940,8 @@ def _remove_lexical_rebuild_artifact(
         )
 
 
-_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v4"
+# v5 retires NULL payload hashes derived before legacy Evidence identity support.
+_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v5"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:

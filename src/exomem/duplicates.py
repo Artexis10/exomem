@@ -101,10 +101,14 @@ def derive_page_payload(rel: str, raw: bytes) -> PagePayload | None:
     protected = raw_protection.marked(rel)
     source_url = None
     if lane == EVIDENCE:
-        holder = frontmatter.get("governance_companion")
-        if not isinstance(holder, Mapping):
-            return None
-        artifact, digest = holder.get("artifact_path"), holder.get("artifact_sha256")
+        if "governance_companion" in frontmatter:
+            holder = frontmatter["governance_companion"]
+            if not isinstance(holder, Mapping):
+                return None
+            artifact, digest = holder.get("artifact_path"), holder.get("artifact_sha256")
+        else:
+            # Earlier Evidence sidecars recorded this complete pair before companions existed.
+            artifact, digest = frontmatter.get("evidence_file"), frontmatter.get("binary_sha256")
     else:
         # The recap recorder revises its one Source in place, so its text is not a captured payload.
         if "episode" in frontmatter:
