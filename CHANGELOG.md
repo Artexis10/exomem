@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.179.0](https://github.com/Artexis10/exomem/compare/v0.178.0...v0.179.0) (2026-11-14)
+
+
+### Features
+
+* **vault-store:** read commands answer from the store snapshot ([#2791](https://github.com/Artexis10/exomem/issues/2791)) ([30f6b37](https://github.com/Artexis10/exomem/commit/30f6b379056db00de392bd15d198455f5dd51d84))
+
+
+### Bug Fixes
+
+* **vault-store:** answer every read from the store and decide restriction from the caller ([#2803](https://github.com/Artexis10/exomem/issues/2803)) ([be6ccf0](https://github.com/Artexis10/exomem/commit/be6ccf0582f16a54e6710879b3c1304cc2de18b4))
+* **vault-store:** make lifecycle writes kill-safe and commit background writes when served ([#2802](https://github.com/Artexis10/exomem/issues/2802)) ([180848b](https://github.com/Artexis10/exomem/commit/180848b70c3877b055eec322f04c0f80b2af5d00))
+
+
+### Performance
+
+* **recall:** remove two per-request costs that leave the reply unchanged ([#2798](https://github.com/Artexis10/exomem/issues/2798)) ([86e5eb1](https://github.com/Artexis10/exomem/commit/86e5eb10bb0fd5b4091c5b3ee0cb0745df519b6f))
+* **review:** read review listings and decisions from one held pass ([#2801](https://github.com/Artexis10/exomem/issues/2801)) ([0f74ff2](https://github.com/Artexis10/exomem/commit/0f74ff205934773cad4019a576d7368ef882acdb))
+* **review:** sweep only eligible chunks for contradictions, and only the changed pages ([#2799](https://github.com/Artexis10/exomem/issues/2799)) ([9c1c0bf](https://github.com/Artexis10/exomem/commit/9c1c0bfcd74364115643f1636e2311e1260c30a3))
+
 ## [0.178.0](https://github.com/Artexis10/exomem/compare/v0.177.1...v0.178.0) (2026-11-13)
 
 

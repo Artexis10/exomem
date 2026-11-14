@@ -91,20 +91,23 @@ def derive_files(root: Path, conn: sqlite3.Connection) -> None:
         replace_row(conn, owned.rel, raw, page)
 
 
+#: The subject's fields and which of them hold a flag, read once: a request decodes one subject per page.
+_SUBJECT_FIELDS = frozenset(field.name for field in fields(membership.MarkdownSubject))
+_SUBJECT_FLAGS = frozenset(field.name for field in fields(membership.MarkdownSubject) if field.type == "bool")
+
+
 def _subject(raw: str, path: str) -> membership.MarkdownSubject:
     value = json.loads(raw)
-    if not isinstance(value, dict) or set(value) != {field.name for field in fields(membership.MarkdownSubject)}:
+    if not isinstance(value, dict) or value.keys() != _SUBJECT_FIELDS:
         raise ValueError("incomplete selector facts")
     subject = membership.MarkdownSubject(**{
         key: tuple(item) if isinstance(item, list) else item for key, item in value.items()
     })
     if subject.path != path or not isinstance(subject.path, str):
         raise ValueError("selector facts name another page")
-    for field in fields(subject):
-        item = getattr(subject, field.name)
-        if field.name == "path":
-            continue
-        if field.type == "bool":
+    for name in _SUBJECT_FIELDS - {"path"}:
+        item = getattr(subject, name)
+        if name in _SUBJECT_FLAGS:
             if type(item) is not bool:
                 raise ValueError("invalid selector fact flag")
         elif not isinstance(item, tuple) or not all(isinstance(part, str) for part in item):
@@ -118,7 +121,7 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
     Facts, membership and misses live only in the request's pinned snapshot. The keyed join proves
     the facts describe that snapshot's exact bytes, including when a concurrent commit is newer.
     """
-    from ..vault_store import ownership, read
+    from ..vault_store import read
 
     memo = read.request_memo(root)
     if memo is None:
@@ -126,6 +129,7 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
     facts = memo.setdefault((__name__, "facts"), {})
     wanted = [path for path in dict.fromkeys(paths) if path not in facts]
     if wanted:
+        pages = read.owned_as_pages(root, wanted)
         with read.snapshot(root) as snapshot:
             conn = snapshot.connection
             if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'page_admission' AND type = 'table'").fetchone() is None:
@@ -139,7 +143,7 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
                         "FROM page_admission f JOIN store_pages p ON p.path = f.path AND p.sha256 = f.sha256 "
                         "WHERE f.path IN (SELECT value FROM json_each(?))", (json.dumps(chunk),),
                     ):
-                        if version != FACTS_VERSION or not simple or ownership.classify(path) is not ownership.Ownership.PAGE:
+                        if version != FACTS_VERSION or not simple or not pages[path]:
                             continue
                         try:
                             facts[path] = (sha256, _subject(raw, path), size)
