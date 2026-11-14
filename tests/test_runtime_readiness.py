@@ -617,7 +617,7 @@ def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(
     assert snapshot["coordination"]["mutation_boundary"] == {"state": "free"}
 
 
-def test_bounded_coordination_status_is_single_flight_and_reuses_late_result(
+def test_bounded_coordination_status_is_single_flight_and_discards_late_result(
     tmp_path: Path,
 ) -> None:
     from exomem import runtime_readiness as readiness_module
@@ -627,15 +627,17 @@ def test_bounded_coordination_status_is_single_flight_and_reuses_late_result(
     release = threading.Event()
     finished = threading.Event()
     calls = 0
-    expected = {"enabled": False, "coordinator_healthy": True}
+    current = {"enabled": True, "coordinator_healthy": True}
 
     def blocked_probe(_vault_root: Path | None):
         nonlocal calls
         calls += 1
-        entered.set()
-        assert release.wait(5)
-        finished.set()
-        return expected
+        measured = dict(current)
+        if calls == 1:
+            entered.set()
+            assert release.wait(5)
+            finished.set()
+        return measured
 
     results: list[object] = []
     workers = [
@@ -659,21 +661,25 @@ def test_bounded_coordination_status_is_single_flight_and_reuses_late_result(
     assert results == [None] * 4
     assert calls == 1
 
+    # The late healthy answer predates the coordinator outage.
+    current["coordinator_healthy"] = False
     release.set()
     assert finished.wait(2)
 
-    assert readiness_module._bounded_coordination_status(
-        vault,
-        blocked_probe,
-        timeout_seconds=0.5,
-    ) == expected
-    assert calls == 1
-    assert readiness_module._bounded_coordination_status(
-        vault,
-        blocked_probe,
-        timeout_seconds=0.5,
-    ) == expected
+    deadline = time.monotonic() + 2
+    measured = None
+    while measured is None and time.monotonic() < deadline:
+        measured = readiness_module._bounded_coordination_status(
+            vault, blocked_probe, timeout_seconds=0.5,
+        )
+    assert measured == {"enabled": True, "coordinator_healthy": False}
     assert calls == 2
+    assert readiness_module._bounded_coordination_status(
+        vault,
+        blocked_probe,
+        timeout_seconds=0.5,
+    ) == measured
+    assert calls == 3
 
 
 def test_runtime_readiness_uses_vault_path_identity_for_a_real_held_boundary(

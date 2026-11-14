@@ -609,6 +609,9 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         for item in ownership.iter_owned(vault)
         if item.ownership is ownership.Ownership.PAGE
     }
+    # Settle repair started by the file-mode baselines before switching modes.
+    # The process-wide audit must still catch repair started after migration.
+    assert lexstore.await_repairs_idle(vault), "file-mode baseline repair did not settle"
     assert migrate_apply(vault) == 0
     if name == "coordination_status" or sample == "maintain_memory:collections-store-adopt-local":
         # Migration takes a lease and changes contention counters, and it publishes a new vault
