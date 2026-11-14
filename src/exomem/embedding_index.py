@@ -3194,6 +3194,25 @@ class EmbeddingIndex:
             conn.close()
         return out
 
+    def matching_chunks(
+        self, selected: Iterable[tuple[str, int, str | ChunkRef, str | None]],
+    ) -> set[tuple[str, int]]:
+        """Verify selected passage cuts against their published text and generation."""
+        matches: set[tuple[str, int]] = set()
+        by_proof: dict[ChunkProof, list[tuple[str, int, str]]] = {}
+        for path, number, stored, expected in selected:
+            if expected is None:
+                continue
+            if isinstance(stored, str):
+                if stored == expected:
+                    matches.add((path, number))
+            else:
+                by_proof.setdefault(stored.proof, []).append((path, number, expected))
+        for proof, rows in by_proof.items():
+            texts = self._texts_for([(path, number) for path, number, _text in rows], proof=proof)
+            matches.update((path, number) for path, number, expected in rows if texts.get((path, number)) == expected)
+        return matches
+
     def stored_chunks_for(self, rel_path: str) -> tuple[list[str], float | None]:
         """One page's published chunk texts in index order, and the file mtime
         the embedding pass stamped on them.

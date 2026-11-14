@@ -509,7 +509,7 @@ RecallResult = retrieval_models.RecallResult
 #: nothing branches on it; the runtime payload is unchanged, and
 #: `tests/test_mcp_output_schema_conformance.py` still validates it.
 _RecallOutput = Annotated[
-    RecallResult,
+    RecallResult | dict[str, Any],
     WithJsonSchema({"anyOf": [{"type": "array"}, {"type": "object"}]}, mode="serialization"),
 ]
 
@@ -4007,6 +4007,7 @@ def _add_source(
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
     reuse: bool = False,
+    passages: list[source_capture.DeclaredPassage] | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4039,6 +4040,7 @@ def _add_source(
                 expected_sha256=expected_sha256,
                 correction=correction,
                 reuse_payload=reuse,
+                passages=passages,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -6904,7 +6906,7 @@ def op_ask_memory(
         relation_of: Anchor path; restrict `relations` to pages connected to it.
         relation_direction: outbound, inbound or any.
         filters: Structured page/unit metadata filters.
-        result_level: auto, page, unit or mixed.
+        result_level: auto, page, unit, mixed or passage.
         limit: Max hits.
         continuation: Token from a prior recall page.
         scope: kb, vault or kb-only.
@@ -6924,6 +6926,10 @@ def op_ask_memory(
         explain: Add retrieval-plan and ranking evidence.
         purpose: Declared purpose; governance may widen or narrow visibility.
     """
+    if result_level == "passage":
+        from . import passage_evidence
+
+        return passage_evidence.search_memory(vault_root, locals())
     with recall_timing_module.measure_recall(include_timings) as trace:
         # Reuse request-local placement and policy work; terminal egress opens fresh scopes.
         with state_paths_module.resolution_scope():
@@ -9133,7 +9139,7 @@ def op_capture_source(
     vault_root: Path,
     source_schema: object,
     title: str,
-    content: str = "",
+    content: str | None = None,
     slug: str | None = None,
     source_type: str | None = None,
     url: str | None = None,
@@ -9150,6 +9156,7 @@ def op_capture_source(
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
+    passages: Any = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9159,7 +9166,8 @@ def op_capture_source(
     needs HTTP MCP. source_kind is required.
 
     Args:
-        content: Authored text, or supply files.
+        content: Authored text, or supply files or passages.
+        passages: Ordered key/text objects; excludes content and files.
         source_type: source_kind alias.
         url: Source URL.
         tags: Labels.
@@ -9175,6 +9183,14 @@ def op_capture_source(
         expected_sha256: Original SHA-256 (UTF-8 for content).
         correction: Correct a Source; expected_hash is its page hash.
     """
+    if passages is not None:
+        if content is not None:
+            raise ValueError("INVALID_PASSAGES: remove content when supplying passages")
+        passages = source_capture.validate_passages(passages)
+        if files or adoption is not None:
+            raise ValueError("INVALID_PASSAGES: remove files and adoption when supplying passages")
+        content = "\n\n".join(passage["text"] for passage in passages)
+    content = content or ""
     if correction is not None:
         correction = source_corrections.validate_correction(correction)
         if source_identity is not None or adoption is not None or files and len(files) != 1:
@@ -9240,6 +9256,7 @@ def op_capture_source(
             expected_sha256=expected_sha256,
             correction=correction,
             reuse=True,
+            passages=passages,
         )
         out = {"source": source}
         if source_identity is not None:

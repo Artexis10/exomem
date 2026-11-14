@@ -1641,7 +1641,7 @@ def find(
     _cache_probe: bool = False,
     _prepared_queries: find_candidates.PreparedQueryInputs | None = None,
     _defer_finish: bool = False,
-) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
+) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit] | dict[str, Any]:
     """Search the vault. Returns up to `limit` hits.
 
     `degraded_out`: optional caller-owned list. While the background warm-up
@@ -1765,6 +1765,10 @@ def find(
     ranked, classified or counted. Omitted, it is `caller_admission`, so a
     restricted caller's find can never run unadmitted.
     """
+    if result_level == "passage":
+        from . import passage_evidence
+
+        return passage_evidence.find(vault_root, locals())
     if admit_path is None:
         admit_path = caller_admission(vault_root)
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)

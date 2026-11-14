@@ -448,6 +448,7 @@ def add(
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    passages: list[source_capture.DeclaredPassage] | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
     reuse_payload: bool = False,
@@ -488,6 +489,9 @@ def add(
     """
     from .governance import raw_protection as raw_guard
 
+    if passages is not None:
+        passages = source_capture.validate_passages(passages)
+        content = "\n\n".join(passage["text"] for passage in passages)
     if correction is not None and (source_identity is not None or adoption_seed is not None or supersede):
         raise ValueError("INVALID_SOURCE_CORRECTION: correction cannot coexist with source_identity, adoption, or episode revision")
     correction_plan = source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
@@ -503,7 +507,7 @@ def add(
             capture_input_digest = source_capture.capture_digest(
                 vault_root, content=content, title=title, source_type=source_type or "", url=url,
                 tags=tags, why_captured=why_captured, domain=domain, projects=projects,
-                slug=slug, raw_protection=raw_protection,
+                slug=slug, raw_protection=raw_protection, passages=passages,
             )
     if raw_protection and artifact is None:
         with tempfile.TemporaryDirectory(prefix="exomem-raw-source-") as staging:
@@ -517,6 +521,7 @@ def add(
                 supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
                 raw_protection=True,
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
+                passages=passages,
                 expected_sha256=expected_sha256,
                 correction=correction,
             )
@@ -598,7 +603,7 @@ def add(
     # Identity decides an identity-bearing capture alone; an artifact, a correction, an adoption, an
     # episode revision and a protected capture each have a lane of their own.
     checks_duplicates = (
-        reuse_payload and artifact is None and source_identity is None and correction is None
+        reuse_payload and passages is None and artifact is None and source_identity is None and correction is None
         and adoption_seed is None and not supersede and extra_frontmatter is None
         and not raw_protection and _prepare is None and _allocation is None
     )
@@ -740,6 +745,8 @@ def add(
         source_identity=source_identity,
         capture_input_digest=capture_input_digest,
         extra_lines=(*(episode_lines or ()), *(
+            ("passage_keys: " + yaml_flow_list(p["key"] for p in passages),) if passages is not None else ()
+        ), *(
             (f"supersedes: {yaml_scalar(correction_plan.old_ref)}",) if correction_plan is not None else ()
         )),
     )

@@ -1195,6 +1195,10 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     segmenter would have run, and the caller decides what a page whose current
     chunking it cannot afford to derive is worth to it.
     """
+    if "passage_keys" in page.frontmatter:
+        from .passage_evidence import declared_chunks
+
+        return [chunk.text for chunk in declared_chunks(page) or ()]
     from . import semantic_segments as ss
 
     if not (

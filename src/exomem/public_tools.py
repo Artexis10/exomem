@@ -217,7 +217,7 @@ class SearchMemory(Wire):
         default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
     options: dict[str, Any] | None = Field(
-        default=None, description="Rare knobs: mode, rerank, scope, relations, categories, kinds."
+        default=None, description="Rare knobs: result_level (page, unit, mixed, passage), mode, rerank, scope, relations, categories, kinds."
     )
     deep: bool | None = Field(default=None, description="Return a packed context for reasoning.")
     limit: int | None = None
@@ -226,6 +226,13 @@ class SearchMemory(Wire):
 
 
 def _search(wire: dict[str, Any], ctx: Context) -> Translated:
+    if (wire.get("options") or {}).get("result_level") == "passage":
+        from . import passage_evidence
+
+        try:
+            passage_evidence.validate_ranking_options(wire.get("options") or {})
+        except ValueError as error:
+            raise Refusal("INVALID_PASSAGE_OPTION", str(error).partition(": ")[2]) from None
     leaf = {
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
@@ -581,7 +588,7 @@ class SaveSource(Wire):
     projects: list[str] | None = None
     tags: list[str] | None = None
     why: str | None = None
-    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction.")
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: passages (ordered key/text objects), raw_protection, source_identity, expected_sha256, correction.")
     detail: Detail | None = _DETAIL
 
 

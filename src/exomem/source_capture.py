@@ -33,6 +33,48 @@ class SourceCaptureError(ValueError):
     """A coded refusal before a durable capture effect."""
 
 
+class DeclaredPassage(TypedDict):
+    key: str
+    text: str
+
+
+def validate_passages(value: object) -> list[DeclaredPassage]:
+    """Keep caller text exact; reject declarations the Source cannot preserve."""
+    if not isinstance(value, list) or not value:
+        raise SourceCaptureError("INVALID_PASSAGES: passage 1 field passages must be a nonempty list of key/text objects")
+    if len(value) > 2000:
+        raise SourceCaptureError("INVALID_PASSAGES: passage 2001 field passages exceeds the limit of 2000; split the capture")
+    seen: dict[str, int] = {}
+    result: list[DeclaredPassage] = []
+    for ordinal, passage in enumerate(value, 1):
+        if not isinstance(passage, dict) or set(passage) != {"key", "text"}:
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} fields must be exactly key and text")
+        key, text = passage["key"], passage["text"]
+        try:
+            size = len(key.encode("utf-8")) if isinstance(key, str) else 0
+        except UnicodeError:
+            size = 0
+        if not 1 <= size <= 128:
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field key must be a string of 1 to 128 UTF-8 bytes")
+        if key in seen:
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field key repeats passage {seen[key]}; supply a unique key")
+        seen[key] = ordinal
+        if not isinstance(text, str) or not text:
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field text must be a nonempty string")
+        if text != text.strip():
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field text has edge whitespace; trim the text")
+        if "\r" in text:
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field text contains a carriage return; use LF line endings")
+        if any(not line.strip() for line in text.split("\n")):
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field text contains a blank line; split it into separate passages")
+        try:
+            text.encode("utf-8")
+        except UnicodeError:
+            raise SourceCaptureError(f"INVALID_PASSAGES: passage {ordinal} field text must contain valid UTF-8 text") from None
+        result.append({"key": key, "text": text})
+    return result
+
+
 def validate_sha256(value: str) -> str:
     """Validate the caller's SHA-256 assertion without changing its meaning."""
     # SHA-256 hexadecimal is a fixed wire format, not a semantic vocabulary.
@@ -92,7 +134,8 @@ def require_authority(root: Path) -> None:
 
 def capture_digest(root: Path, *, content: str, title: str, source_type: str, url: str | None,
                    tags: list[str] | None, why_captured: str | None, domain: str | None,
-                   projects: list[str] | None, slug: str | None, raw_protection: bool) -> str:
+                   projects: list[str] | None, slug: str | None, raw_protection: bool,
+                   passages: list[DeclaredPassage] | None = None) -> str:
     from .add import _clean_tags
 
     taxonomy = source_taxonomy.load_taxonomy(root)
@@ -109,6 +152,8 @@ def capture_digest(root: Path, *, content: str, title: str, source_type: str, ur
         "slug": vault.resolve_filename_slug(title, slug, vault_root=root)[0] if slug is not None else None,
         "raw_protection": raw_protection,
     }
+    if passages is not None:
+        original["passages"] = passages
     return hashlib.sha256(json.dumps(original, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
