@@ -79,6 +79,16 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **THEN** its uncertainty horizon includes existing Source births and its earlier positive associations remain unresolved
 - **AND** lookup includes that image without relying only on surviving fragment membership
 
+#### Scenario: A local ownership index is lost
+- **WHEN** a writer retains valid canonical ownership records but its derived index is unavailable
+- **THEN** it reads the current generated-file binding directly and preserves its ownership map and uncertainty horizon
+- **AND** ordinary capture does not require a whole-catalogue rebuild
+
+#### Scenario: A prior generated publisher resumes after takeover
+- **WHEN** another native publication has taken over the current slot with a new revision
+- **THEN** the old forward publication and rollback cannot reuse their cancelled publication right
+- **AND** displaced physical copies remain outstanding until their owners acknowledge them
+
 #### Scenario: Store audit retains the target's earlier paths
 - **WHEN** target projection and vector cleanup have finished for an incarnation with exact move lineage
 - **THEN** cleanup redacts its identifying audit fields while retaining sequence, revision and operation facts

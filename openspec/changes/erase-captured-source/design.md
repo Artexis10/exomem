@@ -82,11 +82,22 @@ Copy reservations bind the image, actual owner, origin ledger, opaque locator an
 The private owner retains native paths and filesystem identities; canonical locators expose neither.
 Keep only one generated-owner locator in each Source manifest, rather than rewriting every Source manifest for every shared image.
 
+Keep one canonical slot for each generated-file locator and physical owner scope.
+Its deterministic opaque key selects the current copy directly, with at most one pending candidate copy and publication identifier.
+Read its copy records and image headers directly when rendering; a cold local index cannot block capture or erase healthy ownership evidence.
+Reserve the candidate copy before preparing the slot, and prepare the slot before native publication.
+Settle the slot from the native owner's exact installation witness after the rollback-capable batch finishes.
+Equal content hashes cannot select between different ownership maps without that witness.
+A takeover changes the slot revision and cancels delayed forward or inverse publication rights.
+Displacing a copy does not retire its physical obligation; slot references also pin its image until the owner closes them.
+Missing canonical custody remains different from a missing derived cache.
+
 Qualify the derived SQLite membership index against the canonical catalogue identity and ordered checkpoint.
 Advance canonical evidence before changing tracked ownership or publishing bytes; interrupted publication remains unresolved.
 Reconciliation is bounded and resumable. A cold or inconsistent index reports its missing coverage instead of scanning history during erasure.
 Warm lookup batches the target's image and copy obligations with an indexed uncertainty query.
 Work grows with returned obligations, rather than unrelated Sources or one SQL request per fragment.
+Trusted producers reserve new copies from directly verified canonical image evidence; collection and historical lookup still require a qualified index.
 
 A freshly allocated Source can receive `generated_birth={catalogue_id,birth_epoch}` only before any generated output can survive.
 Issuance requires participation by every relevant managed producer and native-copy hook; configuration alone is insufficient.
