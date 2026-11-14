@@ -163,7 +163,8 @@ The passage reference uses 1,500 Sources and at least 40,000 chunks on a 2-CPU c
 Inventory must also remain bounded as that population grows: at most 200 returned items, one bucket seek and a constant number of SQL statements.
 Record the inventory reference once in the request-latency contract: 20,000 captured Sources, at most 200 items and p95 below 200 ms.
 This is a target until measured, not a reported result.
-Use the same public boundary instrument before and after, with generated data and both storage modes where supported.
+Use the maintained public boundary instrument on generated data and both storage modes where supported.
+The inventory route is new, so record its earlier baseline as unavailable and make no improvement claim.
 The count of database calls must not grow with the page length.
 
 ### D6. Close explicit capture attempts under the shared writer boundary
@@ -227,6 +228,12 @@ Reservation must allocate a fresh attempt, settlement must observe current state
 The credential-issuance carve-out provides the existing dispatch seam; retain authority, fencing and terminal filtering around it.
 
 Collect terminal and expired-unused attempts with an indexed bounded batch.
+Read admission and retention policy from one typed operator configuration when reserving an attempt.
+`EXOMEM_CAPTURE_ATTEMPT_ADMISSION_SECONDS` defaults to 600 seconds; `EXOMEM_CAPTURE_ATTEMPT_RETENTION_SECONDS` defaults to 604800 seconds.
+Both values must be finite and positive.
+Persist the issued retention duration privately with the reservation and keep its admission expiry fixed.
+Use that duration when execution or closure first assigns a collection deadline; later observations never extend the deadline.
+Existing attempts do not reread current policy, so a later configuration error cannot block their execution, replay or closure.
 Do not expire accepted execution because its admission timer elapsed or retain permanent identity tombstones.
 Unknown past outcomes stay unknown after collection; a later capture uses a fresh handle.
 The attempt protocol prevents a withdrawn capture from committing after scoped closure.

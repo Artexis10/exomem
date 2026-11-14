@@ -73,6 +73,8 @@ _OPTIONAL_COMMANDS = frozenset(
         "bootstrap",
         "browse_memory",
         "capture_source",
+        "reserve_source_capture",
+        "settle_source_capture",
         "inspect_captured_sources",
         "compile_source",
         "connect_memory",

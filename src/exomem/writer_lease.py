@@ -34,7 +34,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
-from functools import partial, wraps
+from functools import cached_property, partial, wraps
 from pathlib import Path
 from typing import Any, get_args
 
@@ -3147,6 +3147,13 @@ class _ClosingConnection(sqlite3.Connection):
 class IdempotencyStore:
     """Durable per-replica retry cache, deliberately outside the synced vault."""
 
+    @cached_property
+    def capture_attempts(self):
+        """Separate capture admission rows under this database's existing runtime protections."""
+        from .capture_attempts import CaptureAttemptLedger
+
+        return CaptureAttemptLedger(self)
+
     def __init__(
         self,
         path: Path,
@@ -5907,10 +5914,24 @@ class LeaseManager:
             and kwargs.get("operation") == "session"
             and kwargs.get("session_action") == "open"
         )
-        if authorization_issuance:
-            # The generic mutation store pickles its terminal for replay. An
-            # credential issuance terminal contains a raw bearer, so it must never enter
-            # that durable cache (or be emitted a second time by replay).
+        # Closed protocol operations own their terminals; reservation and settlement must stay fresh.
+        capture_attempt_control = command.name in {"reserve_source_capture", "settle_source_capture"}
+        capture_attempt_operation = capture_attempt_control or (
+            command.name == "capture_source" and kwargs.get("capture_reservation") is not None
+        )
+        bypass_generic_replay = authorization_issuance or capture_attempt_operation
+        capture_attempt_wire = None
+        if capture_attempt_operation:
+            from . import capture_attempts
+            from .source_capture import require_authority
+
+            require_authority(injected[0])
+            if not capture_attempt_control:
+                capture_attempt_wire = capture_attempts.wire_from_arguments(kwargs)
+                # Freeze the exact authored tree before preparation can transform input.
+                kwargs = {**kwargs, **capture_attempt_wire.model_dump(mode="json")}
+        if bypass_generic_replay:
+            # Credential issuance cannot retain bearers. Capture attempts own admission and terminals.
             idempotency_key = None
             implicit_idempotency_scope = None
             effective_public_idempotency_key = None
@@ -5931,15 +5952,18 @@ class LeaseManager:
         mutation_subject = self._mutation_subject(injected)
         receipt_vault_root = self._receipt_vault_root(injected)
         digest = _command_digest(command, kwargs)
-        key, expires_after, on_replay = _effective_idempotency_key(
-            self,
-            command=command,
-            mutation_subject=mutation_subject,
-            digest=digest,
-            idempotency_key=idempotency_key,
-            principal_scope=idempotency_principal_scope,
-            implicit_idempotency_scope=implicit_idempotency_scope,
-        )
+        if bypass_generic_replay:
+            key, expires_after, on_replay = None, None, None
+        else:
+            key, expires_after, on_replay = _effective_idempotency_key(
+                self,
+                command=command,
+                mutation_subject=mutation_subject,
+                digest=digest,
+                idempotency_key=idempotency_key,
+                principal_scope=idempotency_principal_scope,
+                implicit_idempotency_scope=implicit_idempotency_scope,
+            )
         # The receipt hooks below are reached only through the idempotent
         # state-machine path; unkeyed writes bypass `IdempotencyStore.run`'s
         # durable receipt protocol.
@@ -5950,12 +5974,12 @@ class LeaseManager:
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
         vocabulary_binding = None
-        vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
+        vocabulary_replay_terminal = None if bypass_generic_replay else self.idempotency.completed_terminal(key, digest)
         # The private-identity inventory is a whole-vault walk. Build it here,
         # after the replay check (a durable terminal replays without paying for
         # it) and before any boundary is taken, so a write that meets it cold
         # does not hold every other writer stopped while it walks.
-        if receipt_vault_root is not None and vocabulary_replay_terminal is None:
+        if receipt_vault_root is not None and vocabulary_replay_terminal is None and not capture_attempt_control:
             from . import reserved_paths
 
             reserved_paths.warm_identity_catalogue_before_boundary(receipt_vault_root)
@@ -6948,34 +6972,60 @@ class LeaseManager:
                 finally:
                     _ACTIVE_FAST_ACK_SESSION.reset(token)
 
+            def invoke_protocol_leaf() -> Any:
+                if not capture_attempt_operation:
+                    return invoke_leaf()
+                from . import capture_attempts
+
+                try:
+                    return capture_attempts.invoke(
+                        self, mutation_subject, command.name, kwargs, invoke_leaf,
+                        wire=capture_attempt_wire,
+                        replay=lambda leaf: replayed_terminal(
+                            _CanonicalRequestReplay(leaf), request_id=request_id,
+                            receipt_id=None, idempotency_key=None,
+                        ),
+                    )
+                except Exception as error:
+                    if commit_state["observed"] and getattr(error, "committed", None) is not True:
+                        raise _PostCommitOutcomeUncertain() from error
+                    raise
+
             def run_idempotent() -> Any:
-                return self.idempotency.run(
-                    key,
-                    digest,
-                    invoke_leaf,
-                    expires_after=expires_after,
-                    on_replay=on_replay,
-                    operation_guard=operation_guard,
-                    commit_observed=lambda: commit_state["observed"],
-                    after_canonical_persisted=persist_graph_sync_progress,
-                    after_operation_guard=finish_before_terminal_persistence,
-                    after_terminal_acknowledgement=finish_after_terminal_persistence,
-                    # Whether derived work is *owed*, not whether a hook is bound
-                    # and not whether a session exists: the session is built before
-                    # the leaf runs, from a feature flag and a vault root, so it
-                    # cannot know whether a batch will be registered. A commit that
-                    # registers none owes no component and must not be stamped
-                    # pending. Evaluated after the leaf, where the batches are known.
-                    acknowledgement_expected=lambda: (
-                        bool(post_terminal_fanout)
-                        or fast_ack_session is not None
-                        and bool(fast_ack_session.batches)
-                    ),
-                    resume_canonically_committed=resume_graph_sync,
-                    commit_evidence=exact_commit_evidence,
-                    legacy_graph_pending_proof=legacy_graph_pending_proof,
-                    reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
-                )
+                try:
+                    return self.idempotency.run(
+                        key,
+                        digest,
+                        invoke_protocol_leaf,
+                        expires_after=expires_after,
+                        on_replay=on_replay,
+                        operation_guard=operation_guard,
+                        commit_observed=lambda: commit_state["observed"],
+                        after_canonical_persisted=persist_graph_sync_progress,
+                        after_operation_guard=finish_before_terminal_persistence,
+                        after_terminal_acknowledgement=finish_after_terminal_persistence,
+                        # Whether derived work is *owed*, not whether a hook is bound
+                        # and not whether a session exists: the session is built before
+                        # the leaf runs, from a feature flag and a vault root, so it
+                        # cannot know whether a batch will be registered. A commit that
+                        # registers none owes no component and must not be stamped
+                        # pending. Evaluated after the leaf, where the batches are known.
+                        acknowledgement_expected=lambda: (
+                            bool(post_terminal_fanout)
+                            or fast_ack_session is not None
+                            and bool(fast_ack_session.batches)
+                        ),
+                        resume_canonically_committed=resume_graph_sync,
+                        commit_evidence=exact_commit_evidence,
+                        legacy_graph_pending_proof=legacy_graph_pending_proof,
+                        reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
+                    )
+                except OpError as error:
+                    if command.name != "settle_source_capture" or error.code != "MUTATION_BUSY" or commit_state["leaf_started"]:
+                        raise
+                    from . import capture_attempts
+
+                    return capture_attempts.pending(self, mutation_subject, kwargs["reservation"])
 
             from .command_surface import OPEN_WORLD_OPS
 

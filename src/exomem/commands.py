@@ -53,6 +53,7 @@ from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
+from . import capture_attempts as capture_attempts_module
 from . import capture_carrier as capture_carrier_module
 from . import capture_inventory as capture_inventory_module
 from . import cloud_cell as cloud_cell_module
@@ -9154,6 +9155,24 @@ def op_replace_memory(
     )
 
 
+def op_reserve_source_capture(
+    vault_root: Path,
+    source_identity: source_capture.SourceIdentity,
+    request_sha256: str,
+    capture_wire_version: Literal[1] = 1,
+) -> dict:
+    """Reserve exact text-capture admission without sending or retaining its content."""
+    return capture_attempts_module.reserve(vault_root, source_identity, request_sha256, capture_wire_version)
+
+
+def op_settle_source_capture(
+    vault_root: Path,
+    reservation: capture_attempts_module.CaptureReservation,
+) -> dict:
+    """Close local capture admission or observe its retained receipt under the canonical boundary."""
+    return capture_attempts_module.settle(vault_root, reservation)
+
+
 def op_capture_source(
     vault_root: Path,
     source_schema: object,
@@ -9176,6 +9195,7 @@ def op_capture_source(
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
     passages: Any = None,
+    capture_reservation: capture_attempts_module.CaptureReservation | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9201,7 +9221,10 @@ def op_capture_source(
         source_identity: Durable text-capture identity.
         expected_sha256: Original SHA-256 (UTF-8 for content).
         correction: Correct a Source; expected_hash is its page hash.
+        capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
     """
+    if capture_reservation is not None:
+        capture_attempts_module.require_active_capture(vault_root, capture_reservation)
     if passages is not None:
         if content is not None:
             raise ValueError("INVALID_PASSAGES: remove content when supplying passages")
@@ -15102,6 +15125,20 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         {"public_title": "Supersede a knowledge note", "preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
     ),
     (
+        "reserve_source_capture",
+        op_reserve_source_capture,
+        1, True, False, None, _MCRC, (),
+        {"public_title": "Reserve Source capture admission", "surface": "primary", "actions": ("save",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_reservation",)}},
+    ),
+    (
+        "settle_source_capture",
+        op_settle_source_capture,
+        1, True, False, None, _MCRC, (),
+        {"public_title": "Close Source capture admission", "surface": "primary", "actions": ("save",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_settlement",)}},
+    ),
+    (
         "capture_source",
         op_capture_source,
         1,
@@ -15116,7 +15153,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
             "actions": ("save",),
             "first_run_safe": False,
             "mcp_meta": {"openai/fileParams": ("files",),
-                         capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("declared_passages",)},
+                         capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("declared_passages", "capture_attempt_commit")},
         },
     ),
     (

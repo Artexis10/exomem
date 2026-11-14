@@ -22,11 +22,11 @@
 
 - [x] 4.1 Resolve P2 as lookup-only attempt closure under the actual shared canonical guard; retain acknowledgement timeouts and remove redundant process-retirement gates.
 - [x] 4.2 Update durable-source-capture and the consumer's convergence contract, then record the shared writer owner's integration agreement.
-- [ ] 4.3 Implement the settled protocol and prove delayed admission, paused writers, nested settlement, replay exclusion, changed custody and restart recovery.
+- [x] 4.3 Implement the settled protocol and prove delayed admission, paused writers, nested settlement, replay exclusion, changed custody and restart recovery.
 
 ## 5. Qualification and delivery
 
-- [ ] 5.1 Add the inventory reference to the existing latency contract and compare the same public instrument on generated production-sized data.
+- [ ] 5.1 Add the inventory reference to the existing latency contract and qualify the public instrument on generated production-sized data; record the new route's baseline as unavailable.
 - [x] 5.2 Prove constant query count for 2 and 200 returned items, with file and store coverage named separately.
 - [ ] 5.3 Run scoped and completion checks, exact-content independent review, privacy checks and strict OpenSpec validation.
 - [ ] 5.4 Deliver the coherent reviewed batch through green CI and the ordinary release; keep separate activation authority unchanged.
