@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.179.1](https://github.com/Artexis10/exomem/compare/v0.179.0...v0.179.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **readiness:** reuse bounded probes and retire late results ([#2812](https://github.com/Artexis10/exomem/issues/2812)) ([9812f1b](https://github.com/Artexis10/exomem/commit/9812f1b2d85e55dd6e0aad5c28bb41451581ffee))
+
+
+### Performance
+
+* **vault-store:** do hub-read work once per path and keep the recall resolver current across a commit ([#2806](https://github.com/Artexis10/exomem/issues/2806)) ([73264fe](https://github.com/Artexis10/exomem/commit/73264fe494fc0fc21378dd6c4362bb2a122e5bb7))
+
 ## [0.179.0](https://github.com/Artexis10/exomem/compare/v0.178.0...v0.179.0) (2026-11-14)
 
 
