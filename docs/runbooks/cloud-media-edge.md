@@ -30,7 +30,7 @@ canary has served real traffic.
   Create a bucket key limited to the media bucket.
 - cellctl meters each cell's stored bytes with a second key for the same bucket. It can only list.
   Terraform creates it with the edge key, in `infra/terraform/durability/media.tf`.
-- The key watcher's pinned set lists both keys and the bucket's settings. Pin them as
+- The key watcher's pinned set lists the four media keys and the bucket's settings. Pin them as
   "Pin the media keys" in `cloud-key-custody.md` says, right after the Terraform apply.
 
 ## Create the Secrets
@@ -167,11 +167,13 @@ Before you start:
 4. Read the canary's last meter line:
    `kubectl -n exomem-cloud logs deployment/cellctl | grep "cell <canary> holds" | tail -n 1`
    Expect `0 name(s) with more than one upload version`.
-5. If the count is above 0 or unknown, stop and do not apply the rule. See the gate note below.
-6. Set the durability variable `cloud_media_condemned_days` to the grace period, with the root's other private values.
-7. Plan the durability root: `infra/scripts/plan.sh durability <plan>`
-   Expect two changes: the media bucket's rule gains `days_from_hiding_to_deleting`, and one new key,
-   `key_watcher_media_list`. A plan without the variable fails and names it.
+5. If the count is above 0 or unknown, stop before step 14. See the gate note below.
+6. Check that the durability variable `cloud_media_condemned_days` holds the grace period that you chose.
+   The media bucket's first apply set the rule's grace and created `key_watcher_media_list`.
+   If the grace is unchanged, go to step 9.
+7. Plan the media bucket only: `infra/scripts/plan.sh durability <plan> -target='b2_bucket.cloud_media[0]'`
+   Expect one in-place change: the bucket's rule gets the new `days_from_hiding_to_deleting`. If the plan
+   holds any other change, stop. A plan without the variable fails and names it.
 8. With the operator's approval, apply that plan: `infra/scripts/apply_saved_plan.sh durability <plan>`
 9. Store the watcher's media key ID:
    `terraform -chdir=infra/terraform/durability output -raw key_watcher_media_list_application_key_id | gh secret set B2_WATCHER_MEDIA_KEY_ID --env key-watcher`
@@ -210,13 +212,15 @@ names its reason in parentheses:
 | `stopped (deadline)` | The Job's time ran out during the pass. The next backup goes on from the names that are still visible. |
 | `stopped (fault)` or `stopped (no-result)` | The pass failed or printed no result. Read the next backup's Job log while its pod exists. |
 
-Gate note: a name with two upload versions loses the older one when the rule applies. If the canary's
+Gate note: the media bucket's rule exists from its first apply. A name with two upload versions loses the
+older one when the grace ends, whether or not a cell collects. Since release 0.166.0 each protection record
+gets a random name, so two upload versions under one name point to a duplicate upload attempt or a defect. If the canary's
 reference names the older version, its original would be lost. This release has no tool that maps a stored
 name to its original. The cell offloads an original again under a new name when its version is not current:
 at its next eviction pass if it holds the bytes, and after a read that hydrates them if it does not. Ask the
-canary's owner to open the evicted originals, then repeat step 4 after the next backup.
+canary's owner to open the evicted originals before the grace ends, then repeat step 4 after the next backup.
 
-No cell collects before step 14, so no hide exists before the rule applies.
+No cell collects before step 14, so no cell hides a name before then.
 
 The undo is the grace period: rescue a version, as "Rescue a hidden version" says, before it ends.
 To stop collection for a cell, take it off `mediaEdge.collectCells` and deploy the chart. Its collector entry

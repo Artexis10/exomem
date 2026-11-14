@@ -22,7 +22,7 @@ This change uses these names:
 - the **stop time** of a deleted cell, when Substrate first reads `cellctl`'s report that the cell is deleted (D4);
 - the **version bound** of a deleted cell, by which the provider should have deleted all of its versions (D4).
 
-Provider behaviour in this document marked † is not yet confirmed on the provider. Task 1 confirms each such point on a disposable bucket and records the result here.
+Task 1 checked the provider behaviour that this document marked † on a disposable bucket. Each result is recorded where the point is stated.
 
 ## Goals / Non-Goals
 
@@ -97,14 +97,16 @@ The backups live in the locked backup bucket of the cell-data account. Inside th
 - It skips a cell on the hold list (D5).
 - While a valid grant names a cell, the custodian creates no cell key for that cell, even when its namespace appears again.
 
-† A key limited to the bucket and the prefix, with only `listFiles` and `writeFiles`, hides a current version in the locked bucket.
+Confirmed (task 1.1): a key limited to the bucket and the prefix, with only `listFiles` and `writeFiles`, hides a current version in the locked bucket.
 
 **Deletion.** The lifecycle rule (`days_from_hiding_to_deleting = 1`) deletes each hidden version once its lock lapses.
 - The lock extender (`lock-cloud-backups-against-deletion` D3) is not yet live. It extends only current versions, and its guard refuses a lock more than R plus 1 days ahead.
 - So a hidden version's lock ends at most R plus 1 days after the hide. Without the extender, a lock ends R days after its upload, which is earlier.
 - The provider therefore deletes the cell's backup versions about R plus 1 days after the hide, plus its own delay. R is 30 days by default, and the variable allows 1 to 60.
 
-† The lifecycle rule deletes a hidden version in the locked bucket only after its lock lapses, and deletes it then.
+Confirmed (task 1.1), from two sources:
+- **Only after the lapse.** The provider's lifecycle documentation states that a lifecycle deletion does not occur for a version under Object Lock. The check agrees: an API call to delete a locked version returned 401 `access_denied`. The check kept no listing from while the lock held.
+- **Then.** The lock of the hidden version lapsed at 2026-11-11 14:55 UTC. A listing at 2026-11-12 18:04 UTC no longer showed it, so the delay after the lapse was at most about 27 hours.
 
 ### D3. The media edge purges the media prefix
 
@@ -168,9 +170,9 @@ The watcher runs in CI, outside the cluster, with its own list keys and its own 
 
 **Leaving the window.** At the end of a cell's window, the watcher sends nothing more for the cell. The watcher keeps no state, so it still lists the cell on each run to see whether a current file or a key keeps the window open. A cell that still holds an entry then already has ANOMALY firing, because the version bound passed a day earlier. No resolution arrives, so the receiver keeps that alert until the operator resolves it there.
 
-† An expired key does or does not still appear in the provider's key listing. Either way, the custodian deletes a stale purge key before its next pass (D2).
+Confirmed (task 1.1): an expired key no longer appears in the provider's key listing. Either way, the custodian deletes a stale purge key before its next pass (D2).
 
-† A key with only `listFiles` sees the `start` entries of unfinished large files. The watcher's states and `cellctl`'s relay rule (D1) depend on it.
+Confirmed (task 1.1): a key with only `listFiles` sees the `start` entries of unfinished large files. The watcher's states and `cellctl`'s relay rule (D1) depend on it.
 
 **Account-level alerts.**
 - `MEDIA_HIDE_BURST` counts only the hides on prefixes of cells outside the deletion set. The watcher already lists the media bucket's versions on each run, and it groups the hides by `cells/<cell_id>/`.
@@ -199,7 +201,7 @@ The watcher runs in CI, outside the cluster, with its own list keys and its own 
   - The edge serves each cell only its own prefix. So a restore into a new cell ID also needs the media copied and re-keyed into the new prefix.
   - This change provides neither the key recovery nor the copy. Without them, rescued media stays unreadable.
 
-† The provider does or does not let a key delete a hide marker in the locked bucket.
+Confirmed (task 1.1): a key with `deleteFiles` can delete a hide marker in the locked bucket, so a rescue works there.
 
 ### D6. The legacy backup bucket stays manual
 

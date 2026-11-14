@@ -6,7 +6,7 @@
 
 The repository retires Hosted code and secret destinations. It does not revoke provider keys or delete manually managed Kubernetes Secrets.
 The inventory lists original, collector and key-custody secret destinations.
-Every row remains pending. No provider credential value or account identifier belongs in disposal evidence.
+Every row except the key custody row remains pending. No provider credential value or account identifier belongs in disposal evidence.
 
 Use explicit operator approval for each destructive live action. Keep Cloud control, scheduler, artifact broker, CSI, volume encryption and alert delivery intact.
 Re-sign the active-secret registry against the kept matrix and selection before the next platform upgrade.
@@ -58,7 +58,7 @@ Verify that registry with `infra/scripts/apply_active_sops_secrets.py --verify-o
 | Collector retirement | `hcloud_capacity_reader_token` | `k3s.hcloud-capacity-reader.active` | `exomem-hcloud-capacity-reader` (sops_k8s_secret) | Pending operator revocation and absence proof |
 | Collector retirement | `rotation_receipt_public_key` | `escrow.rotation-receipt-operator-verifier.active` | `infra/secrets/escrow/rotation-receipt-operator-verifier.{version}.sops.json` (sops_escrow) | Pending operator revocation and absence proof |
 | Collector retirement | `rotation_receipt_signing_key` | `escrow.rotation-receipt-collector.active` | `infra/secrets/escrow/rotation-receipt-collector.{version}.sops.json` (sops_escrow) | Pending operator revocation and absence proof |
-| Key custody retirement | `cloud_cloud_b2_key_management` | `k3s.cloud.exomem-cloud-b2-key-management.active` | `exomem-cloud/exomem-cloud-b2-key-management` (sops_k8s_secret) | Pending provider key deletion (["Destroy the old controller key"](cloud-key-custody.md#destroy-the-old-controller-key)) and absence proof |
+| Key custody retirement | `cloud_cloud_b2_key_management` | `k3s.cloud.exomem-cloud-b2-key-management.active` | `exomem-cloud/exomem-cloud-b2-key-management` (sops_k8s_secret) | Complete 2026-11-12 (["Destroy the old controller key"](cloud-key-custody.md#destroy-the-old-controller-key)). Revocation: the durability apply destroyed the provider key. Absence proof: the provider's key listing no longer shows the key, and a lookup of the Secret in `exomem-cloud` returns NotFound. |
 
 ## BWS inventory
 
