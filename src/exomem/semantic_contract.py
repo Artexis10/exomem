@@ -1190,6 +1190,7 @@ class SemanticCorpusContext:
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
     writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
+    capture_inventory: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -2207,6 +2208,92 @@ def borrow_published_corpus(vault_root: Path) -> PublishedCorpusSnapshot | None:
     return PublishedCorpusSnapshot(entry[1], entry[0], checkpoint, owned)
 
 
+def borrow_capture_inventory(vault_root: Path):
+    """Borrow complete raw metadata with an O(1) publisher-witness recheck."""
+    from . import capture_inventory
+    from .collection_store.views import store_identity
+    from .vault_store import read
+
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    cache_key = _corpus_cache_key(root)
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), semantic_language_registry.core_registry())
+    if resident is None:
+        return None
+    entry, _caption = resident
+    inventory = entry[1].capture_inventory
+    if (inventory is None or inventory.type_dependency is None or inventory.type_dependency[0] == "unavailable"
+            or note_types.Basis(root).loaded_dependency() != inventory.type_dependency):
+        return None
+    if inventory.store_identity is not None:
+        with read.snapshot(root) as view:
+            identity = store_identity(view.connection)
+            witness = (identity["store_id"], identity["instance_id"], view.revision)
+            if inventory.store_identity != witness:
+                return None
+            generation = hashlib.sha256(repr(witness).encode()).hexdigest()
+    else:
+        witness = capture_inventory.raw_witness(root)
+        if witness is None or not witness.current(inventory.raw_stamp):
+            return None
+        generation = hashlib.sha256(repr(inventory.raw_stamp).encode()).hexdigest()
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry:
+            return None
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    if inventory.store_identity is None and not witness.current(inventory.raw_stamp):
+        return None
+    return inventory, generation
+
+
+def publish_capture_inventory(root: Path, witness, *, census: bool = False, excluded=frozenset()) -> bool:
+    """Publish raw-only deltas without admitting excluded pages to semantic fan-out."""
+    from . import capture_inventory
+
+    if capture_inventory.raw_witness(root) is not witness or not witness.live:
+        return False
+    if census:
+        # A strict reconciliation is a new raw observation, including previously missed events.
+        witness.withdraw()
+    epoch, pending, seeded = witness.snapshot()
+    try:
+        cache_key = _corpus_cache_key(root)
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        if entry is None or _config_census(root) != _stored_config_census(entry[0]):
+            witness.withdraw()
+            return False  # The existing corpus warm owns cold work after lexical publication.
+        if not census and not pending and seeded:
+            if entry[1].capture_inventory is not None and witness.current(entry[1].capture_inventory.raw_stamp):
+                return True
+            witness.withdraw()
+            epoch, pending, seeded = witness.snapshot()
+            census = True
+        with _CORPUS_CONTEXT_UPDATE_LOCK:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if entry is None or entry[1].capture_inventory is None:
+                witness.withdraw()
+                return False
+            inventory, covered = capture_inventory.refreshed(root, entry[1].capture_inventory, pending,
+                                                            census=census or not seeded, excluded=excluded)
+            inventory = replace(inventory, raw_stamp=(witness.instance, epoch))
+            context = replace(entry[1], capture_inventory=inventory)
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if (_CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+                        or capture_inventory.raw_witness(root) is not witness or not witness.live):
+                    return False
+                _CORPUS_CONTEXT_CACHE[cache_key] = (entry[0], context)
+                witness.acknowledge(epoch, covered, seeded=census or not seeded)
+        return True
+    except Exception:  # noqa: BLE001 - raw proof failure never withdraws ordinary recall.
+        witness.withdraw()
+        log.warning("canonical raw inventory publication is incomplete")
+        return False
+
+
 def borrow_link_snapshot(
     vault_root: Path, *, declined: dict[str, int] | None = None
 ) -> LinkSnapshot | None:
@@ -2853,6 +2940,9 @@ def _reconcile_markdown_delta(
     paths. Any read or identity ambiguity raises through the same full-build
     validation types instead of blessing partial state.
     """
+    from . import capture_inventory
+
+    raw_changes = {}
     request_budget.checkpoint()
     states = dict(context.pages)
     previous_identities = {entry.path: entry for entry in context.identity_census.entries}
@@ -2879,13 +2969,18 @@ def _reconcile_markdown_delta(
         included = not vault.in_excluded_scan_dir(rel_path) and (
             ".sync-conflict-" not in PurePosixPath(rel_path).name
         )
-        if in_kb:
+        if in_kb and _store_census_owns(root) is not None:
+            data = capture_inventory.read_canonical(root, rel_path)
+            source = data.decode("utf-8") if data is not None else None
+        elif in_kb:
             source = _identity_guarded_delta_source(root, rel_path)
         else:
             try:
                 source = _read_corpus_source(root, source_path)
             except FileNotFoundError:
                 source = None
+        if capture_inventory.raw_path(root, rel_path):
+            raw_changes[rel_path] = capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8")) if source is not None else None
         if source is None:
             states.pop(rel_path, None)
             identities.pop(rel_path, None)
@@ -2925,15 +3020,25 @@ def _reconcile_markdown_delta(
         identity_census=identity_census,
         writer_visibility=context.writer_visibility,
     )
-    if candidate is not None:
-        return candidate
-
-    return _context_from_state_map(
+    if candidate is None:
+        candidate = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
+
+    inventory = context.capture_inventory
+    if inventory is not None:
+        inventory = inventory.with_delta(raw_changes)
+        if inventory.store_identity is not None:
+            from .collection_store.views import store_identity
+            from .vault_store import read
+
+            with read.snapshot(root) as view:
+                identity = store_identity(view.connection)
+                inventory = replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
+    return replace(candidate, capture_inventory=inventory)
 
 
 def on_corpus_files_changed(
@@ -3458,6 +3563,12 @@ def warm_corpus_context(vault_root: Path) -> None:
             "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
         )
 
+    from . import capture_inventory
+
+    witness = capture_inventory.raw_witness(root)
+    if witness is not None and witness.live:
+        publish_capture_inventory(root, witness, census=not witness.seeded)
+
 
 def build_corpus_context_with_census(
     vault_root: Path,
@@ -3977,6 +4088,9 @@ def _build_corpus_context_uncached(
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> SemanticCorpusContext:
     request_budget.checkpoint()
+    from . import capture_inventory
+
+    raw_inputs = {}
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
     eligible: dict[str, Path] = {}
@@ -3999,6 +4113,8 @@ def _build_corpus_context_uncached(
             eligible[rel_path] = disk_path
 
     def consume(rel_path: str, source: str) -> None:
+        if capture_inventory.raw_path(root, rel_path):
+            raw_inputs[rel_path] = capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
         if rel_path in eligible:
             states[rel_path] = _parse_page_state(
                 root,
@@ -4032,13 +4148,15 @@ def _build_corpus_context_uncached(
         identity_census = identity_census.with_page(
             candidate, casefold_paths=vault.vault_casefolds(root)
         )
-    return _context_from_state_map(
+    context = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
 
+
+    return replace(context, capture_inventory=capture_inventory.collect(root, raw_inputs))
 
 
 def _read_corpus_source(root: Path, path: Path) -> str:

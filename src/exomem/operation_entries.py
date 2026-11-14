@@ -589,6 +589,7 @@ _ADOPTION_SCAN_FIELDS = ("path", "max_depth", "include_hidden", "samples", "pack
 _REMAINING = {
     "bootstrap": (None, (_row("instructions", "bootstrap"),)),
     "coordination_status": (None, (_row("writer-status", "bootstrap"),)),
+    "inspect_captured_sources": (None, (_row("inventory", "read_memory"),)),
     "configure_memory": ("action", (
         _row("inspect", "bootstrap", (), kind="settings"),
         _row("set", "change_settings", ("prominence", "expected_revision", "context"), ("prominence", "expected_revision"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.

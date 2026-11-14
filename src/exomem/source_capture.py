@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
@@ -168,119 +169,190 @@ class CanonicalCapturePages:
     frontmatter_free: frozenset[str]
 
 
-def canonical_pages(root: Path) -> CanonicalCapturePages:
-    """Classify raw-lane pages without trusting declarations from bound originals."""
+@dataclass(frozen=True, slots=True)
+class CapturePageInput:
+    """Original-byte companion inputs; no rendered body or duplicate passage text."""
+
+    sha256: str
+    size: int
+    fields: Mapping
+    frontmatter_free: bool
+    invalid: bool
+    bindings: tuple[tuple[str, str, int, bool], ...]
+
+
+def capture_page_input(root: Path, path: str, data: bytes) -> CapturePageInput:
+    """Parse one publisher-owned original, including companion descriptor validation."""
     from .client_artifacts import _expected_companion_paths
     from .governance import companions, raw_protection
     from .preserve import _sidecar_path
+    from .semantic_contract import _freeze
 
-    snapshots: dict[str, bytes] = {}
-    parsed: dict[str, dict] = {}
-    frontmatter_free: set[str] = set()
-    errors: set[str] = set()
-    edges: dict[str, set[str]] = {}
-    types = note_types.Basis(root)
-
-    def unavailable(_error: object = None) -> None:
-        raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical Source lookup is incomplete")
-
+    fields: dict = {}
+    free = invalid = False
+    bindings = []
     try:
-        # These are the schema's two canonical raw-material lanes, not vocabulary.
-        for lane in vault.APPEND_ONLY_KB_SUBPATHS:
-            directory = vault.kb_root(root) / lane
-            try:
-                info = directory.lstat()
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or vault._is_reparse(info):
-                unavailable()
-            for folder, directories, files in os.walk(directory, onerror=unavailable, followlinks=False):
-                for name in directories:
-                    info = (Path(folder) / name).lstat()
-                    if stat.S_ISLNK(info.st_mode) or vault._is_reparse(info):
-                        unavailable()
-                for name in files:
-                    page = Path(folder) / name
-                    # Markdown is fixed by the canonical page format.
-                    if page.suffix.lower() != ".md":
-                        continue
-                    relative = page.relative_to(root).as_posix()
-                    edges[relative] = set()
-                    try:
-                        data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=page.lstat().st_size)
-                        snapshots[relative] = data
-                        text = data.decode("utf-8")
-                        fields, _body, marker = vault.parse_frontmatter(text, strict=True)
-                        if marker is None:
-                            lines = text.removeprefix("\ufeff").splitlines()
-                            # The fixed YAML frontmatter opener cannot become catalog prose.
-                            if lines and lines[0] == "---":
-                                errors.add(relative)
-                            else:
-                                frontmatter_free.add(relative)
-                        else:
-                            parsed[relative] = fields
-                    except (OSError, UnicodeError, RecursionError, vault.PathGuardError, vault.FrontmatterError):
-                        errors.add(relative)
-
-        for owner, fields in parsed.items():
-            if not types.selects(fields.get("type"), note_types.raw):
-                continue
+        text = data.decode("utf-8")
+        fields, _body, marker = vault.parse_frontmatter(text, strict=True)
+        free = marker is None
+        if free:
+            lines = text.removeprefix("\ufeff").splitlines()
+            invalid = bool(lines and lines[0] == "---")  # Fixed YAML frontmatter opener.
+        if note_types.Basis(root).selects(fields.get("type"), note_types.raw):
             declarations = []
-            # These fields are the maintained Source companion byte-binding schema.
+            # These fields are the maintained companion byte-binding schema.
             if "evidence_file" in fields:
                 declarations.append((fields["evidence_file"], fields.get("binary_sha256"), fields.get("binary_size"), False))
             descriptor = fields.get("governance_companion")
             if descriptor is not None:
                 if not isinstance(descriptor, dict):
-                    errors.add(owner)
+                    invalid = True
                 else:
                     declarations.append((descriptor.get("artifact_path"), descriptor.get("artifact_sha256"), descriptor.get("artifact_size"), True))
             for target, digest, size, governed in declarations:
                 if not isinstance(target, str):
-                    errors.add(owner)
+                    invalid = True
                     continue
-                # Non-Markdown originals cannot impersonate a candidate page.
-                if Path(target).suffix.lower() != ".md":
+                if Path(target).suffix.lower() != ".md":  # Canonical page format.
                     continue
-                # The Source and Evidence producers define these companion layouts.
-                source_owners = tuple(path.as_posix() for path in _expected_companion_paths(PurePosixPath(target), lane="source"))
+                owners = tuple(p.as_posix() for p in _expected_companion_paths(PurePosixPath(target), lane="source"))
                 evidence_owner = _sidecar_path(Path(target), protected=raw_protection.marked(target)).as_posix()
-                if owner not in source_owners and owner != evidence_owner:
-                    errors.add(owner)
-                    continue
-                if (target not in edges or not isinstance(digest, str)
-                        or type(size) is not int or size < 0):
-                    errors.add(owner)
-                    continue
-                try:
-                    data, _guard = vault.read_bounded_guarded_bytes(root, target, limit=size, expected_hash=digest)
-                    if len(data) != size or data != snapshots.get(target):
-                        errors.add(owner)
-                        continue
-                    if governed:
-                        companions.classify_proposed_sibling(target, artifact_sha256=digest,
-                                                            artifact_size=size, companion=snapshots[owner])
-                except (OSError, vault.PathGuardError, companions.CompanionClassificationError):
-                    errors.add(owner)
-                    continue
-                edges[owner].add(target)
+                valid = (path in owners or path == evidence_owner) and isinstance(digest, str) and type(size) is int and size >= 0
+                if valid and governed:
+                    try:
+                        companions.classify_proposed_sibling(target, artifact_sha256=digest, artifact_size=size, companion=data)
+                    except companions.CompanionClassificationError:
+                        valid = False
+                bindings.append((target, digest if isinstance(digest, str) else "", size if type(size) is int else -1, valid))
+    except (UnicodeError, RecursionError, vault.FrontmatterError, ValidationError):
+        invalid = True
+    try:
+        fields = _freeze(fields)
+    except RecursionError:
+        fields = _freeze({})
+        invalid = True
+    return CapturePageInput(hashlib.sha256(data).hexdigest(), len(data), fields, free, invalid, tuple(bindings))
 
-        pending = set(edges)
-        canonical: set[str] = set()
-        while pending:
-            incoming = {target for owner in pending for target in edges[owner] if target in pending}
-            owners = pending - incoming
-            if not owners:
+
+def classify_capture_inputs(inputs: dict[str, CapturePageInput]) -> tuple[frozenset[str], frozenset[str]]:
+    """The canonical companion classifier over publisher-owned original-byte metadata."""
+    edges: dict[str, set[str]] = {}
+    errors = {path for path, item in inputs.items() if item.invalid}
+    for owner, item in inputs.items():
+        targets = edges[owner] = set()
+        for target, digest, size, valid in item.bindings:
+            original = inputs.get(target)
+            if not valid or original is None or (original.sha256, original.size) != (digest, size):
+                errors.add(owner)
+            else:
+                targets.add(target)
+    pending = set(inputs)
+    canonical: set[str] = set()
+    while pending:
+        incoming = {target for owner in pending for target in edges[owner] if target in pending}
+        owners = pending - incoming
+        if not owners:
+            return frozenset(canonical), frozenset(errors | pending)
+        canonical.update(owners)
+        originals = {target for owner in owners for target in edges[owner]}
+        # Bound originals are bytes; their declarations carry no authority.
+        pending.difference_update(owners | originals)
+    return frozenset(canonical), frozenset(canonical & errors)
+
+
+def raw_markdown_files(root: Path, *, subtrees: tuple[str, ...] = ()):
+    """Canonical raw-lane membership and alias checks, shared by capture and its publisher."""
+    def unavailable(error=None):
+        raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical raw enumeration is incomplete") from error
+
+    roots = tuple((vault.kb_root(root) / lane).relative_to(root).as_posix() for lane in vault.APPEND_ONLY_KB_SUBPATHS)
+    selected = set()
+    for lane in roots:
+        if not subtrees:
+            selected.add(lane)
+        for prefix in subtrees:
+            if prefix == lane or lane.startswith(prefix.rstrip("/") + "/") or not prefix:
+                selected.add(lane)
+            elif prefix.startswith(lane + "/"):
+                selected.add(prefix)
+    selected = {path for path in selected if not any(path.startswith(other + "/") for other in selected if other != path)}
+    for relative in sorted(selected):
+        directory = root / relative
+        # Every ancestor is a canonical directory, even for an absent deleted subtree.
+        current = root
+        missing = False
+        for component in Path(relative).parts:
+            current /= component
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                missing = True
+                break
+            if stat.S_ISLNK(info.st_mode) or vault._is_reparse(info):
                 unavailable()
-            canonical.update(owners)
-            originals = {target for owner in owners for target in edges[owner]}
-            # Bound originals are bytes, so their outgoing declarations have no authority.
-            pending.difference_update(owners | originals)
-
-        if canonical & errors:
+            if current != directory and not stat.S_ISDIR(info.st_mode):
+                unavailable()
+        if missing:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            if directory.suffix.lower() == ".md":  # Fixed canonical Markdown format.
+                yield relative, info
+            continue
+        if not stat.S_ISDIR(info.st_mode):
             unavailable()
-        return CanonicalCapturePages(frozenset(canonical), snapshots, parsed, frozenset(frontmatter_free))
+        for folder, directories, files in os.walk(directory, onerror=unavailable, followlinks=False):
+            for name in directories:
+                info = (Path(folder) / name).lstat()
+                if stat.S_ISLNK(info.st_mode) or vault._is_reparse(info):
+                    unavailable()
+            for name in files:
+                page = Path(folder) / name
+                if page.suffix.lower() != ".md":  # Fixed canonical Markdown format.
+                    continue
+                info = page.lstat()
+                if not stat.S_ISREG(info.st_mode) or vault._is_reparse(info):
+                    unavailable()
+                yield page.relative_to(root).as_posix(), info
+
+
+def canonical_pages(root: Path) -> CanonicalCapturePages:
+    """Classify raw-lane pages without trusting declarations from bound originals."""
+    snapshots: dict[str, bytes] = {}
+    guards: dict[str, vault.PathGuard] = {}
+    parsed: dict[str, dict] = {}
+    frontmatter_free: set[str] = set()
+    errors: set[str] = set()
+
+    def unavailable(_error: object = None) -> None:
+        raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical Source lookup is incomplete")
+
+    try:
+        for relative, info in raw_markdown_files(root):
+            try:
+                data, guard = vault.read_bounded_guarded_bytes(root, relative, limit=info.st_size)
+                snapshots[relative] = data
+                guards[relative] = guard
+                text = data.decode("utf-8")
+                fields, _body, marker = vault.parse_frontmatter(text, strict=True)
+                if marker is None:
+                    lines = text.removeprefix("\ufeff").splitlines()
+                    if lines and lines[0] == "---":  # Fixed YAML frontmatter opener.
+                        errors.add(relative)
+                    else:
+                        frontmatter_free.add(relative)
+                else:
+                    parsed[relative] = fields
+            except (OSError, UnicodeError, RecursionError, vault.PathGuardError, vault.FrontmatterError):
+                errors.add(relative)
+        inputs = {path: capture_page_input(root, path, data) for path, data in snapshots.items()}
+        canonical, incomplete = classify_capture_inputs(inputs)
+        for item in inputs.values():
+            for target, _digest, _size, valid in item.bindings:
+                if valid and target in guards:
+                    guards[target].recheck(root)
+        if incomplete or canonical & errors:
+            unavailable()
+        return CanonicalCapturePages(canonical, snapshots, parsed, frozenset(frontmatter_free))
     except (OSError, UnicodeError, vault.PathGuardError, vault.FrontmatterError, ValidationError):
         unavailable()
 

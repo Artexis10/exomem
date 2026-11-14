@@ -54,6 +54,7 @@ from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import capture_carrier as capture_carrier_module
+from . import capture_inventory as capture_inventory_module
 from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
@@ -14366,6 +14367,23 @@ def remember_description(project_keys_hint: str) -> str:
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
 
 
+def op_inspect_captured_sources(
+    vault_root: Path,
+    system: str,
+    record_id: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=capture_inventory_module.MAX_PAGE_SIZE)] = capture_inventory_module.MAX_PAGE_SIZE,
+) -> dict:
+    """List canonical captured revisions with complete-publication and exact-index observations.
+
+    Traverse one identity system, optionally one record. Compare every page's generation;
+    repeat traversal when it changes. Pending or incomplete observations never prove absence.
+    """
+    from .capture_inventory import inventory
+
+    return inventory(vault_root, system=system, record_id=record_id, cursor=cursor, limit=limit)
+
+
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
@@ -14852,6 +14870,7 @@ _SPEC: tuple[tuple, ...] = (
     ("served_context", op_served_context, 2, False, False, None, _RC),
     ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
+    ("inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
     ("fetch", op_fetch, 1, False, False, "id", _MCRC),
@@ -14947,6 +14966,12 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "configure_memory", op_configure_memory, 1, True, False, None, _MCRC,
         ("configure_memory",),
         {"public_title": "Read or change memory settings", "surface": "primary", "actions": (), "first_run_safe": False},
+    ),
+    (
+        "inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None,
+        _MCRC, ("inspect_captured_sources",),
+        {"public_title": "Inspect captured Source inventory", "surface": "advanced", "actions": (), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_inventory",)}},
     ),
     (
         "coordination_status",

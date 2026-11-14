@@ -53,6 +53,7 @@ _AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed area names o
     "maintain_memory": "maintenance", "triage_memory": "review", "schema_memory": "schema", "govern_memory": "governance",
     "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures",
     "observe_memory": "observations", "bootstrap": "instructions",
+    "inspect_captured_sources": "sources",
 }
 #: Renderings that sit in another area than their command's.
 _RENDERING_AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed rendering names whose area differs.

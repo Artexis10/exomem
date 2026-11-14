@@ -39,7 +39,7 @@ def software_identity(package_root: Path | None = None) -> dict:
 
 def service_contract(surface: capabilities.ActiveSurfaceDescriptor) -> dict:
     """Read service features from their command declarations, never a second allowlist."""
-    from . import passage_evidence, source_capture
+    from . import capture_inventory, passage_evidence, source_capture
 
     features = sorted({feature for command in surface.contributing_commands
                        for feature in command.mcp_meta.get(capabilities.SERVICE_CAPABILITIES_META_KEY, ())})
@@ -50,6 +50,8 @@ def service_contract(surface: capabilities.ActiveSurfaceDescriptor) -> dict:
                       passage_key_utf8_bytes=source_capture.MAX_PASSAGE_KEY_BYTES)
     if "passage_results" in features:
         limits["passage_results"] = passage_evidence.MAX_RESULTS
+    if "captured_source_inventory" in features:
+        limits["captured_source_inventory_page"] = capture_inventory.MAX_PAGE_SIZE
     return {"operations": features, "limits": limits, "surface_sha256": surface.fingerprint}
 
 

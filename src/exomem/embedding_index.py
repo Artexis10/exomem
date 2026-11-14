@@ -8,6 +8,7 @@ caching, and sqlite-vec fallback behavior. Model loading and encoding stay in
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import sqlite3
@@ -45,6 +46,24 @@ if TYPE_CHECKING:
     from .vault_store.vectors import Withheld
 
 log = logging.getLogger(__name__)
+
+
+def ordered_chunk_digest(chunks: Iterable[str]) -> str:
+    """Hash ordered, length-framed UTF-8 text without retaining another text copy."""
+    digest = hashlib.sha256()
+    for text in chunks:
+        data = text.encode("utf-8")
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
+
+class ChunkReceipt(NamedTuple):
+    digest: str
+    count: int
+    identity: recall_space.SpaceIdentity
+    token: tuple[int, int, int, int]
+
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -964,6 +983,8 @@ class EmbeddingIndex:
         self._lock = threading.RLock()
         # Guards `_identity` and `_identity_token`, so observations stay ordered.
         self._identity_lock = threading.Lock()
+        self._chunk_receipts: dict[str, ChunkReceipt] = {}
+        self._chunk_receipts_lock = threading.Lock()
         # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
         # stalls a chunk write's `_patch_cache`.
         self._unit_lock = threading.Lock()
@@ -1135,6 +1156,8 @@ class EmbeddingIndex:
         if previous != identity:
             # Identity observation holds only the leaf lock; revoke without taking `_lock`.
             self._matrix_invalidation = object()
+            with self._chunk_receipts_lock:
+                self._chunk_receipts.clear()
         if identity is None:
             return
         if self._vec.dim != identity.dim:
@@ -1427,6 +1450,9 @@ class EmbeddingIndex:
         finally:
             conn.close()
         self._complete_publication(stored, own_token)
+        with self._chunk_receipts_lock:
+            for path, chunks, _vectors, _mtime in replacements:
+                self._chunk_receipts[path] = ChunkReceipt(ordered_chunk_digest(chunks), len(chunks), identity, own_token)
         # Write-request threads reach here too (`index_sync.upsert_after_write`),
         # so the splice never runs on this thread: it is handed to the
         # background loader, and the next read finds the matrix current.
@@ -1498,14 +1524,121 @@ class EmbeddingIndex:
         start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
         if start is None or start > token[1] or upto != current[1]:
             return set()
-        changed = set()
-        for path in paths:
-            row = conn.execute(
-                "SELECT generation FROM chunk_path_log WHERE file_path = ?", (path,),
-            ).fetchone()
-            if row is not None and int(row[0]) > token[1]:
-                changed.add(path)
+        changed = {
+            row[0] for row in conn.execute(
+                "SELECT file_path FROM chunk_path_log WHERE file_path IN "
+                "(SELECT value FROM json_each(?)) AND generation > ?",
+                (json.dumps(sorted(paths)), token[1]),
+            )
+        }
         return paths - changed
+
+    def chunk_inventory(self, expected: dict[str, tuple[str, int]], *, source_hashes: dict[str, str] | None = None) -> dict[str, tuple[str, int | None, str | None]]:
+        """Join compact receipts for one bounded page in one SQLite read snapshot."""
+        if not expected:
+            return {}
+        with self._chunk_receipts_lock:
+            receipts = {path: self._chunk_receipts.get(path) for path in expected}
+        # These states are the inventory protocol enum; no content meaning is inferred.
+        result = {path: ("unknown", None, None) for path in expected}
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return result
+        try:
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
+        except (OSError, sqlite3.Error, ValueError):
+            return result
+        try:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if identity is None:
+                return result
+            space = identity.identity_digest
+            result = {path: ("unknown", None, space) for path in expected}
+            failures = StoreRecord(conn).stamps(expected) if source_hashes is not None else {}
+            for path, stamp in failures.items():
+                if stamp.owed and stamp.sha256 == source_hashes.get(path):
+                    result[path] = ("failed", None, space)
+            current = self._build_token(conn)
+            start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+            candidates = []
+            for path, receipt in receipts.items():
+                if receipt is None or receipt.identity != identity:
+                    continue
+                token = receipt.token
+                if current[0] != token[0] or current[2] != token[2] or current[1] < token[1]:
+                    continue
+                if current[1] != token[1] and (start is None or start > token[1] or upto != current[1]):
+                    continue
+                candidates.append((path, token[1]))
+            unchanged = {row[0] for row in conn.execute(
+                "SELECT json_extract(j.value, '$[0]') FROM json_each(?) j "
+                "LEFT JOIN chunk_path_log l ON l.file_path = json_extract(j.value, '$[0]') "
+                "WHERE l.generation IS NULL OR l.generation <= json_extract(j.value, '$[1]')",
+                (json.dumps(candidates),),
+            )}
+            rows = {row[0]: row[1:] for row in conn.execute(
+                "SELECT file_path, COUNT(*), MIN(chunk_idx), MAX(chunk_idx), "
+                "SUM(typeof(chunk_idx) != 'integer' OR length(vector) != ?) "
+                "FROM chunks WHERE file_path IN (SELECT value FROM json_each(?)) GROUP BY file_path",
+                (identity.dim * 4, json.dumps(sorted(expected))),
+            )}
+            for path in unchanged:
+                if result[path][0] == "failed":
+                    continue
+                receipt = receipts[path]
+                count, low, high, invalid = rows.get(path, (0, None, None, 0))
+                if count != receipt.count or invalid or count and (low, high) != (0, count - 1):
+                    continue
+                state = "indexed" if (receipt.digest, receipt.count) == expected[path] else "not_yet_indexed"
+                result[path] = (state, count, space)
+            return result
+        except (sqlite3.Error, ValueError):
+            return result
+        finally:
+            conn.close()
+
+    def reconstruct_chunk_receipt(self, path: str, chunks: list[str], *, space: str) -> bool:
+        """Check one canonical parent's exact rows off the request path, without encoding."""
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return False
+        try:
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
+        except (OSError, sqlite3.Error, ValueError):
+            return False
+        try:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if identity is None or identity.identity_digest != space:
+                return False
+            observed = self._exact_chunk_rows(conn, path, chunks, identity)
+            if observed is None:
+                return False
+            digest, count = observed
+            receipt = ChunkReceipt(digest, count, identity, self._build_token(conn))
+            with self._chunk_receipts_lock:
+                self._chunk_receipts[path] = receipt
+            return True
+        except (sqlite3.Error, ValueError):
+            return False
+        finally:
+            conn.close()
+
+
+    @staticmethod
+    def _exact_chunk_rows(conn, path: str, chunks: list[str], identity) -> tuple[str, int] | None:
+        """Bound text hydration by the canonical input, then verify ordered row structure."""
+        size = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0) FROM chunks WHERE file_path = ?", (path,),
+        ).fetchone()
+        if size[0] > len(chunks) or size[1] > sum(len(text.encode("utf-8")) for text in chunks):
+            return None
+        rows = list(conn.execute(
+            "SELECT chunk_idx, chunk_text, length(vector) FROM chunks WHERE file_path = ? ORDER BY chunk_idx", (path,),
+        ))
+        if any(type(number) is not int or number != ordinal or not isinstance(text, str) or width != identity.dim * 4
+               for ordinal, (number, text, width) in enumerate(rows)):
+            return None
+        return ordered_chunk_digest(row[1] for row in rows), len(rows)
 
     def parent_publication_from_source(
         self, chunks: list[str], state: semantic_index.SemanticParentIndexState,
@@ -1526,20 +1659,9 @@ class EmbeddingIndex:
             stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
             if stored != identity and (chunks or units or stored is not None):
                 return None
-            chunk_size = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0), "
-                "COALESCE(SUM(typeof(chunk_idx) != 'integer'), 0) "
-                "FROM chunks WHERE file_path = ?", (state.path,),
-            ).fetchone()
-            if chunk_size != (len(chunks), sum(len(text.encode("utf-8")) for text in chunks), 0):
+            if self._exact_chunk_rows(conn, state.path, chunks, identity) != (ordered_chunk_digest(chunks), len(chunks)):
                 return None
             width = identity.dim * 4
-            for number, row in enumerate(conn.execute(
-                "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
-                "WHERE file_path = ? ORDER BY chunk_idx", (state.path,),
-            )):
-                if row != (number, chunks[number], width):
-                    return None
             columns = OCCURRENCE_COLUMNS
             text_size = " + ".join(
                 f"COALESCE(length(CAST({column} AS BLOB)), 0)"
@@ -1601,6 +1723,10 @@ class EmbeddingIndex:
         """
         paths = sorted({path for path in rel_paths if path})
         target = connection_path if connection_path is not None else self.path
+        if target == self.path:
+            with self._chunk_receipts_lock:
+                for path in paths:
+                    self._chunk_receipts.pop(path, None)
         if not paths or not target.exists():
             return 0
         conn = self._connect(target)
