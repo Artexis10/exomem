@@ -26,6 +26,8 @@
 
 - [ ] 4.1 Build the declared reference and qualify disk scoring with one caller and with four; record all attempts and runtime receipts. Design and compare a bounded resident mode only if disk qualification fails.
 - [ ] 4.2 Choose the scoring mode from the measurement, report the mode in the reply, and add the reference and the bars to `request_latency_contract.json`; verify the contract check fails on a missed bar.
+- [ ] 4.3 Implement D8's bounded optional resident path after critique; verify numerical admission across held generations, capture/purge/rollover, honest disk fallback and unchanged ordinary APIs.
+- [ ] 4.4 Compare repaired disk and resident modes on the same frozen reference, instrument and conditions, with pressure/peak-memory observations and a case-level interval.
 
 ## 5. Delivery
 

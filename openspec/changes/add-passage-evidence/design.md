@@ -174,6 +174,49 @@ That comparison alternates mode order and reports per-query differences with a c
 Failed preparation or incomplete samples remain visible and cannot establish a passing mode.
 The added driver is maintenance for this capability's fixture and concurrency protocol; it reuses the existing observer and worker rather than creating another instrument.
 
+### D8. A bounded resident preference reuses the existing matrix publisher
+
+Disk qualification missed both bars on the declared reference: p95 478 ms with one caller and 1,522 ms with four.
+Its retained stage spans identify repeated vector fetch, decoding and block scoring as substantial work. They do not establish cost independent of host contention.
+The next comparison uses the publication repair in both arms, so it isolates the scoring mode.
+
+The closest maintained option is `EmbeddingIndex`'s immutable `_EmbCache`, generation proof, background loader, stale-path masking and idle eviction.
+Its gap is memory admission across reader-held generations and rollover indexes. A separate vector store adds an unnecessary publication boundary.
+The engineering primary-source roster's context-engineering and resource rows support reusing that publisher with bounded optional residency.
+
+Passage selection returns one `ChunkSelection` with hits and the actual scoring mode. Existing ordinary selection APIs keep their current result shape.
+The passage operation prefers a fully current admitted resident snapshot and reuses existing masks, space checks and chunk proofs.
+A known lagging snapshot uses disk while refresh runs; masking changed paths would otherwise omit eligible rows and alter top-k.
+A cold, denied or failed cache schedules permitted background work and uses disk immediately; no request loads the full matrix or waits for its publisher.
+The existing startup warm can prepare this optional cache after corpus publication identifies declared passages. Ordinary cells gain no unrelated cache preload.
+Ordinary searches retain disk scoring under `service-v1` and preserve an admitted passage cache rather than evicting it.
+Explicit audit reads retain their transient behavior. The global service profile, encoder settings and model admission remain unchanged.
+
+One process-wide counter bounds all live numerical allocations for this cache, including replacement scratch, retired reader-held generations and rollover indexes.
+The operator setting `EXOMEM_PASSAGE_MATRIX_BYTES` defaults to zero, preserving disk-only service and the project's default-off rule for heavy optional work.
+The reference candidate explicitly configures 512 MiB; later provisioning may select a measured budget through its existing authority.
+This ceiling covers numerical arrays, not total RSS. Before allocation, admission also checks actual host/cgroup headroom for estimated allocation and metadata work.
+Admission accounts for other loaders' outstanding, not-yet-materialized work so two loaders cannot spend the same observed headroom.
+It introduces no fixed free-memory floor. Unknown or insufficient capacity denies the optional allocation and leaves disk service available.
+A false denial costs latency; the control prevents optional arrays from exhausting memory and adds no human gate.
+
+Reservations precede allocation. A weak-reference finalizer on each owning array releases its charge only after its last reader releases it.
+The finalizer retains only its charge token, never the array. Estimates cover fetched vector blobs, stacked replacements and the final matrix at their peak overlap.
+Failed reservations release immediately. No request obtains a reader lease, and no new LRU, storage or publication mechanism is added.
+If a stale cache prevents its replacement from fitting, the loader retires the cache owner's reference before one bounded retry.
+It drops its own strong reference too. Reader-held arrays remain charged; requests use disk until enough capacity returns.
+Catch-up counts replacement work inside the existing SQLite snapshot before `fetchall` or stacking arrays.
+When incremental scratch would exceed admission, the existing streaming full loader may prepare a replacement within the budget.
+Service passage writes and purges hand matrix preparation to that background loader; they do not copy the full matrix on the canonical writer.
+The loader uses existing conditional pointer publication and never falls back to `_full_load_locked` for service passage work.
+A small invalidation witness revokes an in-progress load when eviction, retirement or space invalidation withdraws it, including a slot that returns to `None`.
+Admission covers every chunk row in `_EmbCache`, including rows outside the declared-passage subset.
+Denial uses the existing bounded retry mechanism. Idle eviction, purge and space changes preserve existing proof rules and release allocations when readers finish.
+
+Added maintenance is the small allocation counter and estimates at these allocation seams.
+Proof covers held generations, rollover, growth, purge, capture overlap, disk fallback and unchanged ordinary search/audit behavior.
+The paired run retains actual mode, cgroup peak memory and pressure observations. Residency remains unqualified until the same instrument meets both bars.
+
 ## Risks / Trade-offs
 
 - **Deriving spans costs Source reads.** → At most `limit` selected Sources per public request, including withheld candidates; D7 includes all physical reads.

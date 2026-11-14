@@ -163,9 +163,32 @@ The request latency contract SHALL declare a reference of at least 1,500 Sources
 On that reference, passage requests at the MCP boundary SHALL meet p95 below 200 ms with one caller.
 With four concurrent callers they SHALL meet p95 below 500 ms with no `MODEL_BUSY` refusal.
 A reply SHALL report whether a resident matrix or disk scoring served it.
+Under `service-v1`, passage selection MAY prefer a resource-admitted resident matrix without changing the global service policy or ordinary search selection.
+The process SHALL bound numerical allocations across all live passage matrix generations and indexes through an operator-controlled byte budget.
+That budget SHALL default to zero, and no tenant request SHALL change it.
+Admission SHALL account for replacement scratch before allocation and retain the charge while any reader holds the array.
+Concurrent admissions SHALL account for outstanding unmaterialized reservations before spending observed memory headroom.
+A denied or cold cache SHALL preserve disk service and report its actual mode; the request SHALL NOT load the full matrix or wait for matrix preparation.
+Background preparation SHALL retain existing generation, policy, space and chunk-binding proofs without a full load under the canonical writer lock.
+Passage ranking SHALL use disk while a resident generation is known to lack current eligible rows, rather than return a short or altered top-k.
+When a stale owner-held cache prevents replacement admission, preparation MAY release that owner's reference and retry boundedly.
+Arrays retained by readers SHALL remain charged until release; requests SHALL continue through disk while replacement capacity is unavailable.
+Eviction, retirement or space invalidation during preparation SHALL prevent that preparation from publishing a withdrawn cache afterward.
 
 #### Scenario: The bars are measured on the reference
 
 - **WHEN** the latency measurement runs the passage profile on the declared reference
 - **THEN** it records the one-caller and four-caller series with their sample counts
 - **AND** a series that misses its bar fails the contract check
+
+#### Scenario: Readers retain an old generation during capture
+
+- **WHEN** readers retain an admitted matrix while a capture publishes replacement rows
+- **THEN** old and new numerical allocations remain charged to the same process budget
+- **AND** changed paths do not escape the existing publication and chunk-binding checks
+
+#### Scenario: The cache cannot fit
+
+- **WHEN** the numerical budget is zero, exhausted or insufficient for preparation
+- **THEN** passage search remains available through disk scoring and reports disk mode
+- **AND** no unadmitted numerical allocation or full request-time load occurs
