@@ -55,10 +55,11 @@ import datetime as dt
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import access, foreground_priority, indexes, temporal
+from . import access, find_corpus, foreground_priority, indexes, temporal
 from . import audit as audit_module
 from . import find as find_module
 from .vault import (
@@ -164,23 +165,51 @@ def _normalize_frontmatter_wikilinks(
     return new_text, warnings
 
 
-def _walk_compiled_pages(kb: Path):
-    """Yield every .md under KB that's compiled material (not Sources/Evidence/infra)."""
-    for child in sorted(kb.iterdir()):
-        if child.is_dir():
-            if child.name in _SKIP_KB_SUBDIRS:
-                continue
-            yield from _walk_compiled(child)
-        elif child.is_file() and child.suffix.lower() == ".md":
-            yield child
+def _walk_compiled_pages(vault_root: Path, kb: Path):
+    """Yield every .md under KB that's compiled material (not Sources/Evidence/infra).
+
+    A store-mode vault takes its stored pages from the store, where a page may have no file yet,
+    and walks the disk only for the files that the store does not own, in the walk's order.
+    """
+    from .vault_store import mode, ownership, read
+
+    root = Path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        yield from _walk_compiled(kb)
+        return
+    prefix = kb.relative_to(root).as_posix() + "/"
+    with read.snapshot(root) as view:
+        stored = [
+            root / meta.path for meta in view.pages(prefix)
+            if Path(meta.path).suffix.lower() == ".md"
+            and not _SKIP_KB_SUBDIRS.intersection(meta.path[len(prefix):].split("/")[:-1])
+        ]
+
+    def owned(child: Path) -> bool:
+        return ownership.classify(child.relative_to(root).as_posix()) is ownership.Ownership.PAGE
+
+    yield from sorted([*stored, *_walk_compiled(kb, skip=owned)])
 
 
-def _walk_compiled(d: Path):
+def _page_key(vault_root: Path, path: Path) -> Path:
+    """``path.resolve()``, except that a page the store serves is named by its store key, unstatted:
+    the store decides that page, and its file may be absent or a link."""
+    stored = find_corpus.stored_relative(path, vault_root)
+    return path.resolve() if stored is None else Path(vault_root).resolve() / stored
+
+
+def _page_rel(vault_root: Path, path: Path) -> str:
+    return _page_key(vault_root, path).relative_to(Path(vault_root).resolve()).as_posix()
+
+
+def _walk_compiled(d: Path, skip: Callable[[Path], bool] | None = None):
     for child in sorted(d.iterdir()):
+        if skip is not None and skip(child):
+            continue  # a stored page's file: the store decides the page, unstatted
         if child.is_dir():
             if child.name in _SKIP_KB_SUBDIRS:
                 continue
-            yield from _walk_compiled(child)
+            yield from _walk_compiled(child, skip)
         elif child.is_file() and child.suffix.lower() == ".md":
             yield child
 
@@ -453,7 +482,7 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
     resolver = find_module.shared_resolver(vault_root)
     rewrites: list[_Rewrite] = []
 
-    for md in foreground_priority.yielding_in_bulk(_walk_compiled_pages(kb)):
+    for md in foreground_priority.yielding_in_bulk(_walk_compiled_pages(vault_root, kb)):
         # A `readonly` subtree refuses every write with no override, so a
         # canonicalisation planned for one can never be applied. Planning it
         # anyway broke this pass twice: the dry run reported the page as
@@ -496,7 +525,7 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
                     new_fm_text, req_field, inferred, today_iso
                 )
                 if changed:
-                    rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
+                    rel = _page_rel(vault_root, md)
                     report.fixed.append(FixedFinding(
                         category="frontmatter_compliance",
                         path=rel,
@@ -509,7 +538,7 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
                 new_fm_text2, old_value = _convert_singular_project_to_plural(new_fm_text)
                 if old_value is not None and new_fm_text2 != new_fm_text:
                     new_fm_text = new_fm_text2
-                    rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
+                    rel = _page_rel(vault_root, md)
                     report.fixed.append(FixedFinding(
                         category="frontmatter_compliance",
                         path=rel,
@@ -533,7 +562,7 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
 
         if new_text != original:
             try:
-                rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
+                rel = _page_rel(vault_root, md)
             except ValueError:
                 rel = md.as_posix()
             # Wikilink-only canonicalizations weren't logged as fixes above;
@@ -577,14 +606,17 @@ def _index_refresh_writes(
     """Plan the sub-folder and top-index count refreshes.
 
     ``planned_index_writes`` holds the index pages this fix already rewrites, keyed by
-    resolved path, so the refresh composes over their text. Any other index is read from disk.
+    ``_page_key``, so the refresh composes over their text. Any other index is read from disk,
+    or from the store when the store serves it.
     """
+    from .vault_store import read
+
     top_index_path = kb / "index.md"
-    top_base_write = planned_index_writes.get(top_index_path.resolve())
+    top_base_write = planned_index_writes.get(_page_key(vault_root, top_index_path))
     top_guard = top_base_write.guard if top_base_write is not None else None
     if top_base_write is not None:
         top_base = top_base_write.content
-    elif top_index_path.exists():
+    elif read.page_exists(vault_root, top_index_path.relative_to(vault_root).as_posix()):
         top_base, top_guard = read_guarded_text(vault_root, top_index_path)
     else:
         top_base = None
@@ -609,13 +641,14 @@ def _apply_whole(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: A
     # ---- Pass 3: sub-folder index refresh + top-index counts ----
     writes = [rewrite.write for rewrite in rewrites]
     index_pages = {
-        (kb / "index.md").resolve(),
-        (kb / "Sources" / "index.md").resolve(),
-        (kb / "Notes" / "index.md").resolve(),
-        (kb / "Entities" / "index.md").resolve(),
+        _page_key(vault_root, kb / "index.md"),
+        _page_key(vault_root, kb / "Sources" / "index.md"),
+        _page_key(vault_root, kb / "Notes" / "index.md"),
+        _page_key(vault_root, kb / "Entities" / "index.md"),
     }
     planned_index_writes = {
-        write.path.resolve(): write for write in writes if write.path.resolve() in index_pages
+        _page_key(vault_root, write.path): write
+        for write in writes if _page_key(vault_root, write.path) in index_pages
     }
     refresh_writes = _index_refresh_writes(vault_root, kb, planned_index_writes)
     writes = _compose_writes(writes, refresh_writes)

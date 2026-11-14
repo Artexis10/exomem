@@ -1312,16 +1312,10 @@ def _pages_without_id(
     from . import access, recall_policy
     from .collection_store import ownership
 
-    kb = Path(vault_root) / kb_dirname()
-    if not kb.is_dir():
-        return
     # A backfill job plans over every page before it holds the boundary, so the walk yields
     # to a foreground read.
     with ownership.read_scope(vault_root, finalize=True):
-        for path in foreground_priority.yielding_in_bulk(sorted(kb.rglob("*.md"))):
-            rel = _relative_markdown(vault_root, path)
-            if rel is None:
-                continue
+        for rel, path in foreground_priority.yielding_in_bulk(_backfill_candidates(vault_root)):
             try:
                 raw, guard = vault_module.read_guarded_text(vault_root, path)
             except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
@@ -1346,6 +1340,49 @@ def _pages_without_id(
                 skipped.append({"path": rel, "reason": reason})
                 continue
             yield rel, path, raw, guard
+
+
+def _backfill_candidates(vault_root: Path) -> Iterator[tuple[str, Path]]:
+    """The `(rel, path)` of each Markdown page that a backfill reads, in the walk's path order.
+
+    A store-mode vault lists its stored pages from the store, where a page may have no file yet,
+    and walks the disk only for the files that the store does not own.
+    """
+    from .collection_store import connection
+    from .vault_store import mode, read
+    from .vault_store import ownership as page_ownership
+
+    root = Path(vault_root)
+    kb = root / kb_dirname()
+    if mode.store_mode_for_reads(root):
+        try:
+            with read.snapshot(root) as view:
+                # `rglob("*.md")` below matches the suffix case-sensitively; stored pages keep its rule.
+                stored = {
+                    root / meta.path: meta.path for meta in view.pages(f"{kb_dirname()}/")
+                    if meta.path.endswith(".md") and is_scanned_page(meta.path)
+                }
+        except connection.CollectionStoreError as error:
+            if error.code != read.NOT_ACTIVE:
+                raise
+        else:
+            unowned = (
+                path for path in kb.rglob("*.md")
+                if page_ownership.classify(path.relative_to(root).as_posix())
+                is not page_ownership.Ownership.PAGE
+            )
+            for path in unowned:
+                rel = _relative_markdown(root, path)
+                if rel is not None:
+                    stored[path] = rel
+            yield from ((stored[path], path) for path in sorted(stored))
+            return
+    if not kb.is_dir():
+        return
+    for path in sorted(kb.rglob("*.md")):
+        rel = _relative_markdown(root, path)
+        if rel is not None:
+            yield rel, path
 
 
 def _backfill_plan_id(pages: Iterable[tuple[str, str]]) -> str:

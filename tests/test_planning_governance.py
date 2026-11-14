@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from test_planning_mutation import _manifest
 
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 
 def _write_planning_rule(vault: Path, ceiling: int) -> None:
@@ -523,3 +523,105 @@ def test_a_writer_validates_a_create_against_the_activity_log_as_the_create_comm
         assert "Knowledge Base/log.md" in validated.value.reason
         assert committed.value.code == "RECORD_PUBLICATION_FAILED"
     assert not (vault / collection).exists()
+
+
+def _rotation_due_with_its_archive_withheld(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next log write rotates, and its archive lies in a scope withheld from `external`."""
+    (vault / "Knowledge Base").mkdir(parents=True)
+    entries = "".join(f"## [2026-01-01] note | Notes/n{i}\n\nEntry {i}.\n\n" for i in range(201))
+    (vault / "Knowledge Base" / "log.md").write_text(f"# Log\n\n---\n{entries}", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "64")
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir(parents=True)
+    for name, scope_id, rule_id, paths, ceiling in (
+        ("log", LOG_SCOPE_ID, "01ARZ3NDEKTSV4RRFFQ69G5F04", "log.md", 6),
+        ("archive", "01ARZ3NDEKTSV4RRFFQ69G5F05", "01ARZ3NDEKTSV4RRFFQ69G5F06", "_archive/**", 5),
+    ):
+        (governance / "scopes" / f"{name}.yaml").write_text(
+            f"governance_version: 1\nid: {scope_id}\nname: {name}\npaths: [\"{paths}\"]\n",
+            encoding="utf-8",
+        )
+        (governance / "rules" / f"{name}-external.yaml").write_text(
+            f"governance_version: 1\nid: {rule_id}\nscope_ids: [\"{scope_id}\"]\n"
+            f"audience: external\nceiling: {ceiling}\n",
+            encoding="utf-8",
+        )
+
+
+def test_a_writer_validates_a_create_whose_log_rotation_is_due_as_the_create_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A due rotation adds the log archive to the create's writes. The commit authorizes every
+    planned write before it publishes, so validation that authorizes only the live log names an
+    archive withheld from the caller where the commit answers that the collection is absent."""
+    from granted_writer import grant_writer
+
+    from exomem.planning import create_collection, validate
+    from exomem.structured_collections import CollectionError
+
+    vault = tmp_path / "vault"
+    _rotation_due_with_its_archive_withheld(vault, monkeypatch)
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch,
+        writable_paths=["Planning/**"], capture_paths=["Knowledge Base/Planning"],
+        writable_scopes=[LOG_SCOPE_ID],
+    )("external")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+
+    with request_scope(writer):
+        with pytest.raises(CollectionError) as validated:
+            validate(vault, mode="create", manifest_text=_manifest(), manifest_path=collection)
+        with pytest.raises(CollectionError) as committed:
+            create_collection(vault, collection, _manifest(), why="create planning collection")
+
+    assert committed.value.code == "COLLECTION_NOT_FOUND"
+    assert (validated.value.code, validated.value.reason) == (
+        committed.value.code,
+        committed.value.reason,
+    )
+    assert not (vault / collection).exists()
+
+
+def test_a_writer_validates_a_revision_whose_log_rotation_is_due_as_the_revision_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revision appends its event to the log too, so a due rotation adds the archive to its
+    writes. Validation that authorizes no log write calls valid a revision the commit refuses."""
+    from granted_writer import grant_writer
+
+    from exomem.planning import create_collection, revise, validate
+    from exomem.structured_collections import CollectionError
+
+    vault = tmp_path / "vault"
+    _rotation_due_with_its_archive_withheld(vault, monkeypatch)
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch,
+        writable_paths=["Planning/**"], capture_paths=["Knowledge Base/Planning"],
+        writable_scopes=[LOG_SCOPE_ID],
+    )("external")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    # The owner creates the collection before the rotation is due, so no archive holds history.
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "100000000")
+    with request_scope(owner_principal(surface="library")):
+        create_collection(vault, collection, _manifest(), why="create planning collection")
+        proposal = (vault / collection).read_text(encoding="utf-8").replace(
+            "title: Planning work", "title: Product programme", 1
+        )
+        guards = validate(vault, mode="revision", collection=collection, manifest_text=proposal)[
+            "lifecycle_guards"
+        ]
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "64")
+
+    with request_scope(writer):
+        with pytest.raises(CollectionError) as committed:
+            revise(vault, collection, manifest_text=proposal, **guards, why="rename the programme")
+        with pytest.raises(CollectionError) as validated:
+            validate(vault, mode="revision", collection=collection, manifest_text=proposal)
+
+    assert committed.value.code == "COLLECTION_NOT_FOUND"
+    assert (validated.value.code, validated.value.reason) == (
+        committed.value.code,
+        committed.value.reason,
+    )
+    assert "title: Planning work" in (vault / collection).read_text(encoding="utf-8")

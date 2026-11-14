@@ -9,6 +9,7 @@ boundary. The projector, the importer and the media writers reach the store thre
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -36,8 +37,11 @@ from test_vault_store_write_path import store_rows
 
 from exomem import (
     commands,
+    deferred_index,
+    epistemic_graph,
     extract,
     extraction_parts,
+    graph_drain,
     media_jobs,
     media_store,
     media_worker,
@@ -353,6 +357,34 @@ def test_a_served_start_gives_a_media_file_dropped_on_disk_its_companion_page(
     assert sha(PICTURE_BYTES).encode() in read.owned_bytes(stored, f"{dropped}.md")
     assert [r for r in caplog.records if "HopUnderBoundary" in r.getMessage()] == []
     assert [r for r in caplog.records if "media reconciliation failed" in r.getMessage()] == []
+
+
+def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_debt(
+    stored, service, monkeypatch, caplog
+):
+    """A served start whose graph drain pays file mode's graph debt with whole-vault rebuilds of
+    the sidecar. No store-mode reader opens the sidecar (D9). When such a rebuild could not
+    publish, it left its marker and retried for the life of the process."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    caplog.set_level(logging.INFO)
+    # File mode's debt: the repair its writes queued before the migration, and the barrier that a
+    # stopped rebuild leaves on the sidecar.
+    assert deferred_index.snapshot_graph(stored, limit=8)
+    epistemic_graph.EpistemicGraphIndex(stored).withdraw_availability()
+    activation = server_runtime.LocalRuntimeActivation(stored, fallback_seconds=600.0)
+
+    async def serve():
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            await asyncio.to_thread(activation._thread.join, 120)
+            # Long enough for a drain's first whole-vault pass: its debounce, then its quiet window.
+            await asyncio.sleep(graph_drain.DEBOUNCE_SECONDS + graph_drain.WHOLE_VAULT_SETTLE_SECONDS + 4)
+
+    asyncio.run(serve())
+
+    assert [r.getMessage() for r in caplog.records if "graph rebuild" in r.getMessage()] == []
+    assert deferred_index.graph_full_rebuild_pending(stored) is None
+    assert epistemic_graph.EpistemicGraphIndex(stored).available()
 
 
 def test_the_media_workers_own_frame_write_commits_through_the_served_door(stored, service):

@@ -486,6 +486,15 @@ def comparable(value, *, inbound_links=False):
     return result
 
 
+def same_but_proposed_order(actual, expected):
+    """Whether two answers differ only in the order of their `proposed` findings (a gap below)."""
+    def ordered(value):
+        if not isinstance(value, dict) or not isinstance(value.get("proposed"), list):
+            return value
+        return {**value, "proposed": sorted(value["proposed"], key=lambda row: json.dumps(row, sort_keys=True))}
+    return ordered(actual) == ordered(expected)
+
+
 def test_comparison_ignores_only_inbound_order_and_keeps_duplicate_links():
     """Filesystem walk order must not produce false parity failures or hide a missing link."""
     first = {"path": "Notes/First.md", "line_number": 2}
@@ -512,6 +521,10 @@ def prepare_sample(root, monkeypatch, request, sample):
     dated = sample in ("record_memory:query", "review_memory:plan-progress")
     if sample_arguments.get("validate_only") or name == "observe_memory" or dated:
         request.getfixturevalue("validation_clock")
+    if sample == "maintain_memory:reconcile":
+        # Every call appends a boundary receipt, and reconcile verifies that journal, so a later
+        # observation would verify a longer chain: each one verifies the journal as prepared.
+        monkeypatch.setattr(egress, "emit_boundary_receipt", lambda _collector: None)
     if sample == "schema_memory:census":
         from exomem import relation_census
         monkeypatch.setattr(relation_census, "_cohort_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
@@ -549,23 +562,33 @@ def prepare_sample(root, monkeypatch, request, sample):
     return command, arguments, source_schema
 
 
-#: Each registered read that still breaks the store-mode read contract, and why. Its marker is strict,
-#: so a fix that makes the read pass fails here until its entry goes.
+#: The held listing of a store-mode folder takes each disk entry's identity before it drops the files
+#: at stored pages' paths, so it stats and opens every projected page in the folder. Answers are equal.
+HELD_LISTING_PROBES = (
+    "the store-mode folder listing (reserved_paths.list_generic_tree) stats and opens each projected "
+    "page file for its identity before it leaves the file out; the answer is the store's",
+    frozenset({"page filesystem read"}),
+)
+#: Each registered read that still breaks the store-mode read contract, why, and the only violations
+#: it may show. Its marker is strict, so a fix that makes the read pass fails here until its entry
+#: goes, and any other violation fails it as a regression.
 STORE_READ_GAPS = {
-    "maintain_memory:backfill-ids": (
-        "the page walk stats projections; listing stored pages instead would release withheld names, "
-        "because the terminal egress filter finds vault items on the disk (filter_withheld_entries)"
+    "maintain_memory:fix": (
+        "the store answer holds the same findings, but `proposed` keeps the audit's raw order: file "
+        "mode's walk order (directory enumeration), the store's path order; and its audit lists "
+        f"folders, so: {HELD_LISTING_PROBES[0]}",
+        frozenset({"proposed order differs", *HELD_LISTING_PROBES[1]}),
     ),
-    "maintain_memory:fix": "the fix scan walks and reads page projections",
-    "maintain_memory:reconcile": (
-        "the dry run opens the lexical sidecar, stats projections and raises in store mode"
-    ),
+    **dict.fromkeys((
+        "audit", "browse_memory", "list_directory", "maintain_memory:audit",
+        "manage_memory_file:list", "review_memory:audit",
+    ), HELD_LISTING_PROBES),
 }
 
 
 @pytest.mark.parametrize("sample", [
     pytest.param(key, marks=pytest.mark.xfail(
-        strict=True, raises=ReadSurfaceViolation, reason=STORE_READ_GAPS[key]
+        strict=True, raises=ReadSurfaceViolation, reason=STORE_READ_GAPS[key][0]
     )) if key in STORE_READ_GAPS else key
     for key in sorted(READ_INVOCATIONS)
 ])
@@ -660,7 +683,9 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
                 actual = comparable(answer(command, vault, arguments, source_schema, store=True), inbound_links=links)
             violations = []
             if actual != expected[caller]:
-                violations.append("answer differs")
+                violations.append(
+                    "proposed order differs" if same_but_proposed_order(actual, expected[caller]) else "answer differs"
+                )
             if events["page_io"]:
                 violations.append("page filesystem read")
             if events["sidecars"]:
@@ -678,5 +703,9 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
             })
     record_property("read_surface", json.dumps(observations, default=str))
     failures = [row for row in observations if row["violations"]]
+    tolerated = STORE_READ_GAPS[sample][1] if sample in STORE_READ_GAPS else frozenset()
+    if any(not set(row["violations"]) <= tolerated for row in failures):
+        # Not the known gap: a plain assertion, which the strict marker does not take as expected.
+        raise AssertionError(json.dumps(failures, indent=2, default=str))
     if failures:
         raise ReadSurfaceViolation(json.dumps(failures, indent=2, default=str))

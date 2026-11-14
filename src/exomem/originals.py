@@ -260,6 +260,7 @@ def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | Non
     """
     from . import reserved_paths
     from .vault import FrontmatterError
+    from .vault_store import read as store_read
 
     target = Path(path)
     if target.is_absolute():
@@ -272,13 +273,17 @@ def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | Non
     if not relative or relative != canonical.as_posix() or any(p in {".", ".."} for p in canonical.parts):
         raise ValueError("original path must be canonical and vault-relative")
     binary = vault / target
-    try:
-        reserved_paths.inspect_generic_file(vault, relative)
-        physical = True
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code != "MISSING":
-            raise
-        physical = False
+    if store_read.serves(vault, relative):
+        # The store decides whether a page it owns exists; the file at its path is a projection.
+        physical = store_read.page_exists(vault, relative)
+    else:
+        try:
+            reserved_paths.inspect_generic_file(vault, relative)
+            physical = True
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+            physical = False
     try:
         found = bound_companion(vault, relative)
     except (UnicodeError, FrontmatterError):

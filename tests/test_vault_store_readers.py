@@ -34,6 +34,7 @@ from exomem import __main__ as cli
 from exomem import (
     activation_conventions,
     bm25,
+    capabilities,
     commands,
     context_roles,
     document_containers,
@@ -1046,6 +1047,37 @@ def test_a_write_door_withholds_a_stored_page_that_has_no_projection(stored, wri
     assert withheld == (True, False)
 
 
+@pytest.mark.parametrize("projection", ("present", "deleted", "poisoned"))
+def test_the_terminal_filter_withholds_a_stored_page_under_each_spelling_whatever_its_projection(
+    stored, writer, projection  # noqa: F811
+):
+    """The terminal filter keeps an entry that names no vault item, and it found vault items on the
+    disk only: a stored page that has no file reached a restricted caller under every spelling."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Sources/Secret/**"]')
+    secret = "Knowledge Base/Sources/Secret/Ledger.md"
+    visible = "Knowledge Base/Sources/Open/Notice.md"
+    page = b"---\ntitle: Ledger\ntype: source\ncreated: 2025-01-01\n---\n# Ledger\n\nFigures.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(secret, page), write.PagePut(visible, page),
+    )))
+    for rel in (secret, visible):
+        path = stored / rel
+        path.unlink(missing_ok=True)
+        if projection != "deleted":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(page if projection == "present" else SENTINEL)
+    spellings = (
+        secret, secret.upper(), "knowledge base/sources/secret/ledger.MD", secret.replace(" ", "%20"),
+    )
+
+    with request_scope(EXTERNAL):
+        released = egress.filter_withheld_entries(
+            stored, {"entries": [{"path": name} for name in (*spellings, visible)]}
+        )
+
+    assert released == {"entries": [{"path": visible}]}
+
+
 def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_yet(
     stored, writer  # noqa: F811
 ):
@@ -1067,6 +1099,56 @@ def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_ye
 
     assert deleted["file_count"] == len(pages)
     assert not any(read.holds_file(stored, rel) for rel in pages)
+
+
+#: The public tool shape, which shows a page's links by title (`commands._show_links_by_title`).
+PUBLIC_SHAPE = capabilities.ActiveSurfaceDescriptor(
+    surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+)
+
+
+class LinkShownByStoredPath(AssertionError):
+    """The store-mode read showed the link by its stored path where file mode showed its title."""
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("resolver", [
+    "evicted",
+    pytest.param("resident", marks=pytest.mark.xfail(
+        strict=True, raises=LinkShownByStoredPath,
+        reason="find.borrow_query_resolver compares the file registry's triple with a resolver "
+        "that store mode keys on the snapshot's revision, so a resident resolver never counts as current",
+    )),
+])
+def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolver_is_resident(
+    vault, resolver  # noqa: F811
+):
+    """The public read shows a link by title only through the resident resolver, so a store-mode
+    read that never finds it current shows stored paths where file mode shows titles."""
+    linker = "Knowledge Base/Notes/Linker.md"
+    (vault / linker).write_text(
+        "---\ntitle: Linker\ntype: note\n---\n# Linker\n\nSee [[Knowledge Base/Notes/Beta]] for the table.\n"
+    )
+    build_indexes(vault)
+
+    def body():
+        find_module.evict_resolver_caches(vault)
+        if resolver == "resident":
+            find_module.shared_resolver(vault)
+        with capabilities.active_surface(PUBLIC_SHAPE):
+            return commands.op_read_memory(vault, path=linker)["body"]
+
+    file_mode = body()
+    shown = "[[Beta]]" if resolver == "resident" else "[[Knowledge Base/Notes/Beta]]"
+    if shown not in file_mode:
+        # Not an assertion: the xfail above names only the store-mode difference.
+        pytest.fail(f"file mode no longer shows {shown}: {file_mode!r}")
+    assert migrate_apply(vault) == 0
+
+    store_mode = body()
+    if store_mode != file_mode and store_mode == file_mode.replace("[[Beta]]", "[[Knowledge Base/Notes/Beta]]"):
+        raise LinkShownByStoredPath(store_mode)
+    assert store_mode == file_mode
 
 
 #: Who asks, and whether an active policy withholds a page from the external audience. A caller

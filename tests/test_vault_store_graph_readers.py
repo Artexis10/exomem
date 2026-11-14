@@ -37,6 +37,7 @@ from test_vault_store_readers import (
 from test_vault_store_rederive import PROFILES, project, settle_to_the_end
 
 from exomem import (
+    _held_fs_posix,
     access,
     commands,
     epistemic_graph,
@@ -178,12 +179,29 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
         "page_io", "sidecars", "snapshots", "snapshot_threads", "request_threads", "machinery",
     )}
 
+    bases = (Path(root), Path(root).resolve())
+
+    def relative(path, dir_fd=None):
+        """The call's vault-relative target, also through a descriptor or a held directory's descriptor.
+
+        The kernel names an open descriptor at /proc/self/fd, so this sees descriptor reads on Linux only.
+        """
+        try:
+            if isinstance(path, int):
+                path = os.readlink(f"/proc/self/fd/{path}")
+            elif dir_fd is not None:
+                path = Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / os.fsdecode(path)
+            target = Path(os.fsdecode(path))
+        except (TypeError, OSError):
+            return None
+        for base in bases:
+            if target.is_relative_to(base):
+                return target.relative_to(base).as_posix()
+        return None  # A path outside the vault.
+
     def watching(real, operation):
         def watched(path, *arguments, **keywords):
-            try:
-                rel = Path(path).relative_to(root).as_posix()
-            except (TypeError, ValueError):
-                rel = None  # A descriptor, or a path outside the vault.
+            rel = relative(path, keywords.get("dir_fd"))
             page_owned = (
                 rel in page_paths if page_paths is not None
                 else rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
@@ -234,8 +252,20 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
         for owner_module, name in (
             (os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
             (builtins, "open"), (io, "open"),
+            # The held filesystem binds its own native calls, so patching `os` does not reach them.
+            # Its `_open` stays: the capability probe requires it in `os.supports_dir_fd`, and on
+            # Linux a held open below the root goes through openat2, watched below.
+            (_held_fs_posix, "_stat"), (_held_fs_posix, "_scandir"),
         ):
             patch.setattr(owner_module, name, watching(getattr(owner_module, name), name))
+        real_openat2 = _held_fs_posix._linux_openat2
+        held_open = watching(
+            lambda name, parent, *rest, dir_fd: real_openat2(parent, name, *rest), "openat2"
+        )
+        patch.setattr(
+            _held_fs_posix, "_linux_openat2",
+            lambda parent, name, *rest: held_open(name, parent, *rest, dir_fd=parent),
+        )
         patch.setattr(connection, "store_reader", counting)
         patch.setattr(read, "request_snapshot", requesting)
         patch.setattr(sqlite3, "connect", connecting)

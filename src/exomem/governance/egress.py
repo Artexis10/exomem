@@ -8959,9 +8959,17 @@ def filter_withheld_entries(
         names nothing and the walk below finds the real one. Same payload,
         different answer per platform -- which is the whole thing this
         resolver exists to remove.
+
+        In store mode a stored page may have no file, so the store's names
+        answer first, by the same rule; the disk answers for everything else.
         """
+        from ..vault_store import mode as store_mode
         from ..vault_store import read as store_read
 
+        if store_mode.store_mode_for_reads(vault_root):
+            stored = _stored_spelling(parts)
+            if stored is not None:
+                return stored
         current = vault_root
         real: list[str] = []
         entry: os.DirEntry[str] | None = None
@@ -9002,6 +9010,48 @@ def filter_withheld_entries(
             return "/".join(real) if entry is not None and entry.is_file() else None
         except OSError:
             return None
+
+    # The store's names of each folder, read once per call like `listings`; a folder's case-folded
+    # names are built only when an exact name misses in it.
+    stored_listings: dict[str, set[str]] = {}
+    stored_folded: dict[str, dict[str, str]] = {}
+
+    def _stored_spelling(parts: list[str]) -> str | None:
+        """The page that the store holds at ``parts``, spelled as the store spells it, or `None`.
+
+        The disk walk's rule over the store's names: an exact name first, then a case-folded one.
+        """
+        from ..collection_store import connection as store_connection
+        from ..vault_store import read as store_read
+
+        rel = "/".join(parts)
+        try:
+            with store_read.snapshot(vault_root) as view:
+                if view.page_meta(rel) is None:
+                    real: list[str] = []
+                    for part in parts:
+                        folder = "/".join(real)
+                        names = stored_listings.get(folder)
+                        if names is None:
+                            names = stored_listings[folder] = {child.name for child in view.children(folder)}
+                        if part not in names:
+                            folded = stored_folded.get(folder)
+                            if folded is None:
+                                folded = stored_folded[folder] = {}
+                                for name in sorted(names):
+                                    folded.setdefault(name.casefold(), name)
+                            part = folded.get(part.casefold())
+                            if part is None:
+                                return None
+                        real.append(part)
+                    rel = "/".join(real)
+                    if view.page_meta(rel) is None:
+                        return None
+        except store_connection.CollectionStoreError as error:
+            if error.code != store_read.NOT_ACTIVE:
+                raise
+            return None  # the records stopped saying store mode: the disk answers
+        return rel if store_read.serves(vault_root, rel) else None
 
     def _resolve_uncached(rel_path: str) -> str | None:
         if _tombstoned(rel_path):

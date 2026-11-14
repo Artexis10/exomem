@@ -2351,6 +2351,14 @@ def _validate_collection_create_for_profile(
         # Only a file create appends its event to the log; the store creates a sqlite collection.
         # The event's text never decides write authority: an event keeps the log's metadata.
         audit = _plan_required_audit(root, manifest, "collection", "", "validate")
+        # The commit's own authorization of every planned write, a due rotation's archive
+        # included, so validation refuses a withheld write as the commit does, without naming it.
+        record_governance.precommit_authorize_mutation(
+            root,
+            manifest,
+            None,
+            planned_paths=tuple(write.path.relative_to(root).as_posix() for write in audit.writes),
+        )
         _require_audit_writable(root, audit)
     from .collection_store import summary
 
@@ -2424,6 +2432,20 @@ def _validate_collection_revision_for_profile(
         snapshot,
         semantic_profile=semantic_profile,
     )
+    # A revision appends its event to the log, so validation authorizes the commit's planned
+    # writes and checks the log write as a create's validation does. The snapshot's inventory
+    # already holds the item pages a presentation revision rewrites.
+    audit = _plan_required_audit(root, current, "collection", "", "validate")
+    record_governance.precommit_authorize_mutation(
+        root,
+        current,
+        snapshot,
+        planned_paths=(
+            current.path,
+            *(write.path.relative_to(root).as_posix() for write in audit.writes),
+        ),
+    )
+    _require_audit_writable(root, audit)
     return _with_warnings({
         "valid": True,
         "lifecycle_guards": lifecycle_guards(current, snapshot),
