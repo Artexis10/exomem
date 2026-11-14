@@ -8094,9 +8094,12 @@ def _evict_recall_resolver(root: Path) -> None:
     Scheduling the rebuild here is what makes the eviction cheap for everyone
     except a daemon thread.
     """
+    from . import epistemic_graph
+
     _RECALL_RESOLVER_GENERATIONS[root] = _RECALL_RESOLVER_GENERATIONS.get(root, 0) + 1
     _RECALL_RESOLVER_CACHE.pop(root, None)
     _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+    epistemic_graph.forget_homonyms(root)
     _schedule_recall_resolver_rebuild(root)
 
 
@@ -9044,9 +9047,10 @@ def unload_ram_caches(
 
         lexstore.release_admitted_recall_rows()
     if not keep_recall_resolver:
-        from . import graph_read_publication
+        from . import epistemic_graph, graph_read_publication
 
         graph_read_publication.clear()
+        epistemic_graph.forget_homonyms()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()

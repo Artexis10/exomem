@@ -1192,8 +1192,7 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
         with library_scope(), request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
             started, cpu_started = time.perf_counter(), time.process_time()
             # The pins that the tool dispatcher holds for a store read, and its ownership finish.
-            with read.request_snapshot(root), collection_ownership.request_status_scope(), \
-                    collection_ownership.read_scope(root) as owned:
+            with read.request_snapshot(root), collection_ownership.read_scope(root) as owned:
                 if operation == "participants":
                     with state_paths.resolution_scope():
                         answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
@@ -1220,38 +1219,52 @@ def fitted_slope(samples):
     return {"us_per_link": slope * 1000, "intercept_ms": mean_ms - slope * mean_links}
 
 
-@pytest.mark.parametrize(("caller", "binding"), [
-    ("owner", "none"), ("few withheld", "none"), ("few withheld", "production writer"),
-])
-def test_a_store_read_request_asks_the_lease_coordinator_at_most_once(
-    stored, writer, caller, binding, monkeypatch  # noqa: F811
+@pytest.mark.parametrize("binding", ["none", "production writer"])
+def test_a_fence_moved_during_a_restricted_store_read_refuses_the_read(
+    stored, writer, binding  # noqa: F811
 ):
-    """Each status read is a coordinator round trip; a request's proof and finish must share one.
+    """Defect: the terminal ownership proof reuses the coordinator status that the read took at its
+    start, so a read releases its payload after the coordinator moved the collection store fence.
 
     A served graph read binds no writer; a store-routed read binds the production writer, whose
     proof reads through that writer's connection instead of a reader snapshot.
     """
+    from dataclasses import replace
+
+    from test_managed_collections_migration import OPERATOR_SECRET
+
     from exomem import writer_lease
-    from exomem.collection_store import preview
+    from exomem.collection_store import ownership as collection_ownership
 
     write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
     commit_linked(writer, 20)
     restrict_external(stored, 'tags: ["cohort-0"]')
-    calls = []
-    status = writer_lease.LeaseCoordinatorClient.status
-    monkeypatch.setattr(
-        writer_lease.LeaseCoordinatorClient, "status", lambda client: calls.append(1) or status(client)
-    )
     command = next(command for command in commands.COMMANDS if command.name == "find")
+    leaf, payloads = command.leaf, []
+
+    def leaf_then_fence_moves(*args, **kwargs):
+        payloads.append(leaf(*args, **kwargs))
+        assert collection_ownership._READ.get().initial is not None, "the read proved its ownership"
+        client = collection_ownership._manager(stored).client
+        operator = writer_lease.LeaseCoordinatorClient(replace(client.config, token=OPERATOR_SECRET))
+        fence = client.collection_store_fence()
+        operator.transition_collection_store_fence(
+            expected_generation=fence.generation, store_id="99999999-9999-4999-8999-999999999999",
+        )
+        return payloads[-1]
+
     token = preview._BOUND.set((stored.resolve(), writer, True)) if binding != "none" else None
     try:
-        with request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
-            hits = writer_lease.invoke_command(command, stored, query="lantern", relation_of=CLAIM, limit=15)
+        with request_scope(EXTERNAL), pytest.raises(OpError) as refused:
+            writer_lease.invoke_command(
+                replace(command, leaf=leaf_then_fence_moves), stored,
+                query="lantern", relation_of=CLAIM, limit=15,
+            )
     finally:
         if token is not None:
             preview._BOUND.reset(token)
-    assert hits
-    assert len(calls) == (0 if caller == "owner" else 1)
+    assert payloads and payloads[0], "the leaf answered before the fence moved"
+    assert refused.value.code == "COLLECTION_STORE_UNAVAILABLE"
 
 
 def resolver_maps(resolver):

@@ -14101,6 +14101,18 @@ class _Homonyms:
 _HOMONYM_PATHS: dict[Path, _Homonyms] = {}
 
 
+def forget_homonyms(vault_root: Path | None = None) -> None:
+    """Drop the homonyms kept for ``vault_root``'s resident resolver, or for every vault's.
+
+    A resolver eviction calls this, so the groups and the title index go with the maps they
+    describe. Both are keyed by the reader's spelling of the vault path.
+    """
+    if vault_root is None:
+        _HOMONYM_PATHS.clear()
+    else:
+        _HOMONYM_PATHS.pop(Path(vault_root), None)
+
+
 def _homonym_paths(
     vault_root: Path, resolver: vault_module.WikilinkResolver, check: Callable[[], None],
 ) -> frozenset[str]:
