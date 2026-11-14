@@ -45,7 +45,10 @@ An owner or target change SHALL update all affected binding dependents without r
 
 Every inventory page SHALL identify its observed incarnation-qualified corpus generation and completeness.
 A successful empty inventory SHALL require complete publication proof for the requested scope.
-File-mode proof SHALL cover the live full freshness caption and exclude unpublished external edits.
+File-mode proof SHALL cover the complete canonical raw population through a live seeded raw-input witness and its published epoch.
+The ordinary semantic freshness caption MUST NOT stand for that broader population.
+Every relevant observed event SHALL advance the raw witness before debounce, including same-signature edits and directory topology changes.
+Publication SHALL acknowledge only its covered epoch and preserve later pending events.
 Store-mode proof SHALL cover the pinned revision and canonical ownership of included pages.
 Cold, failed or unavailable proof MUST remain explicit unknown or pending state rather than successful absence.
 Traversal SHALL be live keyset traversal, with each page's generation visible to its consumer.
@@ -55,6 +58,29 @@ Traversal SHALL be live keyset traversal, with each page's generation visible to
 - **WHEN** inventory encounters unpublished external changes
 - **THEN** it reports incomplete observation
 - **AND** it does not claim that a missing identity is absent
+
+#### Scenario: An identified capture enters an excluded raw directory
+
+- **WHEN** a raw Markdown capture appears under a semantically excluded directory or sync-conflict filename
+- **THEN** the raw witness records the observed change without changing ordinary recall membership
+- **AND** inventory cannot claim complete absence before its raw publication includes that input
+
+#### Scenario: A raw directory moves without child events
+
+- **WHEN** the watcher observes a directory move inside or containing a raw root
+- **THEN** background raw publication updates the affected subtree and binding dependents
+- **AND** it does not rely on receiving an event for every child
+
+#### Scenario: An event arrives during publication
+
+- **WHEN** a later raw event arrives after the publisher captured its covered epoch
+- **THEN** acknowledging that publication leaves the later event pending
+
+#### Scenario: Raw collection loses authority
+
+- **WHEN** the watcher stops, reseeds, drops work or cannot enumerate a raw input safely
+- **THEN** inventory withdraws complete-absence proof until complete collection and publication restore it
+- **AND** clearing ordinary semantic pending state does not restore raw authority
 
 #### Scenario: The corpus changes between pages
 

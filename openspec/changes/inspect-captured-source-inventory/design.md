@@ -81,12 +81,45 @@ Order by system, record, revision and canonical Source reference to make travers
 Bind a cursor to the selected scope and reject malformed or foreign-scope cursors.
 
 Each reply names the observed incarnation-qualified generation and whether that observation is complete.
-Reuse the file freshness instance, generation and caption, or the corresponding pinned store identity and revision.
+Use the raw watcher incarnation and published epoch, or the corresponding pinned physical store identity and revision.
 An integer generation alone can repeat after restart and cannot identify a traversal.
-File mode requires a live, current full freshness caption with no unpublished external edits.
+File mode requires a complete, live raw-input publication with no observed input left unpublished.
 Store mode requires the pinned store revision and ownership proof for all included pages.
 Unproved state returns unknown or pending, never a successful empty inventory.
 This stronger absence proof is separate from passage ranking, which verifies its selected Source bytes.
+
+The ordinary vault freshness caption covers semantic scan membership, which excludes some canonical raw Markdown.
+It cannot prove this inventory's population and remains unchanged.
+Attach one raw-input witness to the inventory's existing publisher: watcher incarnation, observed epoch, pending paths and seeded/live state.
+Stamp the immutable inventory with its published raw epoch.
+Every relevant observed raw event advances the epoch before debounce, even when its file signature appears unchanged.
+Publication acknowledges only the epoch it covered; later arrivals remain pending.
+Keep this witness separate from ordinary `external_pending` and its clearance.
+
+Use the existing watcher and reconcile thread, without another signature catalogue, consumer history, watcher or scheduler.
+Raw ingress runs before semantic exclusions and preserves existing suppression, exact-byte publication intents and aborted-intent handling.
+Canonical self-writes publish through the same raw seam even when watchdog echoes are suppressed.
+Directory creation, deletion and moves also affect the raw witness when they are inside, or contain, a raw root.
+Expand changed subtrees off the request path and retire deleted prefixes from retained inputs.
+Do not depend on receiving a child event for every file in a moved directory.
+
+Initial publication requires complete raw collection under the canonical scanner's `lstat`, alias and enumeration rules.
+Share its case-insensitive Markdown membership without semantic skips, including sync-conflict Markdown names.
+Non-Markdown binding targets cannot impersonate canonical pages and are not raw identity dependencies.
+Retain guarded-read signatures beside existing input hashes.
+The existing reconcile turn performs a strict signature census for missed events and reads bodies only for new or changed inputs.
+Delivered same-signature events still require their changed inputs to be checked.
+
+Publish the view and covered witness together under the existing corpus update lock and immutable swap.
+Use a raw-only patch path for excluded inputs; do not send them through semantic parsing or graph and embedding fan-out.
+Inventory borrowing checks its view, raw witness and configuration dependencies, then rechecks the witness in O(1).
+It does not recompute a full map digest or walk directories.
+Stop, restart, reseed, dropped work and failed enumeration withdraw raw authority until a complete publication restores it.
+The existing note-type overlay remains a classification dependency.
+As with the existing watcher, an event cannot be observed before delivery; reconciliation detects missed delivery.
+
+The witness prevents false complete inventory after excluded raw edits.
+A false pending observation delays inventory readiness while the consumer retains its existing backing; no human approval or global serving refusal is added.
 
 Traversal is live keyset traversal, not a multi-request snapshot.
 Each page reports its generation so reconciliation can detect a changed traversal and repeat its bounded pass.
@@ -158,7 +191,7 @@ The maintenance cost is a small immutable inventory view, volatile receipt bookk
 
 ## Risks / Trade-offs
 
-- A cold publication cannot prove absence. Return unknown and let existing publication recovery progress.
+- A cold or invalid raw publication cannot prove absence. Return unknown and let existing publication recovery progress.
 - A lost receipt delays readiness. Reconstruct it in background instead of guessing from counts.
 - A changing corpus invalidates a traversal. Report generations so reconciliation repeats before it claims convergence.
 - Public discovery exposes software and operation metadata. Keep every field content-free and omit private deployment details.

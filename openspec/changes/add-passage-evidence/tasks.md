@@ -24,12 +24,12 @@
 
 ## 4. Latency
 
-- [ ] 4.1 Build the declared reference and qualify disk scoring with one caller and with four; record all attempts and runtime receipts. Design and compare a bounded resident mode only if disk qualification fails.
-- [ ] 4.2 Choose the scoring mode from the measurement, report the mode in the reply, and add the reference and the bars to `request_latency_contract.json`; verify the contract check fails on a missed bar.
-- [ ] 4.3 Implement D8's bounded optional resident path after critique; verify numerical admission across held generations, capture/purge/rollover, honest disk fallback and unchanged ordinary APIs.
-- [ ] 4.4 Compare repaired disk and resident modes on the same frozen reference, instrument and conditions, with pressure/peak-memory observations and a case-level interval.
+- [x] 4.1 Build the declared reference and qualify disk scoring with one caller and with four; record all attempts and runtime receipts. Design and compare a bounded resident mode only if disk qualification fails.
+- [x] 4.2 Choose the scoring mode from the measurement, report the mode in the reply, and add the reference and the bars to `request_latency_contract.json`; verify the contract check fails on a missed bar.
+- [x] 4.3 Implement D8's bounded optional resident path after critique; verify numerical admission across held generations, capture/purge/rollover, honest disk fallback and unchanged ordinary APIs.
+- [x] 4.4 Compare repaired disk and resident modes on the same frozen reference, instrument and conditions, with pressure/peak-memory observations and a case-level interval.
 
 ## 5. Delivery
 
-- [ ] 5.1 Document declared passages and the passage result level in `docs/source-capture.md`.
+- [x] 5.1 Document declared passages and the passage result level in `docs/source-capture.md`.
 - [ ] 5.2 Run `openspec validate --all --strict`, deliver through an independent review, synchronize the deltas into the canonical specs and archive this change in the same delivery.

@@ -8,7 +8,7 @@
 
 - [ ] 2.1 Reuse canonical companion classification over all raw-lane Markdown inputs, retain declaration expectations before masking and update affected binding dependents.
 - [ ] 2.2 Publish immutable identity buckets through the existing corpus generation and copy-on-write updates.
-- [ ] 2.3 Add stronger complete-publication borrowing for inventory without changing ranked passage borrowing.
+- [ ] 2.3 Add a raw-input epoch witness, strict seed/reconcile and raw-only publication path to the existing watcher; borrow it in O(1) without changing ordinary recall.
 - [ ] 2.4 Expose bounded governed inventory through the shared registry with scope-bound keyset cursors and generation reporting.
 
 ## 3. Exact indexing evidence

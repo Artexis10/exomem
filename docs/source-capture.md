@@ -121,6 +121,21 @@ Each hit returns a Source `ref`, optional `source_identity`, `passage_key`, one-
 The span uses character offsets in the Source body after frontmatter. Its fields are `start` and `length`.
 The hash covers the complete declared passage as UTF-8, including when a hit covers only one chunk.
 Several passages from one Source can rank. Hits contain no passage text; callers resolve their own records through the opaque key.
-The reply identifies the embedding `recall_space` and the `scoring_mode`, either `disk` or `resident` for the active resource profile.
+The reply identifies the embedding `recall_space`, its opaque `recall_space_id` and the backend actually used in `scoring_mode`.
 It counts `withheld_chunks` whose indexed text no longer matches their Source.
 Exomem does not refill withheld hits. A request reads at most `limit` distinct selected Sources; terminal checks can reread those Sources.
+
+`EXOMEM_PASSAGE_MATRIX_BYTES` configures the process-wide numerical ceiling for optional passage matrices and replacement scratch.
+Its default is zero. A positive ceiling permits background loading after declared passages are published.
+Current admitted matrices can serve resident scoring. Cold, lagging or capacity-denied state uses disk scoring without waiting for a matrix.
+Reader-held matrices retain their charge after replacement or eviction.
+The [passage reference](../benchmarks/passage-evidence/README.md) records the measured configuration and its limits.
+
+## Cell discovery
+
+A Cloud cell exposes `GET /.well-known/exomem-cell` without requiring a credential or tenant content.
+Clients can compare its configured `cell_id` before sending credentials or content to that destination.
+The response lists implemented operations and their effective limits from the composed command registry.
+It identifies package files observed during server composition and the opaque published recall-space identity.
+An unavailable recall space remains explicit; discovery does not load an encoder.
+Discovery exposes no Source identity, content, credential or local model path.

@@ -98,3 +98,21 @@ Each segment retains warm-up responses, native worker logs, the call ledger, lau
 `frozen-source` preserves source bytes, while before/after manifests detect changes during sampling.
 The current reference covers file mode, the declared synthetic load, and the MCP worker socket boundary.
 It does not qualify store startup, production load, or retrieval quality.
+
+The [2026-11-14 qualification](qualification-2026-11-14.json) records the frozen source, artifact checksums, runtime conditions and resource observations.
+The [case differences](paired-case-differences-2026-11-14.csv) retain all 40 query clusters for each caller condition.
+
+| Mode | Single-caller p95 | Four-caller p95 |
+| --- | ---: | ---: |
+| Disk | 282.329 ms | 1,511.468 ms |
+| Resident, 512 MiB matrix ceiling | 156.947 ms | 431.851 ms |
+
+All 1,200 measured calls succeeded with 30 hits, zero withheld chunks and the requested scoring mode.
+The disk-first rule selects resident for this reference because only resident meets both bars.
+Its mean differences are −137.529 ms and −790.687 ms for one and four callers.
+The corresponding 95% intervals are [−144.224, −132.668] ms and [−829.041, −752.318] ms, conditional on the captured rounds.
+
+The container peak reached 3 GiB, including substantial file cache.
+The final segment recorded 2,352 memory-max events and zero OOM events or kills.
+Resource observations include startup and warm-up; the peak remains cumulative across segments.
+The qualification covers source `0e5a3bc84`, the file-mode reference and the real served query encoder with synthetic corpus vectors.
