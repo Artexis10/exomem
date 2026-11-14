@@ -58,13 +58,43 @@ More than one passage of one Source MAY appear.
 The passage level SHALL honour `limit` up to 200 and SHALL refuse a larger value with an error that names the bound.
 The passage path SHALL NOT run the lexical lane, graph expansion, page fusion, rerank or usage boosts.
 A request that combines the passage level with an option that changes ranking SHALL be refused before retrieval, with an error that names the option to remove.
-A passage request SHALL read at most `limit` Source pages and SHALL NOT read a page or the frontmatter of a Source that is not in its results.
-When the cell cannot admit a passage request's model work at once, it SHALL refuse the request with a busy outcome and a retry hint, and SHALL NOT queue it.
+A passage request SHALL require whole-namespace content authority before it reads candidate metadata or encodes the query.
+Eligibility SHALL use one proved published corpus generation and maintained eligibility indexes, without a corpus build, offline scan or unrelated pending-page hydration.
+The request SHALL read at most `limit` distinct canonical Source pages, selected before byte verification, including selected pages whose chunks are later withheld.
+It SHALL NOT read the body or frontmatter of an unselected Source, and SHALL NOT refill the selection after withholding.
+A cold, contended or unproved publication SHALL return a visible unavailable outcome before encoding or Source hydration.
+The outcome SHALL name the existing publication or warm-up action that can make the request ready, and SHALL promise a retry only when publication can progress.
+When the cell cannot admit a passage request's model work at once, it SHALL refuse with a busy outcome and a retry hint.
+The request SHALL NOT wait for an admission slot. Admitted requests MAY await the existing serialized model execution turn within their bounded admission capacity.
 
 #### Scenario: Page reads do not grow with the vault
 
 - **WHEN** a passage request with `limit` 5 runs against a vault with 200 Sources that have declared passages
-- **THEN** the request reads at most 5 Source pages
+- **THEN** the public request reads at most 5 distinct canonical Source pages, including terminal filtering
+- **AND** it reads no body or frontmatter of an unselected Source
+
+#### Scenario: A restricted caller requests passages
+
+- **WHEN** a caller without whole-namespace content authority requests passage results
+- **THEN** the request refuses before query encoding or Source reads
+- **AND** the refusal names the authority needed or the ordinary page search alternative
+
+#### Scenario: Publication is unavailable
+
+- **WHEN** the published corpus is absent, its proof is stale, or its publication lock is busy
+- **THEN** the request returns unavailable without a corpus build, query encoding or Source reads
+- **AND** ordinary publication can make the same request ready
+
+#### Scenario: An offline caller has no publisher
+
+- **WHEN** a passage request has no proved publication and no publisher that can make progress
+- **THEN** the outcome names the service or warm-up action needed, rather than an unconditional retry
+
+#### Scenario: A selected Source fails byte verification
+
+- **WHEN** a selected Source has stale or malformed passage bytes
+- **THEN** its chunks are withheld and counted
+- **AND** the request reads no replacement Source beyond its original selection
 
 #### Scenario: The cell is busy
 

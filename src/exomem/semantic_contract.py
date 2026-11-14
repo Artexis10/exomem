@@ -2114,6 +2114,88 @@ class LinkSnapshot:
     reference_owners: Mapping[str, tuple[str, ...]]
 
 
+@dataclass(frozen=True, slots=True)
+class PublishedCorpusSnapshot:
+    """Proved resident pages; a store revision covers only store-owned paths."""
+
+    _corpus: SemanticCorpusContext = field(repr=False)
+    census: tuple
+    checkpoint: freshness.FreshnessCheckpoint | None
+    _owns: Callable[[str], bool] | None = field(default=None, repr=False)
+
+    def pages(self) -> Iterator[tuple[str, SemanticPageState]]:
+        """Expose only pages covered by this publication's proof."""
+        for path, page in self._corpus.pages.items():
+            if self._owns is None or self._owns(path):
+                yield path, page
+
+
+def _resident_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple[tuple, SemanticCorpusContext], freshness.FreshnessCheckpoint | None] | None:
+    """Share configuration, store revision and registry proofs without a corpus walk."""
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+        language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+    if (
+        entry is not None
+        and language_hash == f"{language.schema_version}:{language.content_hash}"
+        and _config_census(root) == _stored_config_census(entry[0])
+        and (entry[1].registry.core_version, entry[1].registry.extension_hash)
+        == (registry.core_version, registry.extension_hash)
+    ):
+        return entry, caption
+    return None
+
+
+def _published_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    checkpoint: freshness.FreshnessCheckpoint,
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple, SemanticCorpusContext] | None:
+    """An ordinary event hit also requires its exact publication caption."""
+    resident = _resident_corpus_entry(root, cache_key, registry, language)
+    return resident[0] if resident is not None and resident[1] == checkpoint else None
+
+
+def borrow_published_corpus(vault_root: Path) -> PublishedCorpusSnapshot | None:
+    """Borrow a proved publication without building, walking or waiting for its publisher."""
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled() or not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
+        return None
+    try:
+        owned = _store_census_owns(root)
+        if owned is not None:
+            resident = _resident_corpus_entry(
+                root, _corpus_cache_key(root),
+                relation_registry.core_registry(), semantic_language_registry.core_registry(),
+            )
+            if resident is None:
+                return None
+            entry, _caption = resident
+            return PublishedCorpusSnapshot(entry[1], entry[0], None, owned)
+        if not freshness.is_live(root, "vault"):
+            return None
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if checkpoint.triple is None:
+            return None
+        entry = _published_corpus_entry(
+            root, _corpus_cache_key(root), checkpoint,
+            relation_registry.core_registry(), semantic_language_registry.core_registry(),
+        )
+        if entry is None or freshness.consumer_checkpoint(root, "vault") != checkpoint:
+            return None
+        return PublishedCorpusSnapshot(entry[1], entry[0], checkpoint)
+    finally:
+        _CORPUS_CONTEXT_UPDATE_LOCK.release()
+
+
 def borrow_link_snapshot(
     vault_root: Path, *, declined: dict[str, int] | None = None
 ) -> LinkSnapshot | None:
@@ -3582,24 +3664,10 @@ def _build_corpus_context_with_census(
         cache_key = _corpus_cache_key(root)
         event_checkpoint = freshness.consumer_checkpoint(root, "vault")
         if event_checkpoint.triple is not None:
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                event_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
-                cached_language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
-            if (
-                event_entry is not None
-                and cached_checkpoint == event_checkpoint
-                and cached_language_hash == f"{language.schema_version}:{language.content_hash}"
-                and _config_census(root) == _stored_config_census(event_entry[0])
-                and (
-                    event_entry[1].registry.core_version,
-                    event_entry[1].registry.extension_hash,
-                )
-                == (
-                    relation_definitions.core_version,
-                    relation_definitions.extension_hash,
-                )
-            ):
+            event_entry = _published_corpus_entry(
+                root, cache_key, event_checkpoint, relation_definitions, language
+            )
+            if event_entry is not None:
                 log.info(
                     "semantic corpus context event-hit pages=%d",
                     len(event_entry[1].pages),

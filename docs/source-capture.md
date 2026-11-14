@@ -17,10 +17,12 @@ The identity is local to the vault. Revisions remain separate Sources; capture d
       "title": "Captured record",
       "content": "Original text",
       "source_kind": "session",
-      "source_identity": {
-        "system": "archive",
-        "record_id": "item-4",
-        "revision": "r2"
+      "options": {
+        "source_identity": {
+          "system": "archive",
+          "record_id": "item-4",
+          "revision": "r2"
+        }
       }
     },
     "_meta": {"io.exomem/idempotency_key": "capture-attempt-17"}
@@ -69,3 +71,55 @@ The server rechecks authority before commit and returns `SOURCE_IDENTITY_FORBIDD
 The same authority check precedes cached replay and invocation-key mismatch checks.
 Restricted callers can continue ordinary capture under its existing authority rules.
 Existing Sources need no backfill, and omitting identity preserves existing capture behavior.
+
+## Declared passages
+
+A text capture can declare ordered records through `options.passages` instead of `content`.
+Each record contains exactly `key` and `text`:
+
+```json
+{
+  "title": "Harbour survey",
+  "source_kind": "session",
+  "options": {
+    "source_identity": {"system": "archive", "record_id": "survey", "revision": "r3"},
+    "passages": [
+      {"key": "record-42", "text": "The lantern uses oil."},
+      {"key": "record-43", "text": "The keeper records oil deliveries."}
+    ]
+  }
+}
+```
+
+A capture accepts 1–2,000 passages. Keys must be unique within the capture and contain 1–128 UTF-8 bytes.
+Text must be nonempty UTF-8, without edge whitespace, carriage returns or blank lines. Validation refuses invalid declarations before writing.
+Exomem preserves the text exactly. Keys and text participate in identity reconciliation; a changed key conflicts with an existing identity.
+
+The canonical Source body holds a JSON key block before its Capture section. Frontmatter holds only the passage count.
+File mode and store mode use those same canonical bytes. Keys never contribute to lexical text, vectors or scores.
+Each passage supplies its own chunks. A long passage splits at the existing chunk cap and retains one key and ordinal.
+
+## Passage search
+
+`search_memory` accepts `options.result_level: "passage"`:
+
+```json
+{
+  "query": "lantern oil",
+  "limit": 5,
+  "tags": ["public"],
+  "options": {"result_level": "passage"}
+}
+```
+
+Passage search requires whole-namespace content authority. Restricted callers receive `PASSAGE_AUTHORITY_REQUIRED` and can use ordinary page search.
+The service must first publish its corpus through the maintained warm-up. A cold, contended or invalid publication returns `PASSAGE_INDEX_UNAVAILABLE`.
+The request never builds the corpus. Filters and relations select eligible Sources before dense ranking.
+Passage search accepts limits from 1 to 200 and refuses page-ranking options such as reranking, graph expansion or compilation boosts.
+
+Each hit returns a Source `ref`, optional `source_identity`, `passage_key`, one-based `passage_ordinal`, `passage_hash`, `span` and dense `score`.
+The span uses character offsets in the Source body after frontmatter. Its fields are `start` and `length`.
+The hash covers the complete declared passage as UTF-8, including when a hit covers only one chunk.
+Several passages from one Source can rank. Hits contain no passage text; callers resolve their own records through the opaque key.
+The reply also identifies the embedding `recall_space` and counts `withheld_chunks` whose indexed text no longer matches their Source.
+Exomem does not refill withheld hits. A request reads at most `limit` distinct selected Sources; terminal checks can reread those Sources.

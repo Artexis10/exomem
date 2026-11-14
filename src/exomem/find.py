@@ -1476,6 +1476,9 @@ def _with_catalog_scope(function):
             # Direct store readers pin the same host constants as dispatched read commands.
             state_paths.resolution_scope() if lexstore.store_catalogue() else ExitStack(),
         ):
+            # Passage selection owns its published view; generic pending hydration opens unselected Sources.
+            if kwargs.get("result_level") == "passage":
+                return function(vault_root, *args, **kwargs)
             if (
                 not _managed_reader() or not freshness.event_indexes_enabled()
                 or lexstore.backend() == "python"

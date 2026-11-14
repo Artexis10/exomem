@@ -17,8 +17,10 @@
 - [ ] 3.3 Bind each result to the current page; verify that a chunk with stale stored text is withheld and counted.
 - [ ] 3.4 Apply eligibility before ranking; verify that a tag filter excludes a better match and that the results still fill from eligible Sources.
 - [ ] 3.5 Refuse a ranking option combined with the passage level, and a `limit` above 200; verify each error names what to change.
-- [ ] 3.6 Derive the set of Sources with declared passages once for each published state of the corpus; verify that a request reads at most `limit` Source pages.
+- [ ] 3.6 Borrow a proved publication without building, walking or waiting; derive declaration membership once per published state. Verify the public request reads at most `limit` distinct selected Sources, including filters, relations, terminal filtering and withheld candidates in both storage modes.
 - [ ] 3.7 Refuse a passage request at once when model admission is full; verify the busy outcome and its retry hint.
+- [ ] 3.8 Require whole-namespace content authority before candidate work; verify refusal before encoding or Source reads, including an internal allow-all admission predicate.
+- [ ] 3.9 Verify cold, contended and stale publications return unavailable without Source reads or encoding; cover store revision changes without Markdown projections and successful normal publication afterward.
 
 ## 4. Latency
 

@@ -97,11 +97,12 @@ A Source is append-only, so the derived table for a page is cached in memory aga
 
 `search_memory` accepts `result_level: "passage"`. The path is:
 
-1. Resolve eligibility as today. Filters, governance scope and relation scope produce the allowed paths.
-2. Embed the query once.
-3. Select the top chunks over the allowed Sources that have declared passages, with `EmbeddingIndex.select_chunks` and without the collapse to one chunk for each file. The set of Sources with declared passages is derived once for each published state of the corpus, not on each request.
-4. Derive each selected chunk's passage and span from its page, and check the binding of D4.
-5. Return the results in score order.
+1. Require existing whole-namespace content authority, as durable identity capture does.
+2. Borrow one proved published corpus without waiting for its publisher or building it; resolve filters and relations through maintained indexes.
+3. Embed the query once.
+4. Select the top chunks over allowed Sources with declared passages, without collapsing one file's chunks. Derive declaration membership once per published state.
+5. Derive each selected chunk's passage and span from its page, and check the binding of D4.
+6. Return the results in score order, without replacing withheld chunks.
 
 Each result carries: the Source reference, the `source_identity`, the passage key, the passage ordinal, the hash of the whole passage's text, the span of the matched chunk and the cosine score.
 The reply also names the recall space, because a score compares only inside one space, and the number of withheld chunks.
@@ -112,10 +113,25 @@ The passage hash is SHA-256 of the passage text as UTF-8. Because of D1 it equal
 The path runs no lexical lane, no graph, no fusion, no rerank and no usage boost.
 A request that combines the passage level with an option that changes ranking is refused with an error that names the option to remove. A silent ignore would let a caller believe that the option took effect.
 
-A passage request reads at most `limit` Source pages, the ones in its results. It reads no page and no frontmatter of any other Source.
-When the cell cannot admit the request's model work at once, it refuses the request with a busy outcome and a retry hint. It does not queue the request.
+A public passage request reads at most `limit` distinct canonical Source pages from its original selection, including pages whose chunks fail D4.
+Terminal filtering can reread selected pages; the latency proof includes those physical reads. No stage reads an unselected Source body or frontmatter.
+The passage branch retains existing policy and store snapshot scopes and terminal release filtering, while skipping the generic pending-page hydration path.
+Its corpus borrower verifies the existing semantic registries and configuration census, plus the event publication caption in file mode.
+In store mode, the pinned store revision proves store-owned pages only; the borrowed view excludes unowned filesystem pages without event proof.
+The borrower adds no publication or stored state.
+Cold, contended or unproved state returns unavailable before encoding or Source reads. The outcome names the publisher or warm-up action needed.
+It promises retry only when existing publication can progress; an offline caller without a publisher gets an actionable instruction.
+Unrelated pending writes do not by themselves prevent use of a proved published generation; selected-byte verification still applies.
+When the cell cannot admit model work at once, it refuses with a busy outcome and a retry hint, without waiting for admission.
+Admitted requests use the existing serialized execution turn. Execution contention alone does not consume another admission or cause a busy refusal.
 
-The passage path lives in its own module. `find.py` gets only the dispatch to it.
+The passage path lives in its own module. `find.py` owns the dispatch and its bounded snapshot-wrapper branch.
+
+Whole-namespace authority is a product restriction for this bounded result level, not a new governance rule.
+It prevents per-candidate content admission from reading the whole corpus. A refusal costs a non-owner passage search; ordinary page search remains available.
+The service owner keeps passage search. The alternative requires new published admission machinery and broader ownership changes.
+
+Design source: the engineering primary-source roster's context-engineering and citation rows support minimal published evidence and separate byte binding from claim support.
 
 ### D6. Filters apply before ranking, and no new attribute is added
 
@@ -134,9 +150,23 @@ A Cloud cell scores vectors from sidecar rows on disk today. The measured page p
 If the passage path cannot meet the bar that way, it holds the active space's passage matrix in memory when the resource policy admits its size, and it reports which mode served the request.
 The implementation measures both modes on the reference before it chooses.
 
+The maintained MCP read runner already supplies the managed worker, isolated lease coordinator and terminal-response observer.
+Its general fixture does not declare passages or issue concurrent calls; a passage-specific driver adds only those missing pieces.
+The reference profile lives in `benchmarks/passage-evidence/profile.json` and reuses the pinned public prose of the recall reference.
+It generates 1,500 Sources with 27 short passages each, verifies the stored declaration and chunk counts, and records corpus and runtime digests.
+As in the recall reference, deterministic corpus vectors avoid spending preparation time on model throughput; every measured query uses the real served encoder.
+This proves latency and availability, not retrieval quality. Gate A remains the separate quality evidence.
+The same 40 queries run three times in each mode and caller condition, after untimed warm-up.
+Both modes use the same corpus, encoder, two-CPU limit and MCP worker-socket boundary.
+Each four-caller batch starts together, and its caller times include execution waiting. Every terminal outcome stays in the sample set.
+A mode passes only if all calls succeed and both strict p95 bars pass. The report includes per-query mode differences and their case-level confidence interval.
+Mode order alternates between repeats. Failed preparation or incomplete samples remain visible and cannot establish a passing mode.
+The added driver is maintenance for this capability's fixture and concurrency protocol; it reuses the existing observer and worker rather than creating another instrument.
+
 ## Risks / Trade-offs
 
-- **Deriving spans at read time costs a page read for each Source in the results.** → At most `limit` Sources for each request, cached against the page's identity; the latency bar of D7 includes it.
+- **Deriving spans costs Source reads.** → At most `limit` selected Sources per public request, including withheld candidates; D7 includes all physical reads.
+- **Non-owner callers cannot use passage search.** → The result level requires whole-namespace authority; ordinary page search keeps its existing governance behavior.
 - **One more rule in the search body.** → It applies only to a Source with a passage count in its frontmatter, and a test proves that a key gives no search signal in both storage modes.
 - **Dense-only ranking can miss an exact term.** → One measurement on a production-sized corpus showed no difference from another dense engine; a lexical signal enters only on a measured gain.
 - **A resident matrix costs memory in each cell.** → About 137 MiB for 33,000 passages at 1,024 dimensions; admission goes through the resource policy, and the disk mode stays as the fallback.

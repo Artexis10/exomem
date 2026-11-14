@@ -7,6 +7,7 @@ import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
@@ -15,9 +16,13 @@ from fastmcp import Client
 from test_vault_store_embeddings import install_encoder
 
 from exomem import (
+    cli_ops,
     commands,
     embeddings,
+    find,
     find_corpus,
+    freshness,
+    lexstore,
     memory_refs,
     readiness,
     reserved_paths,
@@ -27,6 +32,18 @@ from exomem import (
     server,
 )
 from exomem import vault as vault_module
+
+
+def publish_reference(vault):
+    """Prepare the maintained corpus and catalog before a service request."""
+    # These are the two fixed freshness scopes of the search protocol.
+    for scope in ("kb", "vault"):
+        freshness.seed(
+            vault, scope,
+            [(str(path), freshness.stat_signature(path)) for path in find._corpus_walk(vault, scope)],
+        )
+    assert lexstore.get_store(vault).rebuild_atomic()
+    semantic_contract.warm_corpus_context(vault)
 
 
 @pytest.fixture
@@ -71,6 +88,7 @@ def test_two_records_of_one_source_rank_with_verifiable_hashes_and_spans(vault, 
     assert captured.get("success", True), captured
     assert "error" not in captured, captured
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     before = len(encoder.texts)
     reply = call(
         "search_memory",
@@ -104,6 +122,36 @@ def test_two_records_of_one_source_rank_with_verifiable_hashes_and_spans(vault, 
     assert reply["withheld_chunks"] == 0
 
 
+def test_four_admitted_public_requests_all_complete(vault, passage_tools, monkeypatch):
+    """Reader contention must not look like a busy model or unavailable publication."""
+    call, encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Concurrent records", source_kind="session",
+        passages=[{"key": "record", "text": "The lantern burns oil."}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    start = threading.Barrier(4)
+
+    def slow_encode(texts, *, is_query=False):
+        # Stand in for a nonzero model turn; this is admission proof, not a latency measurement.
+        threading.Event().wait(0.02)
+        return encoder(texts, is_query=is_query)
+
+    monkeypatch.setattr(embeddings, "embed_texts", slow_encode)
+
+    def search(_number):
+        start.wait(timeout=10)
+        return call(
+            "search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        replies = list(pool.map(search, range(4)))
+    assert all("error" not in reply and len(reply.get("hits", [])) == 1 for reply in replies), replies
+
+
 def test_long_passage_splits_into_adjacent_exact_spans(vault, passage_tools):
     """Whitespace normalization or an ordinal per chunk would break caller record verification."""
     call, _encoder = passage_tools
@@ -118,6 +166,7 @@ def test_long_passage_splits_into_adjacent_exact_spans(vault, passage_tools):
     )
     assert "error" not in captured, captured
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     reply = call(
         "search_memory", {"query": "word400", "limit": 10, "options": {"result_level": "passage"}}
     )
@@ -161,6 +210,7 @@ def test_keys_have_no_indexed_text_vector_or_score_signal(vault, passage_tools):
         )
         assert "error" not in saved, saved
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     reply = call(
         "search_memory",
         {"query": "lantern oil", "limit": 2, "options": {"result_level": "passage"}},
@@ -211,6 +261,7 @@ def test_stale_published_chunk_is_withheld_and_counted(vault, passage_tools):
     )
     assert "error" not in saved, saved
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     before = call("search_memory", {"query": "lantern", "options": {"result_level": "passage"}})
     [hit] = before["hits"]
     index = embeddings.get_embedding_index(vault)
@@ -246,6 +297,7 @@ def test_tag_eligibility_precedes_selection_and_fills_limit(vault, passage_tools
         )
         assert "error" not in saved, saved
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     all_hits = call(
         "search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
     )
@@ -389,6 +441,7 @@ def test_ordinary_source_chunks_remain_unchanged(vault, passage_tools):
     )
     assert "error" not in saved, saved
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     index = embeddings.get_embedding_index(vault)
     before = {
         path: (index.stored_chunks_for(path), index.stored_text_vectors(path)[0])
@@ -429,6 +482,7 @@ def test_maximum_declaration_keeps_every_128_byte_key(vault, passage_tools):
     )
     assert "error" not in saved, saved
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     reply = call(
         "search_memory",
         {"query": "record 1999", "limit": 200, "options": {"result_level": "passage"}},
@@ -505,6 +559,7 @@ def test_inconsistent_declaration_is_withheld_and_counted(vault, passage_tools, 
     )
     assert "error" not in saved, saved
     embeddings.index_incremental(vault)
+    publish_reference(vault)
     path = vault / saved["source"]["path"]
     source = path.read_text()
     assert "declared_passages: 2" in source
@@ -527,8 +582,6 @@ def test_passage_request_reads_only_selected_sources_and_observes_new_capture(
     vault, passage_tools, monkeypatch, record_property
 ):
     """A per-request header scan costs the whole vault; a stale set hides the next capture."""
-    from exomem.governance.principal import owner_principal, request_scope
-
     call, _encoder = passage_tools
     saved = commands.op_capture_source(
         vault,
@@ -546,7 +599,7 @@ def test_passage_request_reads_only_selected_sources_and_observes_new_capture(
             template.replace(identity, str(uuid4()))
         )
     embeddings.index_incremental(vault)
-    semantic_contract.build_corpus_context(vault)
+    publish_reference(vault)
     warm = call(
         "search_memory", {"query": "lantern", "limit": 5, "options": {"result_level": "passage"}}
     )
@@ -564,20 +617,21 @@ def test_passage_request_reads_only_selected_sources_and_observes_new_capture(
             reads.append(str(path))
         return open_binary(root, path, **kwargs)
 
-    with monkeypatch.context() as patch, request_scope(owner_principal()):
+    with monkeypatch.context() as patch:
         patch.setattr(reserved_paths, "read_generic_bytes", count_read)
         patch.setattr(reserved_paths, "open_generic_binary", count_header)
-        reply = commands.op_ask_memory(
-            vault,
-            query="lantern",
-            limit=5,
-            result_level="passage",
+        reply = call(
+            "search_memory",
+            {"query": "lantern", "limit": 5, "options": {"result_level": "passage"}},
         )
     assert len(reply["hits"]) == 5, reply
     record_property("declared_sources", 200)
     record_property("source_reads", len(reads))
-    assert len(reads) <= 5, reads
-    assert set(reads) <= {hit["path"] for hit in reply["hits"]}
+    record_property("distinct_sources_read", len(set(reads)))
+    assert len(set(reads)) <= 5, reads
+    assert set(reads) <= {
+        memory_refs.resolve_identifier_read_only(vault, hit["ref"]) for hit in reply["hits"]
+    }
     new = call(
         "save_source",
         {
@@ -589,13 +643,18 @@ def test_passage_request_reads_only_selected_sources_and_observes_new_capture(
     assert "error" not in new, new
     embeddings.index_incremental(vault)
     reads.clear()
-    with monkeypatch.context() as patch, request_scope(owner_principal()):
+    with monkeypatch.context() as patch:
         patch.setattr(reserved_paths, "read_generic_bytes", count_read)
         patch.setattr(reserved_paths, "open_generic_binary", count_header)
-        reply = commands.op_ask_memory(vault, query="meridian", limit=1, result_level="passage")
+        reply = call(
+            "search_memory",
+            {"query": "meridian", "limit": 1, "options": {"result_level": "passage"}},
+        )
     assert [hit["passage_key"] for hit in reply["hits"]] == ["new"], reply
-    assert len(reads) <= 1, reads
-    assert set(reads) <= {hit["path"] for hit in reply["hits"]}
+    assert len(set(reads)) <= 1, reads
+    assert set(reads) <= {
+        memory_refs.resolve_identifier_read_only(vault, hit["ref"]) for hit in reply["hits"]
+    }
     record_property("source_reads_after_capture", len(reads))
 
 
@@ -626,3 +685,96 @@ def test_full_model_admission_refuses_passage_request_without_encoding(passage_t
         finally:
             release.set()
         holder.result()
+
+
+def test_non_owner_cannot_bypass_passage_authority_with_an_admission_predicate(
+    vault, passage_tools, monkeypatch
+):
+    """A caller-supplied allow-all predicate must not expose hidden Source metadata."""
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    _call, encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Bound records", source_kind="session",
+        passages=[{"key": "record", "text": "The lantern burns oil."}],
+    )
+    parent = Path(saved["source"]["path"]).parent.as_posix() + "/"
+    reads = []
+    original = reserved_paths.read_generic_bytes
+
+    def counted(root, path, **kwargs):
+        if str(path).startswith(parent):
+            reads.append(str(path))
+        return original(root, path, **kwargs)
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", counted)
+    before = len(encoder.texts)
+    reader = RequestPrincipal(audience_id="principal:reader", surface="cli", resolved=True)
+    with request_scope(reader):
+        with pytest.raises(cli_ops.OpError) as public:
+            commands.op_ask_memory(vault, query="lantern", result_level="passage")
+        with pytest.raises(cli_ops.OpError) as internal:
+            find.find(vault, query="lantern", result_level="passage", admit_path=lambda path: True)
+    assert public.value.code == internal.value.code == "PASSAGE_AUTHORITY_REQUIRED"
+    assert reads == []
+    assert len(encoder.texts) == before
+
+
+@pytest.mark.parametrize("state", ["cold", "configuration", "publisher"])
+def test_unavailable_publication_reads_no_source_and_encoding_waits_for_publication(
+    vault, passage_tools, monkeypatch, state
+):
+    """A cold or invalid publication must not turn a request into a corpus rebuild."""
+    call, encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Published record", source_kind="session",
+        passages=[{"key": "record", "text": "The lantern burns oil."}],
+    )
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    if state == "cold":
+        semantic_contract.reset_corpus_context_cache()
+    elif state == "configuration":
+        configured = semantic_contract._config_inputs(vault)[0]
+        configured.parent.mkdir(parents=True, exist_ok=True)
+        configured.write_text("{}\n")
+    ready, release = threading.Event(), threading.Event()
+
+    def publish_elsewhere():
+        with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:
+            ready.set()
+            assert release.wait(10)
+
+    parent = Path(saved["source"]["path"]).parent.as_posix() + "/"
+    reads = []
+    original = reserved_paths.read_generic_bytes
+
+    def counted(root, path, **kwargs):
+        if str(path).startswith(parent):
+            reads.append(str(path))
+        return original(root, path, **kwargs)
+
+    before = len(encoder.texts)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(publish_elsewhere) if state == "publisher" else None
+        if holder is not None:
+            assert ready.wait(5)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(reserved_paths, "read_generic_bytes", counted)
+                reply = call(
+                    "search_memory", {"query": "lantern", "options": {"result_level": "passage"}}
+                )
+        finally:
+            release.set()
+            if holder is not None:
+                holder.result()
+    assert "PASSAGE_INDEX_UNAVAILABLE" in str(reply), reply
+    assert "warm-up" in str(reply), reply
+    assert reads == []
+    assert len(encoder.texts) == before
+    publish_reference(vault)
+    ready_reply = call(
+        "search_memory", {"query": "lantern", "options": {"result_level": "passage"}}
+    )
+    assert [hit["passage_key"] for hit in ready_reply["hits"]] == ["record"], ready_reply

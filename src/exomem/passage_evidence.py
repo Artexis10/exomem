@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_ops,
     embeddings,
+    freshness,
     memory_refs,
     note_types,
     recall_space,
@@ -187,11 +189,11 @@ _DECLARED_SOURCES: OrderedDict[Path, tuple[tuple, tuple, frozenset[str]]] = Orde
 _DECLARED_SOURCES_LOCK = threading.Lock()
 
 
-def declared_sources(vault_root: Path) -> frozenset[str]:
+def declared_sources(vault_root: Path, publication) -> frozenset[str]:
     """Project already-parsed metadata once per published semantic corpus state."""
     from . import semantic_contract
 
-    corpus, census = semantic_contract._build_corpus_context_with_census(vault_root)
+    census = publication.census
     types = note_types.Basis(vault_root)
     dependency = types.dependency
     root = vault_root.resolve()
@@ -202,7 +204,7 @@ def declared_sources(vault_root: Path) -> frozenset[str]:
             return cached[2]
         paths = frozenset(
             path
-            for path, page in corpus.pages.items()
+            for path, page in publication.pages()
             if "declared_passages" in page.frontmatter
             and types.selects(page.page_type, note_types.captured_source)
         )
@@ -216,7 +218,17 @@ def declared_sources(vault_root: Path) -> frozenset[str]:
 
 def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
     """Resolve eligibility first, select chunks once, then verify their byte binding."""
-    from . import find as find_module
+    from . import source_capture
+
+    # Whole-namespace authority avoids per-candidate body admission; non-owners retain page search.
+    try:
+        source_capture.require_authority(vault_root)
+    except source_capture.SourceCaptureError:
+        raise cli_ops.OpError(
+            "PASSAGE_AUTHORITY_REQUIRED",
+            "Passage search requires whole-namespace content authority.",
+            "Use an authorized service connection, or use ordinary page search.",
+        ) from None
 
     limit = request["limit"]
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
@@ -235,17 +247,40 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
         }
     )
     plan = structured_filters.compile_filter(request["filters"], shortcuts=shortcuts)
-    managed = find_module._managed_reader()
-    pending = find_module._request_pending_coverage(vault_root, managed=managed, timings=None)
-    snapshot = find_module.FreshnessSnapshot(vault_root, pending=pending)
+    # Admission refuses immediately; admitted encodes share the existing serialized execution turn.
+    with runtime_resources.model_admission():
+        try:
+            return _find_admitted(vault_root, request, plan)
+        except freshness.RecallProjectionUnavailable:
+            raise _publication_unavailable() from None
+
+
+def _publication_unavailable() -> cli_ops.OpError:
+    return cli_ops.OpError(
+        "PASSAGE_INDEX_UNAVAILABLE",
+        "The published passage index is unavailable.",
+        "Let the service publish its corpus, or run its maintained warm-up before passage search.",
+        details={"complete": False, "status": "unavailable"},
+    )
+
+
+def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
+    from . import find as find_module
+    from . import semantic_contract
+
+    limit, scope, query = request["limit"], request["scope"], request["query"]
+    publication = semantic_contract.borrow_published_corpus(vault_root)
+    if publication is None:
+        raise _publication_unavailable()
+    snapshot = find_module.FreshnessSnapshot(vault_root, require_live_recall=True)
     walk_scope = "vault" if scope == "vault" else "kb"
     eligible = (
-        find_module._resolve_eligible_filter_paths(
+        find_module._managed_eligible_filter_paths(
             vault_root,
             scope=walk_scope,
             plan=plan,
             snapshot=snapshot,
-            pending=pending,
+            pending=None,
         )
         if plan.root is not None
         else None
@@ -261,19 +296,19 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
     )
     if relations is not None:
         eligible = set(relations) if eligible is None else eligible & relations
-    allowed = set(declared_sources(vault_root) & snapshot.recall_paths(walk_scope))
+    allowed = set(declared_sources(vault_root, publication) & snapshot.recall_paths(walk_scope))
     if eligible is not None:
         allowed.intersection_update(eligible)
     if admit is not None:
         allowed = {path for path in allowed if admit(path)}
     index = embeddings.get_embedding_index(vault_root)
     identity = index.identity
-    with runtime_resources.model_execution(wait=False), recall_space.encoding_for(index):
+    with runtime_resources.model_execution(), recall_space.encoding_for(index):
         query_vector = embeddings.embed_texts([query], is_query=True)[0]
     recall_space.require_same_space(index, identity, query_vector)
     selected = index.select_chunks(query_vector, limit, allowed_paths=allowed, encoded_for=identity)
     pages = {
-        path: find_module._resolve_page(vault_root, path, pending)
+        path: find_module._resolve_page(vault_root, path)
         for path in dict.fromkeys(path for path, _number, _stored, _score in selected)
     }
     matches = index.matching_chunks(
