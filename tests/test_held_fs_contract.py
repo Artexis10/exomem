@@ -217,6 +217,20 @@ def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
 
 
 @_requires_native_route
+def test_a_held_file_reports_its_write_time_as_a_stat_does(tmp_path: Path) -> None:
+    """The store records this time in a SQLite INTEGER and compares it with a stat later."""
+    held_fs = _module()
+    (tmp_path / "page.md").write_bytes(b"page")
+    stat_ns = (tmp_path / "page.md").stat().st_mtime_ns
+    with held_fs.acquire(tmp_path).require() as filesystem, filesystem.parent(".").require() as parent:
+        with filesystem.file(parent, "page.md").require() as held:
+            version = held.version()
+    assert version.mtime_ns < 2**63
+    assert abs(version.mtime_ns - stat_ns) < 1_000_000_000
+    assert version.change_time_ns < 2**63
+
+
+@_requires_native_route
 def test_directory_flush_requires_flush_capable_access(tmp_path: Path) -> None:
     held_fs = _module()
     with held_fs.acquire(tmp_path).require() as filesystem:
