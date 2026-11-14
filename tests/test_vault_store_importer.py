@@ -487,7 +487,9 @@ def test_a_path_the_importer_cannot_read_is_reported_and_never_taken_for_a_delet
     (stored / ALPHA).unlink()
     (stored / ALPHA).symlink_to(target)
     folder = stored / "Knowledge Base" / "Sources"
-    if os.geteuid() != 0:
+    # A POSIX mode is the only way to make this folder unreadable; Windows has no such mode, so
+    # there the test covers the symlink refusal alone.
+    if os.name == "posix" and os.geteuid() != 0:
         folder.chmod(0)
     try:
         events = importing.import_paths([ALPHA])
