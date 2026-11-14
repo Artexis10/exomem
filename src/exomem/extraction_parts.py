@@ -322,8 +322,9 @@ def _retire_in_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
     """Delete the part pages that the store holds in one store transaction; return those it kept.
 
     The commit runs on the store thread, as a media sidecar commit does. ``_kept_by_store`` names
-    the parts that it keeps without trying. A store that refuses the commit, or a service that
-    stops before the hop, keeps every part. The caller logs the kept parts.
+    the parts that it keeps without trying. A store that refuses the commit, a vault boundary that
+    stays busy, or a service that stops before the hop, keeps every part. The caller logs the kept
+    parts, and the next part sweep finds them again.
     """
     from .cli_ops import OpError
     from .vault_store import batch, projector, write
@@ -332,9 +333,11 @@ def _retire_in_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
     if store_media.off_store_thread(vault_root):
         try:
             return store_media.on_store_thread(
-                vault_root, lambda: _retire_in_store(vault_root, rels)
+                vault_root,
+                lambda: _retire_in_store(vault_root, rels),
+                operation="vault_store_retire_parts",
             )
-        except (OpError, projector.StoreNotServed):
+        except (OpError, projector.StoreNotServed, projector.BoundaryBusy):
             return tuple(rels)
     kept, writer = _kept_by_store(vault_root, rels)
     deleted = [rel for rel in rels if rel not in kept]

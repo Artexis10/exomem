@@ -133,6 +133,30 @@ def test_committed_pages_a_delete_and_a_move_reach_the_disk_byte_exact(stored, w
     assert temporaries(stored) == []
 
 
+def test_a_vacated_folder_goes_once_its_files_moved_and_stays_while_it_holds_a_persons_file(
+    stored, writer, projecting
+):
+    """A projector that removes a vacated folder before the page queued below it moves, keeps an
+    emptied one, or keeps the folder's intent queued for ever when a person's file stays in it."""
+    commit(writer, **put("Knowledge Base/Gone/Inner/Page.md", b"# Page\n"))
+    projecting.run_pass()
+    (stored / "Knowledge Base/Kept").mkdir()
+    (stored / "Knowledge Base/Kept/person.txt").write_text("mine\n", encoding="utf-8")
+    commit(
+        writer,
+        moves=(write.PageMove("Knowledge Base/Gone/Inner/Page.md", "Knowledge Base/Page.md"),),
+        vacated_folders=("Knowledge Base/Gone", "Knowledge Base/Gone/Inner", "Knowledge Base/Kept"),
+    )
+
+    for _ in range(4):
+        projecting.run_pass()
+
+    assert (stored / "Knowledge Base/Page.md").read_bytes() == b"# Page\n"
+    assert not (stored / "Knowledge Base/Gone").exists()
+    assert (stored / "Knowledge Base/Kept/person.txt").read_text(encoding="utf-8") == "mine\n"
+    assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
+
+
 def test_a_persons_edit_is_held_and_kept_while_newer_store_bytes_wait(stored, writer, projecting):
     """A projector that replaces the file a person edited with the store's newer bytes, projects a
     later revision of a held path, or lets one held path stop the projection of the others."""
@@ -328,7 +352,9 @@ def test_the_service_starts_the_projector_only_for_a_store_mode_vault(vault, mon
         with connection.open_writer(path, lease_check=lambda: True) as handle:
             work(CollectionWriter(vault, handle))
 
-    monkeypatch.setattr(projector, "store_thread_runner", lambda _root: on_a_writer_of_its_own)
+    monkeypatch.setattr(
+        projector, "store_thread_runner", lambda _root, **_options: on_a_writer_of_its_own
+    )
     monkeypatch.setattr(projector, "POLL_SECONDS", 0.05)
     # The store has one writer connection, so the commit finishes before the projector thread
     # opens its own.

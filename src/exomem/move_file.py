@@ -1350,10 +1350,11 @@ def _move_file_local(
             ) -> None:
                 """Move the page and rewrite its linkers in one store transaction.
 
-                The projector renames the file afterwards. The original that pairs with the page,
-                and a dot folder of its parts, are renamed on disk first and recorded by the same
-                commit; a raw-marked page's parts move in the store. A changed source, a link gained
-                since the scan, or a taken destination refuses the whole commit with nothing changed.
+                The projector renames the file afterwards. The commit moves the record of the
+                original that pairs with the page, and that original and a dot folder of its parts
+                are renamed right after the commit; a raw-marked page's parts move in the store. A
+                changed source, a link gained since the scan, or a taken destination refuses the
+                whole commit with nothing changed.
                 The log entry commits with the move; the catalog, prepared as file mode prepares it,
                 publishes after ``commit_move`` returns.
                 """
@@ -1385,7 +1386,6 @@ def _move_file_local(
                         ),
                         *(PageMove(part, moved_to) for part, moved_to in part_moves.items()),
                     ),
-                    binary_deletes=relocation.binary_deletes,
                     expect={
                         old_rel: Expect(
                             sha256=source_guard.expected_content_hash,
@@ -1399,7 +1399,7 @@ def _move_file_local(
                 )
                 # The moved page is the move's one piece of work; its link rewrites earn nothing.
                 with working_set_heat.primary_paths((new_rel,)):
-                    _commit_in_store(
+                    left = _commit_in_store(
                         vault_root,
                         store_writer,
                         relocation,
@@ -1410,6 +1410,7 @@ def _move_file_local(
                         required_guards=required_guards,
                         validate_prepared_bindings=_validate_prepared_bindings,
                     )
+                warnings.extend(left)
 
             heat_moved: list[working_set_heat.ObservedCommit | None] = []
             reading.close()
@@ -1479,7 +1480,7 @@ def _move_file_local(
         if store_writer is not None:
             # The store form has no epoch and no held rename; the log entry commits with the move.
             reading.close()
-            _move_binary_in_store(
+            left = _move_binary_in_store(
                 vault_root,
                 store_writer,
                 old_rel=old_rel,
@@ -1488,6 +1489,7 @@ def _move_file_local(
                 originals_context=originals_context,
                 validate_prepared_bindings=_validate_prepared_bindings,
             )
+            warnings.extend(left)
             store_targets.publish_catalog(
                 catalog_target, error_class=MoveFileError, what="the file move committed"
             )
@@ -1728,28 +1730,27 @@ def _commit_in_store(
     destinations: set[str],
     required_guards=(),
     validate_prepared_bindings: Callable[[], None] | None = None,
-) -> None:
-    """Rename what ``relocation`` moves, then commit ``writes`` and ``lifecycle`` in one store
-    transaction; a refusal renames everything back (``vault_store.binaries``).
+) -> list[str]:
+    """Commit ``writes`` and ``lifecycle`` with the binary moves of ``relocation`` in one store
+    transaction, then rename what it moves (``vault_store.binaries``); a refusal moves nothing.
 
     A stale path among ``sources`` refuses with SOURCE_CHANGED and a taken one among
-    ``destinations`` with DEST_EXISTS, as file mode names them.
+    ``destinations`` with DEST_EXISTS, as file mode names them. Returns a warning for each file
+    that did not move after the commit.
     """
     from .vault_store import batch as store_batch
     from .vault_store import binaries
     from .vault_store.write import StoreConflict
 
     try:
-        with binaries.relocated(vault_root, relocation) as moved:
+        with binaries.relocated(vault_root, relocation, writer) as moved:
             store_batch.commit_batch(
                 writer,
                 writes,
                 vault_root=vault_root,
                 required_guards=required_guards,
                 validate_prepared_bindings=validate_prepared_bindings,
-                lifecycle=dataclasses.replace(
-                    lifecycle, records=moved.records, refresh=moved.refresh
-                ),
+                lifecycle=dataclasses.replace(lifecycle, binary_moves=moved.binary_moves),
             )
     except StoreConflict as conflict:
         if conflict.path in sources:
@@ -1769,12 +1770,13 @@ def _commit_in_store(
                 ),
             ) from conflict
         raise MoveFileError("MOVE_FAILED", "move could not be published") from conflict
-    except binaries.Stranded as error:
+    except binaries.Unreadable as error:
         raise MoveFileError(
             *binaries.refusal(error, "MOVE_FAILED", "move could not be published")
         ) from error
     except reserved_paths.ReservedPathLeafError as error:
         raise _rename_error(error) from error
+    return [f"{rel}: {binaries.LEFT}" for rel in moved.left]
 
 
 def _move_binary_in_store(
@@ -1786,9 +1788,10 @@ def _move_binary_in_store(
     writes: list[PlannedWrite],
     originals_context: ExitStack,
     validate_prepared_bindings: Callable[[], None] | None,
-) -> None:
-    """Move a binary that pairs with no page: rename it, then commit its record and the rewrites
-    of the pages that link to it in one store transaction, as file mode renames it and writes them.
+) -> list[str]:
+    """Move a binary that pairs with no page: commit its record's move and the rewrites of the
+    pages that link to it in one store transaction, then rename it, as file mode renames it and
+    writes them. Returns a warning when the file did not move after the commit.
     """
     from .vault_store import batch as store_batch
     from .vault_store import binaries
@@ -1800,14 +1803,12 @@ def _move_binary_in_store(
     try:
         # Link rewrites are the move's bookkeeping, nobody's work.
         with working_set_heat.primary_paths(()):
-            _commit_in_store(
+            return _commit_in_store(
                 vault_root,
                 writer,
                 relocation,
                 list(writes),
-                store_batch.Lifecycle(
-                    binary_deletes=relocation.binary_deletes, expect=relocation.expect()
-                ),
+                store_batch.Lifecycle(expect=relocation.expect()),
                 sources={old_rel},
                 destinations={new_rel},
                 validate_prepared_bindings=validate_prepared_bindings,
