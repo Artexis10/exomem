@@ -51,3 +51,65 @@ A restricted audience is served fingerprints recomposed over what it may see. It
 
 - **WHEN** a restricted caller names the id of a stored entry whose page is withheld from it
 - **THEN** the service gives the same refusal as for an id that does not exist
+
+### Requirement: Review listings read a held review pass
+
+For an unrestricted caller, the attention and activation views SHALL take their review findings from a pass that the service holds in process memory, per vault. An unrestricted caller is a bound caller from whom the release rules can withhold no page. The service SHALL store no row and no file for the pass. Filtering, ranking, review state and release decisions SHALL run in each request on copies of the held findings. A held pass SHALL be current while the vault's change generation, the UTC day and a maximum age hold. A read with no held pass SHALL compute the pass in its request and hold it, and readers that arrive during that pass SHALL wait for it.
+
+A read of a stale pass SHALL answer from it and ask for one background refresh. The stale answer SHALL drop the items of a page that no longer exists and the due items that the due-state projection no longer holds, and it SHALL mark with `page_changed` the items of a page that changed after the pass. When the due-state projection cannot be read, the stale answer SHALL keep the due items. The listing reply SHALL carry the pass time as `as_of` and SHALL say in `refreshing` whether a pass is due or running.
+
+The serving runtime SHALL also run a background pass once the service has been quiet, when no pass is held, a page changed or the day changed. Age alone SHALL start no background pass. Two background passes SHALL start at least a set multiple of the last pass's duration apart. A failed pass SHALL leave the held pass in place.
+
+A restricted caller, a bound collection writer and a call with no principal SHALL never read a held pass and SHALL have no pass held for them. Each SHALL run its own pass in its request. A vault with no live change generation SHALL hold nothing.
+
+A decision that binds an id from the review queues SHALL read each queue whole and SHALL record no first-surfaced stamp.
+
+#### Scenario: A listing after a completed pass reads no page
+
+- **WHEN** an unrestricted caller lists the review queue and then decides one listed item by its id, after a completed pass
+- **THEN** neither the listing nor the decision opens a vault page
+- **AND** the listing equals a listing whose pass is computed in the request
+
+#### Scenario: A restricted caller never reads a held pass
+
+- **WHEN** an unrestricted caller's pass is held and a restricted caller lists the review queue twice
+- **THEN** the service runs a pass under that caller for each listing
+- **AND** each listing equals a listing computed in the request under that caller
+
+#### Scenario: A serving runtime holds a pass before the first listing
+
+- **WHEN** the serving runtime has started and the service has been quiet
+- **THEN** the service runs one review audit pass and one activation scan in the background
+- **AND** the first listing by an unrestricted caller runs no pass
+
+#### Scenario: An aged pass is renewed only when a listing reads it
+
+- **WHEN** a held pass is older than the maximum age and no page and no day changed
+- **THEN** the service runs no background pass until a listing reads the held pass
+
+#### Scenario: A stale answer drops what a write resolved
+
+- **WHEN** an unrestricted caller compiles a Source, deletes a page or moves a page, and lists the queue before the next pass
+- **THEN** the listing holds no item for the compiled Source, the deleted page or the moved page's old path
+
+#### Scenario: A stale answer marks an edited page
+
+- **WHEN** an unrestricted caller edits a listed page and lists the queue before the next pass
+- **THEN** the item of that page carries `page_changed`
+- **AND** the reply carries the earlier pass's `as_of` and `refreshing: true`
+
+#### Scenario: Many stale reads start one pass
+
+- **WHEN** an unrestricted caller lists a stale queue several times while one background pass runs
+- **THEN** the service runs one pass for them
+
+#### Scenario: An item ranked anywhere binds
+
+- **WHEN** a decision names an item ranked past the first 200 of its queue
+- **THEN** the decision binds that item
+- **AND** no item that the decision's reads saw gains a first-surfaced record
+
+#### Scenario: An unknown id is refused without a pass
+
+- **WHEN** a decision names an id that no queue holds, after a completed pass
+- **THEN** the service refuses it with `ITEM_NOT_FOUND` and runs no review pass
