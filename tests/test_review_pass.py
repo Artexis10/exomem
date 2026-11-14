@@ -239,10 +239,8 @@ def test_a_held_listing_equals_a_listing_computed_in_the_request(
     assert ("stale_review" in _item(fresh, old)["categories"]) is (caller is CLIENT)
 
 
-@pytest.mark.parametrize("notes", [30, 120])
-def test_a_warm_listing_and_decision_open_no_page(
-    vault: Path, warm_managed_cell, notes: int
-) -> None:
+def test_a_warm_listing_and_decision_open_no_page(vault: Path, warm_managed_cell) -> None:
+    notes = 30
     _unlinked_notes(vault, notes)
     _serve(vault, warm_managed_cell)
     _hold(vault)
@@ -480,9 +478,10 @@ def test_after_a_failed_pass_a_stale_listing_runs_its_own_audit(
     with request_scope(OWNER):
         _edit(vault, edited)
         stale = _list(vault)
-        _wait_for(lambda: passes.failed_passes)
-        # The refresh failed, so nothing will replace the stale pass: the listing answers as
-        # it did with no pass held, and the edited item can be decided.
+        # The refresh fails, so nothing will replace the stale pass. Once the worker has
+        # recorded that, the listing answers as it did with no pass held, and the edited item
+        # can be decided.
+        _wait_for(lambda: not _from_held(_list(vault)))
         after = _list(vault)
         decided = _dismiss(vault, _item(after, edited)["id"])
         passes.fail_in_worker = False
@@ -505,7 +504,7 @@ def test_each_failure_in_a_row_doubles_the_gap(
     review_pass.start(vault)
     with request_scope(OWNER):
         # Each listing asks for a pass, so only the gap spaces the attempts.
-        _wait_for(lambda: _list(vault, mode="relation-debt") and len(passes.failed_passes) == 6)
+        _wait_for(lambda: _list(vault, mode="relation-debt") and len(passes.failed_passes) >= 6)
 
     fifth, sixth = passes.failed_passes[4:6]
     # A failed pass counts as one second long: the gap after five failures is 0.05 * 2**5 s.

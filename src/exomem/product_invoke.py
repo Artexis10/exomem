@@ -134,6 +134,11 @@ def invoke_prepared(
 
     if not allows_uninitialized_vault(cmd.name, kwargs):
         state_migration.require_vault_state_ready(root)
+    from .vault_store import availability
+
+    # The service's rollout fence: an in-process command must not answer a store-mode vault from
+    # the Markdown that the store replaced, where the service on this build refuses to start.
+    availability.require_servable(root)
     if cmd.needs_schema:
         injected = (root, schema_module.load_source_schema(root))
     else:

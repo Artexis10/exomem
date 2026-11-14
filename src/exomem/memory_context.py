@@ -165,7 +165,7 @@ def assemble_context(
     # than the owner: the entry filter decides the page a reference names, so
     # the echo would survive for an absent page and not for a withheld one.
     if unit_ref is not None and not (
-        keep is not None and (graph or {}).get("unit_status") == "missing"
+        egress.caller_restricted(vault_root) and (graph or {}).get("unit_status") == "missing"
     ):
         seed["unit_ref"] = unit_ref
     if categories:
