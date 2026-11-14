@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import dataclasses
+import functools
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -19,7 +21,8 @@ import time
 import tomllib
 import uuid
 from collections import Counter
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,7 +32,10 @@ from synth_vault import reference_source
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = ROOT / "benchmarks/passage-evidence/profile.json"
+INVENTORY_PROFILE = ROOT / "benchmarks/passage-evidence/inventory-profile.json"
 REFERENCE = ROOT / "benchmarks/recall-latency"
+_INVENTORY_WORK = ContextVar("inventory_request_work", default=None)
+_WORKER_INVENTORY_OBSERVER = None
 
 
 class CloudArm(Arm):
@@ -71,7 +77,7 @@ def write_json(path: Path, value) -> None:
 def manifest() -> dict:
     paths = [*sorted(path for path in (ROOT / "src/exomem").rglob("*")
                     if path.is_file() and "__pycache__" not in path.parts),
-             *sorted((ROOT / "scripts").glob("*.py")), PROFILE,
+             *sorted((ROOT / "scripts").glob("*.py")), PROFILE, INVENTORY_PROFILE,
              *sorted((ROOT / "benchmarks/recall_parity").glob("*.py")),
              REFERENCE / "profile.json", REFERENCE / "cases.json", REFERENCE / "prose.txt",
              ROOT / "pyproject.toml", ROOT / "uv.lock"]
@@ -129,13 +135,128 @@ def record_worker_launch() -> None:
                "proc_exe": str(Path("/proc/self/exe").resolve()), "module_origins": modules,
                "runtime": runtime(profile), "source": manifest(),
                "matrix_bytes": os.environ.get("EXOMEM_PASSAGE_MATRIX_BYTES")})
+    if observation_path := os.environ.pop("INVENTORY_CALL_OBSERVATIONS", None):
+        global _WORKER_INVENTORY_OBSERVER
+        truth = json.loads(Path(os.environ.pop("INVENTORY_EXPECTED_SOURCES")).read_text())
+        _WORKER_INVENTORY_OBSERVER = observe_inventory_work(
+            Path(observation_path), Path(os.environ["EXOMEM_VAULT_PATH"]), [row["key"][-1] for row in truth])
+        _WORKER_INVENTORY_OBSERVER.__enter__()
+
+
+def arguments_digest(arguments: dict) -> str:
+    return hashlib.sha256(json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@contextmanager
+def observe_inventory_work(path: Path, vault: Path, sources: list[str]):
+    """Observe the real dispatcher and producers; never count a background proof as request work."""
+    from exomem import capture_inventory, embeddings, server
+    from exomem import vault as vault_module
+
+    canonical = {os.path.abspath(vault / source) for source in sources}
+    connect, dispatch = sqlite3.connect, server.PublicCommandNameMiddleware.on_call_tool
+    read = os.read
+    ledger, encode = server._record_ledger_row, embeddings.embed_texts
+    canonical_read, bounded_read = capture_inventory.read_canonical, vault_module.read_bounded_guarded_bytes
+    enabled = True
+    path.touch(exist_ok=False)
+
+    def count(name):
+        if (row := _INVENTORY_WORK.get()) is not None and not row["closed"]:
+            row[name] += 1
+
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(lambda _statement: count("sql_statements"))
+        return connection
+
+    def observed_ledger(**kwargs):
+        if (row := _INVENTORY_WORK.get()) is not None:
+            row["request_id"] = kwargs["request_id"]
+        return ledger(**kwargs)
+
+    def observed_encode(*args, **kwargs):
+        count("encoder_calls")
+        return encode(*args, **kwargs)
+
+    def observed_read(descriptor, size):
+        row = _INVENTORY_WORK.get()
+        selected = False
+        if row is not None and not row["closed"]:
+            try:
+                selected = os.readlink(f"/proc/self/fd/{descriptor}") in canonical
+            except OSError:
+                count("descriptor_observation_errors")
+        data = read(descriptor, size)
+        if selected:
+            count("source_file_read_ops")
+            row["source_file_read_bytes"] += len(data)
+        return data
+
+    def observed_canonical(root, source, *args, **kwargs):
+        if os.path.abspath(Path(root) / source) in canonical:
+            count("canonical_source_read_calls")
+        return canonical_read(root, source, *args, **kwargs)
+
+    def observed_bounded(root, source, *args, **kwargs):
+        if os.path.abspath(Path(root) / source) in canonical:
+            count("canonical_source_read_calls")
+        return bounded_read(root, source, *args, **kwargs)
+
+    def audit(event, arguments):
+        if enabled and event == "open" and _INVENTORY_WORK.get() is not None:
+            source, _mode, flags = arguments
+            if (isinstance(source, (str, bytes, os.PathLike)) and flags & os.O_ACCMODE != os.O_WRONLY
+                    and os.path.abspath(os.fsdecode(source)) in canonical):
+                count("source_file_read_opens")
+
+    @functools.wraps(dispatch)
+    async def observed_dispatch(self, context, call_next):
+        arguments = context.message.arguments or {}
+        # These are the fixed public tool and operation names, never classifications of user text.
+        if context.message.name != "inspect_memory" or arguments.get("operation") != "sources.inventory":
+            return await dispatch(self, context, call_next)
+        row = {"arguments_sha256": arguments_digest(arguments), "request_id": None,
+               "sql_statements": 0, "canonical_source_read_calls": 0,
+               "source_file_read_opens": 0, "source_file_read_ops": 0,
+               "source_file_read_bytes": 0, "descriptor_observation_errors": 0,
+               "encoder_calls": 0, "closed": False}
+        token = _INVENTORY_WORK.set(row)
+        try:
+            return await dispatch(self, context, call_next)
+        finally:
+            row["closed"] = True
+            _INVENTORY_WORK.reset(token)
+            with path.open("a") as output:
+                output.write(json.dumps(row) + "\n")
+                output.flush()
+
+    try:
+        sqlite3.connect = traced_connect
+        os.read = observed_read
+        server.PublicCommandNameMiddleware.on_call_tool = observed_dispatch
+        server._record_ledger_row = observed_ledger
+        embeddings.embed_texts = observed_encode
+        capture_inventory.read_canonical = observed_canonical
+        vault_module.read_bounded_guarded_bytes = observed_bounded
+        sys.addaudithook(audit)
+        yield
+    finally:
+        enabled = False  # Python audit hooks cannot be removed; a closed observer performs no work.
+        sqlite3.connect = connect
+        os.read = read
+        server.PublicCommandNameMiddleware.on_call_tool = dispatch
+        server._record_ledger_row = ledger
+        embeddings.embed_texts = encode
+        capture_inventory.read_canonical = canonical_read
+        vault_module.read_bounded_guarded_bytes = bounded_read
 
 
 def resource_observation() -> dict:
     """Raw cumulative cgroup counters plus host pressure; missing reads stay unavailable."""
     paths = {f"cgroup/{name}": Path("/sys/fs/cgroup") / name for name in
              ("memory.current", "memory.peak", "memory.events", "memory.stat", "memory.pressure",
-              "cpu.stat", "cpu.pressure")}
+              "cpu.stat", "cpu.pressure", "io.stat", "io.pressure")}
     paths.update({f"host/{name}": Path("/proc/pressure") / name for name in ("cpu", "memory")})
     values = {}
     for name, path in paths.items():
@@ -217,7 +338,7 @@ def paired_comparison(samples: list[dict], profile: dict) -> list[dict]:
     return output
 
 
-def fixture(vault: Path, profile: dict) -> list[str]:
+def fixture(vault: Path, profile: dict, *, expected: list[dict] | None = None) -> list[str]:
     from exomem import add, source_capture
 
     reference = json.loads((REFERENCE / "profile.json").read_text())
@@ -235,17 +356,108 @@ def fixture(vault: Path, profile: dict) -> list[str]:
         digest = source_capture.capture_digest(
             vault, content=content, title=title, source_type="document", url=None, tags=[],
             why_captured=None, domain=None, projects=None, slug=None, raw_protection=False, passages=passages)
+        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://example.invalid/passage-latency/{number}"))
         rendered = add._render_source(
             title=title, source_type="document", date_iso="2026-01-15", url=None, tags=[],
             why_captured=None, content=content,
-            exomem_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://example.invalid/passage-latency/{number}")),
+            exomem_id=identifier,
             source_identity={"system": "public-prose-latency", "record_id": str(number), "revision": "1"},
             capture_input_digest=digest, passages=passages)
         relative = f"Knowledge Base/Sources/reference-{number:04d}.md"
         (vault / relative).parent.mkdir(parents=True, exist_ok=True)
         (vault / relative).write_text(rendered)
         paths.append(relative)
+        if expected is not None:
+            reference = f"exomem://memory/{identifier}"
+            expected.append({"key": ["public-prose-latency", str(number), "1", reference, relative],
+                             "item": {"source_identity": {"system": "public-prose-latency", "record_id": str(number), "revision": "1"},
+                                      "source_ref": reference, "source_hash": hashlib.sha256(rendered.encode()).hexdigest(),
+                                      "capture_input_digest": digest}})
     return paths
+
+
+def corpus_vectors(texts: list[str], identity):
+    """Use the maintained corpus-only generator; this never substitutes query encoding."""
+    import numpy as np
+
+    vectors = []
+    for text in texts:
+        seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "little")
+        vector = np.random.default_rng(seed).standard_normal(identity.dim).astype(np.float32)
+        vectors.append(vector / np.linalg.norm(vector))
+    return np.asarray(vectors, dtype=np.float32).reshape((-1, identity.dim))
+
+
+def inventory_cases(profile: dict, rows: list[dict], space: str) -> list[dict]:
+    if len(rows) != profile["sources"] or len({tuple(row["key"]) for row in rows}) != len(rows):
+        raise RuntimeError("generated inventory truth is incomplete or duplicated")
+    ordered = sorted(rows, key=lambda row: row["key"])
+    cases = []
+
+    def cursor(row):
+        if row is None:
+            return None
+        # Scope and the five-part key are the inventory's fixed documented cursor format.
+        return base64.urlsafe_b64encode(json.dumps(
+            {"scope": row["key"][:1], "after": row["key"]}, separators=(",", ":")).encode()).decode()
+
+    for start in range(0, len(ordered), profile["page_limit"]):
+        after = cursor(ordered[start - 1]) if start else None
+        for limit in profile["limits"]:
+            selected = ordered[start:start + limit]
+            items = []
+            for row in selected:
+                truth = {**row["item"], "identity_conflict": False, "index_state": "indexed",
+                         "expected_chunks": profile["passages_per_source"], "indexed_chunks": profile["passages_per_source"],
+                         "recall_space_id": space, "failure": None}
+                items.append({"type": "object", "required": list(truth),
+                              "properties": {name: {"const": value} for name, value in truth.items()}})
+            arguments = {"system": ordered[0]["key"][0], "limit": limit}
+            if after is not None:
+                arguments["cursor"] = after
+            properties = {"state": {"const": "observed"}, "complete": {"const": True},
+                          "classification_state": {"const": "complete"}, "identity_conflict_count": {"const": 0},
+                          "items": {"type": "array", "minItems": len(items), "maxItems": len(items), "prefixItems": items},
+                          "next_cursor": {"const": cursor(selected[-1]) if start + len(selected) < len(ordered) else None}}
+            cases.append({"id": f"inventory-{start:05d}-{limit}", "tool": "inspect_memory", "bar_id": "inventory-page",
+                          "group": str(limit), "arguments": {"operation": "sources.inventory", "arguments": arguments},
+                          "expected": {"response_schema": {"type": "object", "required": list(properties), "properties": properties}}})
+    return cases
+
+
+def inventory_traversal(samples: list[dict], cases: list[dict], truth: list[dict], profile: dict) -> dict:
+    pages = [case for case in cases if case["arguments"]["arguments"]["limit"] == profile["page_limit"]]
+    identifiers = {case["id"] for case in pages}
+    selected = [row for row in samples if row["case"] in identifiers]
+    indexed = {row["case"]: row for row in selected}
+    references = []
+    for row in selected:
+        response = row.get("response")
+        if isinstance(response, dict) and isinstance(response.get("items"), list):
+            references.extend(item["source_ref"] for item in response["items"]
+                              if isinstance(item, dict) and isinstance(item.get("source_ref"), str))
+    after = None
+    failure = None
+    if len(selected) != len(indexed) or set(indexed) != identifiers:
+        failure = "traversal-pages-missing-or-duplicated"
+    else:
+        for case in pages:
+            row = indexed[case["id"]]
+            response = row.get("response")
+            if row.get("failure") is not None or not row.get("terminal_received") or not isinstance(response, dict):
+                failure = "traversal-terminal-unavailable"
+                break
+            if case["arguments"]["arguments"].get("cursor") != after:
+                failure = "traversal-cursor-chain-differs"
+                break
+            after = response["next_cursor"]
+        expected = [row["item"]["source_ref"] for row in sorted(truth, key=lambda row: row["key"])]
+        if failure is None and (references != expected or len(set(references)) != profile["sources"]):
+            failure = "traversal-identities-differ"
+        if failure is None and after is not None:
+            failure = "traversal-has-more-items"
+    return {"complete": failure is None, "failure": failure, "pages": len(selected),
+            "sources": len(references), "unique_sources": len(set(references)), "final_cursor": after}
 
 
 def verify_rows(vault: Path, index, paths: list[str], profile: dict) -> dict:
@@ -303,7 +515,6 @@ def verify_rows(vault: Path, index, paths: list[str], profile: dict) -> dict:
 
 
 def prepare(arm: Arm, profile: dict) -> dict:
-    import numpy as np
     from managed_recall import enter_managed_recall
 
     from exomem import (
@@ -338,12 +549,7 @@ def prepare(arm: Arm, profile: dict) -> dict:
             if is_query:
                 raise RuntimeError("the fixture builder cannot replace query encoding")
             # Same deterministic corpus-only method as recall_latency_gate._prepare_worker.
-            vectors = []
-            for text in texts:
-                seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "little")
-                vector = np.random.default_rng(seed).standard_normal(identity.dim).astype(np.float32)
-                vectors.append(vector / np.linalg.norm(vector))
-            return np.asarray(vectors, dtype=np.float32).reshape((-1, identity.dim))
+            return corpus_vectors(texts, identity)
 
         try:
             embeddings.embed_texts = seeded
@@ -362,6 +568,143 @@ def prepare(arm: Arm, profile: dict) -> dict:
                 "encoder_artifact_digest": model.profile.artifact_digest}
 
 
+def prepare_inventory(arm: Arm, root: Path, profile: dict) -> dict:
+    from exomem import (
+        due_state,
+        embedding_backend,
+        embedding_index,
+        embeddings,
+        find,
+        freshness,
+        lexstore,
+        memory_refs,
+        passage_evidence,
+        recall_space,
+        semantic_index,
+    )
+    from exomem.governance.principal import library_scope
+
+    os.environ.update(arm.env)
+    for name in ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_VAULT_ID",
+                 "EXOMEM_WRITER_LEASE_REPLICA_ID", "EXOMEM_WRITER_LEASE_TOKEN",
+                 "EXOMEM_WRITER_LEASE_TOPOLOGY"):
+        os.environ.pop(name, None)
+    arm.init_vault()
+    served = embedding_backend.served_artifact(embeddings.MODEL_NAME)
+    if served is None or not embedding_backend.artifact_cached(embeddings.MODEL_NAME, served):
+        raise RuntimeError("inventory preparation requires the existing pinned served artifact; no acquisition")
+    artifact = embedding_backend.artifact_dir(embeddings.MODEL_NAME, served)
+    digest = embedding_backend.artifact_sha256(artifact, served.files)
+    encoder_profile = dataclasses.replace(embedding_backend.read_profile(embeddings.MODEL_NAME), artifact_digest=digest)
+    identity = recall_space.SpaceIdentity(embeddings.MODEL_NAME, encoder_profile.fingerprint(), recall_space.current_dim())
+    truth = []
+    with library_scope():
+        paths = fixture(arm.vault, profile, expected=truth)
+        write_json(root / "expected-sources.json", truth)
+        index = embeddings.get_embedding_index(arm.vault)
+        for start in range(0, len(paths), profile["preparation_batch_sources"]):
+            replacements, units = [], []
+            for relative in paths[start:start + profile["preparation_batch_sources"]]:
+                path = arm.vault / relative
+                page = find._CACHE.get(path, arm.vault)
+                chunks = [chunk.text for chunk in passage_evidence.declared_chunks(page)]
+                state = semantic_index.build_parent_index_state(arm.vault, path)
+                replacements.append((relative, chunks, corpus_vectors(chunks, identity), path.stat().st_mtime))
+                content_column = embedding_index.OCCURRENCE_COLUMNS.index("content")
+                texts = [row[content_column] for row in embedding_index.occurrence_rows(state)]
+                units.append((state, corpus_vectors(texts, identity), path.stat().st_mtime))
+            index.upsert_batch(replacements, units, identity=identity)
+            print(f"prepared inventory sources={min(start + len(replacements), len(paths))}", flush=True)
+        lexstore.ensure_fresh(arm.vault)
+        memory_refs.ReferenceIndex(arm.vault).rebuild_all()
+        due_state.reconcile(arm.vault)
+        if not all(freshness.rebaseline(arm.vault).values()):
+            raise RuntimeError("inventory fixture projection is incomplete")
+        rows = verify_rows(arm.vault, index, paths, profile)
+    cases = inventory_cases(profile, truth, identity.identity_digest)
+    from exomem.recall_canary import load_cases
+
+    load_cases(json.dumps(cases).encode())
+    write_json(root / "frozen-cases.json", cases)
+    slots = paired_slots({"modes": ["inventory"], "repeats": profile["repeats"], "callers": [1]}, cases)
+    write_json(root / "attempt-slots.json", slots)
+    from exomem.request_latency_contract import load_contract
+
+    write_json(root / "frozen-protocol.json", {
+        "profile": profile, "bar": load_contract().bar("inventory-page").model_dump(mode="json"),
+        "truth_sha256": hashlib.sha256((root / "expected-sources.json").read_bytes()).hexdigest(),
+        "cases_sha256": hashlib.sha256((root / "frozen-cases.json").read_bytes()).hexdigest(),
+        "attempt_slots": len(slots), "baseline": "unavailable: new route; no before/after or speedup claim",
+        "qualification": "unverified; public MCP worker measurement has not run",
+        "storage_mode": "file; store HTTP startup remains unsupported"})
+    return {"rows": rows, "encoder": dataclasses.asdict(identity), "recall_space_id": identity.identity_digest,
+            "encoder_artifact_digest": digest, "encoder_profile": dataclasses.asdict(encoder_profile),
+            "vector_digest": vector_digest(index.path),
+            "encoding": "corpus_vectors only; inventory queries require no encoder",
+            "sql_proof": inventory_sql_proof(index, truth, profile),
+            "truth_sha256": hashlib.sha256((root / "expected-sources.json").read_bytes()).hexdigest(),
+            "cases_sha256": hashlib.sha256((root / "frozen-cases.json").read_bytes()).hexdigest(),
+            "attempt_slots": len(slots), "qualification": "unverified"}
+
+
+async def inventory_preparation(arm: Arm, root: Path, profile: dict) -> dict:
+    stopped = asyncio.Event()
+    observer = asyncio.create_task(observe_resources(root / "resources.jsonl", stopped, profile["resource_sample_seconds"]))
+    try:
+        return await asyncio.to_thread(prepare_inventory, arm, root, profile)
+    finally:
+        stopped.set()
+        await observer
+
+
+def inventory_sql_proof(index, truth: list[dict], profile: dict) -> dict:
+    from exomem import embedding_index
+
+    originals = sorted(truth, key=lambda row: row["key"])[:profile["page_limit"]]
+    rows = {}
+    with sqlite3.connect(f"file:{index.path}?mode=ro", uri=True) as connection:
+        for row in originals:
+            path = row["key"][-1]
+            texts = [result[0] for result in connection.execute(
+                "SELECT chunk_text FROM chunks WHERE file_path=? ORDER BY chunk_idx", (path,))]
+            rows[path] = (embedding_index.ordered_chunk_digest(texts), len(texts))
+        total = connection.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT file_path, COUNT(*), MIN(chunk_idx), MAX(chunk_idx), "
+            "SUM(typeof(chunk_idx) != 'integer' OR length(vector) != ?) "
+            "FROM chunks WHERE file_path IN (SELECT value FROM json_each(?)) GROUP BY file_path",
+            (index.identity.dim * 4, json.dumps(list(rows)))).fetchall()
+    counts = []
+    original = embedding_index._sqlite_connect
+    for limit in profile["limits"]:
+        count = 0
+
+        def traced(*args, **kwargs):
+            connection = original(*args, **kwargs)
+
+            def observed(_statement):
+                nonlocal count
+                count += 1  # Count only; do not retain SQL text or expanded values.
+
+            connection.set_trace_callback(observed)
+            return connection
+
+        try:
+            embedding_index._sqlite_connect = traced
+            selected = dict(list(rows.items())[:limit])
+            observations = index.chunk_inventory(selected, source_hashes={
+                row["key"][-1]: row["item"]["source_hash"] for row in originals[:limit]})
+        finally:
+            embedding_index._sqlite_connect = original
+        if any(value[:2] != ("indexed", profile["passages_per_source"]) for value in observations.values()):
+            raise RuntimeError("prepared inventory SQL receipt differs from generated chunks")
+        counts.append({"limit": limit, "statements": count, "rows": len(observations)})
+    if len({row["statements"] for row in counts}) != 1 or not any("INDEX" in row[3] and "file_path" in row[3] for row in plan):
+        raise RuntimeError("inventory SQL work differs by page size or lacks an indexed plan")
+    return {"scope": "offline fixture chunk_inventory; public request SQL remains unverified",
+            "chunk_rows": total, "conditions": counts, "query_plan": plan}
+
+
 def frozen_cases(profile: dict, identity: dict, scoring_mode: str = "disk") -> list[dict]:
     specifications = json.loads((REFERENCE / "cases.json").read_text())
     # The reference protocol fixes series names; these are not classifications of prose.
@@ -377,7 +720,7 @@ def frozen_cases(profile: dict, identity: dict, scoring_mode: str = "disk") -> l
                                 "recall_space": {"const": identity}}}}} for case in queries]
 
 
-def dispatch_overlap(lines: str, expected: int) -> dict:
+def dispatch_overlap(lines: str, expected: int, tool_name: str = "ask_memory") -> dict:
     active = set()
     peak = starts = ends = 0
     events = []
@@ -385,8 +728,8 @@ def dispatch_overlap(lines: str, expected: int) -> dict:
         record = json.loads(line)
         line = record["message"]
         # The worker records the public search tool under its normalized command name.
-        if "tool_start tool=ask_memory " not in line and not any(
-                f"tool_{event} tool=ask_memory " in line for event in ("success", "failure", "error")):
+        if f"tool_start tool={tool_name} " not in line and not any(
+                f"tool_{event} tool={tool_name} " in line for event in ("success", "failure", "error")):
             continue
         fields = dict(part.split("=", 1) for part in shlex.split(line) if "=" in part)
         request = fields["request_id"]
@@ -403,20 +746,34 @@ def dispatch_overlap(lines: str, expected: int) -> dict:
             "overlap_verified": starts == ends == expected and peak == expected, "events": events}
 
 
-def retain_batch(rows: list[dict], terminals, output, log: Path, offset: int, callers: int) -> None:
+def retain_batch(rows: list[dict], terminals, output, log: Path, offset: int, callers: int, *,
+                 tool_name: str = "ask_memory", request_observation: tuple[Path, int] | None = None) -> None:
     for row in rows:
         terminals.write(json.dumps(row) + "\n")
     terminals.flush()
     try:
         with log.open() as source:
             source.seek(offset)
-            overlap = dispatch_overlap(source.read(), callers)
+            overlap = dispatch_overlap(source.read(), callers, tool_name)
     except Exception as error:  # noqa: BLE001 - failed observation cannot discard received terminals
         overlap = {"observation_state": "failed", "error_type": type(error).__name__,
                    "starts": None, "ends": None, "peak_dispatched": None,
                    "overlap_verified": False, "events": None}
     for row in rows:
         row["dispatch"] = overlap
+        if request_observation is not None:
+            try:
+                with request_observation[0].open() as source:
+                    source.seek(request_observation[1])
+                    observations = [json.loads(line) for line in source]
+                if (len(rows) != len(observations) or len(rows) != 1
+                        or observations[0]["arguments_sha256"] != row["arguments_sha256"]
+                        or not overlap["overlap_verified"]
+                        or observations[0]["request_id"] != overlap["events"][0]["request_id"]):
+                    raise ValueError("request observation does not match its native dispatch")
+                row["request_work"] = {**observations[0], "observation_state": "observed"}
+            except Exception as error:  # noqa: BLE001 - terminal evidence survives failed count enrichment
+                row["request_work"] = {"observation_state": "failed", "error_type": type(error).__name__}
         output.write(json.dumps(row) + "\n")
     output.flush()
 
@@ -626,6 +983,50 @@ def resource_summary(path: Path) -> dict:
             "pressure": "raw cgroup and host observations remain in resources.jsonl; no pressure exclusion"}
 
 
+def summarize_inventory(samples: list[dict], cases: list[dict], profile: dict) -> dict:
+    from exomem import latency_watch
+    from exomem.request_latency_contract import load_contract
+
+    contract = load_contract()
+    bar = contract.bar("inventory-page")
+    by_id = {case["id"]: case for case in cases}
+    pairs = {}
+    valid_work = []
+    conditions = []
+    for row in samples:
+        arguments = by_id[row["case"]]["arguments"]["arguments"]
+        work = row.get("request_work", {})
+        observed = (work.get("observation_state") == "observed" and work.get("closed") is True
+                    and work.get("request_id") is not None and isinstance(work.get("sql_statements"), int)
+                    and work["sql_statements"] > 0)
+        valid_work.append(observed and all(work.get(name) == 0 for name in
+                          ("canonical_source_read_calls", "source_file_read_opens", "source_file_read_ops", "source_file_read_bytes", "descriptor_observation_errors", "encoder_calls")))
+        pairs.setdefault((row["repeat"], arguments.get("cursor")), {})[arguments["limit"]] = (
+            work["sql_statements"] if observed else None)
+    expected_pairs = len(cases) // len(profile["limits"]) * profile["repeats"]
+    mismatches = [{"repeat": repeat, "cursor_sha256": hashlib.sha256((cursor or "").encode()).hexdigest(), "counts": counts}
+                  for (repeat, cursor), counts in pairs.items()
+                  if set(counts) != set(profile["limits"]) or None in counts.values() or len(set(counts.values())) != 1]
+    sql_constant = len(pairs) == expected_pairs and not mismatches
+    for limit in profile["limits"]:
+        selected = [row for row in samples if by_id[row["case"]]["arguments"]["arguments"]["limit"] == limit]
+        observed = [latency_watch.make_sample(
+            at=row.get("sampled_at", time.time()), tool="inspect_memory", client="inventory-latency", deep=False,
+            total_ms=row["elapsed_ms"], spans=None, bar_id=bar.id, outcome=row["outcome"],
+            source="mcp-canary", contract=contract, trusted_tool=True) for row in selected]
+        judged = latency_watch.summarize(observed, now=time.time(), contract=contract,
+                                        coverage={"population": "declared-series", "evictions": 0})
+        conditions.append({"limit": limit, "attempts": len(selected), "latency": judged,
+                           "terminals": sum(row["terminal_received"] for row in selected),
+                           "failures": sum(row["failure"] is not None for row in selected),
+                           "outcomes": dict(Counter(row["outcome"] for row in selected)),
+                           "sql_statement_counts": dict(Counter(str(row.get("request_work", {}).get("sql_statements")) for row in selected)),
+                           "latency_passed": len(judged) == 1 and judged[0]["verdict"] == "observed-within-bar"})
+    return {"conditions": conditions, "sql_constant": sql_constant, "sql_pairs": len(pairs),
+            "sql_mismatches": mismatches, "request_work_passed": bool(valid_work) and all(valid_work) and sql_constant,
+            "scope": "public dispatcher request context; background proof reads excluded; all outcomes retained"}
+
+
 def make_arm(name: str, root: Path, profile: dict) -> CloudArm:
     settings = worker_settings(embeddings=True, passthrough=json.loads((REFERENCE / "profile.json").read_text())["worker_environment"])
     settings.pop("EXOMEM_PRELOAD_MODELS", None)
@@ -634,6 +1035,185 @@ def make_arm(name: str, root: Path, profile: dict) -> CloudArm:
                     EXOMEM_CLOUD_CELL_ID="passage-latency", EXOMEM_CLOUD_CELL_TOKEN=uuid.uuid4().hex)
     settings.update(profile["mode_environment"][name])
     return CloudArm(name, sys.executable, root / "arm", root, worker_settings=settings, file_watcher=True)
+
+
+async def inventory_measure(root: Path, baseline: Path, profile: dict, *, plan_only: bool = False) -> dict:
+    from exomem.recall_canary import load_cases, measure_call
+    from exomem.request_latency_contract import load_contract
+
+    if root.resolve().is_relative_to(baseline.resolve()) or baseline.resolve().is_relative_to(root.resolve()):
+        raise RuntimeError("inventory output and retained preparation must have separate roots")
+    if (root / "attempt-slots.json").exists():
+        raise RuntimeError("inventory measurement requires a fresh output root")
+    retained_names = ("inventory-preparation.json", "expected-sources.json", "frozen-cases.json", "attempt-slots.json")
+    inputs = {name: hashlib.sha256((baseline / name).read_bytes()).hexdigest() for name in retained_names}
+    preparation_report = json.loads((baseline / "inventory-preparation.json").read_text())
+    preparation = preparation_report["preparation"]
+    truth = json.loads((baseline / "expected-sources.json").read_text())
+    values = json.loads((baseline / "frozen-cases.json").read_text())
+    slots = json.loads((baseline / "attempt-slots.json").read_text())
+    generated = inventory_cases(profile, truth, preparation["recall_space_id"])
+    for retained, expected in zip(values, generated, strict=True):
+        stored_items = retained["expected"]["response_schema"]["properties"]["items"]["prefixItems"]
+        expected_items = expected["expected"]["response_schema"]["properties"]["items"]["prefixItems"]
+        for stored_item, expected_item in zip(stored_items, expected_items, strict=True):
+            # JSON Schema requires a set of field names; serializing truth may reorder its object keys.
+            if set(stored_item["required"]) == set(expected_item["required"]):
+                expected_item["required"] = stored_item["required"]
+    if (preparation_report["profile"] != profile or inputs["expected-sources.json"] != preparation["truth_sha256"]
+            or inputs["frozen-cases.json"] != preparation["cases_sha256"]
+            or values != generated
+            or slots != paired_slots(profile, values)):
+        raise RuntimeError("retained inventory truth, cases or attempt plan differs from its preparation")
+    for name in retained_names:
+        shutil.copy2(baseline / name, root / name)
+    write_json(root / "input-manifest.json", inputs)
+    frozen = freeze_source(root)
+    write_json(root / "frozen-protocol.json", {
+        "profile": profile, "bar": load_contract().bar("inventory-page").model_dump(mode="json"),
+        "inputs": inputs, "attempt_slots": len(slots), "source": frozen,
+        "baseline": "unavailable: new route; no speedup claim", "retries": 0, "exclusions": [],
+        "request_work": "public dispatcher context; count-only SQLite trace, canonical reader calls, file read opens and embed_texts calls",
+        "resource_scope": "whole run, including fixture copy, startup, warm-up and final verification; timing snapshots are separate"})
+    if plan_only:
+        return {"state": "planned", "attempt_slots": len(slots), "inputs": inputs, "source": frozen}
+    cases = {case.id: case for case in load_cases((root / "frozen-cases.json").read_bytes())}
+    arm = None
+    failure = None
+    startup = None
+    copied = None
+    warmup, warmup_attempts = [], 0
+    fixture_after = {"state": "unverified"}
+    stopped = asyncio.Event()
+    observer = asyncio.create_task(observe_resources(root / "resources.jsonl", stopped, profile["resource_sample_seconds"]))
+    log_path, work_path = root / "arm/logs/exomem.log", root / "request-work.jsonl"
+    (root / "terminals.jsonl").touch()
+    (root / "samples-enriched.jsonl").touch()
+    try:
+        copied = await asyncio.to_thread(copied_fixture, baseline, root / "arm", profile, preparation)
+        write_json(root / "fixture-before.json", copied)
+        if copied["vector_digest"] != preparation["vector_digest"]:
+            raise RuntimeError("working inventory vectors differ from the immutable preparation")
+        arm = make_arm("disk", root, profile)
+        os.environ.update(arm.env)
+        controller_runtime = runtime(profile)
+        write_json(root / "controller-runtime.json", controller_runtime)
+        arm.env.update(PASSAGE_WORKER_RECEIPT=str(root / "worker-launch.json"),
+                       INVENTORY_CALL_OBSERVATIONS=str(work_path),
+                       INVENTORY_EXPECTED_SOURCES=str(root / "expected-sources.json"))
+        deadline = time.monotonic() + profile["warmup_timeout_seconds"]
+        startup = await asyncio.wait_for(arm.start(quiescence_limit=180), timeout=max(0, deadline - time.monotonic()))
+        worker = json.loads((root / "worker-launch.json").read_text())
+        if (worker["pid"] != arm.worker.pid or worker["executable"] != arm.python or worker["source"] != frozen
+                or worker["runtime"]["dependencies"] != controller_runtime["dependencies"]
+                or worker["matrix_bytes"] != "0"):
+            raise RuntimeError("inventory worker identity differs from its frozen controller")
+        write_json(root / "mcp-clients.json", {"independent_client_contexts": 1,
+                   "sdk_session_object": id(arm.client.session), "remote_session_id": arm.client.transport.get_session_id()})
+        client = CapturingClient(arm.client)
+        with (root / "warmup.jsonl").open("w") as output:
+            for value in values:
+                if value["arguments"]["arguments"]["limit"] != profile["page_limit"]:
+                    continue
+                case = cases[value["id"]]
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("inventory publication and exact indexed warm-up exceeded its deadline")
+                    client.result = None
+                    observation = await measure_call(client, case, timeout=min(120, remaining))
+                    row = {"case": case.id, "attempt": warmup_attempts, **dataclasses.asdict(observation),
+                           "response": client.result.data if client.result else None}
+                    output.write(json.dumps(row) + "\n")
+                    output.flush()
+                    warmup_attempts += 1
+                    if row["failure"] is None:
+                        warmup.append(row)
+                        print(f"warmed inventory pages={len(warmup)}", flush=True)
+                        break
+                    await asyncio.sleep(min(profile["warmup_probe_interval_seconds"], max(0, deadline - time.monotonic())))
+        traversal = inventory_traversal(warmup, values, truth, profile)
+        write_json(root / "warmup-traversal.json", traversal)
+        if not traversal["complete"]:
+            raise RuntimeError("inventory warm-up did not complete the generated cursor-linked traversal")
+        arm.require_timeable()
+        write_json(root / "resources-before-timing.json", resource_observation())
+        with (root / "terminals.jsonl").open("a") as terminals, (root / "samples-enriched.jsonl").open("a") as output:
+            for slot in slots:
+                case = cases[slot["case"]]
+                log_offset, work_offset = log_path.stat().st_size, work_path.stat().st_size
+                client.result = None
+                observation = await measure_call(client, case, timeout=120)
+                row = {**slot, "bar_id": case.bar_id, "sampled_at": time.time(),
+                       "arguments_sha256": arguments_digest(case.arguments), **dataclasses.asdict(observation),
+                       "response": client.result.data if client.result else None}
+                retain_batch([row], terminals, output, log_path, log_offset, 1,
+                             tool_name="inspect_captured_sources", request_observation=(work_path, work_offset))
+                print(f"measured inventory repeat={slot['repeat'] + 1} case={case.id}", flush=True)
+        write_json(root / "resources-after-timing.json", resource_observation())
+        arm.require_timeable()
+    except (Exception, asyncio.CancelledError) as error:  # noqa: BLE001 - cancellation also retains the declared population
+        failure = {"type": type(error).__name__, "message": str(error)}
+    finally:
+        if arm is not None:
+            try:
+                await arm.stop()
+            except Exception as error:  # noqa: BLE001 - keep terminal evidence when shutdown fails
+                failure = failure or {"type": type(error).__name__, "message": str(error)}
+        if copied is not None:
+            try:
+                vectors = await asyncio.to_thread(vector_digest, Path(copied["vector_path"]))
+                checked, changed = 0, 0
+                for item in truth:
+                    changed += hashlib.sha256((root / "arm/vault" / item["key"][-1]).read_bytes()).hexdigest() != item["item"]["source_hash"]
+                    checked += 1
+                fixture_after = {"state": "checked", "canonical_sources_checked": checked, "changed_sources": changed,
+                                 "vector_digest": vectors, "unchanged": changed == 0 and vectors == preparation["vector_digest"]}
+            except Exception as error:  # noqa: BLE001 - unavailable fixture evidence must remain explicit
+                fixture_after = {"state": "failed", "error_type": type(error).__name__, "unchanged": False}
+        write_json(root / "fixture-after.json", fixture_after)
+        write_json(root / "warmup-traversal.json", inventory_traversal(warmup, values, truth, profile))
+        write_json(root / "source-after.json", manifest())
+        stopped.set()
+        await observer
+    journals, read_errors = {}, {}
+    for name in ("terminals", "samples-enriched"):
+        rows = []
+        try:
+            with (root / f"{name}.jsonl").open() as source:
+                for line in source:
+                    rows.append(json.loads(line))
+        except (OSError, ValueError) as error:
+            read_errors[name] = type(error).__name__
+        retain_slots(slots, rows)
+        journals[name] = {slot_key(row): row for row in rows}
+    samples = []
+    for key, terminal in journals["terminals"].items():
+        enriched = journals["samples-enriched"].get(key, {})
+        samples.append({**terminal, "dispatch": enriched.get("dispatch", {"overlap_verified": False}),
+                        "request_work": enriched.get("request_work", {"observation_state": "missing"})})
+    retained = retain_slots(slots, samples)
+    with (root / "samples.jsonl").open("w") as output:
+        for row in retained:
+            output.write(json.dumps(row) + "\n")
+    summary = summarize_inventory(retained, values, profile)
+    traversals = [{"repeat": repeat, **inventory_traversal([row for row in retained if row["repeat"] == repeat], values, truth, profile)}
+                  for repeat in range(profile["repeats"])]
+    inputs_unchanged = all(hashlib.sha256((baseline / name).read_bytes()).hexdigest() == digest for name, digest in inputs.items())
+    unchanged = frozen == manifest()
+    reference = profile == json.loads(INVENTORY_PROFILE.read_text())
+    passed = (failure is None and not read_errors and unchanged and reference and inputs_unchanged
+              and fixture_after.get("unchanged", False) and summary["request_work_passed"]
+              and all(row["complete"] for row in traversals)
+              and all(row.get("dispatch", {}).get("overlap_verified", False) for row in retained)
+              and all(row["failures"] == 0 and row["terminals"] == row["attempts"] and row["latency_passed"] for row in summary["conditions"]))
+    return {"state": "passed" if passed else "failed", "failure": failure, **summary, "traversals": traversals,
+            "slots": len(retained), "terminals": sum(row["terminal_received"] for row in retained),
+            "warmup_attempts": warmup_attempts, "startup": startup, "source_unchanged": unchanged,
+            "inputs_unchanged": inputs_unchanged, "reference_profile": reference, "journal_read_errors": read_errors,
+            "resources": resource_summary(root / "resources.jsonl"), "fixture": fixture_after,
+            "limitations": ["file mode only; store HTTP startup unsupported", "synthetic corpus vectors; no retrieval quality claim",
+                            "new route: prior latency baseline unavailable; no speedup claim"]}
 
 
 async def paired(root: Path, baseline: Path, profile: dict, *, plan_only: bool = False) -> dict:
@@ -760,7 +1340,7 @@ async def paired(root: Path, baseline: Path, profile: dict, *, plan_only: bool =
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "measure", "paired"))
+    parser.add_argument("mode", choices=("prepare", "measure", "paired", "inventory-prepare", "inventory-measure"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--baseline", type=Path)
@@ -771,13 +1351,20 @@ def main() -> int:
         parser.error("paired output and retained baseline must have separate roots")
     args.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     args.root.chmod(0o700)
-    profile = json.loads(PROFILE.read_text())
+    profile = json.loads((INVENTORY_PROFILE if args.mode.startswith("inventory-") else PROFILE).read_text())
     if args.smoke:
         profile["sources"] = 2
         profile["queries"] = 1
         profile["repeats"] = 1
     report = {"state": "unverified", "profile": profile, "command": sys.argv, "reduced": args.smoke}
     try:
+        if args.mode == "inventory-measure":
+            if args.baseline is None or args.smoke:
+                raise RuntimeError("inventory measurement requires retained full preparation and a fresh output root")
+            if not args.plan_only:
+                report["runtime"] = runtime(profile)
+            report.update(asyncio.run(inventory_measure(args.root, args.baseline, profile, plan_only=args.plan_only)))
+            return 0 if report["state"] in ("planned", "passed") else 1
         if args.mode == "paired":
             if args.baseline is None or args.smoke:
                 raise RuntimeError("paired mode requires the retained baseline and does not generate a smoke fixture")
@@ -786,11 +1373,19 @@ def main() -> int:
             report.update(asyncio.run(paired(args.root, args.baseline, profile, plan_only=args.plan_only)))
             return 0 if report["state"] in ("planned", "passed") else 1
         if args.plan_only:
-            raise RuntimeError("plan-only applies to paired mode")
+            raise RuntimeError("plan-only applies to paired or inventory-measure mode")
         arm = make_arm("disk", args.root, profile)
         os.environ.update(arm.env)
         report["runtime"] = runtime(profile)
-        if args.mode == "prepare":
+        if args.mode == "inventory-prepare":
+            freeze_source(args.root)
+            report["preparation"] = asyncio.run(inventory_preparation(arm, args.root, profile))
+            report["source_unchanged"] = manifest() == json.loads((args.root / "source-before.json").read_text())
+            if not report["source_unchanged"]:
+                raise RuntimeError("inventory preparation source changed")
+            report["state"] = "prepared"
+            write_json(args.root / "inventory-preparation.json", report)
+        elif args.mode == "prepare":
             report["preparation"] = prepare(arm, profile)
             report["state"] = "prepared"
             write_json(args.root / "preparation.json", report)

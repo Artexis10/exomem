@@ -608,6 +608,7 @@
             "plans.history",
             "writer.status",
             "sources.inventory",
+            "sources.erasure_policy",
             "settings.inspect",
             "graph.map",
             "files.overview",

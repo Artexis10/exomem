@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,210 @@ sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location("passage_evidence_latency", SCRIPTS / "passage_evidence_latency.py")
 driver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(driver)
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="the declared worker reference observes Linux descriptor reads")
+@pytest.mark.parametrize("request_work", [False, True])
+def test_inventory_observer_attributes_public_work_but_excludes_background_proof_reads(vault, tmp_path, monkeypatch, request_work):
+    """Global work counters misreport normal proof drain as request Source reads or encoding."""
+    from fastmcp import Client
+
+    from exomem import capture_inventory, embeddings, server
+
+    source = vault / "Knowledge Base/Sources/reference.md"
+    source.write_text("# Reference\n\nPublic fixture words.\n")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *args, **kwargs: [])
+
+    def work():
+        with sqlite3.connect(":memory:") as connection:
+            connection.execute("SELECT 1").fetchone()
+        capture_inventory.read_canonical(vault, source.relative_to(vault).as_posix())
+        source.read_text()
+        embeddings.embed_texts(["fixture"])
+
+    def inventory(*args, **kwargs):
+        background = threading.Thread(target=work)
+        background.start()
+        background.join()
+        if request_work:
+            work()
+        return {"summary": "Observed fixture.", "items": []}
+
+    monkeypatch.setattr(capture_inventory, "inventory", inventory)
+    journal = tmp_path / "request-work.jsonl"
+    with driver.observe_inventory_work(journal, vault, [source.relative_to(vault).as_posix()]):
+        mcp = server.build_server(require_auth=False)
+
+        async def call():
+            async with Client(mcp) as client:
+                return await client.call_tool("inspect_memory", {"operation": "sources.inventory", "arguments": {"system": "reference"}}, raise_on_error=False)
+
+        result = asyncio.run(call())
+
+    [observation] = [json.loads(line) for line in journal.read_text().splitlines()]
+    assert not result.is_error
+    assert observation["request_id"]
+    assert observation["sql_statements"] == int(request_work)
+    assert (observation["canonical_source_read_calls"] > 0) is request_work
+    assert (observation["source_file_read_opens"] > 0) is request_work
+    assert (observation["source_file_read_ops"] > 0) is request_work
+    assert (observation["source_file_read_bytes"] > 0) is request_work
+    assert observation["encoder_calls"] == int(request_work)
+    assert "SELECT" not in journal.read_text()
+
+
+def test_inventory_traversal_rejects_a_repeated_page_even_when_all_slots_exist():
+    """A page-count receipt alone can certify a repeated page and lose half the Sources."""
+    cases = [{"id": "page-1", "arguments": {"arguments": {"limit": 2}}},
+             {"id": "page-2", "arguments": {"arguments": {"limit": 2, "cursor": "after-first"}}}]
+    rows = [{"case": "page-1", "terminal_received": True, "failure": None,
+             "response": {"items": [{"source_ref": "one"}, {"source_ref": "two"}], "next_cursor": "after-first"}},
+            {"case": "page-2", "terminal_received": True, "failure": None,
+             "response": {"items": [{"source_ref": "one"}, {"source_ref": "two"}], "next_cursor": None}}]
+    truth = [{"key": ["reference", str(n)], "item": {"source_ref": ref}} for n, ref in enumerate(("one", "two", "three", "four"))]
+
+    receipt = driver.inventory_traversal(rows, cases, truth, {"page_limit": 2, "sources": 4})
+
+    assert not receipt["complete"]
+    assert receipt["unique_sources"] == 2
+    assert receipt["failure"] == "traversal-identities-differ"
+
+
+def test_inventory_traversal_keeps_a_malformed_terminal_visible_as_failed():
+    """A null item array must fail traversal without crashing aggregation of the retained calls."""
+    cases = [{"id": "page", "arguments": {"arguments": {"limit": 200}}}]
+    rows = [{"case": "page", "terminal_received": True, "failure": "unexpected-response", "response": {"items": None}}]
+
+    receipt = driver.inventory_traversal(rows, cases, [], {"page_limit": 200, "sources": 200})
+
+    assert not receipt["complete"]
+    assert receipt["failure"] == "traversal-terminal-unavailable"
+
+
+@pytest.mark.parametrize("observation", ["missing", "truncated", "different-call"])
+def test_inventory_observation_failure_preserves_the_received_terminal(tmp_path, observation):
+    """Losing count evidence must prevent qualification without erasing a completed public call."""
+    work = tmp_path / "work.jsonl"
+    if observation == "truncated":
+        work.write_text("{partial")
+    elif observation == "different-call":
+        work.write_text(json.dumps({"arguments_sha256": "wrong", "request_id": "other"}) + "\n")
+    log = tmp_path / "worker.log"
+    log.write_text("\n".join(json.dumps({"ts": str(n), "message": f"event=tool_{event} tool=inspect_captured_sources request_id=one"})
+                             for n, event in enumerate(("start", "success"))))
+    row = {"client": 0, "elapsed_ms": 10.0, "terminal_received": True, "failure": None,
+           "response": {"items": []}, "arguments_sha256": "expected"}
+    with (tmp_path / "terminals.jsonl").open("w") as terminals, (tmp_path / "samples.jsonl").open("w") as samples:
+        driver.retain_batch([row], terminals, samples, log, 0, 1,
+                            tool_name="inspect_captured_sources", request_observation=(work, 0))
+
+    [retained] = [json.loads(line) for line in (tmp_path / "samples.jsonl").read_text().splitlines()]
+    assert retained["terminal_received"] and retained["elapsed_ms"] == 10.0
+    assert retained["request_work"]["observation_state"] == "failed"
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+def test_inventory_worker_start_failure_retains_every_scheduled_attempt(tmp_path, monkeypatch, failure_type):
+    """A worker startup failure must leave the full frozen population visible as unattempted."""
+    root, baseline = tmp_path / "run", tmp_path / "prepared"
+    root.mkdir()
+    baseline.mkdir()
+    profile = json.loads(driver.INVENTORY_PROFILE.read_text())
+    profile.update(sources=4, page_limit=2, limits=[1, 2])
+    truth = [{"key": ["reference", str(n), "1", f"ref-{n}", f"source-{n}"],
+              "item": {"source_ref": f"ref-{n}", "source_hash": f"hash-{n}"}} for n in range(4)]
+    cases = driver.inventory_cases(profile, truth, "space")
+    slots = driver.paired_slots(profile, cases)
+    for name, value in (("expected-sources", truth), ("frozen-cases", cases), ("attempt-slots", slots)):
+        driver.write_json(baseline / f"{name}.json", value)
+    preparation = {"encoder": {}, "recall_space_id": "space", "rows": {},
+                   "vector_digest": {"rows": 108, "sha256": "vectors"},
+                   "truth_sha256": hashlib.sha256((baseline / "expected-sources.json").read_bytes()).hexdigest(),
+                   "cases_sha256": hashlib.sha256((baseline / "frozen-cases.json").read_bytes()).hexdigest()}
+    driver.write_json(baseline / "inventory-preparation.json", {"profile": profile, "preparation": preparation})
+
+    class FailedArm:
+        env = {}
+
+        async def start(self, **kwargs):
+            raise failure_type("worker could not start")
+
+        async def stop(self):
+            pass
+
+    def copied(_baseline, destination, *_args, **_kwargs):
+        destination.mkdir()
+        return {"vector_path": str(destination / "vectors"), "vector_digest": preparation["vector_digest"]}
+
+    monkeypatch.setattr(driver, "copied_fixture", copied)
+    monkeypatch.setattr(driver, "vector_digest", lambda _path: preparation["vector_digest"])
+    monkeypatch.setattr(driver, "verify_rows", lambda *_args: {})
+    monkeypatch.setattr(driver, "make_arm", lambda *_args: FailedArm())
+    monkeypatch.setattr(driver, "runtime", lambda _profile: {})
+    monkeypatch.setattr(driver, "manifest", lambda: {})
+
+    report = asyncio.run(driver.inventory_measure(root, baseline, profile))
+
+    retained = [json.loads(line) for line in (root / "samples.jsonl").read_text().splitlines()]
+    assert report["state"] == "failed"
+    assert len(retained) == len(slots)
+    assert all(row["outcome"] == "unattempted" and row["elapsed_ms"] is None for row in retained)
+    assert report["failure"]["message"] == "worker could not start"
+
+
+@pytest.mark.parametrize("defect", [None, "missing", "sql", "source", "encoder", "descriptor"])
+def test_inventory_summary_requires_matching_native_counts_and_zero_request_source_or_encoder_work(defect):
+    """Fast valid responses cannot qualify when count evidence is missing or request work grows."""
+    cases = [{"id": f"page-{limit}", "arguments": {"arguments": {"limit": limit}}} for limit in (2, 200)]
+    profile = {"limits": [2, 200], "repeats": 1}
+    rows = [{"case": case["id"], "repeat": 0, "outcome": "ok", "failure": None,
+             "elapsed_ms": 1.0, "terminal_received": True, "dispatch": {"overlap_verified": True},
+             "request_work": {"observation_state": "observed", "closed": True, "request_id": str(n),
+                              "sql_statements": 9, "canonical_source_read_calls": 0,
+                              "source_file_read_opens": 0, "source_file_read_ops": 0,
+                              "source_file_read_bytes": 0, "descriptor_observation_errors": 0,
+                              "encoder_calls": 0}} for n, case in enumerate(cases)]
+    if defect == "missing":
+        rows[-1].pop("request_work")
+    elif defect == "sql":
+        rows[-1]["request_work"]["sql_statements"] = 10
+    elif defect == "source":
+        rows[-1]["request_work"]["canonical_source_read_calls"] = 1
+    elif defect == "encoder":
+        rows[-1]["request_work"]["encoder_calls"] = 1
+    elif defect == "descriptor":
+        rows[-1]["request_work"]["descriptor_observation_errors"] = 1
+
+    report = driver.summarize_inventory(rows, cases, profile)
+
+    assert report["request_work_passed"] is (defect is None)
+    assert report["sql_constant"] is (defect not in ("missing", "sql"))
+
+
+def test_inventory_plan_uses_generated_truth_and_the_same_keyset_afterpoints():
+    """Lexical record ordering and the final cursor must not drop or repeat Sources."""
+    profile = {"sources": 12, "page_limit": 4, "limits": [2, 4], "repeats": 3, "passages_per_source": 27}
+    rows = [{"key": ["reference", str(n), "1", f"ref-{n}", f"source-{n}"],
+             "item": {"source_ref": f"ref-{n}", "source_hash": f"hash-{n}"}}
+            for n in range(12)]
+    cases = driver.inventory_cases(profile, rows, "space")
+    large = [case for case in cases if case["arguments"]["arguments"]["limit"] == 4]
+    small = [case for case in cases if case["arguments"]["arguments"]["limit"] == 2]
+    truth = sorted(rows, key=lambda row: row["key"])
+    observed = [item["properties"]["source_ref"]["const"] for case in large
+                for item in case["expected"]["response_schema"]["properties"]["items"]["prefixItems"]]
+    assert observed == [row["item"]["source_ref"] for row in truth]
+    assert [case["arguments"]["arguments"].get("cursor") for case in large] == [
+        case["arguments"]["arguments"].get("cursor") for case in small]
+    assert large[-1]["expected"]["response_schema"]["properties"]["next_cursor"] == {"const": None}
+    assert len(driver.paired_slots({"modes": ["inventory"], "repeats": 3, "callers": [1]}, cases)) == 18
+
+
+def test_inventory_plan_rejects_an_incomplete_generated_manifest():
+    """A partial fixture must not silently shrink the frozen attempt population."""
+    with pytest.raises(RuntimeError, match="generated inventory truth"):
+        driver.inventory_cases({"sources": 2, "page_limit": 200, "limits": [2, 200]}, [], "space")
 
 
 @pytest.mark.parametrize("overlapping", [True, False])
