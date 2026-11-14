@@ -30,6 +30,29 @@ def test_unreadable_package_identity_remains_unknown(tmp_path: Path):
     assert observed["sha256"] is None
 
 
+def test_discovery_never_reads_a_foreign_sidecar_alias(vault, tmp_path):
+    """Unauthenticated discovery must not inspect another vault through a sidecar link."""
+    from contextlib import closing
+
+    import pytest
+
+    from exomem import embedding_index, index_paths, recall_space
+
+    foreign = tmp_path / "foreign-vault"
+    foreign.mkdir()
+    index = embedding_index.EmbeddingIndex(foreign)
+    with closing(index._connect()) as connection, connection:
+        recall_space.write_identity(connection, recall_space.SpaceIdentity("foreign-model", "foreign-weights", 2))
+    alias = index_paths.sidecar_path(vault)
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    alias.unlink(missing_ok=True)
+    try:
+        alias.symlink_to(index.path)
+    except OSError:
+        pytest.skip("symbolic links are unavailable")
+    assert embedding_index.read_published_identity(vault) is None
+
+
 def test_discovery_follows_the_filtered_command_registry():
     """A withheld capture command must not advertise capture support or limits."""
     search = next(command for command in commands.PRODUCT_COMMANDS if command.name == "ask_memory")

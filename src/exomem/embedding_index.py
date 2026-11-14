@@ -40,6 +40,7 @@ from . import (
     sidecar_store,
     vecstore,
 )
+from .cli_ops import OpError
 from .vector_index_common import vec_gate
 
 if TYPE_CHECKING:
@@ -917,15 +918,18 @@ def read_published_identity(vault_root: Path) -> recall_space.SpaceIdentity | No
     """Read only the serving space record; never initialize or migrate a sidecar."""
     try:
         path = index_paths.sidecar_path(vault_root, nonblocking=True)
-        with contextlib.closing(sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0
-        )) as conn:
-            conn.execute("BEGIN")
-            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-        if identity is None or identity.dim <= 0:
-            return None
-        return identity if index_paths.sidecar_path(vault_root, nonblocking=True) == path else None
-    except (OSError, sqlite3.DatabaseError, ValueError):
+        with reserved_paths._subsystem_authority_scope("embedding_index"), reserved_paths._identity_coordination_scope(
+            vault_root, descriptor_ids=("embeddings-store",), identity_may_change=False, deadline=time.monotonic(),
+        ), reserved_paths._sqlite_owner_target_scope(vault_root, path, "embeddings-store", create=False) as retained:
+            with contextlib.closing(_sqlite_connect_owned(
+                f"{retained.as_uri()}?mode=ro", uri=True, timeout=0.0
+            )) as conn:
+                conn.execute("BEGIN")
+                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if identity is None or identity.dim <= 0:
+                return None
+            return identity if index_paths.sidecar_path(vault_root, nonblocking=True) == path else None
+    except (OSError, sqlite3.DatabaseError, ValueError, RuntimeError, OpError):
         return None
 
 
