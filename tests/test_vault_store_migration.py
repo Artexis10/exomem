@@ -65,8 +65,9 @@ def _lease_environment(tmp_path, url):
         "EXOMEM_WRITER_LEASE_TOKEN": "lease",
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-service"),
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
-        # Short, so the crash case waits out a dead owner's lease in seconds.
-        "EXOMEM_WRITER_LEASE_TTL": "3",
+        # Short, so the crash case waits out a dead owner's lease in seconds. On a loaded Windows runner
+        # renewals ran two seconds apart and a migrate lost a 3 s lease (WRITER_FENCED), so it lives longer.
+        "EXOMEM_WRITER_LEASE_TTL": "10" if os.name == "nt" else "3",
     }
 
 
