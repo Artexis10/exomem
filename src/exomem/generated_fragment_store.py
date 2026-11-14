@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import uuid
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from .source_capture import validate_sha256
 from .source_custody import OwnerLocator, ProducerBirth
 
 OWNER = "generated_fragment_store"
+log = logging.getLogger(__name__)
 DESCRIPTOR_ID = "generated-fragments"
 INDEX_DESCRIPTOR_ID = "generated-fragments-index"
 # These protocol bounds limit metadata I/O, journal retention and each caller-driven step.
@@ -67,7 +69,7 @@ class Head(_Record):
 
 class ObjectChange(_Record):
     # Kinds select the closed canonical layout, not a content vocabulary.
-    kind: Literal["image", "page", "copy", "uncertainty"]
+    kind: Literal["image", "page", "copy", "uncertainty", "slot"]
     object_id: _Id
     image_id: _Id | None = None
     page_number: Annotated[int, Field(ge=0)] | None = None
@@ -82,7 +84,7 @@ class Change(_Record):
     unit_id: _Id
     # Operations describe this owner's fixed metadata protocol.
     operation: Literal["image_begin", "image_page", "image_seal", "copy_reserve", "copy_ack",
-                       "uncertainty", "birth", "collect", "no_effect"]
+                       "uncertainty", "birth", "collect", "no_effect", "slot_prepare", "slot_settle", "slot_remove"]
     objects: Annotated[tuple[ObjectChange, ...], Field(max_length=3)] = ()
 
 
@@ -146,8 +148,64 @@ class Uncertainty(_Record):
     revision: _Id
 
 
+class SlotPending(_Record):
+    publication_id: _Id
+    candidate_copy_id: _Id
+
+
+class Slot(_Record):
+    slot_id: _Id
+    catalogue_id: _Id
+    current_copy_id: _Id | None = None
+    pending: SlotPending | None = None
+    revision: _Id
+
+
 # ObjectChange fixes these metadata kind tokens and the schema each token selects.
-_OBJECT_MODELS = {"image": ImageHeader, "page": ImagePage, "copy": Copy, "uncertainty": Uncertainty}
+_OBJECT_MODELS = {"image": ImageHeader, "page": ImagePage, "copy": Copy, "uncertainty": Uncertainty, "slot": Slot}
+
+_SLOT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class SlotPublication:
+    """An internal publication right fenced by both slot identity and opaque revision."""
+
+    root: Path
+    owner: str
+    locator: str
+    physical_scope: str
+    slot_id: str
+    revision: str
+    publication_id: str
+    before_copy_id: str | None
+    candidate_copy_id: str
+    _seal: object
+
+
+@dataclass(frozen=True)
+class SlotBinding:
+    state: Literal["observed", "missing", "pending", "unknown"]
+    slot: Slot | None = None
+    current: Copy | None = None
+    candidate: Copy | None = None
+    images: tuple[ImageHeader, ...] = ()
+    publication: SlotPublication | None = None
+
+
+@dataclass(frozen=True)
+class NativeSlotWitness:
+    """Only a native-owner callback supplies retained installation/version evidence.
+
+    Matching bytes or hashes cannot distinguish equal-byte images with different maps.
+    """
+
+    slot_id: str
+    revision: str
+    physical_scope: str
+    publication_id: str | None
+    # These choices form the native publication protocol, not a content vocabulary.
+    selection: Literal["before", "candidate", "absence", "mismatch", "foreign"]
 
 
 @dataclass(frozen=True)
@@ -283,6 +341,10 @@ class GeneratedFragmentStore:
             if item.image_id is None:
                 raise ValueError("generated_copy_key_invalid")
             return self.path / "copies" / item.object_id[:2] / f"{item.object_id}.json"
+        if item.kind == "slot":
+            if item.image_id is not None:
+                raise ValueError("generated_slot_key_invalid")
+            return self.path / "slots" / item.object_id[:2] / f"{item.object_id}.json"
         return self.path / "uncertain" / f"{item.object_id}.json"
 
     def _read(self, path: Path, model):
@@ -360,6 +422,9 @@ class GeneratedFragmentStore:
             item = ObjectChange(kind="uncertainty", object_id=value.unit_id)
             for key in value.object_keys:
                 self._validate_object_key(key)
+        elif relative[0] == "slots":
+            value = Slot.model_validate_json(content)
+            item = ObjectChange(kind="slot", object_id=value.slot_id)
         else:
             raise ValueError("generated_record_path_invalid")
         if path != self._object_path(item):
@@ -371,7 +436,7 @@ class GeneratedFragmentStore:
         parts = Path(key).parts
         if ".." in parts or path.relative_to(self.path).as_posix() != key:
             raise ValueError("generated_object_key_invalid")
-        if not parts or parts[0] not in ("images", "copies", "uncertain"):
+        if not parts or parts[0] not in ("images", "copies", "uncertain", "slots"):
             raise ValueError("generated_object_key_invalid")
         if parts[0] == "images" and len(parts) in (4, 5):
             image_id = _opaque(parts[2])
@@ -381,7 +446,7 @@ class GeneratedFragmentStore:
                 return
             if len(parts) == 5 and parts[3] == "pages" and parts[4] == f"{int(parts[4][:-5])}.json" and int(parts[4][:-5]) >= 0:
                 return
-        elif parts[0] == "copies" and len(parts) == 3:
+        elif parts[0] in ("copies", "slots") and len(parts) == 3:
             identity = _opaque(parts[2][:-5])
             if parts[1] == identity[:2] and parts[2] == f"{identity}.json":
                 return
@@ -503,6 +568,13 @@ class GeneratedFragmentStore:
             CREATE INDEX IF NOT EXISTS copies_missing ON copies(loss_recorded,closed,seen,copy_id);
             CREATE INDEX IF NOT EXISTS copies_owner ON copies(
                 json_extract(data,'$.owner.owner'),json_extract(data,'$.owner.locator'),copy_id);
+            CREATE TABLE IF NOT EXISTS slot_refs (
+                slot_id TEXT NOT NULL,copy_id TEXT NOT NULL,image_id TEXT NOT NULL,revision TEXT NOT NULL,
+                seen TEXT NOT NULL DEFAULT '',loss_recorded INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(slot_id,copy_id));
+            CREATE INDEX IF NOT EXISTS slot_refs_copy ON slot_refs(copy_id,slot_id);
+            CREATE INDEX IF NOT EXISTS slot_refs_image ON slot_refs(image_id,slot_id);
+            CREATE INDEX IF NOT EXISTS slot_refs_seen ON slot_refs(loss_recorded,seen,slot_id,copy_id);
             CREATE TABLE IF NOT EXISTS uncertainties (
                 unit_id TEXT PRIMARY KEY, image_id TEXT, horizon INTEGER NOT NULL,
                 canonical INTEGER NOT NULL DEFAULT 1);
@@ -521,15 +593,18 @@ class GeneratedFragmentStore:
         if head is None:
             head = Head(catalogue_id=_id())
             self._install((self._write(self.path / "head.json", head, guard),))
-            with self._connect() as conn:
-                self._reset(conn, head, ready=True)
-                conn.commit()
+            try:
+                with self._connect() as conn:
+                    self._reset(conn, head, ready=True)
+                    conn.commit()
+            except (ValueError, OSError, RuntimeError, sqlite3.Error, vault.PathGuardError) as error:
+                log.warning("generated derived checkpoint initialization failed (%s)", type(error).__name__)
         return self.head()
 
     @staticmethod
     def _reset(conn, head, *, ready=False) -> bool:
         remaining = False
-        for table in ("members", "copies", "images", "uncertainties"):
+        for table in ("members", "copies", "images", "uncertainties", "slot_refs"):
             # Names are the closed local schema; changing catalogue identity clears only a bounded slice.
             conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} LIMIT ?)", (MAX_STEP,))
             remaining |= conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
@@ -728,16 +803,18 @@ class GeneratedFragmentStore:
         self._run("image_begin", ((item, header),))
         return header
 
-    def _image(self, image_id: str) -> ImageHeader:
+    def _image(self, image_id: str, *, guards: list[vault.PathGuard] | None = None) -> ImageHeader:
         _opaque(image_id)
         item = ObjectChange(kind="image", object_id=image_id, image_id=image_id)
-        value, _ = self._read(self._object_path(item), ImageHeader)
+        value, guard = self._read(self._object_path(item), ImageHeader)
         if value is None:
             raise FileNotFoundError("generated image is missing")
         head = self.head()
         if (value.image_id != image_id or value.catalogue_id != head.catalogue_id
                 or value.unknown_through_epoch > head.epoch):
             raise ValueError("generated_image_binding_invalid")
+        if guards is not None:
+            guards.append(guard)
         return value
 
     def append_image(self, page: ImagePage) -> ImageHeader:
@@ -781,24 +858,200 @@ class GeneratedFragmentStore:
                    expected_revision=current.revision, after_revision=updated.revision), updated),))
         return updated
 
-    def reserve_copy(self, image_id: str, *, owner: OwnerLocator, origin_ledger: str) -> Copy:
+    def reserve_copy(self, image_id: str, *, owner: OwnerLocator, origin_ledger: str,
+                     expected_header: ImageHeader, expected_root: Path) -> Copy:
+        """Reserve after the native producer verified this exact image and map binding."""
         _boundary(self.root)
         self._recover()
         current = self._image(image_id)
         if current.state != "ready":
             raise ValueError("generated copy requires a ready image")
-        head = self.head()
-        with self._connect() as conn:
-            checkpoint = conn.execute("SELECT * FROM checkpoint WHERE singleton=1").fetchone()
-            exact = conn.execute("SELECT exact FROM images WHERE image_id=?", (image_id,)).fetchone()
-            if (head.pending is not None or checkpoint["catalogue_id"] != head.catalogue_id
-                    or checkpoint["applied_epoch"] != head.epoch or not checkpoint["ready"]
-                    or exact is None or not exact[0]):
-                raise ValueError("generated copy requires ready ownership evidence")
+        if Path(expected_root).absolute() != self.root or current != expected_header:
+            raise ValueError("generated verified image binding changed")
         value = Copy(copy_id=_id(), image_id=image_id, owner=owner, origin_ledger=origin_ledger, revision=_id())
         self._run("copy_reserve", ((ObjectChange(kind="copy", object_id=value.copy_id, image_id=image_id,
                    after_revision=value.revision), value),))
         return value
+
+    def _slot_id(self, owner: str, locator: str, physical_scope: str, catalogue_id: str) -> str:
+        # Native owner fields share the existing opaque bounds; no process identity manufactures a durable scope.
+        OwnerLocator(owner=owner, locator=locator, version=physical_scope)
+        # UUIDv5 and canonical JSON fix the key protocol and make the tuple unambiguous.
+        name = json.dumps((owner, locator, physical_scope), ensure_ascii=False, separators=(",", ":"))
+        return uuid.uuid5(uuid.UUID(hex=catalogue_id), name).hex
+
+    def _slot_records(self, slot: Slot) -> tuple[tuple[Copy, ...], tuple[ImageHeader, ...]]:
+        if slot.catalogue_id != self.head().catalogue_id:
+            raise ValueError("generated slot catalogue differs")
+        identities = (slot.current_copy_id, slot.pending.candidate_copy_id if slot.pending else None)
+        copies, images, guards = [], {}, []
+        for identity in dict.fromkeys(identity for identity in identities if identity is not None):
+            copy, guard = self._read(self.path / "copies" / identity[:2] / f"{identity}.json", Copy)
+            if copy is None or copy.copy_id != identity:
+                raise ValueError("generated slot copy binding is unavailable")
+            guards.append(guard)
+            image = self._image(copy.image_id, guards=guards)
+            if image.state != "ready":
+                raise ValueError("generated slot image is not ready")
+            copies.append(copy)
+            images[image.image_id] = image
+        if len({(copy.owner.owner, copy.owner.locator) for copy in copies}) > 1:
+            raise ValueError("generated slot copy owners differ")
+        for guard in guards:
+            guard.recheck(self.root)
+        return tuple(copies), tuple(images.values())
+
+    def read_slot(self, *, owner: str, locator: str, physical_scope: str) -> SlotBinding:
+        """Read one canonical native binding; missing says nothing about native file presence."""
+        _boundary(self.root)
+        slot = None
+        try:
+            head = self.head()
+            identity = self._slot_id(owner, locator, physical_scope, head.catalogue_id)
+            item = ObjectChange(kind="slot", object_id=identity)
+            slot, guard = self._read(self._object_path(item), Slot)
+            if slot is None:
+                guard.recheck(self.root)
+                if self.head() != head or head.pending is not None:
+                    return SlotBinding("pending")
+                return SlotBinding("missing")
+            if slot.slot_id != identity:
+                raise ValueError("generated slot key differs")
+            copies, images = self._slot_records(slot)
+            if any(copy.owner.owner != owner or copy.owner.locator != locator for copy in copies):
+                raise ValueError("generated slot owner differs")
+            by_id = {copy.copy_id: copy for copy in copies}
+            publication = None
+            if slot.pending is not None:
+                publication = SlotPublication(self.root, owner, locator, physical_scope, identity,
+                                              slot.revision, slot.pending.publication_id,
+                                              slot.current_copy_id, slot.pending.candidate_copy_id, _SLOT_SEAL)
+            guard.recheck(self.root)
+            if self.head() != head:
+                return SlotBinding("pending", slot)
+            return SlotBinding("pending" if head.pending is not None else "observed", slot,
+                               by_id.get(slot.current_copy_id),
+                               by_id.get(slot.pending.candidate_copy_id) if slot.pending else None,
+                               images, publication)
+        except (ValueError, OSError, vault.PathGuardError):
+            return SlotBinding("unknown", slot)
+
+    def prepare_slot(self, *, owner: str, locator: str, physical_scope: str,
+                     expected_revision: str | None, expected_current_copy_id: str | None,
+                     candidate: Copy, publication_id: str) -> SlotPublication:
+        """Reserve one candidate without changing the current native binding or retiring a copy."""
+        _boundary(self.root)
+        self._recover()
+        _opaque(publication_id)
+        binding = self.read_slot(owner=owner, locator=locator, physical_scope=physical_scope)
+        if binding.state not in ("missing", "observed"):
+            raise ValueError("generated slot binding is unavailable")
+        current = binding.slot
+        if (getattr(current, "revision", None) != expected_revision
+                or getattr(current, "current_copy_id", None) != expected_current_copy_id):
+            raise ValueError("generated slot binding changed")
+        if current is not None and current.pending is not None:
+            raise ValueError("generated slot publication is pending")
+        item = ObjectChange(kind="copy", object_id=candidate.copy_id, image_id=candidate.image_id)
+        reserved, _ = self._read(self._object_path(item), Copy)
+        if (reserved != candidate or candidate.closed or candidate.owner.owner != owner
+                or candidate.owner.locator != locator or self._image(candidate.image_id).state != "ready"):
+            raise ValueError("generated slot candidate differs from its reservation")
+        head = self.head()
+        identity = self._slot_id(owner, locator, physical_scope, head.catalogue_id)
+        value = Slot(slot_id=identity, catalogue_id=head.catalogue_id,
+                     current_copy_id=expected_current_copy_id,
+                     pending=SlotPending(publication_id=publication_id, candidate_copy_id=candidate.copy_id), revision=_id())
+        self._run("slot_prepare", ((ObjectChange(kind="slot", object_id=identity,
+                   expected_revision=expected_revision, after_revision=value.revision), value),))
+        return SlotPublication(self.root, owner, locator, physical_scope, identity, value.revision,
+                               publication_id, expected_current_copy_id, candidate.copy_id, _SLOT_SEAL)
+
+    def check_slot(self, publication: SlotPublication) -> SlotBinding:
+        """Fence both forward installation and inverse publication against a superseded slot."""
+        _boundary(self.root)
+        if (not isinstance(publication, SlotPublication) or publication._seal is not _SLOT_SEAL
+                or publication.root != self.root):
+            raise ValueError("generated slot publication is not owner-bound")
+        binding = self.read_slot(owner=publication.owner, locator=publication.locator,
+                                 physical_scope=publication.physical_scope)
+        slot = binding.slot
+        if (binding.state != "observed" or slot is None or slot.pending is None
+                or slot.slot_id != publication.slot_id or slot.revision != publication.revision
+                or slot.current_copy_id != publication.before_copy_id
+                or slot.pending.publication_id != publication.publication_id
+                or slot.pending.candidate_copy_id != publication.candidate_copy_id):
+            raise ValueError("generated slot publication was superseded or is unavailable")
+        return binding
+
+    def _native_slot_witness(self, binding: SlotBinding,
+                             witness: Callable[[SlotBinding], NativeSlotWitness]) -> NativeSlotWitness:
+        if not callable(witness):
+            raise ValueError("generated slot requires a native-owner witness callback")
+        proof = witness(binding)
+        slot = binding.slot
+        if (not isinstance(proof, NativeSlotWitness) or proof.slot_id != slot.slot_id
+                or proof.revision != slot.revision
+                or proof.publication_id != (slot.pending.publication_id if slot.pending else None)):
+            raise ValueError("generated native witness is not slot-bound")
+        return proof
+
+    def _uncertain_slot(self, binding: SlotBinding) -> SlotBinding:
+        images = tuple(image.image_id for image in binding.images)
+        for image_id in images or (None,):
+            self.mark_uncertain(image_id)
+        return SlotBinding("unknown", binding.slot, binding.current, binding.candidate, binding.images)
+
+    def settle_slot(self, publication: SlotPublication, *,
+                    witness: Callable[[SlotBinding], NativeSlotWitness]) -> SlotBinding:
+        """Select a witnessed native binding and revoke the old publication right, without copy acknowledgements."""
+        _boundary(self.root)
+        self._recover()
+        binding = self.check_slot(publication)
+        proof = self._native_slot_witness(binding, witness)
+        binding = self.check_slot(publication)
+        if proof.physical_scope != publication.physical_scope or proof.selection == "foreign":
+            return SlotBinding("pending", binding.slot, binding.current, binding.candidate,
+                               binding.images, binding.publication)
+        if proof.selection == "mismatch":
+            return self._uncertain_slot(binding)
+        if proof.selection == "before":
+            selected = binding.current
+        elif proof.selection == "candidate":
+            selected = binding.candidate
+        elif proof.selection == "absence":
+            selected = None
+        else:
+            raise ValueError("generated native witness selection is invalid")
+        if selected is not None and selected.closed:
+            return self._uncertain_slot(binding)
+        value = binding.slot.model_copy(update={"current_copy_id": selected.copy_id if selected else None,
+                                                "pending": None, "revision": _id()})
+        self._run("slot_settle", ((ObjectChange(kind="slot", object_id=value.slot_id,
+                   expected_revision=publication.revision, after_revision=value.revision), value),))
+        return self.read_slot(owner=publication.owner, locator=publication.locator,
+                              physical_scope=publication.physical_scope)
+
+    def remove_slot(self, *, owner: str, locator: str, physical_scope: str, expected_revision: str,
+                    witness: Callable[[SlotBinding], NativeSlotWitness]) -> SlotBinding:
+        """Remove one exact, settled slot only after native-owner absence evidence."""
+        _boundary(self.root)
+        self._recover()
+        binding = self.read_slot(owner=owner, locator=locator, physical_scope=physical_scope)
+        if (binding.state != "observed" or binding.slot.revision != expected_revision
+                or binding.slot.pending is not None):
+            raise ValueError("generated slot removal requires an exact settled revision")
+        proof = self._native_slot_witness(binding, witness)
+        checked = self.read_slot(owner=owner, locator=locator, physical_scope=physical_scope)
+        if checked.state != "observed" or checked.slot != binding.slot:
+            raise ValueError("generated slot binding changed during its native witness")
+        if proof.physical_scope != physical_scope or proof.selection == "foreign":
+            return SlotBinding("pending", binding.slot, binding.current, images=binding.images)
+        if proof.selection != "absence":
+            return self._uncertain_slot(binding)
+        self._run("slot_remove", ((ObjectChange(kind="slot", object_id=binding.slot.slot_id,
+                   expected_revision=expected_revision, remove=True), None),))
+        return self.read_slot(owner=owner, locator=locator, physical_scope=physical_scope)
 
     def ack_copy(self, copy_id: str, *, owner: OwnerLocator,
                  outcome: Literal["present", "no_effect", "retired"]) -> Copy:
@@ -895,6 +1148,8 @@ class GeneratedFragmentStore:
                     conn.execute("DELETE FROM copies WHERE image_id=?", (item.object_id,))
                     conn.execute("DELETE FROM images WHERE image_id=?", (item.object_id,))
                     conn.execute("DELETE FROM uncertainties WHERE image_id=?", (item.object_id,))
+                elif item.kind == "slot":
+                    conn.execute("DELETE FROM slot_refs WHERE slot_id=?", (item.object_id,))
                 return
             if allow_before and item.expected_revision is None:
                 return
@@ -934,6 +1189,17 @@ class GeneratedFragmentStore:
             if conn.execute("SELECT 1 FROM images WHERE image_id=?", (value.image_id,)).fetchone() is None:
                 self._cache_uncertainty(conn, Uncertainty(unit_id=_id(), catalogue_id=self.head().catalogue_id,
                                         unknown_through_epoch=epoch, image_id=value.image_id, revision=_id()), canonical=False)
+        elif item.kind == "slot":
+            try:
+                copies, _ = self._slot_records(value)
+            except (ValueError, OSError, vault.PathGuardError):
+                self._cache_uncertainty(conn, Uncertainty(unit_id=_id(), catalogue_id=value.catalogue_id,
+                                        unknown_through_epoch=epoch, revision=_id()), canonical=False)
+                return
+            conn.execute("DELETE FROM slot_refs WHERE slot_id=?", (value.slot_id,))
+            conn.executemany("INSERT INTO slot_refs(slot_id,copy_id,image_id,revision,seen) VALUES (?,?,?,?,?)",
+                             ((value.slot_id, copy.copy_id, copy.image_id, value.revision,
+                               self._census_token if self._census_epoch == epoch else "") for copy in copies))
         else:
             self._cache_uncertainty(conn, value)
 
@@ -948,20 +1214,25 @@ class GeneratedFragmentStore:
             conn.execute("UPDATE images SET exact=? WHERE image_id=?", (int(exact), image_id))
 
     def _refresh(self, change: Change, head: Head, *, allow_before: bool = False) -> bool:
-        with self._connect() as conn:
-            checkpoint = conn.execute("SELECT * FROM checkpoint WHERE singleton=1").fetchone()
-            if checkpoint["catalogue_id"] != head.catalogue_id or checkpoint["applied_epoch"] != change.epoch - 1:
-                return False
-            conn.execute("BEGIN IMMEDIATE")
-            for item in change.objects:
-                self._cache_object(conn, item, change.epoch, allow_before=allow_before)
-            uncertainty, _ = self._read(self.path / "uncertain" / f"{change.unit_id}.json", Uncertainty)
-            if uncertainty is not None:
-                self._cache_uncertainty(conn, uncertainty)
-            self._qualify_images(conn, (item.image_id for item in change.objects if item.image_id is not None))
-            conn.execute("UPDATE checkpoint SET applied_epoch=? WHERE singleton=1", (change.epoch,))
-            conn.commit()
-            return True
+        try:
+            with self._connect() as conn:
+                checkpoint = conn.execute("SELECT * FROM checkpoint WHERE singleton=1").fetchone()
+                if checkpoint["catalogue_id"] != head.catalogue_id or checkpoint["applied_epoch"] != change.epoch - 1:
+                    return False
+                conn.execute("BEGIN IMMEDIATE")
+                for item in change.objects:
+                    self._cache_object(conn, item, change.epoch, allow_before=allow_before)
+                uncertainty, _ = self._read(self.path / "uncertain" / f"{change.unit_id}.json", Uncertainty)
+                if uncertainty is not None:
+                    self._cache_uncertainty(conn, uncertainty)
+                self._qualify_images(conn, (item.image_id for item in change.objects if item.image_id is not None))
+                conn.execute("UPDATE checkpoint SET applied_epoch=? WHERE singleton=1", (change.epoch,))
+                conn.commit()
+                return True
+        except (ValueError, OSError, RuntimeError, sqlite3.Error, vault.PathGuardError) as error:
+            # Canonical publication remains authoritative; a failed derived transaction keeps lookup unqualified.
+            log.warning("generated derived checkpoint refresh failed (%s)", type(error).__name__)
+            return False
 
     def reconcile(self, *, limit: int = 16) -> Progress:
         """Observe bounded changed objects; a cold cache uses explicit census instead."""
@@ -992,7 +1263,7 @@ class GeneratedFragmentStore:
         if not acquired.ok:
             raise RuntimeError("generated census cannot acquire vault")
         with acquired.require() as filesystem:
-            for family in ("images", "copies", "uncertain"):
+            for family in ("images", "copies", "slots", "uncertain"):
                 path = (self.path / family).relative_to(self.root).as_posix()
                 result = filesystem.parent(path)
                 if not result.ok:
@@ -1020,7 +1291,7 @@ class GeneratedFragmentStore:
                                 try:
                                     for child in children:
                                         identity = _opaque(child if family == "images" else child[:-5])
-                                        if identity[:2] != name or (family == "copies" and child != f"{identity}.json"):
+                                        if identity[:2] != name or (family in ("copies", "slots") and child != f"{identity}.json"):
                                             raise ValueError("generated census identity is unknown")
                                         yield family, identity, None
                                 finally:
@@ -1075,6 +1346,8 @@ class GeneratedFragmentStore:
                             if value is None:
                                 raise ValueError("generated copy disappeared during census")
                             item = ObjectChange(kind="copy", object_id=identity, image_id=value.image_id)
+                        elif family == "slots":
+                            item = ObjectChange(kind="slot", object_id=identity)
                         else:
                             item = ObjectChange(kind="uncertainty", object_id=identity)
                         self._cache_object(conn, item, head.epoch)
@@ -1089,15 +1362,20 @@ class GeneratedFragmentStore:
                 missing = []
                 for comparison in ("<", ">"):
                     missing.extend(conn.execute(
-                        f"SELECT image_id,NULL AS copy_id FROM images WHERE loss_recorded=0 AND seen{comparison}? LIMIT ?",
+                        f"SELECT image_id,NULL AS copy_id,NULL AS slot_id FROM images WHERE loss_recorded=0 AND seen{comparison}? LIMIT ?",
                         (self._census_token, limit - len(missing))).fetchall())
                     missing.extend(conn.execute(
-                        f"SELECT image_id,copy_id FROM copies WHERE loss_recorded=0 AND closed=0 AND seen{comparison}? LIMIT ?",
+                        f"SELECT image_id,copy_id,NULL AS slot_id FROM copies WHERE loss_recorded=0 AND closed=0 AND seen{comparison}? LIMIT ?",
+                        (self._census_token, limit - len(missing))).fetchall())
+                    missing.extend(conn.execute(
+                        f"SELECT image_id,copy_id,slot_id FROM slot_refs WHERE loss_recorded=0 AND seen{comparison}? LIMIT ?",
                         (self._census_token, limit - len(missing))).fetchall())
                 for row in missing:
                     self._cache_uncertainty(conn, Uncertainty(unit_id=_id(), catalogue_id=head.catalogue_id,
                                             unknown_through_epoch=head.epoch, image_id=row[0], revision=_id()), canonical=False)
-                    if row[1] is not None:
+                    if row[2] is not None:
+                        conn.execute("UPDATE slot_refs SET loss_recorded=1 WHERE slot_id=? AND copy_id=?", (row[2], row[1]))
+                    elif row[1] is not None:
                         conn.execute("UPDATE copies SET loss_recorded=1 WHERE copy_id=?", (row[1],))
                 if len(missing) == limit:
                     conn.commit()
@@ -1234,6 +1512,8 @@ class GeneratedFragmentStore:
         except FileNotFoundError:
             return Progress("missing", head.epoch)
         with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM slot_refs WHERE image_id=? LIMIT 1", (image_id,)).fetchone():
+                return Progress("pending", head.epoch)
             if conn.execute("SELECT 1 FROM uncertainties WHERE image_id='' OR image_id=? LIMIT 1", (image_id,)).fetchone():
                 return Progress("unknown", head.epoch)
             if conn.execute("SELECT 1 FROM copies WHERE image_id=? AND closed=0 LIMIT 1", (image_id,)).fetchone():

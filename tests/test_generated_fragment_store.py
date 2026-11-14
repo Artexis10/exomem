@@ -9,7 +9,7 @@ from contextlib import contextmanager
 import pytest
 
 from exomem import generated_fragment_store as generated
-from exomem import memory_refs, writer_lease
+from exomem import memory_refs, reserved_paths, writer_lease
 from exomem import vault as vault_module
 from exomem.generated_fragments import Fragment, FragmentMap, FragmentPlan
 from exomem.governance.principal import owner_principal, request_scope
@@ -68,7 +68,8 @@ def test_copy_reservation_survives_partial_metadata_install_and_replica_census(s
     with monkeypatch.context() as crashing:
         crashing.setattr(vault_module, "batch_atomic_write", crash_after_install)
         with pytest.raises(RuntimeError, match="process lost"):
-            store.reserve_copy(image_id, owner=owner, origin_ledger=origin)
+            store.reserve_copy(image_id, owner=owner, origin_ledger=origin,
+                               expected_header=store.image_header(image_id).value, expected_root=store.root)
     assert store.head().pending is not None
     assert any("/copies/" in path for path in seen)
     store.close()
@@ -86,6 +87,178 @@ def test_copy_reservation_survives_partial_metadata_install_and_replica_census(s
     assert found.copies[0].origin_ledger == origin
     assert replica.head().pending is None
     replica.close()
+
+
+def native_version(store, path):
+    with reserved_paths.open_generic_binary(store.root, path.relative_to(store.root).as_posix()) as source:
+        version = source.version
+        source.require_current()
+        return version
+
+
+def publish_native(store, path, data):
+    try:
+        _, guard = vault_module.read_guarded_text(store.root, path)
+    except FileNotFoundError:
+        guard = vault_module.PathGuard.capture(store.root, path.relative_to(store.root).as_posix(), leaf_policy="absent")
+    vault_module.batch_atomic_write((vault_module.PlannedWrite(path, data.decode(),
+                                    create_only=guard.expects_absence, guard=guard),),
+                                   vault_root=store.root, commit_point=False, post_commit_fanout=False)
+    return native_version(store, path)
+
+
+def native_proof(binding, scope, selection):
+    return generated.NativeSlotWitness(binding.slot.slot_id, binding.slot.revision, scope,
+                                       binding.slot.pending.publication_id if binding.slot.pending else None,
+                                       selection)
+
+
+def current_slot(store):
+    owner = OwnerLocator(owner="native-generated", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
+    scope = writer_lease.active_manager().idempotency.capture_attempts.ledger_id
+    data, mapping = image(reference())
+    build = store.begin_image(data, mapping, unknown_through_epoch=0)
+    for page in build.pages:
+        store.append_image(page)
+    header = store.seal_image(build.header.image_id)
+    copy = store.reserve_copy(header.image_id, owner=owner, origin_ledger=scope,
+                              expected_header=header, expected_root=store.root)
+    token = store.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                               expected_revision=None, expected_current_copy_id=None,
+                               candidate=copy, publication_id=uuid.uuid4().hex)
+    path = store.root / "Knowledge Base/generated.txt"
+    version = publish_native(store, path, data)
+
+    def witnessed_install(binding):
+        assert native_version(store, path) == version
+        return native_proof(binding, scope, "candidate")
+
+    binding = store.settle_slot(token, witness=witnessed_install)
+    copy = store.ack_copy(copy.copy_id, owner=owner, outcome="present")
+    return owner, scope, copy, binding, path, version
+
+
+def test_canonical_slot_survives_cold_unavailable_cache_and_requires_native_version_for_equal_bytes(store, monkeypatch, tmp_path):
+    owner, scope, before, original, path, before_version = current_slot(store)
+    assert len(scope) == 64
+    assert original.slot.current_copy_id == before.copy_id
+    store.close()
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "empty-slot-cache"))
+    replica = generated.GeneratedFragmentStore(store.root)
+    before_ref = replica.image_page(before.image_id, 0).value.fragments[0].source_ref
+
+    @contextmanager
+    def unavailable_cache():
+        raise RuntimeError("derived SQLite owner unavailable")
+        yield  # pragma: no cover - this owner never provides a connection
+
+    with monkeypatch.context() as no_cache:
+        no_cache.setattr(replica, "_connect", unavailable_cache)
+        no_cache.setattr(replica, "owner_copies", lambda **kw: pytest.fail("canonical slot read queried SQLite"))
+        no_cache.setattr(replica, "census", lambda **kw: pytest.fail("canonical slot read ran a census"))
+        observed = replica.read_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope)
+        assert observed.state == "observed" and observed.current.copy_id == before.copy_id
+        assert replica.image_page(observed.current.image_id, 0).value.fragments[0].source_ref == before_ref
+        other_ref = reference()
+        data, mapping = image(other_ref)
+        assert mapping.image_sha256 == observed.images[0].image_sha256
+        build = replica.begin_image(data, mapping, unknown_through_epoch=0)
+        for page in build.pages:
+            replica.append_image(page)
+        header = replica.seal_image(build.header.image_id)
+        candidate_owner = owner.model_copy(update={"version": uuid.uuid4().hex})
+        candidate = replica.reserve_copy(header.image_id, owner=candidate_owner, origin_ledger=scope,
+                                         expected_header=header, expected_root=replica.root)
+        first = replica.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                                     expected_revision=observed.slot.revision, expected_current_copy_id=before.copy_id,
+                                     candidate=candidate, publication_id=uuid.uuid4().hex)
+
+        def unchanged_native(binding):
+            assert native_version(replica, path) == before_version
+            return native_proof(binding, scope, "before")
+
+        retained = replica.settle_slot(first, witness=unchanged_native)
+        assert retained.current.copy_id == before.copy_id
+        with pytest.raises(ValueError, match="superseded"):
+            replica.check_slot(first)
+        second = replica.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                                      expected_revision=retained.slot.revision, expected_current_copy_id=before.copy_id,
+                                      candidate=candidate, publication_id=uuid.uuid4().hex)
+        replica.check_slot(second)
+        candidate_version = publish_native(replica, path, data)
+        assert candidate_version != before_version
+
+        def witnessed_new_install(binding):
+            assert native_version(replica, path) == candidate_version
+            return native_proof(binding, scope, "candidate")
+
+        installed = replica.settle_slot(second, witness=witnessed_new_install)
+        assert installed.current.copy_id == candidate.copy_id and installed.slot.pending is None
+        assert replica.image_page(installed.current.image_id, 0).value.fragments[0].source_ref == other_ref
+        with pytest.raises(ValueError, match="superseded"):
+            replica.check_slot(second)
+    assert replica.owner_copies(owner=owner.owner, locator=owner.locator).state == "pending"
+    replica.close()
+
+
+@pytest.mark.parametrize("native_state", ("before", "candidate", "mismatch", "foreign"))
+def test_interrupted_slot_keeps_both_bindings_until_native_owner_selects(store, monkeypatch, native_state):
+    owner, scope, before, original, path, before_version = current_slot(store)
+    data, mapping = image(reference(), text="replacement generated bytes")
+    build = store.begin_image(data, mapping, unknown_through_epoch=0)
+    for page in build.pages:
+        store.append_image(page)
+    header = store.seal_image(build.header.image_id)
+    candidate = store.reserve_copy(header.image_id, owner=owner.model_copy(update={"version": uuid.uuid4().hex}),
+                                   origin_ledger=scope, expected_header=header, expected_root=store.root)
+    original_write = vault_module.batch_atomic_write
+
+    def lose_after_slot_install(writes, **kw):
+        writes = tuple(writes)
+        result = original_write(writes, **kw)
+        if any("/slots/" in str(write.path) for write in writes):
+            raise RuntimeError("process lost after slot installation")
+        return result
+
+    with monkeypatch.context() as crashing:
+        crashing.setattr(vault_module, "batch_atomic_write", lose_after_slot_install)
+        with pytest.raises(RuntimeError, match="slot installation"):
+            store.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                               expected_revision=original.slot.revision, expected_current_copy_id=before.copy_id,
+                               candidate=candidate, publication_id=uuid.uuid4().hex)
+    recovered = store.read_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope)
+    assert recovered.state == "pending"
+    assert recovered.current.copy_id == before.copy_id and recovered.candidate.copy_id == candidate.copy_id
+    # Settle the metadata unit first; native publication still has its own pending right.
+    store.reconcile()
+    if native_state == "candidate":
+        installed_version = publish_native(store, path, data)
+    elif native_state == "mismatch":
+        installed_version = publish_native(store, path, b"an unexplained native version")
+    else:
+        installed_version = before_version
+
+    def owner_observation(binding):
+        assert native_version(store, path) == installed_version
+        return native_proof(binding, "another-durable-holder" if native_state == "foreign" else scope, native_state)
+
+    result = store.settle_slot(recovered.publication, witness=owner_observation)
+    if native_state in ("mismatch", "foreign"):
+        assert result.state == ("unknown" if native_state == "mismatch" else "pending")
+        assert result.slot.pending is not None and result.current.copy_id == before.copy_id
+        assert result.candidate.copy_id == candidate.copy_id
+        with pytest.raises(ValueError, match="pending"):
+            store.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                               expected_revision=result.slot.revision, expected_current_copy_id=before.copy_id,
+                               candidate=candidate, publication_id=uuid.uuid4().hex)
+    else:
+        assert result.state == "observed" and result.slot.pending is None
+        assert result.current.copy_id == (before.copy_id if native_state == "before" else candidate.copy_id)
+        with pytest.raises(ValueError, match="superseded"):
+            store.check_slot(recovered.publication)
+    copies = store.owner_copies(owner=owner.owner, locator=owner.locator).copies
+    assert next(copy for copy in copies if copy.copy_id == before.copy_id).outcome == "present"
+    assert next(copy for copy in copies if copy.copy_id == candidate.copy_id).outcome == "reserved"
 
 
 def test_legacy_horizon_allows_later_birth_but_dropped_map_is_unknown(store):
@@ -121,7 +294,8 @@ def test_page_budget_chain_and_building_copy_refusal(store):
     assert len(build.pages) > 1
     owner = OwnerLocator(owner="native-stage", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
     with pytest.raises(ValueError, match="ready"):
-        store.reserve_copy(build.header.image_id, owner=owner, origin_ledger=uuid.uuid4().hex)
+        store.reserve_copy(build.header.image_id, owner=owner, origin_ledger=uuid.uuid4().hex,
+                           expected_header=build.header, expected_root=store.root)
     for page in build.pages:
         assert len(generated.encode(page)) <= generated.MAX_RECORD_BYTES
         store.append_image(page)
@@ -243,7 +417,8 @@ def test_closed_copy_collection_retires_membership_and_journal_has_no_source(sto
     ref = reference()
     image_id = ready(store, ref)
     owner = OwnerLocator(owner="native-stage", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
-    copy = store.reserve_copy(image_id, owner=owner, origin_ledger=uuid.uuid4().hex)
+    copy = store.reserve_copy(image_id, owner=owner, origin_ledger=uuid.uuid4().hex,
+                              expected_header=store.image_header(image_id).value, expected_root=store.root)
     with pytest.raises(ValueError, match="outstanding"):
         store.collect(image_id)
     store.ack_copy(copy.copy_id, owner=owner, outcome="retired")
@@ -265,7 +440,8 @@ def test_closed_copy_collection_retires_membership_and_journal_has_no_source(sto
 def test_published_copy_cannot_close_with_a_no_effect_witness(store):
     image_id = ready(store, reference())
     owner = OwnerLocator(owner="retained-history", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
-    copy = store.reserve_copy(image_id, owner=owner, origin_ledger="native-ledger")
+    copy = store.reserve_copy(image_id, owner=owner, origin_ledger="native-ledger",
+                              expected_header=store.image_header(image_id).value, expected_root=store.root)
     store.ack_copy(copy.copy_id, owner=owner, outcome="present")
     with pytest.raises(ValueError, match="published"):
         store.ack_copy(copy.copy_id, owner=owner, outcome="no_effect")
@@ -332,7 +508,8 @@ def test_lookup_pages_across_images_and_copies_without_repeating_obligations(sto
         image_id = ready(store, ref)
         for _ in range(3):
             owner = OwnerLocator(owner="retained-history", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
-            copy = store.reserve_copy(image_id, owner=owner, origin_ledger="native-ledger")
+            copy = store.reserve_copy(image_id, owner=owner, origin_ledger="native-ledger",
+                                      expected_header=store.image_header(image_id).value, expected_root=store.root)
             store.ack_copy(copy.copy_id, owner=owner, outcome="present")
             expected.add(copy.copy_id)
     cursor, found = None, []
@@ -352,7 +529,8 @@ def test_lookup_copy_page_work_stays_bounded_at_20000_copies_of_one_image(store,
     ref = reference()
     image_id = ready(store, ref)
     owner = OwnerLocator(owner="retained-history", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
-    copy = store.reserve_copy(image_id, owner=owner, origin_ledger="native-ledger")
+    copy = store.reserve_copy(image_id, owner=owner, origin_ledger="native-ledger",
+                              expected_header=store.image_header(image_id).value, expected_root=store.root)
     connect, work = store._connect, []
 
     def rows(count):
@@ -424,9 +602,13 @@ def test_owner_copy_selector_survives_replica_and_20000_unrelated_locators(store
     old_owner = OwnerLocator(owner="retained-history", locator=locator, version=uuid.uuid4().hex)
     replacement_owner = old_owner.model_copy(update={"version": uuid.uuid4().hex})
     origin = writer_lease.active_manager().idempotency.capture_attempts.ledger_id
-    old = store.reserve_copy(ready(store, reference()), owner=old_owner, origin_ledger=origin)
+    old_image = ready(store, reference())
+    old = store.reserve_copy(old_image, owner=old_owner, origin_ledger=origin,
+                             expected_header=store.image_header(old_image).value, expected_root=store.root)
     store.ack_copy(old.copy_id, owner=old_owner, outcome="present")
-    replacement = store.reserve_copy(ready(store, reference()), owner=replacement_owner, origin_ledger=origin)
+    replacement_image = ready(store, reference())
+    replacement = store.reserve_copy(replacement_image, owner=replacement_owner, origin_ledger=origin,
+                                     expected_header=store.image_header(replacement_image).value, expected_root=store.root)
     store.close()
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "replica-selector-state"))
     replica = generated.GeneratedFragmentStore(store.root)
@@ -479,4 +661,86 @@ def test_owner_copy_selector_survives_replica_and_20000_unrelated_locators(store
     request.node.user_properties.extend((("unrelated_locators", 20_000),
                                        ("baseline_sqlite_vm_steps", baseline),
                                        ("expanded_sqlite_vm_steps", expanded)))
+    replica.close()
+
+
+def test_slot_rejects_unbound_image_and_public_json_witness_and_never_adopts_native_presence(store, tmp_path):
+    owner, scope, before, binding, path, _ = current_slot(store)
+    assert store.read_slot(owner=owner.owner, locator="untracked-locator", physical_scope=scope).state == "missing"
+    assert path.exists()
+    header = store.image_header(before.image_id).value
+    with pytest.raises(ValueError, match="binding changed"):
+        store.reserve_copy(before.image_id, owner=owner, origin_ledger=scope,
+                           expected_header=header.model_copy(update={"revision": uuid.uuid4().hex}), expected_root=store.root)
+    with pytest.raises(ValueError, match="binding changed"):
+        store.reserve_copy(before.image_id, owner=owner, origin_ledger=scope,
+                           expected_header=header, expected_root=tmp_path / "another-root")
+    candidate = store.reserve_copy(before.image_id, owner=owner.model_copy(update={"version": uuid.uuid4().hex}),
+                                   origin_ledger=scope, expected_header=header, expected_root=store.root)
+    token = store.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                               expected_revision=binding.slot.revision, expected_current_copy_id=before.copy_id,
+                               candidate=candidate, publication_id=uuid.uuid4().hex)
+    with pytest.raises(ValueError, match="callback"):
+        store.settle_slot(token, witness={"selection": "candidate"})
+    with pytest.raises(ValueError, match="slot-bound"):
+        store.settle_slot(token, witness=lambda observed: {"selection": "candidate"})
+    assert store.check_slot(token).slot.pending.candidate_copy_id == candidate.copy_id
+
+
+def test_slot_references_pin_closed_current_and_pending_maps_after_replica_census(store, monkeypatch, tmp_path):
+    owner, scope, before, original, path, _ = current_slot(store)
+    candidate_image = ready(store, reference())
+    candidate = store.reserve_copy(candidate_image, owner=owner.model_copy(update={"version": uuid.uuid4().hex}),
+                                   origin_ledger=scope, expected_header=store.image_header(candidate_image).value,
+                                   expected_root=store.root)
+    token = store.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                               expected_revision=original.slot.revision, expected_current_copy_id=before.copy_id,
+                               candidate=candidate, publication_id=uuid.uuid4().hex)
+    publish_native(store, path, b"Exact generated bytes")
+    # The displaced physical version is closed; the pending slot still needs its before-map.
+    store.ack_copy(before.copy_id, owner=owner, outcome="retired")
+    store.close()
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "slot-collection-replica"))
+    replica = generated.GeneratedFragmentStore(store.root)
+    for _ in range(50):
+        if replica.census(limit=2).state == "ready":
+            break
+    assert replica.collect(before.image_id).state == "pending"
+    assert replica.collect(candidate.image_id).state == "pending"
+    assert replica.image_header(before.image_id).state == "observed"
+    settled = replica.settle_slot(token, witness=lambda observed: native_proof(observed, scope, "candidate"))
+    assert settled.current.copy_id == candidate.copy_id
+    # Slot settlement did not close the candidate's independently owned obligation.
+    assert settled.current.outcome == "reserved"
+    for _ in range(6):
+        if replica.collect(before.image_id).state == "missing":
+            break
+    assert replica.image_header(before.image_id).state == "missing"
+    reserved_paths.unlink_generic_file(replica.root, path.relative_to(replica.root).as_posix())
+    replica.ack_copy(candidate.copy_id, owner=candidate.owner, outcome="retired")
+    assert replica.collect(candidate.image_id).state == "pending"
+
+    def actual_absence(observed):
+        absent = vault_module.PathGuard.capture(replica.root, path.relative_to(replica.root).as_posix(), leaf_policy="absent")
+        absent.recheck(replica.root)
+        return native_proof(observed, scope, "absence")
+
+    with pytest.raises(ValueError, match="revision"):
+        replica.remove_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                            expected_revision=uuid.uuid4().hex, witness=actual_absence)
+    assert replica.remove_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                               expected_revision=settled.slot.revision, witness=actual_absence).state == "missing"
+    for _ in range(6):
+        if replica.collect(candidate.image_id).state == "missing":
+            break
+    assert replica.image_header(candidate.image_id).state == "missing"
+    recreated_image = ready(replica, reference())
+    recreated = replica.reserve_copy(recreated_image, owner=owner, origin_ledger=scope,
+                                     expected_header=replica.image_header(recreated_image).value, expected_root=replica.root)
+    new = replica.prepare_slot(owner=owner.owner, locator=owner.locator, physical_scope=scope,
+                               expected_revision=None, expected_current_copy_id=None,
+                               candidate=recreated, publication_id=uuid.uuid4().hex)
+    assert new.slot_id == token.slot_id and new.revision != token.revision
+    with pytest.raises(ValueError, match="superseded"):
+        replica.check_slot(token)
     replica.close()
