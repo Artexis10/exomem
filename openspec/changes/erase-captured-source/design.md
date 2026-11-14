@@ -90,6 +90,10 @@ An empty local lookup never proves completion. Missing birth coverage preserves 
 
 The native owner uses one protected table in the existing idempotency database, without storing bodies or rollback bytes there.
 It seals root, parent, allocation identity and verified version before publication, then supplies exact cleanup and installation witnesses.
+Installation retains the original allocation handle through the native effect and persists the exact destination version before releasing that handle.
+A later observation requires that version; equal bytes cannot recover a missing witness or reconnect a reused file identity.
+Partial-file cleanup requires the original live allocation handle. After restart, missing continuity leaves the copy unresolved and preserves its bytes.
+This limit prevents deleting an unrelated replacement. Its cost falls only on that copy's cleanup, without blocking ordinary capture.
 This follows [How we contain Claude](https://www.anthropic.com/research/how-we-contain-claude): native capabilities bound destruction while canonical records preserve obligations.
 
 Keep one canonical slot for each generated-file locator and physical owner scope.
@@ -182,13 +186,16 @@ Store-wide monotonic revisions distinguish a replacement page even when its path
 Resolve only held rows proved to belong to the target; an unrelated person's edit is not erasure authority.
 
 After target-qualified projection and vector cleanup finish, redact identifying audit fields rather than deleting audit rows.
-Replace `path`, and `from_path` when set, with an opaque per-row token outside every classified vault namespace.
+Replace `path`, and `from_path` when set, with one opaque token per target life and original path.
+Never reuse a token across lives or targets. Both move halves use the same token for the same original path.
+Require `reserved_paths.classify_logical` to block each token and `ownership.classify` to classify it as something other than a page.
 Keep a null `from_path` null: audit readers use that distinction to identify move halves.
 Never make `path` null: vector readers interpret that value as a vault-wide reset.
 Set `sha256` null and replace the unstructured `reason` with fixed redaction text.
 Retain `seq`, `revision`, `operation`, the closed origin token and timestamp so existing cursors keep their order.
 Follow exact move lineage for the target's life; do not redact a replacement incarnation's later life at a reused path.
-The schema migration must permit only this qualified redaction update before this step can run.
+The schema migration permits only this qualified redaction update, with sequencing fields unchanged, null move origins preserved and `sha256` cleared.
+It refuses all other audit updates and every audit deletion.
 
 Managed reusable store snapshots and published replicas must retire or replace versions older than the purge revision.
 The component receipt binds the physical store and purge revision, including held content, projection and replica publication acknowledgements.

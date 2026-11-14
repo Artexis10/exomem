@@ -468,6 +468,7 @@ def test_partial_publish_retains_custody_when_native_temporary_cleanup_fails(tmp
     held_fs = _module()
     receipt = tmp_path / "custody.json"
     evidence = {}
+    allocation = []
 
     def reserve(name):
         assert not (tmp_path / name).exists()
@@ -475,6 +476,7 @@ def test_partial_publish_retains_custody_when_native_temporary_cleanup_fails(tmp
         receipt.write_text(json.dumps(evidence))
 
     def bind(name, file):
+        allocation.append(file)
         evidence.update(state="bound", inode=file.identity.inode)
         receipt.write_text(json.dumps(evidence))
 
@@ -490,9 +492,12 @@ def test_partial_publish_retains_custody_when_native_temporary_cleanup_fails(tmp
         raise OSError(errno.ENOSPC, "copy interrupted")
 
     with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
-        monkeypatch.setattr(fs, "unlink", lambda file: held_fs.HeldResult(
-            error=held_fs.HeldFsError("IO_REFUSED", "temporary cleanup refused"),
-        ))
+        def refuse_cleanup(file):
+            # The original allocation must still be held when cleanup reopens its name.
+            assert allocation[0].version().identity == file.identity
+            return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "temporary cleanup refused"))
+
+        monkeypatch.setattr(fs, "unlink", refuse_cleanup)
         result = held_fs.publish_bytes(
             fs, parent, "destination.md", held_fs.Chunks(interrupted_bytes),
             custody=held_fs.TemporaryCustody(reserve, bind, release),

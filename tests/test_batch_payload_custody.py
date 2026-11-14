@@ -97,7 +97,8 @@ def test_verified_binary_stage_retains_custody_when_native_cleanup_is_refused(tm
         workspace.close()
 
 
-def test_publish_temporary_witness_survives_an_exception_after_native_install(tmp_path, monkeypatch):
+@pytest.mark.parametrize("replacement", [False, True])
+def test_publish_temporary_witness_survives_an_exception_after_native_install(tmp_path, monkeypatch, replacement):
     """Recovery can distinguish the installed allocation after a publisher loses its result."""
     root = tmp_path / "vault"
     root.mkdir()
@@ -138,6 +139,16 @@ def test_publish_temporary_witness_survives_an_exception_after_native_install(tm
         assert installed.read_bytes() == b"Source allocation"
         assert hashlib.sha256(installed.read_bytes()).hexdigest() == saved["sha256"]
         assert not (root / saved["name"]).exists()
+        if replacement:
+            # Equal content in another allocation cannot inherit the lost native result.
+            other = root / "other.tmp"
+            other.write_bytes(b"Source allocation")
+            os.replace(other, installed)
+            assert workspace.bind_installed_after_error(artifact, installed) is None
+        else:
+            assert workspace.bind_installed_after_error(artifact, installed) is not None
+            artifact.installation_witness = None
+            assert workspace.bind_installed_after_error(artifact, installed) is None
         assert workspace.cleanup()
     finally:
         workspace.close()

@@ -40,7 +40,7 @@ class _Binding(BaseModel):
     root_identity: StableIdentity
     parent_identity: StableIdentity
     destination_parent_identity: StableIdentity | None
-    state: Literal["reserved", "initializing", "verified"] = "reserved"
+    state: Literal["reserved", "initializing", "verified", "installed"] = "reserved"
     identity: StableIdentity | None = None
     version: FileVersion | None = None
     bound_sha256: str | None = None
@@ -62,9 +62,11 @@ class _Binding(BaseModel):
             raise ValueError("native allocation version has a different identity")
         if self.bound_sha256 is not None:
             source_capture.validate_sha256(self.bound_sha256)
-        if self.state == "verified" and (self.version is None or self.version.size != self.expected_size
-                                          or self.bound_sha256 != self.expected_sha256):
+        if self.state in ("verified", "installed") and (self.version is None or self.version.size != self.expected_size
+                                                        or self.bound_sha256 != self.expected_sha256):
             raise ValueError("verified native allocation lacks its complete producer image")
+        if self.state == "installed" and (self.destination_relative is None or self.destination_parent_identity is None):
+            raise ValueError("installed native allocation lacks its destination")
         if (self.state != "reserved" and self.outcome == "not_written"
                 or self.outcome == "installed" and self.state != "verified"):
             raise ValueError("native acknowledgement has no matching allocation fact")
@@ -196,6 +198,8 @@ class NativeCustody:
                                _absolute(self._store.state_dir)):
             raise ValueError("native custody anchor is not a current owner root")
         self._seal = object()
+        # Borrowed handles preserve allocation continuity only while their caller keeps them open.
+        self._live_allocations: dict[str, HeldFile] = {}
         self._vault_identity = self._root_identity(self.root)
         self._anchor_identity = self._root_identity(self.anchor)
         self._database_identity = self._database_file_identity()
@@ -400,6 +404,7 @@ class NativeCustody:
             if value.outcome is not None or value.state != "reserved" or version.size != 0:
                 raise ValueError("native binding requires an empty reserved allocation")
             self._save(conn, value.model_copy(update={"state": "initializing", "identity": version.identity}))
+        self._live_allocations[value.binding_id] = file
 
     def verified(self, reservation: NativeReservation, file: HeldFile, *, sha256: str) -> None:
         source_capture.validate_sha256(sha256)
@@ -411,6 +416,31 @@ class NativeCustody:
                 raise ValueError("native verification does not match its allocation")
             self._save(conn, value.model_copy(update={"state": "verified", "version": version,
                                                       "bound_sha256": sha256}))
+        self._live_allocations.pop(value.binding_id, None)
+
+    def record_installation(self, reservation: NativeReservation, witness: held_fs.InstallationWitness) -> None:
+        """Persist the exact destination version while the native publisher retains its allocation."""
+        if not isinstance(witness, held_fs.InstallationWitness) or not witness.authentic():
+            raise ValueError("native installation requires a held publisher witness")
+        with self._connect() as conn:
+            value = self._reservation(conn, reservation)
+            if (value.outcome is not None or value.state not in ("verified", "installed")
+                    or value.destination_relative is None
+                    or not _same(witness.root_identity, value.root_identity)
+                    or value.destination_parent_identity is None
+                    or not _same(witness.parent_identity, value.destination_parent_identity)
+                    or witness.leaf != _parts(value.destination_relative)[1]
+                    or not _same(witness.after.identity, value.identity)
+                    or witness.after.identity.link_count != 1
+                    or (witness.before.size, witness.before.mtime_ns) != (witness.after.size, witness.after.mtime_ns)
+                    or (value.state == "verified" and witness.before != value.version)
+                    or (value.state == "installed" and witness.after != value.version)):
+                raise ValueError("native installation differs from its verified allocation")
+            with self._held(value, destination=True) as (filesystem, parent, leaf):
+                with filesystem.file(parent, leaf).require() as installed:
+                    if installed.version() != witness.after:
+                        raise ValueError("native installation destination changed")
+            self._save(conn, value.model_copy(update={"state": "installed", "version": witness.after}))
 
     def acknowledge(self, reservation: NativeReservation, identity: StableIdentity | None,
                     outcome: Literal["not_written", "removed", "installed"]) -> None:
@@ -428,6 +458,16 @@ class NativeCustody:
                     or outcome == "installed" and value.state != "verified"):
                 raise ValueError("native acknowledgement does not match its allocation")
             self._save(conn, value.model_copy(update={"outcome": outcome}))
+        self._live_allocations.pop(value.binding_id, None)
+
+    def _live_version(self, value: _Binding) -> FileVersion | None:
+        file = self._live_allocations.get(value.binding_id)
+        if file is None:
+            return None
+        try:
+            return file.version()
+        except (OSError, held_fs.HeldFsError):
+            return None
 
     def _observe(self, value: _Binding, *, destination: bool = False) -> NativeObservation:
         handle = self._handle(value)
@@ -443,15 +483,18 @@ class NativeCustody:
             with result.require() as file:
                 version = file.version()
                 matching = value.identity == version.identity
-                if value.state == "reserved":
+                if value.state == "reserved" and not destination:
                     return NativeObservation("reserved", value.binding_id, version.identity, version,
                                              reservation=handle)
-                if matching and value.state == "verified":
+                if destination:
+                    # Equal bytes cannot reconnect an allocation after its inode was recycled.
+                    matching = matching and value.state == "installed" and version == value.version
+                elif value.state == "initializing":
+                    matching = matching and self._live_version(value) == version
+                elif value.state == "verified":
                     matching = version == value.version and value.bound_sha256 == value.expected_sha256
-                    if destination and not matching and version.size == value.expected_size:
-                        digest, size = reserved_paths._digest_descriptor(file, deadline=None, max_bytes=value.expected_size)
-                        matching = (digest == value.expected_sha256 and size == value.expected_size
-                                    and file.version() == version)
+                elif value.state == "installed":
+                    matching = False
                 state = "installed" if value.outcome == "installed" else value.state
                 return NativeObservation(state if matching else "unknown", value.binding_id,
                                          version.identity, version, matching, value.outcome, handle)
@@ -471,7 +514,7 @@ class NativeCustody:
                 value = self._row(conn, binding_id)
                 if value.outcome is not None:
                     return self._observe(value)
-                if not value.removable:
+                if not value.removable or value.state == "installed":
                     return NativeObservation("unknown", binding_id, reservation=self._handle(value))
                 if value.state == "reserved":
                     self._save(conn, value.model_copy(update={"outcome": "not_written"}))
@@ -485,16 +528,15 @@ class NativeCustody:
                                                                or value.bound_sha256 != value.expected_sha256):
                                 return NativeObservation("unknown", binding_id, before.identity, before, False)
                             if value.state == "initializing":
-                                # An exclusive allocation owns partial bytes; bind their stable digest before cleanup, as workspace artifacts do.
-                                digest, size = reserved_paths._digest_descriptor(file, deadline=None, max_bytes=None)
-                                if size != before.size:
+                                # Without the original live handle, restart cannot prove this is still our allocation.
+                                if self._live_version(value) != before:
                                     return NativeObservation("unknown", binding_id, before.identity, before, False)
-                                value = value.model_copy(update={"version": before, "bound_sha256": digest})
                             if file.version() != before:
                                 return NativeObservation("unknown", binding_id, before.identity, before, False)
                             filesystem.unlink(file).require()
                             filesystem.flush_directory(parent).require()
                     self._save(conn, value.model_copy(update={"outcome": "removed"}))
+                self._live_allocations.pop(value.binding_id, None)
                 return self._observe(value.model_copy(update={"outcome": "not_written" if value.state == "reserved" else "removed"}))
         except (NativeCustodyUnavailable, sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
             return NativeObservation("unknown", binding_id)

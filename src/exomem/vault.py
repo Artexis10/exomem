@@ -2035,6 +2035,7 @@ class _ArtifactCustody:
     temporary: held_fs.TemporaryCustody
     verified: Callable[[held_fs.HeldFile, str], None]
     before_install: Callable[[], None] | None = None
+    installed: Callable[[held_fs.InstallationWitness], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -2062,6 +2063,8 @@ class _WorkspaceArtifact:
     #: The same triple for the destination this stage was copied to, read from the handle
     #: that proved the published identity; `None` when the copy cannot vouch for it.
     installed_generation: tuple[int, int, int] | None = None
+    installation_witness: held_fs.InstallationWitness | None = None
+    requires_installation_witness: bool = False
     custody: _ArtifactCustody | None = None
 
     @property
@@ -2867,6 +2870,7 @@ class _BatchWorkspace:
                 published_metadata = context.published_metadata
             if custody is None:
                 custody = context.custody
+        artifact.requires_installation_witness = custody is not None
         if inverse_recheck is not None:
             inverse_recheck()
         self.recheck()
@@ -2983,6 +2987,14 @@ class _BatchWorkspace:
                                 custody.before_install()
                             recheck_publish_precondition()
 
+                        def after_install(witness: held_fs.InstallationWitness) -> None:
+                            # Save the native fact before an owner acknowledgement can fail.
+                            artifact.installation_witness = witness
+                            after = witness.after
+                            artifact.installed_generation = (after.size, after.mtime_ns, after.change_time_ns)
+                            if custody is not None and custody.installed is not None:
+                                custody.installed(witness)
+
                         _before_batch_destination_published(
                             final, restoring=published_metadata is not None
                         )
@@ -2998,6 +3010,7 @@ class _BatchWorkspace:
                             prepare=prepare_published,
                             custody=custody.temporary if custody is not None else None,
                             before_install=before_install if custody is not None or inverse_recheck is not None else None,
+                            after_install=after_install if custody is not None else None,
                         )
                         if (
                             not published.ok
@@ -3050,6 +3063,11 @@ class _BatchWorkspace:
                             raise PathGuardError(
                                 "PATH_GUARD_CHANGED", "batch destination changed"
                             )
+                        if custody is not None and (
+                            artifact.installation_witness is None
+                            or installed.version() != artifact.installation_witness.after
+                        ):
+                            raise PathGuardError("PATH_GUARD_CHANGED", "batch installation witness changed")
                         if witnessed:
                             # The batch binds a binary by this generation instead of hashing it,
                             # so vouch for it only when the copy shows no change since the
@@ -3130,7 +3148,15 @@ class _BatchWorkspace:
                         expected_destination, installed_identity
                     ):
                         return None
-                    if _descriptor_hash(descriptor, installed_identity) != artifact.content_hash:
+                    if artifact.requires_installation_witness:
+                        witness = artifact.installation_witness
+                        if (witness is None or not witness.authentic()
+                                or witness.leaf != absolute_final.name
+                                or not held_fs._same_file_identity(witness.root_identity, self.held_filesystem.root_identity)
+                                or not held_fs._same_file_identity(witness.parent_identity, self.held_parent.identity)
+                                or installed.version() != witness.after):
+                            return None
+                    elif _descriptor_hash(descriptor, installed_identity) != artifact.content_hash:
                         return None
                 self.recheck()
                 artifact.recheck()
@@ -3266,7 +3292,8 @@ class _BatchWorkspace:
             artifact.recheck()
             if self.held_filesystem is not None and self.held_directory is not None:
                 expected = artifact.identity
-                artifact.close()
+                if artifact.custody is None:
+                    artifact.close()
                 mutable = self.held_filesystem.file(
                     self.held_directory,
                     artifact.name,
@@ -3287,6 +3314,7 @@ class _BatchWorkspace:
                     removed = self.held_filesystem.unlink(current)
                     if not removed.ok:
                         return False
+                artifact.close()
                 self.artifacts.pop(artifact.name)
                 self.recheck()
                 artifact.acknowledge_removed()

@@ -93,6 +93,16 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **WHEN** an explicit canonical Source association retains a copy but its birth evidence cannot qualify historical completeness
 - **THEN** lookup returns the known copy with unknown completeness instead of hiding the obligation
 
+#### Scenario: A native file identity is reused after installation
+- **WHEN** an unrelated allocation reuses a retired allocation's file identity and contains identical bytes
+- **THEN** a different destination version remains unknown instead of inheriting the earlier copy's ownership
+- **AND** ordinary destination observations use the persisted installation version without hashing the content again
+
+#### Scenario: Partial allocation continuity is lost
+- **WHEN** cleanup lacks the original live handle for a partially written allocation
+- **THEN** it preserves the current file and reports unresolved custody instead of adopting its identity or content
+- **AND** this uncertainty blocks only that copy's cleanup
+
 #### Scenario: A prior generated publisher resumes after takeover
 - **WHEN** another native publication has taken over the current slot with a new revision
 - **THEN** the old forward publication and rollback cannot reuse their cancelled publication right
@@ -108,6 +118,7 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **THEN** cleanup redacts its identifying audit fields while retaining sequence, revision and operation facts
 - **AND** it preserves a replacement incarnation's audit facts at a reused path
 - **AND** path fields use non-path opaque tokens, preserving existing null move origins without producing a null path
+- **AND** one token per target life and original path preserves replay across both move halves without reuse across targets
 
 #### Scenario: Managed store replica predates retirement
 - **WHEN** a managed reusable snapshot or published replica contains state older than the purge revision

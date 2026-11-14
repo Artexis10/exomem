@@ -187,13 +187,17 @@ class _CaptureCopies:
             if observed.state != "verified" or observed.matching is not True:
                 raise ValueError("Source publication no longer matches its verified native allocation")
 
+        def installed(witness):
+            assert active_name is not None
+            self.native.record_installation(copies[active_name][1].native, witness)
+
         def release(name, identity, outcome):
             temporary, candidate = copies[name]
             try:
                 self._closed(temporary, identity, outcome)
                 if outcome == "installed":
                     observed = self.native.observe(candidate.native.binding_id, destination=True)
-                    if observed.state != "verified" or observed.matching is not True:
+                    if observed.state != "installed" or observed.matching is not True:
                         raise held_fs.CustodyAcknowledgementPending("Source installation evidence is pending")
                     # Installation keeps destination bytes present; only its temporary-name obligation closed.
                     self._present(candidate)
@@ -203,7 +207,7 @@ class _CaptureCopies:
             except (sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
                 raise held_fs.CustodyAcknowledgementPending("Source publication acknowledgement is pending") from None
 
-        return vault._ArtifactCustody(held_fs.TemporaryCustody(reserve, bind, release), verified, before_install)
+        return vault._ArtifactCustody(held_fs.TemporaryCustody(reserve, bind, release), verified, before_install, installed)
 
     def removed(self, write: vault.PlannedWrite, identity: vault.PathIdentity) -> None:
         copy = self.destinations.get(write.path)
