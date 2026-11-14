@@ -83,6 +83,11 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **AND** an intent that it did not reach in that time stays queued, and the next start projects it
 - **AND** a service on an HTTP transport that its supervisor stops with SIGTERM does the same and hands back the writer lease; a SIGTERM before its startup completes ends it as before, and the stdio transport is unchanged
 
+#### Scenario: Only a process that can record a projection writes it
+- **WHEN** a replica without the vault's writer lease runs a projector and projection intents are queued
+- **THEN** its projector writes no projection file and records nothing, and its pass ends as at a busy boundary, with no failure logged
+- **AND** once that replica takes the writer lease, its next pass projects the queued intents
+
 #### Scenario: A lifecycle write leaves the folders that file mode leaves
 - **WHEN** a store-mode trash, move or recovery has committed and the projector has drained
 - **THEN** a single file moved or trashed out of a folder has removed no folder, not even its emptied parent

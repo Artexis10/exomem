@@ -357,11 +357,7 @@ class Projector:
             except Exception as error:  # noqa: BLE001 - a store that cannot answer now is asked again next pass
                 failure = f"{type(error).__name__}: {error}"
                 if failure != self._last_failure:
-                    # A replica without the writer lease is refused until it takes the lease over.
-                    expected = getattr(error, "code", None) == "WRITER_LEASE_REQUIRED"
-                    log.warning(
-                        "a vault projection pass failed: %s", failure, exc_info=not expected
-                    )
+                    log.warning("a vault projection pass failed: %s", failure, exc_info=True)
                     self._last_failure = failure
             if report is not None:
                 self._note_deferred(report)
@@ -385,6 +381,9 @@ class Projector:
 
     def run_pass(self) -> PassReport:
         """Project every intent that is queued now and not held, oldest first, and report it."""
+        from ..cli_ops import OpError
+        from ..writer_lease import TRANSIENT_WRITER_CODES
+
         report = PassReport()
         with self._pass_lock:
             acquired = held_fs.acquire(anchor(self._root))
@@ -396,17 +395,43 @@ class Projector:
                     batch = self._list(cursor)
                     if not batch:
                         break
-                    for intent in batch:
-                        if self._stopping():
-                            break
-                        try:
+                    try:
+                        if cursor == ("", ""):
+                            self._require_recording()  # before the pass writes any file
+                        for intent in batch:
+                            if self._stopping():
+                                break
                             self._project(filesystem, intent.path, report)
-                        except BoundaryBusy:
-                            # Every later record needs the same boundary, so the pass ends here.
-                            report.busy = True
-                            return report
+                    except BoundaryBusy:
+                        # Every later record needs the same boundary, so the pass ends here.
+                        report.busy = True
+                        return report
+                    except OpError as refusal:
+                        if refusal.code not in TRANSIENT_WRITER_CODES:
+                            raise
+                        # This process may not record now, a follower above all: the pass ends as
+                        # at a busy boundary, quietly, and a pass after it takes the lease projects.
+                        report.busy = True
+                        return report
                     cursor = (batch[-1].queued_at, batch[-1].path)
         return report
+
+    def _require_recording(self) -> None:
+        """Ask what each record of this pass asks, before the pass writes any file.
+
+        A replica without the writer lease would publish files and then be refused their records,
+        so the projection would have a second writer and files that no record vouches for. The
+        question is the record's own: the hop to the store thread under the vault's writer
+        authority (``_holding_boundary``) and the writer's check (``require_write_authority``),
+        so no second notion of role decides it. A lease lost later in the pass refuses that
+        pass's next record the same way.
+        """
+        try:
+            self._run(lambda writer: writer.handle.require_write_authority())
+        except BoundaryBusy:
+            # Contention is not inability: the pass goes on, and each record meets the boundary as
+            # before, so a projection may still race a writer that holds it.
+            return
 
     def _list(self, after: tuple[str, str]) -> list[Intent]:
         """The next intents after ``after`` in queue order, without bodies or held paths."""

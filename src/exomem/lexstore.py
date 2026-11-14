@@ -5372,9 +5372,19 @@ def page_membership(rel: str) -> tuple[bool, bool]:
     Returns ``(in_kb, in_vault)``.
 
     A store-mode commit has no file to walk, so it asks here for the flags that ``page_rows``
-    stores.
+    stores. Both walks yield a Markdown file outside every reserved family alone
+    (``find_corpus._classify_walk_entry``, ``vault._walk_vault_md_entry``). The store also holds
+    other pages, such as a compiled-history entry, and the walks yield none of them.
     """
-    return _membership_of_parts(tuple(rel.split("/")))
+    from . import find_corpus
+
+    parts = tuple(rel.split("/"))
+    if (
+        not find_corpus.walk_name_admits(parts[-1], directory=False)
+        or reserved_paths.classify_logical(rel).blocked
+    ):
+        return False, False
+    return _membership_of_parts(parts)
 
 
 def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]) -> int:
@@ -5450,9 +5460,15 @@ def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
 
 
 def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
-    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
+    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction).
+
+    The delete triggers stamp the parent a fresh revision, which names rows that no longer exist,
+    so it goes too: a reader asks only for the parents it admits, rows that a write inserts again
+    stamp a new one, and a derivation from the files makes none for a page with no rows.
+    """
     for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
         _delete_page_rowid(conn, rowid)
+    conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
 def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:

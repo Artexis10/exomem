@@ -19,7 +19,7 @@ import statistics
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,6 +45,7 @@ from exomem import (
     mutation_lock,
     reserved_paths,
     scene_frames,
+    schema,
     server_runtime,
     writer_lease,
 )
@@ -88,14 +89,21 @@ def service(stored, monkeypatch):
         return outcome
 
     monkeypatch.setattr(runtime.StoreServer, "_registry_tick", recording)
+    with store_thread(stored):
+        yield ticks
+
+
+@contextmanager
+def store_thread(root):
+    """The service's store thread on ``root``, as a service starts it, but with no projector."""
     manager = writer_lease.start_server_lifecycle()
     server = None
     try:
         deadline = time.monotonic() + 60
-        while (server := runtime._SERVERS.get(stored.resolve())) is None or server.runtime is None:
+        while (server := runtime._SERVERS.get(root.resolve())) is None or server.runtime is None:
             assert time.monotonic() < deadline, "the store thread did not open the store"
             time.sleep(0.05)
-        yield ticks
+        yield
     finally:
         manager.close()
         if server is not None:
@@ -104,10 +112,15 @@ def service(stored, monkeypatch):
 
 
 def call(root, tool, **arguments):
-    """One MCP command as the owner, through the dispatcher that routes a write to the store."""
+    """One MCP command as the owner, through the dispatcher that routes a write to the store.
+
+    It injects what the server injects: the vault, and its source schema for a command that needs
+    it.
+    """
     command = next(c for c in commands.product_commands_for("mcp") if c.name == tool)
+    injected = (root, schema.load_source_schema(root)) if command.needs_schema else (root,)
     with request_scope(owner_principal(surface="mcp")):
-        return writer_lease.invoke_command(command, root, **arguments)
+        return writer_lease.invoke_command(command, *injected, **arguments)
 
 
 def commit(root, **change):
@@ -151,6 +164,34 @@ def manifest(root, rel):
 
 def queued(root):
     return {path for (path,) in store_rows(root, "SELECT path FROM store_projection_queue")}
+
+
+def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, service):
+    """A person's note, created, trashed and recovered through the served door, as an agent does.
+
+    The note has a stable identity and a reviewed-none decision, so its recovery binds the trash
+    proof and needs the decision in force. A recovery that refuses the proof because the page lives
+    in the store, or that looks for the decision in the projection, which has no file of it yet
+    (this fixture runs no projector), leaves the note in the trash.
+    """
+    created = call(
+        stored, "remember", title="Kept after all",
+        content="# Kept after all\n\n## Claim\n\nA note that a person trashed by mistake.\n",
+        relation_disposition="reviewed_none", relation_review_reason="a note that stands alone",
+    )
+    path = created["path"]
+    body = read.owned_bytes(stored, path)
+    trashed = call(
+        stored, "manage_memory_file", operation="delete", path=path, confirm=True,
+        response_detail="full",
+    )
+    trash_path = trashed["diagnostics"]["trash_path"]
+
+    recovered = call(stored, "manage_memory_file", operation="recover", trash_path=trash_path)
+
+    assert recovered["path"] == path
+    assert read.owned_bytes(stored, path) == body
+    assert not read.page_exists(stored, trash_path)
 
 
 def test_a_projector_pass_records_a_governed_writes_files_in_a_served_process(stored, service):
@@ -585,6 +626,42 @@ def test_a_second_replica_that_takes_the_lease_and_stops_at_once_leaves_nothing_
     assert left == [], (left, second.log.read_text(encoding="utf-8")[-6000:])
     # Each ends by the signal, as a supervisor that stops it expects.
     assert first.process.returncode == second.process.returncode == -signal.SIGTERM
+
+
+@pytest.mark.timeout(600)
+def test_a_follower_writes_no_projection_until_it_takes_the_lease(stored, tmp_path):
+    """A replica without the writer lease runs a projector but may not record what it projects.
+
+    The leader here is this process's store thread, which runs no projector, so the follower's
+    projector is the only one that could write the leader's new page. A follower that writes the
+    file first and is then refused its bookkeeping leaves a file that no record vouches for, and a
+    second writer of the projection.
+    """
+    page = f"{NOTES}/Leader page.md"
+    with ExitStack() as leader:
+        leader.enter_context(store_thread(stored))
+        commit(stored, puts=(write.PagePut(page, b"# Leader page\n\nThe leader holds it.\n"),))
+        with http_replica(stored, tmp_path, "follower") as follower:
+            # Long enough for several of the follower's passes, each a poll interval apart.
+            watched_until = time.monotonic() + 8 * projector.POLL_SECONDS
+            while time.monotonic() < watched_until:
+                assert not (stored / page).exists(), "the follower projected the leader's page"
+                time.sleep(0.1)
+            leader.close()
+            deadline = time.monotonic() + 60
+            while not (own := remember(follower, "Follower note")).get("success"):
+                assert time.monotonic() < deadline, own
+                time.sleep(0.25)
+            projected = (page, own["data"]["path"])
+            deadline = time.monotonic() + 60
+            # Each file comes to hold what the store holds, once the follower leads.
+            while any(
+                not (stored / rel).exists()
+                or (stored / rel).read_bytes() != read.owned_bytes(stored, rel)
+                for rel in projected
+            ):
+                assert time.monotonic() < deadline, follower.log.read_text(encoding="utf-8")[-4000:]
+                time.sleep(0.25)
 
 
 def idle(service_state):
