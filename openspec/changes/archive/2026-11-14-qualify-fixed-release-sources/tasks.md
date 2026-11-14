@@ -20,5 +20,19 @@
 
 - [x] 3.1 Run the disposable two-cut proof with pinned Release Please and blocked outbound writes; expect intervening changes exactly once.
 - [x] 3.2 Run scoped tests, strict OpenSpec validation and independent batch review; expect green PR CI and an explicit ship verdict.
-- [ ] 3.3 Verify two ordinary cuts with authentic Full, qualified artifacts and actual canaries; expect separate timing and provenance records.
-- [ ] 3.4 Synchronize and archive this change after acceptance; expect canonical requirements, strict validation and clean task resources.
+- [x] 3.3 Verify two ordinary cuts with authentic Full, qualified artifacts and actual canaries; expect separate timing and provenance records.
+- [x] 3.4 Synchronize and archive this change after acceptance; expect canonical requirements, strict validation and clean task resources.
+
+## Delivery evidence
+
+Implementation and independent review shipped in [PR #2786](https://github.com/Artexis10/exomem/pull/2786).
+Both ordinary cuts passed authentic Full CI and qualified their original Python artifacts and five image variants.
+Both deployment logs report `CANARY_ON_TARGET`.
+
+| Release | Source | Full CI | Publisher | Canary |
+|---|---|---|---|---|
+| 0.178.0 | `d50d3bd8` | [43448519041](https://github.com/Artexis10/exomem/actions/runs/43448519041) | [43455668573](https://github.com/Artexis10/exomem/actions/runs/43455668573) | [43459902610](https://github.com/Artexis10/exomem/actions/runs/43459902610) |
+| 0.179.0 | `be6ccf05` | [43574413193](https://github.com/Artexis10/exomem/actions/runs/43574413193) | [43577861908](https://github.com/Artexis10/exomem/actions/runs/43577861908) | [43581165273](https://github.com/Artexis10/exomem/actions/runs/43581165273) |
+
+The second publisher qualified Python on verification attempt 2 and retained the original build attempt 1.
+Unrelated [PR #2809](https://github.com/Artexis10/exomem/pull/2809) merged while its image publication continued.
