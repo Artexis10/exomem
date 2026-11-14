@@ -484,15 +484,27 @@ REST_KEY = "replica-rest-key"
 
 
 @contextmanager
-def http_replica(root, tmp_path, name):
-    """One installed-shape HTTP service process on ``root``, with its own lease replica id."""
+def http_replica(root, tmp_path, name, *, activation_after=None):
+    """One installed-shape HTTP service process on ``root``, with its own lease replica id.
+
+    No request here calls the liveness route, so the service activates its background workers,
+    the vault projector among them, on its fallback timer: after ``activation_after`` seconds
+    when given, else the service's own default.
+    """
     import socket
     import subprocess
     import urllib.request
 
-    shim = tmp_path / "rollout"
+    shim = tmp_path / f"rollout-{name}"
     shim.mkdir(exist_ok=True)
-    (shim / "sitecustomize.py").write_text(rollout_override(), encoding="utf-8")
+    override = rollout_override()
+    if activation_after is not None:
+        override += (
+            "\n_OPENERS['exomem.server_runtime'] = lambda module: "
+            "module.LocalRuntimeActivation.__init__.__kwdefaults__.update("
+            f"fallback_seconds={float(activation_after)!r})\n"
+        )
+    (shim / "sitecustomize.py").write_text(override, encoding="utf-8")
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
@@ -559,6 +571,25 @@ def remember(replica, title):
         {"content": f"# {title}\n\n## Claim\n\nWriter-lease serialization.\n", "title": title,
          "note_type": "insight", "status": "draft"},
     )
+
+
+@pytest.mark.timeout(600)
+def test_a_service_stopped_before_it_activated_still_projects_the_write_it_accepted(
+    stored, tmp_path
+):
+    """A service that accepts a write before its activation starts the vault projector, then
+    stops: a stop that drains only a started projector leaves the write's projections queued, so
+    the person's page has no file until a service starts again."""
+    with http_replica(stored, tmp_path, "unactivated", activation_after=600) as service:
+        written = remember(service, "Accepted before activation")
+        assert written["success"] is True, written
+        service.process.terminate()
+        service.process.wait(60)
+    left = store_rows(stored, "SELECT path, revision, queued_at FROM store_projection_queue")
+    assert left == [], (left, service.log.read_text(encoding="utf-8")[-6000:])
+    page = written["data"]["path"]
+    assert (stored / page).read_bytes() == read.owned_bytes(stored, page)
+    assert service.process.returncode == -signal.SIGTERM
 
 
 @pytest.mark.timeout(600)
@@ -695,12 +726,13 @@ def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path)
 
 
 SERVES_UNDER_AN_EARLIER_ACTION = """
-import signal, sys
+import asyncio, signal, sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from exomem.server import ExomemFastMCP
 
-marks, port, action = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+marks, port, action, startup = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
+starting = marks.with_suffix(".starting")
 
 def mark(word):
     with marks.open("a", encoding="utf-8") as out:
@@ -708,6 +740,11 @@ def mark(word):
 
 @asynccontextmanager
 async def lifespan(_server):
+    if startup == "held":  # the startup awaits until the test removes the file
+        starting.touch()
+        while starting.exists():
+            await asyncio.sleep(0.05)
+    mark("started")
     yield
     mark("torn down")
 
@@ -722,22 +759,27 @@ mark("returned")
 
 
 @pytest.mark.parametrize(
-    ("action", "marks", "status"),
+    ("action", "startup", "marks", "status"),
     [
         # The handler runs once and the runner returns, as on main; main ran it before the outer
         # teardown, and here it runs once the teardown has unwound.
-        ("handler", ["torn down", "handler", "returned"], 0),
+        ("handler", "free", ["started", "torn down", "handler", "returned"], 0),
         # As on main: the ignored signal is ignored, and the runner returns.
-        ("ignore", ["torn down", "returned"], 0),
+        ("ignore", "free", ["started", "torn down", "returned"], 0),
         # Main ends here without the teardown; this change runs it, then ends by the signal.
-        ("default", ["torn down"], -signal.SIGTERM),
+        ("default", "free", ["started", "torn down"], -signal.SIGTERM),
+        # A SIGTERM while the startup awaits meets the handler at once and the process survives;
+        # the SIGTERM once serving still meets the handler only after the teardown.
+        ("handler", "held", ["handler", "started", "torn down", "handler", "returned"], 0),
     ],
 )
 def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
-    tmp_path, action, marks, status
+    tmp_path, action, startup, marks, status
 ):
     """A service whose SIGTERM conversion drops the action that its caller installed: the caller's
-    handler never runs and an ignored signal ends the process, or the teardown does not run."""
+    handler never runs and an ignored signal ends the process, or the teardown does not run. Or a
+    conversion that a SIGTERM during the startup disarms, so the later one meets the handler
+    before the teardown."""
     import socket
     import subprocess
 
@@ -747,27 +789,43 @@ def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
     listener.close()
     written = tmp_path / "marks"
     process = subprocess.Popen(
-        [sys.executable, "-c", SERVES_UNDER_AN_EARLIER_ACTION, str(written), str(port), action],
+        [sys.executable, "-c", SERVES_UNDER_AN_EARLIER_ACTION, str(written), str(port), action,
+         startup],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
-    try:
+
+    def marked():
+        return written.read_text(encoding="utf-8").splitlines() if written.exists() else []
+
+    def listens():
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            return True
+        except OSError:
+            return False
+
+    def until(condition, failure):
         deadline = time.monotonic() + 120
-        while True:  # uvicorn listens only once it has taken the signals
+        while not condition():
             assert process.poll() is None, process.stdout.read().decode()[-3000:]
-            try:
-                socket.create_connection(("127.0.0.1", port), timeout=1).close()
-                break
-            except OSError:
-                assert time.monotonic() < deadline, "the service did not start"
-                time.sleep(0.05)
+            assert time.monotonic() < deadline, failure
+            time.sleep(0.05)
+
+    try:
+        if startup == "held":
+            starting = written.with_suffix(".starting")
+            until(starting.exists, "the startup did not begin")
+            process.terminate()
+            until(lambda: marked() == ["handler"], "the SIGTERM during the startup met no handler")
+            starting.unlink()
+        until(listens, "the service did not start")  # uvicorn listens once it took the signals
         process.terminate()
         output, _ = process.communicate(timeout=60)
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(10)
-    found = written.read_text(encoding="utf-8").splitlines() if written.exists() else []
-    assert (found, process.returncode) == (marks, status), output.decode()[-3000:]
+    assert (marked(), process.returncode) == (marks, status), output.decode()[-3000:]
 
 
 def trashed_once(root, rel, body):
@@ -940,15 +998,19 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
     loop.start()
     during, during_waits = [], []
     try:
+        # The waits are sampled back to back, so their count follows the drain's length in samples
+        # of a few milliseconds, not in fixed sleeps. The two writes come after the first three
+        # samples: a write that ran first, or beside the samples, could outlast a fast drain.
         while set(drained_pages) & queued(stored):
             assert time.monotonic() - began < 780, "the drain finished"
-            if len(during) < 2 and len(during_waits) in (5, 15):
+            if len(during_waits) >= 3 and len(during) < 2:
                 during.append(foreground(f"during {len(during)}"))
             during_waits.append(waits())
-            time.sleep(0.2)
         drain_seconds = time.monotonic() - began
     finally:
         loop.stop()
+    projection = holds.get("vault_store_projection", [])
+    assert len(projection) >= intents, "one hold for each record, none for the whole drain"
     assert len(during_waits) >= 3, "foreground waits were measured while the projector drained"
 
     # One importer batch: an outside edit of as many pages as one store-thread job settles.
@@ -960,7 +1022,6 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
     def ms(values, how):
         return round(how(values) * 1000, 1)
 
-    projection = holds.get("vault_store_projection", [])
     b_idle, q_idle = zip(*baseline_waits, strict=True)
     b_busy, q_busy = zip(*during_waits, strict=True)
     figures = {
@@ -987,7 +1048,6 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
     if report := os.environ.get("EXOMEM_SERVED_DRILL_REPORT"):
         Path(report).write_text(json.dumps(figures, indent=1), encoding="utf-8")
     assert [r.getMessage() for r in caplog.records if r.name.startswith("exomem.vault_store")] == []
-    assert len(projection) >= intents, "one hold for each record, none for the whole drain"
     assert sorted(imported.imported) == sorted(batch)
     # A hold is one record or one batch: far inside the timeout that a foreground writer waits.
     timeout = get_manager()._mutation_timeout_seconds
