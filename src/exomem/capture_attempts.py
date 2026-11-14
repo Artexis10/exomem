@@ -18,6 +18,7 @@ from .governance.principal import OWNER_AUDIENCE, effective_principal, owner_pri
 
 # A fixed per-operation work bound keeps collection independent of ledger size.
 GC_BATCH_SIZE = 128
+MAX_ATTEMPT_RESIDUE = 32  # Fixed bounded work for one text-capture attempt's owner locators.
 
 
 class CaptureAttemptConfig(BaseModel):
@@ -162,7 +163,7 @@ class CaptureAttemptLedger:
         with store._connect() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS capture_attempt_ledger (singleton INTEGER PRIMARY KEY CHECK(singleton=1), ledger_id TEXT NOT NULL)")
             conn.execute("INSERT OR IGNORE INTO capture_attempt_ledger VALUES (1, ?)", (secrets.token_hex(32),))
-            conn.execute("CREATE TABLE IF NOT EXISTS capture_attempts (ticket TEXT PRIMARY KEY, boundary_id TEXT NOT NULL, reservation TEXT NOT NULL, principal TEXT NOT NULL, state TEXT NOT NULL, expires_at REAL NOT NULL, retention_seconds REAL NOT NULL, gc_after REAL, past_outcome TEXT, receipt TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS capture_attempts (ticket TEXT PRIMARY KEY, boundary_id TEXT NOT NULL, reservation TEXT NOT NULL, principal TEXT NOT NULL, state TEXT NOT NULL, expires_at REAL NOT NULL, retention_seconds REAL NOT NULL, gc_after REAL, past_outcome TEXT, receipt TEXT, custody_pending INTEGER NOT NULL DEFAULT 0)")
             # Earlier unreleased candidates never recorded retention; inventing it would change issued policy.
             if "retention_seconds" not in {row[1] for row in conn.execute("PRAGMA table_info(capture_attempts)")}:
                 raise OpError(
@@ -170,8 +171,16 @@ class CaptureAttemptLedger:
                     "capture attempt ledger lacks its issued retention policy",
                     "Use fresh isolated candidate state; earlier candidate retention cannot be inferred.",
                 )
-            conn.execute("CREATE INDEX IF NOT EXISTS capture_attempts_expiry ON capture_attempts (boundary_id, state, expires_at, ticket)")
-            conn.execute("CREATE INDEX IF NOT EXISTS capture_attempts_gc ON capture_attempts (boundary_id, gc_after, ticket) WHERE gc_after IS NOT NULL")
+            if "custody_pending" not in {row[1] for row in conn.execute("PRAGMA table_info(capture_attempts)")}:
+                raise OpError(
+                    "CAPTURE_ATTEMPT_LEDGER_UNAVAILABLE",
+                    "capture attempt ledger lacks custody eligibility",
+                    "Use fresh isolated candidate state; earlier candidate custody cannot be inferred.",
+                )
+            conn.execute("CREATE INDEX IF NOT EXISTS capture_attempts_expiry ON capture_attempts (boundary_id, state, expires_at, ticket) WHERE custody_pending=0")
+            conn.execute("CREATE INDEX IF NOT EXISTS capture_attempts_gc ON capture_attempts (boundary_id, gc_after, ticket) WHERE gc_after IS NOT NULL AND custody_pending=0")
+            conn.execute("CREATE TABLE IF NOT EXISTS capture_attempt_custody (ticket TEXT PRIMARY KEY, allocation TEXT, observed_ref TEXT, publication_state TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS capture_attempt_residue (ticket TEXT NOT NULL, owner TEXT NOT NULL, locator TEXT NOT NULL, version TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(ticket,owner,locator,version))")
             self.ledger_id = conn.execute("SELECT ledger_id FROM capture_attempt_ledger WHERE singleton=1").fetchone()[0]
 
     def scope(self, manager, boundary) -> dict:
@@ -195,11 +204,85 @@ class CaptureAttemptLedger:
         active = self._active_handles(boundary)
         identity = _boundary_id(boundary)
         with self.store._connect() as conn:
-            expired = conn.execute("SELECT ticket FROM capture_attempts WHERE boundary_id=? AND state='reserved' AND expires_at<=? ORDER BY expires_at, ticket LIMIT ?", (identity, now, GC_BATCH_SIZE)).fetchall()
-            terminal = conn.execute("SELECT ticket FROM capture_attempts WHERE boundary_id=? AND gc_after<=? ORDER BY gc_after, ticket LIMIT ?", (identity, now, GC_BATCH_SIZE - len(expired))).fetchall()
+            expired = conn.execute("SELECT ticket FROM capture_attempts WHERE boundary_id=? AND state='reserved' AND custody_pending=0 AND expires_at<=? ORDER BY expires_at,ticket LIMIT ?", (identity, now, GC_BATCH_SIZE)).fetchall()
+            terminal = conn.execute("SELECT ticket FROM capture_attempts WHERE boundary_id=? AND custody_pending=0 AND gc_after<=? ORDER BY gc_after,ticket LIMIT ?", (identity, now, GC_BATCH_SIZE - len(expired))).fetchall()
             tickets = [row for row in (*expired, *terminal) if row[0] not in active]
             conn.executemany("DELETE FROM capture_attempts WHERE ticket=?", tickets)
+            conn.executemany("DELETE FROM capture_attempt_custody WHERE ticket=?", tickets)
+            conn.executemany("DELETE FROM capture_attempt_residue WHERE ticket=?", tickets)
         return len(tickets)
+
+    def record_allocation(self, ticket: str, allocation: dict) -> None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT allocation FROM capture_attempt_custody WHERE ticket=?", (ticket,)).fetchone()
+            if row is not None and row[0] is not None and row[0] != _json(allocation):
+                raise ValueError("CAPTURE_ATTEMPT_CUSTODY_CONFLICT: this wire attempt owns one Source allocation")
+            conn.execute("INSERT INTO capture_attempt_custody(ticket,allocation,publication_state) VALUES (?,?,'allocated') ON CONFLICT(ticket) DO UPDATE SET allocation=excluded.allocation",
+                         (ticket, _json(allocation)))
+            conn.execute("UPDATE capture_attempts SET custody_pending=1 WHERE ticket=?", (ticket,))
+
+    def record_observed(self, ticket: str, reference: str) -> None:
+        with self.store._connect() as conn:
+            conn.execute("INSERT INTO capture_attempt_custody(ticket,observed_ref,publication_state) VALUES (?,?,'observed') ON CONFLICT(ticket) DO UPDATE SET observed_ref=excluded.observed_ref",
+                         (ticket, reference))
+
+    def record_published(self, ticket: str, reference: str) -> None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT allocation FROM capture_attempt_custody WHERE ticket=?", (ticket,)).fetchone()
+            if row is not None and row[0] is not None and json.loads(row[0])["source_ref"] == reference:
+                conn.execute("UPDATE capture_attempt_custody SET publication_state='published' WHERE ticket=?", (ticket,))
+                self._refresh_custody_pending(conn, ticket)
+
+    def reserve_residue(self, ticket: str, owner) -> None:
+        with self.store._connect() as conn:
+            if conn.execute("SELECT 1 FROM capture_attempt_residue WHERE ticket=? AND owner=? AND locator=? AND version=?",
+                            (ticket, owner.owner, owner.locator, owner.version)).fetchone() is not None:
+                return
+            count = conn.execute("SELECT count(*) FROM capture_attempt_residue WHERE ticket=?", (ticket,)).fetchone()[0]
+            if count >= MAX_ATTEMPT_RESIDUE:
+                raise ValueError("CAPTURE_ATTEMPT_CUSTODY_UNAVAILABLE: attempt residue exceeds its bounded owner set")
+            conn.execute("INSERT OR IGNORE INTO capture_attempt_custody(ticket,publication_state) VALUES (?,'unallocated')", (ticket,))
+            conn.execute("INSERT OR IGNORE INTO capture_attempt_residue(ticket,owner,locator,version,state) VALUES (?,?,?,?,'pending')",
+                         (ticket, owner.owner, owner.locator, owner.version))
+            conn.execute("UPDATE capture_attempts SET custody_pending=1 WHERE ticket=?", (ticket,))
+
+    @staticmethod
+    def _refresh_custody_pending(conn, ticket: str) -> None:
+        # Eligibility changes with its owning rows, so collection never scans unresolved predecessors.
+        conn.execute(
+            "UPDATE capture_attempts SET custody_pending="
+            "EXISTS(SELECT 1 FROM capture_attempt_residue WHERE ticket=? AND state!='retired') OR "
+            "EXISTS(SELECT 1 FROM capture_attempt_custody WHERE ticket=? AND allocation IS NOT NULL AND publication_state!='published') "
+            "WHERE ticket=?", (ticket, ticket, ticket),
+        )
+
+    def custody(self, ticket: str) -> dict:
+        """Report attempt ownership, separately from canonical dependency and erasure coverage."""
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT allocation,observed_ref,publication_state FROM capture_attempt_custody WHERE ticket=?", (ticket,)).fetchone()
+            residues = conn.execute("SELECT owner,locator,version,state FROM capture_attempt_residue WHERE ticket=? ORDER BY owner,locator,version LIMIT ?", (ticket, MAX_ATTEMPT_RESIDUE + 1)).fetchall()
+        if row is None or len(residues) > MAX_ATTEMPT_RESIDUE:
+            return _unknown_custody()
+        targets = []
+        state = "complete"
+        if row[0] is not None:
+            allocation = json.loads(row[0])
+            targets.append({"source_ref": allocation["source_ref"], "source_hash": allocation["source_hash"]})
+            if row[2] != "published":
+                state = "unknown"
+        unresolved = [{"owner": item[0], "locator": item[1], "version": item[2]} for item in residues if item[3] != "retired"]
+        return {"custody_state": "pending" if unresolved else state, "owned_targets": targets,
+                "attempt_residue": {"state": "pending" if unresolved else "clear", "owners": unresolved,
+                                    "retirement_requested": any(item[3] == "retire_requested" for item in residues)}}
+
+    def acknowledge_residue(self, reservation: CaptureReservation, owner) -> None:
+        row = self._lookup(reservation)
+        if row is None or row[2] not in ("closed", "completed"):
+            raise ValueError("CAPTURE_ATTEMPT_ADMISSION_OPEN: close admission before residue retirement")
+        with self.store._connect() as conn:
+            conn.execute("UPDATE capture_attempt_residue SET state='retired' WHERE ticket=? AND owner=? AND locator=? AND version=?",
+                         (reservation.ticket, owner.owner, owner.locator, owner.version))
+            self._refresh_custody_pending(conn, reservation.ticket)
 
     def reserve(self, manager, boundary, source_identity, request_sha256) -> dict:
         config = CaptureAttemptConfig.from_env()
@@ -262,11 +345,11 @@ class CaptureAttemptLedger:
             # An interrupted accepted row remains lookup-only. Settlement closes it with unknown past outcome.
             _ACTIVE.reset(token)
 
-    def settle(self, manager, root, reservation: CaptureReservation) -> dict:
+    def settle(self, manager, root, reservation: CaptureReservation, *, retire_owned: bool = False) -> dict:
         boundary = _actual_boundary(manager, root)
         observed = self.scope(manager, boundary)
         result = {"state": "unknown", "admission_closed_here": None, "past_outcome": "unknown",
-                  "observed_scope": observed, "capture_receipt": None}
+                  "observed_scope": observed, "capture_receipt": None, **_unknown_custody()}
         if reservation.scope.model_dump() != observed:
             return result
         if reservation.ticket in self._active_handles(boundary):
@@ -282,6 +365,11 @@ class CaptureAttemptLedger:
                 with self.store._connect() as conn:
                     conn.execute("UPDATE capture_attempts SET state='closed',past_outcome=?,gc_after=COALESCE(gc_after,?) WHERE ticket=?", (past, self.store.clock() + row[5], reservation.ticket))
                 result["past_outcome"] = past
+        if retire_owned and row is not None:
+            # This records withdrawal of pre-reference residue; only its producer can acknowledge removal.
+            with self.store._connect() as conn:
+                conn.execute("UPDATE capture_attempt_residue SET state='retire_requested' WHERE ticket=? AND state='pending'", (reservation.ticket,))
+        result.update(self.custody(reservation.ticket))
         self.collect(boundary)
         source_capture.require_authority(root)
         return result
@@ -303,14 +391,14 @@ def reserve(root, source_identity, request_sha256, capture_wire_version=1) -> di
     return result
 
 
-def settle(root, reservation) -> dict:
+def settle(root, reservation, *, retire_owned: bool = False) -> dict:
     from .writer_lease import active_manager
 
     source_capture.require_authority(root)
     _principal_binding()
     manager = active_manager()
     _consume_dispatch(manager, root, "settle_source_capture")
-    result = manager.idempotency.capture_attempts.settle(manager, root, _reservation(reservation))
+    result = manager.idempotency.capture_attempts.settle(manager, root, _reservation(reservation), retire_owned=retire_owned)
     source_capture.require_authority(root)
     return result
 
@@ -347,4 +435,61 @@ def pending(manager, root, reservation) -> dict:
     source_capture.require_authority(root)
     return {"state": "pending" if reserved.scope.model_dump() == observed else "unknown",
             "admission_closed_here": None, "past_outcome": "unknown", "observed_scope": observed,
-            "capture_receipt": None}
+            "capture_receipt": None, **_unknown_custody()}
+
+
+def _unknown_custody() -> dict:
+    return {"custody_state": "unknown", "owned_targets": None,
+            "attempt_residue": {"state": "unknown", "owners": None}}
+
+
+def _custody_attempt(root):
+    from .writer_lease import active_manager
+
+    if not _ACTIVE.get():
+        return None
+    manager = active_manager()
+    boundary = _actual_boundary(manager, root)
+    ledger = manager.idempotency.capture_attempts
+    for ledger_id, boundary_id, ticket in reversed(_ACTIVE.get()):
+        if ledger_id == ledger.ledger_id and boundary_id == _boundary_id(boundary):
+            return ledger, ticket
+    return None
+
+
+def record_allocation(root, *, reference: str, source_hash: str, path: str) -> None:
+    active = _custody_attempt(root)
+    if active is not None:
+        active[0].record_allocation(active[1], {"source_ref": reference, "source_hash": source_hash, "canonical_path": path})
+
+
+def record_observed(root, reference: str) -> None:
+    active = _custody_attempt(root)
+    if active is not None:
+        active[0].record_observed(active[1], reference)
+
+
+def record_published(root, reference: str) -> None:
+    active = _custody_attempt(root)
+    if active is not None:
+        active[0].record_published(active[1], reference)
+
+
+def reserve_residue(root, owner) -> None:
+    active = _custody_attempt(root)
+    if active is None:
+        raise ValueError("CAPTURE_ATTEMPT_LIFECYCLE_REQUIRED: residue requires an active capture attempt")
+    active[0].reserve_residue(active[1], owner)
+
+
+def acknowledge_residue(root, reservation, owner) -> None:
+    from .writer_lease import active_manager
+
+    source_capture.require_authority(root)
+    manager = active_manager()
+    boundary = _actual_boundary(manager, root)
+    reserved = _reservation(reservation)
+    ledger = manager.idempotency.capture_attempts
+    if reserved.scope.model_dump() != ledger.scope(manager, boundary):
+        raise ValueError("CAPTURE_ATTEMPT_SCOPE_CHANGED: residue custody is unavailable")
+    ledger.acknowledge_residue(reserved, owner)

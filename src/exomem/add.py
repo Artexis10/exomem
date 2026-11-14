@@ -599,6 +599,10 @@ def add(
             source_capture.require_authority(vault_root)
             if original_digest != capture_input_digest:
                 raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
+            from . import capture_attempts, source_custody
+
+            if source_custody.available():
+                capture_attempts.record_observed(vault_root, reference)
             return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
     # Identity decides an identity-bearing capture alone; an artifact, a correction, an adoption, an
     # episode revision and a protected capture each have a lane of their own.
@@ -893,6 +897,13 @@ def add(
             vault_root, primary=writes[0],
             derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
         )
+        from . import source_custody
+
+        source_reference = memory_refs.memory_ref(exomem_id)
+        source_custody.begin_capture(
+            vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
+            source_hash=content_hash(writes[0].content),
+        )
         def validate_bindings() -> None:
             if _validate_inputs is not None:
                 _validate_inputs()
@@ -901,6 +912,7 @@ def add(
                 source_capture.require_authority(vault_root)
             if correction_plan is not None:
                 correction_plan.require_authority(vault_root)
+            source_custody.require_publishable(vault_root, source_reference)
 
         def prepare_final(planned: list[PlannedWrite]) -> None:
             _prepare({"allocation": allocation, "ref": memory_refs.memory_ref(exomem_id),
@@ -964,6 +976,8 @@ def add(
         deferred_fanout(
             vault_root, committed, created_paths=created_paths, publication_intents=publication_intents
         )
+
+    source_custody.finish_capture(vault_root, source_reference)
 
     if checks_duplicates or artifact is not None:
         # The next acquisition of the mutation boundary finds this payload, whatever other indexes have caught up.

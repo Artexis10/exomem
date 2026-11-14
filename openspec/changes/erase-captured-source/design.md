@@ -137,7 +137,8 @@ Existing retained projection pins still constrain their owner's collection; they
 ### D6. Close attempt residue separately from admission
 
 Extend settlement with `custody_state`, `owned_targets` and `attempt_residue` without changing `past_outcome`.
-Each owned target reports allocated reference, retained hash, canonical path and observed canonical state.
+Each owned target reports only its allocated reference and retained hash.
+Keep allocation paths private. Settlement reads only its ledger; the caller obtains current presence, hash and indexing evidence through complete P4 inventory.
 Unknown capture outcome can coexist with a known allocation; neither proves canonical publication.
 
 Ordinary settlement only closes admission and reports custody. An explicit `retire_owned` continuation requests cleanup of pre-reference residue.
