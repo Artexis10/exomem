@@ -39,14 +39,31 @@ def layer_folders():
     return tuple(vault.kb_dirname() + "/" + profile.placement_layer for profile in collection_profiles.PROFILES.values())
 
 
+#: The portable keys of `layer_folders`, with the folder name and the profiles object they were read from.
+_LAYER_ROOTS: tuple[str, object, tuple[str, ...]] = ("", None, ())
+
+
+def _layer_roots():
+    """`layer_folders` as portable keys, read again only when the folder name or the profiles change.
+
+    The profiles are an immutable mapping of frozen profiles, so their identity names their value.
+    """
+    global _LAYER_ROOTS
+    kb, profiles = vault.kb_dirname(), collection_profiles.PROFILES
+    cached = _LAYER_ROOTS
+    if cached[0] != kb or cached[1] is not profiles:
+        cached = (kb, profiles, tuple(collections._portable_path_key(folder) for folder in layer_folders()))
+        _LAYER_ROOTS = cached
+    return cached[2]
+
+
 def relevant(path, *, ancestors=False):
     """Profile placement proves disjoint knowledge without consulting collection SQL."""
     if path is None:
         return True
     key = collections._portable_path_key(str(path).replace("\\", "/").strip("/"))
-    roots = tuple(collections._portable_path_key(folder) for folder in layer_folders())
     return any(key == root or key.startswith(root + "/") or ancestors and
-               (not key or root.startswith(key + "/")) for root in roots)
+               (not key or root.startswith(key + "/")) for root in _layer_roots())
 
 
 def enrollment(root):
@@ -174,6 +191,32 @@ def _coordinator_fence(client):
     return cached[client]
 
 
+_REQUEST_STATUS: ContextVar[dict | None] = ContextVar("collection_ownership_request_status", default=None)
+
+
+@contextmanager
+def request_status_scope():
+    """Read the coordinator's status once for one read request that holds a store snapshot.
+
+    The request answers for that snapshot, so its proof and its finish answer for one status: the
+    finish still re-reads the local declarations, but no longer sees a fence that moves meanwhile.
+    """
+    token = _REQUEST_STATUS.set({})
+    try:
+        yield
+    finally:
+        _REQUEST_STATUS.reset(token)
+
+
+def _coordinator_status(client):
+    cached = _REQUEST_STATUS.get()
+    if cached is None:
+        return client.status()
+    if client not in cached:
+        cached[client] = client.status()
+    return cached[client]
+
+
 def _canonical(root, conn, placement, recorded, *, private=False, restored=None, manager=None, status=None):
     meta = legacy_originals.metadata(conn)
     sid, instance = meta[schema.META_STORE_ID], meta[schema.META_INSTANCE_ID]
@@ -194,7 +237,7 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
             fence = _coordinator_fence(manager.client)
         else:
             # Status replaces the fence read; its coordinator transaction can contend briefly.
-            status = manager.client.status() if status is None else status
+            status = _coordinator_status(manager.client) if status is None else status
             required = status.collection_store_head
             if required is not None:
                 fence = CollectionStoreFenceState(status.required_collection_store_capability, True,
@@ -354,7 +397,7 @@ def resolve(root, *, conn=None, private=False, path=None, manager=None):
             manager = manager or _manager(root)
             if manager.client is None:
                 raise unavailable()
-            status = manager.client.status()
+            status = _coordinator_status(manager.client)
         # Ownership declarations use the unchanged metadata wire; payload reads still require the current schema.
         with connection.ownership_reader(path, reader_pool(root, path)) as reader:
             reader.execute("BEGIN")

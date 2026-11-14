@@ -17,6 +17,7 @@ from exomem.vault_store.ownership import (
     Skipped,
     SkipReason,
     classify,
+    classify_many,
     iter_owned,
 )
 
@@ -141,6 +142,28 @@ def test_a_markdown_file_is_a_page_in_any_letter_case(rel):
 def test_every_other_file_is_a_binary(rel):
     """Defect: the store loads a PDF as a page, so its bytes enter the database and its hash covers the wrong rows."""
     assert classify(rel) is Ownership.BINARY
+
+
+@pytest.mark.parametrize("folder", [KB, "Notebook"])
+def test_a_batch_answers_as_the_rule_for_every_spelling_and_folder_name(monkeypatch, folder):
+    """Defect: a batch keeps the layer roots or answers of the folder name it met first, or drifts from the
+    scalar rule, so a request owns another owner's files.
+
+    The two folder names run in one process, so the second meets layer roots prepared for the first.
+    """
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", folder)
+    spellings = [
+        f"{folder}/_governance/policy.md", f"{folder}/_compiled/2026/history.md",
+        f"{folder}/_Schema/registry.yaml", f"{folder}/Notes/café.md", f"{folder}/Notes/ｗｉｄｅ.md",
+        f"{folder}/Ｒecords/Work/item.md", f"{folder}/records/Work/item.md", f"{folder}/Planning",
+        f"{folder}/Notes／Records/item.md", f"{folder}\\Notes\\idea.md", f"{folder}/Records\\Work\\item.md",
+        f"{folder}/.obsidian/workspace.json", f"{folder}/Notes/.hidden.md",
+        f"{folder}/Notes/idea.sync-conflict-20260101-120000-ABCDEFG.md", f"{folder}/Evidence/scan.pdf",
+        f"{folder}/Notes/idea.md", f"{KB}/Records/Work/item.md", "Notebook/Records/Work/item.md",
+    ]
+    assert classify_many(spellings) == {rel: classify(rel) for rel in spellings}
+    assert classify_many([f"{folder}/Records/Work/item.md"]) == {f"{folder}/Records/Work/item.md": Ownership.NONE}
+    assert classify(f"{folder}/Ｒecords/Work/item.md") is Ownership.NONE
 
 
 # --- iter_owned: the walk agrees with the rule -------------------------------------------------

@@ -14079,6 +14079,156 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     return _link_candidates_for_key(resolver, cleaned)
 
 
+@dataclass(slots=True)
+class _Homonyms:
+    """The pages that share a link name with another page, for one resident resolver publication.
+
+    ``groups`` holds each name's candidates where they are more than one, and ``names_by_title``
+    each name without a folder under its title key: a patch reads both to regroup what it reaches.
+    The first patch builds ``names_by_title``, so a read that only groups never pays for it.
+    """
+
+    publication: object
+    prefix: str
+    paths: frozenset[str]
+    groups: dict[str, frozenset[str]]
+    names_by_title: dict[str, str | tuple[str, ...]] | None = None
+
+
+#: The homonyms of the resident resolver publication whose token the entry holds. Which reader
+#: sees them is decided per request, so the entry holds nothing of a caller. Like the topology
+#: digests, it keeps the token, never the resolver's maps.
+_HOMONYM_PATHS: dict[Path, _Homonyms] = {}
+
+
+def _homonym_paths(
+    vault_root: Path, resolver: vault_module.WikilinkResolver, check: Callable[[], None],
+) -> frozenset[str]:
+    """Every page whose name a link can share with another page.
+
+    A resolver copied from a resident publication carries its token, and every patch to its
+    maps drops it, so a kept entry describes exactly these maps. A resolver without a token is
+    read again.
+    """
+    key, publication, prefix = Path(vault_root), resolver.publication, kb_prefix()
+    cached = _HOMONYM_PATHS.get(key)
+    if publication is not None and cached is not None and (
+        cached.publication, cached.prefix
+    ) == (publication, prefix):
+        return cached.paths
+    groups: dict[str, frozenset[str]] = {}
+    for name in resolver.full_paths | resolver.stems.keys() | resolver.titles.keys():
+        check()
+        candidates = _link_candidates_for_key(resolver, name)
+        if len(candidates) > 1:
+            groups[name] = frozenset(candidates)
+    homonyms = frozenset().union(*groups.values())
+    if publication is not None and resolver.publication is publication:
+        _HOMONYM_PATHS[key] = _Homonyms(publication, prefix, homonyms, groups)
+    return homonyms
+
+
+@contextmanager
+def homonyms_across_patch(
+    vault_root: Path, resolver: vault_module.WikilinkResolver, rels: Iterable[str],
+) -> Iterator[None]:
+    """Carry the homonyms of ``resolver``'s publication across the body, which patches ``rels`` into
+    ``resolver`` in place and gives it a new publication token.
+
+    A name's candidates read the path maps at the name and at its Knowledge Base spelling, and a
+    name without a folder also reads the stem and title buckets at the name and at its title key.
+    The patch changes the path maps only at each touched path's key, the stem buckets only at its
+    stem, and the title buckets only at the title keys of the key's candidates before and after it.
+    So only these names can gain, lose or change candidates: each key and its Knowledge Base
+    relative spelling, each stem, each such title key, and each name without a folder that files
+    under one of those title keys. Every other name keeps its group. Without a kept entry for this
+    publication the body runs alone, and the next reader groups the whole resolver.
+    """
+    key, prefix = Path(vault_root), kb_prefix()
+    memo = _HOMONYM_PATHS.get(key)
+    if memo is None or resolver.publication is None or (memo.publication, memo.prefix) != (
+        resolver.publication, prefix,
+    ):
+        yield
+        return
+    rels = list(rels)
+    # A body that fails leaves no entry, so no reader keeps groups of half-patched maps.
+    _HOMONYM_PATHS.pop(key, None)
+    if memo.names_by_title is None:
+        memo.names_by_title = _names_by_title(resolver)
+    by_title = memo.names_by_title
+    names, titles = _names_a_patch_reaches(resolver, rels, prefix)
+    yield
+    after_names, after_titles = _names_a_patch_reaches(resolver, rels, prefix)
+    titles |= after_titles
+    names |= after_names | titles
+    for title in titles:
+        filed = by_title.get(title, ())
+        names.update((filed,) if isinstance(filed, str) else filed)
+    for name in names:
+        held = name in resolver.full_paths or name in resolver.stems or name in resolver.titles
+        candidates = _link_candidates_for_key(resolver, name) if held else set()
+        if len(candidates) > 1:
+            memo.groups[name] = frozenset(candidates)
+        else:
+            memo.groups.pop(name, None)
+        if "/" not in name:
+            _file_name(by_title, vault_module.title_key(name), name, held)
+    if resolver.publication is not None:
+        _HOMONYM_PATHS[key] = _Homonyms(
+            resolver.publication, prefix, frozenset().union(*memo.groups.values()),
+            memo.groups, memo.names_by_title,
+        )
+
+
+def _names_by_title(resolver: vault_module.WikilinkResolver) -> dict[str, str | tuple[str, ...]]:
+    """Each name without a folder in ``resolver``'s maps, under its title key."""
+    by_title: dict[str, str | tuple[str, ...]] = {}
+    for names in (resolver.full_paths, resolver.stems.keys(), resolver.titles.keys()):
+        for name in names:
+            if "/" not in name:
+                _file_name(by_title, vault_module.title_key(name), name, True)
+    return by_title
+
+
+def _file_name(
+    by_title: dict[str, str | tuple[str, ...]], title: str, name: str, held: bool,
+) -> None:
+    """File ``name`` under ``title`` when ``held``, else take it out.
+
+    A key holds a bare name, or a tuple when names share it. A vault's worth of one-name sets
+    would give the cyclic garbage collector tens of thousands of objects to scan on a served heap.
+    """
+    filed = by_title.get(title, ())
+    names = [filed] if isinstance(filed, str) else list(filed)
+    if held and name not in names:
+        names.append(name)
+    elif not held and name in names:
+        names.remove(name)
+    if names:
+        by_title[title] = names[0] if len(names) == 1 else tuple(names)
+    else:
+        by_title.pop(title, None)
+
+
+def _names_a_patch_reaches(
+    resolver: vault_module.WikilinkResolver, rels: list[str], prefix: str,
+) -> tuple[set[str], set[str]]:
+    """The names that a patch of ``rels`` reaches through the path maps and the stems, and the
+    title keys of the touched keys' candidates, in ``resolver``'s maps."""
+    names: set[str] = set()
+    titles: set[str] = set()
+    for rel in rels:
+        path_key = vault_module._wikilink_path_key(str(rel).replace("\\", "/").lstrip("/"))
+        names.update((path_key, path_key.removeprefix(prefix), path_key.rsplit("/", 1)[-1]))
+        titles.update(
+            candidate.title_key
+            for candidate in resolver.candidates_by_key.get(path_key, ())
+            if candidate.title_key
+        )
+    return names, titles
+
+
 def _link_candidates_for_key(resolver: vault_module.WikilinkResolver, cleaned: str) -> set[str]:
     """Read a normalized resolver key without consuming its extension or link syntax again."""
     if not cleaned:
@@ -14863,16 +15013,11 @@ class GraphView:
         resolver = self._shared_resolver()
         if self.keep is None:
             return set()
-        paths = set()
+        paths: Collection[str]
         if not store_mode.store_mode_for_reads(self.vault_root) or self.reads_placeholders:
             paths = {f"{path}.md" for path in resolver.full_paths}
         else:
-            names = resolver.full_paths | resolver.stems.keys() | resolver.titles.keys()
-            for name in names:
-                self._check()
-                candidates = _link_candidates_for_key(resolver, name)
-                if len(candidates) > 1:
-                    paths.update(candidates)
+            paths = _homonym_paths(self.vault_root, resolver, self._check)
         verdicts = self._kept_many(paths)
         withheld = set()
         for path, allowed in verdicts.items():

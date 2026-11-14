@@ -329,27 +329,56 @@ def match_overlay(root: Path, spec: RegistrySpec, relative_path: str, *,
 
 def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
     """Supply assigned registry membership without decoding its definitions."""
-    from .. import registry_history
     from ..governance import connector_boundary
-    from . import registry_specs
+    from ..structured_collections import _portable_path_key
 
     requirement = connector_boundary.read_requirement(root)
     if requirement is None or requirement["version"] == 1:
         return None
-    document = requirement["vocabulary"]
-    for scope, binding in ((None, document["public"]), *document["private"].items()):
+    child = _portable_path_key(path)
+    for scope, namespace, trees, overlays in _bound_storage(root, requirement["vocabulary"]):
         if scope is not None and scope not in compiled.scopes:
             raise RegistryError("REGISTRY_UNAVAILABLE: canonical binding is unavailable")
-        assigned = frozenset((scope,)) if scope is not None else frozenset()
-        history_root = registry_history.history_dir(root, binding["history"]).relative_to(root).as_posix()
-        if path == binding["namespace"] or _contains(history_root, path):
-            return assigned
+        # `_contains` both ways is an equal key; one way is the path inside the tree.
+        if path == namespace or child in overlays or any(
+            child == tree or child.startswith(tree + "/") for tree in trees
+        ):
+            return frozenset((scope,)) if scope is not None else frozenset()
+    return None
+
+
+def _bound_storage(
+    root: Path, document: dict[str, Any],
+) -> tuple[tuple[str | None, str, tuple[str, ...], frozenset[str]], ...]:
+    """Each binding's scope, namespace, and the portable keys of its history trees and overlays.
+
+    They depend only on the binding and the Knowledge Base folder name. A store request asks for
+    every page it admits, so it prepares them once.
+    """
+    from .. import registry_history
+    from ..kbdir import kb_dirname
+    from ..structured_collections import _portable_path_key
+    from ..vault_store import read
+    from . import registry_specs
+
+    memo = read.request_memo(root)
+    folder = kb_dirname()
+    if memo is not None:
+        kept = memo.get((__name__, "bound storage"))
+        if kept is not None and kept[1] == folder and (kept[0] is document or kept[0] == document):
+            return kept[2]
+    prepared = []
+    for scope, binding in ((None, document["public"]), *document["private"].items()):
+        trees = [registry_history.history_dir(root, binding["history"]).relative_to(root).as_posix()]
+        overlays = set()
         for spec in registry_specs().values():
             overlay, stem = storage(spec, binding)
-            history = registry_history.history_dir(root, stem).relative_to(root).as_posix()
-            if (_contains(overlay, path) and _contains(path, overlay)) or _contains(history, path):
-                return assigned
-    return None
+            trees.append(registry_history.history_dir(root, stem).relative_to(root).as_posix())
+            overlays.add(_portable_path_key(overlay))
+        prepared.append((scope, binding["namespace"], tuple(map(_portable_path_key, trees)), frozenset(overlays)))
+    if memo is not None:
+        memo[(__name__, "bound storage")] = (document, folder, tuple(prepared))
+    return tuple(prepared)
 
 
 def public_storage(root: Path, path: str) -> bool:

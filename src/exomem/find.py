@@ -16,7 +16,7 @@ import os
 import threading
 import time
 from collections import ChainMap, OrderedDict
-from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -3212,7 +3212,7 @@ class _UnitCandidate:
         return self.row.parent_path
 
     @property
-    def frontmatter(self) -> dict[str, Any]:
+    def frontmatter(self) -> Mapping[str, Any]:
         return self.parent_metadata.ranking.frontmatter
 
     @property
@@ -8478,21 +8478,24 @@ def recall_resolver_snapshot(
             # graph rebuild performs its stronger direct before/after proof
             # around sidecar publication.
             if _RECALL_RESOLVER_GENERATIONS.get(root) == generation:
-                _RECALL_RESOLVER_CACHE[root] = (identity, resolver, object())
+                resolver.publication = object()
+                _RECALL_RESOLVER_CACHE[root] = (identity, resolver, resolver.publication)
                 if checkpoint is not None:
                     _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
                 else:
                     _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+            # A publisher patches the published maps in place under this lock, so the copy is taken here.
+            with call_spans.span(
+                "resolver.fork", {"build_returns": 1, "paths": len(resolver.full_paths)}
+            ):
+                forked = resolver.fork()
     finally:
         if leader:
             with _RECALL_REBUILD_LOCK:
                 done = _RECALL_RESOLVER_BUILDS.pop(root, None)
             if done is not None:
                 done.set()
-    with call_spans.span(
-        "resolver.fork", {"build_returns": 1, "paths": len(resolver.full_paths)}
-    ):
-        return resolver.fork()
+    return forked
 
 
 def recall_resolver_snapshot_at_checkpoint(
@@ -8909,16 +8912,91 @@ def on_resolver_files_changed(
             ):
                 return
             projected.on_entries_changed(entries, projected_deleted_rels)
+            projected.publication = object()
             _RECALL_RESOLVER_CACHE[root] = (
                 _recall_checkpoint_identity(delta.to),
                 projected,
-                object(),
+                projected.publication,
             )
             _RECALL_RESOLVER_CHECKPOINTS[root] = delta.to
     except Exception:  # noqa: BLE001 - a partial resolver must never publish.
         with _RESOLVER_LOCK:
             if _RECALL_RESOLVER_CACHE.get(root) == projected_cached:
                 _evict_recall_resolver(root)
+
+
+def on_store_commit(
+    vault_root: Path,
+    before: tuple[int, int, str],
+    after: tuple[int, int, str],
+    entries: Iterable[tuple[str, str | None]],
+    deleted: Iterable[str],
+) -> None:
+    """Advance the resident recall resolver across one store commit, else leave it for a rebuild.
+
+    ``before`` and ``after`` are the store's vault triples around the commit, and ``entries`` and
+    ``deleted`` the resolver delta that its derivation applied. A store reader builds the resolver
+    from the store's page rows that the live access policy indexes, so a resident resolver at
+    ``before`` with this policy, patched by the indexed part of the delta, holds the maps of a build
+    at ``after``. Any other resident resolver stays as it is, and the next reader rebuilds it.
+    """
+    try:
+        _advance_recall_resolver(Path(vault_root), before, after, list(entries), list(deleted))
+    except Exception:  # noqa: BLE001 - the commit has landed; a resolver left behind is rebuilt by its next reader.
+        return
+
+
+def _advance_recall_resolver(
+    root: Path,
+    before: tuple[int, int, str],
+    after: tuple[int, int, str],
+    entries: list[tuple[str, str | None]],
+    deleted: list[str],
+) -> None:
+    from . import access, epistemic_graph
+    from .vault_store import read as store_read
+
+    # The writer and a reader may spell the vault's path differently; the cache keeps the reader's.
+    resolved = root.resolve()
+    keys = [key for key in list(_RECALL_RESOLVER_CACHE) if key == root or key.resolve() == resolved]
+    if not keys:
+        return
+    policy_version, fingerprint = recall_policy.recall_policy_identity(root)
+    filter_fingerprint, indexable = access.indexable_filter(root)
+    if filter_fingerprint != fingerprint:
+        return  # the policy changed between the two reads
+    expected, advanced = (
+        freshness.RecallFreshnessCheckpoint(
+            store_read.STORE_CHECKPOINT, triple[1], triple, policy_version, fingerprint
+        )
+        for triple in (before, after)
+    )
+    indexed = [(rel, title) for rel, title in entries if indexable is None or indexable(rel)]
+    withheld = [rel for rel, _title in entries if indexable is not None and not indexable(rel)]
+    touched = [*(rel for rel, _title in entries), *deleted]
+    with _RESOLVER_LOCK:
+        for key in keys:
+            cached = _RECALL_RESOLVER_CACHE.get(key)
+            if (
+                cached is None
+                or _RECALL_RESOLVER_CHECKPOINTS.get(key) != expected
+                or cached[0] != _recall_checkpoint_identity(expected)
+            ):
+                continue
+            resolver = cached[1]
+            try:
+                with epistemic_graph.homonyms_across_patch(key, resolver, touched):
+                    resolver.on_entries_changed(indexed, [*deleted, *withheld])
+                    resolver.publication = object()
+            except Exception:  # noqa: BLE001 - a partial resolver must never publish.
+                _evict_recall_resolver(key)
+                continue
+            # A build that started before this patch must not replace the patched resolver.
+            _RECALL_RESOLVER_GENERATIONS[key] = _RECALL_RESOLVER_GENERATIONS.get(key, 0) + 1
+            _RECALL_RESOLVER_CACHE[key] = (
+                _recall_checkpoint_identity(advanced), resolver, resolver.publication
+            )
+            _RECALL_RESOLVER_CHECKPOINTS[key] = advanced
 
 
 def unload_ram_caches(

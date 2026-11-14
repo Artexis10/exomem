@@ -56,13 +56,22 @@ class _GraphInputs:
     landing: Callable[[str, str], tuple[str, str, dict[str, str]]]
 
 
-def apply(tx: Connection, root: Path, change: StoreChange, existing: frozenset[str]) -> None:
-    """Derive the rows of ``change`` into ``tx``.
+@dataclass(frozen=True, slots=True)
+class ResolverDelta:
+    """How a commit changes the vault's resolver entries: each page that the resolver holds after it,
+    with its title, and each page that it held or that the commit derived and that it does not hold."""
+
+    entries: tuple[tuple[str, str | None], ...]
+    deleted: tuple[str, ...]
+
+
+def apply(tx: Connection, root: Path, change: StoreChange, existing: frozenset[str]) -> ResolverDelta:
+    """Derive the rows of ``change`` into ``tx``, and return the commit's resolver delta.
 
     ``existing`` is the set of the change's page paths that the store held before the commit, which
     tells a new page from an edited one.
     """
-    _Derivation(
+    return _Derivation(
         tx,
         Path(root),
         written=[*(put.rel for put in change.puts), *(move.dst for move in change.moves)],
@@ -127,7 +136,7 @@ class _Derivation:
 
     # ------------------------------------------------------------------ run
 
-    def run(self) -> None:
+    def run(self) -> ResolverDelta:
         before = self._resolver_entries()
         derived = self._write_lexical_and_identity()
         if self.links:
@@ -135,12 +144,13 @@ class _Derivation:
         after_entries = {
             rel: title for rel, (title, in_resolver) in derived.items() if in_resolver
         }
+        delta = ResolverDelta(
+            tuple(after_entries.items()),
+            (*self.removed, *(rel for rel in derived if rel not in after_entries)),
+        )
         resolver = vault.WikilinkResolver.from_entries(self.root, before.items())
         before_resolver = resolver.fork()
-        resolver.on_entries_changed(
-            after_entries.items(),
-            [*self.removed, *(rel for rel in derived if rel not in after_entries)],
-        )
+        resolver.on_entries_changed(delta.entries, delta.deleted)
         graph = _GraphInputs(
             resolver=resolver,
             stamps=epistemic_graph.graph_registry_stamps(self.root),
@@ -153,6 +163,7 @@ class _Derivation:
             self._write_graph(rel, graph)
         for rel in self._dependents(before, after_entries, before_resolver, resolver):
             self._write_graph(rel, graph)
+        return delta
 
     def _resolver_entries(self) -> dict[str, str | None]:
         """The ``(path, title)`` of every page that the catalogue holds in the vault scope.

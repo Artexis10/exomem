@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import builtins
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -39,16 +40,18 @@ from test_vault_store_rederive import PROFILES, project, settle_to_the_end
 from exomem import (
     access,
     commands,
+    delete_directory,
     epistemic_graph,
     find,
     graph_read_publication,
     lexstore,
+    recover_from_trash,
     semantic_index,
 )
 from exomem import vault as vaults
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection
-from exomem.governance import egress
+from exomem.collection_store import connection, preview
+from exomem.governance import egress, lifecycle
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
@@ -991,6 +994,34 @@ def test_withheld_names_follow_the_store_policy_and_caller(stored, writer, chang
         assert answer(replace(EXTERNAL, audience_id="partner"), hidden, visible) == before
 
 
+def test_a_commit_that_joins_a_withheld_page_to_a_name_regroups_the_names_of_a_warm_process(
+    stored, writer,  # noqa: F811
+):
+    """Defect: the pages that share a name are kept from an earlier resolver, so a page newly titled
+    like a visible one is not seen as a homonym, and a link to the visible page resolves as in the full
+    vault: the restricted reader loses the link that the vault without the withheld page holds."""
+    source, visible, hidden = f"{INSIGHTS}/Survey.md", f"{INSIGHTS}/Signal.md", f"{INSIGHTS}/Other.md"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "homonyms", puts=(
+        write.PagePut(source, b"---\ntitle: Survey\ntype: note\n---\nSee [[Beacon]].\n"),
+        write.PagePut(visible, b"---\ntitle: Beacon\ntype: note\n---\nVisible beacon.\n"),
+        write.PagePut(hidden, b"---\ntitle: Other\ntype: note\ntags: [secret]\n---\nPrivate beacon.\n"),
+    )))
+    project(writer, stored)
+    restrict_external(stored, 'tags: ["secret"]')
+
+    def answer():
+        with request_scope(EXTERNAL):
+            hits = find.find(stored, query="", relation_of=visible, mode="keyword", graph=False)
+        assert hidden not in json.dumps([(hit.path, hit.title, hit.excerpt) for hit in hits])
+        return [(hit.path, hit.title, hit.excerpt) for hit in hits]
+
+    before = answer()
+    assert source in {path for path, _, _ in before}
+    assert answer() == before
+    write.commit(writer, put(hidden, b"---\ntitle: Beacon\ntype: note\ntags: [secret]\n---\nPrivate beacon.\n"))
+    assert answer() == before
+
+
 def test_a_repeated_restricted_hub_does_not_recheck_unchanged_pages(
     stored, writer, monkeypatch,  # noqa: F811
 ):
@@ -1021,29 +1052,119 @@ def test_a_repeated_restricted_hub_does_not_recheck_unchanged_pages(
         assert not any("/Gen/" in path for path in checked)
 
 
-def admission_sample(root, caller, operation):
-    """One graph-reader sample, including the scalar work hidden by an elapsed time."""
+def test_a_restricted_hub_read_classifies_each_path_once(stored, writer):  # noqa: F811
+    """Defect: each admission layer of one request classifies an endpoint again, and each classification
+    rebuilds the collection layer roots, so ownership work grows with hub degree several times over."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    layer_reads = {}
+    for links in (20, 40):
+        commit_linked(writer, links)
+        sample = admission_sample(stored, "few withheld", "participants")
+        assert sample["result_count"] >= links * 9 // 10
+        assert sample["ownership_classifications"] == sample["distinct_classified"], sample
+        layer_reads[links] = sample["layer_folder_reads"]
+    assert layer_reads[40] == layer_reads[20], layer_reads
+
+
+def test_a_new_caller_views_first_find_checks_content_floors_only_for_exception_pages(stored, writer):  # noqa: F811
+    """Defect: the first find of a new caller view publishes every catalogue page's verdict through the
+    per-page content floor, so that find grows with the vault; only pages without stored facts need it."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    scope = stored / "Knowledge Base" / "_Governance" / "scopes" / "secret.yaml"
+    for links, cohort in ((20, "cohort-0"), (40, "cohort-1")):
+        commit_linked(writer, links)
+        if scope.exists():
+            scope.write_text(scope.read_text().replace("cohort-0", cohort))  # a policy edit: a new view
+        else:
+            restrict_external(stored, f'tags: ["{cohort}"]')
+        first = admission_sample(stored, "few withheld", "find")
+        warm = admission_sample(stored, "few withheld", "find")
+        assert first["publication_decisions"] > links
+        assert first["content_floor_checks"] == warm["content_floor_checks"], (first, warm)
+        assert warm["ownership_classifications"] == warm["distinct_classified"], warm
+
+
+def test_a_repeated_restricted_hub_read_looks_up_names_and_held_pages_once(stored, writer):  # noqa: F811
+    """Defect: every restricted read looks up every name in the vault to find the pages that share
+    one, and reads an endpoint's held state once per admission layer, so both grow with the vault."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    lookups = {}
+    for links in (20, 40):
+        commit_linked(writer, links)
+        admission_sample(stored, "few withheld", "participants")  # the first read after the commit
+        sample = admission_sample(stored, "few withheld", "participants")
+        assert sample["result_count"] >= links * 9 // 10
+        assert sample["held_page_reads"] == sample["distinct_held_reads"], sample
+        lookups[links] = sample["name_candidate_lookups"]
+    assert lookups[40] == lookups[20], lookups
+
+
+def cpu_pressure():
+    """The host's CPU stall share over the last ten seconds, or None where the kernel does not report it."""
+    try:
+        with open("/proc/pressure/cpu") as pressure:
+            return float(pressure.readline().split()[1].partition("=")[2])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def admission_sample(root, caller, operation, anchor=CLAIM):
+    """One graph-reader sample, including the scalar work hidden by an elapsed time.
+
+    Wall time is the budget figure; CPU time beside it tells a slow read from a loaded host.
+    """
     import time
 
     import yaml
 
-    from exomem import find_corpus
+    from exomem import find_corpus, reserved_paths, state_paths, writer_lease
+    from exomem.collection_store import ownership as collection_ownership
+    from exomem.governance import membership, page_admission
     from exomem.governance.principal import library_scope
 
     counters = {"scalar_decisions": 0, "page_parses": 0, "yaml_decodes": 0,
-                "ordinary_scalar_decisions": 0, "ordinary_page_parses": 0}
+                "ordinary_scalar_decisions": 0, "ordinary_page_parses": 0,
+                "ownership_classifications": 0, "page_hydrations": 0,
+                "admitted_publications": 0, "published_candidates": 0,
+                "layer_folder_reads": 0, "descriptor_matches": 0, "subject_decodes": 0,
+                "membership_evaluations": 0, "publication_decisions": 0, "coordinator_status_calls": 0,
+                "name_candidate_lookups": 0, "held_page_reads": 0, "content_floor_checks": 0}
+    classified, held = set(), set()
 
     def counted(name, real):
         def call(*args, **kwargs):
             counters[name] += 1
-            if name != "yaml_decodes":
+            if name in ("scalar_decisions", "page_parses"):
                 path = str(args[1] if name == "scalar_decisions" else args[0])
                 if path.startswith(str(root) + "/"):
                     path = path[len(str(root)) + 1:]
                 if path.startswith("Knowledge Base/Notes/"):
                     counters["ordinary_" + name] += 1
+            elif name == "ownership_classifications":
+                classified.add(args[0])
             return real(*args, **kwargs)
         return call
+
+    publish = lexstore.LexicalStore.published_admitted_paths
+    decide_verdicts = lexstore.LexicalStore._publish_verdicts
+    held_pages = read.StoreSnapshot.held_pages
+
+    def published(self, scope, checkpoint, admission, candidates, **kwargs):
+        counters["admitted_publications"] += 1
+        counters["published_candidates"] += len(candidates)
+        return publish(self, scope, checkpoint, admission, candidates, **kwargs)
+
+    def deciding_verdicts(self, plan, admission):
+        counters["publication_decisions"] += len(plan.missing)
+        return decide_verdicts(self, plan, admission)
+
+    def reading_held(self, rels):
+        rels = list(rels)
+        counters["held_page_reads"] += len(rels)
+        held.update(rels)
+        return held_pages(self, rels)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(egress, "_decide_path", counted("scalar_decisions", egress._decide_path))
@@ -1051,38 +1172,279 @@ def admission_sample(root, caller, operation):
                       counted("page_parses", find_corpus._parse_page_after_checkpoint))
         # Both safe_load and the vault's libyaml loader call this decoder entry.
         patch.setattr(yaml, "load", counted("yaml_decodes", yaml.load))
+        patch.setattr(ownership, "classify", counted("ownership_classifications", ownership.classify))
+        patch.setattr(find, "_resolve_page", counted("page_hydrations", find._resolve_page))
+        patch.setattr(lexstore.LexicalStore, "published_admitted_paths", published)
+        patch.setattr(lexstore.LexicalStore, "_publish_verdicts", deciding_verdicts)
+        patch.setattr(read.StoreSnapshot, "held_pages", reading_held)
+        patch.setattr(collection_ownership, "layer_folders",
+                      counted("layer_folder_reads", collection_ownership.layer_folders))
+        patch.setattr(reserved_paths.InternalStateDescriptor, "matches",
+                      counted("descriptor_matches", reserved_paths.InternalStateDescriptor.matches))
+        patch.setattr(page_admission, "_subject", counted("subject_decodes", page_admission._subject))
+        patch.setattr(membership, "evaluate_subject",
+                      counted("membership_evaluations", membership.evaluate_subject))
+        patch.setattr(writer_lease.LeaseCoordinatorClient, "status",
+                      counted("coordinator_status_calls", writer_lease.LeaseCoordinatorClient.status))
+        patch.setattr(epistemic_graph, "_link_candidates_for_key",
+                      counted("name_candidate_lookups", epistemic_graph._link_candidates_for_key))
+        patch.setattr(egress, "content_permits", counted("content_floor_checks", egress.content_permits))
         with library_scope(), request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
-            started = time.perf_counter()
-            if operation == "participants":
-                with read.request_snapshot(root):
-                    answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
-                        [], anchor=CLAIM, keep=egress.edge_view(root, find.caller_admission(root)),
-                        resolver=lambda: find.recall_resolver_snapshot(root),
-                    )
-                size = len(answer.paths)
-            else:
-                size = len(GRAPH_CALLS["find relation_of"](root))
+            started, cpu_started = time.perf_counter(), time.process_time()
+            # The pins that the tool dispatcher holds for a store read, and its ownership finish.
+            with read.request_snapshot(root), collection_ownership.request_status_scope(), \
+                    collection_ownership.read_scope(root) as owned:
+                if operation == "participants":
+                    with state_paths.resolution_scope():
+                        answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
+                            [], anchor=anchor, keep=egress.edge_view(root, find.caller_admission(root)),
+                            resolver=lambda: find.recall_resolver_snapshot(root),
+                        )
+                    size = len(answer.paths)
+                else:
+                    size = len(GRAPH_CALLS["find relation_of"](root))
+                owned.finish()
             elapsed = (time.perf_counter() - started) * 1000
-    return {"ms": elapsed, "result_count": size, **counters, "load": os.getloadavg()}
+            cpu = (time.process_time() - cpu_started) * 1000
+    return {"ms": elapsed, "cpu_ms": cpu, "result_count": size, **counters,
+            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg(), "cpu_pressure_avg10": cpu_pressure()}
+
+
+def fitted_slope(samples):
+    """Least-squares milliseconds per link and the fixed intercept, over (links, milliseconds) pairs."""
+    count = len(samples)
+    mean_links = sum(links for links, _ in samples) / count
+    mean_ms = sum(ms for _, ms in samples) / count
+    spread = sum((links - mean_links) ** 2 for links, _ in samples)
+    slope = sum((links - mean_links) * (ms - mean_ms) for links, ms in samples) / spread
+    return {"us_per_link": slope * 1000, "intercept_ms": mean_ms - slope * mean_links}
+
+
+@pytest.mark.parametrize(("caller", "binding"), [
+    ("owner", "none"), ("few withheld", "none"), ("few withheld", "production writer"),
+])
+def test_a_store_read_request_asks_the_lease_coordinator_at_most_once(
+    stored, writer, caller, binding, monkeypatch  # noqa: F811
+):
+    """Each status read is a coordinator round trip; a request's proof and finish must share one.
+
+    A served graph read binds no writer; a store-routed read binds the production writer, whose
+    proof reads through that writer's connection instead of a reader snapshot.
+    """
+    from exomem import writer_lease
+    from exomem.collection_store import preview
+
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, 20)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    calls = []
+    status = writer_lease.LeaseCoordinatorClient.status
+    monkeypatch.setattr(
+        writer_lease.LeaseCoordinatorClient, "status", lambda client: calls.append(1) or status(client)
+    )
+    command = next(command for command in commands.COMMANDS if command.name == "find")
+    token = preview._BOUND.set((stored.resolve(), writer, True)) if binding != "none" else None
+    try:
+        with request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
+            hits = writer_lease.invoke_command(command, stored, query="lantern", relation_of=CLAIM, limit=15)
+    finally:
+        if token is not None:
+            preview._BOUND.reset(token)
+    assert hits
+    assert len(calls) == (0 if caller == "owner" else 1)
+
+
+def resolver_maps(resolver):
+    return {
+        "full_paths": resolver.full_paths, "kb_stripped": resolver.kb_stripped,
+        "stems": resolver.stems, "titles": resolver.titles,
+        "candidates_by_key": resolver.candidates_by_key,
+    }
+
+
+def test_a_store_commit_advances_the_resident_resolver_to_what_a_rebuild_holds(stored, writer):  # noqa: F811
+    """Defect: the commit's patch of the resident resolver, or of its homonym groups, drifts from a
+    rebuild at the commit's revision, so a link resolves to another page, or a withheld page's name
+    stops changing what a restricted caller's links resolve to."""
+    beacon, twin = "Knowledge Base/Notes/Beacon.md", "Knowledge Base/Entities/Beacon.md"
+    (stored / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Notes/Vault Hidden/\n")
+    for rel in (CLAIM, EVIDENCE, RIVAL, TIDE, TIDE_TWIN):
+        write.commit(writer, put(rel, PAGES[rel].encode()))
+    commit_linked(writer, 20)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+
+    def participants(resolver):
+        with library_scope(), request_scope(EXTERNAL), read.request_snapshot(stored):
+            return epistemic_graph.EpistemicGraphIndex(stored).relation_participants(
+                [], anchor=CLAIM, keep=egress.edge_view(stored, find.caller_admission(stored)),
+                resolver=resolver,
+            )
+
+    def change(**edits):
+        return write.StoreChange(write.Origin.GOVERNED, "test", **edits)
+
+    # A restricted read leaves the resident resolver and its homonym groups.
+    participants(lambda: find.recall_resolver_snapshot(stored))
+    steps = {
+        "create": put(beacon, b"---\ntitle: Beacon\n---\n# Beacon\n\nIt lights [[Lantern Claim]].\n"),
+        "title shared with another page": put(beacon, b"---\ntitle: Rival Theory\n---\n# Beacon\n"),
+        "stem shared with another page": put(twin, b"---\ntitle: Beacon twin\n---\n# Beacon\n"),
+        "stem no longer shared": change(deletes=(write.PageDelete(twin),)),
+        "move": change(moves=(write.PageMove(beacon, f"{INSIGHTS}/Beacon Moved.md"),)),
+        "Unicode name": put(
+            "Knowledge Base/Notes/Café Fähre.md",
+            "---\ntitle: Café Fähre\n---\n# Ferry\n\nSee [[Café Fähre]].\n".encode(),
+        ),
+        "page becomes withheld": put(
+            TIDE, PAGES[TIDE].replace("type: note\n", "type: note\ntags: [cohort-0]\n").encode()
+        ),
+        "move into an excluded folder": change(
+            moves=(write.PageMove(RIVAL, "Knowledge Base/Notes/Vault Hidden/Rival.md"),)
+        ),
+        "delete": change(deletes=(write.PageDelete(EVIDENCE),)),
+    }
+
+    def holds_what_a_rebuild_holds(step):
+        resident, checkpoint, token = find.borrow_recall_resolver(stored)
+        assert checkpoint == read.recall_checkpoint(stored, "vault"), step
+        entries = lexstore.get_store(stored).recall_resolver_entries("vault", checkpoint)
+        rebuilt = vaults.WikilinkResolver.from_entries(stored, entries)
+        assert resolver_maps(resident) == resolver_maps(rebuilt), step
+        kept = epistemic_graph._HOMONYM_PATHS[stored]
+        assert kept.publication is token, step
+        assert kept.paths == epistemic_graph._homonym_paths(stored, rebuilt, lambda: None), step
+        assert participants(lambda: find.recall_resolver_snapshot(stored)) == participants(
+            rebuilt.fork
+        ), step
+
+    for step, commit in steps.items():
+        write.commit(writer, commit)
+        holds_what_a_rebuild_holds(step)
+    # A folder trash moves several pages and a binary out of the vault scope in one commit. A
+    # governed page in the folder makes it a governed deletion, and its `Tide` is a third `Tide`.
+    harbour = "Knowledge Base/Notes/Harbour"
+    (stored / harbour).mkdir(parents=True)
+    (stored / harbour / "chart.bin").write_bytes(b"chart")
+    write.commit(writer, change(
+        puts=(
+            write.PagePut(f"{harbour}/Tide.md", b"---\ntitle: Harbour Tide\n---\n# Tide\n\n[[Lantern Claim]]\n"),
+            write.PagePut(f"{harbour}/Ledger.md", b"---\ntitle: Harbour Tide\ntags: [cohort-0]\n---\n# Ledger\n"),
+        ),
+        binaries=(write.BinaryRecord(f"{harbour}/chart.bin", hashlib.sha256(b"chart").hexdigest(), 5),),
+    ))
+
+    @contextlib.contextmanager
+    def bound_writer():
+        # The lifecycle writers commit through the writer that the service binds for a request.
+        token = preview._BOUND.set((stored.resolve(), writer, False))
+        try:
+            yield
+        finally:
+            preview._BOUND.reset(token)
+
+    with bound_writer():
+        trashed = delete_directory.delete_directory(
+            stored, path=harbour, confirm=True, recursive=True, force_orphan=True
+        )
+    assert lifecycle.is_tombstoned(stored, f"{harbour}/Ledger.md")
+    assert not (stored / harbour / "chart.bin").exists()
+    holds_what_a_rebuild_holds("governed folder trash")
+    # Its recovery brings the pages back in one commit, two of them one title's homonyms.
+    with bound_writer():
+        recover_from_trash.recover_from_trash(stored, trash_path=trashed.trash_path)
+    assert not lifecycle.is_tombstoned(stored, f"{harbour}/Ledger.md")
+    with read.snapshot(stored) as view:
+        assert view.page_meta(f"{harbour}/Ledger.md") is not None
+    holds_what_a_rebuild_holds("governed folder recovery")
+    with library_scope(), request_scope(EXTERNAL):
+        patched = GRAPH_CALLS["find relation_of"](stored), GRAPH_CALLS["graph_context depth 2"](stored)
+        find.evict_resolver_caches(stored)
+        epistemic_graph._HOMONYM_PATHS.clear()
+        assert patched == (
+            GRAPH_CALLS["find relation_of"](stored), GRAPH_CALLS["graph_context depth 2"](stored)
+        )
+
+
+def test_a_commit_and_the_next_restricted_read_look_up_only_the_names_it_touched(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """Defect: a commit drops the resident resolver's homonym groups, so the first restricted read
+    after it looks up every link name in the vault again, or the commit does it instead.
+
+    A restricted read looks up the names that link to its withheld pages, which a warm read shows, and
+    after a commit at most the one link name that names the changed page. The commit's own lookups
+    must not grow with the vault.
+    """
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    during_commits = []
+    for size in (20, 60):
+        commit_linked(writer, size)
+        admission_sample(stored, "few withheld", "find")
+        warm = admission_sample(stored, "few withheld", "find")
+        during_commit = []
+
+        def counted(*args, found=during_commit, real=epistemic_graph._link_candidates_for_key):
+            found.append(1)
+            return real(*args)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(epistemic_graph, "_link_candidates_for_key", counted)
+            write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\n{size}\n".encode()))
+        after = admission_sample(stored, "few withheld", "find")
+        assert after["result_count"] == warm["result_count"] > 0
+        assert after["name_candidate_lookups"] - warm["name_candidate_lookups"] <= 1, (size, warm, after)
+        during_commits.append(len(during_commit))
+    assert during_commits[0] == during_commits[1], during_commits
+
+
+@pytest.mark.parametrize("caller", ["owner", "few withheld"])
+def test_store_hub_ranking_reads_yaml_only_for_selected_pages(stored, writer, caller, monkeypatch):  # noqa: F811
+    """A linked page's unique identifier must not force YAML decoding for every ranked candidate."""
+    # Keep secondary link degrees constant as the main hub grows; the final next-page target is absent.
+    monkeypatch.setattr(sys.modules[__name__], "GENERATED", 241)
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, 120)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    sample = admission_sample(stored, caller, "find")
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "grow hub", puts=tuple(
+            write.PagePut(*linked_page(index)) for index in range(120, 240)
+        ),
+    ))
+    larger = admission_sample(stored, caller, "find")
+    assert sample["result_count"] == 15
+    assert larger["result_count"] == sample["result_count"]
+    # Emitted pages retain full release proofs; doubling unselected candidates must add no decodes.
+    assert larger["yaml_decodes"] <= sample["yaml_decodes"], (sample, larger)
 
 
 @pytest.mark.skipif(not os.environ.get("EXOMEM_ADMISSION_DRILL_REPORT"), reason="Explicit load drill")
 @pytest.mark.timeout(1800)
 def test_restricted_admission_drill(stored, writer):  # noqa: F811
     """Measure a realistic hub before and after commits and owner-pass revision bumps."""
+    import statistics
     import subprocess
 
     from exomem.governance import membership
 
     links = int(os.environ.get("EXOMEM_ADMISSION_DRILL_LINKS", str(GENERATED)))
+    # The degree sweep reads smaller hubs of the same corpus: the first `degree` pages also link to their anchor.
+    degrees = [int(value) for value in os.environ.get("EXOMEM_ADMISSION_DRILL_DEGREES", "").split(",") if value]
+    anchors = {degree: CLAIM if degree == links else f"{INSIGHTS}/Sweep {degree}.md" for degree in degrees}
     for rel in (CLAIM, EVIDENCE, RIVAL):
         write.commit(writer, put(rel, PAGES[rel].encode()))
+    for degree, anchor in anchors.items():
+        if anchor != CLAIM:
+            write.commit(writer, put(anchor, f"---\ntitle: Sweep {degree}\ntype: insight\n---\n# Sweep\n".encode()))
     for start in range(0, GENERATED, 200):
         puts = []
         for index in range(start, min(GENERATED, start + 200)):
             rel, body = linked_page(index)
             if index >= links:
                 body = body.replace(b"[[Lantern Claim]]", b"the keeper")
+            body += b"".join(f"\nAlso [[Sweep {degree}]].\n".encode()
+                             for degree, anchor in anchors.items() if anchor != CLAIM and index < degree)
             puts.append(write.PagePut(rel, body))
         write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "drill", puts=tuple(puts)))
     restrict_external(stored, 'tags: ["cohort-0"]')
@@ -1106,6 +1468,9 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
         for operation in operations:
             for state in states:
                 samples = []
+                if state == "first after commit":
+                    # A caller view this process has not seen yet is the cold cell's cost, not this one's.
+                    admission_sample(stored, caller, operation)
                 for repeat in range(repeats):
                     if state == "cold process":
                         result = subprocess.run([
@@ -1130,9 +1495,30 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
                     samples.append(admission_sample(stored, caller, operation))
                 report["samples"][f"{caller}/{operation}/{state}"] = samples
                 report_path.write_text(json.dumps(report, indent=2))
+    report["sweep"] = {}
+    for caller in callers if degrees else ():
+        scope.write_text(scope.read_text().split("tags:")[0] + "tags: " + (
+            '["cohort-0"]' if caller != "most withheld" else
+            '[' + ', '.join(f'"cohort-{i}"' for i in range(9)) + ']'
+        ) + "\n")
+        for anchor in anchors.values():
+            admission_sample(stored, caller, "participants", anchor)
+        # Interleave the degrees so a load swing during the sweep reaches each of them alike.
+        swept = {degree: [] for degree in degrees}
+        for _ in range(repeats):
+            for degree, anchor in anchors.items():
+                swept[degree].append(admission_sample(stored, caller, "participants", anchor))
+        report["sweep"][caller] = {"samples": {str(degree): found for degree, found in swept.items()}}
+        for clock in ("ms", "cpu_ms"):
+            for pick in ("min", "median"):
+                choose = min if pick == "min" else statistics.median
+                report["sweep"][caller][f"{clock}_{pick}"] = fitted_slope(
+                    [(degree, choose(sample[clock] for sample in found)) for degree, found in swept.items()]
+                )
+        report_path.write_text(json.dumps(report, indent=2))
     with read.snapshot(stored) as snapshot:
         report["rows"] = {table: snapshot.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                          for table in ("store_pages", "graph_nodes", "graph_edges")}
+                          for table in ("store_pages", "semantic_units", "graph_nodes", "graph_edges")}
         if snapshot.connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'page_admission'").fetchone():
             import time
 
@@ -1152,11 +1538,47 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
         import cProfile
         import pstats
 
-        write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + b"\nProfile revision.\n"))
-        find.clear_cache()
-        with cProfile.Profile() as profiler:
-            report["profile_sample"] = admission_sample(stored, "few withheld", "find")
-        profiler.dump_stats(profile_path + ".pstats")
-        with Path(profile_path).open("w") as output:
-            pstats.Stats(profiler, stream=output).sort_stats("cumulative").print_stats(65)
+        named = [cell for cell in os.environ.get("EXOMEM_ADMISSION_DRILL_PROFILE_CELLS", "").split(";") if cell]
+        slowest = named or sorted(
+            report["samples"],
+            key=lambda cell: statistics.median(sample["ms"] for sample in report["samples"][cell]),
+            reverse=True,
+        )[:2]
+        report["profiles"] = {}
+        for index, cell in enumerate(slowest):
+            caller, operation, state = cell.split("/")
+            selector = '["cohort-0"]' if caller != "most withheld" else (
+                '[' + ', '.join(f'"cohort-{i}"' for i in range(9)) + ']'
+            )
+            scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector}\n")
+            target = profile_path + f".{index}"
+            if state == "cold process":
+                script = (
+                    "import cProfile,json,pstats,sys; from pathlib import Path; "
+                    "from test_vault_store_graph_readers import admission_sample; "
+                    "p=cProfile.Profile(); p.enable(); "
+                    "sample=admission_sample(Path(sys.argv[1]),sys.argv[2],sys.argv[3]); "
+                    "p.disable(); p.dump_stats(sys.argv[4]+'.pstats'); "
+                    "out=open(sys.argv[4],'w'); "
+                    "pstats.Stats(p,stream=out).sort_stats('cumulative').print_stats(65); "
+                    "out.close(); print(json.dumps(sample))"
+                )
+                profiled = subprocess.run(
+                    [sys.executable, "-c", script, str(stored), caller, operation, target],
+                    check=True, capture_output=True, text=True, timeout=180,
+                )
+                sample = json.loads(profiled.stdout.splitlines()[-1])
+            else:
+                admission_sample(stored, caller, operation)
+                if state == "first after commit":
+                    write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\nProfile {index}.\n".encode()))
+                elif state == "registry pass":
+                    rederive.settle(stored, writer)
+                membership.clear_memo()
+                with cProfile.Profile() as profiler:
+                    sample = admission_sample(stored, caller, operation)
+                profiler.dump_stats(target + ".pstats")
+                with Path(target).open("w") as output:
+                    pstats.Stats(profiler, stream=output).sort_stats("cumulative").print_stats(65)
+            report["profiles"][cell] = {"path": target, "sample": sample}
     report_path.write_text(json.dumps(report, indent=2))
