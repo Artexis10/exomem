@@ -54,7 +54,9 @@ A bounded claim wait returns busy with a retry hint. A missing, foreign, expired
 
 ### A cancellation marker preserves cleanup ownership
 
-Under the existing upload lock, authenticate the active record and require its unclaimed payload. Flush the authenticated record's contents before atomically renaming it to `<key>.cancelling.json`. Flush the directory after the rename. Only then may cleanup remove bytes. A failed flush or rename leaves the upload intact and reports failure.
+Under the existing upload lock, authenticate the active record and require its unclaimed payload. Flush the authenticated record's contents before atomically renaming it to `<key>.cancelling.json`. Flush the directory after the rename. Only then may cleanup remove bytes.
+
+A failed record flush or rename leaves the active upload intact and reports failure. If the rename succeeds but its directory flush fails, retain the marker, payload, and quota charge. The active handle may already be unavailable. Report incomplete cancellation without claiming released capacity. A retry or sweep must establish marker durability before deleting bytes; do not attempt a second rename as rollback.
 
 The marker keeps the original binding, size, and expiry. The existing quota scan already includes its `.json` suffix. Redemption cannot find the former active record.
 
@@ -68,9 +70,13 @@ The original expiry still governs an active hold. An authenticated retry of an a
 
 ### Upload identity cannot be reassigned during cancellation
 
-Normal held uploads mint fresh random handles. Import handoffs derive a handle from a ticket nonce; the existing ticket claim consumes that nonce before reading the request body. Keep that one-use boundary.
+Normal held uploads mint fresh random handles. Import handoffs derive a handle from a ticket nonce. The existing ticket claim unlinks its ticket before reading the request body, but does not flush that deletion. It is not yet a durable one-use boundary across power loss.
 
-An active cancellation marker owns its key until cleanup completes. Publication must not replace that key's bytes while cancellation can still act on them. Preserve existing exact-byte import handoff behavior.
+Make ticket consumption durable under the existing ticket lock before returning authority to read the body. Use the existing directory flush after unlinking. A failed flush refuses that request before body acceptance; the caller may need a fresh ticket. This prevents replay from recreating a completed cancellation's old handle, without adding a permanent tombstone store.
+
+An active cancellation marker owns its key until cleanup completes. Under the upload lock, `hold()` must reject that key before creating its payload temporary or entering cleanup that could remove another operation's payload. Publication must not replace that key's bytes while cancellation can still act on them. Preserve existing exact-byte import handoff behavior.
+
+After older serving workers stop, establish a directory durability barrier for existing ticket consumption before enabling cancellation. This settles deletions performed by older code; the new claim path makes later consumption durable. Do not treat normal-execution one-use behavior as proof of the power-loss guarantee.
 
 ## Risks / Trade-offs
 

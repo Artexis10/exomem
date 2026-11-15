@@ -70,6 +70,19 @@ The operation SHALL return one ordered outcome per supplied file identifier. A c
 - **THEN** its durable record still owns any remaining temporary payload and its quota charge
 - **AND** recovery cannot remove that record before confirmed payload removal
 
+#### Scenario: An import ticket is replayed after completed cancellation
+
+- **WHEN** an import upload was cancelled and the service restarts after power loss
+- **THEN** its consumed ticket cannot recreate an upload under the cancelled handle
+- **AND** a repeated cancellation cannot remove a later upload
+
+#### Scenario: The cancellation rename cannot be confirmed durable
+
+- **WHEN** the intent rename succeeds but flushing its directory fails
+- **THEN** the result reports incomplete cancellation without released capacity
+- **AND** the payload, cleanup record, and quota charge remain for recovery
+- **AND** recovery confirms record durability before deleting bytes
+
 #### Scenario: The client loses the cancellation acknowledgement
 
 - **WHEN** cancellation completes and its acknowledgement is lost
