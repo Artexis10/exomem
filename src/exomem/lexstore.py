@@ -5375,9 +5375,19 @@ def page_membership(rel: str) -> tuple[bool, bool]:
     Returns ``(in_kb, in_vault)``.
 
     A store-mode commit has no file to walk, so it asks here for the flags that ``page_rows``
-    stores.
+    stores. Both walks yield a Markdown file outside every reserved family alone
+    (``find_corpus._classify_walk_entry``, ``vault._walk_vault_md_entry``). The store also holds
+    other pages, such as a compiled-history entry, and the walks yield none of them.
     """
-    return _membership_of_parts(tuple(rel.split("/")))
+    from . import find_corpus
+
+    parts = tuple(rel.split("/"))
+    if (
+        not find_corpus.walk_name_admits(parts[-1], directory=False)
+        or reserved_paths.classify_logical(rel).blocked
+    ):
+        return False, False
+    return _membership_of_parts(parts)
 
 
 def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]) -> int:
@@ -5453,9 +5463,15 @@ def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
 
 
 def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
-    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
+    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction).
+
+    The delete triggers stamp the parent a fresh revision, which names rows that no longer exist,
+    so it goes too: a reader asks only for the parents it admits, rows that a write inserts again
+    stamp a new one, and a derivation from the files makes none for a page with no rows.
+    """
     for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
         _delete_page_rowid(conn, rowid)
+    conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
 def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
@@ -12227,7 +12243,7 @@ class LexicalStore:
         and the receipt for what a caller reads comes from the hits it is given.
         """
         decided: dict[str, bool] = {}
-        stored: dict[str, bool] = {}
+        publishable: dict[str, tuple[bool, tuple]] = {}
         # A collection store decides its pages on one thread, so the pages it owns share one store request.
         with deciding(plan.missing):
             # The predicate's set rule decides each ordinary scope class once; the rest stay scalar.
@@ -12235,8 +12251,15 @@ class LexicalStore:
                 decided[path] = allowed
                 if page_local and path not in plan.live and plan.signatures is not None:
                     signature = plan.signatures.get(path)
-                    if signature is not None and self._page_unchanged_since(path, signature):
-                        stored[sys.intern(path)] = allowed
+                    if signature is not None:
+                        publishable[path] = (allowed, signature)
+        from .vault_store import read as store_read
+
+        served = store_read.serves_many(self.vault_root, publishable)
+        stored = {
+            sys.intern(path): allowed for path, (allowed, signature) in publishable.items()
+            if self._page_unchanged_since(path, signature, served[path])
+        }
         if stored or not plan.current:
             known = plan.signatures or {}
             allowed_map = {
@@ -12268,15 +12291,13 @@ class LexicalStore:
             _key, dropped = held.popitem(last=False)
             total -= len(dropped.allowed)
 
-    def _page_unchanged_since(self, path: str, signature: tuple) -> bool:
+    def _page_unchanged_since(self, path: str, signature: tuple, served: bool) -> bool:
         """Whether the file still carries the `mtime_ns` its catalogue row was built from.
 
-        A page that the store serves has no file to ask: its commit derived its row, so the row is
-        the page's at the snapshot that the plan read.
+        A page that the store serves (`served`, decided once for the batch) has no file to ask: its
+        commit derived its row, so the row is the page's at the snapshot that the plan read.
         """
-        from .vault_store import read as store_read
-
-        if store_read.serves(self.vault_root, path):
+        if served:
             return True
         try:
             return os.stat(self.vault_root / path).st_mtime_ns == signature[1]

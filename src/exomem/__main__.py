@@ -5146,6 +5146,10 @@ def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
             if err.get("remediation"):
                 print(err["remediation"], file=sys.stderr)
         return 1
+    finally:
+        from . import writer_lease
+
+        writer_lease.hand_back_after_command()
 
     if as_json:
         print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))

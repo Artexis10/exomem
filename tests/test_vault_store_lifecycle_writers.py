@@ -93,16 +93,14 @@ def project_by_hand(root):
 
 
 def differences_from_a_cold_build(root, tmp_path):
-    """Rows that differ from what file mode derives from the same files, outside one key table."""
+    """Rows that differ from what file mode derives from the same files."""
     project_by_hand(root)
     expected = tmp_path / "expected.sqlite"
     verify.derive_expected(root, expected)
     with closing(sqlite3.connect(connection.store_path(root))) as store:
         comparison = verify.compare_tables(store, expected)
     assert comparison.tables, "the comparison must cover tables for this check to mean anything"
-    # A trigger stamps a revision key for a parent whose page rows go, in file mode as here; a cold
-    # build creates none, so that one key-only table is the only place the two may differ.
-    return [d for d in comparison.differences if d.table != "unit_revisions"]
+    return list(comparison.differences)
 
 
 def test_a_move_carries_the_rows_and_rewrites_a_stored_linker_without_writing_markdown(served):
@@ -594,6 +592,47 @@ def test_a_trashed_folder_recovers_with_every_page_and_its_rows(served):
     assert store_rows(
         served, "SELECT 1 FROM store_binaries WHERE path = ?", trashed.trash_meta_path
     ) == []
+
+
+def test_a_restricted_caller_is_refused_a_recovery_of_a_trashed_page_as_of_an_absent_entry(served):
+    """A caller with no writable scope gets one refusal for a trashed page, whether or not the entry exists.
+
+    File mode gives this caller the same answer; this case pins the two modes together."""
+    store_gamma(served)
+    govern(served, GAMMA)
+    trashed = delete_file.delete_file(served, path=GAMMA, confirm=True)
+    before, start = tree(served), revision(served)
+    absent = trashed.trash_path.replace("Gamma", "Absent")
+
+    answers = []
+    with request_scope(most_restrictive_principal(surface="rest")):
+        for path in (trashed.trash_path, absent):
+            with pytest.raises(recover_from_trash.RecoverError) as refused:
+                recover_from_trash.recover_from_trash(served, trash_path=path)
+            answers.append(refused.value.as_dict())
+
+    assert answers == [{"code": "WRITE_REFUSED", "reason": "target is unavailable"}] * 2
+    assert revision(served) == start and tree(served) == before
+    assert read.page_exists(served, trashed.trash_path) and not read.page_exists(served, GAMMA)
+
+
+def test_a_restricted_caller_is_refused_a_recovery_of_a_trashed_folder(served):
+    """A caller with no writable scope cannot restore a governed folder from the trash.
+
+    The folder's own entry is admitted before any page below it is counted."""
+    pages = store_folder(served, 3)
+    govern(served, f"{HARBOUR}/**")
+    trashed = delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
+    before, start = tree(served), revision(served)
+
+    with request_scope(most_restrictive_principal(surface="rest")):
+        with pytest.raises(recover_from_trash.RecoverError) as refused:
+            recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+
+    assert refused.value.as_dict() == {"code": "WRITE_REFUSED", "reason": "target is unavailable"}
+    assert revision(served) == start and tree(served) == before
+    with read.snapshot(served) as view:
+        assert view.held_pages(pages) == frozenset()
 
 
 def test_a_projected_folder_trash_and_its_recovery_need_nothing_from_the_importer(served, writer):

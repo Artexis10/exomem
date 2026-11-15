@@ -148,6 +148,28 @@ def forget_read_mode(vault_root: Path) -> None:
 
 def _stored_mode(vault_root: Path) -> str | None:
     """The store's ``store_mode.mode``, or None when the store, its schema 15 or its mode row is absent."""
+    row = _stored_row(vault_root, "SELECT mode FROM store_mode WHERE id = 1")
+    return None if row is None else row[0]
+
+
+def projections_queued(vault_root: Path) -> bool:
+    """Whether the vault is in store mode, as ``state`` reads it, and its queue holds an intent.
+
+    A stop asks it before it starts a projector only to drain. A file-mode vault answers from its
+    manifest and never opens the store; a store-mode vault answers with one statement.
+    """
+    if not state_migration.vault_store_recorded(vault_root):
+        return False
+    row = _stored_row(
+        vault_root,
+        "SELECT mode FROM store_mode "
+        "WHERE id = 1 AND EXISTS (SELECT 1 FROM store_projection_queue)",
+    )
+    return row is not None and row[0] == STORE_MODE
+
+
+def _stored_row(vault_root: Path, statement: str) -> tuple | None:
+    """The statement's first row, or None when the store, its schema 15 or the row is absent."""
     path = connection.store_path(vault_root)
     if not path.is_file():
         return None
@@ -155,8 +177,7 @@ def _stored_mode(vault_root: Path) -> str | None:
     with closing(reader):
         if found < schema.VAULT_STORE_SCHEMA_VERSION:
             return None
-        row = reader.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
-    return None if row is None else row[0]
+        return reader.execute(statement).fetchone()
 
 
 #: The projector acts on a queued intent only while no hold sits on its path or on a move's old
