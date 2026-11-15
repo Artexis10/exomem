@@ -560,10 +560,9 @@ def _unwrap_result(value: Any) -> Any:
 
 
 #: The tools a local server lists, the contract this journey proves from the client side.
-# The reviewed public contract that scripts/dump-tool-schemas.py generates from the tool registry;
-# the installed wheel must list exactly these tools.
+#: It is the reviewed schema fixture that scripts/dump-tool-schemas.py generates.
 PUBLIC_TOOLS = frozenset(json.loads(
-    (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "mcp_tool_schemas.json").read_text(encoding="utf-8")
+    (REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json").read_text(encoding="utf-8")
 ))
 
 
