@@ -1856,3 +1856,12 @@ def read_reference_owner(vault_root: Path, path: Path) -> str | None:
     """
     row = _read_identity(vault_root, path)
     return row[1] if row is not None and row[4] == "valid" else None
+
+
+def reference_owner_from_bytes(vault_root: Path, rel: str, raw: bytes | None) -> str | None:
+    """``read_reference_owner`` for a page's bytes, such as a stored page's, instead of its file.
+
+    ``raw`` is None for a page that does not exist.
+    """
+    row = None if raw is None else identity_row(vault_root, rel, raw)
+    return row[1] if row is not None and row[4] == "valid" else None
