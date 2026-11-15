@@ -37,11 +37,13 @@ Coverage SHALL be `full` when every row was read. Above the documented source-si
 - **THEN** the job's inserted, rejected and collapsed counts equal the preview's
 
 ### Requirement: Import counts distinguish collapse from restatement
-Import status and receipts SHALL report `collapsed_in_source` for rows whose identity an earlier row of the same job produced, and `restated_existing` for rows that restated a row already stored. `duplicates` SHALL equal their sum. The job's totals SHALL equal the sum of its batch receipts.
+Import status and receipts SHALL report `collapsed_in_source` for rows whose identity an earlier row of the same job produced, and `restated_existing` for rows that restated a row already stored. `duplicates` SHALL equal their sum.
 
-#### Scenario: Totals equal receipts
-- **WHEN** a job finishes after ten batches
-- **THEN** its inserted, updated, unchanged, rejected, collapsed and restated totals each equal the sum of the same field over its ten batch receipts
+A batch that commits rows SHALL write its counts in its receipt. A batch that commits no row writes no receipt, so status SHALL report its counts in `uncommitted`. For a job on a store collection, each total SHALL equal the sum of the same field over the job's batch receipts plus `uncommitted`. `uncommitted` SHALL be `null` on a derived collection and for a job that an earlier release recorded.
+
+#### Scenario: Totals equal receipts plus the batches that committed nothing
+- **WHEN** a job on a store collection finishes after batches that commit rows and a last batch that holds only rejected rows
+- **THEN** its inserted, updated, unchanged, rejected, collapsed and restated totals each equal the sum of the same field over its batch receipts plus `uncommitted`, and `uncommitted` holds the last batch's rejections
 
 ### Requirement: A row id resolves one row
 `edit_record` and every action that takes a row id SHALL resolve the id to one row without rendering or returning the other rows of the collection.

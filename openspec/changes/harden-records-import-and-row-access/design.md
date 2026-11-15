@@ -76,7 +76,7 @@ Using the batch's own preparation means preview and import cannot disagree.
 - `collapsed_in_source`: a later source row produced a key that an earlier row of the same job also produced.
 - `restated_existing`: the row restated a row that was already stored.
 
-`duplicates` stays the sum of the two for existing readers. The job's totals are folded from the batch receipts, so the totals and the receipts always agree.
+`duplicates` stays the sum of the two for existing readers. The job's totals are folded from the same tally that each batch receipt carries. A batch that commits no row writes no receipt, so the job also keeps that batch's tally in `uncommitted`. On a store collection the totals then equal the receipts plus `uncommitted`.
 
 ### 4. Edit by row id binds one row without reading the collection
 

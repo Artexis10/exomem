@@ -206,7 +206,11 @@ def contract() -> dict[str, Any]:
         "identity": (
             "rows sharing a natural key: the last valid occurrence wins whatever the batching, and status "
             "counts each earlier one as collapsed_in_source. A row that restates a row stored before the "
-            "job is counted again as restated_existing, within updated or unchanged; duplicates is the sum"
+            "job is counted again as restated_existing, within updated or unchanged; duplicates is the sum. "
+            "A batch that commits rows puts its counts in its receipt as import_batch; uncommitted holds the "
+            "counts of batches that committed none, so the totals equal the receipts plus uncommitted. "
+            "uncommitted is null on a derived collection, which writes no batch receipts, and for a job "
+            "recorded by an earlier release"
         ),
         "preview": (
             f"owner-only; writes nothing. The first {PREVIEW_ROWS} rows give the fields, nested shape, time "
@@ -2093,23 +2097,25 @@ def _load(conn, job_id: str) -> _Job | None:
         row[3],
         row[4],
         json.loads(row[5]),
-        _split_duplicates(json.loads(row[6])),
+        _current_progress(conn, row[1], json.loads(row[6])),
         row[7],
         row[8],
     )
 
 
-def _split_duplicates(progress: dict[str, Any]) -> dict[str, Any]:
-    """A job started before duplicates were split gets both parts from the counters it already holds.
+def _current_progress(conn, collection_id: str, progress: dict[str, Any]) -> dict[str, Any]:
+    """A job recorded by an earlier release, in the counters this release keeps.
 
-    It counted a row that restated this job's own earlier row as a duplicate, which is `collapsed_in_source`,
-    and it left a row that restated an earlier-stored row inside `updated` or `unchanged`.
+    Its ``duplicates`` are ``collapsed_in_source``. A store job left a row that restated an earlier-stored
+    row in ``updated`` or ``unchanged``, so their sum is ``restated_existing``; a derived job counts none,
+    as it still does. It tallied no batch that committed nothing, so ``uncommitted`` is unknown.
+    Job rows are kept, so this stays until a store migration rewrites their progress.
     """
-    if "collapsed_in_source" in progress:
+    if "uncommitted" in progress:
         return progress
-    restated = progress["updated"] + progress["unchanged"]
+    restated = 0 if derived_rows.is_derived(conn, collection_id) else progress["updated"] + progress["unchanged"]
     return {**progress, "collapsed_in_source": progress["duplicates"], "restated_existing": restated,
-            "duplicates": progress["duplicates"] + restated}
+            "duplicates": progress["duplicates"] + restated, "uncommitted": None}
 
 
 def _bound_principal(who: principal_module.RequestPrincipal) -> dict[str, Any]:
@@ -2244,7 +2250,8 @@ def _deadline_passed(job: _Job) -> bool:
 
 def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     progress, checkpoint = job.progress, job.checkpoint
-    if job.state == "running" and derived_rows.is_derived(writer.connection, job.collection_id):
+    derived = derived_rows.is_derived(writer.connection, job.collection_id)
+    if job.state == "running" and derived:
         record = derived_rows.open_store(writer).progress(job.collection_id)
         if record is not None and record["job"] == job.id:
             progress = _with_member(progress, record["counts"])
@@ -2315,6 +2322,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
             "total": bound["members"]["bytes"] if "members" in bound else bound["bytes"],
         },
         "batches": progress["batches"],
+        "uncommitted": None if derived else progress["uncommitted"],
         "window": {
             "started_at": _iso(job.window_started),
             **limit,
@@ -2645,8 +2653,9 @@ def _record(
     """Advance the checkpoint, counters and rejections inside the batch transaction.
 
     The counters add the batch's ``tally`` (``_batch_tally``), the same counts its receipt
-    carries, so the job's totals and its receipts agree. ``batches`` counts settlements that
-    committed rows. ``prepared`` is ``_collapse``'s identity of each batch row and ``version``
+    carries. A batch that committed no row writes no receipt, so its tally is added to
+    ``uncommitted`` too, and the totals equal the receipts plus ``uncommitted``. ``batches`` counts
+    settlements that committed rows. ``prepared`` is ``_collapse``'s identity of each batch row and ``version``
     the collection's schema version, from which an export member's import log hashes its rows.
     """
     progress = dict(job.progress)
@@ -2672,6 +2681,8 @@ def _record(
                 "transition_id": result["first_transition"],
             }
             progress["batches"] += 1
+        elif progress["uncommitted"] is not None:
+            progress["uncommitted"] = {name: progress["uncommitted"][name] + tally[name] for name in _BATCH_COUNTS}
         for name in _BATCH_COUNTS:
             progress[name] += tally[name]
         progress["imported"] += tally["inserted"] + tally["updated"] + tally["unchanged"]
@@ -3481,6 +3492,7 @@ _PROGRESS = {
     "updated": 0,
     "unchanged": 0,
     "batches": 0,
+    "uncommitted": dict.fromkeys(_BATCH_COUNTS, 0),
     "last_receipt": None,
     "error": None,
 }

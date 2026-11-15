@@ -1388,9 +1388,9 @@ NULL_TAIL_MAPPING = {
 }
 
 
-def null_tail_rows(valid_rows=25, null_rows=12):
-    ordered = [{"list": "a", "position": index, "title": f"track {index}"} for index in range(1, valid_rows + 1)]
-    return ordered + [{"list": "a", "position": None, "title": f"loved {index}"} for index in range(null_rows)]
+def null_tail_rows(valid_rows=25, null_rows=12, tail="unplaced"):
+    ordered = [{"list": "a", "position": index, "title": f"entry {index}"} for index in range(1, valid_rows + 1)]
+    return ordered + [{"list": "a", "position": None, "title": f"{tail} {index}"} for index in range(null_rows)]
 
 
 def test_a_null_required_key_part_rejects_each_row_and_never_collapses_the_tail(store, monkeypatch):
@@ -1407,6 +1407,30 @@ def test_a_null_required_key_part_rejects_each_row_and_never_collapses_the_tail(
     assert [(entry["row"], entry["code"]) for entry in result["rejections"]] == [
         (ordinal, "SCHEMA_REQUIRED_FIELD") for ordinal in range(25, 37)
     ]
+
+
+def test_job_totals_equal_its_receipts_plus_the_batches_that_committed_nothing(store, monkeypatch):
+    """A batch that commits no row writes no receipt, so totals folded from it would match no receipt."""
+    setup(store, ndjson(null_tail_rows()), fields=NULL_TAIL_FIELDS)
+    small(monkeypatch, rows=10)  # the fourth and last batch holds only rejected rows
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    first = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    # An identical start returns the first job, so the tail differs; every stored row restates unchanged.
+    write_source(store.root, ndjson(null_tail_rows(tail="pending")))
+    again = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+
+    for job, uncommitted in ((first, {"rejected": 7}), (again, {"unchanged": 25, "restated_existing": 25, "rejected": 12})):
+        result = status(store, job)
+        receipts = [
+            json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+                "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+                (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+        ]
+        assert result["uncommitted"] == {name: uncommitted.get(name, 0) for name in names}
+        assert {name: sum(receipt[name] for receipt in receipts) + result["uncommitted"][name] for name in names} == {
+            name: result["rows"][name] for name in names}
 
 
 def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):

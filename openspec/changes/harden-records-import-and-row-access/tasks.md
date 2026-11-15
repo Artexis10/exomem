@@ -12,7 +12,7 @@
   - the 734-row `null` tail through import;
   - a `null` optional key part through bulk upsert.
 - [x] 2.2 Run full-source preview through the job's own row preparation, with the `would_*` counts, coordinates, collapse samples and `coverage`. Test the malformed tail placed after the valid rows.
-- [x] 2.3 Split `duplicates` into `collapsed_in_source` and `restated_existing`, and fold the job totals from the batch receipts. Test totals against receipts after a multi-batch job.
+- [x] 2.3 Split `duplicates` into `collapsed_in_source` and `restated_existing`. Fold the job totals from the batch receipts, and record the counts of a batch that commits no row in `uncommitted`. Test totals against receipts plus `uncommitted` after a multi-batch job.
 
 ## 3. Row access (delivery 1)
 
