@@ -329,7 +329,11 @@ def match_overlay(root: Path, spec: RegistrySpec, relative_path: str, *,
 
 
 def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
-    """Supply assigned registry membership without decoding its definitions."""
+    """Supply assigned registry membership without decoding its definitions.
+
+    The scope-set memo keys on `membership.subject_inputs`: an input this reads beyond the
+    connector requirement, the root and the Knowledge Base folder name goes there too.
+    """
     from ..governance import connector_boundary
     from ..structured_collections import _portable_path_key
 
@@ -386,6 +390,7 @@ def public_storage(root: Path, path: str) -> bool:
 
     A version-2 binding answers this through `bound_scopes`; this answers it for
     an unarmed or version-1 vault, where the shipped storage paths are the public instance's.
+    An input this gains beyond the root goes into `membership.subject_inputs` as well.
     """
     from .. import registry_history
     from . import registry_specs

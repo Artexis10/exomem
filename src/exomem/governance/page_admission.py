@@ -120,9 +120,9 @@ def _subject(raw: str, path: str) -> membership.MarkdownSubject:
 
 #: Entries kept for each vault's scope sets. The bound sits above the 50,000-page case, so the load target never evicts.
 _SCOPE_ENTRIES_MAX = 65_536
-#: Summed subject-text bytes kept for each vault (the stored text is ASCII, so characters are bytes). It bounds the text and the page path inside it, not the whole memo: with about 245 B of table and string headers for each entry, one vault holds at most about 80 MiB.
+#: Summed subject-text bytes kept for each vault (the stored text is ASCII, so characters are bytes). It bounds the text and the page path inside it, not the whole memo: with about 245 B of table and string headers for each entry, one vault holds about 80 MiB while its pages share scope sets, and up to about 140 MiB when every entry has its own.
 _SCOPE_BYTES_MAX = 32 * 1024 * 1024
-#: Distinct scope sets shared between entries: a vault has few, and a larger table means pages rarely agree, so sharing gains little and the table restarts.
+#: Distinct scope sets shared between entries: a vault has few. Past this size the table restarts, which bounds it; sets still share within the call that restarted it.
 _SCOPE_SHARED_MAX = 1_024
 
 
