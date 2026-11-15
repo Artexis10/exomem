@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from . import memory_refs, reserved_paths, source_capture, source_corrections, vault
 from .cli_ops import OpError
@@ -68,9 +68,37 @@ class Publication(BaseModel):
     state: Literal["pending", "published"] = "pending"
 
 
+class DependencyEpoch(BaseModel):
+    """One bounded recovery interval; the producer retains its exact operations."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    epoch_id: _Opaque
+    revision: Annotated[int, Field(gt=0)]
+    producer: OwnerLocator
+    opening_checkpoint: _Opaque
+    state: Literal["open", "closed"] = "open"
+    closing_checkpoint: _Opaque | None = None
+
+    @model_validator(mode="after")
+    def coherent(self):
+        if (self.state == "closed") != (self.closing_checkpoint is not None):
+            raise ValueError("dependency closure requires its producer checkpoint")
+        return self
+
+
+class DependencyAdmission(BaseModel):
+    """Publication right for one operation, valid only while this epoch stays open."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    source_ref: _Opaque
+    epoch_id: _Opaque
+    operation_id: _Opaque
+    producer: OwnerLocator
+
+
 class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     source_ref: _Opaque
     allocated_hash: _Hash
     publication: Literal["allocated", "published"] = "allocated"
@@ -79,7 +107,29 @@ class Manifest(BaseModel):
     generated_birth: ProducerBirth | None = None
     owners: Annotated[dict[str, OwnerLocator], Field(max_length=MAX_OWNER_FAMILIES)] = Field(default_factory=dict)
     reservations: Annotated[dict[str, Publication], Field(max_length=MAX_OWNER_FAMILIES)] = Field(default_factory=dict)
+    legacy_dependency_uncertain: bool = False
+    dependency_epochs: Annotated[dict[str, DependencyEpoch], Field(max_length=MAX_OWNER_FAMILIES)] = Field(default_factory=dict)
     retirement: RetirementFence | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_manifest(cls, value):
+        if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1:
+            # Version one lost displaced publications; upgrading cannot manufacture their closure.
+            dependency = value.get("dependency", {})
+            value = {**value, "version": 2, "legacy_dependency_uncertain":
+                     bool(dependency.get("uncertain", False)) if isinstance(dependency, dict) else False}
+        return value
+
+    @model_validator(mode="after")
+    def coherent_dependencies(self):
+        if any(family != epoch.producer.owner for family, epoch in self.dependency_epochs.items()):
+            raise ValueError("dependency epoch belongs to a different producer family")
+        uncertain = self.legacy_dependency_uncertain or any(
+            epoch.state == "open" for epoch in self.dependency_epochs.values())
+        if self.dependency.uncertain != uncertain:
+            raise ValueError("dependency summary differs from its retained evidence")
+        return self
 
 
 @dataclass(frozen=True)
@@ -281,7 +331,8 @@ def reserve_publication(root: Path, *, reference: str, producer: OwnerLocator, p
     # Replacing an unresolved owner entry cannot erase uncertainty about an older publication.
     dependency = manifest.dependency.model_copy(update={"uncertain": True})
     updated = Manifest.model_validate({**manifest.model_dump(), "owners": owners,
-                                       "reservations": reservations, "dependency": dependency})
+                                       "reservations": reservations, "dependency": dependency,
+                                       "legacy_dependency_uncertain": True})
     publish(root, PlannedCustody((_write(root, manifest_path(root, reference), updated, manifest_guard, MAX_MANIFEST_BYTES),)))
     return publication
 
@@ -305,6 +356,123 @@ def observe_publication(root: Path, publication: Publication) -> bool:
         reservations[publication.producer.owner] = current.model_copy(update={"state": "published"})
     updated = manifest.model_copy(update={"dependency": dependency, "reservations": reservations})
     publish(root, PlannedCustody((_write(root, manifest_path(root, publication.source_ref), updated, manifest_guard, MAX_MANIFEST_BYTES),)))
+    return True
+
+
+def reserve_dependencies(root: Path, references: Sequence[str], *, producer: OwnerLocator,
+                         operation_id: str, checkpoint: str) -> tuple[DependencyAdmission, ...]:
+    """Join one recovery epoch per Source, before this complete operation can retain bytes."""
+    if not available() or not references:
+        return ()
+    _boundary(root)
+    admissions = []
+    writes = []
+    for reference in dict.fromkeys(references):
+        manifest, guard = read_manifest(root, reference)
+        if manifest is None:
+            continue
+        if manifest.retirement is not None:
+            raise OpError("SOURCE_RETIRED", "the Source incarnation is retired")
+        previous = manifest.dependency_epochs.get(producer.owner)
+        if previous is not None and previous.producer != producer:
+            raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "dependency recovery belongs to another producer scope")
+        if previous is not None and previous.state == "open":
+            epoch = previous.model_copy(update={"revision": previous.revision + 1})
+        else:
+            # Closed identifiers never reopen: that would restore a delayed publisher's revoked right.
+            epoch = DependencyEpoch(epoch_id=str(uuid.uuid4()), revision=1, producer=producer,
+                                    opening_checkpoint=checkpoint)
+        admission = DependencyAdmission(source_ref=reference, epoch_id=epoch.epoch_id,
+                                         operation_id=operation_id, producer=producer)
+        epochs = {**manifest.dependency_epochs, producer.owner: epoch}
+        updated = Manifest.model_validate({**manifest.model_dump(), "dependency_epochs": epochs,
+                                           "dependency": manifest.dependency.model_copy(update={"uncertain": True})})
+        writes.append(_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES))
+        admissions.append(admission)
+    publish(root, PlannedCustody(tuple(writes)))
+    return tuple(admissions)
+
+
+def require_dependencies(root: Path, admissions: Sequence[DependencyAdmission]) -> None:
+    """Recheck immediately before each effect, under the same actual boundary hold."""
+    if not admissions:
+        return
+    _boundary(root)
+    for admission in admissions:
+        manifest, _ = read_manifest(root, admission.source_ref)
+        if manifest is None:
+            raise OpError("SOURCE_CUSTODY_UNAVAILABLE", "issued dependency custody is unavailable")
+        if manifest.retirement is not None:
+            raise OpError("SOURCE_RETIRED", "the Source incarnation is retired")
+        epoch = manifest.dependency_epochs.get(admission.producer.owner)
+        if (epoch is None or epoch.state != "open" or epoch.epoch_id != admission.epoch_id
+                or epoch.producer != admission.producer):
+            raise OpError("SOURCE_DEPENDENCY_STALE", "dependency recovery closed this publication right")
+
+
+def begin_dependency_effect(root: Path, admissions: Sequence[DependencyAdmission]) -> None:
+    """Invalidate older censuses before an effect; keep this boundary held through that effect.
+
+    Admission alone does not cover a later commit: a census may already have passed this
+    producer when it publishes. Advancing before every staging or canonical commit prevents
+    that commit from disappearing behind a crashed positive acknowledgment.
+    """
+    if not admissions:
+        return
+    require_dependencies(root, admissions)
+    writes = []
+    families: dict[str, set[str]] = {}
+    for admission in admissions:
+        families.setdefault(admission.source_ref, set()).add(admission.producer.owner)
+    for reference, owners in families.items():
+        manifest, guard = read_manifest(root, reference)
+        epochs = {family: epoch.model_copy(update={"revision": epoch.revision + 1}) if family in owners else epoch
+                  for family, epoch in manifest.dependency_epochs.items()}
+        updated = manifest.model_copy(update={"dependency_epochs": epochs})
+        writes.append(_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES))
+    publish(root, PlannedCustody(tuple(writes)))
+
+
+def observe_dependency(root: Path, admission: DependencyAdmission, *, witness: OwnerLocator) -> None:
+    """Retain the trusted producer's exact immutable effect witness, including delayed positives."""
+    _boundary(root)
+    if witness.owner != admission.producer.owner:
+        raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "dependency witness belongs to another producer family")
+    manifest, guard = read_manifest(root, admission.source_ref)
+    if manifest is None:
+        raise OpError("SOURCE_CUSTODY_UNAVAILABLE", "issued dependency custody is unavailable")
+    if manifest.dependency.first_publication is not None:
+        return
+    dependency = manifest.dependency.model_copy(update={"first_publication": witness})
+    updated = manifest.model_copy(update={"dependency": dependency})
+    publish(root, PlannedCustody((_write(root, manifest_path(root, admission.source_ref), updated, guard, MAX_MANIFEST_BYTES),)))
+
+
+def reconcile_dependencies(root: Path, reference: str, *, producer: OwnerLocator, expected: DependencyEpoch,
+                           checkpoint: str, complete: bool) -> bool:
+    """Close only the producer's complete, revision-qualified census; individual rollback is insufficient.
+
+    The producer verifies exact effects and cleanup before calling this function. It closes SQL
+    snapshots and releases its request checkout first. The boundary keeps this CAS and the final
+    producer checkpoint check in one hold, so a new admission invalidates an earlier census.
+    """
+    _boundary(root)
+    if not complete or expected.producer != producer or expected.state != "open":
+        return False
+    manifest, guard = read_manifest(root, reference)
+    if manifest is None:
+        raise OpError("SOURCE_CUSTODY_UNAVAILABLE", "dependency recovery custody is unavailable")
+    closed = expected.model_copy(update={"state": "closed", "closing_checkpoint": checkpoint})
+    current = manifest.dependency_epochs.get(producer.owner)
+    if current == closed:
+        return True
+    if current != expected:
+        return False
+    epochs = {**manifest.dependency_epochs, producer.owner: closed}
+    dependency = manifest.dependency.model_copy(update={"uncertain": manifest.legacy_dependency_uncertain
+        or any(epoch.state == "open" for epoch in epochs.values())})
+    updated = manifest.model_copy(update={"dependency_epochs": epochs, "dependency": dependency})
+    publish(root, PlannedCustody((_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES),)))
     return True
 
 

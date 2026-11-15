@@ -33,6 +33,10 @@ class OriginInputProof:
     journal_guard: PathGuard | None = None
 
     @property
+    def source_reference(self) -> str:
+        return self.retained.canonical
+
+    @property
     def guards(self) -> tuple[PathGuard, ...]:
         assert self.retained.guard is not None
         return (self.retained.guard,) + (
@@ -47,6 +51,10 @@ class OriginalInputProof:
     root: str
     version: str
     size: int
+
+    @property
+    def source_reference(self) -> str:
+        return self.root
 
     def recheck(self, vault_root: Path) -> None:
         _resolve_original(vault_root, {"reference": self.root, "version": self.version, "size": self.size})
@@ -77,6 +85,11 @@ class PreparedOriginInputs:
     source: str
     inputs: tuple[tuple[str, OriginInputProof | OriginalInputProof], ...]
 
+    @property
+    def source_references(self) -> tuple[str, ...]:
+        """Source incarnations differ from an episode's shared provenance grouping digest."""
+        return tuple(dict.fromkeys(proof.source_reference for _label, proof in self.inputs))
+
     def revalidate(self, vault_root: Path) -> None:
         document = provenance.parse_origin(self.source, managed=True, authoring=True, strict=True)
         if document.payload is None:
@@ -94,7 +107,7 @@ class PreparedOriginInputs:
                     if current.root != prior.root:
                         raise provenance.OriginError("ORIGIN_INPUT_STALE", "retained input root changed")
                     try:
-                        source_custody.require_publishable(vault_root, current.root)
+                        source_custody.require_publishable(vault_root, current.source_reference)
                     except OpError as error:
                         raise provenance.OriginError(error.code, error.message) from error
             except provenance.OriginError as error:

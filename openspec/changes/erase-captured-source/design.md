@@ -182,6 +182,33 @@ Successful publication marks it present. Proven no-effect or complete rollback r
 Interrupted publication stays uncertain until existing producer recovery resolves the exact publication identity.
 Resolving one no-effect reservation cannot clear another unresolved publication; any successful dependency makes present sticky.
 
+Use one recovery epoch per Source and producer family for collection writers.
+Concurrent operations join that epoch; exact operations remain in existing audit, version and import records.
+This reuses producer recovery instead of adding a reverse dependency graph or another witness database.
+Its maintenance cost is a versioned Source manifest, incarnation bindings in existing records, and producer recovery hooks.
+The stable-interface principle in [Managed Agents](https://www.anthropic.com/research/managed-agents) applies: execution can change while producer custody remains durable.
+
+Each admission advances the epoch revision. Before each surviving stage or commit, advance it again under the actual writer boundary.
+Keep that boundary through the effect. A crash before positive settlement therefore invalidates an earlier census.
+The census captures its epoch and revision before its first page and closes only that exact revision after complete producer reconciliation.
+Closing revokes delayed publication rights. A later admission uses a fresh epoch identifier; closed identifiers never reopen.
+Individual rollback cannot close a shared epoch. Version-one displaced uncertainty remains conservative legacy evidence.
+
+Explicit collection sources retain their canonical incarnation alongside their presentation paths.
+Read both final and historical origin carriers through the existing parser, including unchanged carriers that need no new authoring-input preparation.
+File audit events bind each effect's exact references and shared operation identifier; kept history carries the same bindings with its retained payload.
+Reserve the union of current and prior dependencies, but label each binding with its owning payload.
+A primary and its audit prove current membership; surviving history proves only prior membership.
+Partial rollback cannot transfer a failed replacement's inputs to an independent prior snapshot.
+Store version associations bind exact references, epoch and operation to immutable row versions and the authenticated event.
+Producer checkpoints bind logical store identity, physical instance, immutable transition and effect membership; paths and transaction integers cannot supply that identity.
+
+Reserve imports before derived staging. Canonical member publication proves dependence; missing progress does not prove cleanup.
+An aborted member records its exact closure in the final revert transaction, with FULL durability established before that transaction.
+The closure binds the Source, epoch, job, member and physical derived instance, then mirrors into matching terminal job custody.
+Filesystem rollback needs the publication owner's exact cleanup outcome; SQL rollback and a suppressed cleanup exception cannot establish absence.
+Close active SQL snapshots and release request checkouts before canonical Source metadata work; retain only detached preparation between phases.
+
 Semantic writes include resolved claims whose Source back-reference was skipped, retained origin bindings and historical before-images.
 Restricted writers still publish service-owned custody in the same batch when they cannot write the Source back-reference.
 Collection writes include item versions, imports and bulk operations. Both correction endpoints refuse erasure through existing correction facts.

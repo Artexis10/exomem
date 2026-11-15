@@ -376,7 +376,7 @@ def test_metadata_scope_rejects_unbound_payload_before_service_authority(vault, 
             other_ref = memory_refs.memory_ref(memory_refs.new_id())
             write.content = write.content.replace(reference, other_ref)
         elif invalid == "extra-payload":
-            write.content = write.content.replace('"version":1', '"unowned":"bytes","version":1')
+            write.content = json.dumps({**json.loads(write.content), "unowned": "bytes"})
         else:
             write.ensure_directories = (vault / "unowned",)
         monkeypatch.setattr(principal, "owner_local_producer", lambda *a, **k: pytest.fail("invalid plan entered service authority"))

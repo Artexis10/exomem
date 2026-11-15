@@ -2558,7 +2558,7 @@ class CollectionWriter:
                 raise collections.CollectionError(
                     "INVALID_RECORD_SOURCE", "source must be a preserved Sources or Evidence page"
                 )
-            relative, guard = resolved
+            relative, guard = resolved.path, resolved.guard
             validated.append(relative)
             guards.append(guard)
         return validated, guards
@@ -2859,7 +2859,7 @@ class CollectionWriter:
                         outcomes.append(records._bulk_reject(index, "SOURCE_NOT_FOUND",
                                         "source is not a preserved Sources or Evidence page", source=reference))
                         continue
-                    source_rel, guard = resolved
+                    source_rel, guard = resolved.path, resolved.guard
                     values = (_import.prepared_row(index, manifest, reference, resolved, raw["item"])
                               if _import is not None else None)
                     if values is None:

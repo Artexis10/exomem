@@ -1527,7 +1527,7 @@ def _custody_references(
     origins: origin_bindings.PreparedOriginInputs | None,
 ) -> tuple[str, ...]:
     references = source_closure.custody_references(closure) if closure is not None else ()
-    return tuple(dict.fromkeys((*references, *(proof.root for _label, proof in origins.inputs)))) if origins is not None else references
+    return tuple(dict.fromkeys((*references, *origins.source_references))) if origins is not None else references
 
 
 def _origin_commit_guards(
