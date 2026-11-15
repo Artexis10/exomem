@@ -7815,10 +7815,16 @@ def release_walk_filter(
             vault_root, policy, who, declared_purpose, grants_hash, tombstones,
         )
 
-    keep = AdmittedPredicate(Admission(identity, judge, lambda paths, publish: _stored_admission_many(
-        vault_root, paths, publish, policy=policy, who=who, purpose=declared_purpose,
-        tombstones=tombstones, identity=identity, scalar=judge, record_outcomes=True,
-    )))
+    def judge_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
+        if not paths:
+            return {}
+        with release_decision_context(vault_root):
+            return _stored_admission_many(
+                vault_root, paths, publish, policy=policy, who=who, purpose=declared_purpose,
+                tombstones=tombstones, identity=identity, scalar=judge, record_outcomes=True,
+            )
+
+    keep = AdmittedPredicate(Admission(identity, judge, judge_many))
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
@@ -7873,6 +7879,49 @@ def restricted_release_filter(
     if who is None:
         return None
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+@contextmanager
+def release_decision_context(vault_root: Path) -> Iterator[None]:
+    """Hold one store snapshot, authorization and path placement while a set of pages is decided.
+
+    Under a bound writer, each page's decision otherwise opens its own snapshot and builds its own
+    authorization, which loads the policy again: the inputs that every page of the set shares, read
+    once per page. A decision nested in the held snapshot joins it
+    (`CollectionWriter.read_snapshot`). Each decision also opened a pooled snapshot of the vault
+    store to read the page's container; the set holds one (`request_snapshot`), as a move's
+    post-commit filter does, and a request that already holds one keeps it. The store
+    thread serves a write without a resolution scope, so each decision also resolved the vault and
+    its state folder again; the set shares one resolution, as a move's preflight does. The scope
+    ends with the set, so the write still finds the placement live, and reads the store's new
+    revision, after it waits for the mutation boundary or commits. Without a bound writer a
+    decision opens no writer snapshot, so this holds nothing.
+    """
+    writer = bound_writer(vault_root)
+    if writer is None:
+        yield
+        return
+    from ..vault_store import read as store_read
+
+    with (
+        state_paths.resolution_scope(),
+        writer.read_snapshot(),
+        store_read.request_snapshot(vault_root),
+    ):
+        yield
+
+
+def admitted(keep: Callable[[str], bool], paths: Iterable[str]) -> frozenset[str]:
+    """The paths that the release filter `keep` admits, decided as one set.
+
+    A filter that offers its `Admission` decides the set through `decide_many`; any other filter is
+    asked once per path. Each path gets the verdict that `keep(path)` gives it.
+    """
+    wanted = list(dict.fromkeys(paths))
+    offered = admission_of(keep)
+    if offered is None:
+        return frozenset(path for path in wanted if keep(path))
+    return frozenset(path for path, verdict in offered.decide_many(wanted).items() if verdict[0])
 
 
 def file_mode_restricted_caller(
@@ -8161,7 +8210,10 @@ def page_filter_over(
     # catalogue publishes only the pages `decide` hands on to the release verdict.
     def decide_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
         if store_read.request_memo(root) is None:
-            return {path: decide(path, publish) for path in paths}
+            if not paths:
+                return {}
+            with release_decision_context(root):
+                return {path: decide(path, publish) for path in paths}
         held_page = store_read.held_lookup(root, paths)
         ordinary = [path for path in paths if path not in held and held_page(path)]
         answers = offered.decide_many(ordinary, publish)
