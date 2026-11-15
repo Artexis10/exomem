@@ -281,10 +281,9 @@ class Stages:
 
 
 def _child(args: argparse.Namespace) -> dict[str, object]:
-    # This diagnostic owns its configuration; inherited endpoints could change a live writer lease.
-    for name in tuple(os.environ):
-        if name.startswith(("EXOMEM_", "KB_MCP_")):
-            del os.environ[name]
+    from _records_measurement_env import clear_inherited
+
+    clear_inherited()
     # The parent deletes the work directory after this process exits. Receipt connections and
     # the idempotency owner lock stay open until exit, and Windows cannot delete an open file.
     with contextlib.ExitStack() as cleanup:
@@ -293,26 +292,11 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
 
 def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.ExitStack) -> dict[str, object]:
     size = args.size
-    os.environ.update(
-        {
-            "XDG_STATE_HOME": str(tmp / "xdg"),
-            "EXOMEM_STATE_ROOT": str(tmp / "state"),
-            "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp / "state" / "writer-lease"),
-            "EXOMEM_CONFIG_PATH": str(tmp / "no-such-config.json"),
-            "EXOMEM_DISABLE_EMBEDDINGS": "1",
-            "EXOMEM_DISABLE_RELEVANCE_CHECK": "1",
-            "EXOMEM_DISABLE_WARMUP": "1",
-            "EXOMEM_DISABLE_FILE_WATCHER": "1",
-            "EXOMEM_DISABLE_MODE_WATCH": "1",
-            "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
-            "EXOMEM_DISABLE_CLIP": "1",
-            "EXOMEM_DISABLE_RANKING_CONFIG": "1",
-            "CUDA_VISIBLE_DEVICES": "",
-        }
-    )
+    from _records_measurement_env import isolate
+
     vault = tmp / "vault"
+    isolate(tmp, vault)
     (vault / "Knowledge Base").mkdir(parents=True)
-    os.environ["EXOMEM_VAULT_PATH"] = str(vault)
     sys.path.insert(0, str(REPO / "src"))
 
     from exomem import (
