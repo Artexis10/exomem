@@ -73,6 +73,9 @@ class FakeClusterGateway:
         self.readiness: dict[str, bytes] = {}
         self.histories: dict[str, bytes] = {}
         self.history_reads: list[str] = []
+        # Server-side apply's field ownership of each StatefulSet's annotations, by namespace:
+        # the keys a merge patch (an Update entry) owns, which an apply that omits them keeps.
+        self.patch_owned: dict[str, set[str]] = {}
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
         return self.observations.get(cell_id, ClusterObservation())
@@ -89,6 +92,15 @@ class FakeClusterGateway:
     def apply_all(self, manifests: list[dict]) -> None:
         for manifest in manifests:
             key = (manifest["metadata"].get("namespace", ""), manifest["kind"], manifest["metadata"]["name"])
+            if manifest["kind"] == "StatefulSet":
+                # An applied value that differs is forced away from the patch; an omitted key the patch owns stays.
+                live = self.applied.get(key, {}).get("metadata", {}).get("annotations", {})
+                applied = manifest["metadata"].get("annotations", {})
+                owned = self.patch_owned.setdefault(key[0], set())
+                owned -= {name for name in owned if name in applied and applied[name] != live.get(name)}
+                kept = {name: live[name] for name in owned if name not in applied and name in live}
+                if kept:
+                    manifest = {**manifest, "metadata": {**manifest["metadata"], "annotations": {**applied, **kept}}}
             self.applied[key] = manifest
             if manifest["kind"] == "StatefulSet":
                 self.events.append(("apply_statefulset", key[0], manifest["spec"]["replicas"]))
@@ -176,11 +188,15 @@ class FakeClusterGateway:
         if statefulset is None:
             return
         live = statefulset["metadata"]["annotations"]
+        owned = self.patch_owned.setdefault(namespace, set())
         for key, value in annotations.items():
             if value is None:
                 live.pop(key, None)
-            else:
+                owned.discard(key)
+            elif live.get(key) != value:
+                # An update owns the fields whose value it changed.
                 live[key] = value
+                owned.add(key)
 
     def read_secret_value(self, namespace: str, name: str, key: str) -> str:
         return "https://receiver.example/alerts/token"

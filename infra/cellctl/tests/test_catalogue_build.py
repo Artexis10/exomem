@@ -337,6 +337,57 @@ async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting
         await fleet.close()
 
 
+async def test_an_attempt_started_beside_a_finished_build_leaves_no_hold_once_it_is_ready(cell_db):
+    """The start that cancels a build records its hold by merge patch, and server-side apply keeps keys
+    another manager owns. Without their removal, the pass after the Ready exit resumes a half-cleared
+    attempt and stops the upgraded cell on its previous image."""
+    from .test_reconcile import _ATTEMPT_SNAPSHOT
+    from .test_rollout_automation import (
+        IDLE,
+        OWNER,
+        TENANT,
+        _annotations,
+        _image,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    try:
+        cluster.readiness[TENANT] = IDLE
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT)
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+        # A build Job has no TTL, so a finished build is still there when the attempt starts.
+        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, succeeded=True)
+        cluster.builds[namespace_name(TENANT)] = (job,)
+        await fleet.run(NOW, cluster_config=CONFIG)
+        patched = [event[2] for event in cluster.events if event[0] == "patch_annotations" and "exomem.io/hold" in event[2]]
+        assert len(patched) == 1 and _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        cluster.builds.clear()  # The next census shows the cancelled Job gone.
+        for seconds, overrides in ((5, {}), (10, {}), (15, {"backup_job_succeeded": True,
+                                                            "backup_job_snapshot_id": _ATTEMPT_SNAPSHOT}),
+                                   (20, {}), (25, {})):
+            _observe(cluster, TENANT, pod_node="worker-one", **overrides)
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        # The Ready exit landed: the target serves, and the key only the apply owned is gone.
+        assert _image(cluster, TENANT) == IMAGE_B and "exomem.io/target-applied-at" not in _annotations(cluster, TENANT)
+        cluster.events.clear()
+        for seconds in (30, 35, 40):
+            _observe(cluster, TENANT, pod_node="worker-one")
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        assert not set(patched[0]) & set(_annotations(cluster, TENANT))
+        assert ("apply_statefulset", namespace_name(TENANT), 0) not in cluster.events
+        assert _image(cluster, TENANT) == IMAGE_B and _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+    finally:
+        await fleet.close()
+
+
 def test_build_job_uses_foreground_deletion_to_keep_pod_cleanup_observable():
     """Background deletion would hide the Job before its dependent pods release the claim."""
     calls = []
