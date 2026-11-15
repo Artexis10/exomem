@@ -480,9 +480,12 @@ def test_verified_temporary_preserves_a_replacement_that_arrives_during_install(
 
         def replace_destination(held_parent, name, **options):
             if name == "rewritten.tmp":
-                replacement = tmp_path / "newer.tmp"
-                replacement.write_bytes(b"newer")
-                replacement.replace(tmp_path / "current.md")
+                # Another writer replaces the held destination with POSIX rename semantics; a plain
+                # Windows replace cannot rename onto a file that another handle holds open.
+                with original(held_parent, "newer.tmp", access="write", create=True, exclusive=True).require() as newer:
+                    fs.write(newer, b"newer").require()
+                with original(held_parent, "newer.tmp", access="mutate").require() as newer:
+                    fs.rename(newer, held_parent, "current.md", replace=True).require()
             return original(held_parent, name, **options)
 
         monkeypatch.setattr(fs, "file", replace_destination)
