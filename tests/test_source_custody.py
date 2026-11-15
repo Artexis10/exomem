@@ -704,3 +704,217 @@ def test_fresh_default_off_capture_does_not_initialize_a_generated_catalogue(vau
     with request_scope(owner_principal(surface="mcp")):
         manifest, _ = source_custody.read_manifest(vault, reference)
     assert manifest is None
+
+
+def test_tracked_log_rotation_and_retry_keep_the_native_archive_map(vault, attempts, registered_custody, monkeypatch):
+    from exomem import generated_output_plan, source_native_custody
+
+    manager, call = attempts
+    args = {**authored(), "title": "Archived café 🧭"}
+    ticket = reserve(call, args)
+    call("capture_source", **args, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        padding = [vault_module.LogEntry("2026-11-15", "note", f"Notes/independent-{number}", "An independent finding.")
+                   for number in range(vault_module.LOG_ROTATE_KEEP_ENTRIES)]
+        with generated_output_plan.producer(vault) as producer:
+            setup = vault_module.plan_log_entries(vault, padding, operation_token="padding", generated_producer=producer)
+            vault_module.batch_atomic_write(setup.writes, vault_root=vault, post_commit_fanout=False)
+        monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1")
+        with generated_output_plan.producer(vault) as producer:
+            def no_derived_cache():
+                pytest.fail("log planning consulted the derived catalogue")
+
+            monkeypatch.setattr(producer.store, "_connect", no_derived_cache)
+            plan = vault_module.plan_log_writes(vault, date_iso="2026-11-15", op="note", rel_path_no_ext="Notes/latest",
+                body="The latest independent finding.", operation_token="rotation", generated_producer=producer)
+            assert plan.rotation_note is not None
+            archive, live = plan.writes
+            assert {item.source_ref for item in archive.generated_image.after.after.fragments} == {reference}
+            assert live.generated_image.after.after.fragments == ()
+            archive_map = archive.generated_image.after.after
+            vault_module.batch_atomic_write(plan.writes, vault_root=vault, post_commit_fanout=False)
+        before_retry = {write.path: write.path.read_bytes() for write in plan.writes}
+        with generated_output_plan.producer(vault) as producer:
+            retry = vault_module.plan_log_writes(vault, date_iso="2026-11-15", op="note", rel_path_no_ext="Notes/latest",
+                body="The latest independent finding.", operation_token="rotation", generated_producer=producer)
+            assert retry.rotation_note is None
+            assert retry.writes[0].path == archive.path
+            assert retry.writes[0].generated_image.after.after == archive_map
+            vault_module.batch_atomic_write(retry.writes, vault_root=vault, post_commit_fanout=False)
+        assert {write.path: write.path.read_bytes() for write in retry.writes} == before_retry
+        with generated_output_plan.producer(vault) as producer:
+            current = producer.before(archive.path)
+            assert current.mapping.after == archive_map and current.current is not None
+            native = source_native_custody.NativeCustody(vault)
+            assert native.observe(current.current.native.binding_id, destination=True).matching is True
+
+
+def test_note_preserve_and_edit_keep_capture_ownership_after_activity_trim_and_log_rotation(
+    vault, attempts, registered_custody, monkeypatch,
+):
+    from exomem import generated_output_plan, indexes
+
+    manager, call = attempts
+    first = {**authored(), "title": "Retained café 🧭"}
+    ticket = reserve(call, first)
+    call("capture_source", **first, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    later = {**authored(), "title": "Later unenrolled survey", "content": "Another observation.",
+             "source_identity": {"system": "unlisted", "record_id": "later", "revision": "one"}}
+    call("capture_source", **later)
+    anchor = vault / "Knowledge Base/Notes/Insights/anchor.md"
+    anchor.parent.mkdir(parents=True, exist_ok=True)
+    anchor.write_text("---\ntype: insight\nstatus: active\n---\n# Anchor\n\n- [finding] A separate finding.\n")
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with generated_output_plan.producer(vault) as producer:
+            top, _ = indexes.plan_recent_activity(vault,
+                (("2026-11-15", f"Independent activity {number}") for number in range(indexes.RECENT_ACTIVITY_CAP - 2)),
+                generated_producer=producer)
+            logs = vault_module.plan_log_entries(vault,
+                (vault_module.LogEntry("2026-11-15", "note", f"Notes/padding-{number}", "An independent finding.")
+                 for number in range(vault_module.LOG_ROTATE_KEEP_ENTRIES)),
+                operation_token="workflow-padding", generated_producer=producer)
+            vault_module.batch_atomic_write([top, *logs.writes], vault_root=vault, post_commit_fanout=False)
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1")
+    with request_scope(owner_principal(surface="mcp")):
+        note = dispatch(manager, vault, "remember", {"title": "Independent note", "note_type": "insight",
+            "content": "## Observations\n\n- [finding] A separate independent fact. ^independent\n\n## Relations\n- supports [[Knowledge Base/Notes/Insights/anchor]]\n"})
+        dispatch(manager, vault, "preserve_evidence", {"scope": "References", "category": "snapshots", "filename": "independent.txt",
+            "content": "A separately preserved observation."})
+        dispatch(manager, vault, "edit_memory", {"path": note["path"], "why": "Clarify the independent finding.",
+            "operation": {"kind": "replace_string", "old_string": "separate independent fact", "new_string": "clear independent fact"}})
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with generated_output_plan.producer(vault) as producer:
+            top = producer.before(vault / "Knowledge Base/index.md")
+            assert top.current is not None
+            assert reference not in {item.source_ref for item in top.mapping.after.fragments}
+            sources = producer.before(vault / "Knowledge Base/Sources/index.md")
+            assert sources.current is not None
+            assert reference in {item.source_ref for item in sources.mapping.after.fragments}
+            archives = list((vault / "Knowledge Base/_archive/logs").glob("log-*.md"))
+            assert archives
+            retained = []
+            for path in archives:
+                current = producer.before(path)
+                assert current.current is not None and current.binding.slot.pending is None
+                retained.extend(item for item in current.mapping.after.fragments if item.source_ref == reference)
+            assert retained
+    assert "clear independent fact" in (vault / note["path"]).read_text()
+
+
+def test_public_append_preserves_captured_source_log_map(vault, attempts, registered_custody):
+    from exomem import generated_output_plan
+
+    manager, call = attempts
+    args = authored()
+    ticket = reserve(call, args)
+    call("capture_source", **args, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    log = vault / "Knowledge Base/log.md"
+    target = vault / "Knowledge Base/Evidence/sidecar.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("Independent evidence sidecar.\n")
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with generated_output_plan.producer(vault) as producer:
+            before = producer.before(log)
+            assert before.current is not None
+            assert reference in {fragment.source_ref for fragment in before.mapping.after.fragments}
+        dispatch(manager, vault, "manage_memory_file", {"operation": "append",
+            "path": target.relative_to(vault).as_posix(), "content": "A separate sidecar update."})
+        assert "A separate sidecar update." in target.read_text()
+        with generated_output_plan.producer(vault) as producer:
+            after = producer.before(log)
+            assert after.current is not None
+            assert reference in {fragment.source_ref for fragment in after.mapping.after.fragments}
+
+
+@pytest.mark.parametrize("lost_descriptor", (False, True))
+def test_public_create_recovers_pending_custody_without_mutating_preview(vault, attempts, registered_custody, monkeypatch, lost_descriptor):
+    import sqlite3
+
+    from exomem import generated_output_plan, native_copy_custody, source_native_custody
+
+    manager, call = attempts
+    args = authored()
+    ticket = reserve(call, args)
+    call("capture_source", **args, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    log = vault / "Knowledge Base/log.md"
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with generated_output_plan.producer(vault) as producer:
+            before = producer.before(log)
+            assert before.current is not None
+            store = producer.store
+            native = source_native_custody.NativeCustody(vault)
+            copies = native_copy_custody.NativeCopyCustody(vault, store=store, native=native)
+            header = store.image_header(before.current.canonical.image_id).value
+            set_head = store._set_head
+
+            def lose_after_pending(expected, value):
+                result = set_head(expected, value)
+                if value.pending is not None:
+                    raise RuntimeError("interruption after canonical pending head")
+                return result
+
+            with monkeypatch.context() as crashing:
+                crashing.setattr(store, "_set_head", lose_after_pending)
+                with pytest.raises(RuntimeError, match="interruption"):
+                    copies.prepare(header, logical_path=log)
+            assert store.head().pending is not None
+            interrupted_epoch = store.head().epoch
+            if lost_descriptor:
+                (store.path / "changes" / f"{store.head().epoch}.json").unlink()
+
+                def unavailable_cache(_store):
+                    raise sqlite3.DatabaseError("derived cache unavailable")
+
+                monkeypatch.setattr(type(store), "_connect", unavailable_cache)
+            canonical = {path: path.read_bytes() for path in store.path.rglob("*.json")}
+            proposal = {"operation": "create", "path": "Knowledge Base/after-interruption.txt", "content": "Independent evidence."}
+            preview = {"operation": "create", "path": "Knowledge Base/Notes/Insights/proposed.md",
+                "content": "# Proposed\n\n## Observations\n\n- [constraint] Keep recovery bounded.\n",
+                "frontmatter": {"type": "insight", "title": "Proposed", "status": "active"}, "validate_only": True}
+            dispatch(manager, vault, "manage_memory_file", preview)
+            assert not (vault / preview["path"]).exists()
+            assert {path: path.read_bytes() for path in store.path.rglob("*.json")} == canonical
+            dispatch(manager, vault, "manage_memory_file", proposal)
+            assert (vault / proposal["path"]).exists()
+            assert store.head().pending is None
+        with generated_output_plan.producer(vault) as producer:
+            after = producer.before(log)
+            assert after.current is not None
+            assert reference in {fragment.source_ref for fragment in after.mapping.after.fragments}
+            assert {(fragment.opaque_fragment_id, fragment.source_ref, fragment.payload_sha256)
+                    for fragment in after.mapping.after.fragments} == {
+                (fragment.opaque_fragment_id, fragment.source_ref, fragment.payload_sha256)
+                for fragment in before.mapping.after.fragments}
+            assert after.mapping.unknown_through_epoch >= interrupted_epoch
+
+
+def test_planning_preparation_keeps_generated_custody_unchanged(vault, attempts, registered_custody):
+    from test_planning_mutation import _manifest
+
+    from exomem import generated_output_plan, planning
+
+    manager, call = attempts
+    args = authored()
+    ticket = reserve(call, args)
+    call("capture_source", **args, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        planning.create_collection(vault, collection, _manifest(), why="Retain intended work.")
+        current = planning.inspect(vault, collection)
+        with generated_output_plan.producer(vault) as producer:
+            before = producer.before(vault / "Knowledge Base/log.md")
+            assert reference in {fragment.source_ref for fragment in before.mapping.after.fragments}
+            canonical = {path: path.read_bytes() for path in producer.store.path.rglob("*.json")}
+            prepared = planning.prepare(vault, "add", {"collection": collection,
+                "plan_id": "991acdd4-16b9-4396-8220-2cb37b7e8516", "item": {"title": "Review the account"},
+                "why": "Retain intended work.", "expected_container_hash": current["snapshot"]})
+            assert not (vault / prepared["path"]).exists()
+            assert {path: path.read_bytes() for path in producer.store.path.rglob("*.json")} == canonical
+            after = generated_output_plan.read_before(producer.store, producer.native, path=before.path,
+                text=before.path.read_bytes().decode(), guard=before.guard)
+            assert after == before

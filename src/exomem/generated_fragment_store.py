@@ -785,6 +785,12 @@ class GeneratedFragmentStore:
         return head.model_copy(update={"unknown_through_epoch": horizon,
                                        "summarized_through_epoch": head.epoch})
 
+    def recover(self) -> Head:
+        """Settle bounded canonical metadata without requiring a qualified derived index."""
+        _boundary(self.root)
+        self._recover()
+        return self.head()
+
     def _recover(self) -> None:
         head = self.head()
         covered_before = head.epoch - int(head.pending is not None)
@@ -807,9 +813,13 @@ class GeneratedFragmentStore:
             if change is not None:
                 self._refresh(change, settled, allow_before=True)
             else:
-                with self._connect() as conn:
-                    conn.execute("UPDATE checkpoint SET ready=0 WHERE singleton=1")
-                    conn.commit()
+                try:
+                    with self._connect() as conn:
+                        conn.execute("UPDATE checkpoint SET ready=0 WHERE singleton=1")
+                        conn.commit()
+                except (ValueError, OSError, RuntimeError, sqlite3.Error, vault.PathGuardError) as error:
+                    # Canonical uncertainty already fences lookup; derived invalidation cannot block recovered publication.
+                    log.warning("generated derived checkpoint invalidation failed (%s)", type(error).__name__)
             head = settled
         path = self.path / "changes" / f"{head.epoch + 1}.json"
         try:

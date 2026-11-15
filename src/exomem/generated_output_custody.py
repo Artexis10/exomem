@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +44,7 @@ class _GeneratedCopies:
         self.outputs: dict[Path, _Output] = {}
         self.settlement_attempted = False
         try:
+            self.store.recover()
             head = self.store.head()
             for write in writes:
                 plan = write.generated_image
@@ -224,46 +225,45 @@ class _GeneratedCopies:
             raise held_fs.CustodyAcknowledgementPending("generated Slot settlement is pending") from None
 
 
-@contextmanager
 def batch(root: Path | None, writes: Sequence[vault.PlannedWrite],
-          previous: vault._BatchPayloadCustody | None) -> Iterator[vault._BatchPayloadCustody | None]:
+          previous: vault._BatchPayloadCustody | None, *, lifetime: ExitStack) -> vault._BatchPayloadCustody | None:
     planned = [write for write in writes if write.generated_image is not None]
     if not planned:
-        yield previous
-        return
+        return previous
     if root is None:
         raise ValueError("generated output custody requires its vault root")
     owner = _GeneratedCopies(root, planned)
-    try:
-        own = vault._BatchPayloadCustody(owner.stage, owner.publication, owner.removed, owner.finished)
-        if previous is None:
-            yield own
-        else:
-            def artifact(hook, *args):
-                first, second = getattr(previous, hook)(*args), getattr(own, hook)(*args)
-                if first is not None and second is not None:
-                    raise ValueError("native artifact has two custody owners")
-                return first or second
 
-            def removed(*args):
-                previous.removed(*args)
-                own.removed(*args)
+    def finish_unsettled():
+        if not owner.settlement_attempted:
+            try:
+                owner.finished()
+            except held_fs.CustodyAcknowledgementPending:
+                pass
 
-            def finished():
-                try:
-                    if previous.finished is not None:
-                        previous.finished()
-                finally:
-                    own.finished()
+    # Callbacks preserve the caller's exception, including immutable domain errors.
+    lifetime.callback(owner.store.close)
+    lifetime.callback(finish_unsettled)
+    own = vault._BatchPayloadCustody(owner.stage, owner.publication, owner.removed, owner.finished)
+    if previous is None:
+        return own
 
-            yield vault._BatchPayloadCustody(lambda *args: artifact("stage", *args),
-                lambda *args: artifact("publication", *args), removed, finished)
-    finally:
+    def artifact(hook, *args):
+        first, second = getattr(previous, hook)(*args), getattr(own, hook)(*args)
+        if first is not None and second is not None:
+            raise ValueError("native artifact has two custody owners")
+        return first or second
+
+    def removed(*args):
+        previous.removed(*args)
+        own.removed(*args)
+
+    def finished():
         try:
-            if not owner.settlement_attempted:
-                try:
-                    owner.finished()
-                except held_fs.CustodyAcknowledgementPending:
-                    pass
+            if previous.finished is not None:
+                previous.finished()
         finally:
-            owner.store.close()
+            own.finished()
+
+    return vault._BatchPayloadCustody(lambda *args: artifact("stage", *args),
+        lambda *args: artifact("publication", *args), removed, finished)

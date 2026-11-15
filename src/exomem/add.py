@@ -905,6 +905,7 @@ def add(
                     top_index_write=top_write,
                     pending_paths=[rel_source_no_ext],
                     include_sources_index=False,
+                    generated_producer=producer,
                 )
                 if counted_top is not None:
                     derived = [(role, counted_top if write.path == counted_top.path else write) for role, write in derived]
@@ -1719,25 +1720,35 @@ def revision_activity_writes(
     the recent-activity lists and the log as a new page did. A revision adds no
     page, so the folder counts stay the ones on disk.
     """
-    page = Path(path)
-    folder = page.parent.name
-    rel_no_ext = page.with_suffix("").as_posix()
-    update = indexes.compute_updates(
-        vault_root,
-        source_type=folder.lower(),
-        folder_title=folder,
-        folder_description=source_taxonomy.load_taxonomy(vault_root).category_description(folder),
-        rel_source_path=rel_no_ext,
-        date_iso=temporal.render_date(now),
-        stamp_iso=temporal.stamp(now),
-        activity_summary=_activity_summary(
-            rel_source_no_ext=rel_no_ext, title=title, source_type=source_type, tags=[]
-        ),
-        log_entry_body=_log_entry_body(
-            title=title, source_type=source_type, url=None, tags=[], why_captured=None
-        ),
-    )
-    return _derived_index_writes(vault_root, update, top_index_content=update.top_index_content)
+    from . import generated_output_plan
+
+    with generated_output_plan.producer(vault_root) as producer:
+        page = Path(path)
+        folder = page.parent.name
+        rel_no_ext = page.with_suffix("").as_posix()
+        before_maps = producer.before_maps((indexes.sources_index_path(vault_root), kb_root(vault_root) / "index.md",
+                                            kb_root(vault_root) / "log.md")) if producer is not None else None
+        update = indexes.compute_updates(
+            vault_root,
+            source_type=folder.lower(),
+            folder_title=folder,
+            folder_description=source_taxonomy.load_taxonomy(vault_root).category_description(folder),
+            rel_source_path=rel_no_ext,
+            date_iso=temporal.render_date(now),
+            stamp_iso=temporal.stamp(now),
+            activity_summary=_activity_summary(
+                rel_source_no_ext=rel_no_ext, title=title, source_type=source_type, tags=[]
+            ),
+            log_entry_body=_log_entry_body(
+                title=title, source_type=source_type, url=None, tags=[], why_captured=None
+            ),
+            before_fragment_maps=before_maps,
+        )
+        derived = _derived_index_writes(vault_root, update, top_index_content=update.top_index_content)
+        if producer is not None:
+            for _role, write in derived:
+                producer.attach(write, update.fragment_plans[write.path.relative_to(vault_root).as_posix()])
+        return derived
 
 
 def _log_entry_body(

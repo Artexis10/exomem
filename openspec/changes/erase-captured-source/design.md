@@ -109,6 +109,8 @@ This follows [How we contain Claude](https://www.anthropic.com/research/how-we-c
 Keep one canonical slot for each generated-file locator and physical owner scope.
 Its deterministic opaque key selects the current copy directly, with at most one pending candidate copy and publication identifier.
 Read its copy records and image headers directly when rendering; a cold local index cannot block capture or erase healthy ownership evidence.
+Pending catalogue metadata retains independently witnessed positive fragments and its uncertainty horizon during read-only planning.
+Before validating a generated commit, recover bounded canonical metadata without requiring derived-index readiness; previews and preparation never recover or allocate custody.
 Reserve the candidate copy and prepare the slot before selecting its private temporary name.
 Each native publication retry prepares a fresh candidate and publication right before selecting its new temporary name.
 Before allocating that name, recheck the open canonical reservation and immutable image content; uncertainty may only increase.

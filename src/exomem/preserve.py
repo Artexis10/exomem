@@ -831,52 +831,39 @@ def preserve(
         from .governance import connector_boundary
 
         effect_admitted = connector_boundary.effect_admission(vault_root)
-        top_index = kb / "index.md"
-        if top_index.exists() and not raw_protection and effect_admitted(top_index):
-            current_top, _guard = read_guarded_text(vault_root, top_index)
-            new_top, _trim_note = indexes._prepend_recent_activity(
-                with_newline(current_top, "\n"),
-                date_iso=date_iso,
-                summary=activity_summary,
-            )
-            new_top = with_newline(new_top, document_newline(current_top))
-            # Evidence writes don't change Notes/Entities counts, but keeping
-            # the sub-index refresh in the path makes drift impossible to
-            # accumulate from any write op (cheap walk; no-op if already-fresh).
-            sub_writes, new_top_with_counts = indexes.compute_subindex_writes(
-                vault_root, top_index_write=PlannedWrite(top_index, new_top, guard=_guard,
-                                                        expected_hash=content_hash(current_top))
-            )
-            # Cap-50 trim is recorded in log.md; no per-write warning needed.
-            writes.append(
-                new_top_with_counts or PlannedWrite(
-                    path=top_index,
-                    content=new_top,
-                    expected_hash=content_hash(current_top),
-                )
-            )
-            writes.extend(sub_writes)
-        elif not raw_protection and not top_index.exists():
-            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+        from . import generated_fragments, generated_output_plan
 
-        log_file = kb / "log.md"
-        if log_file.exists() and not raw_protection and effect_admitted(log_file):
-            current_log, _guard = read_guarded_text(vault_root, log_file)
-            new_log = _prepend_log_entry(
-                current_log,
-                date_iso=stamp_iso,
-                rel_path=rel_artifact,
-                body=log_body,
-            )
-            writes.append(
-                PlannedWrite(
-                    path=log_file,
-                    content=new_log,
-                    expected_hash=content_hash(current_log),
+        with generated_output_plan.producer(vault_root, preview=raw_protection) as producer:
+            top_index = kb / "index.md"
+            if top_index.exists() and not raw_protection and effect_admitted(top_index):
+                top_write, _trims = indexes.plan_recent_activity(vault_root, ((date_iso, activity_summary),),
+                                                                generated_producer=producer)
+                # Evidence writes don't change Notes/Entities counts, but keeping
+                # the sub-index refresh in the path makes drift impossible to
+                # accumulate from any write op (cheap walk; no-op if already-fresh).
+                sub_writes, new_top_with_counts = indexes.compute_subindex_writes(
+                    vault_root, top_index_write=top_write, generated_producer=producer,
                 )
-            )
-        elif not raw_protection and not log_file.exists():
-            warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+                writes.append(new_top_with_counts or top_write)
+                writes.extend(sub_writes)
+            elif not raw_protection and not top_index.exists():
+                warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+
+            log_file = kb / "log.md"
+            if log_file.exists() and not raw_protection and effect_admitted(log_file):
+                current_log, log_guard = read_guarded_text(vault_root, log_file)
+                tracking = None
+                if producer is not None:
+                    before = producer.before(log_file)
+                    tracking = generated_fragments._Image.before(current_log, before.mapping, log_guard.expected_content_hash)
+                new_log = prepend_log_entry(current_log, date_iso=stamp_iso, op="preserve", rel_path_no_ext=rel_artifact,
+                                            body=log_body, _tracking=tracking)
+                log_write = PlannedWrite(log_file, new_log, guard=log_guard)
+                if producer is not None:
+                    producer.attach(log_write, tracking.plan(before.mapping.before_sha256))
+                writes.append(log_write)
+            elif not raw_protection and not log_file.exists():
+                warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer
 

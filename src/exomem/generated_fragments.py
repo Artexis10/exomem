@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Annotated, Literal
@@ -222,6 +222,42 @@ class _Image:
             None if self.unknown_through_epoch is None or replacement.unknown_through_epoch is None
             else max(self.unknown_through_epoch, replacement.unknown_through_epoch)
         )
+
+    def replace_ranges(self, replacements: Iterable[tuple[int, int, str]]) -> None:
+        """Apply renderer substitutions together, without copying the body once per token."""
+        pieces, starts, ends, new_starts, new_ends, deltas = [], [], [], [], [], []
+        character, old_byte, new_byte = 0, 0, 0
+        for start, end, text in sorted(replacements):
+            if not character <= start < end <= len(self.text):
+                raise ValueError("fragment_substitution_ranges_invalid")
+            retained = self.text[character:start]
+            retained_size = len(retained.encode("utf-8"))
+            old_byte += retained_size
+            new_byte += retained_size
+            starts.append(old_byte)
+            new_starts.append(new_byte)
+            old_byte += len(self.text[start:end].encode("utf-8"))
+            new_byte += len(text.encode("utf-8"))
+            ends.append(old_byte)
+            new_ends.append(new_byte)
+            deltas.append(new_byte - old_byte)
+            pieces.extend((retained, text))
+            character = end
+        pieces.append(self.text[character:])
+
+        def boundary(position: int, *, start: bool) -> int:
+            index = bisect_right(ends, position) if start else bisect_left(ends, position)
+            if index < len(ends) and starts[index] < position < ends[index]:
+                return new_ends[index] if start else new_starts[index]
+            completed = bisect_right(ends, position)
+            return position + (deltas[completed - 1] if completed else 0)
+
+        spans = []
+        for span in self.spans:
+            start, end = boundary(span.start, start=True), boundary(span.end, start=False)
+            if start < end:
+                spans.append(_Span(span.identity, span.source_ref, start, end))
+        self.text, self.spans = "".join(pieces), tuple(spans)
 
     def normalize_newlines(self) -> None:
         data = self.text.encode("utf-8")

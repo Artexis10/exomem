@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from . import (
     call_spans,
@@ -42,6 +43,9 @@ from .vault import (
 )
 
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .generated_output_plan import BoundText, GeneratedProducer
 
 RECENT_ACTIVITY_CAP = 50
 
@@ -1251,6 +1255,73 @@ def _refresh_entities_subindex_text(
     return joined
 
 
+@dataclass(frozen=True)
+class ActivityTrim:
+    text: str
+    generated: BoundText | None = None
+
+
+def plan_recent_activity(
+    root: Path, entries: Iterable[tuple[str, str]], *, generated_producer: GeneratedProducer | None = None,
+) -> tuple[PlannedWrite, tuple[ActivityTrim | None, ...]]:
+    """Render activity from guarded original bytes and retain each displaced excerpt's input."""
+    from . import generated_output_plan
+
+    path = kb_root(root) / "index.md"
+    current, guard = read_guarded_text(root, path)
+    before, tracking = None, None
+    if generated_producer is not None:
+        before = generated_producer.before(path)
+        tracking = generated_fragments._Image.before(current, before.mapping, guard.expected_content_hash)
+        tracking.normalize_newlines()
+    updated = current.replace("\r\n", "\n").replace("\r", "\n")
+    trims = []
+    for date_iso, summary in entries:
+        copied = []
+        updated, trim = _prepend_recent_activity(updated, date_iso=date_iso, summary=summary,
+                                                _tracking=tracking, _trim_fragments=copied)
+        bound = generated_output_plan.BoundText(copied[0], (before,)) if copied and before is not None else None
+        trims.append(ActivityTrim(trim, bound) if trim is not None else None)
+    newline = document_newline(current)
+    if tracking is not None:
+        tracking.restore_newlines(newline)
+        updated = tracking.text
+    else:
+        updated = updated.replace("\n", newline)
+    write = PlannedWrite(path, updated, guard=guard)
+    if generated_producer is not None:
+        generated_producer.attach(write, tracking.plan(before.mapping.before_sha256))
+    return write, tuple(trims)
+
+
+def _refresh_index_write(
+    root: Path, write: PlannedWrite, rewrite: Callable[[str, generated_fragments._Image | None], str],
+    *, generated_producer: GeneratedProducer | None, current_input: bool = False,
+    fallback_guard: PathGuard | None = None,
+) -> PlannedWrite:
+    from . import generated_output_plan
+
+    write = replace(write, guard=write.guard or fallback_guard)
+    plan = write.generated_image
+    tracking, before = None, None
+    if plan is not None:
+        tracking = generated_fragments._Image.before(write.content, plan.after, plan.after.after.image_sha256)
+    elif generated_producer is not None:
+        before = generated_producer.before(write.path)
+        # A planned rewrite without a map cannot inherit ownership merely because its bytes match.
+        tracking = generated_fragments._Image.before(write.content, before.mapping if current_input else None,
+            before.mapping.before_sha256, current_epoch=before.checkpoint)
+    text = _rewritten_in_place(write.content, lambda logical: rewrite(logical, tracking), _tracking=tracking)
+    text = _render_tracked_links(text, root, tracking)
+    result = replace(write, content=text)
+    if plan is not None:
+        result.generated_image = generated_output_plan.seal(plan.before, content=text,
+            rendered=tracking.plan(plan.before.mapping.before_sha256), inputs=plan.inputs[1:])
+    elif generated_producer is not None:
+        generated_producer.attach(result, tracking.plan(before.mapping.before_sha256))
+    return result
+
+
 def compute_subindex_writes(
     vault_root: Path,
     *,
@@ -1260,6 +1331,7 @@ def compute_subindex_writes(
     include_unchanged: bool = False,
     include_sources_index: bool = True,
     sources_counts: Mapping[str, int] | None = None,
+    generated_producer: GeneratedProducer | None = None,
 ) -> tuple[list[PlannedWrite], PlannedWrite | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
@@ -1345,27 +1417,16 @@ def compute_subindex_writes(
     # Top index counts refresh (Sources + Notes + Entities rows).
     new_top_write: PlannedWrite | None = None
     if top_index_write is not None:
-        top_index_text = top_index_write.content
-        plan = top_index_write.generated_image
-        tracking = generated_fragments._Image.before(top_index_text, plan.after,
-            plan.after.after.image_sha256) if plan is not None else None
-        new_top_text = _rewritten_in_place(
-            top_index_text,
-            lambda logical: _rewrite_top_index_notes_and_entities_counts(
+        new_top_write = _refresh_index_write(
+            vault_root, top_index_write,
+            lambda logical, tracking: _rewrite_top_index_notes_and_entities_counts(
                 _rewrite_sources_count(logical, counts=sources_counts, _tracking=tracking),
                 notes_counts=notes_counts,
                 entities_counts=entities_counts,
                 _tracking=tracking,
             ),
-            _tracking=tracking,
+            generated_producer=generated_producer,
         )
-        new_top_text = _render_tracked_links(new_top_text, vault_root, tracking)
-        new_top_write = replace(top_index_write, content=new_top_text)
-        if plan is not None:
-            from . import generated_output_plan
-
-            new_top_write.generated_image = generated_output_plan.seal(plan.before, content=new_top_text,
-                rendered=tracking.plan(plan.before.mapping.before_sha256), inputs=plan.inputs[1:])
 
     # Sources/index.md refresh.
     sources_index = sources_index_path(vault_root)
@@ -1380,23 +1441,20 @@ def compute_subindex_writes(
             # Keep guarded reading outside the rendering cost: callers may
             # discard this text while still depending on its validation.
             with call_spans.span("indexes.sources_render"):
-                new = _rewritten_in_place(
-                    base,
-                    lambda logical: _replace_by_type_section(
+                planned = _refresh_index_write(vault_root,
+                    base_write or PlannedWrite(sources_index, current, guard=guard),
+                    lambda logical, tracking: _replace_by_type_section(
                         logical,
                         folder_title="Articles",
                         folder_description=_LEGACY_FOLDER_DESCRIPTIONS["Articles"],
                         counts=sources_counts,
                         vault_root=vault_root,
+                        _tracking=tracking,
                     ),
+                    generated_producer=generated_producer, current_input=base_write is None, fallback_guard=guard,
                 )
-                new = render_wikilinks_for_vault(new, vault_root)
-            if include_unchanged or new != base:
-                writes.append(PlannedWrite(
-                    path=sources_index,
-                    content=new,
-                    guard=base_write.guard if base_write and base_write.guard else guard,
-                ))
+            if include_unchanged or planned.content != base:
+                writes.append(planned)
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
@@ -1408,22 +1466,19 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(page_relative_path(notes_index, vault_root))
             base = base_write.content if base_write is not None else current
-            new = _rewritten_in_place(
-                base,
-                lambda logical: _refresh_notes_subindex_text(
+            planned = _refresh_index_write(vault_root,
+                base_write or PlannedWrite(notes_index, current, guard=guard),
+                lambda logical, tracking: _refresh_notes_subindex_text(
                     logical,
                     counts_by_type=notes_counts,
                     counts_by_subfolder=notes_by_subfolder,
                     owners=notes_owners,
+                    _tracking=tracking,
                 ),
+                generated_producer=generated_producer, current_input=base_write is None, fallback_guard=guard,
             )
-            new = render_wikilinks_for_vault(new, vault_root)
-            if include_unchanged or new != base:
-                writes.append(PlannedWrite(
-                    path=notes_index,
-                    content=new,
-                    guard=base_write.guard if base_write and base_write.guard else guard,
-                ))
+            if include_unchanged or planned.content != base:
+                writes.append(planned)
 
     # Entities/index.md refresh.
     entities_index = entities_dir / "index.md"
@@ -1435,21 +1490,18 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(page_relative_path(entities_index, vault_root))
             base = base_write.content if base_write is not None else current
-            new = _rewritten_in_place(
-                base,
-                lambda logical: _refresh_entities_subindex_text(
+            planned = _refresh_index_write(vault_root,
+                base_write or PlannedWrite(entities_index, current, guard=guard),
+                lambda logical, tracking: _refresh_entities_subindex_text(
                     logical,
                     counts_by_type=entities_counts,
                     registry=entity_registry,
+                    _tracking=tracking,
                 ),
+                generated_producer=generated_producer, current_input=base_write is None, fallback_guard=guard,
             )
-            new = render_wikilinks_for_vault(new, vault_root)
-            if include_unchanged or new != base:
-                writes.append(PlannedWrite(
-                    path=entities_index,
-                    content=new,
-                    guard=base_write.guard if base_write and base_write.guard else guard,
-                ))
+            if include_unchanged or planned.content != base:
+                writes.append(planned)
 
     return writes, new_top_write
 

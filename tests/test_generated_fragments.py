@@ -44,6 +44,55 @@ def test_lost_or_mismatched_before_map_raises_uncertainty_to_current_checkpoint(
     assert not lost.spans and not changed.spans
 
 
+@pytest.mark.parametrize("payload", ["Café [[private 🧭]]", "![[outer [[private]] tail]]", "[[]]]", "[[open\n[[private]]"])
+def test_log_escaping_keeps_source_ranges_through_actual_delimiter_replacements(payload):
+    from exomem.vault import escape_wikilinks_for_log
+
+    reference = _reference(60)
+    image = fragments._Image(payload).own(reference)
+    identity = image.spans[0].identity
+    expected = escape_wikilinks_for_log(payload)
+    assert escape_wikilinks_for_log(payload, _tracking=image) == expected == image.text
+    plan = image.plan(_hash(payload))
+    assert plan.after.fragments[0].opaque_fragment_id == identity
+    erased, _ = fragments.remove_source_fragments(image.text, plan, reference)
+    assert erased == ""
+
+
+def test_log_quoting_retains_only_the_copied_source_excerpt():
+    from exomem.generated_output_plan import BoundText
+    from exomem.vault import prepend_log_entry
+
+    reference = _reference(61)
+    before = "# Log\r\n\r\n---\r\nExisting entry.\r\n"
+    image = fragments._Image(before)
+    body = fragments._Image.join((fragments._Image("An unrelated finding.\n\n"),
+                                  fragments._Image("Retained [[café 🧭]]\nSecond source line.").own(reference)))
+    text = prepend_log_entry(before, date_iso="2026-11-15", op="note", rel_path_no_ext="Notes/new",
+        body=body.text, provenance={"version": 1}, _tracking=image, _generated_body=BoundText(body, ()))
+    expected = prepend_log_entry(before, date_iso="2026-11-15", op="note", rel_path_no_ext="Notes/new",
+                                body=body.text, provenance={"version": 1})
+    assert text == image.text == expected
+    assert "\n" not in text.replace("\r\n", "")
+    erased, _ = fragments.remove_source_fragments(text, image.plan(_hash(before)), reference)
+    assert "café" not in erased and "Second source line" not in erased
+    assert "An unrelated finding." in erased and "Existing entry." in erased
+    assert "exomem-operation-v1" in erased
+
+
+def test_many_log_delimiters_keep_one_source_obligation():
+    from exomem.vault import escape_wikilinks_for_log
+
+    payload = "Café ![[private 🧭]] " * 3000
+    reference = _reference(62)
+    image = fragments._Image(payload).own(reference)
+    rendered = escape_wikilinks_for_log(payload, _tracking=image)
+    plan = image.plan(_hash(payload))
+    assert rendered == "Café `private 🧭` " * 3000
+    assert len(plan.after.fragments) == 1
+    assert fragments.remove_source_fragments(rendered, plan, reference)[0] == ""
+
+
 @pytest.mark.parametrize("kind", ["top", "notes", "entities"])
 def test_count_refresh_keeps_source_owned_unicode_prose_and_crlf_byte_ranges(kind):
     reference = _reference(8)

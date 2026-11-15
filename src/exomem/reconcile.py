@@ -926,15 +926,21 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
 
     # ---- 1. Index counts (recompute from disk; preserve curated text) ----
     maintenance_jobs.checkpoint("indexes")
-    with _phase_hold(vault_root, "reconcile_indexes", dry_run=dry_run):
+    from . import generated_output_plan
+
+    with _phase_hold(vault_root, "reconcile_indexes", dry_run=dry_run), generated_output_plan.producer(vault_root, preview=dry_run) as producer:
         # Counted inside the hold, so the counts it writes are the vault's as it writes them.
         top_index_path = kb / "index.md"
-        top_text = (
-            top_index_path.read_text(encoding="utf-8")
-            if top_index_path.exists() else None
-        )
+        top_text, top_write = None, None
+        if top_index_path.exists():
+            from .vault import read_guarded_text
+
+            top_text, guard = read_guarded_text(vault_root, top_index_path)
+            top_write = PlannedWrite(top_index_path, top_text, guard=guard)
+            if producer is not None:
+                producer.attach(top_write, producer.before(top_index_path).mapping)
         sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root, top_index_write=PlannedWrite(top_index_path, top_text) if top_text is not None else None
+            vault_root, top_index_write=top_write, generated_producer=producer,
         )
         writes: list[PlannedWrite] = _changed_writes(list(sub_writes))
         if new_top is not None and top_text is not None and new_top.content != top_text:

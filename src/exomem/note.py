@@ -89,7 +89,6 @@ from .vault import (
     normalize_wikilink,
     parse_frontmatter,
     plan_log_entries,
-    read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
     respell_new_path,
@@ -366,58 +365,59 @@ def _plan_navigation(root: Path, entries: Sequence[_NavigationEntry]) -> _Naviga
     files end as they do after one commit per note. The counts and the log rotation are
     decided once for the whole update.
     """
+    from . import generated_output_plan
     from .governance import connector_boundary
     from .relation_census import operation_provenance
     from .vault_store import read as store_read
 
-    writes: list[PlannedWrite] = []
-    warnings: list[str] = []
-    top_index = kb_root(root) / "index.md"
-    if not store_read.holds_file(root, top_index.relative_to(root).as_posix()):
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
-    elif connector_boundary.effect_admission(root)(top_index):
-        top_text, top_guard = read_guarded_text(root, top_index)
-        new_top = top_text
-        for entry in entries:
-            new_top, _ = indexes._prepend_recent_activity(
-                new_top, date_iso=entry.render_date, summary=entry.activity_summary
+    with generated_output_plan.producer(root) as producer:
+        writes: list[PlannedWrite] = []
+        warnings: list[str] = []
+        top_index = kb_root(root) / "index.md"
+        if not store_read.holds_file(root, top_index.relative_to(root).as_posix()):
+            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+        elif connector_boundary.effect_admission(root)(top_index):
+            top_write, _trims = indexes.plan_recent_activity(
+                root, ((entry.render_date, entry.activity_summary) for entry in entries), generated_producer=producer,
             )
-        sub_writes, counted_top = indexes.compute_subindex_writes(
-            root,
-            top_index_write=PlannedWrite(top_index, new_top, guard=top_guard),
-            pending_paths=[entry.rel_path_no_ext for entry in entries],
-            include_unchanged=True,
-        )
-        writes.append(counted_top or PlannedWrite(top_index, new_top, guard=top_guard))
-        writes.extend(sub_writes)
-    try:
-        log_plan = plan_log_entries(
-            root,
-            [
-                LogEntry(
-                    entry.stamp_iso,
-                    "note",
-                    entry.rel_path_no_ext,
-                    entry.log_body,
-                    entry.operation_token,
-                    operation_provenance(
-                        entry.preflight,
-                        predecessor_path=entry.predecessor_path,
-                        predecessor_content_hash=entry.predecessor_content_hash,
-                    ),
-                )
-                for entry in entries
-            ],
-            operation_token="\n".join(entry.operation_token for entry in entries),
-        )
-    except (OSError, UnicodeError, ValueError) as error:
-        raise NoteError(
-            "LOG_PLAN_CONFLICT", [], "note log update could not be planned safely"
-        ) from error
-    writes.extend(log_plan.writes)
-    if log_plan.warning is not None:
-        warnings.append(log_plan.warning)
-    return _NavigationPlan(tuple(writes), tuple(warnings), log_plan.rotation_note)
+            sub_writes, counted_top = indexes.compute_subindex_writes(
+                root,
+                top_index_write=top_write,
+                pending_paths=[entry.rel_path_no_ext for entry in entries],
+                include_unchanged=True,
+                generated_producer=producer,
+            )
+            writes.append(counted_top or top_write)
+            writes.extend(sub_writes)
+        try:
+            log_plan = plan_log_entries(
+                root,
+                [
+                    LogEntry(
+                        entry.stamp_iso,
+                        "note",
+                        entry.rel_path_no_ext,
+                        entry.log_body,
+                        entry.operation_token,
+                        operation_provenance(
+                            entry.preflight,
+                            predecessor_path=entry.predecessor_path,
+                            predecessor_content_hash=entry.predecessor_content_hash,
+                        ),
+                    )
+                    for entry in entries
+                ],
+                operation_token="\n".join(entry.operation_token for entry in entries),
+                generated_producer=producer,
+            )
+        except (OSError, UnicodeError, ValueError) as error:
+            raise NoteError(
+                "LOG_PLAN_CONFLICT", [], "note log update could not be planned safely"
+            ) from error
+        writes.extend(log_plan.writes)
+        if log_plan.warning is not None:
+            warnings.append(log_plan.warning)
+        return _NavigationPlan(tuple(writes), tuple(warnings), log_plan.rotation_note)
 
 
 def _build_write_feedback(

@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,6 +69,14 @@ class GeneratedImagePlan:
         self.after.after.validate_image(write.content.encode("utf-8"))
 
 
+@dataclass(frozen=True)
+class BoundText:
+    """Transient rendered bytes retain the canonical inputs of copied excerpts."""
+
+    image: generated_fragments._Image
+    inputs: tuple[GeneratedInput, ...]
+
+
 def _mapping(store: generated.GeneratedFragmentStore, header: generated.ImageHeader,
              data: bytes) -> generated_fragments.FragmentMap:
     if header.whole_source_ref is not None or header.image_size != len(data):
@@ -112,7 +120,7 @@ def read_before(store: generated.GeneratedFragmentStore, native: source_native_c
     if guard.expects_absence and binding.state == "missing":
         mapping = generated_fragments.FragmentMap(image_sha256=digest)
         horizon, unknown = binding.unknown_through_epoch, ()
-    elif binding.state == "observed":
+    elif binding.state in ("observed", "pending"):
         matches = []
         for copy in (binding.current, binding.candidate):
             if copy is None or copy.closed:
@@ -135,7 +143,11 @@ def read_before(store: generated.GeneratedFragmentStore, native: source_native_c
                     raise ValueError("generated before-image header is unavailable")
                 mapping = _mapping(store, header, data)
                 selected = native_copy_custody.CopyAllocation(copy, allocation)
-                horizon, unknown = binding.unknown_through_epoch, ()
+                if binding.state == "pending":
+                    # A complete native witness retains positive fragments; pending metadata still bounds unknown ownership.
+                    unknown = ("fragment_catalogue_pending",)
+                else:
+                    horizon, unknown = binding.unknown_through_epoch, ()
                 confirmed = native.observe(allocation.binding_id, destination=True)
                 if confirmed.matching is not True or confirmed.version != version:
                     raise ValueError("generated native before-image changed while reading its map")
@@ -214,6 +226,18 @@ class GeneratedProducer:
     def before_maps(self, paths: Iterable[Path]) -> dict[str, generated_fragments.FragmentPlan]:
         return {path.relative_to(self.store.root).as_posix(): self.before(path).mapping for path in paths}
 
+    def include(self, inputs: Iterable[GeneratedInput]) -> None:
+        catalogue_id, physical_scope = self.store.head().catalogue_id, self.native.physical_scope
+        for item in inputs:
+            if (not isinstance(item, GeneratedInput) or item._seal is not _INPUT_SEAL
+                    or item.root != self.store.root or item.catalogue_id != catalogue_id
+                    or item.physical_scope != physical_scope):
+                raise ValueError("generated text input belongs to another producer scope")
+            existing = self.inputs.get(item.path)
+            if existing is not None and existing != item:
+                raise ValueError("generated text inputs bind different versions of one path")
+            self.inputs[item.path] = item
+
     def attach(self, write: vault.PlannedWrite, rendered: generated_fragments.FragmentPlan) -> vault.PlannedWrite:
         before = self.before(write.path)
         write.generated_image = seal(before, content=write.content, rendered=rendered,
@@ -223,11 +247,11 @@ class GeneratedProducer:
 
 
 @contextmanager
-def producer(root: Path, *, initialize: bool = False) -> Iterator[GeneratedProducer | None]:
+def producer(root: Path, *, initialize: bool = False, preview: bool = False) -> Iterator[GeneratedProducer | None]:
     """Reuse existing file custody independently of current Source enrollment."""
     from .vault_store import availability
 
-    if availability.page_writer(root) is not None:
+    if preview or availability.page_writer(root) is not None:
         yield None
         return
     store = generated.GeneratedFragmentStore(root)
@@ -235,10 +259,20 @@ def producer(root: Path, *, initialize: bool = False) -> Iterator[GeneratedProdu
         if not initialize and not store.path.exists():
             yield None
             return
-        if initialize:
-            store.initialize()
-        else:
-            store.head()
-        yield GeneratedProducer(store, source_native_custody.NativeCustody(root))
+        from .writer_lease import active_manager
+
+        manager = active_manager()
+        boundary = manager._mutation_coordinator_for(root)
+        # Planning may precede the commit hold. Read under the actual boundary without advancing its write generation.
+        hold = nullcontext() if boundary.current_thread_holds_boundary() else (
+            manager.mutation_guard(root, operation="generated_inputs") if initialize
+            else manager.consistency_guard(root, operation="generated_inputs", holder_kind="producer", may_borrow=False)
+        )
+        with hold:
+            if initialize:
+                store.initialize()
+            else:
+                store.head()
+            yield GeneratedProducer(store, source_native_custody.NativeCustody(root))
     finally:
         store.close()

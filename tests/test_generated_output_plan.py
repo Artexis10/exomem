@@ -297,6 +297,28 @@ def test_new_generated_destination_rollback_retires_its_copy_and_settles_absence
     assert all(copy.destination_relative != path.name for copy in native.lookup(limit=128).reservations)
 
 
+def test_duplicate_generated_batch_leaves_no_unstarted_reservation(installed, monkeypatch):
+    store, native, _, path, _ = installed
+    text, guard = vault_module.read_guarded_text(store.root, path)
+    before = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+    plan = generated_output_plan.seal(before, content=text, rendered=before.mapping)
+    reserved = []
+    prepare = native_copy_custody.NativeCopyCustody.prepare
+
+    def recorded(owner, *args, **options):
+        result = prepare(owner, *args, **options)
+        reserved.append(result)
+        return result
+
+    monkeypatch.setattr(native_copy_custody.NativeCopyCustody, "prepare", recorded)
+    writes = [vault_module.PlannedWrite(path, text, guard=guard, generated_image=plan),
+              vault_module.PlannedWrite(path, text, guard=guard, generated_image=plan)]
+    with pytest.raises(vault_module.PathGuardError, match="destinations collide"):
+        vault_module.batch_atomic_write(writes, vault_root=store.root, post_commit_fanout=False)
+    assert all(store.copy_record(item.canonical.copy_id).value.outcome == "no_effect" for item in reserved)
+    assert path.read_bytes() == text.encode()
+
+
 def test_failed_stage_closes_a_publication_whose_native_reservation_never_started(installed, monkeypatch):
     store, native, _, _, _ = installed
     path = store.root / "not-staged.md"
