@@ -1,0 +1,165 @@
+"""Shared original custody: immutable bytes stay private and survive publication failures."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from exomem import artifact_lifecycle, held_fs, original_pool, reserved_paths, state_migration
+
+
+def test_staged_original_releases_coordination_and_never_exposes_a_generic_alias(tmp_path: Path) -> None:
+    """A slow upload must not monopolize metadata or expose its private stage through a new alias."""
+    content = b"an immutable original"
+    target = tmp_path / "Knowledge Base" / reserved_paths.ORIGINAL_POOL_DIRNAME / "sha256" / "ab" / "original.blob"
+    copied = []
+
+    def chunks():
+        assert not reserved_paths._identity_coordination_active(tmp_path, "original-pool")
+        copied.append(len(content))
+        yield content
+
+    with reserved_paths._subsystem_authority_scope("original_pool"):
+        with reserved_paths._stage_owner_chunks(tmp_path, target, "original-pool", held_fs.Chunks(chunks),
+                expected_sha256=hashlib.sha256(content).hexdigest(), expected_size=len(content)) as staged:
+            assert copied == [len(content)]
+            reserved_paths._install_staged_owner(staged)
+            with reserved_paths._open_owner_binary(tmp_path, target, "original-pool") as source:
+                assert not reserved_paths._identity_coordination_active(tmp_path, "original-pool")
+                assert source.stream.read() == content
+                source.require_current()
+            with pytest.raises(reserved_paths.ReservedPathLeafError):
+                with reserved_paths.open_generic_binary(tmp_path, target.relative_to(tmp_path).as_posix()):
+                    pytest.fail("a private original became a generic file")
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_streamed_original_rejects_exchanged_ancestor(tmp_path: Path) -> None:
+    """Renaming a grandparent must not let a held original validate against a detached directory."""
+    content = b"the original"
+    pool = tmp_path / "Knowledge Base" / reserved_paths.ORIGINAL_POOL_DIRNAME
+    target = pool / "sha256" / "ab" / "original.blob"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(content)
+    with reserved_paths._subsystem_authority_scope("original_pool"):
+        with pytest.raises(held_fs.HeldFsError, match="private parent changed"):
+            with reserved_paths._open_owner_binary(tmp_path, target, "original-pool") as source:
+                (pool / "sha256").rename(pool / "aside")
+                target.parent.mkdir(parents=True)
+                target.write_bytes(content)
+                source.require_current()
+
+
+def test_staged_original_refuses_replaced_input_before_publication(tmp_path: Path) -> None:
+    """A replaced stage must never be accepted as the verified uploaded original."""
+    content = b"the verified upload"
+    target = tmp_path / "Knowledge Base" / reserved_paths.ORIGINAL_POOL_DIRNAME / "original.blob"
+    with reserved_paths._subsystem_authority_scope("original_pool"):
+        with pytest.raises(held_fs.HeldFsError, match="private stage changed"):
+            with reserved_paths._stage_owner_chunks(tmp_path, target, "original-pool",
+                    held_fs.Chunks(lambda: [content]), expected_sha256=hashlib.sha256(content).hexdigest(),
+                    expected_size=len(content)) as staged:
+                temporary = target.with_name(staged.temporary)
+                temporary.rename(temporary.with_suffix(".aside"))
+                temporary.write_bytes(b"unverified replacement")
+                reserved_paths._install_staged_owner(staged)
+    assert not target.exists()
+
+
+def test_original_directory_flush_failure_prevents_a_binding_commit(tmp_path: Path, monkeypatch) -> None:
+    """Acknowledging a filing before its object directory is durable can lose that filing after a crash."""
+    content = b"durable original"
+    target = tmp_path / "Knowledge Base" / reserved_paths.ORIGINAL_POOL_DIRNAME / "original.blob"
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+
+    def failed_flush(self, directory):
+        return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "directory flush failed"))
+
+    monkeypatch.setattr(filesystem_type, "flush_directory", failed_flush)
+    committed = []
+    with reserved_paths._subsystem_authority_scope("original_pool"):
+        with pytest.raises(held_fs.HeldFsError, match="directory flush failed"):
+            with reserved_paths._stage_owner_chunks(tmp_path, target, "original-pool",
+                    held_fs.Chunks(lambda: [content]), expected_sha256=hashlib.sha256(content).hexdigest(),
+                    expected_size=len(content)) as staged:
+                reserved_paths._install_staged_owner(staged)
+                committed.append(target)
+    assert committed == []
+    assert target.read_bytes() == content
+
+
+def test_pool_activation_requires_launcher_custody_before_any_canonical_marker(vault, monkeypatch) -> None:
+    """An old launcher must not admit a layout that its rollback path cannot recognize."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        original_pool.enable(vault)
+    assert not original_pool.pool_root(vault).exists()
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    assert original_pool.enabled(vault)
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_concurrent_identical_uploads_publish_one_verified_original(vault, monkeypatch) -> None:
+    """Two prepared uploads can race without replacing an original or losing the second filing's bytes."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    content = b"one immutable original for independent filings"
+    digest = hashlib.sha256(content).hexdigest()
+    with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(lambda: [content])) as first:
+        with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(lambda: [content])) as second:
+            first.publish()
+            with pytest.raises(original_pool.PublicationRace):
+                second.publish()
+            assert second.confirm_existing()
+            second.publish()
+            first.require_current()
+            second.require_current()
+    assert list((original_pool.pool_root(vault) / "sha256").rglob("*.blob")) == [original_pool.object_path(vault, digest)]
+    with original_pool.open_object(vault, digest, len(content)) as source:
+        assert source.stream.read() == content
+
+
+def test_pool_hit_still_stages_all_supplied_bytes_before_filing(vault, monkeypatch) -> None:
+    """A hidden match cannot bypass the uploaded-byte allocation and integrity checks."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    content = b"the same complete upload"
+    digest = hashlib.sha256(content).hexdigest()
+    with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(lambda: [content])) as first:
+        first.publish()
+    copied = []
+
+    def chunks():
+        copied.append(len(content))
+        yield content
+
+    with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(chunks)) as second:
+        assert copied == [len(content)]
+        second.publish()
+    original_pool.object_path(vault, digest).write_bytes(b"corrupted stored bytes")
+    with pytest.raises(ValueError, match="differs from its canonical binding"):
+        with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(chunks)):
+            pytest.fail("a corrupted shared original was accepted")
+    assert copied == [len(content), len(content)]
+
+
+def test_interrupted_marker_publication_retains_compatibility_and_resumes(vault, monkeypatch) -> None:
+    """A durable format requirement must survive an unacknowledged marker publication."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    real_flush = held_fs.flush_directory_path
+
+    def interrupted(path):
+        return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "marker flush interrupted"))
+
+    monkeypatch.setattr(held_fs, "flush_directory_path", interrupted)
+    with pytest.raises(held_fs.HeldFsError, match="marker flush interrupted"):
+        original_pool.enable(vault)
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+    monkeypatch.setattr(held_fs, "flush_directory_path", real_flush)
+    original_pool.enable(vault)
+    assert original_pool.enabled(vault)

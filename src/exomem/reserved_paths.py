@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from dataclasses import replace as dataclass_replace
@@ -4342,6 +4342,169 @@ def _owner_directory_is_current(
         require_name=bool(getattr(directory, "named", False)),
     )
     return current.ok
+
+
+def _require_owner_parent(
+    filesystem: held_fs.HeldFilesystem, route: _OwnerRoute,
+    parent: held_fs.HeldDirectory,
+) -> None:
+    """Reacquire the entire rooted chain; an immediate-parent check misses exchanged ancestors."""
+    with filesystem.parent(route.held_relative.parent.as_posix()).require() as current:
+        if _identity_key(current.identity) != _identity_key(parent.identity):
+            raise held_fs.HeldFsError("IDENTITY_CHANGED", "private parent changed")
+        filesystem.validate_directory(current, require_name=bool(getattr(current, "named", False))).require()
+
+
+def _flush_owner_chain(filesystem: held_fs.HeldFilesystem, route: _OwnerRoute) -> None:
+    """Persist the leaf's directory and all ancestor entries before a canonical binding."""
+    for directory in route.held_relative.parents:
+        if directory == Path("."):
+            # Windows cannot elevate an acquired root handle; this maintained seam securely opens it.
+            held_fs.flush_directory_path(route.trust_root).require()
+            with held_fs.acquire(route.trust_root).require() as current:
+                if _identity_key(current.root_identity) != _identity_key(filesystem.root_identity):
+                    raise held_fs.HeldFsError("IDENTITY_CHANGED", "private root changed")
+        else:
+            with filesystem.parent(directory.as_posix(), access="flush").require() as parent:
+                filesystem.flush_directory(parent).require()
+
+
+@contextmanager
+def _open_owner_binary(vault_root: Path, path: Path, descriptor_id: str) -> Iterator[GenericBinarySource]:
+    """Retain an exact owner's stream without holding coordination while the caller reads."""
+    root = Path(os.path.abspath(vault_root))
+    route = _owner_relative_path(root, path, descriptor_id, operation="binary read")
+    with ExitStack() as stack:
+        with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,), identity_may_change=False):
+            filesystem = stack.enter_context(held_fs.acquire(route.trust_root).require())
+            parent = stack.enter_context(filesystem.parent(route.held_relative.parent.as_posix()).require())
+            file = stack.enter_context(filesystem.file(parent, route.held_relative.name).require())
+            version = file.version()
+            if version.identity.link_count != 1:
+                raise held_fs.HeldFsError("IDENTITY_CHANGED", "private original is ambiguous")
+            _require_owner_parent(filesystem, route, parent)
+            if not route.external:
+                _publish_owner_identity_delta(root, descriptor_id,
+                    put={route.logical_relative.as_posix(): file.identity}, remove={})
+
+        def require_current() -> None:
+            with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,), identity_may_change=False):
+                if file.version() != version:
+                    raise held_fs.HeldFsError("IDENTITY_CHANGED", "private original changed")
+                _require_owner_parent(filesystem, route, parent)
+                with filesystem.file(parent, route.held_relative.name).require() as current:
+                    if current.version() != version:
+                        raise held_fs.HeldFsError("IDENTITY_CHANGED", "private original changed")
+
+        require_current()
+        with os.fdopen(os.dup(file.descriptor), "rb") as stream:
+            yield GenericBinarySource(stream, version, require_current, file.version)
+            require_current()
+
+
+@dataclass(slots=True)
+class StagedOwnerFile:
+    """An in-process held stage; no pathname or identity supplied by a caller grants ownership."""
+
+    root: Path
+    route: _OwnerRoute
+    descriptor_id: str
+    filesystem: held_fs.HeldFilesystem
+    parent: held_fs.HeldDirectory
+    temporary: str
+    version: held_fs.FileVersion
+
+
+@contextmanager
+def _stage_owner_chunks(
+    vault_root: Path, path: Path, descriptor_id: str, data: held_fs.Chunks,
+    *, expected_sha256: str, expected_size: int,
+) -> Iterator[StagedOwnerFile]:
+    """Copy and hash all supplied bytes outside identity coordination, including on a pool hit."""
+    root = Path(os.path.abspath(vault_root))
+    route = _owner_relative_path(root, path, descriptor_id, operation="binary staging")
+    if not isinstance(data, held_fs.Chunks) or type(expected_size) is not int or expected_size < 0:
+        raise ValueError("private staging requires chunks and a nonnegative size")
+    with ExitStack() as stack:
+        with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
+            filesystem = stack.enter_context(held_fs.acquire(route.trust_root).require())
+            parent = stack.enter_context(filesystem.parent(
+                route.held_relative.parent.as_posix(), create=True, access="flush").require())
+            _require_owner_parent(filesystem, route, parent)
+            # The exact owner tree retains this stage; the generic publication family owns bare temporary names.
+            temporary = held_fs.publish_temporary_name() + ".stage"
+            writable = stack.enter_context(filesystem.file(
+                parent, temporary, access="write", create=True, exclusive=True).require())
+            identity = writable.identity
+            temporary_relative = route.logical_relative.with_name(temporary).as_posix()
+            if not route.external:
+                published = {temporary_relative: identity}
+                for directory in route.logical_relative.parents:
+                    if classify_logical(directory.as_posix()).descriptor_id == descriptor_id:
+                        with filesystem.parent(directory.as_posix()).require() as ancestor:
+                            published[directory.as_posix()] = ancestor.identity
+                _publish_owner_identity_delta(root, descriptor_id, put=published, remove={})
+        try:
+            digest, size = hashlib.sha256(), 0
+
+            def chunks() -> Iterator[bytes]:
+                nonlocal size
+                for part in data.open():
+                    size += len(part)
+                    if size > expected_size:
+                        raise ValueError("private original exceeds its declared size")
+                    digest.update(part)
+                    yield part
+
+            filesystem.write(writable, held_fs.Chunks(chunks)).require()
+            if size != expected_size or digest.hexdigest() != expected_sha256:
+                raise ValueError("private original differs from its declared bytes")
+            version = writable.version()
+            yield StagedOwnerFile(root, route, descriptor_id, filesystem, parent, temporary, version)
+        finally:
+            with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
+                _require_owner_parent(filesystem, route, parent)
+                residue = filesystem.file(parent, temporary, access="mutate")
+                if residue.ok:
+                    with residue.require() as file:
+                        if file.identity != identity:
+                            raise held_fs.HeldFsError("IDENTITY_CHANGED", "private stage changed")
+                        filesystem.unlink(file).require()
+                        filesystem.flush_directory(parent).require()
+                elif residue.error is None or residue.error.code != "MISSING":
+                    residue.require()
+                if not route.external:
+                    _publish_owner_identity_delta(root, descriptor_id, put={}, remove={temporary_relative: identity})
+
+
+def _install_staged_owner(
+    staged: StagedOwnerFile, *, verified_existing: GenericBinarySource | None = None,
+) -> held_fs.StableIdentity:
+    """Install verified bytes without replacement; this step never copies or hashes content."""
+    root, route, descriptor_id = staged.root, staged.route, staged.descriptor_id
+    _owner_relative_path(root, route.target, descriptor_id, operation="binary publication")
+    filesystem, parent = staged.filesystem, staged.parent
+    with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
+        _require_owner_parent(filesystem, route, parent)
+        with filesystem.file(parent, staged.temporary).require() as current:
+            if current.version() != staged.version:
+                raise held_fs.HeldFsError("IDENTITY_CHANGED", "private stage changed")
+        if verified_existing is not None:
+            verified_existing.require_current()
+            with filesystem.file(parent, route.held_relative.name).require() as current:
+                if current.version() != verified_existing.version:
+                    raise held_fs.HeldFsError("IDENTITY_CHANGED", "private original changed")
+                identity = current.identity
+        else:
+            identity = held_fs.install_temporary(filesystem, parent, staged.temporary,
+                route.held_relative.name, expected_identity=staged.version.identity).require()
+        # Publish identity before flushing: uncertain durability still owns the physical file.
+        if not route.external:
+            _publish_owner_identity_delta(root, descriptor_id,
+                put={route.logical_relative.as_posix(): identity}, remove={})
+        _flush_owner_chain(filesystem, route)
+        _require_owner_parent(filesystem, route, parent)
+        return identity
 
 
 @contextmanager
