@@ -1321,7 +1321,8 @@ class WorkerRuntime:
             f"{socket_path.stem}-standby{socket_path.suffix}"
         )
         self.standby_capable = False
-        self.lifecycle_argument_capable = False
+        #: Each inspected release's accepted lifecycle launch arguments, by (interpreter, version).
+        self._lifecycle_formats: dict[tuple[str, str], frozenset[str]] = {}
         # The exact verified candidate, its optional state support, its store schema ceiling,
         # the offline migrations its own migrator runs and its own state verdict.
         self._verified_state_compatibility: tuple[
@@ -1538,11 +1539,13 @@ class WorkerRuntime:
             "except Exception:\n"
             "    store_schema = None\n"
             + _STATE_DECLARATIONS_PROBE
+            # The lifecycle formats the target's worker accepts as launch arguments; a release
+            # before the argument accepts none, so its command must never carry one.
             + "try:\n"
-            + "    from exomem.service_manager import lifecycle_state_compatibility_ids as _lifecycle_ids\n"
-            + "    lifecycle_argument = True\n"
+            + "    from exomem.artifact_lifecycle import LIFECYCLE_IDS as _lifecycle_ids\n"
+            + "    lifecycle_formats = sorted(_lifecycle_ids)\n"
             + "except ImportError:\n"
-            + "    lifecycle_argument = False\n"
+            + "    lifecycle_formats = []\n"
             # The target's verdict on this vault's state, computed by the target's own
             # release: the supervisor never interprets format ids itself, so a launcher
             # that predates a recorded format still starts the worker that wrote it.
@@ -1557,7 +1560,7 @@ class WorkerRuntime:
             '"standby":standby,"state_descriptors":descriptors,'
             '"supported_state_compatibility":compatibility,"store_schema":store_schema,'
             '"offline_migrations":migrations,"state_verdict":state_verdict,'
-            '"lifecycle_argument":lifecycle_argument}))'
+            '"lifecycle_formats":lifecycle_formats}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -1614,7 +1617,13 @@ class WorkerRuntime:
             # verdict, leaves the supervisor's own read as the fallback.
             verdict = None
         self.standby_capable = actual.get("standby") is True
-        self.lifecycle_argument_capable = actual.get("lifecycle_argument") is True
+        formats = actual.get("lifecycle_formats")
+        # Kept per exact release: a restart of an older active worker must not inherit a newer target's.
+        self._lifecycle_formats[(interpreter, version)] = (
+            frozenset(formats)
+            if isinstance(formats, list) and all(isinstance(entry, str) and entry for entry in formats)
+            else frozenset()
+        )
         self._verified_state_compatibility = (
             (interpreter, version, tuple(descriptors)),
             frozenset(compatibility),
@@ -1915,9 +1924,9 @@ class WorkerRuntime:
         ]
         if standby:
             command.append("--standby")
-        if self.lifecycle_argument_capable:
-            for format_id in lifecycle_state_compatibility_ids():
-                command.extend(["--lifecycle-state-compatibility", format_id])
+        accepted = self._lifecycle_formats.get((target["python"], target["version"]), frozenset())
+        for format_id in sorted(set(lifecycle_state_compatibility_ids()) & accepted):
+            command.extend(["--lifecycle-state-compatibility", format_id])
         return command
 
     async def _probe(self, client: Any, target: dict[str, Any]) -> dict[str, Any]:

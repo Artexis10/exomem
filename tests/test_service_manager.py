@@ -2706,3 +2706,27 @@ def test_cancellation_cleanup_does_not_relax_another_format_admission(tmp_path, 
     with pytest.raises(ValueError, match="other required state formats"):
         runtime.cancellation_cleanup_required(target)
     assert state_migration.COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_restarting_an_older_active_worker_omits_a_newer_targets_lifecycle_arguments(tmp_path, candidate_runtime):
+    """A refused upgrade must not leave a crashed older worker unable to parse its restart command."""
+    from exomem import state_migration
+
+    runtime, actual = candidate_runtime
+    cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
+    actual["version"] = "1.0.0"  # a release from before the lifecycle argument: its probe reports none
+    older = asyncio.run(runtime.inspect({"python": sys.executable, "version": "1.0.0"}))
+    actual.update(version="1.2.3", lifecycle_formats=[cancellation])
+    newer = asyncio.run(runtime.inspect({"python": sys.executable, "version": "1.2.3"}))
+    commands = []
+
+    async def spawn(command, **kwargs):
+        commands.append(command)
+        raise RuntimeError("spawn captured")
+
+    runtime._spawn = spawn
+    for target in (older, newer):
+        with pytest.raises(RuntimeError, match="spawn captured"):
+            asyncio.run(runtime.start(target, timeout=1))
+    assert "--lifecycle-state-compatibility" not in commands[0]
+    assert commands[1][commands[1].index("--lifecycle-state-compatibility") + 1] == cancellation

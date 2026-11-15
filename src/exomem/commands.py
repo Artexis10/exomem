@@ -9748,6 +9748,14 @@ def op_transfer_artifact(
             raise ValueError(
                 f"INVALID_MODE: cancellation takes 1 to {held_uploads.HOLD_MAX_COUNT} held-upload references only"
             )
+        malformed = [index for index, reference in enumerate(uploads)
+                     if not held_uploads.is_cancellable_reference(reference)]
+        if malformed:
+            # Checked before any cancellation, so a rejected batch changes nothing and fetches nothing.
+            raise ValueError(
+                f"INVALID_MODE: uploads[{malformed[0]}] is not a held-upload handle; submit the "
+                f"{held_uploads.HELD_SCHEME} reference that the held upload returned, not a URL or file id"
+            )
         outcomes = []
         for index, reference in enumerate(uploads):
             try:
@@ -14588,6 +14596,14 @@ def writes_through_superseded_maintenance_leaf(command: Command, kwargs: dict[st
     return _resolved_invocation_selector(command, kwargs, "dry_run") is not True
 
 
+def invocation_writes_outside_writer(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Whether a write skips canonical writer custody because it changes only session-private bytes.
+
+    The lease treats it as a read; read-only cells and the call ledger still treat it as a write.
+    """
+    return command.name == "transfer_artifact" and kwargs.get("operation") == "cancel"
+
+
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """Classify one resolved product-command invocation for lease gating.
 
@@ -14597,8 +14613,7 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """
     if command.read_only:
         return True
-    if command.name == "transfer_artifact" and kwargs.get("operation") == "cancel":
-        # Cancellation changes only session-private temporary bytes, outside canonical writer custody.
+    if invocation_writes_outside_writer(command, kwargs):
         return True
     if command.name == "maintain_memory" and kwargs.get("mode") == "curation":
         from . import curation as curation_module

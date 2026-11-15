@@ -1,6 +1,6 @@
 # Proposal
 
-This change specifies a managed shared-originals folder and explicit held-upload cancellation. It remains design-only until its implementation is authorized.
+This change specifies a managed shared-originals folder and explicit held-upload cancellation. Its implementation is authorized; cancellation ships first.
 
 ## Why
 

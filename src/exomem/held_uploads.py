@@ -148,13 +148,21 @@ def _finish_cancellation(store: Path, key: str, marker: Path) -> None:
     private_state.sync_directory(store)
 
 
+def marker_key(marker: Path) -> str | None:
+    """The storage key a cancellation marker names, or None for a file this store never wrote."""
+    key = marker.name.removesuffix(_CANCELLING_SUFFIX)
+    # Storage keys have the closed SHA-256 hex filename format; malformed state owns no other path.
+    if len(key) == 64 and all(character in "0123456789abcdef" for character in key):
+        return key
+    return None
+
+
 def _sweep(store: Path, now: float) -> None:
     """Drop expired holds and anything a crashed hold or claim left behind."""
     for meta_path in store.glob("*.json"):
         if meta_path.name.endswith(_CANCELLING_SUFFIX):
-            key = meta_path.name.removesuffix(_CANCELLING_SUFFIX)
-            # Cleanup keys have the SHA-256 filename format; malformed state owns no other path.
-            if len(key) == 64 and all(character in "0123456789abcdef" for character in key):
+            key = marker_key(meta_path)
+            if key is not None:
                 try:
                     _finish_cancellation(store, key, meta_path)
                 except OSError:
@@ -301,15 +309,31 @@ def hold(
     }
 
 
+def is_cancellable_reference(value: object) -> bool:
+    """Whether a value has the held-upload handle form; it proves no ownership."""
+    return is_held_reference(value) and _SECRET.fullmatch(value[len(HELD_SCHEME):]) is not None
+
+
 def cancel(vault_root: Path, reference: str) -> int:
-    """Cancel owned waiting bytes only after the launcher has settled older workers."""
+    """Cancel owned waiting bytes only after the launcher has settled older workers.
+
+    The format activates only once this session's ownership is proven, so unknown,
+    foreign and malformed handles never add a downgrade step.
+    """
     from . import artifact_lifecycle, state_migration
 
-    if not _bindings():
+    bindings = _bindings()
+    if not bindings or not is_cancellable_reference(reference):
         raise _unavailable()
+    key = _key(reference[len(HELD_SCHEME):])
+    try:
+        # A lock-free read: `_cancel` proves ownership again under the claim boundary.
+        _owned(_store(vault_root), key, bindings)
+    except OSError:
+        raise _unavailable() from None
     try:
         artifact_lifecycle.activate_cancellation(vault_root)
-    except FileLockTimeout:
+    except TimeoutError:
         raise HeldUploadError("HELD_UPLOAD_BUSY", "upload ownership is busy; retry this handle") from None
     except state_migration.StateMigrationOfflineRequired:
         raise HeldUploadError(
@@ -323,43 +347,49 @@ def cancel(vault_root: Path, reference: str) -> int:
     return _cancel(vault_root, reference)
 
 
+def _owned(store: Path, key: str, bindings: tuple[str, ...]) -> tuple[Path, Path, int]:
+    """Return the owning metadata, its marker path and charge, or raise unavailable.
+
+    A surviving marker is owned work to finish; an active record must be unexpired with its payload.
+    """
+    active = store / f"{key}.json"
+    marker = store / f"{key}{_CANCELLING_SUFFIX}"
+    metadata = marker if marker.exists() else active
+    try:
+        record = json.loads(metadata.read_text(encoding="utf-8"))
+        bound = str(record["binding"]).encode("utf-8")
+        size = record["size"]
+        expires = float(record["expires"])
+    except (OSError, ValueError, KeyError, TypeError):
+        raise _unavailable() from None
+    if not any(hmac.compare_digest(bound, binding.encode("utf-8")) for binding in bindings):
+        raise _unavailable()
+    if type(size) is not int or size < 0 or not math.isfinite(expires) or expires <= 0:
+        raise _unavailable()
+    if metadata is active and (expires <= _now() or not (store / f"{key}.bin").is_file()):
+        raise _unavailable()
+    return metadata, marker, size
+
+
 def _cancel(vault_root: Path, reference: str) -> int:
     """Cancel one owned unclaimed hold; the lifecycle-admitted leaf owns exposure.
 
     Return only its confirmed quota charge. Never inspect unrelated uploads or
     wait for the claim lock. Unavailable and failed operations claim no release.
     """
-    secret = reference[len(HELD_SCHEME):] if is_held_reference(reference) else ""
     bindings = _bindings()
-    if not bindings or _SECRET.fullmatch(secret) is None:
+    if not bindings or not is_cancellable_reference(reference):
         raise _unavailable()
+    key = _key(reference[len(HELD_SCHEME):])
     try:
         store = _store(vault_root)
         with FileLock(store / ".lock", timeout=0):
-            key = _key(secret)
-            active = store / f"{key}.json"
-            marker = store / f"{key}{_CANCELLING_SUFFIX}"
-            committed = marker.exists()
-            metadata = marker if committed else active
-            try:
-                record = json.loads(metadata.read_text(encoding="utf-8"))
-                bound = str(record["binding"]).encode("utf-8")
-                size = record["size"]
-                expires = float(record["expires"])
-            except (OSError, ValueError, KeyError, TypeError):
-                raise _unavailable() from None
-            if not any(hmac.compare_digest(bound, binding.encode("utf-8")) for binding in bindings):
-                raise _unavailable()
-            if type(size) is not int or size < 0 or not math.isfinite(expires) or expires <= 0:
-                raise _unavailable()
-            if not committed:
-                payload = store / f"{key}.bin"
-                if expires <= _now() or not payload.is_file():
-                    raise _unavailable()
+            metadata, marker, size = _owned(store, key, bindings)
+            if metadata != marker:
                 # Windows requires a writable handle to flush the record; its contents stay unchanged.
-                with active.open("r+b") as source:
+                with metadata.open("r+b") as source:
                     os.fsync(source.fileno())
-                os.rename(active, marker)
+                os.rename(metadata, marker)
             _finish_cancellation(store, key, marker)
             return size
     except FileLockTimeout:

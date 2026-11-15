@@ -737,19 +737,14 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         parser.error("--root requires --handoff-file")
     args.lane = args.lane or "evidence"
 
-    token_file = args.token_file or os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
-    raw_port = str(args.port or os.environ.get("EXOMEM_LOCAL_PORT", "")).strip()
-    if not token_file:
-        parser.error("a local client token file is required (--token-file or EXOMEM_LOCAL_TOKEN_FILE)")
-    if not raw_port.isascii() or not raw_port.isdigit() or not 0 < int(raw_port) < 65536:
-        parser.error("a valid local port is required (--port or EXOMEM_LOCAL_PORT)")
+    from .local_transfer_client import LocalListenerUnset, local_listener
+
     try:
-        token = Path(token_file).expanduser().read_text(encoding="ascii").strip()
-    except (OSError, UnicodeDecodeError):
-        print("attach: the local client token file could not be read", file=sys.stderr)
-        return 2
-    if not token:
-        print("attach: the local client token file is empty", file=sys.stderr)
+        token, port = local_listener(args.token_file, args.port)
+    except LocalListenerUnset as error:
+        parser.error(str(error))
+    except ValueError as error:
+        print(f"attach: {error}", file=sys.stderr)
         return 2
     source = Path(args.file).expanduser()
     if not source.is_file():
@@ -782,7 +777,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
 
     from .upload_sessions import MAX_PATCH_BYTES
 
-    base = f"http://127.0.0.1:{int(raw_port)}"
+    base = f"http://127.0.0.1:{port}"
     timeout = httpx.Timeout(30.0, read=300.0, write=300.0)
     if hold or not (args.resumable or source.stat().st_size > MAX_PATCH_BYTES):
         try:
@@ -802,7 +797,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
                     data=fields,
                 )
         except (httpx.ConnectError, httpx.ConnectTimeout):
-            print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+            print(f"attach: the local listener on 127.0.0.1:{port} is unreachable", file=sys.stderr)
             return 1
         except httpx.HTTPError:
             # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
@@ -827,7 +822,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         ) as client:
             return _attach_resumable(client, base, token, source, name, fields)
     except (httpx.ConnectError, httpx.ConnectTimeout):
-        print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+        print(f"attach: the local listener on 127.0.0.1:{port} is unreachable", file=sys.stderr)
         return 1
     except httpx.HTTPError:
         print("attach: the upload was interrupted; run the same command again to resume",
@@ -5083,6 +5078,12 @@ def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
     args = parser.parse_args(argv)
     cmd = cmds[args.op]
     as_json = getattr(args, "json", False)
+    if cmd.name == "transfer_artifact" and not local_cancellation:
+        if getattr(args, "operation", None) == "cancel":
+            # The transport selector reads only the full spelling; an abbreviation must not run in-process.
+            parser.error("spell --operation cancel in full")
+        if args.token_file or args.port:
+            parser.error("--token-file and --port apply only to --operation cancel")
 
     try:
         raw = _collect_raw_args(cmd, args, parser)

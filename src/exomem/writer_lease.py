@@ -8720,6 +8720,7 @@ def invoke_command(
     from .commands import (
         invocation_is_audit,
         invocation_is_read_only,
+        invocation_writes_outside_writer,
         validate_process_media_operation,
         writes_through_superseded_maintenance_leaf,
     )
@@ -8760,7 +8761,7 @@ def invoke_command(
         selector_error = error
         read_only = False
 
-    if not read_only:
+    if not read_only or invocation_writes_outside_writer(command, kwargs):
         from . import cloud_cell
 
         if cloud_cell.cloud_read_only_enabled():

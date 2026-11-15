@@ -474,14 +474,14 @@ def test_only_one_concurrent_request_can_claim_a_ticket(upload_env):
     asyncio.run(send())
 
 
-def test_old_launcher_cannot_activate_cancellation_from_an_inherited_environment(upload_env, monkeypatch):
+def test_a_worker_whose_launcher_declared_nothing_cannot_activate_cancellation(upload_env, monkeypatch):
     """A new worker under an old launcher must keep held bytes redeemable."""
     from exomem import artifact_lifecycle, state_migration
 
     vault, who, *_ = upload_env
     held = _post(upload_env, _prepare(upload_env)).json()
-    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
-    monkeypatch.setenv("EXOMEM_LIFECYCLE_STATE_COMPATIBILITY", state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    artifact_lifecycle.claim_launcher_support(None)  # an old launcher passes no lifecycle argument
     with principal.request_scope(who):
         with pytest.raises(held_uploads.HeldUploadError) as refused:
             held_uploads.cancel(vault, held["file"]["download_url"])
@@ -491,6 +491,74 @@ def test_old_launcher_cannot_activate_cancellation_from_an_inherited_environment
         assert held_uploads.restore(vault, claimed)
     assert not list(held_uploads._store(vault).glob("*.cancelling.json"))
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_a_newer_launchers_unknown_lifecycle_formats_do_not_stop_this_worker(monkeypatch):
+    """A later launcher declares formats this release never wrote; a downgrade must still start."""
+    from exomem import artifact_lifecycle, state_migration
+
+    cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    artifact_lifecycle.claim_launcher_support([cancellation, "a-later-format-v1"])
+    assert artifact_lifecycle.supports(cancellation)
+    assert not artifact_lifecycle.supports("a-later-format-v1")
+
+
+def test_unknown_and_foreign_handles_never_record_the_cancellation_format(upload_env, monkeypatch):
+    """Only proven ownership may add a step to every later downgrade."""
+    from exomem import artifact_lifecycle, state_migration
+
+    vault, who, *_ = upload_env
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    monkeypatch.setattr(artifact_lifecycle, "_activated", set())
+    with principal.request_scope(who):
+        with pytest.raises(held_uploads.HeldUploadError) as unknown:
+            held_uploads.cancel(vault, held_uploads.HELD_SCHEME + "x" * 43)
+    assert unknown.value.code == "HELD_UPLOAD_UNAVAILABLE"
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in (
+        state_migration.recorded_descriptor_ids(vault) or ()
+    )
+
+
+def test_a_url_in_a_cancellation_batch_names_the_handle_and_cancels_nothing(upload_env, monkeypatch):
+    """An agent that passes the attachment URL learns what to send instead; its real hold survives."""
+    from exomem import artifact_lifecycle, commands, state_migration
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    monkeypatch.setattr(artifact_lifecycle, "_activated", set())
+    with principal.request_scope(who):
+        with pytest.raises(ValueError, match=r"uploads\[1\].*exomem-held:"):
+            commands.op_transfer_artifact(
+                vault, operation="cancel",
+                uploads=[held["file"]["download_url"], "https://files.example/report.pdf"],
+            )
+        claimed = held_uploads.redeem(vault, held["file"]["download_url"], lane="source")
+        assert held_uploads.restore(vault, claimed)
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in (
+        state_migration.recorded_descriptor_ids(vault) or ()
+    )
+
+
+def test_a_read_only_cloud_cell_refuses_cancellation_before_deleting_bytes(upload_env, monkeypatch):
+    """Read-only mode refuses every mutation, including writes outside canonical writer custody."""
+    from exomem import artifact_lifecycle, commands, writer_lease
+    from exomem.cli_ops import OpError
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    monkeypatch.setattr(artifact_lifecycle, "_activated", set())
+    monkeypatch.setenv("EXOMEM_CLOUD_READ_ONLY", "1")
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "transfer_artifact")
+    with principal.request_scope(who):
+        with pytest.raises(OpError) as refused:
+            writer_lease.invoke_command(command, vault, operation="cancel", uploads=[held["file"]["download_url"]])
+        assert refused.value.code == "CLOUD_CELL_READ_ONLY"
+        claimed = held_uploads.redeem(vault, held["file"]["download_url"], lane="source")
+        assert claimed.path.read_bytes() == b"exact original\n"
+        assert held_uploads.restore(vault, claimed)
 
 
 @pytest.mark.parametrize("managed_worker", [False, True])

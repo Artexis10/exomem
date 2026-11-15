@@ -186,3 +186,13 @@ def test_cli_forwards_the_protected_authorization_session_only_to_the_local_list
     assert credential not in body
     assert credential not in output.out + output.err
     assert json.loads(output.out)["data"]["cancelled"] == 1
+
+
+def test_an_abbreviated_cancel_selector_is_refused_instead_of_running_in_process(capsys):
+    """An abbreviation would skip the holding client's listener and report its live hold as unavailable."""
+    import pytest
+
+    with pytest.raises(SystemExit) as refused:
+        _core_op_main(["transfer_artifact", "--oper", "cancel", "--uploads", held_uploads.HELD_SCHEME + "x" * 43])
+    assert refused.value.code == 2
+    assert "--operation cancel in full" in capsys.readouterr().err

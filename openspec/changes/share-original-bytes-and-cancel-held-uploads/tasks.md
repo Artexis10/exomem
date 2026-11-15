@@ -1,6 +1,6 @@
 # Tasks
 
-All tasks describe future implementation. This design authorizes no code changes, live conversion, fold, or cleanup.
+The operator authorized implementation and release of both capabilities. Held-upload cancellation ships first; shared original storage follows in its own release. No task authorizes live conversion, fold, or cleanup of an existing archive.
 
 ## 1. Canonical pool and original resolution
 
