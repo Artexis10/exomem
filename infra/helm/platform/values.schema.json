@@ -439,7 +439,7 @@
         }
       },
       "allOf": [
-        {"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"endpoint": {"minLength": 1}, "bucket": {"minLength": 1}, "bucketId": {"minLength": 1}}}},
+        {"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"endpoint": {"minLength": 1}, "bucket": {"minLength": 1}, "bucketId": {"minLength": 1}, "state": {"properties": {"storageClassName": {"type": "string", "minLength": 1}}}}}},
         {"if": {"properties": {"cellIds": {"minItems": 1}}}, "then": {"properties": {"enabled": {"const": true}}}},
         {"if": {"properties": {"allCells": {"const": true}}}, "then": {"properties": {"enabled": {"const": true}}}},
         {"if": {"properties": {"collectCells": {"minItems": 1}}}, "then": {"properties": {"enabled": {"const": true}}}}
