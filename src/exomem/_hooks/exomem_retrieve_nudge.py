@@ -2432,6 +2432,9 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     room = max_chars - len(action) - (1 if action else 0) - len(reset) - (1 if reset else 0)
     stance_text, stance_complete = _format_stance_block(packet.get("stance"), room, last_stance)
     room -= len(stance_text) + (1 if stance_text else 0)
+    # The service records an upkeep item delivered when it attaches it, so a packet that carries one must show it.
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room))
+    room -= len(upkeep) + (1 if upkeep else 0)
     text, complete = _format_map_block(packet["map"], room, last_generation)
     room -= len(text) + (1 if text else 0)
     # Priority is routes, then the turn slice, then links: the server protects the slice before leads and links.
@@ -2441,7 +2444,7 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     spare = max(0, room - routes_cost - len(turn) - (1 if turn else 0))
     task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
     skills_text = _format_skills_block(packet.get("skills"))
-    return "\n".join(part for part in (reset, stance_text, skills_text, text, task, turn, action) if part), complete, stance_complete
+    return "\n".join(part for part in (reset, stance_text, upkeep, skills_text, text, task, turn, action) if part), complete, stance_complete
 
 
 def _map_is_held(block: dict, last_generation: str) -> bool:
@@ -2460,9 +2463,12 @@ def _format_session_context(packet: dict, max_chars: int, last_generation: str, 
     room = max_chars
     stance_text, stance_complete = ("", True) if _stance_is_held(packet.get("stance"), last_stance) else _format_stance_block(packet.get("stance"), room, last_stance)
     room -= len(stance_text) + (1 if stance_text else 0)
+    # The service records an upkeep item delivered when it attaches it, so a packet that carries one must show it.
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room))
+    room -= len(upkeep) + (1 if upkeep else 0)
     map_text, complete = ("", True) if _map_is_held(packet["map"], last_generation) else _format_map_block(packet["map"], room, last_generation)
     skills_text = _format_skills_block(packet.get("skills"))
-    return "\n".join(part for part in (stance_text, skills_text, map_text) if part), complete, stance_complete
+    return "\n".join(part for part in (stance_text, upkeep, skills_text, map_text) if part), complete, stance_complete
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
