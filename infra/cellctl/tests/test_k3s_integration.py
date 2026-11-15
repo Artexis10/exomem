@@ -2368,6 +2368,7 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
         "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
         "--set-json", f'artifactBroker.cellIds=["{labelled_id}"]',
         "--set", "mediaEdge.enabled=true",
+        "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
         "--set-string", f"mediaEdge.endpoint={endpoint}",
         "--set-string", "mediaEdge.bucket=media-bucket",
         "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
@@ -2456,6 +2457,7 @@ def test_cellctl_may_write_only_the_deletion_grants_config_map_and_its_one_key(k
         "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
         "--set-json", f'artifactBroker.cellIds=["{_cell_id()}"]',
         "--set", "mediaEdge.enabled=true",
+        "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
         "--set-string", "mediaEdge.endpoint=http://10.43.0.30:8769",
         "--set-string", "mediaEdge.bucket=media-bucket",
         "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
@@ -2520,6 +2522,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
     endpoint = "http://10.43.0.30:8769"
     documents = _render_platform("templates/cellctl.yaml", settings=(
         "--set", "mediaEdge.enabled=true",
+        "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
         "--set-string", f"artifactBroker.image={image}",
         "--set-string", f"mediaEdge.endpoint={endpoint}",
         "--set-string", "mediaEdge.bucket=media-bucket",

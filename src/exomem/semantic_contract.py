@@ -3424,6 +3424,8 @@ def build_corpus_context_with_census(
                 return memo[2], census
         previous = memo[0].pages if memo is not None else {}
         reused = memo[3] if memo is not None else {}
+        # A filter turns the memo off, so it decides every page: as one set, under one snapshot.
+        admitted = None if visible is None else egress.admitted(visible, context.pages)
         states = {
             path: (
                 reused[path]
@@ -3431,7 +3433,7 @@ def build_corpus_context_with_census(
                 else enrich_page_state(root, state, basis, type_basis, relation_definitions=registry,
                                        language=language_registry, require_status=False,
                                        definitions_selection=selection)
-                if visible is None or visible(path)
+                if admitted is None or path in admitted
                 else state
             )
             for path, state in context.pages.items()
@@ -5191,17 +5193,25 @@ def _relation_disposition(
             rejected.append(RejectedRelationFact(fact, result.reasons))
     review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
-    other_governed = corpus.eligible_governed_paths - {page.path}
-    other_unknown = corpus.status_unavailable_paths - {page.path}
-    if visible is not None:
-        other_governed = frozenset(path for path in other_governed if visible(path))
-        other_unknown = frozenset(path for path in other_unknown if visible(path))
+
+    def _any_seen(paths: frozenset[str]) -> bool:
+        """Whether the writer may see any of `paths`.
+
+        Only the bootstrap branches ask, and only whether one exists: the pages are decided in
+        path order under one snapshot, up to the first that the writer may see.
+        """
+        if visible is None or not paths:
+            return bool(paths)
+        from .governance import egress
+
+        with egress.release_decision_context(corpus.vault_root):
+            return any(visible(path) for path in sorted(paths))
 
     def _no_other_governed(governed: frozenset[str], unknown: frozenset[str]) -> bool:
         # "No other governed page" is undecided while a page's class is unavailable.
-        if governed:
+        if _any_seen(governed):
             return False
-        if unknown:
+        if _any_seen(unknown):
             lifecycle_statuses.Classification(None).require()
         return True
 
@@ -5312,7 +5322,10 @@ def _relation_disposition(
         review_is_current
         and review is not None
         and review.kind == "bootstrap"
-        and _no_other_governed(other_governed, other_unknown)
+        and _no_other_governed(
+            corpus.eligible_governed_paths - {page.path},
+            corpus.status_unavailable_paths - {page.path},
+        )
     ):
         return RelationDisposition(
             "bootstrap",
@@ -5322,25 +5335,20 @@ def _relation_disposition(
             review_reason=review.reason,
             review_reference=review.reference,
         )
-    before_governed = before_corpus.eligible_governed_paths
-    after_governed = corpus.eligible_governed_paths
-    before_unknown = before_corpus.status_unavailable_paths
-    after_unknown = corpus.status_unavailable_paths - {page.path}
-    if visible is not None:
-        # A writer that sees no governed page bootstraps its first one, as in
-        # a vault without the pages withheld from it.
-        before_governed = frozenset(path for path in before_governed if visible(path))
-        after_governed = frozenset(path for path in after_governed if visible(path))
-        before_unknown = frozenset(path for path in before_unknown if visible(path))
-        after_unknown = frozenset(path for path in after_unknown if visible(path))
+    # A writer that sees no governed page bootstraps its first one, as in a vault without the pages
+    # withheld from it. The governed pages it sees after the write are this page alone.
     automatic_bootstrap = (
         review is None
         and mode == "precommit"
         and operation in _CREATE_LIKE
         and before is None
-        and after_governed == frozenset({page.path})
-        and _no_other_governed(before_governed, before_unknown)
-        and _no_other_governed(frozenset(), after_unknown)
+        and page.path in corpus.eligible_governed_paths
+        and (visible is None or visible(page.path))
+        and not _any_seen(corpus.eligible_governed_paths - {page.path})
+        and _no_other_governed(
+            before_corpus.eligible_governed_paths, before_corpus.status_unavailable_paths
+        )
+        and _no_other_governed(frozenset(), corpus.status_unavailable_paths - {page.path})
     )
     if automatic_bootstrap:
         return RelationDisposition(

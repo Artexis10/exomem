@@ -66,17 +66,23 @@ procedure instead of `kubectl`.
 2. Pick a free address in the Service range for the edge. Record it.
 3. Set these values and deploy the chart:
    `mediaEdge.enabled=true`, `mediaEdge.endpoint=http://<address>:8769`,
-   `mediaEdge.bucket=<bucket>`, `mediaEdge.bucketId=<bucket id>`, `mediaEdge.cellIds=["<canary>"]`.
+   `mediaEdge.bucket=<bucket>`, `mediaEdge.bucketId=<bucket id>`, `mediaEdge.cellIds=["<canary>"]`,
+   `mediaEdge.state.storageClassName=exomem-cloud-encrypted`.
    Take the bucket name and ID from the `cloud_media_bucket_name` and `cloud_media_bucket_id` outputs.
-   If the cluster has no default StorageClass (`kubectl get storageclass` marks none "(default)"), also set
-   `mediaEdge.state.storageClassName` to an existing class, such as the one the cells' `cell-data` claims use.
-   Without a class, the edge's state volume never binds and its pod stays Pending.
+   The storage class is required: these clusters have no default StorageClass. Usually use
+   `exomem-cloud-encrypted`, the class of the cells' `cell-data` claims. Without a class, the schema refuses the render.
    `mediaEdge.physicalHeadroom` defaults to 2: cellctl alerts when a cell's prefix holds more than
    `mediaEdge.storePolicy.allowance_bytes` times that factor. It is a starting figure. Change it from
    the readings in the cellctl log line `holds <n> media byte(s)` once a canary has run for a month.
 4. Check that `exomem-media-edge` is Ready and that its Service address matches `mediaEdge.endpoint`.
 5. Check that ConfigMap `exomem-media-edge-active-set` lists the canary in `active-set.json`.
-6. Wait for cellctl to re-render the canary. Check that its Secret `cell-credentials` has the keys
+6. Wait for cellctl to re-render the canary; expect the new keys in its Secret `cell-credentials`.
+   cellctl re-applies a changed render digest only when the cell is due in its one-hour UTC upgrade window,
+   controlled by `cellctl.upgradeWindow.*`. A cell with no MCP request since startup never counts as idle.
+   It re-renders only during the window's last `forceMinutes`, so the wait can reach one day.
+   Set `CANARY_CELL_ID` to the ID from step 1, then read the StatefulSet's `exomem.io/upgrade-window` annotation:
+   `kubectl -n "exo-cell-$CANARY_CELL_ID" get statefulset -o 'jsonpath={.items[*].metadata.annotations.exomem\.io/upgrade-window}'`
+   After the render, expect the keys
    `media-edge-credential`, `media-age-identity`, `media-name-key` and `media-store.json`.
 7. Check that the canary's namespace carries the label that opens the network to the edge:
    `kubectl get namespace exo-cell-<canary> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
@@ -87,6 +93,24 @@ procedure instead of `kubectl`.
 
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and
 the canary reads and writes media through the edge.
+
+Offload runs with the chart's default store policy. Eviction stays off until the operator sets all six keys
+below in `mediaEdge.storePolicy`. The chart sets none of them. The canary's target, margin and minimum idle age are set after two to four
+weeks of its hydration records (task 6.2 and the design's open question on eviction settings).
+
+| Key | Meaning |
+| --- | --- |
+| `eviction_enabled` | Set `true` to allow the cell to remove local copies whose stored versions it confirms. |
+| `eviction_target` | Start ordinary eviction when used volume bytes exceed this fraction of total volume bytes. |
+| `eviction_margin` | Stop ordinary eviction at `eviction_target - eviction_margin`; require `0 < eviction_margin < eviction_target < 1`. |
+| `minimum_idle_seconds` | Keep an original local until this many seconds pass since its last owner read. Active readers and jobs also pin it. |
+| `max_temporary_bytes` | Bound the total temporary bytes used by concurrent hydrations; set a positive whole number. |
+| `max_hydrations` | Bound concurrent hydrations; set a positive whole number alongside `max_temporary_bytes`. |
+
+The cell logs no offload, eviction or hydration event. Use the owner's `inspect_memory` operation `media.status`
+to inspect store and cache state. Compare volume use before and after eviction or hydration.
+cellctl's `holds <n> media byte(s)` line shows the physical bytes stored after a backup.
+The edge's `/v1/pending` shows unfinished writes, including an uncertain offload; zero alone does not prove that a file offloaded.
 
 ## Read the physical meter
 
