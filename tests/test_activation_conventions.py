@@ -327,6 +327,24 @@ def test_unknown_resolution_key_is_ignored_with_a_finding(vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Budgets: the size bounds of what the server serves each session
+# --------------------------------------------------------------------------- #
+
+
+def test_one_bad_budget_does_not_void_the_other_or_the_file(vault: Path) -> None:
+    _override(
+        vault,
+        {"schema_version": 1, "budgets": {"skills_max_chars": 99999, "skill_summary_max_chars": 120, "bogus": 1}, "stopwords": {"add": ["der"]}},
+    )
+    registry = ac.load_conventions(vault)
+
+    assert registry.conventions.budget("skills_max_chars") == 3500
+    assert registry.conventions.budget("skill_summary_max_chars") == 120
+    assert "der" in registry.conventions.stopwords
+    assert {finding["field"] for finding in registry.findings} == {"budgets.skills_max_chars", "budgets.bogus"}
+
+
+# --------------------------------------------------------------------------- #
 # The digest is over EFFECTIVE values, never file bytes
 # --------------------------------------------------------------------------- #
 
