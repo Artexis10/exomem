@@ -40,7 +40,8 @@ PASS = "vault_store_registry_pass"
 OWNER_SCHEMA = "vault_store_owner_schema"
 # Inbound rows were complete at v1; later owners must not invalidate that readiness proof.
 LINK_ROWS_VERSION = 1
-OWNER_SCHEMA_VERSION = 2
+# v3 rederives payload hashes that older builds omitted from legacy Evidence pages.
+OWNER_SCHEMA_VERSION = 3
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
@@ -217,7 +218,7 @@ def settle(root: Path, writer) -> str:
                 _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
-        _set(tx, PASS, json.dumps({"target": target, "after": paths[-1]}))
+        _set(tx, PASS, json.dumps({"target": target, "after": paths[-1], "owner_schema": OWNER_SCHEMA_VERSION}))
         return ADVANCED
 
 
@@ -265,7 +266,8 @@ def _resume(tx: Connection, target: int, state: str) -> tuple[int, str]:
         try:
             recorded = json.loads(row[0])
             pinned = int(recorded["target"])
-            if pinned == target or state == mode.UNKNOWN:
+            # Only this derivation version can attest pages before a saved cursor.
+            if recorded.get("owner_schema") == OWNER_SCHEMA_VERSION and (pinned == target or state == mode.UNKNOWN):
                 return pinned, str(recorded["after"])
         except (ValueError, KeyError, TypeError):
             pass  # an unreadable cursor starts the pass over: it costs time, never correctness
