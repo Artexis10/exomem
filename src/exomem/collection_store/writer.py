@@ -2953,6 +2953,8 @@ class CollectionWriter:
             self._precommit(manifest)
             for guard in source_guards.values():
                 self._recheck_guard(guard, publication=True)
+            if _import is not None:
+                _import.receipt(self, result)
             self._insert_txn(txn, result)
             if _import is not None:
                 _import(self, result)

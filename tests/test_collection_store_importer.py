@@ -1346,6 +1346,36 @@ def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(sto
     assert (counts["imported"], counts["duplicates"], counts["rejected"]) == (12, 1, 0)
 
 
+def test_job_totals_equal_the_sum_of_its_batch_receipts_whatever_the_batching(store, monkeypatch):
+    """Totals folded apart from the receipts, or a duplicate counted by where batches end, make the two disagree."""
+    mapping = {"fields": {"exercise_id": "id", "kind": "kind"}, "on_invalid": "skip",
+               "coverage": {name: {"classification": None} for name in ("id", "kind")}}
+    setup(store, ndjson({"id": f"r{i}", "kind": "first"} for i in range(2)))
+    start(store, mapping=mapping)
+    run(store)
+    batches = [
+        [{"id": "n0", "kind": "a"}, {"id": "n1", "kind": "a"}, {"id": "n1", "kind": "b"}, {"id": "n2", "kind": "a"}],
+        [{"id": "n3", "kind": "a"}, {"id": "r0", "kind": "first"}, {"id": "n0", "kind": "c"}, {"id": None, "kind": "a"}],
+        [{"id": "n4", "kind": "a"}, {"id": "n5", "kind": "a"}, {"id": "r1", "kind": "changed"}, {"id": "n6", "kind": "a"}],
+    ]
+    write_source(store.root, ndjson(row for batch in batches for row in batch))
+    small(monkeypatch, rows=4)
+    job = start(store, mapping=mapping)
+    run(store)
+    result = status(store, job)
+    receipts = [
+        json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+            "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+            (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+    ]
+    assert len(receipts) == result["batches"] == 3
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    assert {name: sum(receipt[name] for receipt in receipts) for name in names} == {name: result["rows"][name] for name in names}
+    assert {name: result["rows"][name] for name in names} == {
+        "inserted": 7, "updated": 1, "unchanged": 1, "rejected": 1, "collapsed_in_source": 2, "restated_existing": 2}
+    assert result["rows"]["duplicates"] == 4 and result["rows"]["imported"] == 9
+
+
 NULL_TAIL_FIELDS = (
     "  natural_key: [list_id, position]\n  fields:\n"
     "    list_id: {type: string, required: true}\n    position: {type: integer, required: true}\n"

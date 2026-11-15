@@ -202,8 +202,9 @@ def contract() -> dict[str, Any]:
             "skipped"
         ),
         "identity": (
-            "rows sharing a natural key: the last valid occurrence wins whatever the batching; "
-            "status counts the superseded ones as duplicates"
+            "rows sharing a natural key: the last valid occurrence wins whatever the batching, and status "
+            "counts each earlier one as collapsed_in_source. A row that restates a row stored before the "
+            "job is counted again as restated_existing, within updated or unchanged; duplicates is the sum"
         ),
         "preview": (
             f"owner-only; reads up to {PREVIEW_ROWS} rows and writes nothing: fields, nested shape, time "
@@ -2081,10 +2082,23 @@ def _load(conn, job_id: str) -> _Job | None:
         row[3],
         row[4],
         json.loads(row[5]),
-        json.loads(row[6]),
+        _split_duplicates(json.loads(row[6])),
         row[7],
         row[8],
     )
+
+
+def _split_duplicates(progress: dict[str, Any]) -> dict[str, Any]:
+    """A job started before duplicates were split gets both parts from the counters it already holds.
+
+    It counted a row that restated this job's own earlier row as a duplicate, which is `collapsed_in_source`,
+    and it left a row that restated an earlier-stored row inside `updated` or `unchanged`.
+    """
+    if "collapsed_in_source" in progress:
+        return progress
+    restated = progress["updated"] + progress["unchanged"]
+    return {**progress, "collapsed_in_source": progress["duplicates"], "restated_existing": restated,
+            "duplicates": progress["duplicates"] + restated}
 
 
 def _bound_principal(who: principal_module.RequestPrincipal) -> dict[str, Any]:
@@ -2278,6 +2292,8 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
             "imported": progress["imported"],
             "rejected": progress["rejected"],
             "duplicates": progress["duplicates"],
+            "collapsed_in_source": progress["collapsed_in_source"],
+            "restated_existing": progress["restated_existing"],
             "remaining": 0 if state == "complete" else None,
             "inserted": progress["inserted"],
             "updated": progress["updated"],
@@ -2565,6 +2581,33 @@ def _rewrote(writer, job: _Job, outcome: Mapping[str, Any]) -> bool:
     return found is not None and (found[0] or "").startswith(f"import:{job.id}:")
 
 
+#: What one batch settles each of its rows as. The receipt and the job totals carry exactly these.
+_BATCH_COUNTS = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+
+
+def _batch_tally(
+    writer, job: _Job, batch: Batch, superseded: int, result: Mapping[str, Any] | None
+) -> dict[str, int]:
+    """Settle each row of one batch once, so the counts do not depend on where batches end.
+
+    A row superseded within the batch, or one that re-states what this job stored in an earlier batch,
+    is ``collapsed_in_source``: the source gave its key twice. A row that restates a row stored before
+    the job is ``updated`` or ``unchanged`` as the writer decided, and also ``restated_existing``.
+    ``duplicates`` is the sum of the two causes.
+    """
+    tally = dict.fromkeys(_BATCH_COUNTS, 0)
+    tally["rejected"], tally["collapsed_in_source"] = len(batch.rejections), superseded
+    for outcome in (result or {}).get("rows", ()):
+        if outcome["outcome"] == "rejected":
+            tally["rejected"] += 1
+        elif _rewrote(writer, job, outcome):
+            tally["collapsed_in_source"] += 1
+        else:
+            tally[outcome["outcome"]] += 1
+            tally["restated_existing"] += outcome["outcome"] != "inserted"
+    return tally
+
+
 def _record(
     writer,
     job: _Job,
@@ -2576,14 +2619,14 @@ def _record(
     fail: tuple[Row, str, str] | None = None,
     prepared: list[_PreparedRow] = (),
     version: int = 0,
+    tally: Mapping[str, int] | None = None,
 ) -> None:
     """Advance the checkpoint, counters and rejections inside the batch transaction.
 
-    A row superseded in this batch, or re-stating what this job wrote in an
-    earlier one, counts once as a duplicate, so the counts do not depend on where
-    batches end. ``batches`` counts settlements that committed rows. ``prepared``
-    is ``_collapse``'s identity of each batch row and ``version`` the collection's
-    schema version, from which an export member's import log hashes its rows.
+    The counters add the batch's ``tally`` (``_batch_tally``), the same counts its receipt
+    carries, so the job's totals and its receipts agree. ``batches`` counts settlements that
+    committed rows. ``prepared`` is ``_collapse``'s identity of each batch row and ``version``
+    the collection's schema version, from which an export member's import log hashes its rows.
     """
     progress = dict(job.progress)
     sequence = job.checkpoint["batch"]
@@ -2594,17 +2637,13 @@ def _record(
         state, reason = "failed", "invalid_row"
     else:
         rejections = list(batch.rejections)
-        counts = {"inserted": 0, "updated": 0, "unchanged": 0}
-        duplicates = superseded
         for outcome in (result or {}).get("rows", ()):
             if outcome["outcome"] == "rejected":
                 rejections.append(
                     (kept[outcome["index"]][0], outcome.get("code", "IMPORT_ROW_REJECTED"), "item")
                 )
-            elif _rewrote(writer, job, outcome):
-                duplicates += 1
-            else:
-                counts[outcome["outcome"]] += 1
+        if tally is None:
+            tally = _batch_tally(writer, job, batch, superseded, result)
         if result is not None and result.get("committed"):
             progress["last_receipt"] = {
                 "batch": sequence,
@@ -2612,11 +2651,10 @@ def _record(
                 "transition_id": result["first_transition"],
             }
             progress["batches"] += 1
-        for name, value in counts.items():
-            progress[name] += value
-        progress["imported"] += sum(counts.values())
-        progress["rejected"] += len(rejections)
-        progress["duplicates"] += duplicates
+        for name in _BATCH_COUNTS:
+            progress[name] += tally[name]
+        progress["imported"] += tally["inserted"] + tally["updated"] + tally["unchanged"]
+        progress["duplicates"] += tally["collapsed_in_source"] + tally["restated_existing"]
         logged = _logged(batch, kept, result, prepared, version) if "members" in job.binding["source"] else []
         tally = _members(writer, job, batch, progress, logged)
         writer._execute(
@@ -2792,7 +2830,8 @@ def _control(
     never the source, its path or a row value.
     """
     progress, checkpoint = progress or job.progress, checkpoint or job.checkpoint
-    counts = {name: progress[name] for name in ("imported", "rejected", "duplicates", "batches")}
+    counts = {name: progress[name] for name in (
+        "imported", "rejected", "duplicates", "collapsed_in_source", "restated_existing", "batches")}
     writer.record_control_transition(
         operation,
         {
@@ -2832,6 +2871,7 @@ class _Settlement:
         self.source = (proof.ref, proof.guard)
         self.guards = guards
         self.prepared, self.version = prepared, version
+        self.tally: dict[str, int] | None = None
         self._manifest = (manifest.collection_id, manifest.manifest_version.path, manifest.manifest_version.hash)
         self._source = self.source
         positions = {id(row): index for index, (row, _) in enumerate(batch.rows)}
@@ -2852,6 +2892,11 @@ class _Settlement:
         if prepared.refusal is not None:
             raise collections.CollectionError(*prepared.refusal)
         return prepared.stored
+
+    def receipt(self, writer, result: dict[str, Any]) -> None:
+        """Put the batch's tally in the receipt the writer is about to store."""
+        self.tally = result["import_batch"] = _batch_tally(
+            writer, self.job, self.batch, self.superseded, result)
 
     def __call__(self, writer, result: Mapping[str, Any]) -> None:
         _authorize(writer, self.job, prove=False)
@@ -2876,6 +2921,7 @@ class _Settlement:
                 result=result,
                 prepared=self.prepared,
                 version=self.version,
+                tally=self.tally,
             )
 
 
@@ -3154,6 +3200,7 @@ def _with_member(progress: dict[str, Any], counts: dict[str, int]) -> dict[str, 
     folded = dict(progress)
     for name in ("inserted", "updated", "unchanged", "rejected", "duplicates", "batches"):
         folded[name] += counts[name]
+    folded["collapsed_in_source"] += counts["duplicates"]  # a derived member counts the rows it supersedes within a batch
     folded["imported"] += counts["inserted"] + counts["updated"] + counts["unchanged"]
     folded["members"] = {"read": progress["members"]["read"] + counts["read"],
                          "skipped": progress["members"]["skipped"] + counts["skipped"]}
@@ -3407,6 +3454,8 @@ _PROGRESS = {
     "imported": 0,
     "rejected": 0,
     "duplicates": 0,
+    "collapsed_in_source": 0,
+    "restated_existing": 0,
     "inserted": 0,
     "updated": 0,
     "unchanged": 0,
