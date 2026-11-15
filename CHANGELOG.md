@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.181.0](https://github.com/Artexis10/exomem/compare/v0.180.1...v0.181.0) (2026-11-15)
+
+
+### Features
+
+* **cloud:** prewarm cell catalogues before upgrade stops ([#2819](https://github.com/Artexis10/exomem/issues/2819)) ([3d6eddd](https://github.com/Artexis10/exomem/commit/3d6edddc1490922a88fff8fadc7493c2374e9afa))
+
+
+### Bug Fixes
+
+* **media:** call B2 API v4 from the media edge ([#2836](https://github.com/Artexis10/exomem/issues/2836)) ([af18fde](https://github.com/Artexis10/exomem/commit/af18fde1e59259eb0f8c3703af9b4fe2b5a23226))
+* report work in task-context method spans ([#2835](https://github.com/Artexis10/exomem/issues/2835)) ([8a337d7](https://github.com/Artexis10/exomem/commit/8a337d7c31677a34ab3db29c452b47bd04076ca6))
+
 ## [0.180.1](https://github.com/Artexis10/exomem/compare/v0.180.0...v0.180.1) (2026-11-15)
 
 
