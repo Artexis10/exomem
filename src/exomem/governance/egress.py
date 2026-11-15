@@ -7892,17 +7892,26 @@ def release_decision_context(vault_root: Path) -> Iterator[None]:
     Under a bound writer, each page's decision otherwise opens its own snapshot and builds its own
     authorization, which loads the policy again: the inputs that every page of the set shares, read
     once per page. A decision nested in the held snapshot joins it
-    (`CollectionWriter.read_snapshot`). The store thread serves a write without a resolution
-    scope, so each decision also resolved the vault and its state folder again; the set shares
-    one resolution, as a move's preflight does. The scope ends with the set, so the write still
-    finds the placement live after it waits for the mutation boundary. Without a bound writer a
+    (`CollectionWriter.read_snapshot`). Each decision also opened a pooled snapshot of the vault
+    store to read the page's container; the set holds one (`request_snapshot`), as a move's
+    post-commit filter does, and a request that already holds one keeps it. The store
+    thread serves a write without a resolution scope, so each decision also resolved the vault and
+    its state folder again; the set shares one resolution, as a move's preflight does. The scope
+    ends with the set, so the write still finds the placement live, and reads the store's new
+    revision, after it waits for the mutation boundary or commits. Without a bound writer a
     decision opens no writer snapshot, so this holds nothing.
     """
     writer = bound_writer(vault_root)
     if writer is None:
         yield
         return
-    with state_paths.resolution_scope(), writer.read_snapshot():
+    from ..vault_store import read as store_read
+
+    with (
+        state_paths.resolution_scope(),
+        writer.read_snapshot(),
+        store_read.request_snapshot(vault_root),
+    ):
         yield
 
 

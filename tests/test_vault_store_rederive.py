@@ -33,10 +33,12 @@ from test_vault_store_migration import (  # noqa: F401
 )
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
-from exomem import writer_lease
+from exomem import note_types, writer_lease
 from exomem.collection_store import connection, preview, runtime
 from exomem.collection_store.writer import CollectionWriter
+from exomem.governance import connector_boundary
 from exomem.vault_store import derive, mode, projection, rederive, verify, write
+from exomem.vocabulary import instances
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -205,6 +207,52 @@ def test_a_kept_registry_version_is_no_overlay_change(stored, writer):  # noqa: 
     )
     assert mode.status(stored)["registry"] == rederive.CURRENT
     assert rederive.settle(stored, writer) == rederive.IDLE
+
+
+def test_a_registry_overlay_that_a_binding_puts_in_the_review_folder_is_an_overlay_change(
+    stored, writer  # noqa: F811
+):
+    """A note-type overlay that the vault's binding places among the relation review records: its
+    loader reads it, but its save left the rows of the old registry current, like a review."""
+    reviews = "Knowledge Base/_Schema/relation-reviews"
+    overlay = f"{reviews}/active-note-types.yaml"
+    public = {
+        "namespace": "Knowledge Base/_Schema/public",
+        "history": "public",
+        "overrides": {note_types.SPEC.stem: {"overlay": overlay}},
+    }
+    vocabulary = {"public": public, "private": {}, "destinations": {}, "selections": {}}
+    # An armed boundary protects at least one scope, so the vault gets one before the binding.
+    scope = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    scopes = stored / "Knowledge Base/_Governance/scopes"
+    scopes.mkdir(parents=True, exist_ok=True)
+    (scopes / "capture.yaml").write_text(
+        f'governance_version: 1\nid: {scope}\npaths: ["Capture/**"]\n', encoding="utf-8"
+    )
+    connector_boundary.publish_requirement(
+        stored,
+        connector_boundary.Snapshot(
+            revision="",
+            default_denied_scope_ids=frozenset({scope}),
+            clients=(),
+            capture_paths=("Knowledge Base/Capture",),
+            vocabulary=vocabulary,
+        ),
+    )
+    assert instances.match_overlay(stored, note_types.SPEC, overlay) is not None
+    review = write.PagePut(f"{reviews}/0a1b2c3d.json", b'{"decision": "reviewed_none"}\n')
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "review", puts=(review,)))
+    assert mode.status(stored)["registry"] == rederive.CURRENT, "a review record is no input"
+
+    note_type = b"types:\n  meeting-note:\n    role: compiled\n    folder: Notes/Meetings\n"
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED, "note types", puts=(write.PagePut(overlay, note_type),)
+        ),
+    )
+    assert mode.status(stored)["registry"] == rederive.REBUILDING
+    assert rederive.settle(stored, writer) == rederive.WAITING
 
 
 def test_each_batch_of_a_pass_moves_the_store_revision(stored, writer):  # noqa: F811

@@ -17,8 +17,9 @@ per tick (``StoreServer._registry_tick``).
 
 from __future__ import annotations
 
+import functools
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
@@ -75,7 +76,9 @@ class Registry:
     owner_schema_behind: bool = False
 
 
-def is_overlay_source(root: Path, rel: str) -> bool:
+def is_overlay_source(
+    root: Path, rel: str, *, overlays: Callable[[], frozenset[str] | None] | None = None
+) -> bool:
     """Whether the path holds an input of the registries or of the access policy.
 
     The schema overlay is the one folder that ownership gives to the store as pages, and the access
@@ -83,23 +86,49 @@ def is_overlay_source(root: Path, rel: str) -> bool:
     needs no entry here. Two kinds of overlay file are not inputs. The loaders read the live overlay
     files, and only the registry tools read a kept version under the history folder, at request
     time. A door's record of its own work (a relation review; `policy.is_workflow_state_path`) is
-    compiled by no loader, and every create and edit writes one.
+    compiled by no loader, and every create and edit writes one; a registry overlay that a binding
+    places in such a folder is still an input. ``overlays`` gives the bound overlay paths
+    (`configured_overlays`), so a caller that asks about many paths reads the bindings once.
     """
     from ..governance import policy as governance_policy
 
     schema_folder = f"{kb_dirname()}/{vault.SCHEMA_OVERLAY_DIRNAME}/"
     history = f"{registry_history.history_dir(root, '').relative_to(root).as_posix()}/"
     access_policy = access.access_config_path(root).relative_to(root).as_posix()
-    return (
-        rel.startswith(schema_folder)
-        and not rel.startswith(history)
-        and not governance_policy.is_workflow_state_path(rel)
-    ) or rel == access_policy
+    if rel == access_policy:
+        return True
+    if not rel.startswith(schema_folder) or rel.startswith(history):
+        return False
+    if not governance_policy.is_workflow_state_path(rel):
+        return True
+    bound = configured_overlays(root) if overlays is None else overlays()
+    return bound is None or rel in bound
+
+
+def configured_overlays(root: Path) -> frozenset[str] | None:
+    """The overlay file of every registry in every instance binding, as `instances.match_overlay`
+    selects them, or None when the bindings cannot be read."""
+    from ..governance import connector_boundary
+    from ..vocabulary import instances, registry_specs
+
+    specs = registry_specs().values()
+    try:
+        document = instances.configuration(root)
+    except instances.AssignmentRequired:
+        document = None
+    except connector_boundary.BoundaryUnavailable:
+        # Unreadable bindings may name any file as an overlay, so the pass runs, as it did before.
+        return None
+    if document is None:
+        return frozenset(spec.overlay(root).relative_to(root).as_posix() for spec in specs)
+    bindings = (document["public"], *document["private"].values())
+    return frozenset(instances.storage(spec, binding)[0] for spec in specs for binding in bindings)
 
 
 def record_overlay_change(tx: Connection, root: Path, paths: Iterable[str], revision: int) -> None:
     """Record, inside the commit's transaction, that this revision changed an overlay source."""
-    if any(is_overlay_source(root, rel) for rel in paths):
+    overlays = functools.cache(lambda: configured_overlays(root))
+    if any(is_overlay_source(root, rel, overlays=overlays) for rel in paths):
         _set(tx, OVERLAY_REVISION, str(revision))
 
 
@@ -181,7 +210,8 @@ def waiting_on(conn: Connection, root: Path) -> int:
     queued = conn.execute("SELECT path, from_path FROM store_projection_queue").fetchall()
     held = conn.execute("SELECT path FROM store_held").fetchall()
     named = {rel for row in (*queued, *held) for rel in row if rel is not None}
-    return sum(is_overlay_source(root, rel) for rel in named)
+    overlays = functools.cache(lambda: configured_overlays(root))
+    return sum(is_overlay_source(root, rel, overlays=overlays) for rel in named)
 
 
 def settle(root: Path, writer) -> str:

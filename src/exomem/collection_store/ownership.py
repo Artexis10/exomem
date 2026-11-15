@@ -386,7 +386,8 @@ _READ: ContextVar[ReadScope | None] = ContextVar("collection_ownership_read", de
 
 class ReadScope:
     def __init__(self, root, *, initial=None):
-        self.root = Path(root).resolve()
+        # A decision set's resolution scope resolves the root once; `finish` proves it again.
+        self.root = state_paths.resolved_vault_path(root, expanduser=False)
         # A proof the caller made earlier skips this scope's own; `finish` still proves again and compares.
         self.initial = initial
         self.store_enrolled = False
