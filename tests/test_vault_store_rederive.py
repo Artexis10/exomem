@@ -136,6 +136,51 @@ def assert_cold_derivation(root, tmp_path):
     assert {key: live.get(key) for key in stamps} == {key: cold_stamps.get(key) for key in stamps}
 
 
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_legacy_evidence_hashes_refresh_after_a_store_upgrade(vault, monkeypatch, interrupted):  # noqa: F811
+    """An old store must retire NULL hashes, report warming, then reuse unchanged originals."""
+    from duplicate_fixtures import legacy_evidence_filing
+    from test_vault_store_migration import build_indexes
+
+    from exomem import duplicates, freshness, lexstore
+
+    original = b"original retained by an earlier store"
+    rel = legacy_evidence_filing(vault, original)
+    before = (vault / rel).read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    derive_payload = duplicates.derive_page_payload
+    with monkeypatch.context() as earlier:
+        earlier.setattr(rederive, "OWNER_SCHEMA_VERSION", 2)
+        earlier.setattr(duplicates, "derive_page_payload", lambda path, raw: None if path == rel else derive_payload(path, raw))
+        freshness.clear()
+        lexstore.clear_stores()
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+        assert rows(vault, "SELECT payload_hash FROM pages WHERE path = ?", rel) == [(None,)]
+        if interrupted:
+            # An old pass already derived this page without a payload hash; its cursor has no version.
+            with store_writer(vault) as bound, bound.handle.transaction() as tx:
+                tx.execute("DELETE FROM store_meta WHERE key = ?", (rederive.REGISTRY_REVISION,))
+                tx.execute(
+                    "INSERT INTO store_meta(key, value) VALUES (?, ?)",
+                    (rederive.PASS, json.dumps({"target": revision(vault), "after": rel})),
+                )
+    lexstore.clear_stores()
+
+    assert mode.status(vault)["registry"] == mode.UNKNOWN
+    assert lexstore.payload_candidates(vault, digest) is None
+    with store_writer(vault) as bound:
+        assert rederive.pending(bound.connection, vault) == rederive.READY
+        settle_to_the_end(vault, bound)
+
+    assert mode.status(vault)["registry"] == rederive.CURRENT
+    hit = duplicates.find_duplicate(vault, sha256=digest, lane=duplicates.EVIDENCE, protected=False).hit
+    assert hit is not None and hit.path == rel
+    assert (vault / rel).read_bytes() == before
+    assert (vault / hit.payload.artifact_path).read_bytes() == original
+    assert not lexstore.full_rebuild_in_flight(vault)
+
+
 def test_a_policy_commit_returns_before_its_rows_and_the_job_then_matches_a_cold_derivation(
     stored, writer, tmp_path  # noqa: F811
 ):

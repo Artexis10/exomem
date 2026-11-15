@@ -428,3 +428,37 @@ def test_turning_the_edge_off_renders_once_the_live_active_set_lists_no_cell(
     result = _upgrade_with_the_edge_off(active_set_json, tmp_path)
 
     assert result.returncode == 0, result.stderr
+
+
+_WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
+
+
+def _pod_specs(documents: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    specs = []
+    for doc in documents:
+        if doc.get("kind") not in _WORKLOAD_KINDS:
+            continue
+        template = doc["spec"]["jobTemplate"]["spec"]["template"] if doc["kind"] == "CronJob" else doc["spec"]["template"]
+        specs.append((f"{doc['kind']}/{doc['metadata']['name']}", template["spec"]))
+    return specs
+
+
+def test_every_non_root_pod_can_read_the_secret_and_configmap_files_it_mounts() -> None:
+    """A non-root pod cannot open a mounted Secret file whose mode keeps "other" out unless an fsGroup
+    gives it group read (Kubernetes writes those files as root). cellctl crashed at startup this way when
+    the media edge was turned on: it could not read its 0440 signing key."""
+    unreadable = []
+    for name, pod in _pod_specs(_helm_template(*EDGE)):
+        context = pod.get("securityContext", {})
+        if context.get("runAsUser", 0) == 0:
+            continue
+        for volume in pod.get("volumes", []):
+            source = volume.get("secret") or volume.get("configMap")
+            if source is None:
+                continue
+            modes = [item["mode"] for item in source.get("items", []) if "mode" in item]
+            for mode in modes or [source.get("defaultMode", 0o644)]:
+                readable = bool(mode & 0o004) or (bool(mode & 0o040) and "fsGroup" in context)
+                if not readable:
+                    unreadable.append((name, volume["name"], oct(mode)))
+    assert unreadable == []

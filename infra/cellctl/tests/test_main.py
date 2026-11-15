@@ -237,6 +237,8 @@ def test_cellctl_refuses_to_start_without_an_upgrade_window_value(monkeypatch, n
     # automate-cloud-releases D4/D3: catches a deploy that silently runs without
     # windows, or without the barriers that hold a one-way attempt.
     monkeypatch.setenv("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES", "30")
+    monkeypatch.setenv("CELLCTL_UPGRADE_CONCURRENCY_PER_NODE", "1")
+    monkeypatch.setenv("CELLCTL_UPGRADE_PREPARE_ENABLED", "true")
     main.build_reconcile_config()
     monkeypatch.delenv(name)
 
@@ -247,6 +249,8 @@ def test_cellctl_refuses_to_start_without_an_upgrade_window_value(monkeypatch, n
 def test_cellctl_refuses_a_default_range_that_overlaps_the_backup_window(monkeypatch) -> None:
     # Catches a configuration that rolls unmeasured cells during the stopped nightly backups.
     monkeypatch.setenv("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES", "30")
+    monkeypatch.setenv("CELLCTL_UPGRADE_CONCURRENCY_PER_NODE", "1")
+    monkeypatch.setenv("CELLCTL_UPGRADE_PREPARE_ENABLED", "true")
     monkeypatch.setenv("CELLCTL_BACKUP_WINDOW", "2-5")
     monkeypatch.setenv("CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START", "4")
 

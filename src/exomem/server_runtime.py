@@ -208,6 +208,12 @@ class LocalRuntimeActivation:
     def _activate(self) -> None:
         if self._shutdown.is_set():
             return
+        from .cloud_cell import cloud_mode_enabled
+
+        if cloud_mode_enabled():
+            from .catalogue_prewarm import adopt_at_boot
+
+            self._start_component("staged catalogue", adopt_at_boot)
         self._start_component("derived drain", self._start_derived_drain)
         if self._shutdown.is_set():
             self._stop_background_workers()
@@ -1140,9 +1146,18 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
     with it. Where the watcher was absent, nothing drained the queue at all and
     the graph stayed `recovery_required` indefinitely with the repair already
     queued and admissible.
+
+    A store-mode vault starts no drain (design D9). Each commit writes its graph rows in the store,
+    and every graph reader reads them there, so the queue, barrier and marker this drain pays
+    describe file mode's sidecar. In store mode its whole-vault pass could not publish, left its
+    marker and retried for the life of the process. Rollback rebuilds the sidecar.
     """
     from . import graph_drain
+    from .vault_store import mode
 
+    if mode.store_mode_active(vault_root):
+        log.info("graph drain not started: a store-mode vault keeps its graph rows in the store")
+        return None
     try:
         return graph_drain.start(vault_root)
     except Exception as exc:  # noqa: BLE001 - convergence must not break startup

@@ -1767,12 +1767,48 @@ def test_cellctl_is_given_the_upgrade_readiness_deadline_the_chart_sets(monkeypa
     from cellctl.decide import ReconcileConfig
     from cellctl.main import build_reconcile_config
 
+    env = _cellctl_env(_helm_template())
+    for env_name, value in env.items():
+        if value is not None and env_name.startswith("CELLCTL_"):
+            monkeypatch.setenv(env_name, value)
     name = "CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"
-    monkeypatch.setenv(name, _cellctl_env(_helm_template())[name])
     assert build_reconcile_config().upgrade_ready_deadline == ReconcileConfig().upgrade_ready_deadline
 
     changed = _cellctl_env(_helm_template("--set", "cellctl.upgradeReadyDeadlineMinutes=45"))
     assert changed[name] == "45"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_given_the_per_node_concurrency_and_prepare_switch_the_chart_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # automate-cloud-releases D4/D9. Catches a value that the chart never
+    # renders, which would stop cellctl at its next deploy, and a name the two
+    # sides disagree on.
+    from cellctl.decide import ReconcileConfig
+    from cellctl.main import build_reconcile_config
+
+    env = _cellctl_env(_helm_template())
+    for name, value in env.items():
+        if value is not None and name.startswith("CELLCTL_"):
+            monkeypatch.setenv(name, value)
+
+    assert (
+        build_reconcile_config().upgrade_concurrency_per_node
+        == ReconcileConfig().upgrade_concurrency_per_node
+    )
+    assert build_reconcile_config().upgrade_prepare_enabled is True
+
+    changed = _cellctl_env(
+        _helm_template(
+            "--set",
+            "cellctl.upgradeConcurrencyPerNode=3",
+            "--set",
+            "cellctl.upgradePrepareEnabled=false",
+        )
+    )
+    assert changed["CELLCTL_UPGRADE_CONCURRENCY_PER_NODE"] == "3"
+    assert changed["CELLCTL_UPGRADE_PREPARE_ENABLED"] == "false"
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1865,6 +1901,28 @@ def test_the_admission_policy_pins_the_lease_rule_after_the_broker_rule() -> Non
     both = expression[expression.index("size(variables.np.egress) == 2"):]
     assert both.index("exomem-artifact-broker") < both.index("exomem-media-slot-lease")
     assert "egress[0].ports[0].port == 8767" in both and "egress[1].ports[0].port == 8768" in both
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_scope_policy_admits_the_prepare_job_and_its_no_egress_label() -> None:
+    # automate-cloud-releases D9: the rendered prepare Job must pass the same
+    # admission rules cellctl's other objects do, or every apply after the
+    # Job kind was added is refused and cells never converge.
+    documents = _helm_template()
+    egress = _admission_expression(documents, "cellctl may write job-egress")
+    assert "size(variables.np.podSelector.matchExpressions[1].values) == 3" in egress
+    assert "'prepare' in" in egress
+    placement = _admission_expression(documents, "cellctl may use only exact operator-selected")
+    assert "cell-prepare-" in placement and "podSpec.nodeName" in placement
+    prepare = placement[placement.index("variables.target.metadata.name.matches('^cell-prepare-"):]
+    prepare = prepare[:prepare.index("(!has(variables.podSpec.nodeName)")]
+    assert "labels['exomem.io/cell-job'] == 'prepare'" in prepare
+    assert "!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0" in prepare
+    # Hostile templates run through this rendered rule in the K3s local-storage admission test.
+    assert "!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0" in prepare
+    assert "c.command == ['true']" in prepare
+    assert "!has(c.lifecycle)" in prepare
+    assert "!has(c.startupProbe) && !has(c.livenessProbe) && !has(c.readinessProbe)" in prepare
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
