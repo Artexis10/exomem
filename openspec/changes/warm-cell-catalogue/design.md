@@ -9,7 +9,7 @@ See proposal.md for motivation. These current contracts constrain the design:
 - Freshness event histories belong to one process. `checkpoint_state` excludes that local history; `_reconcile_live` and `_heal_delta` handle ordinary restart drift.
 - `decide.py` stops the cell before backup. Its backup deadline is 15 minutes; its stall bound is 30 minutes. Both start at the attempt's hold.
 - RWO volumes permit pods on the same node. This build Job introduces the first read-write mount of the live claim beside a serving pod. Hourly backups read a snapshot clone; upgrade backups wait for the serving pod to release the claim.
-- Attempts are fleet-serial today. `automate-cloud-releases` task 1.9 has not added per-node attempt concurrency.
+- Attempts use `config.upgrade_concurrency_per_node`; each node has its own attempt limit.
 - Admission forbids `nodeName` and `priorityClassName`. Export pack Jobs already use required pod affinity for shared placement.
 
 ## Goals / Non-Goals
@@ -47,7 +47,7 @@ Platform `infra/helm/platform/templates/cellctl.yaml` quota admission rule 9 cur
 
 Required pod affinity pins the build Job to its serving pod through `kubernetes.io/hostname`, following the export pack pattern. A local PV also constrains the node. Keep `nodeName` forbidden so the scheduler checks capacity. Keep `priorityClassName` forbidden: capacity requests avoid granting cellctl control over pod preemption. Insufficient capacity leaves the build Job pending until cancellation or timeout; the upgrade proceeds cold.
 
-Detached builds need their own cap despite today's fleet-serial attempts. Allow at most one build per node until task 1.9 accounts for builds alongside attempts. A cell also gets at most one build Job. Raising every ordinary Job's ceiling would add unrelated capacity; the dedicated slot bounds this workload alone.
+Attempts already use a per-node limit, but that limit does not count detached builds. Keep at most one build per node until shared accounting includes both workloads. A cell also gets at most one build Job. Raising every ordinary Job's ceiling would add unrelated capacity; the dedicated slot bounds this workload alone.
 
 ### D3 — Tenant-locked cells keep the cold rebuild
 
@@ -57,13 +57,15 @@ Skip every tenant-locked cell, including an unlocked tenant-locked cell. Custody
 
 For each rollout candidate, schedule the build Job when its upgrade window opens, subject to D2 and D3. The build Job computes the target identity and self-gates, so scheduling does not require cellctl to read the catalogue. The feature defaults off. Cellctl records the current Job name and the outcome `requested` before creating a Job. It clears the current Job name only after observing both the Job and its pods absent. With the flag off, it queries build inventory only while a current Job name remains. Historical outcomes add no dependency to later upgrades. These annotations record controller work; staged validation decides adoption. Canary and disabled-window rules still determine when attempts are due; an immediate attempt can have no build opportunity.
 
-Builds follow the attempts' canary-first rule. A due backup, pending import or export, dirty row or changed render digest prevents or cancels a build. Cellctl persists cancelled target names for the current window before deleting their Jobs. The same target gets no further build in that window, including after controller restarts. Only applies that stop or replace the serving pod wait for build Job and pod absence. A build error affects only its cell; a failed fleet census delays only cells with a recorded current Job.
+Builds follow the attempts' canary-first rule. A due backup, pending import or export, dirty row or changed render digest prevents or cancels a build. Cellctl persists cancelled target names for the current window before deleting their Jobs. The same target gets no further build in that window, including after controller restarts. Only applies that stop or replace the serving pod wait for build Job and pod absence. A build error affects only its cell; a failed fleet census delays serving replacements on nodes with a recorded current Job.
 
 A running build Job has a pod Running, including image pull after binding to a node. Pending for node capacity is not running.
 
 Before the final force minutes, count a running build Job as activity in the due rule, like an in-flight request. The force period retains its existing default of 10 minutes. A build Job waiting for node capacity does not defer the attempt. When the build Job ends, ordinary request idleness determines whether the cell is due. Force minutes override build activity, so a running build Job cannot postpone the forced attempt.
 
 With chart defaults, `is_due` makes an idle cell due about five seconds after its window opens. Counting build activity gives that idle cell time to finish its staged copy inside the window.
+
+Before a serving stop or replacement, cancel every unfinished, unbound build targeting that node, including other cells' builds. Persist each cancellation in its own cell's window record before deletion, and wait for observed pod absence on a later pass. Unknown inventory for a recorded build on that node also defers the stop. Bound builds on other cells keep their capacity and continue; a node without waiting builds adds no delay.
 
 When the cell becomes due, start its attempt with the existing hold clocks and deadlines. Delete any unfinished build Job and confirm its pods have ended before stopping the serving pod. Record the build outcome with the attempt. Boot may adopt any staged copy that passes D1 validation, including a complete staged copy published during cancellation.
 
@@ -94,12 +96,12 @@ Restic backs up `/data/vault` and `/data/host` (`infra/cellctl/src/cellctl/manif
 - [Catch-up grows between build and boot] → reuse restart reconcile; accept a cold rebuild when reconcile cannot prove the drift.
 - [Build memory could evict a neighbour] → request the estimated peak and cap builds per node; never bypass scheduling.
 - [CPU contention slows serving reads] → use the upgrade window and bounded resources; measure contention in rehearsal.
-- [Image pull and startup consume the pre-attempt window] → build activity defers idle attempts only before the force minutes. Fleet-serial attempts still bound rollout throughput.
+- [Image pull and startup consume the pre-attempt window] → build activity defers idle attempts only before the force minutes. The per-node attempt limit still bounds rollout throughput.
 - [Staged copies consume volume space] → retain only the current build Job's completed staged copy, then remove every unadopted staged copy at boot.
 - [Temporary catalogues increase backup bytes during the stop] → exclude staged copies and `.building` families by fixed filename patterns.
 - [Target startup changes another store] → use a narrow entrypoint and prove the rest of the shared volume stays unchanged.
 
-- [Build activity reduces attempts per window hour] → attempts stay fleet-serial; include this throughput cost in rehearsal.
+- [Build activity reduces attempts per window hour] → attempts retain their per-node limit; include this throughput cost in rehearsal.
 
 ## Migration Plan
 

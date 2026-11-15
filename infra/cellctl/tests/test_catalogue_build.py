@@ -212,9 +212,15 @@ async def test_ineligible_cells_receive_no_build_job(skip):
     obs = _observation(pod_exists=False, pod_ready=False) if skip == "not-running" else _observation()
     if skip == "identity-conflict":
         obs = _observation(namespace_exists=True, namespace_cell_label="bbbbbbbbbbbbbbbb")
-    await reconcile._sync_catalogue_builds(cluster, [row], {CELL: obs}, RolloutRow(), IMAGE_B, NOW, WINDOWS,
-                                          _cluster_config() if skip == "flag-off" else CONFIG, allow_schedule=True)
+        cluster.builds[namespace_name(CELL)] = (BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B,
+                                                       "worker-one", NOW),)
+    result = await reconcile._sync_catalogue_builds(
+        cluster, [row], {CELL: obs}, RolloutRow(), IMAGE_B, NOW, WINDOWS,
+        _cluster_config() if skip == "flag-off" else CONFIG, allow_schedule=True)
     assert not cluster.jobs and not cluster.applied
+    if skip == "identity-conflict":
+        assert result[CELL].catalogue_waiting_builds is None
+        assert not cluster.events
 
 
 @pytest.mark.parametrize("reason", ["timeout", "pause", "target-change", "window-close", "disable"])
@@ -261,7 +267,9 @@ def test_bound_image_pull_counts_as_running_but_pending_node_capacity_does_not()
     pod.spec.node_name = "worker-one"
     assert client.observe_catalogue_builds()[metadata.namespace][0].running
     pod.metadata.deletion_timestamp = NOW
-    assert not client.observe_catalogue_builds()[metadata.namespace][0].running
+    terminating = client.observe_catalogue_builds()[metadata.namespace][0]
+    assert not terminating.running
+    assert terminating.bound and not terminating.waiting
 
 
 @pytest.mark.parametrize("cancellation_record", [
@@ -441,8 +449,8 @@ async def test_a_tenant_build_waits_for_the_canary_target_before_writing_its_vol
 
 
 @pytest.mark.parametrize("after_create", [False, True])
-async def test_build_census_failure_delays_only_cells_with_a_recorded_current_job(after_create):
-    """An optional fleet census outage must not block applies for cells that never requested a build."""
+async def test_build_census_failure_delays_stops_only_on_nodes_with_a_recorded_current_job(after_create):
+    """Unknown peer builds defer the shared node without inventing builds on unrelated nodes."""
     from kubernetes.client.rest import ApiException
 
     cluster = BuildCluster()
@@ -455,13 +463,18 @@ async def test_build_census_failure_delays_only_cells_with_a_recorded_current_jo
         raise ApiException(status=500)
     cluster.observe_catalogue_builds = unavailable
     other = "bbbbbbbbbbbbbbbb"
-    rows = [replace(_row(), desired_image=IMAGE_A), _row(other)]
+    separate = "cccccccccccccccc"
+    rows = [replace(_row(), desired_image=IMAGE_A), _row(other), replace(_row(separate), desired_image=IMAGE_A)]
     obs = {CELL: _observation(), other: _observation(
-        catalogue_build_job=None if after_create else catalogue_build_name(IMAGE_B))}
+        catalogue_build_job=None if after_create else catalogue_build_name(IMAGE_B)),
+        separate: _observation(pod_node="worker-two")}
     result = await reconcile._sync_catalogue_builds(cluster, rows, obs, RolloutRow(), IMAGE_B,
                                                    NOW, WINDOWS, CONFIG, allow_schedule=True)
     assert result[CELL].catalogue_builds == ()
     assert result[other].catalogue_builds is None
+    assert result[CELL].catalogue_waiting_builds is None
+    assert result[other].catalogue_waiting_builds is None
+    assert result[separate].catalogue_waiting_builds == {}
 
 
 async def test_build_request_annotation_failure_preserves_known_absence_of_jobs():
@@ -501,6 +514,92 @@ async def _settle_target(fleet):
     for _ in range(3):
         await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
         _observe(fleet.cluster, OWNER, TENANT, pod_node="worker-one")
+
+
+@pytest.mark.parametrize("running,node,yields", [
+    (False, "worker-one", True),
+    (True, "worker-one", False),
+    (False, "worker-two", False),
+])
+async def test_another_cells_waiting_build_yields_only_to_a_same_node_stop(cell_db, running, node, yields):
+    """A pending neighbour must not take replacement capacity or lose its own cancellation record."""
+    from .test_rollout_automation import (
+        BUSY,
+        IDLE,
+        OWNER,
+        TENANT,
+        TENANT_2,
+        _annotations,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT, TENANT_2)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    try:
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=ANY($2::text[])",
+                                  IMAGE_B, [TENANT, TENANT_2])
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+            _observe(cluster, TENANT_2, pod_node=node)
+        cluster.readiness.update({TENANT: IDLE, TENANT_2: BUSY})
+        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, node, NOW, running=running)
+        cluster.builds[namespace_name(TENANT_2)] = (job,)
+        _annotations(cluster, TENANT_2).update({
+            "exomem.io/catalogue-build-job": job.name, "exomem.io/catalogue-build-outcome": "requested",
+        })
+        # This cell already took the cold fallback; it has no build to cancel at this stop.
+        prior = json.dumps({"window": NOW.replace(minute=0).isoformat(), "jobs": [job.name]})
+        _annotations(cluster, TENANT)["exomem.io/catalogue-build-cancelled"] = prior
+        _observe(cluster, TENANT, pod_node="worker-one")
+        _observe(cluster, TENANT_2, pod_node=node)
+        cluster.events.clear()
+        await fleet.run(NOW, cluster_config=CONFIG)
+
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == int(yields)
+        deletion = ("delete_catalogue_build_job", namespace_name(TENANT_2), job.name)
+        if not yields:
+            assert deletion not in cluster.events
+            assert cluster.builds[namespace_name(TENANT_2)] == (job,)
+            assert "exomem.io/catalogue-build-cancelled" not in _annotations(cluster, TENANT_2)
+            return
+
+        cancellation = json.loads(_annotations(cluster, TENANT_2)["exomem.io/catalogue-build-cancelled"])
+        assert cancellation == {"window": NOW.replace(minute=0).isoformat(), "jobs": [job.name]}
+        assert _annotations(cluster, TENANT_2)["exomem.io/catalogue-build-outcome"] == "cancelled"
+        assert _annotations(cluster, TENANT)["exomem.io/catalogue-build-cancelled"] == prior
+        persisted = next(index for index, event in enumerate(cluster.events)
+                         if event[0] == "patch_annotations" and event[1] == namespace_name(TENANT_2)
+                         and "exomem.io/catalogue-build-cancelled" in event[2])
+        assert persisted < cluster.events.index(deletion)
+
+        # Foreground deletion is not yet proof that the pending pod disappeared.
+        _observe(cluster, TENANT, pod_node="worker-one")
+        _observe(cluster, TENANT_2, pod_node=node)
+        census = cluster.observe_catalogue_builds
+        def unavailable():
+            raise RuntimeError("census unavailable")
+        cluster.observe_catalogue_builds = unavailable
+        await fleet.run(NOW + timedelta(seconds=5), cluster_config=CONFIG)
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        cluster.observe_catalogue_builds = census
+        await fleet.run(NOW + timedelta(seconds=10), cluster_config=CONFIG)
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        cluster.builds.clear()
+        fleet.memory = reconcile.LoopMemory()
+        _observe(cluster, TENANT, pod_node="worker-one")
+        _observe(cluster, TENANT_2, pod_node=node)
+        await fleet.run(NOW + timedelta(seconds=15), cluster_config=CONFIG)
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 0
+        assert not any(build["metadata"]["namespace"] == namespace_name(TENANT_2)
+                       and build["metadata"]["labels"].get(JOB_KIND_LABEL) == JOB_KIND_CATALOGUE_BUILD
+                       for build in cluster.jobs)
+    finally:
+        await fleet.close()
 
 
 async def test_due_backup_and_forced_upgrade_cannot_starve_behind_recreated_builds(cell_db, record_property):

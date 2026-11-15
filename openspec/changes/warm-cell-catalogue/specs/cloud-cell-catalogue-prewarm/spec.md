@@ -10,7 +10,7 @@ Build a catalogue beside the serving cell before its upgrade attempt, so a ready
 
 The feature SHALL default off. When enabled, `cellctl` SHALL schedule a build Job for each running rollout candidate when its upgrade window opens, subject to capacity and skip rules. The build Job SHALL use the target image and share the serving pod's node through scheduler-enforced placement, mounting the live claim read-write.
 
-Builds SHALL follow the attempts' canary-first rule. Cellctl SHALL NOT schedule or keep a build while a backup is due, a content operation is pending, or a row or digest needs apply. After cancellation, cellctl SHALL NOT recreate a build for that target in the same window, including after controller restarts. Only applies that stop or replace the serving pod SHALL wait for build Job and pod absence. One cell's build error SHALL NOT stop another cell's reconciliation. A failed fleet census SHALL delay only cells with a recorded current Job.
+Builds SHALL follow the attempts' canary-first rule. Cellctl SHALL NOT schedule or keep a build while a backup is due, a content operation is pending, or a row or digest needs apply. After cancellation, cellctl SHALL NOT recreate a build for that target in the same window, including after controller restarts. Only applies that stop or replace the serving pod SHALL wait for build Job and pod absence. One cell's build error SHALL NOT stop another cell's reconciliation. A failed fleet census SHALL defer serving stops and replacements on nodes with a recorded current Job.
 
 A running build Job has a pod Running, including image pull after binding to a node. Pending for node capacity is not running.
 
@@ -34,6 +34,15 @@ Before the final force minutes, `cellctl` SHALL count a running build Job as act
 - **WHEN** the force minutes make the attempt due while its build Job still runs
 - **THEN** cellctl deletes the build Job and confirms its pods have ended before stopping the cell
 - **AND** the attempt records the build outcome and continues under its existing deadlines
+
+#### Scenario: A waiting build yields to another cell's stop on the same node
+
+- **WHEN** a cell will stop or replace its serving pod and another cell has an unfinished, unbound build targeting that node
+- **THEN** cellctl records the cancellation in the build's own cell's current window before deleting its Job
+- **AND** the stop waits until a later census proves the build's pods absent; unknown inventory also defers the stop
+- **AND** that target receives no further build in the same window and retains its cold-rebuild fallback
+- **AND** bound builds and builds targeting other nodes remain untouched
+- **AND** a cell without its own builds or waiting builds on its node stops in the same pass
 
 #### Scenario: The build Job fails, expires or no longer applies
 
