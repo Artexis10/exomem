@@ -14,18 +14,26 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from cellctl.capacity import LocalCapacityObservation, LogicalVolumeRecord, compute_local_capacity
 from cellctl.manifests import BACKUP_PATHS
+from cellctl.storage_config import GIB
 from cellctl.upgrade_window import parse_window
 
 from cloud_rehearsal import build, platform, release_rollout, substrate
 from cloud_rehearsal.__main__ import _parser, main
 from cloud_rehearsal.release_rollout import (
+    CELL_GIB,
     HOLD_BUDGET_SECONDS,
+    LOCAL,
     MIN_MINUTES_LEFT,
+    POOL_GIB,
+    SLOTS_AT_REST,
     deploy_settings,
     deploy_transport,
     load_cloud_deploy,
+    pause_alert_lines,
     poll_failures,
+    require_admission_room,
     seconds_until_quiet_hour,
     summarize_calls,
     window_annotations,
@@ -175,3 +183,71 @@ def test_a_failed_proof_fails_the_stage_and_blocks_only_what_needs_it(monkeypatc
     assert [steps[number].status for number in (13, 14, 15, 23)] == ["passed", "failed", "blocked", "passed"]
     assert "step(s) [14]" in steps[15].failure["message"]
     assert ctx.report.stages["release_rollout"]["status"] == "failed"
+
+
+def test_the_pool_publishes_a_slot_for_each_cell_with_the_canarys_attempt_held() -> None:
+    """The first run found no slot for the second cell: cellctl publishes what the pool holds beyond its backup
+    reserve, so a pool or a cell size that leaves less than three slots stops the mode at its first redemption."""
+    cells = {"a": CELL_GIB, "b": CELL_GIB, "c": CELL_GIB}
+    # The three cells, then the canary's attempt: a snapshot and its clone, each at the cell's size.
+    volumes = tuple(LogicalVolumeRecord("node", CELL_GIB * GIB, LOCAL.device_class, True, False) for _ in range(5))
+    free = POOL_GIB * GIB - sum(volume.size for volume in volumes)
+    observation = LocalCapacityObservation(free_bytes={"node": free}, volumes=volumes,
+                                           cell_nodes={cell_id: "node" for cell_id in cells})
+    published = compute_local_capacity(observation, local=LOCAL, cell_sizes=cells)["node"].cell_slots
+    assert published == SLOTS_AT_REST
+    assert published - len(cells) >= 1
+
+
+def test_the_stage_stops_before_a_redemption_that_substrate_would_refuse() -> None:
+    import asyncio
+
+    from cloud_rehearsal import report as report_module
+
+    async def fetchrow(_sql):
+        return {"published_slots": 0, "live_cells": 1, "cell_gib": '{"abc": 10}'}
+
+    ctx = SimpleNamespace(fetchrow=fetchrow)
+    record = report_module.StepRecord(13, "provision_disposable_cells")
+    with pytest.raises(report_module.StepFailure) as stopped:
+        asyncio.run(require_admission_room(ctx, record, "B and C", room=2, timeout=0))
+    assert "published 0 slot(s) for 1 live cell(s)" in str(stopped.value)
+    assert record.evidence["admission"]["B and C"] == {"published_slots": 0, "live_cells": 1, "cell_gib": {"abc": 10}, "room": -1}
+
+
+def test_admission_with_room_records_the_published_slots_and_goes_on() -> None:
+    import asyncio
+
+    from cloud_rehearsal import report as report_module
+
+    async def fetchrow(_sql):
+        return {"published_slots": SLOTS_AT_REST, "live_cells": 1, "cell_gib": '{"abc": 4}'}
+
+    record = report_module.StepRecord(13, "provision_disposable_cells")
+    asyncio.run(require_admission_room(SimpleNamespace(fetchrow=fetchrow), record, "B and C", room=2, timeout=0))
+    assert record.evidence["admission"]["B and C"]["published_slots"] == SLOTS_AT_REST
+
+
+def test_a_step_that_never_provisioned_blocks_the_poll_check_and_every_proof_after_it() -> None:
+    """The first run read "switch A was never polled" as a finding of its own, though step 13 had failed and no
+    poller had started. With the real proof table, the poll check is blocked and names the step that failed."""
+    import asyncio
+
+    from cloud_rehearsal import report as report_module
+
+    ctx = SimpleNamespace(report=report_module.Report("release"), a=SimpleNamespace(client=None, cell_id=None))
+    asyncio.run(release_rollout.run_release_rollout(ctx))
+    steps = {step.number: step for step in ctx.report.steps}
+    assert steps[13].status == "failed"
+    assert {steps[number].status for number in steps if number != 13} == {"blocked"}
+    assert "the failed step is [13]" in steps[23].failure["message"]
+    assert ctx.report.stages["release_rollout"]["status"] == "failed"
+
+
+def test_only_the_line_where_the_pause_alert_fires_for_the_canary_counts() -> None:
+    delivery_failure = "ERROR cellctl: cloud-rollout-paused alert delivery failed; retrying in a minute: 404"
+    other_cell = "WARNING cellctl: cloud-rollout-paused: bbbbbbbbbbbbbbbb"
+    fires = "WARNING cellctl: cloud-rollout-paused: aaaaaaaaaaaaaaaa"
+    log = "\n".join([delivery_failure, other_cell, fires])
+    assert pause_alert_lines(delivery_failure + "\n" + other_cell, "aaaaaaaaaaaaaaaa") == 0
+    assert pause_alert_lines(log, "aaaaaaaaaaaaaaaa") == 1

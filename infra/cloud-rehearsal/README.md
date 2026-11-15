@@ -227,8 +227,9 @@ Set the workflow inputs `original_fixity_originals` and `original_fixity_mean_ki
 
 `--release` proves `automate-cloud-releases` tasks 1.15, 2.1 and 3.1. It runs only on demand, as the `release` mode of the `Cloud rehearsal` workflow, after steps 1 to 3. Dispatch it with `gh workflow run cloud-rehearsal.yml -f mode=release`.
 The canary and two more cells run on the local storage domain. The baseline release and every later release go through the deploy token and the workflow script's own Substrate client.
+Substrate inserts each cell at 10 GiB, which leaves the pool no slot. The mode sets each cell's row to the 4 GiB default before checkout, and step 13 stops, with the published slots in its evidence, when admission still has no room.
 Each proof is a step record from 13 up. The steps cover the canary rolling at once, an idle cell rolling after its idle minute, a busy cell waiting, a second release leaving the running attempt pinned, a failed canary pausing the rollout and being restored, and only the admin token clearing the pause.
-The run polls each rolled cell through its switch. An errored call fails step 23.
+The run polls each rolled cell through its switch. An errored call fails step 23, and step 23 is blocked when step 14, which starts the first poll, did not pass.
 Hand-set window annotations hold the cells back, because cellctl keeps a cell's window for the UTC day. A window opens only with 20 minutes of the hour left, so a run can wait for the next hour before step 16.
 The chart's gateway hold budget is 0, which turns the hold off. The mode sets 40 seconds and records it.
 The exit code is 0 only when every proof passed. The mode never gates a node.

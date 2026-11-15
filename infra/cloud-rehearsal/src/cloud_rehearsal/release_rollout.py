@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from cellctl.alerts import ROLLOUT_PAUSED_ALERT
+from cellctl.capacity import snapshot_reserve_bytes
 from cellctl.manifests import (
     BACKUP_PATHS,
     PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION,
@@ -40,6 +41,7 @@ from cellctl.manifests import (
     clone_claim_name,
     namespace_name,
 )
+from cellctl.storage_config import GIB, LocalStorage
 
 from . import build, images
 from .platform import CLOUD_NAMESPACE
@@ -63,6 +65,7 @@ from .scenarios import (
     _flatten,
     _running_ready,
     _safe_body,
+    activate_subscription,
     first_session,
     redeem_invite,
 )
@@ -73,12 +76,20 @@ if TYPE_CHECKING:
 
 DEPLOY_SCRIPT = images.REPO_ROOT / "infra/scripts/cloud_deploy.py"
 
-# The local domain needs a cell volume of at least 4 GiB (the platform's default cell size). Each
-# cell holds a volume, and an attempt holds a snapshot and a clone of the same size beside it.
-# TopoLVM counts every thin volume at its virtual size, so the pool covers three cells, the
-# canary's attempt, a second attempt, and the snapshot reserve cellctl keeps back from the slots.
-CELL_GIB = 4
-POOL_GIB = 3 * CELL_GIB + 2 * (2 * CELL_GIB) + 2 * (2 * CELL_GIB)
+# The platform chart's own local-storage settings, which the rehearsal keeps but for the cell volume cap.
+LOCAL = LocalStorage()
+# Substrate admits an address while the published slots exceed its live cells. cellctl reserves a snapshot
+# and a clone of its largest cell per backup and charges a cell above the default size extra slots
+# (capacity.compute_local_capacity). Substrate inserts a cell row at 10 GiB, so size_cell sets the row to this
+# size before the cell's claim is rendered: left alone, the first cell leaves this pool no slot.
+CELL_GIB = LOCAL.default_cell_gib
+# TopoLVM counts every thin volume at its virtual size, so the pool covers the three cells, the failed
+# attempts' snapshot and clone beside the canary (two of them, in case a second attempt overlaps the
+# first), and the snapshot reserve that cellctl keeps back from the published slots.
+POOL_GIB = 3 * CELL_GIB + 2 * (2 * CELL_GIB) + snapshot_reserve_bytes(LOCAL, CELL_GIB) // GIB
+# What cellctl publishes with no cell larger than CELL_GIB, whatever the cells and their attempts hold.
+SLOTS_AT_REST = (POOL_GIB - snapshot_reserve_bytes(LOCAL, CELL_GIB) // GIB) // CELL_GIB
+
 # The window rule under test (D4): a cell rolls once it has been quiet for this long. A minute
 # is the chart's smallest value, so each proof waits minutes, not the production five.
 IDLE_MINUTES = 1
@@ -241,6 +252,14 @@ def poll_failures(label: str, summary: dict[str, Any], budget: float = HOLD_BUDG
     return problems
 
 
+def pause_alert_lines(log: str, cell_id: str) -> int:
+    """The lines where cellctl logs that the pause alert fires for `cell_id`. This rehearsal has no alert
+    receiver, so the log is the only record; cellctl formats the line itself as `cellctl: <alert>: <cells>`
+    (reconcile.py), and a failed delivery names the alert with no colon after it."""
+
+    return sum(1 for line in log.splitlines() if f"cellctl: {ROLLOUT_PAUSED_ALERT}: {cell_id}" in line)
+
+
 # --- the upgrade window, held by hand ------------------------------------------------------
 
 
@@ -294,6 +313,54 @@ async def wait_until(description: str, timeout: float, probe, *, interval: float
             return answer
         await asyncio.sleep(interval)
     raise StepFailure(f"timed out after {timeout:.0f}s waiting for {description}")
+
+
+# --- admission: the slots cellctl publishes and Substrate counts ---------------------------------
+
+
+async def size_cell(ctx: Context, tenant: Tenant) -> None:
+    """Set the cell's volume to CELL_GIB. The row is stopped until checkout, so no claim is rendered yet."""
+
+    await ctx.execute("UPDATE exomem_cloud_cells SET storage_gib = $2 WHERE cell_id = $1", tenant.cell_id, CELL_GIB)
+
+
+# Substrate's own count (cloud-capacity.ts): the slots of the observations from the last five minutes, and
+# the cells whose deletion has not finished. cell_gib is the size each cell's claim is rendered at.
+ADMISSION_SQL = """
+SELECT
+  (SELECT COALESCE(SUM(cell_slots), 0) FROM exomem_cloud_capacity
+   WHERE observed_at > statement_timestamp() - interval '5 minutes'
+     AND observed_at <= statement_timestamp()) AS published_slots,
+  (SELECT COUNT(*) FROM exomem_cloud_cells AS cell WHERE NOT exomem_cloud_cell_deletion_finished(cell)) AS live_cells,
+  (SELECT jsonb_object_agg(cell_id, GREATEST(storage_gib, COALESCE(grown_storage_gib, 0)))
+   FROM exomem_cloud_cells) AS cell_gib
+"""
+
+
+async def admission_state(ctx: Context) -> dict[str, Any]:
+    row = await ctx.fetchrow(ADMISSION_SQL) or {}
+    gib = row.get("cell_gib")
+    return {"published_slots": int(row.get("published_slots") or 0), "live_cells": int(row.get("live_cells") or 0),
+            "cell_gib": json.loads(gib) if isinstance(gib, str) else (gib or {})}
+
+
+async def require_admission_room(ctx: Context, record: StepRecord, label: str, *, room: int, timeout: float = 60.0) -> None:
+    """Fail before a redemption that Substrate would refuse with 503 HOSTED_ADMISSION_CLOSED, naming the slots
+    cellctl published. A cell's corrected size reaches Substrate on cellctl's next pass, so the wait is bounded."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        state = await admission_state(ctx)
+        state["room"] = state["published_slots"] - state["live_cells"]
+        record.evidence.setdefault("admission", {})[label] = state
+        if state["room"] >= room:
+            return
+        if time.monotonic() > deadline:
+            raise StepFailure(
+                f"admission has no room for {label}: cellctl published {state['published_slots']} slot(s) for "
+                f"{state['live_cells']} live cell(s), and {room} more cell(s) need room. The pool holds {SLOTS_AT_REST} "
+                f"slot(s) at rest for {CELL_GIB} GiB cells; cell volume sizes in GiB: {state['cell_gib']}")
+        await asyncio.sleep(2)
 
 
 async def wait_for_hold(ctx: Context, tenant: Tenant, *, timeout: float = HOLD_TIMEOUT) -> dict[str, Any]:
@@ -361,6 +428,7 @@ class Rollout:
     closed_hour: int = 0
     put_at: dt.datetime | None = None
     c_hold_started_at: dt.datetime | None = None
+    outcome: dict[int, str] = field(default_factory=dict)
 
     def start_poller(self, label: str, tenant: Tenant, interval: float = 1.0) -> SwitchPoller:
         poller = self.pollers[label] = SwitchPoller(label, tenant, interval)
@@ -382,9 +450,18 @@ class Rollout:
         ctx = self.ctx
         if not (ctx.a.client and ctx.a.cell_id):
             raise StepFailure("the canary's connector is missing: steps 2 and 3 did not complete")
+        # B and C need a slot each; the check also names the published slots when cellctl has none to give.
+        await require_admission_room(ctx, record, "B and C", room=2)
         for tenant in (ctx.b, ctx.c):
             started = time.monotonic()
-            await redeem_invite(ctx, tenant, await seed_invite(ctx.substrate, tenant.email, paid=False))
+            if tenant is ctx.c:
+                # B's row was inserted at Substrate's size until size_cell corrected it, and cellctl publishes that.
+                await require_admission_room(ctx, record, "C", room=1)
+            # A paid invite admits a stopped cell, so its volume is sized before checkout starts it, as for A.
+            tenant.paid = True
+            await redeem_invite(ctx, tenant, await seed_invite(ctx.substrate, tenant.email, paid=tenant.paid))
+            await size_cell(ctx, tenant)
+            await activate_subscription(ctx, tenant)
             await ctx.wait_cell(tenant.cell_id, _running_ready(ctx.images.cell_v1), timeout=600,
                                 description=f"cell {tenant.label} to run v1 and be ready")
             tenant.client = TenantClient(ctx.resolver, ctx.browser, tenant.session, ctx.substrate.redirect_uri)
@@ -576,10 +653,10 @@ class Rollout:
         if not snapshots:
             problems.append(f"{PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION} was never set on the canary's attempt")
         logs = await asyncio.to_thread(ctx.kubectl, "logs", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, "--tail=-1")
-        alert_lines = sum(1 for line in logs.stdout.splitlines() if ROLLOUT_PAUSED_ALERT in line)
-        record.evidence["cellctl_log_lines_naming_the_pause_alert"] = alert_lines
+        alert_lines = pause_alert_lines(logs.stdout, a)
+        record.evidence["cellctl_log_lines_for_the_pause_alert"] = alert_lines
         if not alert_lines:
-            problems.append(f"cellctl's log has no {ROLLOUT_PAUSED_ALERT} line")
+            problems.append(f"cellctl's log has no line saying {ROLLOUT_PAUSED_ALERT} fires for the canary {a}")
         if problems:
             raise StepFailure("; ".join(problems))
 
@@ -686,11 +763,22 @@ class Rollout:
         record.evidence["hold_budget_seconds"] = HOLD_BUDGET_SECONDS
         record.evidence["switches"] = self.switches
         problems = []
-        for label in ("A", "C_busy", "B", "C"):
-            problems += poll_failures(label, self.switches.get(label) or summarize_calls([]))
+        not_polled = {}
+        for label, step in POLLER_STARTED_BY.items():
+            if label in self.switches:
+                problems += poll_failures(label, self.switches[label])
+            elif self.outcome.get(step) == PASSED:
+                problems.append(f"switch {label} was never polled, though step {step}, which starts it, passed")
+            else:
+                # The step that starts the poller did not pass and records why; a missing poll is no second finding.
+                not_polled[label] = f"step {step} did not pass"
+        record.evidence["not_polled"] = not_polled
         if problems:
             raise StepFailure("; ".join(problems))
 
+
+# The step that starts each switch's poller.
+POLLER_STARTED_BY = {"A": 14, "C_busy": 16, "B": 16, "C": 17}
 
 # (number, the proof, the proofs it needs). A step record takes its name from the method.
 PROOFS: list[tuple[int, Callable[[Rollout, StepRecord], Awaitable[None]], tuple[int, ...]]] = [
@@ -704,7 +792,8 @@ PROOFS: list[tuple[int, Callable[[Rollout, StepRecord], Awaitable[None]], tuple[
     (20, Rollout.workflow_fails_with_the_code_alone, (19,)),
     (21, Rollout.acknowledged_write_survives_and_no_broken_file_remains, (19,)),
     (22, Rollout.pause_is_cleared_only_by_the_admin_token, (19,)),
-    (23, Rollout.switch_polls_never_failed, ()),
+    # It reads what the pollers saw, whichever later proof failed, so it needs only the step that starts the first poller.
+    (23, Rollout.switch_polls_never_failed, (14,)),
 ]
 
 
@@ -715,9 +804,12 @@ async def run_release_rollout(ctx: Context) -> None:
         "status": "running", "principal": "deploy token (cloud-deploy's Substrate client)",
         "hold_budget_seconds": HOLD_BUDGET_SECONDS, "idle_minutes": IDLE_MINUTES, "force_minutes": FORCE_MINUTES,
         "cells": {"canary": "A", "idle": "B", "busy_then_idle": "C"},
+        "pool": {"pool_gib": POOL_GIB, "cell_gib": CELL_GIB, "slots_at_rest": SLOTS_AT_REST},
     }
     rollout = Rollout(ctx)
-    outcome: dict[int, str] = {}
+    outcome = rollout.outcome
+    # The step whose failure started each chain of blocked steps, so a blocked proof names where to look.
+    origin: dict[int, set[int]] = {}
     try:
         for number, proof, needs in PROOFS:
             name = proof.__name__
@@ -725,7 +817,9 @@ async def run_release_rollout(ctx: Context) -> None:
             ctx.report.steps.append(record)
             unmet = [n for n in needs if outcome.get(n) != PASSED]
             if unmet:
-                record.failure = {"type": "Blocked", "message": f"depends on step(s) {unmet}, which did not pass"}
+                origin[number] = set().union(*({n} if outcome[n] == FAILED else origin[n] for n in unmet))
+                record.failure = {"type": "Blocked", "message": f"depends on step(s) {unmet}, which did not pass; "
+                                                                f"the failed step is {sorted(origin[number])}"}
                 outcome[number] = BLOCKED
                 print(f"[rehearsal] step {number} {name}: BLOCKED by {unmet}", flush=True)
                 continue

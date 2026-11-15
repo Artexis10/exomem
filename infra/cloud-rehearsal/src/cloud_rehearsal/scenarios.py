@@ -552,6 +552,11 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
         # created at this size and cellctl, capped at it by the chart, cannot grow it.
         await ctx.execute("UPDATE exomem_cloud_cells SET storage_gib = $2 WHERE cell_id = $1",
                           ctx.a.cell_id, ctx.large_import.volume_gib)
+    elif ctx.release_rollout:
+        # The same, for the release mode's pool, which Substrate's default cell size would leave without a slot.
+        from .release_rollout import size_cell
+
+        await size_cell(ctx, ctx.a)
     admitted = await ctx.cell(ctx.a.cell_id)
     record.evidence["admitted"] = cell_summary(admitted)
     if admitted["desired_state"] != "stopped":
