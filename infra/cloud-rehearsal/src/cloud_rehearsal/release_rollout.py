@@ -23,6 +23,7 @@ import io
 import json
 import sys
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from types import ModuleType
@@ -42,8 +43,10 @@ from cellctl.manifests import (
     namespace_name,
 )
 from cellctl.storage_config import GIB, LocalStorage
+from mcp.shared.exceptions import McpError
 
 from . import build, images
+from .mcp_client import MeasuredSession, refusal_text, session_gone
 from .platform import CLOUD_NAMESPACE
 from .report import (
     BLOCKED,
@@ -171,18 +174,24 @@ class SwitchPoller:
     """Sequential `search_memory` calls through a tenant's switch, each timed from the call to its answer.
 
     Calls never overlap: a call held behind a restart delays the next call, as a single client's would be.
+    The poller keeps its MCP session open across calls, as a connector does, because the gateway counts every
+    request from the harness's address (initialize and its notification too) against a bucket of 120 a minute.
+    The SDK ends a session when a request fails, so the next poll opens another; `sessions` counts them.
     """
 
     label: str
     tenant: Tenant
     interval: float
     calls: list[Call] = field(default_factory=list)
+    sessions: int = 0
     last_completed_at: dt.datetime | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _first: asyncio.Event = field(default_factory=asyncio.Event)
     _task: asyncio.Task[None] | None = None
+    _started: float = 0.0
 
     def start(self) -> None:
+        self._started = time.perf_counter()
         self._task = asyncio.create_task(self._run())
 
     async def first_call(self) -> None:
@@ -196,26 +205,59 @@ class SwitchPoller:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._task, timeout)
             self._task = None
-        return summarize_calls(self.calls)
+        polled = round(time.perf_counter() - self._started)
+        return {**summarize_calls(self.calls), "sessions": self.sessions, "polled_seconds": polled}
 
     async def _run(self) -> None:
         assert self.tenant.client is not None
+        began = time.perf_counter()
+        # The server said the session is gone: a client initializes another and repeats the call, once.
+        retrying = False
         while not self._stop.is_set():
-            began = time.perf_counter()
-            error: str | None = None
+            if not retrying:
+                # A poll that opens a session also waits for its initialize, as a client's first call does.
+                began = time.perf_counter()
+            in_flight = True
             try:
                 async with self.tenant.client.mcp() as session:
-                    result = await session.call("search_memory", {"query": POLL_QUERY})
-                if result.is_error:
-                    error = f"tool error {result.error_code or 'unknown'}"
+                    self.sessions += 1
+                    while not self._stop.is_set():
+                        in_flight = True
+                        error, gone = await self._call(session)
+                        in_flight = False
+                        if gone and not retrying:
+                            retrying = True
+                            break
+                        retrying = False
+                        self._record(began, error)
+                        await self._pause(began)
+                        began = time.perf_counter()
             except Exception as raised:  # noqa: BLE001 - an errored call is the measurement
-                error = _flatten(innermost(raised))[:200]
-            seconds = time.perf_counter() - began
-            self.calls.append(Call(seconds, error))
-            self.last_completed_at = dt.datetime.now(dt.UTC)
-            self._first.set()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop.wait(), max(0.0, self.interval - seconds))
+                if not in_flight and self._stop.is_set():
+                    break  # the session closing after the last call, with no call to blame
+                retrying = False
+                self._record(began, refusal_text(innermost(raised)) or _flatten(innermost(raised))[:200])
+                await self._pause(began)
+
+    async def _call(self, session: MeasuredSession) -> tuple[str | None, bool]:
+        """The error a poll saw, if any, and whether it says the session is gone."""
+
+        try:
+            result = await session.call("search_memory", {"query": POLL_QUERY})
+        except McpError as error:  # a JSON-RPC error answered on a live session; an HTTP failure ends it instead
+            return _flatten(error)[:200], session_gone(error)
+        if result.is_error:
+            return f"tool error {result.error_code or 'unknown'}", False
+        return None, False
+
+    def _record(self, began: float, error: str | None) -> None:
+        self.calls.append(Call(time.perf_counter() - began, error))
+        self.last_completed_at = dt.datetime.now(dt.UTC)
+        self._first.set()
+
+    async def _pause(self, began: float) -> None:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stop.wait(), max(0.0, self.interval - (time.perf_counter() - began)))
 
 
 def summarize_calls(calls: list[Call]) -> dict[str, Any]:
@@ -229,6 +271,8 @@ def summarize_calls(calls: list[Call]) -> dict[str, Any]:
         # A wait over the gateway's retry interval is a call held behind a restart.
         "held_calls": sum(1 for wait in waits if wait > 2.0),
         "error_samples": [{"waited_seconds": round(call.seconds, 2), "error": call.error} for call in errors[:5]],
+        # How often each kind of error came, since the samples keep only the first few.
+        "error_kinds": dict(Counter((call.error or "").splitlines()[0][:100] for call in errors)),
     }
 
 

@@ -8,6 +8,8 @@ The run itself needs a K3s cluster and is exercised by the `release` workflow mo
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import subprocess
 from types import SimpleNamespace
@@ -18,9 +20,12 @@ from cellctl.capacity import LocalCapacityObservation, LogicalVolumeRecord, comp
 from cellctl.manifests import BACKUP_PATHS
 from cellctl.storage_config import GIB
 from cellctl.upgrade_window import parse_window
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 
 from cloud_rehearsal import build, platform, release_rollout, substrate
 from cloud_rehearsal.__main__ import _parser, main
+from cloud_rehearsal.mcp_client import read_refusal_body, refusal_text
 from cloud_rehearsal.release_rollout import (
     CELL_GIB,
     HOLD_BUDGET_SECONDS,
@@ -251,3 +256,81 @@ def test_only_the_line_where_the_pause_alert_fires_for_the_canary_counts() -> No
     log = "\n".join([delivery_failure, other_cell, fires])
     assert pause_alert_lines(delivery_failure + "\n" + other_cell, "aaaaaaaaaaaaaaaa") == 0
     assert pause_alert_lines(log, "aaaaaaaaaaaaaaaa") == 1
+
+
+class _Session:
+    """A session that answers its script in order and repeats the last answer: a result, or an error to raise."""
+
+    def __init__(self, *script) -> None:
+        self.script = list(script)
+
+    async def call(self, _name, _arguments):
+        step = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        if isinstance(step, BaseException):
+            raise step
+        return SimpleNamespace(is_error=False, error_code=None)
+
+
+class _Connector:
+    """A tenant's connector: each `mcp()` opens the next scripted session, and `opened` counts them."""
+
+    def __init__(self, *sessions: _Session) -> None:
+        self.sessions = list(sessions)
+        self.opened = 0
+
+    @contextlib.asynccontextmanager
+    async def mcp(self):
+        session = self.sessions[min(self.opened, len(self.sessions) - 1)]
+        self.opened += 1
+        yield session
+
+
+def _poll(connector: _Connector, calls: int) -> dict:
+    async def run() -> dict:
+        poller = release_rollout.SwitchPoller("A", SimpleNamespace(client=connector), interval=0.001)
+        poller.start()
+        while len(poller.calls) < calls:
+            await asyncio.sleep(0.005)
+        return await poller.stop()
+
+    return asyncio.run(run())
+
+
+def test_a_poller_reuses_its_session_across_calls() -> None:
+    """The second run answered 429 to almost half of its polls: a session per call sent three requests from the
+    harness's address each time, over the gateway's 120 a minute. A session kept open sends a request per call."""
+    connector = _Connector(_Session("answers"))
+    summary = _poll(connector, calls=8)
+    assert connector.opened == 1
+    assert summary["sessions"] == 1
+    assert summary["errors"] == 0
+
+
+def test_a_poller_opens_another_session_when_the_server_says_it_is_gone_and_repeats_the_call() -> None:
+    gone = McpError(ErrorData(code=32600, message="Session terminated"))
+    connector = _Connector(_Session(gone), _Session("answers"))
+    summary = _poll(connector, calls=3)
+    assert summary["sessions"] == 2
+    assert summary["errors"] == 0
+
+
+def test_a_refused_call_names_the_gateways_error_code_and_the_next_poll_opens_a_new_session() -> None:
+    async def refused(hooks: list) -> httpx.HTTPStatusError:
+        # The body arrives as a stream, as the SDK's streamed POST receives it.
+        def answer(_request):
+            return httpx.Response(429, stream=httpx.ByteStream(b'{"error": "RATE_LIMITED"}'))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(answer), event_hooks={"response": hooks}) as client:
+            with pytest.raises(httpx.HTTPStatusError) as raised:
+                async with client.stream("POST", "https://mcp.rehearsal.test/mcp") as response:
+                    response.raise_for_status()
+        return raised.value
+
+    assert refusal_text(asyncio.run(refused([]))) == "HTTP 429 <body not read>"
+    error = asyncio.run(refused([read_refusal_body]))
+    assert refusal_text(error) == "HTTP 429 RATE_LIMITED"
+
+    connector = _Connector(_Session(error), _Session("answers"))
+    summary = _poll(connector, calls=3)
+    assert summary["sessions"] == 2
+    assert summary["error_kinds"] == {"HTTP 429 RATE_LIMITED": 1}
