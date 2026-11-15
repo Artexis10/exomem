@@ -46,7 +46,9 @@
   - the rollout view's answer holds no cell ID and no tenant ID, and keeps its size as the fleet grows, which catches a view that leaks identifiers or grows unbounded;
   - the admin token still clears a pause, which catches a narrowing that locks out the person;
   - the receiver refuses the `cloud-deploy` capability for any other job name, which catches a CI capability that can raise or resolve other alerts.
-- [ ] 1.4 Measure client tool-call timeouts against the hold budget. For each MCP client that Cloud supports, record how long it waits for a tool-call answer, and whether it retries a `503` with `Retry-After`. Use a disposable cell that refuses connections for 10, 30, 45 and 60 seconds. Record the longest tool call that the rehearsal cell answers. Verify: design.md records each client's timeout and retry behaviour, a gateway latency budget, and the idle bound. The chosen budget sits below the shortest timeout, and the idle bound above the longest tool call. It catches a budget that clients abandon before the cell returns, and an idle bound that cuts a long tool call.
+- [x] 1.4 Measure client tool-call timeouts against the hold budget. For each MCP client that Cloud supports, record how long it waits for a tool-call answer, and whether it retries a `503` with `Retry-After`. Use a disposable cell that refuses connections for 10, 30, 45 and 60 seconds. Record the longest tool call that the rehearsal cell answers. Verify: design.md records each client's timeout and retry behaviour, a gateway latency budget, and the idle bound. The chosen budget sits below the shortest timeout, and the idle bound above the longest tool call. It catches a budget that clients abandon before the cell returns, and an idle bound that cuts a long tool call.
+
+  Note (2026-11-15): Claude Code and Codex CLI were measured against a local stand-in that held each tool call with no response bytes, which is what a client sees during a gateway hold. claude.ai and ChatGPT run only in a browser, so design D5 records their documented limits and marks them as not measured. The cloud-rehearsal `release` mode run 43759488588 gives the longest tool call.
 - [x] 1.5 Add hourly traffic counts to the cloud cell (D4).
   - Keep the counts file under `/data/host`, outside `/data/vault`.
   - Add `inflight` and `last_request_age_seconds` to the readiness `traffic` block.
@@ -156,12 +158,12 @@
 
   Verify: every alert name of D2, D3 and D8 has a runbook step, and each new command runs as written against the rehearsal cluster. It catches an alert that fires with no step for the person who receives it, and a dispatch that the branch policy refuses.
 - [x] 1.14 Open follow-up: sign the origin proof and the artifact grant per attempt, before task 1.4 raises the hold budget above about 50 s. Verify: a request that the gateway retries for the full budget still carries a valid proof and grant. It catches a held request that the cell refuses, because its proof expired during the hold.
-- [ ] 1.15 (Harness merged in #2746; open until the rehearsal run shows the route accepts it.) Open follow-up: make the cloud-rehearsal harness send `release` with `cellImage`. Verify: the harness sets the image through the deploy route without a refusal. It catches a rehearsal that fails on the narrowed deploy principal.
+- [x] 1.15 (Harness merged in #2746. Proven 2026-11-15 by cloud-rehearsal run 43759488588, step 14: the deploy token set the image through the workflow script's own Substrate client.) Open follow-up: make the cloud-rehearsal harness send `release` with `cellImage`. Verify: the harness sets the image through the deploy route without a refusal. It catches a rehearsal that fails on the narrowed deploy principal.
 - [x] 1.16 Open follow-up: add a test of the gateway server-slot leave and retake around a hold. Verify: a held request leaves its server slot, and retakes it when the cell accepts. It catches a slot that leaks, or a hold that counts against the server cap.
 
 ## 2. Phase 1 rehearsal
 
-- [ ] 2.1 With the operator's approval, rehearse a release end to end on the rehearsal cluster, with a disposable canary and two disposable cells. Start from a real tag publish, not a manual dispatch. If the tag run's completion starts no `cloud-deploy` run, add an explicit `gh workflow run cloud-deploy.yml --ref main` step to the release workflow's tag run, and repeat. Verify:
+- [x] 2.1 With the operator's approval, rehearse a release end to end on the rehearsal cluster, with a disposable canary and two disposable cells. Start from a real tag publish, not a manual dispatch. If the tag run's completion starts no `cloud-deploy` run, add an explicit `gh workflow run cloud-deploy.yml --ref main` step to the release workflow's tag run, and repeat. Verify:
   - a real tag publish starts `cloud-deploy`, which catches a `workflow_run` trigger that a run started with `github.token` never fires (2026-11-12: v0.172.0 to v0.174.0 started none, so the tag run now ends with the dispatch; the rehearsal proves the dispatch);
   - the workflow sets the image, the canary rolls at once, and each other cell rolls only in its window, after its idle minutes;
   - a client that calls a tool every second through each switch sees no error within the budget, and the run records the waits;
@@ -171,12 +173,20 @@
 
   It catches a path whose parts pass alone, while the workflow, `cellctl` and the gateway disagree.
 
-  Note (2026-11-12): the tags v0.172.0 to v0.174.0 started no `cloud-deploy` run, so the release workflow's tag run now dispatches it in its `deploy-cells` job. On production, the v0.175.0 tag run dispatched `cloud-deploy`, which set the image and reported the canary on the target. The canary's pod runs the digest that the tag run published. This proves the first bullet on production. Every later release repeats it: the first tag run of each release from v0.175.0 to v0.181.0 ended with `deploy-cells`, and a `cloud-deploy` run followed within seconds. The rehearsal still owns the other bullets.
+  Note (2026-11-12): the tags v0.172.0 to v0.174.0 started no `cloud-deploy` run, so the release workflow's tag run now dispatches it in its `deploy-cells` job. On production, the v0.175.0 tag run dispatched `cloud-deploy`, which set the image and reported the canary on the target. The canary's pod runs the digest that the tag run published. This proves the first bullet on production. Every later release repeats it: the first tag run of each release from v0.175.0 to v0.181.0 ended with `deploy-cells`, and a `cloud-deploy` run followed within seconds. The rehearsal proves the other bullets.
+
+  Note (2026-11-15): the cloud-rehearsal `release` mode proves bullets 2 to 6 in run 43759488588, steps 13 to 23, on cells on the local storage domain. The run starts from a workflow dispatch, because a real tag publishes to production; the tag path is the production proof above.
+  - The deploy token set the image, and the canary's upgrade hold began 5.4 s later. The other two cells stayed on the old image for 120 s while the window excluded the hour.
+  - With the window open, the idle cell's attempt began after 69.6 s idle. The busy cell waited through 75 s of calls, then began after 60.9 s idle.
+  - A client called `search_memory` every second through each switch: 1,083 calls, no error, longest wait 34.5 s within the 40 s hold budget.
+  - A second release during a cell's attempt left that attempt on its pinned target, and the cell's pod ran that target afterwards.
+  - The forced readiness failure paused the rollout with `UPGRADE_READINESS_TIMEOUT`, and cellctl logged `cloud-rollout-paused` once. The workflow's paused path printed `cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT` and exited 1.
+  - The deploy token's pause clear got `403 OPERATOR_SCOPE_DENIED`, and the pause stayed until the admin token cleared it.
 - [ ] 2.2 Measure each stop on real cells after phase 1: the stop, the pull, the init and the cold start, per cell. Verify: design.md replaces each "est." stop figure with the measured median and range, and names the run. It catches a "seamless" claim that rests on estimates.
 
 ## 3. Phase 2: restore point (D6)
 
-- [ ] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the cloud-rehearsal `release` mode on local storage:
+- [x] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the cloud-rehearsal `release` mode on local storage:
   - the target applies before the backup Job starts, which catches a backup that is still inside the stop;
   - no snapshot is taken while a pod uses the volume, which catches a crash-consistent restore point;
   - in the rehearsal's `release` mode, a write acknowledged just before the stop is present after a forced-failure restore. It catches a snapshot of an unflushed volume that loses the last commits;
@@ -186,7 +196,7 @@
   - a missing snapshot falls back to the off-site backup. With neither, the row records `RESTORE_FAILED`, and no image starts. It catches a guess onto an unrestored volume;
   - a `cellctl` restart at each step resumes from the annotations, which catches an attempt that loses its restore point on restart.
 
-  Note: the reconcile tests pass. `test_clone_restore_copy_command_on_real_k3s` proves only the copy command on mounted claims. It takes no snapshot and stops no cell. The box stays open until the rehearsal's `release` mode proves the acknowledged-write bullet with a real snapshot after the stop. The live K3s suite has no CSI snapshot controller. The rehearsal's local storage domain runs TopoLVM and the snapshot controller.
+  Note: the reconcile tests pass. `test_clone_restore_copy_command_on_real_k3s` proves only the copy command on mounted claims. It takes no snapshot and stops no cell. The live K3s suite has no CSI snapshot controller, so the rehearsal's local storage domain, with TopoLVM and the snapshot controller, proves the snapshot bullets. In cloud-rehearsal run 43759488588 (2026-11-15), step 21, a note written through MCP and acknowledged before the forced-failure attempt was present after the restore from the attempt's snapshot clone. The broken target had written marker files under `/data/vault` and `/data/host` during the attempt, and none remained after the restore.
 - [x] 3.2 Drop `forget --prune` from the pre-upgrade backup of a cell without snapshot support, and keep its nightly prune. Verify: a test of `_backup_source` shows no retention for that cell's upgrade hold, and retention for its nightly backup. It catches a prune that holds restic's exclusive lock inside the stop.
 - [x] 3.3 Update `docs/runbooks/cloud-operator-restore.md` for the snapshot restore point. Verify: the runbook names `exomem.io/pre-upgrade-volume-snapshot`, the fallback order, and the forward-only hold's kept snapshot and clone. It catches a person who restores by hand from `last_backup_snapshot` instead of the attempt's own state.
 
