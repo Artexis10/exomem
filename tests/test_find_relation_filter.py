@@ -730,3 +730,38 @@ def test_a_restricted_caller_still_filters_by_the_edges_between_visible_pages(
 
     assert _hit_paths(supersedes) == {BUDGET, OLD_BUDGET}
     assert _hit_paths(supports) == {MEMO, FINDINGS}
+
+
+def test_a_search_filtered_to_a_page_ranks_no_more_pages_as_its_links_grow(
+    tmp_path: Path, monkeypatch, warm_managed_cell
+) -> None:
+    """Defect: a filter made every page that passed it a ranking candidate, so a search filtered
+    to a page with thousands of links read and ranked all of them on every request. Each ranking
+    lane now hands fusion the depth an unfiltered search uses, so the work stays flat."""
+    ranked: list[int] = []
+    read_metadata = find_module._managed_page_metadata
+
+    def counting(vault_root, paths, **kwargs):
+        if kwargs.get("include_ranking"):
+            ranked.append(len(paths))
+        return read_metadata(vault_root, paths, **kwargs)
+
+    monkeypatch.setattr(find_module, "_managed_page_metadata", counting)
+    hub = "Knowledge Base/Notes/Insights/hub.md"
+    rows = {}
+    for links in (240, 480):
+        vault = tmp_path / f"links-{links}"
+        targets = [f"Knowledge Base/Notes/Insights/p{index:03d}" for index in range(links)]
+        _write(vault, hub, "---\ntype: insight\n---\n# Hub\n\n## Relations\n\n"
+               + "".join(f"- supports [[{target}]]\n" for target in targets))
+        for index, target in enumerate(targets):
+            _write(vault, f"{target}.md",
+                   f"---\ntype: insight\n---\n# Copper latch {index}\n\nThe copper latch holds.\n")
+        warm_managed_cell(vault)
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        ranked.clear()
+        hits = find_module.find(vault, query="copper latch", relation_of=hub, limit=5)
+        assert len(hits) == 5
+        rows[links] = sum(ranked)
+
+    assert rows[480] == rows[240], rows

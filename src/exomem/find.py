@@ -2700,9 +2700,6 @@ def find(
         relation_set = set(relation_paths)
         eligible_paths = relation_set if eligible_paths is None else (eligible_paths & relation_set)
 
-    # Only the caller's own filters size the candidate pool. Admission narrows
-    # what every lane ranks; it never deepens the pool (`collect_candidates`).
-    filtered = eligible_paths is not None
     if admitted_paths is not None:
         eligible_paths = admitted_paths if eligible_paths is None else eligible_paths & admitted_paths
 
@@ -2766,7 +2763,6 @@ def find(
                 degraded_out=degraded,
                 failed_out=failed,
                 eligible_paths=eligible_paths,
-                filtered=filtered,
                 admitted_paths=admitted_paths,
                 recall_scope="kb" if scope == "kb-only" else "vault",
                 retrieval_trace=retrieval_trace,
@@ -6476,7 +6472,6 @@ def _find_semantic(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     eligible_paths: set[str] | None = None,
-    filtered: bool = False,
     admitted_paths: set[str] | None = None,
     recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
@@ -6610,7 +6605,6 @@ def _find_semantic(
             ),
             lexical_repair=lexical_repair,
             eligible_paths=eligible_paths,
-            filtered=filtered,
             admitted_paths=admitted_paths,
             capture_trace=retrieval_trace is not None,
             query_vector_provider=query_vector_provider,

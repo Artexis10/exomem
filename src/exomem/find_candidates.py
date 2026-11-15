@@ -341,7 +341,6 @@ def collect_candidates(
     recall_paths: AbstractSet[str],
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
-    filtered: bool = False,
     admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -360,10 +359,10 @@ def collect_candidates(
     consume it. The keyword lane is excluded because it arrives from the
     caller's own provider already shadowed. Default None is a strict no-op.
 
-    `filtered` says `eligible_paths` holds the caller's own filters, so the pool
-    reaches their whole eligible set. Admission alone never deepens it: every
-    lane already ranks only `eligible_paths`, so each hands fusion its top
-    `candidate_k` admitted pages, as it would over a corpus without the rest.
+    Every lane ranks only `eligible_paths` (the caller's filters and admission)
+    and hands fusion its top `candidate_k` pages, as it would over a corpus
+    without the rest. A filter never deepens the pool, so a filtered search
+    costs what an unfiltered one does, whatever the size of its eligible set.
     """
     from . import (
         bm25,
@@ -382,11 +381,7 @@ def collect_candidates(
         from . import usage as usage_module
         usage_map = usage_module.activation_map(config)
 
-    candidate_k = max(
-        limit * config.candidate_multiplier,
-        config.candidate_floor,
-        len(eligible_paths) if filtered and eligible_paths is not None else 0,
-    )
+    candidate_k = max(limit * config.candidate_multiplier, config.candidate_floor)
     semantic_paths = (
         recall_paths if eligible_paths is None else (recall_paths & eligible_paths)
     )
