@@ -264,7 +264,15 @@ def test_bound_image_pull_counts_as_running_but_pending_node_capacity_does_not()
     assert not client.observe_catalogue_builds()[metadata.namespace][0].running
 
 
-async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting_hold_clock(cell_db):
+@pytest.mark.parametrize("cancellation_record", [
+    None,
+    "not json",
+    "[]",
+    '{"window":"2026-01-01T16:00:00+00:00","jobs":[{}]}',
+])
+async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting_hold_clock(
+    cell_db, caplog, cancellation_record,
+):
     """The stop and backup must wait for deletion, while the original attempt deadlines keep running."""
     from .test_rollout_automation import (
         OWNER,
@@ -287,6 +295,9 @@ async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting
             await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
             _observe(cluster, OWNER, TENANT, pod_node="worker-one")
         cluster.jobs.clear()
+        if cancellation_record is not None:
+            _annotations(cluster, TENANT)["exomem.io/catalogue-build-cancelled"] = cancellation_record
+            _observe(cluster, TENANT, pod_node="worker-one")
         job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, running=True)
         cluster.builds[namespace_name(TENANT)] = (job,)
         await fleet.run(NOW + timedelta(seconds=5), cluster_config=CONFIG)
@@ -312,6 +323,8 @@ async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting
         assert any(job["metadata"]["labels"].get(JOB_KIND_LABEL) == "backup" for job in cluster.jobs)
         assert fleet.config.backup_deadline == timedelta(minutes=15)
         assert fleet.config.upgrade_stall_bound == timedelta(minutes=30)
+        malformed_warnings = [record for record in caplog.records if "malformed catalogue cancellation" in record.message]
+        assert len(malformed_warnings) == int(cancellation_record is not None)
     finally:
         await fleet.close()
 
@@ -449,6 +462,24 @@ async def test_build_census_failure_delays_only_cells_with_a_recorded_current_jo
                                                    NOW, WINDOWS, CONFIG, allow_schedule=True)
     assert result[CELL].catalogue_builds == ()
     assert result[other].catalogue_builds is None
+
+
+async def test_build_request_annotation_failure_preserves_known_absence_of_jobs():
+    """An optional annotation failure cannot invent a builder that blocks serving-pod replacement."""
+    from kubernetes.client.rest import ApiException
+
+    cluster = BuildCluster()
+    def unavailable(namespace, annotations):
+        raise ApiException(status=500)
+    cluster.patch_statefulset_annotations = unavailable
+    for _ in range(2):
+        result = await reconcile._sync_catalogue_builds(
+            cluster, [_row()], {CELL: _observation()}, RolloutRow(), IMAGE_B, NOW,
+            WINDOWS, CONFIG, allow_schedule=True,
+        )
+        assert result[CELL].catalogue_builds == ()
+        assert result[CELL].catalogue_build_job is None
+    assert not cluster.jobs
 
 
 async def _build_fleet(cell_db):

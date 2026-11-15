@@ -321,6 +321,8 @@ class LoopMemory:
     here is needed for correctness: a restarted cellctl starts afresh and at
     worst makes each bounded call once more."""
 
+    # Malformed cancellation metadata is advisory; warn once until that cell returns a valid record.
+    catalogue_cancellation_invalid: set[str] = field(default_factory=set)
     orphan_scan_at: datetime | None = None
     volume_checked_at: dict[str, datetime] = field(default_factory=dict)
     # A volume confirmed absent stays absent: its id is never reused.
@@ -1328,14 +1330,29 @@ async def _sync_rollout_annotations(
     return updated
 
 
-def _catalogue_cancellations(observation: ClusterObservation, now: datetime) -> tuple[str, set[str]]:
+def _catalogue_cancellations(
+    observation: ClusterObservation, now: datetime, *, cell_id: str, memory: LoopMemory | None = None,
+) -> tuple[str, set[str]]:
     """Keep cancellation names for this window in StatefulSet metadata, across controller restarts."""
     window = parse_window(observation.statefulset_upgrade_window)
     start = now.replace(hour=window.hour if window else now.hour, minute=0, second=0, microsecond=0)
     if start > now:
         start -= timedelta(days=1)
     key = start.isoformat()
-    prior = json.loads(observation.catalogue_build_cancelled or "{}")
+    try:
+        prior = json.loads(observation.catalogue_build_cancelled or "{}")
+        if (not isinstance(prior, dict) or not isinstance(prior.get("window", ""), str)
+                or not isinstance(prior.get("jobs", []), list)
+                or not all(isinstance(job, str) for job in prior.get("jobs", []))):
+            raise ValueError("invalid cancellation record")
+    except ValueError:
+        prior = {}
+        if memory is not None and cell_id not in memory.catalogue_cancellation_invalid:
+            logger.warning("cellctl: malformed catalogue cancellation for cell %s; treating it as empty", cell_id)
+            memory.catalogue_cancellation_invalid.add(cell_id)
+    else:
+        if memory is not None:
+            memory.catalogue_cancellation_invalid.discard(cell_id)
     return key, set(prior.get("jobs", ())) if prior.get("window") == key else set()
 
 
@@ -1348,7 +1365,7 @@ async def _cancel_catalogue_builds(cluster: ClusterGateway, row: CellRow, observ
         jobs.add(observation.catalogue_build_job)
     if not jobs:
         return observation
-    window, cancelled = _catalogue_cancellations(observation, now)
+    window, cancelled = _catalogue_cancellations(observation, now, cell_id=row.cell_id)
     record = json.dumps({"window": window, "jobs": sorted(cancelled | jobs)}, sort_keys=True)
     # Persist before deletion: a crash between these operations must not re-create a cancelled build.
     outcome = observation.catalogue_build_outcome
@@ -1366,6 +1383,7 @@ async def _sync_catalogue_builds(
     cluster: ClusterGateway, rows: list[CellRow], observations: dict[str, ClusterObservation],
     rollout, cell_image: str | None, now: datetime, window_config: WindowConfig | None,
     cluster_config: ClusterConfig, *, allow_schedule: bool, pending_starts: frozenset[str] = frozenset(),
+    memory: LoopMemory | None = None,
 ) -> dict[str, ClusterObservation]:
     """Build outside attempts; reserve one slot per node, and retain deletion evidence until the stop."""
     from .manifests import (
@@ -1377,6 +1395,8 @@ async def _sync_catalogue_builds(
         render_resource_quota,
     )
 
+    memory = memory if memory is not None else LoopMemory()
+    memory.catalogue_cancellation_invalid.intersection_update(observations)
     config = cluster_config.catalogue_prewarm
     if config is None and not any(obs.catalogue_build_job for obs in observations.values()):
         return observations
@@ -1411,6 +1431,7 @@ async def _sync_catalogue_builds(
                 })
                 obs = dataclass_replace(obs, catalogue_build_job=None, catalogue_build_outcome=outcome)
                 updated[row.cell_id] = obs
+            _, cancelled = _catalogue_cancellations(obs, now, cell_id=row.cell_id, memory=memory)
             window = parse_window(obs.statefulset_upgrade_window)
             # Match the attempts' canary-first rule before target code can write to tenant volumes.
             canary_ready = canary is None or row.cell_id == canary.cell_id or (
@@ -1432,7 +1453,6 @@ async def _sync_catalogue_builds(
             elif family:
                 obs = dataclass_replace(obs, catalogue_build_outcome=family[-1].outcome)
             updated[row.cell_id] = obs
-            _, cancelled = _catalogue_cancellations(obs, now)
             if (not eligible or not allow_schedule or family or obs.pod_node in occupied
                     or catalogue_build_name(target) in cancelled):
                 continue
@@ -1462,8 +1482,10 @@ async def _sync_catalogue_builds(
             created = True
         except Exception as error:  # noqa: BLE001 - one cell's build must not stop other cells' work
             logger.warning("cellctl: catalogue build failed for cell %s: %s", row.cell_id, _describe_error(error))
-            updated[row.cell_id] = dataclass_replace(updated[row.cell_id], catalogue_builds=None)
-            failed_cells.add(row.cell_id)
+            failed = updated[row.cell_id]
+            if failed.catalogue_build_job or failed.catalogue_builds:
+                updated[row.cell_id] = dataclass_replace(failed, catalogue_builds=None)
+                failed_cells.add(row.cell_id)
     if created:
         try:
             builds = await asyncio.to_thread(cluster.observe_catalogue_builds)
@@ -1956,7 +1978,7 @@ async def reconcile_once(
         ))
     observations = await _sync_catalogue_builds(
         cluster, rows, observations, rollout, cell_image, now, window_config, cluster_config,
-        allow_schedule=not fleet_unobserved, pending_starts=frozenset(pending_starts),
+        allow_schedule=not fleet_unobserved, pending_starts=frozenset(pending_starts), memory=memory,
     )
 
     # D4 refusal parking. A row is refused while its last refusal's key is

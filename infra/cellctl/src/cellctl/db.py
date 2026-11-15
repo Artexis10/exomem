@@ -415,14 +415,20 @@ def _request_fields(record: asyncpg.Record, row_type: type) -> dict:
     return fields
 
 
+# Migration 0061 fixes this open-import predicate for reads and optional-build admission.
+_OPEN_IMPORT_PREDICATE = (
+    "i.observed_state IS NULL OR "
+    "i.observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_discard_stopping','cleanup_pending') OR "
+    "(i.requested_state='discard_requested' AND i.observed_state IS DISTINCT FROM 'discarded')"
+)
+
+
 async def read_import(connection: asyncpg.Connection, cell_id: str):
     from .imports import ImportRow
 
     # Migration 0061 fixes the open predicate; terminal history only repairs an orphan C1 hold.
     record = await connection.fetchrow(
-        "SELECT * FROM (SELECT i.*, (observed_state IS NULL OR "
-        "observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_discard_stopping','cleanup_pending') OR "
-        "(requested_state='discard_requested' AND observed_state IS DISTINCT FROM 'discarded')) AS is_open "
+        f"SELECT * FROM (SELECT i.*, ({_OPEN_IMPORT_PREDICATE}) AS is_open "
         "FROM exomem_cloud_imports i WHERE cell_id=$1) requests WHERE is_open OR "
         "EXISTS (SELECT 1 FROM exomem_cloud_cells c WHERE c.cell_id=$1 AND c.hold_kind='import') "
         "ORDER BY is_open DESC, created_at DESC, import_id DESC LIMIT 1", cell_id,
@@ -520,7 +526,7 @@ async def read_content_start_cells(connection: asyncpg.Connection, cell_ids: lis
     records = await connection.fetch(
         "SELECT cell_id FROM exomem_cloud_cells c WHERE cell_id=ANY($1::text[]) AND ("
         "EXISTS (SELECT 1 FROM exomem_cloud_imports i WHERE i.cell_id=c.cell_id AND "
-        "(i.observed_state IS NULL OR i.observed_state IN ('key_ready','importing'))) OR "
+        f"({_OPEN_IMPORT_PREDICATE})) OR "
         "EXISTS (SELECT 1 FROM exomem_cloud_exports e WHERE e.cell_id=c.cell_id AND "
         "(e.observed_state IS NULL OR e.observed_state='packing')))", cell_ids,
     )
