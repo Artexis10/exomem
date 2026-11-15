@@ -1468,16 +1468,17 @@ def test_preview_counts_the_whole_source_and_the_job_agrees(store, monkeypatch):
     assert done["restated_existing"] == preview["would_match_stored"]
 
 
-def test_preview_over_the_ceiling_samples_and_carries_no_counts(store, monkeypatch):
-    """A sample's counts presented as the source's would hide a malformed tail it never read."""
+def test_preview_that_reaches_its_budget_is_partial_and_keeps_its_counts_apart(store, monkeypatch):
+    """Preview holds the store thread; past its budget it must stop, and the rows it read are not the source."""
     setup(store, ndjson(null_tail_rows(valid_rows=130, null_rows=12)), fields=NULL_TAIL_FIELDS)
-    monkeypatch.setattr(importer(), "PREVIEW_SOURCE_CEILING", 1 << 10)
+    monkeypatch.setattr(importer(), "PREVIEW_HOLD_SECONDS", 0.0)  # spent before the survey reads its second row
 
     preview = preview_of(store)
 
-    assert preview["coverage"] == "sampled" and preview["survey"]["unread"] == "source_over_ceiling"
-    assert preview["survey"]["ceiling"] == 1 << 10 and preview["survey"]["rows_read"] == 100
+    assert preview["coverage"] == "partial" and preview["survey"]["unread"] == "time_budget"
+    assert preview["survey"]["budget_seconds"] == 0.0 and preview["survey"]["rows_read"] == 1
     assert [preview[name] for name in ("rows_total", "would_insert", "would_reject", "would_collapse")] == [None] * 4
+    assert preview["survey"]["partial_counts"]["would_insert"] == 1
 
 
 def test_preview_stopped_by_a_malformed_row_is_partial_and_names_where(store):

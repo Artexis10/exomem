@@ -84,8 +84,8 @@ MAX_DEPTH = 32
 MAX_BATCH_ROWS = 500
 MAX_BATCH_BYTES = 4 << 20
 PREVIEW_ROWS = 100
-# Preview runs on the store thread, so it counts a source in full only up to this size.
-PREVIEW_SOURCE_CEILING = 256 << 20
+# Preview runs on the store thread, where every store write and status call waits behind it.
+PREVIEW_HOLD_SECONDS = 1.0
 JOB_WINDOW_SECONDS = 3600
 # A job paused because the session store was unreadable retries after this many seconds, doubling per
 # consecutive failure up to the cap: each retry can wait out the store's own timeout.
@@ -219,8 +219,10 @@ def contract() -> dict[str, Any]:
             "through the job's own mapping, validation and identity rule, as if on_invalid were skip: "
             "rows_total, would_insert, would_match_stored (null on a derived collection), would_reject by "
             "code with its first coordinates, and would_collapse with sample keys. coverage is full when "
-            f"every row was read, sampled when the source exceeds {PREVIEW_SOURCE_CEILING} bytes or has no "
-            "valid mapping, and partial when a row stopped the read; only full carries counts"
+            "every row was read and sampled when the mapping is not valid. It is partial when a row stopped "
+            f"the read, or when the read reached the {PREVIEW_HOLD_SECONDS:g} s preview budget between rows; "
+            "survey then gives rows_read and the counts so far as partial_counts. Only full carries the "
+            "source's counts"
         ),
         "states": {
             "running": (
@@ -1988,7 +1990,8 @@ _GAP = "TIME_LOCAL_GAP"
 
 
 def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold | None, *,
-                limit: int | None = None) -> Batch:
+                limit: int | None = None, deadline: float | None = None) -> Batch:
+    """The next batch of rows; a ``deadline`` (``time.monotonic``) also closes it, after at least one row."""
     limit = MAX_BATCH_ROWS if limit is None else limit
     begin = reader.position()["byte"] if not pending else pending[0].start
     rows: list[tuple[Row, dict[str, Any]]] = []
@@ -1996,7 +1999,9 @@ def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold 
     checkpoint = reader.position() if not pending else None
     eof = ended = False
     spent = 0
-    while len(rows) + len(rejections) < limit:
+    while len(rows) + len(rejections) < limit and (
+        deadline is None or not (rows or rejections) or time.monotonic() < deadline
+    ):
         row = pending.pop() if pending else reader.next()
         if row is None or row is _MEMBER_END:
             eof, ended = row is None, True
@@ -3916,7 +3921,7 @@ def _row_reader(root: Path, source: Source, members, size: int, fmt: str, rows: 
 
 
 # Why a preview counted fewer rows than the source holds.
-_UNREAD_CEILING, _UNREAD_MAPPING = "source_over_ceiling", "no_valid_mapping"
+_UNREAD_BUDGET, _UNREAD_MAPPING = "time_budget", "no_valid_mapping"
 
 
 class _Survey:
@@ -3930,6 +3935,7 @@ class _Survey:
         self.sample_keys: list[dict[str, Any]] = []
         self.digests: set[int] = set()
         self.stopped: dict[str, Any] | None = None
+        self.out_of_time = False
 
     def _reject(self, row: Row, code: str, at: str | None) -> None:
         found = self.rejects.setdefault(code, {"rows": 0, "first": []})
@@ -3978,41 +3984,43 @@ class _Survey:
             self.stopped = {"row": row.ordinal, "byte": row.start, "code": code, "at": at or None}
 
 
-def _surveyed(survey: _Survey, plan: Plan, reader) -> None:
-    """Read the whole source as a job running ``on_invalid: skip`` would, writing nothing."""
+def _surveyed(survey: _Survey, plan: Plan, reader, deadline: float) -> None:
+    """Read the source as a job running ``on_invalid: skip`` would, writing nothing, until it ends, a row
+    stops the read, or the ``deadline`` passes between two rows."""
     skipping = dataclasses.replace(plan, on_invalid="skip")
     order = import_time.Fold() if plan.ordered else None
     pending = getattr(reader, "pending", [])
     while True:
-        batch = _next_batch(reader, skipping, pending, order)
+        batch = _next_batch(reader, skipping, pending, order, deadline=deadline)
         survey.take(batch)
         if batch.stop is not None or batch.eof:
             return
+        if time.monotonic() >= deadline:
+            survey.out_of_time = True
+            return
 
 
-def _coverage(survey: _Survey | None, rows_read: int, unread: str | None, policy: str | None) -> dict[str, Any]:
-    """The preview's whole-source keys; only a full read carries counts, never a sample's or a stopped read's."""
-    if survey is None or survey.stopped is not None:
-        coverage = "sampled" if survey is None else "partial"
-        counts = dict.fromkeys(("rows_total", "would_insert", "would_match_stored", "would_reject", "would_collapse"))
-    else:
-        coverage = "full"
-        counts = {
-            "rows_total": survey.rows,
-            "would_insert": survey.inserts,
-            "would_match_stored": None if survey.manifest.derived else survey.matched,
-            "would_reject": survey.rejects,
-            "would_collapse": {"rows": survey.collapsed, "sample_keys": survey.sample_keys},
-        }
+def _coverage(survey: _Survey | None, sampled: int, policy: str | None) -> dict[str, Any]:
+    """The preview's whole-source keys. Only a full read carries the source's counts; a read that a row or
+    the budget stopped gives its counts so far apart, as ``partial_counts``."""
+    counts = None if survey is None else {
+        "would_insert": survey.inserts,
+        "would_match_stored": None if survey.manifest.derived else survey.matched,
+        "would_reject": survey.rejects,
+        "would_collapse": {"rows": survey.collapsed, "sample_keys": survey.sample_keys},
+    }
+    full = survey is not None and survey.stopped is None and not survey.out_of_time
     return {
-        "coverage": coverage,
-        **counts,
+        "coverage": "full" if full else "sampled" if survey is None else "partial",
+        "rows_total": survey.rows if full else None,
+        **(counts if full else dict.fromkeys(("would_insert", "would_match_stored", "would_reject", "would_collapse"))),
         "survey": {
-            "rows_read": rows_read,
-            "ceiling": PREVIEW_SOURCE_CEILING,
+            "rows_read": sampled if survey is None else survey.rows,
+            "budget_seconds": PREVIEW_HOLD_SECONDS,
             "on_invalid": policy,
-            "unread": unread,
+            "unread": _UNREAD_MAPPING if survey is None else _UNREAD_BUDGET if survey.out_of_time else None,
             "stopped": None if survey is None else survey.stopped,
+            "partial_counts": None if full else counts,
         },
     }
 
@@ -4028,6 +4036,7 @@ def _window_limit(who: principal_module.RequestPrincipal) -> dict[str, Any]:
 
 
 def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
+    deadline = time.monotonic() + PREVIEW_HOLD_SECONDS
     with writer.read_snapshot():
         row, manifest, declared = writer._collection(collection, facade_profile="records")
         # Raw shape previews cannot attest to field-only disclosure; a refused recipient asks the owner to preview.
@@ -4070,15 +4079,13 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
             (row["collection_id"], row["manifest_version"]),
         ).fetchone()[0]
-    # The whole-source pass holds no snapshot of its own: it reads for as long as the source is large.
-    survey, unread = None, _UNREAD_MAPPING
-    if plan is not None and (sum(member.bytes for member in members) if members else size) > PREVIEW_SOURCE_CEILING:
-        unread = _UNREAD_CEILING
-    elif plan is not None:
-        survey, unread = _Survey(writer, manifest, source.ref, row["collection_id"]), None
+    # The whole-source pass holds no snapshot of its own; the hold budget bounds how long it reads.
+    survey = None
+    if plan is not None:
+        survey = _Survey(writer, manifest, source.ref, row["collection_id"])
         try:
             with _row_reader(root, source, members, size, request.format, rows) as reader:
-                _surveyed(survey, plan, reader)
+                _surveyed(survey, plan, reader, deadline)
         except (_Lost, OSError, vault.PathGuardError):
             _source_not_found()
     produced = (
@@ -4119,8 +4126,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             "invalid": sample.rows - sample.valid,
             "complete": complete,
         },
-        **_coverage(survey, sample.rows if survey is None else survey.rows, unread,
-                    None if plan is None else plan.on_invalid),
+        **_coverage(survey, sample.rows, None if plan is None else plan.on_invalid),
         "fields": {path: sorted(kinds) for path, kinds in sample.paths.items()},
         "nested": sample.nested,
         "truncated": sample.truncated,
