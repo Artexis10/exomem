@@ -2009,14 +2009,15 @@ def _bounded_block(lines: list[str], max_chars: int) -> str:
     return "\n".join([_WORKING_SET_HEADER, *kept]) if kept else ""
 
 
-def _bounded_lines(lines: list[str], max_chars: int) -> list[str]:
-    """The whole lines that fit under the header, in order.
+def _bounded_lines(lines: list[str], max_chars: int, *, header: str = _WORKING_SET_HEADER) -> list[str]:
+    """The whole lines that fit under `header`, in order, each charged with the newline before it.
 
     Split out from `_bounded_block` so a caller that reserves room for a
     trailing instruction can see WHICH lines survived, and drop an instruction
-    about a menu the ceiling left empty."""
+    about a menu the ceiling left empty. A layout that charges its own framing
+    passes `header=""`, so no header is charged twice."""
     kept: list[str] = []
-    used = len(_WORKING_SET_HEADER)
+    used = len(header)
     for line in lines:
         if used + 1 + len(line) > max_chars:
             break
@@ -2470,12 +2471,15 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
         action = _COMPAT_NEXT_ACTION.get("slice_empty", "")
     action = action if len(action) <= min(240, max_chars - len(reset) - (1 if reset else 0)) else ""
     room = max_chars - len(action) - (1 if action else 0) - len(reset) - (1 if reset else 0)
+    # The service records an upkeep item delivered when it attaches it, so it claims room before the map's floor:
+    # a map with no room keeps the old token and arrives on the next prompt, while a dropped item is lost.
+    # This layout frames upkeep with no header of its own, so none is charged.
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room, header=""))
+    room -= len(upkeep) + (1 if upkeep else 0)
+    # The stance comes again with every packet, so it yields to the map's floor.
     floor = _map_floor_cost(packet["map"], last_generation)
     stance_text, stance_complete = _format_stance_block(packet.get("stance"), room - floor, last_stance)
     room -= len(stance_text) + (1 if stance_text else 0)
-    # The service records an upkeep item delivered when it attaches it, so a packet that carries one must show it.
-    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room - floor))
-    room -= len(upkeep) + (1 if upkeep else 0)
     text, complete = _format_map_block(packet["map"], room, last_generation)
     shown = bool(text) or _map_is_held(packet["map"], last_generation)
     room -= len(text) + (1 if text else 0)
@@ -2506,20 +2510,19 @@ def _format_session_context(packet: dict, max_chars: int, last_generation: str, 
 
     Returns the block, whether the map rendered whole, whether the stance did, and whether the map reached the
     agent in any form. The last decides the token: a token names the map held, and the service then answers it
-    `unchanged`, so a changed map must not be acknowledged unseen. The map's floor is therefore reserved before
-    stance and upkeep. A stance that loses that room comes back on the next prompt, because the hook records
-    only a stance it showed whole and the service sends the stance on every packet.
+    `unchanged`, so a changed map must not be acknowledged unseen. Room goes first to an upkeep item, which the
+    service records delivered when it attaches it, then to the map's floor, then to the stance. A map with no
+    room keeps the old token and comes back on the next prompt; so does a stance that loses its room, because
+    the hook records only a stance it showed whole and the service sends the stance on every packet.
     """
-    header = len(_SESSION_CONTEXT_HEADER)
+    room = max_chars - len(_SESSION_CONTEXT_HEADER)
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room, header=""))
+    room -= len(upkeep) + (1 if upkeep else 0)
     block = packet["map"]
     floor = _map_floor_cost(block, last_generation)
     stance = packet.get("stance")
-    stance_text, stance_complete = ("", True) if _stance_is_held(stance, last_stance) else _format_stance_block(stance, max_chars - header - 1 - floor, last_stance)
-    stance_cost = len(stance_text) + 1 if stance_text else 0
-    # The service records an upkeep item delivered when it attaches it, so a packet that carries one must show it.
-    # `_bounded_lines` charges the header itself, so it gets the ceiling less the stance and the map's floor.
-    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), max_chars - stance_cost - floor))
-    room = max_chars - header - stance_cost - (len(upkeep) + 1 if upkeep else 0)
+    stance_text, stance_complete = ("", True) if _stance_is_held(stance, last_stance) else _format_stance_block(stance, room - 1 - floor, last_stance)
+    room -= len(stance_text) + (1 if stance_text else 0)
     held = _map_is_held(block, last_generation)
     map_text, complete = ("", True) if held else _format_map_block(block, room - 1, last_generation, turn_activated=False)
     skills_text = _format_skills_block(packet.get("skills"))
