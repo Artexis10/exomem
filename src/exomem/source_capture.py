@@ -143,8 +143,7 @@ def canonical_pages(root: Path, *, join_request: bool = True) -> CanonicalCaptur
     def unavailable(_error: object = None) -> None:
         raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical Source lookup is incomplete")
 
-    def remember(relative: str, data: bytes) -> None:
-        snapshots[relative] = data
+    def parse_page(relative: str, data: bytes) -> None:
         try:
             text = data.decode("utf-8")
             fields, _body, marker = vault.parse_frontmatter(text, strict=True)
@@ -162,21 +161,24 @@ def canonical_pages(root: Path, *, join_request: bool = True) -> CanonicalCaptur
 
     try:
         if store_mode:
+            metadata = {}
             with read.snapshot(root, join_request=join_request) as view:
                 for lane in vault.APPEND_ONLY_KB_SUBPATHS:
                     prefix = (vault.kb_root(root) / lane).relative_to(root).as_posix() + "/"
-                    metadata = {item.path: item for item in view.pages(prefix) if Path(item.path).suffix.lower() == ".md"}
-                    bodies = view.bodies(metadata)
-                    if bodies.keys() != metadata.keys():
+                    lane_metadata = {item.path: item for item in view.pages(prefix) if Path(item.path).suffix.lower() == ".md"}
+                    bodies = view.bodies(lane_metadata)
+                    if bodies.keys() != lane_metadata.keys():
                         unavailable()
-                    for relative, data in bodies.items():
-                        meta = metadata[relative]
-                        if (not isinstance(data, bytes) or len(data) != meta.size
-                                or hashlib.sha256(data).hexdigest() != meta.sha256):
-                            unavailable()
-                        edges[relative] = set()
-                        remember(relative, data)
+                    metadata.update(lane_metadata)
+                    snapshots.update(bodies)
                 store_revision = view.revision
+            for relative, data in snapshots.items():
+                meta = metadata[relative]
+                if (not isinstance(data, bytes) or len(data) != meta.size
+                        or hashlib.sha256(data).hexdigest() != meta.sha256):
+                    unavailable()
+                edges[relative] = set()
+                parse_page(relative, data)
         # These are the schema's two canonical raw-material lanes, not vocabulary.
         for lane in (() if store_mode else vault.APPEND_ONLY_KB_SUBPATHS):
             directory = vault.kb_root(root) / lane
@@ -200,7 +202,8 @@ def canonical_pages(root: Path, *, join_request: bool = True) -> CanonicalCaptur
                     edges[relative] = set()
                     try:
                         data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=page.lstat().st_size)
-                        remember(relative, data)
+                        snapshots[relative] = data
+                        parse_page(relative, data)
                     except (OSError, UnicodeError, RecursionError, vault.PathGuardError, vault.FrontmatterError):
                         errors.add(relative)
 
