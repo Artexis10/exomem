@@ -275,7 +275,8 @@ class _Image:
                     end_byte=f.end,
                     payload_sha256=_hash(data[f.start : f.end]),
                 )
-                for f in self.spans
+                # Copied slices can repeat an enclosing attribution; persist each exact range once.
+                for f in dict.fromkeys(self.spans)
             ),
         )
         mapping.validate_image(data)

@@ -96,6 +96,25 @@ def test_count_refresh_keeps_source_owned_unicode_prose_and_crlf_byte_ranges(kin
         assert "[[Entities/People/|People]] (3)" in stripped
 
 
+def test_repeated_count_rewrite_persists_each_source_attribution_once():
+    reference = _reference(9)
+    image = fragments._Image.join((
+        fragments._Image("- Notes (research): 1\n").own(reference),
+        fragments._Image("- Entities (person): 1\n"),
+    ))
+    for count in range(1, 7):
+        before = _hash(image.text)
+        rendered = indexes._rewrite_top_index_notes_and_entities_counts(
+            image.text, notes_counts={"research": count}, entities_counts={"person": 1}, _tracking=image,
+        )
+        plan = image.plan(before)
+        ranges = {(item.opaque_fragment_id, item.source_ref, item.start_byte, item.end_byte) for item in plan.after.fragments}
+        assert len(plan.after.fragments) == len(ranges)
+        stripped, _ = fragments.remove_source_fragments(rendered, plan, reference)
+        assert "Notes (research)" not in stripped and "Entities (person)" in stripped
+        image = fragments._Image.before(rendered, plan, _hash(rendered))
+
+
 def _seed(root: Path) -> dict[str, fragments.FragmentMap | fragments.FragmentPlan]:
     contents = {
         "Knowledge Base/Sources/index.md": "# Sources\n\n## By type\n\n## Recent captures\n\n",
