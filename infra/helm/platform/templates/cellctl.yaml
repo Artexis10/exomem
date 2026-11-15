@@ -270,6 +270,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        # Kubernetes writes Secret files as root without an fsGroup, so the 0440 media edge
+        # signing key is readable by cellctl only through this group.
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:

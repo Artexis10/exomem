@@ -68,6 +68,9 @@ procedure instead of `kubectl`.
    `mediaEdge.enabled=true`, `mediaEdge.endpoint=http://<address>:8769`,
    `mediaEdge.bucket=<bucket>`, `mediaEdge.bucketId=<bucket id>`, `mediaEdge.cellIds=["<canary>"]`.
    Take the bucket name and ID from the `cloud_media_bucket_name` and `cloud_media_bucket_id` outputs.
+   If the cluster has no default StorageClass (`kubectl get storageclass` marks none "(default)"), also set
+   `mediaEdge.state.storageClassName` to an existing class, such as the one the cells' `cell-data` claims use.
+   Without a class, the edge's state volume never binds and its pod stays Pending.
    `mediaEdge.physicalHeadroom` defaults to 2: cellctl alerts when a cell's prefix holds more than
    `mediaEdge.storePolicy.allowance_bytes` times that factor. It is a starting figure. Change it from
    the readings in the cellctl log line `holds <n> media byte(s)` once a canary has run for a month.
