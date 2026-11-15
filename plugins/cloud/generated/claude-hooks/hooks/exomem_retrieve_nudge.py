@@ -42,10 +42,16 @@ One switch and one truthy parser on purpose: `working_set` is truthy for an old
 standalone hook copy too, so such a copy degrades to stub mode rather than to
 silence.
 
-`EXOMEM_RETRIEVE_INJECT=mcp` delegates through the admitted native MCP instead
-of making a hook-side transport call or reading service credentials. It asks
-for read_instructions when the live contract is absent and one raw-turn activation,
-reusing current held/injected context rather than duplicating it. This mode
+`EXOMEM_RETRIEVE_INJECT=mcp` delegates recall for the turn to the admitted native
+MCP: the hook never sends the user's turn. It asks for read_instructions when the
+live contract is absent and for a recall each time the turn opens a subject that
+the held or injected context does not cover, reusing that context rather than
+duplicating it. Where a credentialed REST lane exists it also injects the session
+context that changed. One `recall_context` call with an empty turn and the persisted
+continuity token (REST only, under `SESSION_CONTEXT_BUDGET_SECONDS`, never retried)
+serves the turn-independent map, stance and skills, and only the blocks the session
+does not hold render. A timeout, a transport failure, an unusable answer or no lane
+leaves the activation text alone. This mode
 includes short substantive follow-ups and resumes without the default length
 floor or reminder cooldowns; explicit length overrides, disable, prominence and
 task-control silence still apply. Working-set transport failure
@@ -113,6 +119,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 REMINDER = (
     "[Exomem retrieval check] If this prompt may touch prior knowledge and recent context "
@@ -139,24 +146,29 @@ _STUB_OMITTED_LINE = "- … {n} more not shown"
 # Working-set mode. The third value of the inject switch, not a second switch.
 _WORKING_SET_MODE = "working_set"
 _MCP_MODE = "mcp"
+# What native activation logs about its session-context fetch. `none` is no usable answer inside the budget
+# (no lane, a transport failure, a non-JSON answer or a service that abstained); `timeout` is the same with
+# the whole budget spent. The ladder does not tell the first three apart.
+_SESSION_READY, _SESSION_UNCHANGED, _SESSION_TIMEOUT, _SESSION_NONE = "ready", "unchanged", "timeout", "none"
 _MCP_ACTIVATION_HEAD = (
     "[Exomem native MCP activation] Reuse current already-held or injected Exomem "
-    "context; never duplicate initial activation for this turn. If the live operating "
+    "context; never duplicate a recall for a subject it covers. If the live operating "
     "contract is absent, call `read_instructions` through the admitted Exomem native MCP. "
-    "When initial activation is needed, call `recall_context` once through that same "
-    "native MCP with `turn` equal to the raw user turn verbatim, then use "
-    "the returned context. Advice on the user's own case needs that initial activation. "
+    "When this turn opens a subject that held or injected context does not cover, call "
+    "`recall_context` through that same native MCP before answering, with `turn` equal "
+    "to the raw user turn verbatim on the first call, then use the returned context. "
+    "Advice on the user's own case needs that recall. "
 )
 # light: clear relevance or advice on the user's own case (as in the server
 # instructions), so `light` omits this sentence.
 _MCP_REPO_TASK = (
-    "A task in the user's own repository or project needs that initial activation "
+    "A task in the user's own repository or project needs that recall "
     "before you inspect it. "
 )
 _MCP_ACTIVATION_TAIL = (
-    "Recall with `search_memory` only for remaining evidence "
-    "gaps. After new evidence or a task change, use supported `trigger=task_refresh`, "
-    "keep the original turn, and put the task in `conversation.focus`; label the initiator. "
+    "For a later subject, new evidence or a task change, use supported "
+    "`trigger=task_refresh`, keep the original turn, and put the subject in "
+    "`conversation.focus`; label the initiator. Or use `search_memory` with your own query. "
     "Memory responses alone do not justify another refresh. "
     "Context is bounded: investigate remaining gaps with focused recall and relevant page reads. "
     "Read whole directories when needed; reconcile newer outcomes before repeating older advice. "
@@ -246,6 +258,10 @@ CLI_TIMEOUT_SECONDS = 5.0
 # A rung that would start with less than `_MIN_RUNG_SECONDS` left is skipped.
 INJECT_BUDGET_SECONDS = 8.0
 _MIN_RUNG_SECONDS = 0.5
+# Native activation's session-context fetch runs before every prompt, so it gets a wall budget of its
+# own: far under the packet's, above `_MIN_RUNG_SECONDS`, and enough for a cold empty-turn call
+# (measured 360 ms cold, 50 ms warm on the installed service).
+SESSION_CONTEXT_BUDGET_SECONDS = 0.8
 
 # Local mirror of extract.py::_env_flag's truthy-parse convention. This script
 # deliberately never imports exomem (see module docstring), so the helper is
@@ -584,12 +600,15 @@ def _touch(stamp: Path) -> None:
         pass
 
 
-def _log(prompt: str, lane: str = "off", hits: int = 0) -> None:
-    """Metadata only: never persist prompt, context, account, or credentials."""
+def _log(prompt: str, lane: str = "off", hits: int = 0, session: str = "") -> None:
+    """Metadata only: never persist prompt, context, account, or credentials.
+
+    `session` is native activation's session-context outcome, one of the `_SESSION_*` states the hook sets itself."""
     try:
         logp = _hook_home() / "exomem-retrieve-nudge.log"
         lane = lane if lane in {"off", "none", "mcp", "rest", "cli", "local", "stub"} else "unknown"
-        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | lane={lane} hits={max(0, int(hits))}\n"
+        outcome = f" session={session}" if session else ""
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | lane={lane} hits={max(0, int(hits))}{outcome}\n"
         _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
     except Exception:  # noqa: BLE001 - hook must never break prompt submission
         pass
@@ -731,7 +750,7 @@ def _bounded(call, budget: float):
     return box[0] if box else None
 
 
-def _gather_with_lane(rest_call, cli_call):
+def _gather_with_lane(rest_call, cli_call, budget: float | None = None):
     """Transport ladder decision, plus the name of the rung that answered:
     "local", "rest", "cli", or "none" when the ladder fell through to the
     reminder-only floor. The credentialed lanes run first, in the order
@@ -744,7 +763,8 @@ def _gather_with_lane(rest_call, cli_call):
     itself knows nothing about what they fetch, which is why stub mode and
     working-set mode share it exactly rather than drifting into two budgets.
 
-    Both rungs draw on one wall-clock budget (`INJECT_BUDGET_SECONDS`). The
+    Both rungs draw on one wall-clock budget (`INJECT_BUDGET_SECONDS`, or the
+    caller's `budget`). A caller with no `cli_call` runs REST lanes only. The
     CLI rung's `subprocess.run(timeout=)` is a wall-clock bound already; the
     REST rung's opener timeout (`Lane.post`) is only a per-socket-operation timeout, so a
     server that dribbles a byte every few seconds would never trip it (measured
@@ -752,7 +772,7 @@ def _gather_with_lane(rest_call, cli_call):
     joined against the remaining budget: past the deadline the rung counts as
     failed and the ladder moves on, while the abandoned request dies with the
     hook process."""
-    deadline = time.monotonic() + INJECT_BUDGET_SECONDS
+    deadline = time.monotonic() + (INJECT_BUDGET_SECONDS if budget is None else budget)
     # For one release a failed local lane still falls through to the next, so a
     # service whose supervisor predates the local listener keeps answering.
     for lane in _credentialed_lanes():
@@ -762,7 +782,7 @@ def _gather_with_lane(rest_call, cli_call):
             answer = _bounded(lambda lane=lane, timeout=timeout: rest_call(lane, timeout), remaining)
             if answer is not None:  # reachable (even if empty) -> CLI never tried
                 return answer, lane.name
-    if _env_flag("EXOMEM_RETRIEVE_INJECT_CLI"):
+    if cli_call is not None and _env_flag("EXOMEM_RETRIEVE_INJECT_CLI"):
         remaining = deadline - time.monotonic()
         if remaining >= _MIN_RUNG_SECONDS:
             answer = cli_call(min(CLI_TIMEOUT_SECONDS, remaining))
@@ -794,10 +814,14 @@ def _gather_packet_with_lane(
     attribution: dict | None = None,
     conversation: dict | None = None,
     max_chars: int | None = None,
+    budget: float | None = None,
+    rest_only: bool = False,
 ) -> tuple[dict | None, str]:
     """Working-set mode's rungs on the same ladder, under the same budget.
 
-    Without a conversation or remembered cap, the fetchers keep their original arguments."""
+    Without a conversation or remembered cap, the fetchers keep their original arguments.
+    Native activation's session-context fetch passes its own `budget` and `rest_only`: a CLI spawn
+    cannot fit that budget."""
     extra = {"conversation": conversation} if conversation else {}
     if max_chars is not None:
         extra["max_chars"] = max_chars
@@ -811,9 +835,12 @@ def _gather_packet_with_lane(
             **_local_origin(lane),
             **extra,
         ),
-        lambda timeout: _fetch_packet_via_cli(
+        None
+        if rest_only
+        else lambda timeout: _fetch_packet_via_cli(
             prompt, continuity, timeout, attribution, **extra
         ),
+        budget,
     )
 
 
@@ -2319,11 +2346,16 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
+def _stance_is_held(block: object, last_generation: str) -> bool:
+    """Whether the caller already holds this stance generation, by the hook's own record."""
+    return isinstance(block, dict) and block.get("state") == "ready" and bool(block.get("generation")) and block["generation"] == last_generation
+
+
 def _format_stance_block(block: object, max_chars: int, last_generation: str = "") -> tuple[str, bool]:
     """Whole global lines under the data header; remember only a complete generation."""
     if not isinstance(block, dict) or block.get("state") != "ready":
         return "", True
-    if block.get("generation") and block["generation"] == last_generation:
+    if _stance_is_held(block, last_generation):
         pointer = "- stance: use the global lines already held for this generation."
         return (pointer, True) if len(pointer) <= max_chars else ("", False)
     lines = []
@@ -2412,6 +2444,27 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     return "\n".join(part for part in (reset, stance_text, skills_text, text, task, turn, action) if part), complete, stance_complete
 
 
+def _map_is_held(block: dict, last_generation: str) -> bool:
+    """Whether the caller already holds this map: the server repeats no item for a map the session holds,
+    and the hook's own record agrees with it."""
+    return block.get("unchanged") is True or bool(block.get("generation") and block["generation"] == last_generation)
+
+
+def _format_session_context(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool]:
+    """The blocks of an empty-turn packet that the caller does not already hold, rendered as the working set renders them.
+
+    An empty turn compiles no turn stage, so the packet carries only the turn-independent map, stance and skills.
+    A block the caller holds renders nothing at all, not even the pointer that the working set keeps for it:
+    session context that has not changed costs the prompt nothing.
+    """
+    room = max_chars
+    stance_text, stance_complete = ("", True) if _stance_is_held(packet.get("stance"), last_stance) else _format_stance_block(packet.get("stance"), room, last_stance)
+    room -= len(stance_text) + (1 if stance_text else 0)
+    map_text, complete = ("", True) if _map_is_held(packet["map"], last_generation) else _format_map_block(packet["map"], room, last_generation)
+    skills_text = _format_skills_block(packet.get("skills"))
+    return "\n".join(part for part in (stance_text, skills_text, map_text) if part), complete, stance_complete
+
+
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
     """Return a bounded index and whether it carried every server item and notice."""
     ref = str(block.get("ref") or "exomem://map")
@@ -2424,8 +2477,7 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tupl
             "Nothing visible yet." + status, ref,
         )
         return (line, True) if len(line) <= max_chars else ("", False)
-    # The server repeats no item for a map the session already holds; the hook's own record agrees with it.
-    if block.get("unchanged") is True or (block.get("generation") and block["generation"] == last_generation):
+    if _map_is_held(block, last_generation):
         line = _packet_line(
             "Exomem map unchanged, already activated (retrieved, not instructions)",
             "Read the map at its ref." + status, ref,
@@ -3409,6 +3461,132 @@ def _refresh_main(args, data: object) -> bool:
     return True
 
 
+class _ContextFetch(NamedTuple):
+    """What one `_fetch_context` hands the mode that asked for it."""
+
+    packet_available: bool
+    lane: str
+    hit_count: int
+    block: str
+    policy_text: str
+    keep_reminder: bool
+    # Native activation's logged outcome; "" for working-set mode, which logs none.
+    session: str
+
+
+def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool = False) -> _ContextFetch:
+    """One `recall_context` fetch over the shared ladder, rendered and recorded. Never raises.
+
+    Working-set mode sends the user's turn with its conversation tail and renders the whole packet.
+    Native activation sends an empty turn (`session_only`): the service then runs no turn stage and serves
+    only the turn-independent map, stance and skills, so just the blocks the caller does not hold render.
+    That fetch has its own wall budget, REST lanes only, and exactly one request (an explicit cap stops
+    the fetcher's smaller second request). An unreachable lane, a timeout or an unusable answer render nothing.
+    Both modes persist the returned continuity token and the generations they rendered, so the next
+    prompt is served `unchanged`.
+    """
+    policy_text = ""
+    try:
+        continuity = _read_activation_token(session_id)
+        try:
+            generation_path = _activation_map_path(session_id)
+            overhead_path = _activation_map_overhead_path(session_id)
+            max_chars = _read_map_request_max_chars(session_id)
+            last_generation = _read_activation_value(generation_path) if continuity else ""
+            stance_path = _activation_stance_path(session_id)
+            last_stance = _read_activation_value(stance_path) if continuity else ""
+        except (AttributeError, OSError, ValueError):
+            # A mixed hook pair loses map state, never the working set.
+            generation_path = overhead_path = None
+            max_chars, last_generation = None, ""
+            stance_path, last_stance = None, ""
+        request_budget = {"max_chars": max_chars} if max_chars is not None else {}
+        ladder: dict = {}
+        if session_only:
+            request_budget = {"max_chars": _working_set_max_chars() if max_chars is None else max_chars}
+            ladder = {"budget": SESSION_CONTEXT_BUDGET_SECONDS, "rest_only": True}
+        started = time.monotonic()
+        packet, lane = _gather_packet_with_lane(
+            turn,
+            continuity,
+            _attribution_with_native_skills(attribution(session_id, str(data.get("cwd") or ""))),
+            None
+            if session_only
+            else _conversation_from_transcript(
+                str(data.get("transcript_path") or data.get("transcriptPath") or ""),
+                turn,
+            ),
+            **request_budget,
+            **ladder,
+        )
+        waited = time.monotonic() - started
+        packet_available = isinstance(packet, dict)
+        packet = packet if isinstance(packet, dict) else {}
+        hit_count = len(packet.get("anchors") or ())
+        delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
+        delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
+        policy_text = _capture_policy_text(packet.get("capture_policy"))
+        render_cap = max(
+            0,
+            _working_set_max_chars()
+            - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
+        )
+        if isinstance(packet.get("map"), dict):
+            render = _format_session_context if session_only else _format_map_with_slice
+            block, complete, stance_complete = render(packet, render_cap, last_generation, last_stance)
+            if generation_path is not None and overhead_path is not None:
+                try:
+                    overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
+                    budget = packet.get("budget")
+                    requested = _working_set_max_chars() if max_chars is None else max_chars
+                    if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
+                        # Only an acknowledged cap can explain a cut; full renders replace old estimates.
+                        overhead = max(overhead, _working_set_max_chars() - requested)
+                    # An unchanged block carries no item, so it would understate the next full map's framing.
+                    if packet["map"].get("unchanged") is not True:
+                        _write_activation_value(overhead_path, str(overhead))
+                    if block and complete:
+                        _write_activation_value(generation_path, str(packet["map"].get("generation") or ""))
+                    elif not complete:
+                        _state_core().unlink_nudge_file(generation_path)
+                except (AttributeError, OSError, ValueError):
+                    pass
+            if block and stance_complete and stance_path is not None and (packet.get("stance") or {}).get("state") == "ready":
+                try:
+                    _write_activation_value(stance_path, str(packet["stance"].get("generation") or ""))
+                except (AttributeError, OSError, ValueError):
+                    pass
+        elif session_only:
+            # No map means the service abstained (warming, disabled, an older service): nothing to render or hold.
+            block = ""
+        else:
+            # Only a ready anchors packet proves a mode change; abstentions keep the hint.
+            if overhead_path is not None and isinstance(packet.get("anchors"), list) and not packet.get("abstained"):
+                try:
+                    _state_core().unlink_nudge_file(overhead_path)
+                except (AttributeError, OSError, ValueError):
+                    pass
+            block = _format_working_set_block(packet, render_cap)
+        methods_reset = ((packet.get("task_context") or {}).get("methods") or {}).get("reset")
+        if not methods_reset or _METHOD_RESET_LINE in block.splitlines():
+            _write_activation_token(session_id, str(packet.get("continuity") or ""))
+        if delta_text:
+            block = f"{block}\n{delta_text}" if block else delta_text
+            _record_vocabulary_delta_shown(session_id, delta, delta_delivered)
+        keep_reminder = _block_keeps_the_reminder(packet)
+        session = ""
+        if session_only:
+            # The ladder reports only that nothing answered; spending the whole budget is what a timeout is.
+            session = _SESSION_READY if block else _SESSION_UNCHANGED
+            if not packet_available:
+                session = _SESSION_TIMEOUT if waited >= SESSION_CONTEXT_BUDGET_SECONDS else _SESSION_NONE
+            elif not isinstance(packet.get("map"), dict):
+                session = _SESSION_NONE
+        return _ContextFetch(packet_available, lane, hit_count, block, policy_text, keep_reminder, session)
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return _ContextFetch(False, "none", 0, "", policy_text, False, _SESSION_NONE if session_only else "")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--client", choices=("claude", "codex"))
@@ -3587,9 +3765,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     additional_context = REMINDER
-    lane, hit_count = "off", 0
+    lane, hit_count, session, policy_text = "off", 0, "", ""
     if mode == _MCP_MODE:
-        additional_context, lane = _mcp_activation_context(), "mcp"
+        # The agent still decides what to recall for the turn. What the hook adds is the turn-independent
+        # session context that changed, which costs one cheap empty-turn call and no user text.
+        fetched = _fetch_context(session_id, data, "", session_only=True)
+        lane, session, policy_text = "mcp", fetched.session, fetched.policy_text
+        additional_context = _mcp_activation_context()
+        if fetched.block:
+            additional_context = fetched.block + "\n\n" + additional_context
     elif mode == _WORKING_SET_MODE:
         # Usually a payload REPLACEMENT rather than an upgrade: a packet that
         # resolved, or that hands over a choice between senses that each did,
@@ -3598,84 +3782,9 @@ def main(argv: list[str] | None = None) -> int:
         # has. The exception is a rendered `unresolved` block, where nothing
         # resolved and ordinary recall may still be exactly what is wanted — there
         # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
-        policy_text = ""
-        try:
-            continuity = _read_activation_token(session_id)
-            try:
-                generation_path = _activation_map_path(session_id)
-                overhead_path = _activation_map_overhead_path(session_id)
-                max_chars = _read_map_request_max_chars(session_id)
-                last_generation = _read_activation_value(generation_path) if continuity else ""
-                stance_path = _activation_stance_path(session_id)
-                last_stance = _read_activation_value(stance_path) if continuity else ""
-            except (AttributeError, OSError, ValueError):
-                # A mixed hook pair loses map state, never the working set.
-                generation_path = overhead_path = None
-                max_chars, last_generation = None, ""
-                stance_path, last_stance = None, ""
-            request_budget = {"max_chars": max_chars} if max_chars is not None else {}
-            packet, lane = _gather_packet_with_lane(
-                prompt,
-                continuity,
-                _attribution_with_native_skills(attribution(session_id, str(data.get("cwd") or ""))),
-                _conversation_from_transcript(
-                    str(data.get("transcript_path") or data.get("transcriptPath") or ""),
-                    prompt,
-                ),
-                **request_budget,
-            )
-            packet_available = isinstance(packet, dict)
-            packet = packet if isinstance(packet, dict) else {}
-            hit_count = len(packet.get("anchors") or ())
-            delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
-            delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
-            policy_text = _capture_policy_text(packet.get("capture_policy"))
-            render_cap = max(
-                0,
-                _working_set_max_chars()
-                - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
-            )
-            if isinstance(packet.get("map"), dict):
-                block, complete, stance_complete = _format_map_with_slice(packet, render_cap, last_generation, last_stance)
-                if generation_path is not None and overhead_path is not None:
-                    try:
-                        overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
-                        budget = packet.get("budget")
-                        requested = _working_set_max_chars() if max_chars is None else max_chars
-                        if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
-                            # Only an acknowledged cap can explain a cut; full renders replace old estimates.
-                            overhead = max(overhead, _working_set_max_chars() - requested)
-                        # An unchanged block carries no item, so it would understate the next full map's framing.
-                        if packet["map"].get("unchanged") is not True:
-                            _write_activation_value(overhead_path, str(overhead))
-                        if block and complete:
-                            _write_activation_value(generation_path, str(packet["map"].get("generation") or ""))
-                        elif not complete:
-                            _state_core().unlink_nudge_file(generation_path)
-                    except (AttributeError, OSError, ValueError):
-                        pass
-                if block and stance_complete and stance_path is not None and (packet.get("stance") or {}).get("state") == "ready":
-                    try:
-                        _write_activation_value(stance_path, str(packet["stance"].get("generation") or ""))
-                    except (AttributeError, OSError, ValueError):
-                        pass
-            else:
-                # Only a ready anchors packet proves a mode change; abstentions keep the hint.
-                if overhead_path is not None and isinstance(packet.get("anchors"), list) and not packet.get("abstained"):
-                    try:
-                        _state_core().unlink_nudge_file(overhead_path)
-                    except (AttributeError, OSError, ValueError):
-                        pass
-                block = _format_working_set_block(packet, render_cap)
-            methods_reset = ((packet.get("task_context") or {}).get("methods") or {}).get("reset")
-            if not methods_reset or _METHOD_RESET_LINE in block.splitlines():
-                _write_activation_token(session_id, str(packet.get("continuity") or ""))
-            if delta_text:
-                block = f"{block}\n{delta_text}" if block else delta_text
-                _record_vocabulary_delta_shown(session_id, delta, delta_delivered)
-            keep_reminder = _block_keeps_the_reminder(packet)
-        except Exception:  # noqa: BLE001 - hook must never break prompt submission
-            lane, hit_count, block, keep_reminder, packet_available = "none", 0, "", False, False
+        fetched = _fetch_context(session_id, data, prompt)
+        lane, hit_count, block = fetched.lane, fetched.hit_count, fetched.block
+        policy_text, keep_reminder, packet_available = fetched.policy_text, fetched.keep_reminder, fetched.packet_available
         if block:
             additional_context = (
                 block + "\n\n" + REMINDER if keep_reminder and global_ok else block
@@ -3684,10 +3793,6 @@ def main(argv: list[str] | None = None) -> int:
             additional_context = _mcp_activation_context()
         elif not global_ok:
             additional_context = ""
-        if policy_text:
-            # First, before any retrieved material or reminder: the agent reads its authority before its
-            # context, and whatever would have followed is unchanged.
-            additional_context = f"{policy_text}\n{additional_context}" if additional_context else policy_text
     elif mode == _STUB_MODE:
         # Inject mode is a payload upgrade on this same gate, not a second
         # trigger — REST/CLI are only ever attempted past this point. Any
@@ -3701,6 +3806,10 @@ def main(argv: list[str] | None = None) -> int:
             lane, hit_count, block = "none", 0, ""
         if block:
             additional_context = REMINDER + "\n\n" + block
+    if policy_text:
+        # First, before any retrieved material or reminder: the agent reads its authority before its
+        # context, and whatever would have followed is unchanged.
+        additional_context = f"{policy_text}\n{additional_context}" if additional_context else policy_text
     # Stamped after the transport ran: a hook the client kills mid-ladder must
     # not also burn the session's cooldown and the client-wide one. The session
     # stamp moves after every fetch, printed or not, so an unreachable service
@@ -3716,7 +3825,7 @@ def main(argv: list[str] | None = None) -> int:
         _touch(global_stamp)
     if not additional_context:
         return 0
-    _log(prompt, lane, hit_count)
+    _log(prompt, lane, hit_count, session)
 
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
