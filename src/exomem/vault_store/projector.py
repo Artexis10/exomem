@@ -416,21 +416,24 @@ class Projector:
                     cursor = (batch[-1].queued_at, batch[-1].path)
         return report
 
-    def _with_authority(self, effect: Callable[[], _Done]) -> _Done:
-        """Run one change to the disk right after the writer's authority check, under one hold.
+    def _with_authority(self, effect: Callable[[Callable[[], None]], _Done]) -> _Done:
+        """Run one change to the disk on the store thread, with the writer's authority checked
+        before it starts and again right before each install, rename or unlink in it.
 
         This follows the contract of ``require_write_authority``: recheck before SQL or a
-        publication filesystem effect, as the collection publisher does before each effect. The
-        effect runs on the store thread inside the hold that the check needs, and a release of the
-        lease must take that hold. So no lease loss can fall between the check and the effect. A
+        publication filesystem effect. The effect runs on the store thread inside the hold that the
+        check needs, so no cooperative hand-back can fall between them. The coordinator can still
+        revoke the grant while bytes are staged, so ``effect`` gets the check and calls it before
+        each of those steps, as the collection publisher checks before every one of its own. A
         busy boundary or a refusal leaves the record queued and ends the pass, as a record's own
         refusal does.
         """
         done: list[_Done] = []
 
         def work(writer: CollectionWriter) -> None:
-            writer.handle.require_write_authority()
-            done.append(effect())
+            check = writer.handle.require_write_authority
+            check()
+            done.append(effect(check))
 
         self._run(work)
         return done[0]
@@ -548,7 +551,9 @@ class Projector:
             body = self._stored_body(page)
             if body is None:
                 return  # a commit changed the page meanwhile; its intent comes up next pass
-            installed = self._with_authority(lambda: _publish(filesystem, facts.path, body, disk))
+            installed = self._with_authority(
+                lambda check: _publish(filesystem, facts.path, body, disk, check)
+            )
             self._record_projected(page, installed.size, installed.mtime_ns)
             report.projected += 1
 
@@ -586,7 +591,7 @@ class Projector:
             return True
         if verdict is Removal.UNLINK:
             assert disk is not None
-            self._with_authority(lambda: _unlink(filesystem, facts.path, disk))
+            self._with_authority(lambda check: _unlink(filesystem, facts.path, disk, check))
             report.removed += 1
             return True
         if verdict is Removal.LEAVE:
@@ -602,6 +607,11 @@ class Projector:
         Any other state is the move's two halves, which are the removal of the old path and the
         write of the new one from the store, and each half then keeps its own rule about a
         person's file.
+
+        The page's parts move before the record that completes the intent or turns it into a write,
+        so the intent keeps the move's source until they have. A pass that ends at a busy boundary
+        before them, or a kill, leaves the move queued; the next pass finds the page already at its
+        new path, takes the move's two halves and moves the parts.
         """
         intent, page = facts.intent, facts.page
         assert intent is not None and intent.from_path is not None
@@ -619,11 +629,13 @@ class Projector:
             and new_disk is None
         ):
             renamed = self._with_authority(
-                lambda: _rename(filesystem, old.path, intent.path, old_disk)
+                lambda check: _rename(filesystem, old.path, intent.path, old_disk, check)
+            )
+            self._with_authority(
+                lambda check: _move_parts(filesystem, old.path, intent.path, check)
             )
             self._record_moved(intent, page, old.path, renamed)
             report.projected += 1
-            self._with_authority(lambda: _move_parts(filesystem, old.path, intent.path))
             return
         verdict = _judge_write(facts, None if new_disk is None else new_disk.sha256)
         if verdict in (Judgement.HOLD_DELETE, Judgement.HOLD_EDIT):
@@ -632,8 +644,8 @@ class Projector:
             return
         if not self._remove(filesystem, old, old_disk, report, store_revision=None):
             return
+        self._with_authority(lambda check: _move_parts(filesystem, old.path, intent.path, check))
         self._record_move_split(intent, old.path)
-        self._with_authority(lambda: _move_parts(filesystem, old.path, intent.path))
         self._project(filesystem, intent.path, report)
 
     def _project_folder(
@@ -663,11 +675,12 @@ class Projector:
         if queued is None or waiting is not None:
             return
 
-        def remove_folder() -> bool:
+        def remove_folder(check: Callable[[], None]) -> bool:
             opened = _parent(filesystem, folder, access="mutate")
             if not opened.ok:
                 return False
             with opened.require() as directory:
+                check()
                 return filesystem.unlink_directory(directory).ok
 
         removed = self._with_authority(remove_folder)
@@ -701,7 +714,9 @@ class Projector:
         ):
             source, seen = intent.from_path, old_disk  # names that the rename's closure keeps
             try:
-                self._with_authority(lambda: _rename(filesystem, source, intent.path, seen))
+                self._with_authority(
+                    lambda check: _rename(filesystem, source, intent.path, seen, check)
+                )
             except (Deferred, held_fs.HeldFsError, OSError):
                 # The writer renames the same file right after its commit and may have won.
                 old_disk = observe(filesystem, intent.from_path)
@@ -1326,7 +1341,11 @@ def _retrying(operation: Callable[[], held_fs.HeldResult]) -> None:
 
 
 def _publish(
-    filesystem: held_fs.HeldFilesystem, rel: str, body: bytes, existing: OnDisk | None
+    filesystem: held_fs.HeldFilesystem,
+    rel: str,
+    body: bytes,
+    existing: OnDisk | None,
+    check: Callable[[], None],
 ) -> OnDisk:
     """Write ``body`` to a new file, or replace ``existing`` only while it is still that exact file.
 
@@ -1334,6 +1353,9 @@ def _publish(
     rename and makes the temporary durable before it. A create-only install is a hard link, and a
     new folder is a bare mkdir, and neither flushes a folder: so this flushes the file's folder
     after the install, and the folder above each folder that it made, before it returns.
+
+    ``check`` runs after the bytes are staged, at the publication's last hook before it installs
+    them: ``validate_existing`` before a replacing rename, ``prepare`` before a create-only link.
     """
     folder, leaf = _split(rel)
     opened, created = _open_creating(filesystem, folder)
@@ -1348,7 +1370,12 @@ def _publish(
                 body,
                 expected_identity=None if existing is None else existing.identity,
                 expected_sha256=None if existing is None else existing.sha256,
-                prepare=_keep_permissions(None if existing is None else existing.permissions),
+                validate_existing=None if existing is None else (lambda _held: check()),
+                prepare=(
+                    (lambda _staged: check())
+                    if existing is None
+                    else _keep_permissions(existing.permissions)
+                ),
             )
             if result.ok:
                 published.append(result.require())
@@ -1430,14 +1457,22 @@ def _installed(
         return OnDisk(sha256, version.size, version.mtime_ns, file.identity, _permissions(file))
 
 
-def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> None:
-    """Remove the file only while it is still the exact file, with the bytes, that was judged."""
+def _unlink(
+    filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk, check: Callable[[], None]
+) -> None:
+    """Remove the file only while it is still the exact file, with the bytes, that was judged, and
+    only right after ``check``, on every try."""
     folder, leaf = _split(rel)
     with _parent(filesystem, folder, access="mutate").require() as parent:
         with filesystem.file(parent, leaf, access="mutate").require() as file:
             if file.identity != expected.identity or _stream_sha256(file) != expected.sha256:
                 raise Deferred("the file changed before it was removed")
-            _retrying(lambda: filesystem.unlink(file))
+
+            def unlink() -> held_fs.HeldResult:
+                check()
+                return filesystem.unlink(file)
+
+            _retrying(unlink)
         _flush(filesystem, parent)
 
 
@@ -1459,7 +1494,9 @@ def move_into_custody(vault_root: Path, rel: str, custody: str) -> None:
                     _flush_above(filesystem, created)
 
 
-def _move_parts(filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str) -> None:
+def _move_parts(
+    filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str, check: Callable[[], None]
+) -> None:
     """Move a page's dot folder of parts beside the page's new path, as the page's move left it.
 
     The writer renames the folder right after its commit; a kill before that leaves it here. The
@@ -1481,14 +1518,22 @@ def _move_parts(filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str
         with opened.require() as new_parent:
             # A name that is taken refuses the rename: a person's folder there stays, and so does
             # this one.
+            check()
             if not filesystem.rename_directory(held, new_parent, new_leaf).ok:
                 return
             _flush_above(filesystem, created)
     _flush_folder(filesystem, _split(old_parts)[0])
 
 
-def _rename(filesystem: held_fs.HeldFilesystem, old: str, new: str, expected: OnDisk) -> OnDisk:
-    """Rename the old file to a free path, only while it is still the exact file that was judged.
+def _rename(
+    filesystem: held_fs.HeldFilesystem,
+    old: str,
+    new: str,
+    expected: OnDisk,
+    check: Callable[[], None],
+) -> OnDisk:
+    """Rename the old file to a free path, only while it is still the exact file that was judged,
+    and only right after ``check``, on every try.
 
     The source is checked before the destination folder is made, so a refused rename leaves no new
     folder. On POSIX the rename flushes both folders; this flushes the folders above any new one.
@@ -1501,7 +1546,12 @@ def _rename(filesystem: held_fs.HeldFilesystem, old: str, new: str, expected: On
                 raise Deferred("the file changed before it was renamed")
             opened, created = _open_creating(filesystem, new_folder)
             with opened.require() as new_parent:
-                _retrying(lambda: filesystem.rename(file, new_parent, new_leaf, replace=False))
+
+                def rename() -> held_fs.HeldResult:
+                    check()
+                    return filesystem.rename(file, new_parent, new_leaf, replace=False)
+
+                _retrying(rename)
                 _flush_above(filesystem, created)
                 return _installed(
                     filesystem, new_parent, new_leaf, expected.identity, expected.sha256

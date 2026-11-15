@@ -158,6 +158,78 @@ def test_a_projector_that_loses_its_writer_authority_changes_no_file_after_the_l
     assert [rel for rel in pages if (stored / rel).exists()] == on_disk_at_the_loss
 
 
+# A new file installs by a link and a replaced one by a rename: each checks at its own last step.
+@pytest.mark.parametrize("target", [NEW, ALPHA], ids=["a new file", "a replaced file"])
+def test_a_grant_revoked_while_a_publication_stages_its_bytes_installs_nothing(
+    stored, monkeypatch, target
+):
+    """A projector that checks writer authority once before a publication: the coordinator revokes
+    the grant while the bytes are staged, and the file still reaches the vault after the loss."""
+    before = (stored / target).read_bytes() if (stored / target).exists() else None
+    authority = {"held": True}
+    publish = held_fs.publish_bytes
+
+    def revoked_while_staging(*arguments, prepare=None, **keywords):
+        def the_coordinator_revokes(staged):
+            authority["held"] = False
+            if prepare is not None:
+                prepare(staged)
+
+        return publish(*arguments, prepare=the_coordinator_revokes, **keywords)
+
+    monkeypatch.setattr(held_fs, "publish_bytes", revoked_while_staging)
+    path = connection.store_path(stored)
+    with connection.open_writer(path, lease_check=lambda: authority["held"]) as handle:
+        writer = CollectionWriter(stored, handle)
+        commit(writer, **put(target, EDITED))
+
+        with pytest.raises(connection.CollectionStoreError) as refused:
+            projector.Projector(stored, run=lambda work: work(writer)).run_pass()
+
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert ((stored / target).read_bytes() if (stored / target).exists() else None) == before
+    assert temporaries(stored) == []
+
+
+def test_a_moved_pages_parts_follow_it_after_the_pass_that_moved_it_met_a_busy_boundary(
+    stored, writer, projecting, monkeypatch
+):
+    """A projector that completes a move before it moves the page's parts: a busy boundary at the
+    parts then leaves them at the old path with nothing queued to move them, and the moved page
+    loses its extracted content for good."""
+    from exomem.extraction_parts import folder_for
+
+    commit(writer, **put(MOVE_FROM, b"# Drifter\n"))
+    projecting.run_pass()
+    old_parts = stored / folder_for(Path(MOVE_FROM))
+    old_parts.mkdir()
+    (old_parts / "part-2.md").write_bytes(b"The rest of the extraction.\n")
+    commit(writer, moves=(write.PageMove(MOVE_FROM, MOVE_TO),))
+    rename_directory = _held_fs_posix.PosixHeldFilesystem.rename_directory
+    busy = []
+
+    def busy_when_the_parts_move_first(self, *arguments, **keywords):
+        if not busy:
+            busy.append(True)
+            # As the parts' turn on the store thread meets a busy boundary: nothing moved yet.
+            raise projector.BoundaryBusy("another holder has the vault's mutation boundary")
+        return rename_directory(self, *arguments, **keywords)
+
+    monkeypatch.setattr(
+        _held_fs_posix.PosixHeldFilesystem, "rename_directory", busy_when_the_parts_move_first
+    )
+
+    assert projecting.run_pass().busy
+    projecting.run_pass()
+
+    assert (stored / MOVE_TO).read_bytes() == b"# Drifter\n"
+    moved_parts = stored / folder_for(Path(MOVE_TO))
+    assert (moved_parts / "part-2.md").read_bytes() == b"The rest of the extraction.\n"
+    assert not old_parts.exists() and not (stored / MOVE_FROM).exists()
+    assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
+    assert rows(stored, "SELECT path FROM store_manifest WHERE path = ?", MOVE_FROM) == []
+
+
 def test_a_vacated_folder_goes_once_its_files_moved_and_stays_while_it_holds_a_persons_file(
     stored, writer, projecting
 ):

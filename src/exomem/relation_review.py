@@ -831,7 +831,7 @@ def _canonical_lifecycle_json(value: dict[str, Any]) -> str:
 
 def _bounded_lifecycle_text(value: dict[str, Any]) -> str:
     text = _canonical_lifecycle_json(value)
-    _require_artifact_size(text.encode("utf-8"))
+    _require_artifact_size(len(text.encode("utf-8")))
     return text
 
 
@@ -1831,14 +1831,21 @@ def _stored_artifact(
     if not read.serves(root, relative):
         return None
     _require_artifact_admission(admission, relative)
-    raw, guard = _read_bound(root, relative)
-    _require_artifact_size(raw)  # as the file reader refuses it, before anything parses it
-    return raw, guard
+    # The size is read first, from the snapshot that the bytes come from, so an artifact over the
+    # limit is refused before its body is loaded, as the file reader refuses one.
+    with read.snapshot(root) as view:
+        meta = view.page_meta(relative)
+        if meta is None:
+            return None, vault.PathGuard.of_stored(relative, None)
+        _require_artifact_size(meta.size)
+        page = view.page(relative)
+    assert page is not None  # the snapshot that held its metadata holds the page
+    return page.body, vault.PathGuard.of_stored(relative, hashlib.sha256(page.body).hexdigest())
 
 
-def _require_artifact_size(raw: bytes | None) -> None:
-    """Refuse an artifact over the size limit, read from the disk or from the store."""
-    if raw is not None and len(raw) > _MAX_ARTIFACT_BYTES:
+def _require_artifact_size(size: int) -> None:
+    """Refuse an artifact over the size limit, read from the disk or held in the store."""
+    if size > _MAX_ARTIFACT_BYTES:
         raise RelationReviewError(
             "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
         )
@@ -2941,7 +2948,7 @@ def _read_artifact_bytes(
         raise RelationReviewError("RELATION_REVIEW_SWAPPED", "review artifact changed during read")
     _recheck_review_directory(opened.root, opened.chain)
     _require_artifact_admission(opened.admission, relative)
-    _require_artifact_size(raw)
+    _require_artifact_size(len(raw))
     try:
         guard = vault.PathGuard.capture(
             opened.root,
