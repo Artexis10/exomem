@@ -2296,3 +2296,53 @@ def test_an_indexed_original_edited_on_disk_is_not_reused(tmp_path):
     )
     assert _lookup(tmp_path, text_digest) == duplicates.DuplicateLookup()
 
+
+def test_legacy_evidence_rows_rebuild_in_the_background_after_upgrade(tmp_path, monkeypatch):
+    """An upgrade must repair old NULL hashes even when no sidecar changes."""
+    from duplicate_fixtures import legacy_evidence_filing
+
+    original = b"an original from an earlier release"
+    rel = legacy_evidence_filing(tmp_path, original)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    digest = hashlib.sha256(original).hexdigest()
+    derive = duplicates.derive_page_payload
+    with monkeypatch.context() as earlier:
+        earlier.setattr(lexstore, "_CATALOG_IDENTITY_SCHEMA", "exomem.semantic-catalog.row-identity.v4")
+        earlier.setattr(duplicates, "derive_page_payload", lambda path, raw: None if path == rel else derive(path, raw))
+        _built(tmp_path)
+        assert lexstore.payload_candidates(tmp_path, digest) == ()
+    lexstore.clear_stores()
+    started, release = threading.Event(), threading.Event()
+    rebuild = lexstore.LexicalStore.rebuild_atomic
+
+    def held_rebuild(self, *args, **kwargs):
+        started.set()
+        assert release.wait(timeout=30)
+        return rebuild(self, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "rebuild_atomic", held_rebuild)
+    try:
+        assert lexstore.payload_candidates(tmp_path, digest) is None
+        assert started.wait(timeout=10)
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == "exomem-lexical-repair":
+                thread.join(timeout=60)
+
+    hit = duplicates.find_duplicate(tmp_path, sha256=digest, lane=duplicates.EVIDENCE, protected=False).hit
+    assert hit is not None and hit.path == rel
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    (tmp_path / hit.payload.artifact_path).write_bytes(b"changed original")
+    assert duplicates.find_duplicate(tmp_path, sha256=digest, lane=duplicates.EVIDENCE, protected=False).hit is None
+
+
+@pytest.mark.parametrize("companion", ["null", "{}", "{artifact_path: other.bin}", "{artifact_sha256: invalid}"])
+def test_present_invalid_companions_never_fall_back_to_legacy_fields(tmp_path, companion):
+    """A malformed current identity must not borrow legacy fields to become reusable."""
+    from duplicate_fixtures import legacy_evidence_filing
+
+    rel = legacy_evidence_filing(tmp_path, b"legacy bytes")
+    raw = (tmp_path / rel).read_bytes().replace(b"type: source\n", f"type: source\ngovernance_companion: {companion}\n".encode())
+    assert duplicates.derive_page_payload(rel, raw) is None
+

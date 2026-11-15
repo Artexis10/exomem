@@ -2,13 +2,16 @@
 
 A store-mode write runs with the store thread's writer bound, so every caller's release filter
 decides each page, the owner's included. These tests hold the write to work that does not grow with
-the vault: a bounded number of decisions per page, one policy load and one store snapshot per set of
-decisions, and no registry re-derivation for a write that changes no registry input.
+the vault: a bounded number of decisions per page; one policy load and one store snapshot per set of
+decisions, whose vault store readers and path resolutions do not grow with the pages decided; and no
+registry re-derivation for a write that changes no registry input.
 """
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
 from collections import Counter
 from contextlib import closing
 
@@ -54,14 +57,14 @@ def grow(writer, start, count):
 
 class Counts:
     """How often a write decides a page, loads the policy, builds a store authorization, opens a
-    store snapshot and builds the entity registry index."""
+    store snapshot and builds the registry index; and how often its decisions open a vault store
+    reader and resolve a path."""
 
-    NAMES = ("decisions", "loads", "authorizations", "snapshots", "indexes")
+    NAMES = ("decisions", "loads", "authorizations", "snapshots", "readers", "realpaths", "indexes")
 
     def __init__(self, monkeypatch):
         self.seen = Counter()
         for name, owner, attribute in (
-            ("decisions", egress, "_decide_path"),
             ("loads", policy, "load"),
             ("authorizations", store_governance.OperationAuthorization, "__init__"),
             ("indexes", entity_recurrence, "registry_index"),
@@ -75,10 +78,31 @@ class Counts:
             return snapshot(writer, *args, **kwargs)
 
         monkeypatch.setattr(CollectionWriter, "read_snapshot", opened)
+        # Lease, freshness and warm-up work resolves paths and opens readers on its own schedule,
+        # so only what a decision does counts.
+        deciding, decide = threading.local(), egress._decide_path
 
-    def counted(self, name, function):
+        def decided(*args, **kwargs):
+            self.seen["decisions"] += 1
+            deciding.depth = getattr(deciding, "depth", 0) + 1
+            try:
+                return decide(*args, **kwargs)
+            finally:
+                deciding.depth -= 1
+
+        monkeypatch.setattr(egress, "_decide_path", decided)
+        for name, owner, attribute in (
+            # A vault store snapshot that joins none opens a reader: a pooled lend when served.
+            ("readers", connection, "store_reader"),
+            ("realpaths", os.path, "realpath"),
+        ):
+            monkeypatch.setattr(
+                owner, attribute, self.counted(name, getattr(owner, attribute), deciding)
+            )
+
+    def counted(self, name, function, inside=None):
         def counting(*args, **kwargs):
-            self.seen[name] += 1
+            self.seen[name] += inside is None or getattr(inside, "depth", 0) > 0
             return function(*args, **kwargs)
 
         return counting
@@ -122,9 +146,10 @@ def edit(root, path):
 def test_a_store_write_decides_each_page_a_bounded_number_of_times_under_one_policy_load(
     served, writer, monkeypatch  # noqa: F811
 ):
-    """A write that opens a store snapshot and loads the policy for each page it decides, decides
-    the corpus in every advisory and builds the entity registry in each: at 1,000 pages it costs
-    20 times a file-mode write. A create and an edit are measured at N pages and at 2N."""
+    """A write that opens store snapshots, resolves paths and loads the policy for each page it
+    decides, decides the corpus in every advisory and builds the entity registry in each: at 1,000
+    pages it costs 20 times a file-mode write. A create and an edit are measured at N and 2N pages.
+    """
     grow(writer, 1, 24)
     # The first write of a process loads what the later writes reuse.
     edit(served, create(served, "Warm-up"))
@@ -151,4 +176,7 @@ def test_a_store_write_decides_each_page_a_bounded_number_of_times_under_one_pol
     for at_n, at_2n in ((create_n, create_2n), (edit_n, edit_2n)):
         for shared in ("loads", "authorizations", "snapshots"):
             assert at_2n[shared] <= at_n[shared], (shared, measured)
+        # Under load a decision now and then resolves a path more; one per page is the defect.
+        for per_set in ("readers", "realpaths"):
+            assert at_2n[per_set] - at_n[per_set] < grown, (per_set, measured)
         assert at_n["indexes"] == at_2n["indexes"] == 1, measured

@@ -122,18 +122,17 @@ def _filters(vault_root: Path) -> tuple[Any, bool]:
     withheld from it.
 
     Nothing can be on a vault with no file policy and no tombstones (no
-    predicate). The owner in file mode is treated as withheld nothing, as
-    egress treats the owner for every derived structure:
-    `egress.restricted_release_filter` gives the owner no filter.
+    predicate). Whether the caller is one that pages can be withheld from is
+    `egress.caller_restricted`, the same in file mode and in a bound store: a
+    bound store gives the owner a predicate as well, and the owner is still
+    withheld nothing.
     """
     from .governance import egress
     from .governance.principal import effective_principal
 
     who = effective_principal()
-    keep = egress.restricted_release_filter(Path(vault_root), principal=who)
-    if keep is not None:
-        return keep, True
-    return egress.release_walk_filter(Path(vault_root), principal=who), False
+    keep = egress.release_walk_filter(Path(vault_root), principal=who)
+    return keep, keep is not None and egress.caller_restricted(Path(vault_root), principal=who)
 
 
 def _visible(keep, path: str) -> bool:

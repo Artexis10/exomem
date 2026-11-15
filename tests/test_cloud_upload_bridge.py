@@ -304,6 +304,33 @@ def test_a_refused_adoption_leaves_the_held_upload_to_retry(cell, tmp_path, caps
     assert (vault / retried["stored_path"]).read_bytes() == ORIGINAL
 
 
+def test_a_legacy_evidence_duplicate_consumes_its_hold_without_storing_again(cell, tmp_path, capsys, monkeypatch):
+    """A renamed held upload reuses old bytes and frees the session's upload quota."""
+    from duplicate_fixtures import legacy_evidence_filing
+
+    from exomem import held_uploads, lexstore
+
+    key, app, vault = cell
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
+    rel = legacy_evidence_filing(vault, ORIGINAL)
+    assert lexstore.get_store(vault).rebuild_atomic()
+    before = {path: path.read_bytes() for path in (vault / "Knowledge Base/Evidence").rglob("*") if path.is_file()}
+    monkeypatch.setattr(held_uploads, "HOLD_MAX_COUNT", 1)
+    handle = _hold_through_the_cli(key, app, tmp_path, capsys, "evidence")
+    arguments = {"scope": "case", "category": "raw", "files": [{**handle, "file_name": "renamed.bin"}]}
+
+    result = _run(app, lambda client: _tool(client, "preserve_artifacts", arguments, _mcp_origin(key, LOGIN_A)))
+    [receipt] = result["files"]
+
+    assert receipt["state"] == "already_stored", receipt
+    assert receipt["duplicate_of"]["path"] == rel.removesuffix(".md")
+    assert result["summary"] == {"stored": 0, "already_stored": 1, "failed": 0}
+    assert {path: path.read_bytes() for path in (vault / "Knowledge Base/Evidence").rglob("*") if path.is_file()} == before
+    # A fresh upload fits the one-hold quota only if reuse consumed the previous hold.
+    next_handle = _hold_through_the_cli(key, app, tmp_path, capsys, "evidence")
+    assert next_handle["file_id"] != handle["file_id"]
+
+
 def test_another_logins_proof_cannot_spend_a_ticket(cell):
     key, app, _ = cell
 

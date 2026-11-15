@@ -1940,7 +1940,8 @@ def _remove_lexical_rebuild_artifact(
         )
 
 
-_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v4"
+# v5 retires NULL payload hashes derived before legacy Evidence identity support.
+_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v5"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:
@@ -4787,6 +4788,7 @@ def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> Lexical
     A catalogue that is missing, at an older schema or built under another semantic identity is rebuilt from
     canonical pages in the background (`rebuild_atomic`) and reads as None until that lands: the rebuild is
     O(vault) and a storing door asks under its mutation boundary (D5), so the door stores unchecked meanwhile.
+    In store mode the owner's bounded background pass repairs old rows, without a file-catalogue rebuild.
     A store flagged by a failed `record_payload_commit` is reconciled inline, which costs one pass over the
     pages and never rebuilds whole, because the identity was proved first. `verify` reconciles the catalogue
     against the pages even when nothing flags it, because the audit counts every row and a row lost to a failed
@@ -4799,7 +4801,8 @@ def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> Lexical
     if store._failed:
         return None
     if not store.catalogue_current():
-        _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
+        if not store._reads_store():
+            _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
         return None
     if store._payload_stale or verify:
         try:
@@ -5947,7 +5950,7 @@ class LexicalStore:
         finally:
             conn.close()
 
-    def _sweep_orphan_rebuild_temps(self) -> list[Path]:
+    def _sweep_orphan_rebuild_temps(self, *, boot: bool = False) -> list[Path]:
         """Remove rebuild temps a killed build left beside the live sidecar.
 
         Each temp is a whole catalogue, and a catalogue version bump sends
@@ -5975,14 +5978,14 @@ class LexicalStore:
             if _RebuildTempLock(base).held():
                 continue
             try:
-                if any(
+                if not boot and any(
                     now - member.stat().st_mtime < _ORPHAN_REBUILD_TEMP_AGE_SECONDS
                     for member in members
                 ):
                     continue
             except OSError:
                 continue
-            if base in members and self._rebuild_temp_in_use(base):
+            if not boot and base in members and self._rebuild_temp_in_use(base):
                 continue
             for member in (base, *self._wal_shm_paths(base), base.with_name(f"{base.name}-journal")):
                 try:
@@ -6349,7 +6352,9 @@ class LexicalStore:
             conn.close()
         return False
 
-    def _publish_over_quarantined_set(self, temp_path: Path) -> bool:
+    def _publish_over_quarantined_set(
+        self, temp_path: Path, *, source_owner: str = "lexical-rebuild"
+    ) -> bool:
         """Recover a missing-main-with-orphans or proven-fatal live set by moving
         the ENTIRE live-name set aside, then installing the validated temp.
 
@@ -6376,7 +6381,7 @@ class LexicalStore:
                 reserved_paths._move_owner_file(
                     self.vault_root,
                     temp_path,
-                    "lexical-rebuild",
+                    source_owner,
                     self.path,
                     "lexical-store",
                     replace=False,
@@ -9216,7 +9221,9 @@ class LexicalStore:
                 reparsed += 1
         return reparsed, removed, inserted, unchanged
 
-    def _replace_live_catalog(self, temp_path: Path) -> bool:
+    def _replace_live_catalog(
+        self, temp_path: Path, *, source_owner: str = "lexical-rebuild"
+    ) -> bool:
         """Install a folded temp catalogue over the live set.
 
         The caller holds the publication barrier and has already decided the
@@ -9227,11 +9234,11 @@ class LexicalStore:
             # setup together so none opens the new main between those steps.
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
-                descriptor_ids=("lexical-store", "lexical-rebuild", "lexical-quarantine"),
+                descriptor_ids=("lexical-store", source_owner, "lexical-quarantine"),
             ):
                 # A missing or fatal main with sidecars must move as one set.
                 if self._live_set_disposition() == "quarantine":
-                    if not self._publish_over_quarantined_set(temp_path):
+                    if not self._publish_over_quarantined_set(temp_path, source_owner=source_owner):
                         return self._decline_rebuild("publish_conflict")
                 else:
                     if not self._quiesce_live_wal():
@@ -9240,7 +9247,7 @@ class LexicalStore:
                     reserved_paths._move_owner_file(
                         self.vault_root,
                         temp_path,
-                        "lexical-rebuild",
+                        source_owner,
                         self.path,
                         "lexical-store",
                         replace=True,
@@ -11676,13 +11683,17 @@ class LexicalStore:
             return dict.fromkeys(rel_paths, None)
 
     def catalogue_current(self) -> bool:
-        """Whether the sidecar exists at the current schema, shape and semantic identity. Read-only, no DDL.
+        """Whether derived rows are current for duplicate lookup. Read-only, no DDL.
 
-        A catalogue that fails any of these is one that `ensure_fresh` rebuilds whole, so a caller that must not
-        wait for that (the duplicate lookup) treats it as absent.
+        A file catalogue must match this build's schema, shape and semantic identity.
+        Store rows must finish their owner-version pass before the index can answer.
         """
         if self._reads_store():
-            return True  # the store derives each page's rows in its commit
+            from .vault_store import rederive
+
+            # Old store rows stay incomplete until the owner's background pass finishes.
+            with self._store_connection() as conn:
+                return conn is not None and not rederive.owner_schema_behind(conn)
         from .vocabulary.registry import RegistryError
 
         if self._sidecar_unreadable():
