@@ -49,7 +49,7 @@ The task layer stays deferred. Publication follows normal review and delivery; l
 - [x] 7.2 Compare recorded fields with final authorized responses on a small built development run. Verify zero metadata disagreements, exact upkeep identities and truthful unknown usage.
 - [ ] 7.3 Verify actor-visible delivery before behavioral scoring. On real models, exercise each retained move, scoped/global distinction, exact requests, confirmation/decline, unexpected input and a transport provider outage.
 - [x] 7.4 Use independent source-derived keys and report paired case-level differences with intervals. Preserve failed delivery; an interval containing zero is no change. State the allowance estimate and obtain any required spend agreement before generation.
-- [x] 7.4a Serve an identified stance page on a release-gated vault: terminal egress re-decides the unit shape compilation admitted, path included; verify a store-enrolled vault with an `exomem_id` page returns `ready` through `activate_context`. Raise `STANCE_MAX_CHARS` to 1600 after the first real profile fit only four of nine lines.
+- [x] 7.4a Serve an identified stance page on a release-gated vault: terminal egress re-decides the unit shape compilation admitted, path included; verify a store-enrolled vault with an `exomem_id` page returns `ready` through `activate_context`. Move the stance cap to the vault-settable `budgets.stance_max_chars` convention, shipped at 1600, after the first real profile fit only four of nine lines under 800.
 - [ ] 7.5 Run the full corpus in CI-shaped shards at the implementation boundary. Complete independent exact-content review, correction rechecks, CI, merge and the ordinary release.
 
 ## 8. Closure

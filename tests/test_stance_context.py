@@ -526,3 +526,22 @@ def test_identified_stance_page_is_served_on_a_store_enrolled_vault(stance_vault
         "Keep a source for each claim.", "Prefer prose over lists.",
     ]
     assert all(item["ref"].startswith("exomem://memory/") for item in packet["stance"]["items"])
+
+
+def test_a_vault_budget_caps_the_stance_lines(stance_vault):
+    from exomem import activation_conventions
+
+    _page(stance_vault, "global", "stance: true\n", body=(
+        "- [rule] Keep a source for each claim. ^source\n"
+        "- [rule] Prefer prose over lists in every reply you write. ^prose\n"
+    ))
+    full = _stance(stance_vault, limit=4000)
+    assert len(full["items"]) == 2
+    first_line_only = len(stance.item_line(full["items"][0])) + 1
+    override = activation_conventions.override_path(stance_vault)
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text(f"schema_version: 1\nbudgets:\n  stance_max_chars: {first_line_only}\n", encoding="utf-8")
+    activation_conventions.clear_cache()
+    capped = _stance(stance_vault, limit=4000)
+    assert [item["text"] for item in capped["items"]] == ["Keep a source for each claim."]
+    assert capped["omitted"] == 1

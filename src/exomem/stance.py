@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    activation_conventions,
     context_catalogue,
     lifecycle_statuses,
     semantic_contract,
@@ -22,9 +23,7 @@ from . import (
 )
 from .governance import egress, principal
 
-# Resource bounds fixed by the stance-block contract; neither is vault vocabulary.
-# 1600 fits a nine-line profile with short authored anchors (measured 1,539 characters).
-STANCE_MAX_CHARS = 1600
+# A resource bound, not vault vocabulary. The stance character cap is the vault's `budgets.stance_max_chars`.
 CACHE_SIZE = 128
 _CACHE: OrderedDict[tuple, tuple[date | None, dict[str, Any], list[dict[str, Any]]]] = OrderedDict()
 _LOCK = threading.Lock()
@@ -100,7 +99,8 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
     admitted = tuple(item for item, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT)
     vault.recheck_path_guards(root, (guards[path] for path in {item.path for item in admitted}))
     admitted = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
-    limit = max(0, min(STANCE_MAX_CHARS, max_chars))
+    configured = activation_conventions.load_conventions(root).conventions.budget("stance_max_chars")
+    limit = max(0, max_chars if configured is None else min(configured, max_chars))
     inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance)) for item in admitted]
     key = (str(root), caller.binding, _digest(inputs), limit)
     with _LOCK:
