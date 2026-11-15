@@ -1409,6 +1409,64 @@ def test_a_null_required_key_part_rejects_each_row_and_never_collapses_the_tail(
     ]
 
 
+def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):
+    return call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping,
+                **overrides)
+
+
+def test_preview_counts_the_whole_source_and_the_job_agrees(store, monkeypatch):
+    """A 100-row sample sees a clean source; the tail's rejections, a repeated key and a stored row must show before the job."""
+    setup(store, ndjson(null_tail_rows(valid_rows=3, null_rows=0)), fields=NULL_TAIL_FIELDS)
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    assert status(store, job)["rows"]["imported"] == 3
+    rows = null_tail_rows(valid_rows=130, null_rows=12)
+    rows.insert(130, {"list": "a", "position": 50, "title": "again"})  # repeats a key that comes earlier in the source
+    write_source(store.root, ndjson(rows))
+
+    preview = preview_of(store)
+
+    assert preview["rows"] == {"sampled": 100, "valid": 100, "invalid": 0, "complete": False}
+    assert (preview["coverage"], preview["rows_total"]) == ("full", 143)
+    assert (preview["would_insert"], preview["would_match_stored"]) == (127, 3)
+    assert preview["would_collapse"]["rows"] == 1 and len(preview["would_collapse"]["sample_keys"]) == 1
+    starts = [len(ndjson(rows[:ordinal])) for ordinal in range(len(rows))]
+    assert preview["would_reject"] == {"SCHEMA_REQUIRED_FIELD": {"rows": 12, "first": [
+        {"row": ordinal, "byte": starts[ordinal], "at": "position"} for ordinal in range(131, 143)]}}
+    assert preview["survey"]["on_invalid"] == "skip" and preview["survey"]["rows_read"] == 143
+
+    small(monkeypatch, rows=40)
+    again = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    done = status(store, again)["rows"]
+    assert done["inserted"] == preview["would_insert"] and done["rejected"] == 12
+    assert done["collapsed_in_source"] == preview["would_collapse"]["rows"]
+    assert done["restated_existing"] == preview["would_match_stored"]
+
+
+def test_preview_over_the_ceiling_samples_and_carries_no_counts(store, monkeypatch):
+    """A sample's counts presented as the source's would hide a malformed tail it never read."""
+    setup(store, ndjson(null_tail_rows(valid_rows=130, null_rows=12)), fields=NULL_TAIL_FIELDS)
+    monkeypatch.setattr(importer(), "PREVIEW_SOURCE_CEILING", 1 << 10)
+
+    preview = preview_of(store)
+
+    assert preview["coverage"] == "sampled" and preview["survey"]["unread"] == "source_over_ceiling"
+    assert preview["survey"]["ceiling"] == 1 << 10 and preview["survey"]["rows_read"] == 100
+    assert [preview[name] for name in ("rows_total", "would_insert", "would_reject", "would_collapse")] == [None] * 4
+
+
+def test_preview_stopped_by_a_malformed_row_is_partial_and_names_where(store):
+    """A read that ends where the source has no row boundary must not read as a clean, complete count."""
+    setup(store, b'[{"list": "a", "position": 1}, {"list": "a", "position": 2} {"list": "a", "position": 3}]', fields=NULL_TAIL_FIELDS)
+
+    preview = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="json-array",
+                   mapping={**NULL_TAIL_MAPPING, "fields": {"list_id": "list", "position": "position"}})
+
+    assert preview["coverage"] == "partial" and preview["rows_total"] is None and preview["would_insert"] is None
+    assert preview["survey"]["stopped"]["code"] == "IMPORT_SOURCE_MALFORMED" and preview["survey"]["stopped"]["row"] == 2
+
+
 @pytest.mark.parametrize("change,before,after,refusal", [
     ("boolean", {"distance_m": 1}, {"distance_m": True}, "SCHEMA_FIELD_TYPE"),
     ("integer", {"distance_m": False}, {"distance_m": 0}, None),
