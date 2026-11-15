@@ -9,6 +9,8 @@ on:
       - ".github/actions/substrate-test-contract/**"
       - ".github/actions/free-runner-disk/**"
       - ".github/workflows/cloud-rehearsal.yml"
+      - "docs/runbooks/cloud-platform-deploy.md"
+      - "infra/scripts/cloud_deploy.py"
   # The live rehearsal (P3) is the node gate; run it by hand before P4 and
   # after any change to cellctl, the platform chart, the cell image or the
   # pinned Substrate commit.
