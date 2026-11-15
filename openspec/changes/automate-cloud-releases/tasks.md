@@ -145,7 +145,7 @@
   - the CI log of every recorded case holds no token, no cell ID and no tenant ID, which catches tenant identifiers in a public log;
   - a release run on `main` without a tag starts no run, which catches a run on every merge;
   - `actionlint` passes, and `gh api` shows that the environment's branch policy admits only `main`, which catches a token that a branch can reach.
-- [ ] 1.13 (Runbook merged in #2724; open until the Substrate data-list entry and the rehearsal checks are done.) Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
+- [ ] 1.13 (Runbook merged in #2724. The Substrate data-list entry merged in substrate-systems/substrate#309 on 2026-11-12. Open until the rehearsal checks are done.) Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
   - record the platform Deployment after each manual upgrade, with one `gh api` command, then dispatch `gh workflow run cloud-deploy.yml --ref main`;
   - record the first platform Deployment, with every barrier entry at or below the live release in `barriers_crossed`;
   - list `barriers_crossed` when an upgrade crosses a barrier;
@@ -171,22 +171,22 @@
 
   It catches a path whose parts pass alone, while the workflow, `cellctl` and the gateway disagree.
 
-  Note (2026-11-12): the tags v0.172.0 to v0.174.0 started no `cloud-deploy` run, so the release workflow's tag run now dispatches it in its `deploy-cells` job. On production, the v0.175.0 tag run dispatched `cloud-deploy`, which set the image and reported the canary on the target. The canary's pod runs the digest that the tag run published. This proves the first bullet on production. The rehearsal still owns the other bullets.
+  Note (2026-11-12): the tags v0.172.0 to v0.174.0 started no `cloud-deploy` run, so the release workflow's tag run now dispatches it in its `deploy-cells` job. On production, the v0.175.0 tag run dispatched `cloud-deploy`, which set the image and reported the canary on the target. The canary's pod runs the digest that the tag run published. This proves the first bullet on production. Every later release repeats it: the first tag run of each release from v0.175.0 to v0.181.0 ended with `deploy-cells`, and a `cloud-deploy` run followed within seconds. The rehearsal still owns the other bullets.
 - [ ] 2.2 Measure each stop on real cells after phase 1: the stop, the pull, the init and the cold start, per cell. Verify: design.md replaces each "est." stop figure with the measured median and range, and names the run. It catches a "seamless" claim that rests on estimates.
 
 ## 3. Phase 2: restore point (D6)
 
-- [ ] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the K3s Live job:
+- [ ] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the cloud-rehearsal `release` mode on local storage:
   - the target applies before the backup Job starts, which catches a backup that is still inside the stop;
   - no snapshot is taken while a pod uses the volume, which catches a crash-consistent restore point;
-  - on the K3s Live job, a write acknowledged just before the stop is present after a forced-failure restore. It catches a snapshot of an unflushed volume that loses the last commits;
+  - in the rehearsal's `release` mode, a write acknowledged just before the stop is present after a forced-failure restore. It catches a snapshot of an unflushed volume that loses the last commits;
   - a failed target restores from the snapshot, and no file that the target created remains, which catches a restore that leaves the target's migrations behind;
   - a restore during the backup Job reuses the attempt's clone, and the cell never holds two clones, which catches a restore that the quota refuses;
   - an hourly backup hold does not start while the upgrade hold keeps its clone, which catches a second clone request;
   - a missing snapshot falls back to the off-site backup. With neither, the row records `RESTORE_FAILED`, and no image starts. It catches a guess onto an unrestored volume;
   - a `cellctl` restart at each step resumes from the annotations, which catches an attempt that loses its restore point on restart.
 
-  Note: the reconcile tests pass. `test_clone_restore_copy_command_on_real_k3s` proves only the copy command on mounted claims. It takes no snapshot and stops no cell. The box stays open until the K3s Live job proves the acknowledged-write bullet with a real snapshot after the stop.
+  Note: the reconcile tests pass. `test_clone_restore_copy_command_on_real_k3s` proves only the copy command on mounted claims. It takes no snapshot and stops no cell. The box stays open until the rehearsal's `release` mode proves the acknowledged-write bullet with a real snapshot after the stop. The live K3s suite has no CSI snapshot controller. The rehearsal's local storage domain runs TopoLVM and the snapshot controller.
 - [x] 3.2 Drop `forget --prune` from the pre-upgrade backup of a cell without snapshot support, and keep its nightly prune. Verify: a test of `_backup_source` shows no retention for that cell's upgrade hold, and retention for its nightly backup. It catches a prune that holds restic's exclusive lock inside the stop.
 - [x] 3.3 Update `docs/runbooks/cloud-operator-restore.md` for the snapshot restore point. Verify: the runbook names `exomem.io/pre-upgrade-volume-snapshot`, the fallback order, and the forward-only hold's kept snapshot and clone. It catches a person who restores by hand from `last_backup_snapshot` instead of the attempt's own state.
 
@@ -199,12 +199,12 @@
   - a crossed one-way barrier removes `--atomic`, and every other upgrade keeps it, which catches a Helm rollback across a one-way change;
   - a success dispatches `cloud-deploy` with `--ref main`, which catches a platform upgrade after which cells never move;
   - a failed upgrade records `failure`, no `success` and no dispatch, which catches cells that move onto a failed platform.
-- [ ] 4.3 (Runbook merged here; open until the rehearsal upgrade runs the command.) Replace the runbook's manual upgrade steps with the command, and keep the manual steps as the fallback. Verify: an upgrade with the command on the rehearsal cluster records the platform Deployment, and the `cloud-deploy` workflow then runs. It catches a command whose record or dispatch the live GitHub settings refuse.
+- [x] 4.3 (Runbook merged here.) Replace the runbook's manual upgrade steps with the command, and keep the manual steps as the fallback. Verify: an upgrade with the command on the rehearsal cluster records the platform Deployment, and the `cloud-deploy` workflow then runs. It catches a command whose record or dispatch the live GitHub settings refuse.
+
+  Note (2026-11-15): proven on production rather than on the rehearsal cluster, because the verify targets the live GitHub settings, and only production has them. `platform_upgrade.py` recorded the `cloud-platform` Deployments 7801126391 to 7807138203 (v0.180.0 and v0.181.0), and each run dispatched `cloud-deploy`. Run 43739304108 set the cell image and reported the canary on the target. The runbook names the command first and keeps "Manual fallback".
 
 ## 5. Later phase: deploy tier and prepare Job (D7, D9)
 
-- [ ] 5.1 After `make-cloud-cells-operator-resistant` tasks 4.1 and 4.6, decide the custody of the CI path: an ephemeral private-network peer and a revocable ServiceAccount token for the deploy identity. Then add the path, so that a release that changes `cellctl`'s build inputs and not the chart's rolls `cellctl` as an image-only change. Verify:
-  - such a release rolls `cellctl` with no presence step, and records the platform Deployment, which catches a controller-only release that still waits for a person;
-  - an unattested image and a change to anything but an image are denied, which catches a CI path that can change more than images.
+- 5.1 moved on 2026-11-15 to `make-cloud-cells-operator-resistant` task 4.7, beside tasks 4.1 and 4.6, which it waits on.
 - [ ] 5.2 Add the pull-only prepare Job: one Job per node per target, before the node's first window. Verify: the first attempt on a node after the Job shows no image pull in its events, and the Job fits the namespace quota. It catches a prepare Job that runs on the wrong node.
 - [x] 5.3 (Change `warm-cell-catalogue` merged in #2765; its implementation is that change's own tasks.) Open a separate OpenSpec change for the catalogue warm-build. Verify: that change decides the cross-process adoption, the second pod's quota and the key handover for tenant-locked cells before any code. It catches a warm-build that ships without a key handover for locked cells.
