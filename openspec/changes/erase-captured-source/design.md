@@ -94,11 +94,16 @@ Installation retains the original allocation handle through the native effect an
 A later observation requires that version; equal bytes cannot recover a missing witness or reconnect a reused file identity.
 Partial-file cleanup requires the original live allocation handle. After restart, missing continuity leaves the copy unresolved and preserves its bytes.
 This limit prevents deleting an unrelated replacement. Its cost falls only on that copy's cleanup, without blocking ordinary capture.
-Replacement retirement retains the old allocation through the native rename and observes its zero-link state before closing that handle.
-The publisher emits a sealed retirement witness only after that close and proven durability of the name change.
+Replacement retirement retains the old allocation through the native rename.
+The backend checks the expected old version and records its zero-link state and raw version before publisher callbacks.
+Its sealed name receipt binds that replacement and the affected managed parents' durability barriers.
+The publisher requires that same raw version before closing the old handle, then emits the retirement witness.
+No later zero-link observation can replace a missing backend receipt.
 An alias, moved old name or missing native evidence leaves the old copy open; ordinary publication can still succeed.
 An overlapping reader may finish from its borrowed handle without becoming a reusable managed copy.
 Canonical retirement requires the exact saved installed version and matching native allocation, rather than displacement from a slot.
+The command-surface owner-access boundary and transactional-vault-writes pathname-window exclusion still apply.
+Neither a writer lease nor a zero-link observation proves universal exclusion of unobservable direct OS-owner interference.
 This follows [How we contain Claude](https://www.anthropic.com/research/how-we-contain-claude): native capabilities bound destruction while canonical records preserve obligations.
 
 Keep one canonical slot for each generated-file locator and physical owner scope.

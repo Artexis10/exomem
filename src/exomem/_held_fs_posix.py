@@ -27,8 +27,12 @@ from .held_fs import (
     HeldFilesystem,
     HeldFsError,
     HeldResult,
+    NameRetirementReceipt,
+    RetiringFile,
     SagaRecord,
     StableIdentity,
+    _name_retirement_receipt,
+    _retirement_before,
     name_variants,
     write_parts,
 )
@@ -331,11 +335,12 @@ class PosixHeldFile(HeldFile):
         try:
             if self.closed or self.filesystem.closed:
                 raise OSError(errno.ESTALE, "held file is closed")
-            current = _identity(_fstat(self.descriptor))
+            info = _fstat(self.descriptor)
+            current = _identity(info)
             if (not _same_object(current, self.identity) or current.kind != "file"
                     or not _same_object(_identity(_fstat(self.parent_descriptor)), self.parent_identity)):
                 raise OSError(errno.ESTALE, "held allocation changed")
-            return HeldResult(value=FileRetirementState(current))
+            return HeldResult(value=FileRetirementState(FileVersion(current, info.st_size, info.st_mtime_ns, info.st_ctime_ns)))
         except OSError as error:
             return HeldResult(error=_error(error))
 
@@ -604,7 +609,8 @@ class PosixHeldFilesystem(HeldFilesystem):
         destination_leaf: str,
         *,
         replace: bool = False,
-    ) -> HeldResult[None]:
+        retiring: RetiringFile | None = None,
+    ) -> HeldResult[NameRetirementReceipt | None]:
         try:
             checked = self._check_file(source)
             destination = self._destination(
@@ -614,6 +620,7 @@ class PosixHeldFilesystem(HeldFilesystem):
                 replace=replace,
             )
             operation = _replace if replace else _rename_noreplace
+            before = _retirement_before(retiring) if replace else None
             operation(
                 checked.name,
                 destination_leaf,
@@ -624,7 +631,7 @@ class PosixHeldFilesystem(HeldFilesystem):
             _fsync(checked.parent_descriptor)
             if destination.descriptor != checked.parent_descriptor:
                 _fsync(destination.descriptor)
-            return HeldResult(value=None)
+            return HeldResult(value=_name_retirement_receipt(self, destination, destination_leaf, retiring, before))
         except OSError as error:
             return HeldResult(error=_error(error))
 

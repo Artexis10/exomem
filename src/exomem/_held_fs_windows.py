@@ -46,8 +46,12 @@ from .held_fs import (
     HeldFilesystem,
     HeldFsError,
     HeldResult,
+    NameRetirementReceipt,
+    RetiringFile,
     SagaRecord,
     StableIdentity,
+    _name_retirement_receipt,
+    _retirement_before,
     write_parts,
 )
 
@@ -592,12 +596,15 @@ class WindowsHeldFile(HeldFile):
 
     def version(self) -> FileVersion:
         self.check()
+        return self._version(self.identity)
+
+    def _version(self, identity: StableIdentity, *, size: int | None = None) -> FileVersion:
         assert GetFileInformationByHandleEx is not None
         info = FILE_BASIC_INFO()
         if not GetFileInformationByHandleEx(_native(self.descriptor), FILE_BASIC_INFO_CLASS, byref(info), sizeof(info)):
             raise OSError("FileBasicInfo is unavailable")
         # ChangeTime detects ordinary writes; a hostile host can explicitly alter these timestamps.
-        return FileVersion(self.identity, os.fstat(self.descriptor).st_size,
+        return FileVersion(identity, os.fstat(self.descriptor).st_size if size is None else size,
                            int(info.LastWriteTime) * 100, int(info.ChangeTime) * 100)
 
     def retirement_state(self) -> HeldResult[FileRetirementState]:
@@ -615,7 +622,7 @@ class WindowsHeldFile(HeldFile):
             if info.Directory:
                 raise OSError(errno.ESTALE, "held allocation is not a file")
             identity = StableIdentity(current.device, current.inode, current.kind, int(info.NumberOfLinks))
-            return HeldResult(value=FileRetirementState(identity, bool(info.DeletePending)))
+            return HeldResult(value=FileRetirementState(self._version(identity, size=int(info.EndOfFile)), bool(info.DeletePending)))
         except OSError as error:
             return HeldResult(error=_error(error))
 
@@ -905,7 +912,8 @@ class WindowsHeldFilesystem(HeldFilesystem):
         destination_leaf: str,
         *,
         replace: bool = False,
-    ) -> HeldResult[None]:
+        retiring: RetiringFile | None = None,
+    ) -> HeldResult[NameRetirementReceipt | None]:
         try:
             checked = self._check_file(source)
             destination = self._destination(
@@ -914,6 +922,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
                 destination_leaf,
                 replace=replace,
             )
+            before = _retirement_before(retiring) if replace else None
             _set_name_information(
                 checked.descriptor,
                 _native(destination.descriptor),
@@ -924,7 +933,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
                 replace=replace,
             )
             checked.named = False
-            return HeldResult(value=None)
+            return HeldResult(value=_name_retirement_receipt(self, destination, destination_leaf, retiring, before))
         except OSError as error:
             return HeldResult(error=_error(error))
 

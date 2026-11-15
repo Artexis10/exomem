@@ -2925,7 +2925,6 @@ class _BatchWorkspace:
                 parent_relative = relative.parent.as_posix()
                 parent_result = filesystem.parent(
                     parent_relative if parent_relative != "." else ".",
-                    **({"access": "mutate"} if custody is not None and custody.retired is not None else {}),
                 )
                 if not parent_result.ok:
                     raise PathGuardError(

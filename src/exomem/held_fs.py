@@ -30,6 +30,7 @@ _CAPABILITY_CACHE: dict[tuple[int, str, int, int], Capabilities] = {}
 _CAPABILITY_CACHE_LOCK = threading.Lock()
 _INSTALLATION_SEAL = object()
 _RETIREMENT_SEAL = object()
+_NAME_RETIREMENT_SEAL = object()
 
 
 @dataclass(slots=True)
@@ -160,8 +161,33 @@ class InstallationWitness:
 class FileRetirementState:
     """Native namespace state observed from the original retained allocation."""
 
-    identity: StableIdentity
+    version: FileVersion
     delete_pending: bool | None = None
+
+    @property
+    def identity(self) -> StableIdentity:
+        return self.version.identity
+
+
+@dataclass(frozen=True, slots=True)
+class RetiringFile:
+    file: HeldFile
+    expected: FileVersion
+
+
+@dataclass(frozen=True, slots=True)
+class NameRetirementReceipt:
+    """A backend's durable replacement effect, captured before publisher callbacks."""
+
+    root_identity: StableIdentity
+    parent_identity: StableIdentity
+    leaf: str
+    before: FileVersion
+    observed: FileRetirementState
+    _seal: object = field(repr=False, compare=False)
+
+    def authentic(self) -> bool:
+        return self._seal is _NAME_RETIREMENT_SEAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,7 +350,8 @@ class HeldFilesystem:
         destination_leaf: str,
         *,
         replace: bool = False,
-    ) -> HeldResult[None]:
+        retiring: RetiringFile | None = None,
+    ) -> HeldResult[NameRetirementReceipt | None]:
         raise NotImplementedError
 
     def rename_directory(
@@ -576,23 +603,55 @@ def _published_identity(
         return HeldResult(value=after.identity)
 
 
+def _retirement_before(retiring: RetiringFile | None) -> FileVersion | None:
+    if retiring is not None:
+        try:
+            if retiring.file.version() == retiring.expected:
+                return retiring.expected
+        except (OSError, HeldFsError):
+            pass
+    return None
+
+
+def _name_retirement_receipt(
+    filesystem: HeldFilesystem, parent: HeldDirectory, leaf: str,
+    retiring: RetiringFile | None, before: FileVersion | None,
+) -> NameRetirementReceipt | None:
+    """Called only inside the native backend, after its replacement and parent barriers."""
+    if retiring is None or before is None:
+        return None
+    try:
+        if (retiring.file.filesystem is not filesystem or retiring.file.name != leaf
+                or not _same_file_identity(retiring.file.parent_identity, parent.identity)):
+            return None
+        state = retiring.file.retirement_state()
+        if state.ok:
+            current = state.require()
+            if (_same_file_identity(current.identity, before.identity) and current.identity.link_count == 0
+                    and current.delete_pending is not False
+                    and (filesystem.name_changes_flush_parents or filesystem.flush_directory(parent).ok)):
+                return NameRetirementReceipt(filesystem.root_identity, parent.identity, leaf, before, current,
+                                             _NAME_RETIREMENT_SEAL)
+    except (OSError, HeldFsError):
+        pass
+    return None
+
+
 def _close_replaced(
     filesystem: HeldFilesystem, parent: HeldDirectory, leaf: str,
-    existing: HeldFile | None, before: FileVersion | None, completed: bool,
+    existing: HeldFile | None, before: FileVersion | None, receipt: NameRetirementReceipt | None,
     after_retire: Callable[[RetirementWitness], None] | None,
 ) -> None:
     if existing is None:
         return
     observed = None
     try:
-        if after_retire is not None and before is not None and completed:
+        if (after_retire is not None and before is not None and receipt is not None and receipt.authentic()
+                and receipt.before == before and receipt.root_identity == filesystem.root_identity
+                and receipt.parent_identity == parent.identity and receipt.leaf == leaf):
             state = existing.retirement_state()
-            if state.ok:
-                current = state.require()
-                if (_same_file_identity(current.identity, before.identity) and current.identity.link_count == 0
-                        and current.delete_pending is not False
-                        and (filesystem.name_changes_flush_parents or filesystem.flush_directory(parent).ok)):
-                    observed = current
+            if state.ok and state.require() == receipt.observed:
+                observed = receipt.observed
     except (OSError, HeldFsError):
         # Missing native or durability evidence keeps the old copy unresolved without blocking publication.
         pass
@@ -644,7 +703,7 @@ def install_temporary(
         return HeldResult(error=HeldFsError("INVALID_INPUT", "temporary version names a different identity"))
     existing: HeldFile | None = None
     existing_before: FileVersion | None = None
-    replaced_old = False
+    retirement = None
     try:
         current = filesystem.file(parent, leaf)
         if expected_destination is None:
@@ -696,16 +755,17 @@ def install_temporary(
                 before = staged.version()
                 if before != expected_version:
                     return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "temporary version changed"))
-                replaced = filesystem.rename(staged, parent, leaf, replace=True)
+                replaced = filesystem.rename(staged, parent, leaf, replace=True,
+                    **({"retiring": RetiringFile(existing, existing_before)} if after_retire is not None else {}))
                 if not replaced.ok:
                     return publication_error(replaced.error)
-                replaced_old = True
+                retirement = replaced.value
             return _published_identity(filesystem, parent, leaf, staged, before, after_install)
     except OSError as error:
         code = "IDENTITY_CHANGED" if error.errno == errno.ESTALE else "IO_REFUSED"
         return publication_error(HeldFsError(code, "temporary installation was refused", cause=error))
     finally:
-        _close_replaced(filesystem, parent, leaf, existing, existing_before, replaced_old, after_retire)
+        _close_replaced(filesystem, parent, leaf, existing, existing_before, retirement, after_retire)
 
 
 def publish_bytes(
@@ -750,6 +810,7 @@ def publish_bytes(
     custody_reserved = False
     copy_started = False
     installed = False
+    retirement = None
 
     def publication_error(error: HeldFsError | None) -> HeldResult[StableIdentity]:
         bounded = error or HeldFsError("IO_REFUSED", "publish was refused")
@@ -853,15 +914,17 @@ def publish_bytes(
             assert existing is not None
             existing_before = existing.version() if after_retire is not None else None
             before = staged.version()
-            replaced = filesystem.rename(staged, parent, leaf, replace=True)
+            replaced = filesystem.rename(staged, parent, leaf, replace=True,
+                **({"retiring": RetiringFile(existing, existing_before)} if after_retire is not None else {}))
             if not replaced.ok:
                 return publication_error(replaced.error)
             installed = True
+            retirement = replaced.value
 
         return _published_identity(filesystem, parent, leaf, staged, before, after_install)
     finally:
         try:
-            _close_replaced(filesystem, parent, leaf, existing, existing_before, installed, after_retire)
+            _close_replaced(filesystem, parent, leaf, existing, existing_before, retirement, after_retire)
         finally:
             try:
                 released = "installed" if installed else "not_written" if not copy_started else None

@@ -29,9 +29,12 @@ def reserve(custody, data=b"complete payload", **kwargs):
                            expected_size=len(data), **kwargs)
 
 
-def test_retirement_closes_only_the_matching_canonical_copy(vault):
+@pytest.mark.parametrize("late_alias", [False, True])
+def test_retirement_closes_only_the_matching_canonical_copy(vault, monkeypatch, late_alias):
     from exomem import generated_fragment_store, native_copy_custody
 
+    if late_alias and os.name == "nt":
+        pytest.skip("POSIX directory durability race")
     references = [f"exomem://memory/{uuid.UUID(int=value)}" for value in (31, 32)]
     with owner(vault) as custody:
         store = generated_fragment_store.GeneratedFragmentStore(vault)
@@ -39,7 +42,7 @@ def test_retirement_closes_only_the_matching_canonical_copy(vault):
         copies = native_copy_custody.NativeCopyCustody(vault, store=store, native=custody)
         allocations = []
         try:
-            with held_fs.acquire(vault).require() as filesystem, filesystem.parent(".", access="mutate").require() as parent:
+            with held_fs.acquire(vault).require() as filesystem, filesystem.parent(".").require() as parent:
                 durable = filesystem.name_changes_flush_parents or filesystem.flush_directory(parent).ok
                 for name, reference in zip(("first", "second"), references, strict=True):
                     data = name.encode()
@@ -61,9 +64,29 @@ def test_retirement_closes_only_the_matching_canonical_copy(vault):
                     allocations.append(allocation)
                 before = custody.get(allocations[1].native.binding_id).version
                 witnesses = []
+                unflushed_unlink = None
+                if late_alias:
+                    alias_parent = vault / "other"
+                    alias_parent.mkdir()
+                    alias = alias_parent / "old.txt"
+                    rename = filesystem.rename
+
+                    def alias_before_rename(source, destination, leaf, **options):
+                        os.link(vault / "second.txt", alias)
+                        directory = os.open(alias_parent, os.O_RDONLY | os.O_DIRECTORY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
+                        return rename(source, destination, leaf, **options)
+
+                    monkeypatch.setattr(filesystem, "rename", alias_before_rename)
+                    def unflushed_unlink(witness):
+                        alias.unlink()
                 held_fs.publish_bytes(filesystem, parent, "second.txt", b"replacement",
-                                      expected_identity=before.identity, after_retire=witnesses.append).require()
-                assert bool(witnesses) == durable
+                    expected_identity=before.identity, after_install=unflushed_unlink, after_retire=witnesses.append).require()
+                assert (vault / "second.txt").read_bytes() == b"replacement"
+                assert bool(witnesses) == (durable and not late_alias)
                 if witnesses:
                     wrong = native_copy_custody.CopyAllocation(allocations[0].canonical, allocations[1].native)
                     with pytest.raises(ValueError, match="canonical copy differs"):
@@ -75,6 +98,7 @@ def test_retirement_closes_only_the_matching_canonical_copy(vault):
                     assert store.lookup(references[1], None).copies == ()
                 else:
                     assert store.lookup(references[1], None).copies
+                    assert custody.lookup(source_ref=references[1]).reservations
                 assert store.lookup(references[0], None).copies[0].outcome == "present"
                 assert custody.observe(allocations[0].native.binding_id, destination=True).matching is True
         finally:

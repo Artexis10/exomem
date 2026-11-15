@@ -32,7 +32,7 @@ def test_replacement_retirement_requires_zero_names_and_allows_an_overlapping_re
     target = tmp_path / "current.txt"
     target.write_bytes(b"old bytes")
     witnesses = []
-    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".", access="mutate").require() as parent:
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
         durable = fs.name_changes_flush_parents or fs.flush_directory(parent).ok
         with fs.file(parent, "current.txt").require() as reader:
             before = reader.version()
@@ -68,7 +68,7 @@ def test_retirement_is_reported_after_old_close_even_when_new_installation_callb
     (tmp_path / "current.txt").write_bytes(b"before")
     original_files = []
     witnesses = []
-    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".", access="mutate").require() as parent:
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
         durable = fs.name_changes_flush_parents or fs.flush_directory(parent).ok
         file = fs.file
 
@@ -109,7 +109,7 @@ def test_missing_retirement_evidence_keeps_publication_successful(tmp_path, monk
     held_fs = _module()
     (tmp_path / "current.txt").write_bytes(b"before")
     witnesses = []
-    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".", access="mutate").require() as parent:
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
         with fs.file(parent, "current.txt").require() as original:
             expected = original.identity
             monkeypatch.setattr(type(original), "retirement_state", lambda self: held_fs.HeldResult(
