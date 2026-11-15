@@ -10,6 +10,7 @@ read back from the store's rows, never from the importer's own report.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
@@ -377,6 +378,73 @@ def test_a_trashed_folder_that_holds_a_recorded_evicted_original_comes_back_whol
     assert planned.restored_path == recovered.restored_path == folder
     assert (vault / rel).read_bytes() == ORIGINAL_BYTES
     assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", rel) == [(rel,)]
+
+
+def test_a_folder_dry_run_reads_the_store_as_often_for_four_evicted_originals_as_for_two(
+    vault, selected_store, monkeypatch
+):
+    """A store-mode folder dry run that resolves each evicted original below the folder with its own read
+    of the companion's body, though the recovery has read the folder's pages in one batch: every evicted
+    original added one statement. Both folders hold four originals and four pages, so they differ only in
+    how many originals are evicted. Each folder's dry run runs once before the counted one, so the
+    registries that the first recovery loads are not counted."""
+    trashed = {}
+    for evicted in (2, 4):
+        folder = f"{NOTES}/Album {evicted}"
+        (vault / folder).mkdir(parents=True)
+        for index in range(4):
+            (vault / folder / f"sample-{index}.txt").write_bytes(ORIGINAL_BYTES)
+        trash = delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True).trash_path
+        trashed[evicted] = (folder, trash, [f"{trash}/sample-{index}.txt" for index in range(evicted)])
+        for index in range(4):
+            offloaded(vault, f"{trash}/sample-{index}.txt")  # the media worker settles each original where it lies
+    enter_store_mode(vault)
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    statements = {}
+    planned = {}
+    real = read.connection.store_reader
+
+    def traced(trash):
+        log = statements[trash] = []
+
+        @contextlib.contextmanager
+        def tracing(*arguments, **keywords):
+            with real(*arguments, **keywords) as reader:
+                reader.set_trace_callback(log.append)
+                try:
+                    yield reader
+                finally:
+                    reader.set_trace_callback(None)
+
+        def dry_run(writer):
+            writer.connection.set_trace_callback(log.append)
+            try:
+                with monkeypatch.context() as patch:
+                    patch.setattr(read.connection, "store_reader", tracing)
+                    planned[trash] = recover_from_trash.recover_from_trash(
+                        vault, trash_path=trash, validate_only=True)
+            finally:
+                writer.connection.set_trace_callback(None)
+
+        thread.run(dry_run)
+
+    try:
+        for _folder, _trash, entries in trashed.values():
+            for entry in entries:
+                with media_store.open_original(vault, vault / entry):
+                    pass  # a read records the cache binding that an eviction needs
+                assert media_store.evict(vault, vault / entry)
+        for _round in range(2):  # each call starts its folder's log afresh, so the second round counts
+            for _folder, trash, _entries in trashed.values():
+                traced(trash)
+    finally:
+        thread.close()
+
+    assert [planned[trash].restored_path for _folder, trash, _entries in trashed.values()] == [
+        folder for folder, _trash, _entries in trashed.values()]
+    two, four = (statements[trashed[evicted][1]] for evicted in (2, 4))
+    assert two and len(four) == len(two)
 
 
 def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and_restored(

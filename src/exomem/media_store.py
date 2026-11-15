@@ -247,6 +247,42 @@ def _recorded_identity(vault: Path, path: Path, snapshot: OriginalSnapshot) -> s
         conn.close()
 
 
+# SQLite's smallest default limit on bound parameters is 999; a chunk stays below it.
+_LEDGER_PATHS_PER_QUERY = 500
+
+
+def recorded_versions(
+    vault: Path, wanted: list[tuple[originals.BinaryBinding, StoredObject]],
+) -> list[bool]:
+    """For each binding in `wanted`, whether the ledger records that exact version at its path.
+
+    The media store writes that row itself when it offloads, reads or evicts the original there, and
+    no note writes one, so a row is the store's own evidence that the version belongs at the path.
+    Reads without creating state or a store client, a few paths per query; raises `sqlite3.Error`
+    when the ledger cannot be read.
+    """
+    store = MediaJobStore(Path(vault).resolve(), create=False)
+    if not wanted or not store.path.exists():
+        return [False] * len(wanted)
+    keys = [store._relative(store.vault_root / binary.path) for binary, _reference in wanted]
+    paths = sorted(set(keys))
+    rows: dict[str, tuple[str, str]] = {}
+    with closing(store._connect(readonly=True)) as conn:
+        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_cache' AND type = 'table'").fetchone() is None:
+            return [False] * len(wanted)
+        for start in range(0, len(paths), _LEDGER_PATHS_PER_QUERY):
+            chunk = paths[start:start + _LEDGER_PATHS_PER_QUERY]
+            rows.update(
+                (row["binary_rel"], (row["reference"], row["sha256"]))
+                for row in conn.execute(
+                    f"SELECT binary_rel, reference, sha256 FROM media_cache WHERE binary_rel IN ({', '.join('?' * len(chunk))})",
+                    chunk,
+                )
+            )
+    return [rows.get(key) == (_reference_key(reference), binary.sha256)
+            for key, (binary, reference) in zip(keys, wanted, strict=True)]
+
+
 def cache_matches(vault: Path, path: Path, *, snapshot: OriginalSnapshot | None = None) -> bool:
     """Read a proven cache identity without creating state or a store client."""
     selected = snapshot if snapshot is not None else original_state(vault, path)

@@ -160,9 +160,10 @@ _NOT_HELD = (
 )
 
 
-def evicted_original(vault_root: Path, rel: str):
+def evicted_original(vault_root: Path, rel: str, *, companions: Mapping[str, bytes] | None = None):
     """The original at ``rel`` whose record the store keeps while the media store holds its bytes,
-    or None: a page, a binary on disk, or a vault with no originals binding."""
+    or None: a page, a binary on disk, or a vault with no originals binding. A caller that has read
+    the pages beside ``rel`` in one batch passes them as ``companions``, so this reads no page."""
     from .. import originals
 
     root = Path(vault_root)
@@ -172,7 +173,7 @@ def evicted_original(vault_root: Path, rel: str):
         or originals.binding_for(root) is None
     ):
         return None
-    candidate = originals.original_state(root, root / rel)
+    candidate = originals.original_state(root, root / rel, companions=companions)
     return candidate if candidate.state == "evicted" else None
 
 

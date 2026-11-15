@@ -1324,6 +1324,92 @@ def test_moving_a_companion_page_fetches_its_evicted_original_only_for_a_caller_
         assert originals.bound_path(fields) == destination[:-3]
 
 
+def test_a_page_moved_alone_from_its_withheld_original_keeps_offloads_working(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a census that cannot read the reference which a confined move leaves in a page that it moved
+    alone, away from its withheld evicted original: the owner's census turned unknown, and an unrelated
+    original's offload failed with MEDIA_ALLOWANCE_UNKNOWN."""
+    from exomem import (
+        media_allowance,
+        media_jobs,
+        media_processing,
+        media_store,
+        move_file,
+        preserve,
+    )
+    from exomem.governance import egress, principal
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"original bytes")
+    media_processing.reconcile_media(vault, path)
+    companion = path.with_name(path.name + ".md")
+    preserve.update_sidecar_extraction(vault, companion, text="extracted text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    original = path.relative_to(vault).as_posix()
+    with monkeypatch.context() as confined:
+        confined.setattr(egress, "restricted_release_filter",
+                         lambda *_args, **_kwargs: lambda candidate: candidate != original)
+        with principal.request_scope(principal.most_restrictive_principal(surface="mcp")):
+            move_file.move_file(vault, old_path=companion.relative_to(vault).as_posix(),
+                                new_path="Knowledge Base/Notes/Media/renamed.md")
+    assert not companion.exists() and originals.original_state(vault, path).state == "missing"
+    unrelated = _preserved(vault, category="unrelated")
+
+    usage = media_allowance.reference_usage(vault)
+    _offload(vault, unrelated)
+
+    assert usage.used_bytes == len(b"original bytes")
+    assert originals.original_state(vault, unrelated).state == "cached"
+
+
+def test_a_page_recovered_alone_from_its_withheld_original_keeps_offloads_working(
+        vault: Path, selected_store, monkeypatch):
+    """Catches the same unknown census after a confined recovery brings a companion page back alone: the page
+    binds its original's Trash path, which the ledger records, and the original stays evicted in the Trash."""
+    from exomem import (
+        delete_file,
+        media_allowance,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        recover_from_trash,
+    )
+    from exomem.governance import egress, principal
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"original bytes")
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+    entry = vault / trashed.trash_path
+    with media_store.open_original(vault, entry):
+        pass  # a read records the cache binding that an eviction needs
+    assert media_store.evict(vault, entry)
+    companion = entry.with_name(entry.name + ".md")
+    companion.write_text(companion.read_text(encoding="utf-8") + "\nNotes a person kept.\n", encoding="utf-8")
+    with monkeypatch.context() as confined:
+        confined.setattr(egress, "restricted_release_filter",
+                         lambda *_args, **_kwargs: lambda candidate: candidate != trashed.trash_path)
+        with principal.request_scope(principal.most_restrictive_principal(surface="mcp")):
+            recover_from_trash.recover_from_trash(vault, trash_path=companion.relative_to(vault).as_posix(),
+                                                  restore_path="Knowledge Base/Notes/Media/sample-notes.md")
+    assert not companion.exists() and originals.original_state(vault, entry).state == "missing"
+    unrelated = _preserved(vault, category="unrelated")
+
+    usage = media_allowance.reference_usage(vault)
+    _offload(vault, unrelated)
+
+    assert usage.used_bytes == len(b"original bytes")
+    assert originals.original_state(vault, unrelated).state == "cached"
+
+
 def test_a_bound_writer_withholds_an_evicted_trashed_original_from_a_confined_mover(
         vault: Path, selected_store, monkeypatch):
     """Catches an owner exemption keyed on the bound writer instead of on the caller. A bound store's filter leaves
@@ -1581,6 +1667,64 @@ def test_recovering_a_companion_page_fetches_its_evicted_original_only_for_a_cal
         assert opened == [] and not entry.exists()
     else:
         assert opened and entry.read_bytes() == b"original bytes"
+
+
+@pytest.mark.parametrize("online", [True, False])
+def test_resident_page_publication_refuses_before_fetch(
+        vault: Path, selected_store, configured_boundary, monkeypatch, online):
+    """Catches a recovery that fetches before an admission that the page on the volume decides: the owner's
+    recovery of a protected companion page into the capture folder fetched its evicted original and cached
+    its plaintext before it refused, and in an outage answered with the store's error instead of the refusal."""
+    from exomem import (
+        delete_file,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        recover_from_trash,
+    )
+    from exomem.governance import principal
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    with library_scope():
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"original bytes")
+        media_processing.reconcile_media(vault, path)
+        preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text",
+                                           engine="text")
+        media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+        _offload(vault, path)
+        trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+        entry = vault / trashed.trash_path
+        with media_store.open_original(vault, entry):
+            pass  # a read records the cache binding that an eviction at the trash path needs
+        assert media_store.evict(vault, entry)
+    companion = entry.with_name(entry.name + ".md")
+    text = companion.read_text(encoding="utf-8").replace("---\n", "---\nproject: private-project\n", 1)
+    companion.write_text(text + "\nNotes a person kept about the sample.\n", encoding="utf-8")
+    opened = []
+    store_open = media_store.FilesystemStore.open
+
+    def counted(self, *args, **kwargs):
+        opened.append(args)
+        if not online:
+            raise OSError("the store is unreachable")
+        return store_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", counted)
+    capture = "Knowledge Base/Capture/sample-notes.md"
+    (vault / capture).parent.mkdir(parents=True, exist_ok=True)
+
+    refusals = []
+    with principal.request_scope(principal.owner_principal(surface="cli")):
+        for validate_only in (True, False):
+            with pytest.raises(recover_from_trash.RecoverError) as refused:
+                recover_from_trash.recover_from_trash(vault, trash_path=companion.relative_to(vault).as_posix(),
+                                                      restore_path=capture, validate_only=validate_only)
+            refusals.append(refused.value.as_dict())
+
+    assert refusals == [{"code": "WRITE_REFUSED", "reason": "target is unavailable"}] * 2
+    assert opened == [] and not entry.exists() and companion.exists()
 
 
 def test_an_evicted_text_original_comes_back_as_a_page_in_the_capture_folder(

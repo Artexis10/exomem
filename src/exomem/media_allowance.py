@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -137,7 +138,7 @@ def _binding(
 ) -> tuple[originals.BinaryBinding, originals.StoredObject] | None:
     try:
         return originals.referenced_binding(fields, sidecar_path=path, store=store)
-    except ValueError:
+    except ValueError:  # A live page's `DisplacedReference` goes to `bound_references`, which confirms it.
         if not PurePosixPath(path).is_relative_to(PurePosixPath(kb_dirname()) / trash_metadata.TRASH_SUBPATH):
             raise
     from .relation_review import parse_exact_json_object
@@ -187,10 +188,15 @@ def bound_references(
     `unreadable` is told of each note that fails on its own: a header that the tree cannot read, decode or
     prepare within the note's own budget, or one that does not parse or bind. The walk then goes on to the next note, and that caller must treat
     the census as unknown once told. Without it, the first such note raises.
+
+    A live page that binds a reference away from its original's companion path, as a confined move leaves
+    one, counts only when the media ledger records that exact version at the original's path; those pages
+    come after the walk, from one batched ledger read.
     """
     metadata: dict[str, str] = {}
     placements: dict[str, dict[str, object]] = {}
     placement_versions: dict[str, held_fs.FileVersion] = {}
+    displaced: list[tuple[str, originals.DisplacedReference]] = []
 
     def select(candidates: list[tuple[str, str]]):
         for relative, kind in candidates:
@@ -221,6 +227,9 @@ def bound_references(
                     parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
                     path, store, metadata, vault, placements, placement_versions,
                 )
+            except originals.DisplacedReference as error:
+                displaced.append((path, error))
+                continue
             except ValueError as error:  # This note's YAML or binding. The tree reports a header it cannot read; a walk or I/O failure is no ValueError.
                 if unreadable is None:
                     raise
@@ -230,6 +239,20 @@ def bound_references(
                 del entry
             if bound is not None:
                 yield path, bound[0], bound[1]
+    if displaced:
+        from . import media_store
+
+        try:
+            recorded = media_store.recorded_versions(vault, [(item.binary, item.reference) for _path, item in displaced])
+        except sqlite3.Error as error:
+            raise OSError("the media ledger that confirms a moved page's reference cannot be read") from error
+        for (path, item), confirmed in zip(displaced, recorded, strict=True):
+            if confirmed:
+                yield path, item.binary, item.reference
+            elif unreadable is None:
+                raise item
+            else:
+                unreadable(path, item)
     for metadata_path, version in placement_versions.items():
         with reserved_paths.open_generic_binary(vault, metadata_path) as source:
             if source.version != version:

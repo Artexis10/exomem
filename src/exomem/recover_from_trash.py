@@ -192,25 +192,17 @@ def _recover_from_trash_local(
         allow_curated=allow_curated,
         fold=_fold,
     )
-    if not validate_only:
-        _materialize(vault_root, originals_context, trash_rel, trash_kind)
-        try:
-            if stored_original is not None:
-                trash_file_snapshot = reserved_paths.read_generic_bytes(vault_root, trash_rel)
-            elif evicted_below:
-                # The fetched originals are on the volume now; the transition rechecks this read.
-                trash_tree = reserved_paths.read_generic_tree(vault_root, trash_rel)
-                evicted_below = ()
-        except reserved_paths.ReservedPathLeafError as error:
-            raise _unacquired_source(error) from None
+    # Every admission that the bytes on the volume can decide runs before a commit fetches an
+    # original, so a refused recovery reads nothing from the store.
     restored: tuple[tuple[str, str], ...]
     if trash_kind == "file":
         if trash_file_snapshot is not None:
             _admit_publication(vault_root, restore_rel, trash_file_snapshot.data)
             digest = hashlib.sha256(trash_file_snapshot.data).hexdigest()
         else:
-            # A dry run of an evicted original. Only a page's membership needs its bytes, which a
-            # dry run does not fetch, so the commit judges a page after its fetch.
+            # An evicted original counts by the digest of its stored version, which its fetch
+            # verifies. Only a page's membership needs its bytes, so a commit judges a page after
+            # the fetch below, and a dry run, which fetches nothing, cannot judge it.
             assert stored_original is not None and stored_original.binary_sha256 is not None
             if not restore_rel.lower().endswith(".md"):
                 _admit_publication(vault_root, restore_rel, None)
@@ -292,6 +284,17 @@ def _recover_from_trash_local(
                 code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 reason=str(error),
             ) from error
+
+    if not validate_only:
+        # The fetched originals are on the volume from here, before the census guards and the
+        # transition read them; the transition checks them against `initial_restore_state`.
+        _materialize(vault_root, originals_context, trash_rel, trash_kind)
+        if stored_original is not None and restore_rel.lower().endswith(".md"):
+            try:
+                fetched = reserved_paths.read_generic_bytes(vault_root, trash_rel)
+            except reserved_paths.ReservedPathLeafError as error:
+                raise _unacquired_source(error) from None
+            _admit_publication(vault_root, restore_rel, fetched.data)
 
     semantic: dict | None = None
     lifecycle_operation: lifecycle.LifecycleOperation | None = None
@@ -1204,8 +1207,10 @@ def _recover_in_store(
                     error_class=RecoverError,
                     failed_code="RECOVER_FAILED",
                     # A dry run fetches nothing, so it lists an evicted original from its record.
+                    # Its companion lies beside it, so below the folder: `stored` holds its bytes.
                     evicted=None if not validate_only else (
-                        lambda rel: store_targets.evicted_original(root, rel) is not None
+                        lambda rel: store_targets.evicted_original(root, rel, companions=stored)
+                        is not None
                     ),
                 )
             if len(stored) + listing.file_count > DIRECTORY_TRANSITION_LIMIT:
