@@ -16,11 +16,17 @@ import os
 import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path, PurePosixPath
 
-from . import call_spans, generated_fragments, homes, markdown_relations, note_types
+from . import (
+    call_spans,
+    generated_fragments,
+    homes,
+    markdown_relations,
+    note_types,
+)
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -105,6 +111,20 @@ def _matched_image(match: re.Match[str], group: str | int,
     if start == -1:
         return generated_fragments._Image("")
     return tracking.slice(start, end) if tracking is not None else generated_fragments._Image(match.group(group))
+
+
+def _render_tracked_links(text: str, root: Path, tracking: generated_fragments._Image | None) -> str:
+    output = render_wikilinks_for_vault(text, root)
+    if tracking is not None:
+        if tracking.text != text:
+            raise ValueError("fragment_renderer_image_changed")
+        for start, end in reversed(rewritable_link_ranges(text)):
+            replacement = render_wikilinks_for_vault(text[start:end], root)
+            if replacement != text[start:end]:
+                tracking.splice(start, end, generated_fragments._Image(replacement))
+        if tracking.text != output:
+            raise ValueError("fragment_renderer_image_changed")
+    return output
 
 
 @dataclass
@@ -269,18 +289,10 @@ def compute_updates(
         (top_index, top_index_new, top_index_guard),
         (log_file, log_new, log_guard),
     ):
-        output = render_wikilinks_for_vault(text, vault_root)
         relative = path.relative_to(vault_root).as_posix()
+        image = tracked.get(relative)
+        output = _render_tracked_links(text, vault_root, image)
         if relative in tracked:
-            image = tracked[relative]
-            if image.text != text:
-                raise ValueError("fragment_renderer_image_changed")
-            for start, end in reversed(rewritable_link_ranges(text)):
-                replacement = render_wikilinks_for_vault(text[start:end], vault_root)
-                if replacement != text[start:end]:
-                    image.splice(start, end, generated_fragments._Image(replacement))
-            if image.text != output:
-                raise ValueError("fragment_renderer_image_changed")
             plans[relative] = image.plan(guard.expected_content_hash)
         rendered.append(output)
 
@@ -1242,23 +1254,22 @@ def _refresh_entities_subindex_text(
 def compute_subindex_writes(
     vault_root: Path,
     *,
-    top_index_text: str | None = None,
+    top_index_write: PlannedWrite | None = None,
     base_writes: Mapping[Path, PlannedWrite] | None = None,
     pending_paths: list[str] | None = None,
     include_unchanged: bool = False,
     include_sources_index: bool = True,
     sources_counts: Mapping[str, int] | None = None,
-) -> tuple[list[PlannedWrite], str | None]:
+) -> tuple[list[PlannedWrite], PlannedWrite | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
-    Returns `(writes, top_index_new_text)`. If `top_index_text` is provided,
-    it is used as the base for rewriting top-index counts (so the caller's
-    in-flight changes to Recent activity don't get clobbered); the rewritten
-    text is returned. `base_writes` similarly supplies already-planned text and
+    Returns `(writes, top_index_write)`. The guarded `top_index_write` supplies
+    the base and ownership plan for count changes alongside Recent activity.
+    `base_writes` similarly supplies already-planned text and
     its guard for sub-indexes. This lets a caller compose independent edits to
     an index into one guarded write instead of scheduling competing replacements.
     Disk reads still bind a guard for indexes with no base write. Otherwise the
-    caller is responsible for re-reading the top index from disk later.
+    caller supplies no top-index write when it needs no top-index refresh.
 
     `sources_counts` is a Sources census the caller already holds for the state
     before `pending_paths`; it replaces the walk, which a caller that commits many
@@ -1332,17 +1343,29 @@ def compute_subindex_writes(
                 entities_counts[definition.id] = entities_counts.get(definition.id, 0) + 1
 
     # Top index counts refresh (Sources + Notes + Entities rows).
-    new_top_text: str | None = None
-    if top_index_text is not None:
+    new_top_write: PlannedWrite | None = None
+    if top_index_write is not None:
+        top_index_text = top_index_write.content
+        plan = top_index_write.generated_image
+        tracking = generated_fragments._Image.before(top_index_text, plan.after,
+            plan.after.after.image_sha256) if plan is not None else None
         new_top_text = _rewritten_in_place(
             top_index_text,
             lambda logical: _rewrite_top_index_notes_and_entities_counts(
-                _rewrite_sources_count(logical, counts=sources_counts),
+                _rewrite_sources_count(logical, counts=sources_counts, _tracking=tracking),
                 notes_counts=notes_counts,
                 entities_counts=entities_counts,
+                _tracking=tracking,
             ),
+            _tracking=tracking,
         )
-        new_top_text = render_wikilinks_for_vault(new_top_text, vault_root)
+        new_top_text = _render_tracked_links(new_top_text, vault_root, tracking)
+        new_top_write = replace(top_index_write, content=new_top_text)
+        if plan is not None:
+            from . import generated_output_plan
+
+            new_top_write.generated_image = generated_output_plan.seal(plan.before, content=new_top_text,
+                rendered=tracking.plan(plan.before.mapping.before_sha256), inputs=plan.inputs[1:])
 
     # Sources/index.md refresh.
     sources_index = sources_index_path(vault_root)
@@ -1428,7 +1451,7 @@ def compute_subindex_writes(
                     guard=base_write.guard if base_write and base_write.guard else guard,
                 ))
 
-    return writes, new_top_text
+    return writes, new_top_write
 
 
 def _update_log(

@@ -590,14 +590,12 @@ def _index_refresh_writes(
         top_base = None
     sub_writes, new_top = indexes.compute_subindex_writes(
         vault_root,
-        top_index_text=top_base,
+        top_index_write=(top_base_write or PlannedWrite(top_index_path, top_base, guard=top_guard)) if top_base is not None else None,
         base_writes=planned_index_writes,
     )
     refresh_writes: list[PlannedWrite] = list(sub_writes)
-    if new_top is not None and top_base is not None and new_top != top_base:
-        refresh_writes.append(
-            PlannedWrite(path=top_index_path, content=new_top, guard=top_guard)
-        )
+    if new_top is not None and top_base is not None and new_top.content != top_base:
+        refresh_writes.append(new_top)
     return refresh_writes
 
 

@@ -770,72 +770,15 @@ def add(
             digest=artifact_digest,
         )
 
-    # Plan with post-creation counts: the folder may not exist until the batch
-    # creates it, so include the new file in the in-memory counts.
-    rel_source_no_ext = (
-        source_path.relative_to(vault_root).with_suffix("").as_posix()
-    )
-
-    # Pre-compute counts and bump the relevant folder by 1 for the new file.
+    rel_source_no_ext = source_path.relative_to(vault_root).with_suffix("").as_posix()
     count_errors: list[OSError] = []
     with call_spans.span("source.counts"):
-        pre_counts = indexes._count_sources(
-            kb_root(vault_root) / "Sources", on_error=count_errors.append
-        )
+        pre_counts = indexes._count_sources(kb_root(vault_root) / "Sources", on_error=count_errors.append)
     post_counts = dict(pre_counts)
     if in_sources:
         post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
-
-    activity_summary = _activity_summary(
-        rel_source_no_ext=rel_source_no_ext,
-        title=title,
-        source_type=kind.key,
-        tags=tags_clean,
-    )
-    log_entry_body = _log_entry_body(
-        title=title,
-        source_type=kind.key,
-        url=url,
-        tags=tags_clean,
-        why_captured=why_captured,
-    )
-
-    with call_spans.span("source.index_planning"):
-        update = indexes.compute_updates(
-            vault_root,
-            source_type=folder_name.lower(),
-            folder_title=folder_name,
-            folder_description=taxonomy.category_description(folder_name),
-            rel_source_path=(
-                f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
-                if in_sources else rel_source_no_ext
-            ),
-            date_iso=date_iso,
-            stamp_iso=stamp_iso,
-            activity_summary=activity_summary,
-            log_entry_body=log_entry_body,
-            source_counts=post_counts,
-        )
-
-        # Refresh the Notes/Entities counts in the top index alongside the
-        # Sources counts that compute_updates() already handled. `add` doesn't
-        # change Notes/Entities counts, so no override needed.
-        sub_writes, top_with_counts = indexes.compute_subindex_writes(
-            vault_root,
-            top_index_text=update.top_index_content,
-            pending_paths=[rel_source_no_ext],
-            include_sources_index=False,
-        )
-        top_index_final = (
-            top_with_counts if top_with_counts is not None
-            else update.top_index_content
-        )
-    derived = _derived_index_writes(vault_root, update, top_index_content=top_index_final)
-    derived.extend(("index", write) for write in sub_writes)
-    writes = [
-        PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
-        *(write for _role, write in derived),
-    ]
+    derived: list[tuple[str, PlannedWrite]] = []
+    writes = [PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH)]
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
     writes.extend(supersede_writes)
@@ -900,17 +843,77 @@ def add(
             writes.extend(container_plan.writes)
             originals.extend(write for write in container_plan.writes if isinstance(write.content, PreparedBinaryContent))
             core_paths.update(write.path for write in container_plan.writes)
-        # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
-        bound_outputs = vocabulary_auxiliaries.seal(
-            vault_root, primary=writes[0],
-            derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
+        from . import (
+            generated_fragments,
+            generated_output_plan,
+            source_custody,
+            source_payload_custody,
         )
-        from . import source_custody, source_payload_custody
 
         source_reference = memory_refs.memory_ref(exomem_id)
         custody_started = source_custody.begin_capture(
             vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
             source_hash=content_hash(writes[0].content), identity=source_identity,
+        )
+        if not raw_protection:
+            producer = container_stack.enter_context(generated_output_plan.producer(vault_root, initialize=custody_started))
+            before_maps = producer.before_maps((indexes.sources_index_path(vault_root), kb_root(vault_root) / "index.md",
+                                                kb_root(vault_root) / "log.md")) if producer is not None else None
+            activity_summary = _activity_summary(
+                rel_source_no_ext=rel_source_no_ext,
+                title=title,
+                source_type=kind.key,
+                tags=tags_clean,
+            )
+            log_entry_body = _log_entry_body(
+                title=title,
+                source_type=kind.key,
+                url=url,
+                tags=tags_clean,
+                why_captured=why_captured,
+            )
+
+            with call_spans.span("source.index_planning"):
+                update = indexes.compute_updates(
+                    vault_root,
+                    source_type=folder_name.lower(),
+                    folder_title=folder_name,
+                    folder_description=taxonomy.category_description(folder_name),
+                    rel_source_path=(
+                        f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
+                        if in_sources else rel_source_no_ext
+                    ),
+                    date_iso=date_iso,
+                    stamp_iso=stamp_iso,
+                    activity_summary=activity_summary,
+                    log_entry_body=log_entry_body,
+                    source_counts=post_counts,
+                    source_ref=generated_fragments.SourceRef(source_reference) if custody_started else None,
+                    before_fragment_maps=before_maps,
+                )
+
+                # Refresh the Notes/Entities counts in the top index alongside the
+                # Sources counts that compute_updates() already handled. `add` doesn't
+                # change Notes/Entities counts, so no override needed.
+                derived = _derived_index_writes(vault_root, update, top_index_content=update.top_index_content)
+                if producer is not None:
+                    for _role, write in derived:
+                        producer.attach(write, update.fragment_plans[write.path.relative_to(vault_root).as_posix()])
+                top_write = next((write for _role, write in derived if write.path == kb_root(vault_root) / "index.md"), None)
+                sub_writes, counted_top = indexes.compute_subindex_writes(
+                    vault_root,
+                    top_index_write=top_write,
+                    pending_paths=[rel_source_no_ext],
+                    include_sources_index=False,
+                )
+                if counted_top is not None:
+                    derived = [(role, counted_top if write.path == counted_top.path else write) for role, write in derived]
+            derived.extend(("index", write) for write in sub_writes)
+            writes[1:1] = [write for _role, write in derived]
+        # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
+        bound_outputs = vocabulary_auxiliaries.seal(
+            vault_root, primary=writes[0],
+            derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
         )
         payload_custody = container_stack.enter_context(source_payload_custody.capture(
             vault_root, reference=source_reference, primary=writes[0], writes=writes,

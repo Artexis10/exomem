@@ -934,11 +934,11 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
             if top_index_path.exists() else None
         )
         sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root, top_index_text=top_text
+            vault_root, top_index_write=PlannedWrite(top_index_path, top_text) if top_text is not None else None
         )
         writes: list[PlannedWrite] = _changed_writes(list(sub_writes))
-        if new_top is not None and top_text is not None and new_top != top_text:
-            writes.append(PlannedWrite(path=top_index_path, content=new_top))
+        if new_top is not None and top_text is not None and new_top.content != top_text:
+            writes.append(new_top)
         report.indexes_updated = [_rel(w.path, vault_root) for w in writes]
         if writes and not dry_run:
             batch_atomic_write(writes, vault_root=vault_root)

@@ -1042,11 +1042,11 @@ def link(
         )
         sub_writes, counted_top = indexes.compute_subindex_writes(
             vault_root,
-            top_index_text=new_top,
+            top_index_write=PlannedWrite(top_index, new_top, guard=top_guard),
             pending_paths=[rel_entity_no_ext],
             include_unchanged=True,
         )
-        index_writes = [PlannedWrite(top_index, counted_top or new_top, guard=top_guard), *sub_writes]
+        index_writes = [counted_top or PlannedWrite(top_index, new_top, guard=top_guard), *sub_writes]
         auxiliary.extend(index_writes)
         derived_auxiliaries.extend(("index", write) for write in index_writes)
     try:

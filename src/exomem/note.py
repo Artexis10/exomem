@@ -384,11 +384,11 @@ def _plan_navigation(root: Path, entries: Sequence[_NavigationEntry]) -> _Naviga
             )
         sub_writes, counted_top = indexes.compute_subindex_writes(
             root,
-            top_index_text=new_top,
+            top_index_write=PlannedWrite(top_index, new_top, guard=top_guard),
             pending_paths=[entry.rel_path_no_ext for entry in entries],
             include_unchanged=True,
         )
-        writes.append(PlannedWrite(top_index, counted_top or new_top, guard=top_guard))
+        writes.append(counted_top or PlannedWrite(top_index, new_top, guard=top_guard))
         writes.extend(sub_writes)
     try:
         log_plan = plan_log_entries(
@@ -961,14 +961,12 @@ def _legacy_note(
         # state without a second disk scan.
         sub_writes, new_top_with_counts = indexes.compute_subindex_writes(
             vault_root,
-            top_index_text=new_top,
+            top_index_write=PlannedWrite(top_index, new_top),
             pending_paths=[rel_note_no_ext],
         )
-        if new_top_with_counts is not None:
-            new_top = new_top_with_counts
         # trim_note still flows into the log entry body below — log.md is the
         # paper trail for cap-50 displacement (SKILL.md trim discipline).
-        writes.append(PlannedWrite(path=top_index, content=new_top))
+        writes.append(new_top_with_counts or PlannedWrite(path=top_index, content=new_top))
         writes.extend(sub_writes)
     else:
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")

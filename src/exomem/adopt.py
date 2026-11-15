@@ -311,9 +311,10 @@ def _add_manifest_index_writes(
         )
         sub_writes, top_text = indexes.compute_subindex_writes(
             root,
-            top_index_text=top_text,
+            top_index_write=PlannedWrite(top_index, top_text),
         )
-        writes.append(PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8")))
+        if top_text is not None:
+            writes.append(top_text)
         writes.extend(sub_writes)
     else:
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
@@ -1016,12 +1017,12 @@ def commit_import_items(
             )
             sub_writes, top_text = indexes.compute_subindex_writes(
                 root,
-                top_index_text=top_text,
+                top_index_write=PlannedWrite(top_index, top_text, guard=top_guard),
                 pending_paths=[row["source_path"] for row in copied if row["source_path"] not in existing_sources],
                 include_sources_index=False,  # The Sources index write above supplies that page.
                 sources_counts=pre_counts,
             )
-            derived.append(("index", PlannedWrite(path=top_index, content=top_text or top_current, guard=top_guard)))
+            derived.append(("index", top_text or PlannedWrite(top_index, top_current, guard=top_guard)))
             derived.extend(("index", write) for write in sub_writes)
             if trim_note:
                 warnings.append(trim_note)

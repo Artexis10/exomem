@@ -1137,12 +1137,10 @@ def commit_edit(
     if top_index.exists() and connector_boundary.effect_admission(vault_root)(top_index):
         current_top, top_guard = read_guarded_text(vault_root, top_index)
         sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root, top_index_text=current_top
+            vault_root, top_index_write=PlannedWrite(top_index, current_top, guard=top_guard)
         )
-        if new_top is not None and new_top != current_top:
-            writes.append(
-                PlannedWrite(path=top_index, content=new_top, guard=top_guard)
-            )
+        if new_top is not None and new_top.content != current_top:
+            writes.append(new_top)
             derived_auxiliary_writes.append(("index", writes[-1]))
         writes.extend(sub_writes)
         derived_auxiliary_writes.extend(("index", write) for write in sub_writes)

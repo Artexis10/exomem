@@ -1268,7 +1268,7 @@ def test_reconcile_only_clears_semantic_work_after_completed_embedding_refresh(
     monkeypatch.setattr(
         reconcile_module.indexes,
         "compute_subindex_writes",
-        lambda root, top_index_text: ([], top_index_text),
+        lambda root, top_index_write: ([], top_index_write),
     )
     monkeypatch.setattr("exomem.lexstore.ensure_fresh", lambda root: None)
 
@@ -1309,7 +1309,7 @@ def test_reconcile_preserves_deferred_work_after_embedding_failure(
     monkeypatch.setattr(
         reconcile_module.indexes,
         "compute_subindex_writes",
-        lambda root, top_index_text: ([], top_index_text),
+        lambda root, top_index_write: ([], top_index_write),
     )
     monkeypatch.setattr("exomem.lexstore.ensure_fresh", lambda root: None)
 
@@ -1347,7 +1347,7 @@ def test_reconcile_counts_the_pages_a_partial_embedding_refresh_reached(vault: P
     )
     monkeypatch.setattr(audit_module, "audit", lambda root, categories: SimpleNamespace(findings=[]))
     monkeypatch.setattr(
-        reconcile_module.indexes, "compute_subindex_writes", lambda root, top_index_text: ([], top_index_text)
+        reconcile_module.indexes, "compute_subindex_writes", lambda root, top_index_write: ([], top_index_write)
     )
     monkeypatch.setattr("exomem.lexstore.ensure_fresh", lambda root: None)
 

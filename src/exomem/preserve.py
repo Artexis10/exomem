@@ -844,13 +844,12 @@ def preserve(
             # the sub-index refresh in the path makes drift impossible to
             # accumulate from any write op (cheap walk; no-op if already-fresh).
             sub_writes, new_top_with_counts = indexes.compute_subindex_writes(
-                vault_root, top_index_text=new_top
+                vault_root, top_index_write=PlannedWrite(top_index, new_top, guard=_guard,
+                                                        expected_hash=content_hash(current_top))
             )
-            if new_top_with_counts is not None:
-                new_top = new_top_with_counts
             # Cap-50 trim is recorded in log.md; no per-write warning needed.
             writes.append(
-                PlannedWrite(
+                new_top_with_counts or PlannedWrite(
                     path=top_index,
                     content=new_top,
                     expected_hash=content_hash(current_top),

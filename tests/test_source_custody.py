@@ -107,9 +107,19 @@ def test_capture_retains_canonical_copy_when_the_native_binding_disappears(vault
         store = generated_fragment_store.GeneratedFragmentStore(vault)
         native = source_native_custody.NativeCustody(vault)
         try:
-            lookup = store.lookup(target["source_ref"], None)
-            assert lookup.state == "unknown" and len(lookup.copies) == 1
-            copy = lookup.copies[0]
+            copies, cursor = [], None
+            for _ in range(16):
+                lookup = store.lookup(target["source_ref"], None, cursor=cursor)
+                assert lookup.state == "unknown"
+                copies.extend(lookup.copies)
+                cursor = lookup.cursor
+                if cursor is None:
+                    break
+            assert cursor is None
+            whole = [copy for copy in copies
+                     if store.image_header(copy.image_id).value.whole_source_ref == target["source_ref"]]
+            assert len(whole) == 1
+            copy = whole[0]
             assert copy.outcome == "present" and copy.origin_ledger == native.ledger_id
             assert native.observe(copy.owner.version, destination=True).matching is True
             image = store.image_header(copy.image_id).value
@@ -121,8 +131,15 @@ def test_capture_retains_canonical_copy_when_the_native_binding_disappears(vault
                 conn.execute("DELETE FROM source_native_bindings WHERE binding_id=?", (copy.owner.version,))
             assert native.lookup(source_ref=target["source_ref"]).reservations == ()
             assert native.observe(copy.owner.version, destination=True).state == "unknown"
-            retained = store.lookup(target["source_ref"], None)
-            assert retained.state == "unknown" and retained.copies == (copy,)
+            retained_copies, cursor = [], None
+            for _ in range(16):
+                retained = store.lookup(target["source_ref"], None, cursor=cursor)
+                assert retained.state == "unknown"
+                retained_copies.extend(retained.copies)
+                cursor = retained.cursor
+                if cursor is None:
+                    break
+            assert cursor is None and retained_copies == copies
             assert not copy.closed
         finally:
             store.close()
@@ -148,21 +165,24 @@ def test_sealed_binary_original_uses_whole_source_custody(vault, source_schema, 
         native = source_native_custody.NativeCustody(vault)
         try:
             copies, cursor = [], None
-            for _ in range(3):
+            for _ in range(16):
                 page = store.lookup(saved.ref, None, cursor=cursor)
                 copies.extend(page.copies)
                 cursor = page.cursor
                 if cursor is None:
                     break
-            assert cursor is None and len(copies) == 2
-            originals = []
+            assert cursor is None
+            originals, whole = [], []
             for copy in copies:
                 image = store.image_header(copy.image_id).value
-                assert image.whole_source_ref == saved.ref and image.page_count == 0
                 assert copy.outcome == "present"
                 assert native.observe(copy.owner.version, destination=True).matching is True
-                if image.image_sha256 == hashlib.sha256(original).hexdigest():
-                    originals.append(copy)
+                if image.whole_source_ref is not None:
+                    assert image.whole_source_ref == saved.ref and image.page_count == 0
+                    whole.append(copy)
+                    if image.image_sha256 == hashlib.sha256(original).hexdigest():
+                        originals.append(copy)
+            assert len(whole) == 2
             assert len(originals) == 1
             assert (vault / saved.artifact_path).read_bytes() == original
         finally:
@@ -629,3 +649,58 @@ def test_earlier_candidate_without_custody_eligibility_is_not_guessed(attempts):
     with pytest.raises(OpError, match="CAPTURE_ATTEMPT_LEDGER_UNAVAILABLE") as caught:
         capture_attempts.CaptureAttemptLedger(manager.idempotency)
     assert "custody eligibility" in caught.value.message
+
+
+def test_real_default_off_capture_keeps_prior_index_and_log_ownership(vault, attempts, registered_custody):
+    from exomem import (
+        generated_fragment_store,
+        generated_fragments,
+        generated_output_plan,
+        source_native_custody,
+    )
+
+    manager, call = attempts
+    paths = [vault / "Knowledge Base" / relative for relative in ("Sources/index.md", "index.md", "log.md")]
+    for path in paths:
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    first = {**authored(), "title": "Retained café 🧭"}
+    ticket = reserve(call, first)
+    captured = call("capture_source", **first, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    second = {**authored(), "title": "Unenrolled later survey", "content": "A different observation.",
+              "source_identity": {"system": "unlisted", "record_id": "later", "revision": "one"}}
+    later = call("capture_source", **second)
+    assert captured["capture_outcome"] == later["capture_outcome"] == "created"
+    later_reference = memory_refs.ref_from_markdown((vault / later["source"]["path"]).read_text())
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        manifest, _ = source_custody.read_manifest(vault, later_reference)
+        assert manifest is None
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        native = source_native_custody.NativeCustody(vault)
+        try:
+            for path in paths:
+                text, guard = vault_module.read_guarded_text(vault, path)
+                bound = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+                assert bound.current is not None and bound.binding.slot.pending is None
+                assert {fragment.source_ref for fragment in bound.mapping.after.fragments} == {reference}
+                erased, _ = generated_fragments.remove_source_fragments(text, bound.mapping,
+                                                                        generated_fragments.SourceRef(reference))
+                assert "Retained café" not in erased
+                if path.parent.name != "Sources":
+                    assert "Unenrolled later survey" in erased
+        finally:
+            store.close()
+
+
+def test_fresh_default_off_capture_does_not_initialize_a_generated_catalogue(vault, attempts, monkeypatch):
+    from exomem import generated_fragment_store
+
+    monkeypatch.setenv("EXOMEM_SOURCE_ERASURE_POLICY", '{"enabled_systems":[]}')
+    manager, call = attempts
+    captured = call("capture_source", **authored())
+    assert captured["capture_outcome"] == "created"
+    assert not generated_fragment_store.GeneratedFragmentStore(vault).path.exists()
+    reference = memory_refs.ref_from_markdown((vault / captured["source"]["path"]).read_text())
+    with request_scope(owner_principal(surface="mcp")):
+        manifest, _ = source_custody.read_manifest(vault, reference)
+    assert manifest is None

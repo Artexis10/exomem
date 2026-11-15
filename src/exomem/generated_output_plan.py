@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -188,5 +189,56 @@ def already_installed(root: Path, write: vault.PlannedWrite) -> bool:
                 and observed.mapping.unknown_through_epoch >= plan.after.unknown_through_epoch)
     except (OSError, ValueError, sqlite3.Error, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
         return False
+    finally:
+        store.close()
+
+
+class GeneratedProducer:
+    """Bind exact renderer inputs once and attach their final ownership plans."""
+
+    def __init__(self, store: generated.GeneratedFragmentStore, native: source_native_custody.NativeCustody):
+        self.store, self.native = store, native
+        self.inputs: dict[Path, GeneratedInput] = {}
+
+    def before(self, path: Path) -> GeneratedInput:
+        path = Path(path).absolute()
+        if path not in self.inputs:
+            try:
+                text, guard = vault.read_guarded_text(self.store.root, path)
+            except FileNotFoundError:
+                text = ""
+                guard = vault.PathGuard.capture(self.store.root, path.relative_to(self.store.root).as_posix(), leaf_policy="absent")
+            self.inputs[path] = read_before(self.store, self.native, path=path, text=text, guard=guard)
+        return self.inputs[path]
+
+    def before_maps(self, paths: Iterable[Path]) -> dict[str, generated_fragments.FragmentPlan]:
+        return {path.relative_to(self.store.root).as_posix(): self.before(path).mapping for path in paths}
+
+    def attach(self, write: vault.PlannedWrite, rendered: generated_fragments.FragmentPlan) -> vault.PlannedWrite:
+        before = self.before(write.path)
+        write.generated_image = seal(before, content=write.content, rendered=rendered,
+            inputs=(item for item in self.inputs.values() if item is not before))
+        write.generated_image.validate(self.store.root, write)
+        return write
+
+
+@contextmanager
+def producer(root: Path, *, initialize: bool = False) -> Iterator[GeneratedProducer | None]:
+    """Reuse existing file custody independently of current Source enrollment."""
+    from .vault_store import availability
+
+    if availability.page_writer(root) is not None:
+        yield None
+        return
+    store = generated.GeneratedFragmentStore(root)
+    try:
+        if not initialize and not store.path.exists():
+            yield None
+            return
+        if initialize:
+            store.initialize()
+        else:
+            store.head()
+        yield GeneratedProducer(store, source_native_custody.NativeCustody(root))
     finally:
         store.close()
