@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from test_agent_upload_handoff import _post, _prepare
 from test_agent_upload_handoff import upload_env as upload_env
+from test_governance_egress import _reset_governance_caches, write_rule, write_scope
 
 from exomem import held_fs, originals, reserved_paths
 from exomem.governance.principal import library_scope
@@ -1354,6 +1355,63 @@ def test_trash_keeps_a_stored_version_accounted_until_its_original_recovers(vaul
     assert not originals.sidecar_path(vault / trashed.trash_path).exists()
     assert not (vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).exists()
     assert (Path(selected_store[0]["root"]) / reference.object / reference.version).exists()
+
+
+@pytest.mark.parametrize("online", [True, False])
+def test_a_recovery_fetches_a_stored_original_only_for_a_caller_it_admits(vault: Path, selected_store, monkeypatch, online):
+    """Catches a recovery that fetches before it admits: it restored a protected original to the volume for the
+    caller it then refused, and in an outage answered that caller with the store's error where an absent path
+    got the refusal, which names a stored original."""
+    from exomem import (
+        delete_file,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        recover_from_trash,
+    )
+    from exomem.governance import egress, principal
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"original bytes")
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+    entry = vault / trashed.trash_path
+    with media_store.open_original(vault, entry):
+        pass  # a read records the cache binding that an eviction at the trash path needs
+    assert media_store.evict(vault, entry)
+    write_scope(vault, paths="Knowledge Base/**")
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _reset_governance_caches()
+    if not online:
+        def unavailable(self, *args, **kwargs):
+            raise OSError("the store is unreachable")
+
+        monkeypatch.setattr(media_store.FilesystemStore, "open", unavailable)
+
+    def refusal(target: str) -> dict[str, str]:
+        with principal.request_scope(principal.most_restrictive_principal(surface="mcp")):
+            with pytest.raises(recover_from_trash.RecoverError) as refused:
+                recover_from_trash.recover_from_trash(vault, trash_path=target)
+        return refused.value.as_dict()
+
+    absent = trashed.trash_path.replace(path.name, "absent-" + path.name)
+    assert refusal(trashed.trash_path) == refusal(absent) == {"code": "WRITE_REFUSED", "reason": "target is unavailable"}
+    assert not entry.exists() and originals.original_state(vault, entry).state == "evicted"
+
+    with principal.request_scope(principal.owner_principal(surface="cli")):
+        planned = recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path, validate_only=True)
+    assert planned.restored_path == path.relative_to(vault).as_posix()
+    assert not entry.exists()
+    if online:
+        with principal.request_scope(principal.owner_principal(surface="cli")):
+            recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path)
+        assert path.read_bytes() == b"original bytes"
+        assert not entry.exists()
 
 
 def test_original_states_use_only_the_bound_store(tmp_path: Path, monkeypatch):

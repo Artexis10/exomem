@@ -305,3 +305,26 @@ def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | Non
         # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
         offloadable=not is_note_path(relative) and "data_file" not in fields,
     )
+
+
+def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, OriginalSnapshot] | None:
+    """An evicted original that the caller may see, found without fetching it; any other absent path is none.
+
+    A door that moves an original reads this to accept the path before it materializes anything, so a
+    withheld original and an absent path answer alike whether the store is reachable or not.
+    """
+    if binding_for(vault) is None:
+        return None
+    from . import reserved_paths
+    from .governance import egress
+    from .vault import VaultPathError, resolve_under_vault
+
+    try:
+        abs_path, rel_path = resolve_under_vault(vault, path, must_be_file=True)
+        stored = original_state(vault, abs_path)
+    except (VaultPathError, reserved_paths.ReservedPathLeafError):
+        return None
+    visible = egress.restricted_release_filter(vault)
+    if stored.state != "evicted" or (visible is not None and not visible(rel_path)):
+        return None
+    return abs_path, rel_path, stored

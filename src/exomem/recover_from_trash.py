@@ -11,6 +11,8 @@ a different `restore_path` if the original location is now occupied.
 A recovery is a move out of the trash, so a restricted writer's confinement binds it as it binds
 `move_file`: both modes admit the trash entry as the source and the restore path as the
 destination before any existence check, and a refusal is `WRITE_REFUSED: target is unavailable`.
+A stored original is fetched only after those admissions: a dry run fetches nothing, and a commit
+runs the dry run first, as `move_file` materializes an original once its own checks have passed.
 """
 
 from __future__ import annotations
@@ -105,8 +107,18 @@ def recover_from_trash(
 ) -> RecoverResult:
     from .media_store import local_originals
 
+    def run(*, dry_run: bool) -> RecoverResult:
+        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=dry_run, relation_reviews=relation_reviews, _fold=_fold)
+
+    if validate_only or originals.binding_for(vault_root) is None:
+        # A dry run fetches nothing, and a vault with no media store has nothing to fetch.
+        return run(dry_run=validate_only)
+    # The dry run makes every admission and refusal before the store is asked for an original, so a
+    # refused caller cannot make it fetch one, and an outage cannot tell a withheld path from an
+    # absent one. It reads the source as resident or evicted alike (see the source resolve below).
+    run(dry_run=True)
     with local_originals(vault_root, (trash_path,)):
-        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews, _fold=_fold)
+        return run(dry_run=False)
 
 
 def _recover_from_trash_local(
@@ -133,12 +145,23 @@ def _recover_from_trash_local(
         )
     # A recovery is a move out of the trash, so its source is admitted as a move's is: before any
     # existence check, and a withheld entry answers as an absent one.
+    stored_original = None
     try:
         trash_abs, trash_rel = resolve_under_vault(
             vault_root, trash_path, must_exist=True, refuse_withheld=True
         )
     except VaultPathError as e:
-        raise RecoverError(code=e.code, reason=e.reason) from e
+        # A dry run holds no bytes of an evicted original, and fetches none: one that the caller may
+        # see is read here by the digest its stored version is bound to. A commit only gets here
+        # after the original is on the volume, and a withheld one answers as an absent one.
+        evicted = (
+            originals.evicted_visible_original(vault_root, trash_path)
+            if validate_only and e.code == "NOT_FOUND"
+            else None
+        )
+        if evicted is None:
+            raise RecoverError(code=e.code, reason=e.reason) from e
+        trash_abs, trash_rel, stored_original = evicted
 
     _refuse_outside_trash(trash_rel)
 
@@ -148,7 +171,9 @@ def _recover_from_trash_local(
     trash_file_snapshot = None
     trash_tree: tuple[reserved_paths.GenericTreeFile, ...] = ()
     try:
-        if trash_abs.is_file():
+        if stored_original is not None:
+            trash_kind = "file"
+        elif trash_abs.is_file():
             trash_kind = "file"
             trash_file_snapshot = reserved_paths.read_generic_bytes(vault_root, trash_rel)
         elif trash_abs.is_dir():
@@ -163,7 +188,7 @@ def _recover_from_trash_local(
             reason="trash source could not be acquired through the generic boundary",
         ) from None
 
-    if trash_kind == "file" and trash_rel.lower().endswith(".md"):
+    if trash_file_snapshot is not None and trash_rel.lower().endswith(".md"):
         _refuse_reference_companion(trash_file_snapshot.data)
 
     sidecar, meta, sidecar_guard, sidecar_proof_guard, sidecar_source, sidecar_identity = (
@@ -177,20 +202,30 @@ def _recover_from_trash_local(
         allow_curated=allow_curated,
         fold=_fold,
     )
+    restored: tuple[tuple[str, str], ...]
     if trash_kind == "file":
-        assert trash_file_snapshot is not None
-        _admit_publication(vault_root, restore_rel, trash_file_snapshot.data)
-        restored = ((restore_rel, trash_file_snapshot.data),)
+        data: bytes | None
+        if trash_file_snapshot is not None:
+            data = trash_file_snapshot.data
+            digest = hashlib.sha256(data).hexdigest()
+        else:
+            assert stored_original is not None and stored_original.binary_sha256 is not None
+            data, digest = None, stored_original.binary_sha256
+        _admit_publication(vault_root, restore_rel, data)
+        restored = ((restore_rel, digest),)
     else:
         restored = tuple(
-            (f"{restore_rel.rstrip('/')}/{item.relative_path}", item.snapshot.data)
+            (
+                f"{restore_rel.rstrip('/')}/{item.relative_path}",
+                hashlib.sha256(item.snapshot.data).hexdigest(),
+            )
             for item in trash_tree
         )
     from .collection_store import authority as collection_authority
 
     # Decided before the existence check below, so it cannot tell a withheld view from none.
     collection_authority.refuse_view_paths(
-        vault_root, (restore_rel, *(path for path, _data in restored)), RecoverError
+        vault_root, (restore_rel, *(path for path, _digest in restored)), RecoverError
     )
 
     try:
@@ -228,9 +263,7 @@ def _recover_from_trash_local(
                 ),
             )
 
-    initial_restore_state = tuple(
-        sorted((path, hashlib.sha256(data).hexdigest()) for path, data in restored)
-    )
+    initial_restore_state = tuple(sorted(restored))
     catalog_content_paths = tuple(path for path, _digest in initial_restore_state)
 
     today = today or dt.date.today()
@@ -779,7 +812,9 @@ def _admit_publication(vault_root: Path, restore_rel: str, data: bytes | None) -
 
     The rename publishes outside that check, so the recovery asks here, as `move_file` does for a
     move out of the trash: every writer keeps capture namespaces free of protected content. Only
-    a page's bytes decide its membership, so a binary is judged by its path.
+    a page's bytes decide its membership, so any other file is judged by its path and its
+    governance companion. A file with no companion has no resolved membership, and the boundary
+    refuses it into a capture namespace.
     """
     from .governance import connector_boundary
 
