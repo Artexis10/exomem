@@ -341,6 +341,18 @@ def test_a_map_that_cannot_fit_the_ceiling_renders_twice_then_is_acknowledged(
     assert third == hook._mcp_activation_context()
 
 
+def test_session_context_never_claims_the_turn_was_activated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The instructions tell an agent to skip recall on a turn a hook activated; session context must not claim that."""
+    _serve(monkeypatch, _packet())
+
+    context = _prompt(monkeypatch, capsys)
+
+    assert context.startswith(hook._SESSION_CONTEXT_HEADER + "\n")
+    assert "activated for this turn" not in context.lower()
+
+
 def test_changed_stance_under_a_held_map_arrives_under_the_data_header(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -355,7 +367,7 @@ def test_changed_stance_under_a_held_map_arrives_under_the_data_header(
 
     second = _prompt(monkeypatch, capsys, "And what about the winter schedule for the depot")
 
-    assert second.startswith(hook._WORKING_SET_HEADER + "\n")
+    assert second.startswith(hook._SESSION_CONTEXT_HEADER + "\n")
     assert "\n[Exomem operator override" not in second
     assert "Line three" in second
 
