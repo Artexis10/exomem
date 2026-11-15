@@ -89,7 +89,7 @@ The system SHALL confirm durable original bytes before committing a filing that 
 
 ### Requirement: Shared object eligibility aggregates every binding
 
-Eviction and hydration SHALL decide per physical object over every binding. The latest owner read through any binding SHALL set idle age. A pending or claimed job, access pin, active read, or drain latch on any binding SHALL retain local bytes. Eviction SHALL require every binding's own current usable Cloud reference. Eligibility SHALL use maintained indexed metadata rather than per-binding queries.
+Eviction and hydration SHALL decide per physical object over every binding. The latest owner read through any binding SHALL set idle age. An existing job pin, access pin, active read, or drain latch on any binding SHALL retain local bytes. Claimed jobs SHALL retain their existing pin when returned to pending. An unclaimed pending job SHALL NOT retain bytes. Eviction SHALL require every binding's own current usable Cloud reference. Eligibility SHALL use maintained indexed metadata rather than per-binding queries.
 
 #### Scenario: Another binding was read recently
 
@@ -98,8 +98,14 @@ Eviction and hydration SHALL decide per physical object over every binding. The 
 
 #### Scenario: Another binding retains the local object
 
-- **WHEN** any binding has a pending or claimed job, access pin, active read, drain latch, or missing current recovery reference
+- **WHEN** any binding has a pinned job, access pin, active read, drain latch, or missing current recovery reference
 - **THEN** eviction retains the local object for every binding
+
+#### Scenario: Only unclaimed processing jobs remain
+
+- **WHEN** every binding has a usable current recovery reference and no pin, active read, drain latch, or recent owner read
+- **AND** its only processing jobs are pending and unclaimed
+- **THEN** those jobs do not prevent eviction of the shared object
 
 ### Requirement: Drain results identify physical objects
 

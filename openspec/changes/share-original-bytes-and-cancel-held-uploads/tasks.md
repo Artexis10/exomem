@@ -12,7 +12,7 @@ All tasks describe future implementation. This design authorizes no code changes
 
 ## 2. Shared lifetime and governance
 
-- [ ] 2.1 Extend existing pins, residency requirements, reservations, jobs, and eviction selection to indexed physical-object identities. Prove the latest owner read sets idle age and every binding's job, read, pin, or drain latch retains bytes, without per-filing queries.
+- [ ] 2.1 Extend existing pins, residency requirements, reservations, jobs, and eviction selection to indexed physical-object identities. Prove aggregate owner-read age and existing job/read/pin/drain retention without per-filing queries; keep unclaimed pending jobs evictable.
 - [ ] 2.2 Share verified hydration while preserving separate filings and unchanged companion bytes. Prove independent revocation, owner repeat reads, and no granted-content transfer between filings.
 - [ ] 2.3 Extend the existing raw-protected dataset owner/ungranted-reader workflow to shared originals. Exercise warmed owner access, distinct ungranted metadata/query/stream requests, and unchanged original and sidecar hashes.
 - [ ] 2.4 Integrate existing Cloud reference reuse without changing cell prefixes, keys, random names, release ordering, or retained-backup protection. Prove every binding has its own current recovery reference before eviction; retain existing remote accounting units.

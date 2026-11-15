@@ -52,7 +52,7 @@ A read through one filing must prevent eviction initiated through another. Concu
 
 Every binding also contributes its residency requirement. Retain the local object if any binding is resident-only or lacks its own usable recovery reference. A Source's remote copy cannot make a separately governed dataset evictable. Maintain this derived eligibility through existing indexed metadata and its invalidation; do not scan filings during eviction.
 
-Decide eviction and hydration per physical object across every binding. The latest owner read through any binding sets idle age. A pending or claimed job, access pin, active read, or drain latch on any binding retains the local object. Eviction requires every binding's own current Cloud reference.
+Decide eviction and hydration per physical object across every binding. The latest owner read through any binding sets idle age. An existing job pin, access pin, active read, or drain latch on any binding retains the local object. Claimed jobs keep their pin when returned to pending; an unclaimed pending job does not retain bytes. Eviction requires every binding's own current Cloud reference.
 
 ### Physical reuse grants no admission credit
 
