@@ -212,14 +212,10 @@ def validate(
     """Validate a complete Planning manifest in create or revision mode."""
     root = Path(vault_root)
     if mode == "create" and manifest_path is not None and collection is None:
-        records._validate_collection_create_for_profile(
-            root,
-            manifest_path,
-            manifest_text,
-            semantic_profile="planning",
-            scaffold=scaffold,
-            require=partial(records.require_create_manifest, root),
-        )
+        # The caller's text gets the create preflight alone. The commit names its log archive from
+        # the scaffolded manifest, so only that manifest's validation plans and authorizes the log
+        # writes; planning them for the caller's text too would authorize another archive.
+        records._preflight_collection_create(root, root / manifest_path, manifest_text, scaffold=scaffold)
         manifest = require_planning_profile(
             collections.parse_manifest_bytes(
                 root, root / manifest_path, manifest_text.encode("utf-8")

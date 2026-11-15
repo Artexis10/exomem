@@ -2608,6 +2608,45 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
 
 
 
+def test_a_cut_map_is_acknowledged_once_its_ref_reaches_the_agent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    working_set_mode,
+) -> None:
+    """The service answers `unchanged` for a map its token names, so a token saved over a map that rendered in
+    no form keeps the map from the agent for the rest of the session."""
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    # Too small for even the map's ref.
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "60")
+    full = {
+        "ref": "exomem://map", "generation": "map-1", "description": "Index of what exists.",
+        "items": [
+            {"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."},
+            {"title": "Long entry", "ref": "exomem://memory/long", "description": "x" * 2000},
+        ],
+    }
+    sent: list[str] = []
+
+    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None, max_chars=None):
+        sent.append(continuity)
+        held = {**full, "items": [], "unchanged": True}
+        return {"map": held if continuity == "token-map-1" else full, "continuity": "token-map-1", "abstained": False}
+
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    monkeypatch.setattr(hook, "_fetch_packet_via_rest", _fetch)
+
+    unseen = [_context(_run(monkeypatch, capsys, _event(), tmp_path)) for _ in range(2)]
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "420")
+    cut = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    held = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    assert not any("exomem://map" in text for text in unseen)
+    assert "[exomem://map]" in cut and "more not shown by hook" in cut and "Long entry" not in cut
+    assert "map unchanged" in held
+    assert sent == ["", "", "", "token-map-1"]
+
+
 def test_the_hook_renders_a_map_the_server_sent_unchanged_as_its_one_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
     working_set_mode,

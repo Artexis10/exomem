@@ -1,4 +1,4 @@
-"""An in-process Backblaze B2 native API (v3) at the HTTP level, for the media edge tests.
+"""An in-process Backblaze B2 native API (v4) at the HTTP level, for the media edge tests.
 
 It answers real httpx requests through a mock transport. It enforces the rules the
 edge depends on: SHA-1 on every upload, token use, two or more parts with a
@@ -32,7 +32,7 @@ LIST_KEY_ID = "list-key"
 
 
 class FakeB2:
-    def __init__(self, *, bucket: str = "media-bucket", minimum_part: int = 1000, shape: str = "single",
+    def __init__(self, *, bucket: str = "media-bucket", minimum_part: int = 1000, shape: str = "listed",
                  hiding_days: int = 7):
         self.bucket, self.bucket_id = bucket, "bucket-id-1"
         self.hiding_days, self.day = hiding_days, 0
@@ -149,18 +149,21 @@ class FakeB2:
         return f"{self.account_token}-list"
 
     def _authorize(self, request: httpx.Request) -> httpx.Response:
+        # The provider refuses a key limited to a list of buckets (the default: Terraform's keys) below API v4.
+        version = int(request.url.path.split("/b2api/v")[1].split("/")[0])
+        if self.shape == "listed" and version < 4:
+            return self._json(400, {"code": "bad_request",
+                                    "message": f"This request is not currently supported on API version number {version}"})
         if request.headers.get("authorization", "").startswith("Basic "):
             listing = base64.b64decode(request.headers["authorization"][6:]).decode().startswith(f"{LIST_KEY_ID}:")
             storage = {"apiUrl": API, "downloadUrl": DOWNLOAD, "absoluteMinimumPartSize": self.minimum_part,
-                       "recommendedPartSize": 100_000_000,
-                       "capabilities": ["listFiles"] if listing else ["readFiles", "writeFiles"]}
+                       "recommendedPartSize": 100_000_000}
             bucket = {"id": self.bucket_id, "name": self.bucket}
-            if self.shape == "single":
-                storage |= {"bucketId": self.bucket_id, "bucketName": self.bucket}
-            elif self.shape == "listed":
-                storage |= {"bucketId": None, "bucketName": None, "allowed": {"buckets": [bucket]}}
-            else:
-                storage |= {"bucketId": None, "bucketName": None}
+            storage["allowed"] = {
+                "capabilities": ["listFiles"] if listing else ["readFiles", "writeFiles"],
+                "buckets": None if self.shape == "unrestricted" else [bucket],
+                "namePrefix": None,
+            }
             token = self._list_token() if listing else self.account_token
             return self._json(200, {"accountId": "account", "authorizationToken": token,
                                     "apiInfo": {"storageApi": storage}})

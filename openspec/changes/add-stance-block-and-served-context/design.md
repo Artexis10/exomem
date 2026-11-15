@@ -26,7 +26,7 @@ Stance remains data under current instructions and governance. The mark supplies
 
 ### D3. The stance cache has a bounded lifetime
 
-Whole lines fit under `STANCE_MAX_CHARS`, initially 800, and the remaining counted-prose budget. The cap is a protocol resource bound, not a measured optimum. Count omitted current lines and expired admitted lines. An empty block consumes no stance prose allocation.
+Whole lines fit under the stance budget and the remaining counted-prose budget. How much of every response the stance may use is the vault owner's choice, so the budget is the vault-settable activation convention `budgets.stance_max_chars`. It started at 800 as a code constant. A first real profile of nine short-anchored lines measured 1,539 characters and fit only four lines, so the shipped value is 1600. Count omitted current lines and expired admitted lines. An empty block consumes no stance prose allocation.
 
 Cache the block separately from conversation-dependent packets. Bind it to the caller's released view, admitted stance inputs and the next relevant date boundary. A passed boundary invalidates the cached block even when no page changed. No hidden line affects its public generation or counts. Serving the block is independent of prominence; capture still follows the resolved engagement policy.
 

@@ -453,16 +453,19 @@ def test_hook_keeps_reset_stance_and_move_when_optional_routes_cannot_fit():
         "next_action": {"state": "method_reset", "say": "Read the current method source."},
     }
     stance_text, _ = hook._format_stance_block(packet["stance"], 4000)
-    cap = len(hook._METHOD_RESET_LINE) + len(stance_text) + len(packet["next_action"]["say"]) + 2
-    first, complete, stance_complete = hook._format_map_with_slice(packet, cap, "")
+    # The map's floor is reserved too: a token must not name a map that reached the agent in no form.
+    floor = len(hook._map_floor(packet["map"])) + 1
+    cap = len(hook._METHOD_RESET_LINE) + len(stance_text) + len(packet["next_action"]["say"]) + 2 + floor
+    first, complete, stance_complete, map_shown = hook._format_map_with_slice(packet, cap, "")
     assert first.splitlines()[0] == hook._METHOD_RESET_LINE
     assert "Keep the source." in first and first.endswith(packet["next_action"]["say"])
     assert "method.md" not in first and not complete and stance_complete
+    assert map_shown and "[exomem://map]" in first
     assert len(first) <= cap
     full, *_ = hook._format_map_with_slice(packet, 4000, "")
     assert full.index(hook._METHOD_RESET_LINE) < full.index("method.md")
     packet["task_context"]["methods"]["reset"] = False
-    second, _, held_complete = hook._format_map_with_slice(packet, cap, "", "stance")
+    second, _, held_complete, _ = hook._format_map_with_slice(packet, cap, "", "stance")
     assert "already held" in second and second.endswith(packet["next_action"]["say"])
     assert hook._METHOD_RESET_LINE not in second and held_complete and len(second) <= cap
 
@@ -504,3 +507,60 @@ def test_served_rows_from_before_task_metadata_remain_readable(stance_vault):
     assert served_context.read(stance_vault, served_context_id=before)["record"] == old["record"]
     assert served_context.read(stance_vault, served_context_id=after)["record"]["task_context"]["state"] == "empty"
     assert served_context.read(stance_vault)["retained_rows"] == 2
+
+
+def test_identified_stance_page_is_served_on_a_store_enrolled_vault(stance_vault, monkeypatch):
+    """A release-gated vault must not turn an identified page's stance lines into `unavailable`."""
+    from exomem import commands, state_migration, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    _page(stance_vault, "global", "stance: true\nexomem_id: 0b5f3a52-4c1e-4d8e-9a8f-2f7c1d9e6a10\n",
+          body="- [rule] Keep a source for each claim.\n- [rule] Prefer prose over lists.\n")
+    state_migration.record_collection_store_compatibility(stance_vault, authority_check=lambda: True)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    working_set_runtime.reset_caches_for_tests()
+    lexstore.ensure_fresh(stance_vault)
+    _built(stance_vault)
+    _reset_caches()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    packet = invoke_command(command, stance_vault, turn="Keep a source", max_chars=2000)
+    assert packet["stance"]["state"] == "ready"
+    assert [item["text"] for item in packet["stance"]["items"]] == [
+        "Keep a source for each claim.", "Prefer prose over lists.",
+    ]
+    assert all(item["ref"].startswith("exomem://memory/") for item in packet["stance"]["items"])
+
+
+def test_a_vault_budget_caps_the_stance_lines(stance_vault):
+    from exomem import activation_conventions
+
+    _page(stance_vault, "global", "stance: true\n", body=(
+        "- [rule] Keep a source for each claim. ^source\n"
+        "- [rule] Prefer prose over lists in every reply you write. ^prose\n"
+    ))
+    full = _stance(stance_vault, limit=4000)
+    assert len(full["items"]) == 2
+    first_line_only = len(stance.item_line(full["items"][0])) + 1
+    override = activation_conventions.override_path(stance_vault)
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text(f"schema_version: 1\nbudgets:\n  stance_max_chars: {first_line_only}\n", encoding="utf-8")
+    activation_conventions.clear_cache()
+    capped = _stance(stance_vault, limit=4000)
+    assert [item["text"] for item in capped["items"]] == ["Keep a source for each claim."]
+    assert capped["omitted"] == 1
+
+
+def test_a_renamed_stance_page_is_decided_at_its_new_path(stance_vault):
+    """A warm cache must not judge a renamed stance page by an unrelated page now at its old path."""
+    from exomem import state_migration
+
+    state_migration.record_collection_store_compatibility(stance_vault, authority_check=lambda: True)
+    identity = "stance: true\nexomem_id: 6c1f0a3e-2b7d-4e59-8a14-3d9e0c7b5f21\n"
+    old = _page(stance_vault, "global", identity, body="- [rule] Keep a source for each claim. ^source\n")
+    assert _stance(stance_vault, who=_external())["state"] == "ready"
+    _page(stance_vault, "moved", identity, body="- [rule] Keep a source for each claim. ^source\n")
+    _page(stance_vault, "global", "", body="- [rule] An unrelated page. ^other\n")
+    _withhold(stance_vault, old, ceiling=0)
+    renamed = _stance(stance_vault, who=_external())
+    assert renamed["state"] == "ready"
+    assert [item["text"] for item in renamed["items"]] == ["Keep a source for each claim."]

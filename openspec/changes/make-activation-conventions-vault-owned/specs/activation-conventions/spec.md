@@ -195,6 +195,23 @@ continuity token.
 - **WHEN** an override drops a shipped cue
 - **THEN** a turn made only of that cue is no longer referential
 
+### Requirement: Response budgets are vault-settable
+
+The registry SHALL carry a `budgets` section whose keys name response budgets the server implements, each with an accepted integer range.
+The shipped registry SHALL set every budget the server reads; `stance_max_chars` ships at 1600 with range 0..8000.
+A vault override MAY replace a budget's value. An out-of-range, non-integer or boolean value SHALL keep the shipped value and produce an `invalid_budget` finding. An unknown key SHALL produce an `unknown_field` finding.
+Budgets SHALL join the turn digest and SHALL NOT join the index digest, so a budget change invalidates cached packets without rebuilding the anchor sidecar.
+
+#### Scenario: A vault raises its stance budget
+
+- **WHEN** an override sets `budgets: {stance_max_chars: 2400}`
+- **THEN** the effective budget is 2400, the index digest is unchanged and the turn digest changes
+
+#### Scenario: An invalid budget is visible and harmless
+
+- **WHEN** an override sets `budgets: {stance_max_chars: 9000}`
+- **THEN** the effective budget stays 1600 and the registry reports an `invalid_budget` finding
+
 ### Requirement: Governed registry saves keep reversible history
 Every `save-roles` and `save-conventions` SHALL, in the same atomic batch as the
 override, snapshot the bytes it replaced under `_Schema/history/<registry>/` with the

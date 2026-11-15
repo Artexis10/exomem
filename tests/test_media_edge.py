@@ -108,6 +108,25 @@ def harness(tmp_path: Path) -> Harness:
     return Harness(tmp_path)
 
 
+def test_an_unrestricted_key_cannot_store_an_original(harness: Harness, monkeypatch):
+    harness.fake.shape = "unrestricted"
+    authorize = harness.fake._authorize
+
+    def with_legacy_bucket_fields(request: httpx.Request) -> httpx.Response:
+        body = authorize(request).json()
+        # Only v4 allowed.buckets grants a bucket limit; obsolete fields cannot supply one.
+        body["apiInfo"]["storageApi"].update(bucketId=harness.fake.bucket_id, bucketName=harness.fake.bucket)
+        return httpx.Response(200, json=body)
+
+    monkeypatch.setattr(harness.fake, "_authorize", with_legacy_bucket_fields)
+    response = harness.put(b"ciphertext")
+
+    assert response.status_code == 503
+    assert harness.fake.files == {}
+    assert harness.fake.upload_bytes == 0
+    assert harness.fake.calls == ["authorize"]
+
+
 def test_the_prefix_comes_from_the_credential_alone(harness: Harness):
     data = b"ciphertext"
     smuggled = {"x-exomem-prefix": f"cells/{CELL_B}/", "x-exomem-cell": CELL_B}

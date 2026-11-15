@@ -46,7 +46,14 @@ from . import (
 )
 from .http import Resolver
 from .report import Report, StageFailed, failure_record, guarded, stage
-from .scenarios import Context, close_clients, post_checks, ready_matches_pods, run_steps
+from .scenarios import (
+    RELEASE_V1,
+    Context,
+    close_clients,
+    post_checks,
+    ready_matches_pods,
+    run_steps,
+)
 from .shell import run, wait_for
 
 
@@ -367,7 +374,7 @@ async def _run(args: argparse.Namespace) -> int:
                           notes=args.original_fixity_notes) if args.original_fixity else None)
         with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route.
-            await ctx.admin_release({"cellImage": built.cell_v1})
+            await ctx.admin_release({"cellImage": built.cell_v1, "release": RELEASE_V1})
             report.stages["release"]["published_cell_slots"] = await _published_cell_slots(ctx, timeout=120)
         try:
             await run_steps(ctx, only=only)

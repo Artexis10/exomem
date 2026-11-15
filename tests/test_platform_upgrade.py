@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("platform_upgrade", ROOT / "infra/scripts/platform_upgrade.py")
@@ -97,10 +101,12 @@ class Recorded:
     def __init__(self, tmp_path: Path, *, barriers=(), schema_check=True, secret_changed=False,
                  deployments=None, statuses=None, detail=None, live_tag=LIVE_TAG,
                  failures=(), cronjobs=None, storage_class=True,
-                 status_fails=None, manifest_exists=None) -> None:
+                 status_fails=None, manifest_exists=None, schema_exit=0) -> None:
         self.checkout = tmp_path / "upgrade" / "checkout"
         self.barriers = list(barriers)
         self.schema_check = schema_check
+        self.schema_exit = schema_exit
+        self.cluster_schema_result = None
         self.secret_changed = secret_changed
         self.deployments = deployments if deployments is not None else [{"id": 9001, "ref": LIVE_TAG}]
         self.statuses = statuses if statuses is not None else [{"state": "success"}]
@@ -118,7 +124,14 @@ class Recorded:
     def _materialize_checkout(self) -> None:
         if self.schema_check:
             (self.checkout / "infra/cellctl/src/cellctl").mkdir(parents=True, exist_ok=True)
-            (self.checkout / "infra/cellctl/src/cellctl/schema_check.py").write_text("")
+            (self.checkout / "infra/cellctl/src/cellctl/__init__.py").write_text("")
+            (self.checkout / "infra/cellctl/src/cellctl/schema_contract.py").write_text(
+                f"EXIT_CODE = {self.schema_exit}\n")
+            (self.checkout / "infra/cellctl/src/cellctl/schema_check.py").write_text(
+                "import json, os, sys\n"
+                "from .schema_contract import EXIT_CODE\n"
+                "print(json.dumps({'dsn': os.environ[sys.argv[-1]], 'module': __file__}))\n"
+                "sys.exit(EXIT_CODE)\n")
         (self.checkout / "infra/contracts").mkdir(parents=True, exist_ok=True)
         (self.checkout / "infra/contracts/upgrade-barriers-v1.json").write_text(
             json.dumps({"schema_version": 1, "barriers": self.barriers}))
@@ -164,6 +177,14 @@ class Recorded:
                 return pu.Completed(0, NEW_MANIFEST)
             case "helm" if argv[1] == "upgrade":
                 return pu.Completed(0, "Release has been upgraded.")
+            case "kubectl" if "exec" in argv:
+                # Execute the streamed bootstrap locally in place of a pod; no cluster or database is contacted.
+                result = subprocess.run(
+                    [sys.executable, *argv[argv.index("-c"):]], input=stdin,
+                    capture_output=True, text=True, check=False,
+                    env={**os.environ, "CELLCTL_DATABASE_DSN": "postgres://pod.invalid/cells"})
+                self.cluster_schema_result = result
+                return pu.Completed(result.returncode, result.stdout, result.stderr)
             case "kubectl" if "cronjob" in argv:
                 return pu.Completed(0, self.cronjobs)
             case "kubectl" if "storageclass" in argv:
@@ -209,6 +230,50 @@ def test_a_review_failure_stops_before_any_change(tmp_path: Path) -> None:
         result, runner, _ = run_upgrade(tmp_path / f"case{index}", failures=[failure])
         assert result == 1, failure
         assert runner.mutating() == [], (failure, runner.calls)
+
+
+def test_the_schema_check_uses_the_local_dsn_when_set(tmp_path: Path) -> None:
+    runner = Recorded(tmp_path)
+    runner._materialize_checkout()
+
+    def local(argv, cwd, stdin):
+        assert argv == ["uv", "run", "--frozen", "python", "-m", "cellctl.schema_check",
+                        "--dsn-env", "EXOMEM_CELLCTL_DSN"]
+        assert cwd == runner.checkout / "infra/cellctl"
+        assert stdin is None
+        return pu.Completed(0)
+
+    assert pu.schema_check(local, env_for(tmp_path), runner.checkout) == (
+        "the release's schema check passed against EXOMEM_CELLCTL_DSN")
+
+
+# The bootstrap runs on the host here, and asserts the pod's Linux /tmp path.
+@pytest.mark.skipif(sys.platform != "linux", reason="the pod bootstrap's /tmp path is Linux-specific")
+@pytest.mark.parametrize("schema_exit", [0, 1], ids=["passes", "stops-before-any-change"])
+def test_without_a_local_dsn_the_tag_checks_the_schema_in_the_pod_and_removes_its_copy(
+    tmp_path: Path, schema_exit: int, capsys
+) -> None:
+    env = env_for(tmp_path)
+    del env["EXOMEM_CELLCTL_DSN"]
+    runner = Recorded(tmp_path, schema_exit=schema_exit)
+
+    result = pu.platform_upgrade([TAG], env, runner)
+
+    assert runner.cluster_schema_result is not None
+    assert result == schema_exit
+    call = next(c for c in runner.calls if c[0] == "kubectl" and "exec" in c)
+    assert call[:8] == ["kubectl", "--namespace", "exomem-cloud", "exec", "-i", "deploy/cellctl",
+                       "--", "/opt/cellctl/bin/python"]
+    report = json.loads(runner.cluster_schema_result.stdout)
+    assert report["dsn"] == "postgres://pod.invalid/cells"
+    copy = Path(report["module"]).parents[1]
+    assert copy.parent == Path("/tmp")
+    assert not copy.exists()
+    if schema_exit:
+        assert runner.mutating() == []
+        assert "schema-check" in capsys.readouterr().err
+    else:
+        assert runner.mutating()
 
 
 def test_a_secret_contract_change_with_no_barrier_stops_the_command(tmp_path: Path) -> None:

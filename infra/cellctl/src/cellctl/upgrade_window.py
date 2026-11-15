@@ -146,7 +146,9 @@ def window_open(hour: int, now: datetime) -> bool:
     return now.hour == hour
 
 
-def is_due(hour: int, now: datetime, idle: Idle | None, config: WindowConfig) -> bool:
+def is_due(
+    hour: int, now: datetime, idle: Idle | None, config: WindowConfig, *, build_running: bool = False
+) -> bool:
     """Inside its window, a cell is due once nothing is in flight and no request arrived
     for idleMinutes, or once fewer than forceMinutes of the window remain. `idle` is None
     when readiness could not be read, which counts as not idle."""
@@ -156,7 +158,7 @@ def is_due(hour: int, now: datetime, idle: Idle | None, config: WindowConfig) ->
     remaining = _hour_start(now) + timedelta(hours=1) - now
     if remaining < timedelta(minutes=config.force_minutes):
         return True
-    if idle is None or idle.inflight > 0:
+    if build_running or idle is None or idle.inflight > 0:
         return False
     # No request since the cell started says nothing about how long it has been
     # quiet, so it is not idle; the force minutes still roll it.

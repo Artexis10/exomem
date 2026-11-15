@@ -42,16 +42,21 @@ from .manifests import (
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
     CANDIDATE_SINCE_ANNOTATION,
+    CATALOGUE_BUILD_CANCELLED_ANNOTATION,
+    CATALOGUE_BUILD_JOB_ANNOTATION,
+    CATALOGUE_BUILD_OUTCOME_ANNOTATION,
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     GROW_STORAGE_ANNOTATION,
-    HOLD_ANNOTATION,  # re-exported for reconcile.py convenience
+    HOLD_ANNOTATION,
+    # re-exported for reconcile.py convenience
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
     JOB_KIND_LABEL,
     MEDIA_EDGE_ACCESS_LABEL,
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
+    PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION,
     PREVIOUS_IMAGE_ANNOTATION,
     RELOCATION_ANNOTATION,
     RENDER_DIGEST_ANNOTATION,
@@ -66,6 +71,7 @@ from .manifests import (
     UPGRADE_WINDOW_ANNOTATION,
     UPGRADE_WINDOW_AT_ANNOTATION,
     cell_id_from_namespace,
+    clone_claim_name,
     hold_job_name,
     namespace_name,
     snapshot_backup_name,
@@ -478,6 +484,66 @@ class ClusterClient:
                          created_at=_parse_timestamp(job.metadata.creation_timestamp) if job is not None else None,
                          running_at=min(started, default=None))
 
+    def observe_catalogue_builds(self):
+        """Two fleet lists; orphan and terminating pods still prevent the serving stop."""
+        from .catalogue_build import BuildJob
+        from .manifests import (
+            CATALOGUE_BUILD_NAME_RE,
+            CATALOGUE_BUILD_NODE_ANNOTATION,
+            JOB_KIND_CATALOGUE_BUILD,
+        )
+
+        selector = f"{JOB_KIND_LABEL}={JOB_KIND_CATALOGUE_BUILD}"
+        def pages(list_resources):
+            continuation = None
+            while True:
+                response = list_resources(label_selector=selector, limit=500, _continue=continuation)
+                yield from response.items
+                continuation = response.metadata._continue if response.metadata else None
+                if not continuation:
+                    return
+
+        jobs = pages(self._batch.list_job_for_all_namespaces)
+        pods = pages(self._core.list_pod_for_all_namespaces)
+        grouped = {}
+        for job in jobs:
+            if not CATALOGUE_BUILD_NAME_RE.fullmatch(job.metadata.name):
+                continue
+            grouped[(job.metadata.namespace, job.metadata.name)] = (job, [])
+        for pod in pods:
+            name = (pod.metadata.labels or {}).get("batch.kubernetes.io/job-name", "")
+            # This is the renderer's closed runtime name protocol, never a content classifier.
+            if not CATALOGUE_BUILD_NAME_RE.fullmatch(name):
+                continue
+            grouped.setdefault((pod.metadata.namespace, name), (None, []))[1].append(pod)
+        observed = {}
+        for (namespace, name), (job, family) in grouped.items():
+            spec = job.spec.template.spec if job is not None else family[0].spec
+            annotations = (job.metadata.annotations or {}) if job is not None else {}
+            node = next((p.spec.node_name for p in family if p.spec.node_name),
+                        annotations.get(CATALOGUE_BUILD_NODE_ANNOTATION))
+            # Bound image pulls count as activity; Pending without a node is capacity waiting.
+            running = any(p.spec.node_name and p.status.phase in ("Pending", "Running")
+                          and p.metadata.deletion_timestamp is None for p in family)
+            status = job.status if job is not None else None
+            observed.setdefault(namespace, []).append(BuildJob(
+                name, spec.containers[0].image, node,
+                _parse_timestamp(job.metadata.creation_timestamp) if job is not None else None,
+                running=running, bound=any(p.spec.node_name for p in family),
+                succeeded=bool(status and status.succeeded),
+                failed=bool(status and (status.failed or any(c.type == "Failed" and c.status == "True"
+                                                           for c in (status.conditions or [])))),
+            ))
+        return {namespace: tuple(family) for namespace, family in observed.items()}
+
+    def delete_catalogue_build_job(self, namespace: str, name: str) -> None:
+        """Foreground deletion keeps the Job observable until its dependent pods end."""
+        try:
+            self._batch.delete_namespaced_job(name, namespace, propagation_policy="Foreground")
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+
     def delete_job(self, namespace: str, name: str) -> None:
         # Background propagation removes the Job's pods too; a batch/v1 Job
         # deleted without a policy orphans them.
@@ -713,6 +779,7 @@ class ClusterClient:
         statefulset_replicas = None
         update_revision = None
         hold_kind = hold_started_at = previous_image = pre_upgrade_snapshot = None
+        pre_upgrade_volume_snapshot = None
         target_applied_at = restored_snapshot = backup_retry_after = backup_outcome = relocation_volume = None
         backup_family_request = None
         backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = grow_storage_gib = None
@@ -736,6 +803,9 @@ class ClusterClient:
             hold_started_at = _parse_timestamp(started_raw) if started_raw else None
             previous_image = annotations.get(PREVIOUS_IMAGE_ANNOTATION) or None
             pre_upgrade_snapshot = annotations.get(PRE_UPGRADE_SNAPSHOT_ANNOTATION) or None
+            pre_upgrade_volume_snapshot = (
+                annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) or None
+            )
             target_applied_at = _parse_timestamp(annotations.get(TARGET_APPLIED_ANNOTATION))
             restored_snapshot = annotations.get(RESTORED_SNAPSHOT_ANNOTATION) or None
             backup_outcome = annotations.get(BACKUP_OUTCOME_ANNOTATION) or None
@@ -793,8 +863,14 @@ class ClusterClient:
         backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
         backup_media_census = backup_media_collection = None
         snapshot_steps: dict[str, bool] = {}
-        if backup_family_request or (started_raw and hold_kind == SNAPSHOT_BACKUP):
-            snapshot_steps = self._snapshot_steps(namespace, started_raw, backup_family_request)
+        if (
+            backup_family_request
+            or pre_upgrade_volume_snapshot
+            or (started_raw and hold_kind == SNAPSHOT_BACKUP)
+        ):
+            snapshot_steps = self._snapshot_steps(
+                namespace, started_raw, backup_family_request, pre_upgrade_volume_snapshot
+            )
         if started_raw:
             backup_name = hold_job_name(BACKUP_JOB_NAME, started_raw)
             backup_job = self._get_job(namespace, backup_name)
@@ -816,6 +892,9 @@ class ClusterClient:
             secret_referenced = (None if family_secret_references is None or local is None else
                                  (local.reservation_namespace, name) in family_secret_references)
         return ClusterObservation(
+            catalogue_build_job=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_JOB_ANNOTATION) if statefulset else None,
+            catalogue_build_outcome=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_OUTCOME_ANNOTATION) if statefulset else None,
+            catalogue_build_cancelled=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_CANCELLED_ANNOTATION) if statefulset else None,
             namespace_exists=True,
             namespace_cell_label=namespace_cell_label,
             namespace_media_edge_access=namespace_labels.get(MEDIA_EDGE_ACCESS_LABEL) == "true",
@@ -847,6 +926,7 @@ class ClusterClient:
             statefulset_hold_started_at=hold_started_at,
             statefulset_previous_image=previous_image,
             statefulset_pre_upgrade_snapshot=pre_upgrade_snapshot,
+            statefulset_pre_upgrade_volume_snapshot=pre_upgrade_volume_snapshot,
             statefulset_target_applied_at=target_applied_at,
             statefulset_restored_snapshot=restored_snapshot,
             statefulset_backup_outcome=backup_outcome,
@@ -886,23 +966,32 @@ class ClusterClient:
             **snapshot_steps,
         )
 
-    def _snapshot_steps(self, namespace: str, started_raw: str | None, family_raw: str | None = None) -> dict[str, object]:
+    def _snapshot_steps(self, namespace: str, started_raw: str | None, family_raw: str | None = None,
+                        volume_snapshot_name: str | None = None) -> dict[str, object]:
         """D3: the current hourly hold's snapshot and clone, by the names its
-        start gave them; an earlier hold's never answer."""
+        start gave them; an earlier hold's never answer. automate-cloud-releases
+        D6: an upgrade hold's pair answers instead by the VolumeSnapshot name its
+        annotation recorded, since a later hold's start would derive the wrong
+        names; the clone shares the snapshot's hold digest."""
 
         request = FamilyRequest.parse(family_raw) if family_raw else None
         cell_id = namespace.removeprefix(NAMESPACE_PREFIX)
+        if volume_snapshot_name is not None:
+            snapshot_name = volume_snapshot_name
+            clone_name = clone_claim_name(volume_snapshot_name)
+        else:
+            snapshot_name = snapshot_backup_name(SNAPSHOT_NAME, cell_id, started_raw, request)
+            clone_name = snapshot_backup_name(CLONE_CLAIM_NAME, cell_id, started_raw, request)
         try:
             snapshot = self._custom.get_namespaced_custom_object(
-                SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", snapshot_backup_name(SNAPSHOT_NAME, cell_id, started_raw, request)
+                SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", snapshot_name
             )
         except ApiException as error:
             if not _not_found(error):
                 raise
             snapshot = None
         try:
-            clone = self._core.read_namespaced_persistent_volume_claim(
-                snapshot_backup_name(CLONE_CLAIM_NAME, cell_id, started_raw, request), namespace)
+            clone = self._core.read_namespaced_persistent_volume_claim(clone_name, namespace)
         except ApiException as error:
             if not _not_found(error):
                 raise
