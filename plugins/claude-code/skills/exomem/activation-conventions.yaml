@@ -50,11 +50,21 @@
 #     drop_cues: [status]                          # must name a shipped cue
 #     add_filler: [bitte]                          # exactly one word each
 #     drop_filler: []
+#   budgets:
+#     skills_max_chars: 5000                       # the skills block's own size, 0..8000
+#     skill_summary_max_chars: 160                 # one skill's summary line, 40..1000
 #
 # An added cue needs one word of its own that is neither a stopword nor a
 # filler word, entries are at most 64 characters, and a vault may add at
 # most 64 cues and 128 filler words. A cue change only changes how a turn is
 # read: it rebuilds nothing and keeps every conversation's continuity.
+#
+# A budget is a size limit on one block the server serves each session, set
+# to the size of YOUR vault: a vault with many skills raises `skills_max_chars`
+# so more of them are listed whole, one with long trigger sentences adjusts
+# `skill_summary_max_chars`. A value outside its range, or not a whole number,
+# is rejected with a finding and the shipped value stays. A budget change
+# rebuilds nothing and keeps every conversation's continuity.
 #
 # A folder rule cannot claim raw material (`Sources/`, `Evidence/`), a
 # Planning or Records collection tree, the entity folder, or anything
@@ -111,6 +121,16 @@ stopwords:
 
 resolution:
   rare_term_max_anchors: 3
+
+# The size limits of what the server serves each session, in characters.
+# `skills_max_chars` bounds the whole skills block: whole skills are listed
+# until the next would not fit, and the rest are counted as omitted. It is a
+# block of its own, so it never reduces the turn's `max_chars`.
+# `skill_summary_max_chars` bounds one skill's summary line, which is the
+# first sentence of its description cut at a whole word.
+budgets:
+  skills_max_chars: 3500
+  skill_summary_max_chars: 200
 
 # The shipped referential seed: what makes a turn point back at recent work.
 # A cue is matched on whole words, never inside a longer one. The filler

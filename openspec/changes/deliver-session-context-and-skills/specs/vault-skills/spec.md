@@ -30,11 +30,22 @@ Other files in a skill's directory SHALL remain ordinary pages.
 
 Unless `EXOMEM_ACTIVATION_SKILLS=off`, each maps response SHALL carry `skills` with `state`, `generation`, `items` and `omitted`.
 Each item SHALL carry the skill's `name`, a `summary` and a `ref` that opens the skill page.
-The summary SHALL be the first sentence of the description, cut at a whole word to at most `SKILL_SUMMARY_MAX_CHARS` (initially 200).
-Items SHALL follow skill name order. Whole items SHALL fit within `SKILLS_MAX_CHARS` (initially 3500); `omitted` SHALL count visible skills that did not fit.
+The summary SHALL be the first sentence of the description, cut at a whole word to at most the vault's `skill_summary_max_chars`.
+Items SHALL follow skill name order. Whole items SHALL fit within the vault's `skills_max_chars`; `omitted` SHALL count visible skills that did not fit.
+Both bounds SHALL be vault-owned `budgets` in the activation conventions, with shipped defaults of 3500 and 200, accepted as whole numbers in 0..8000 and 40..1000.
 The catalogue SHALL be session context: it SHALL count against its own bound and SHALL NOT reduce the response's `max_chars` allowance for turn context.
 State SHALL be `ready` for at least one item, `empty` for no visible skill, `unchanged` when the caller already holds this generation, and `unavailable` when compilation fails.
 A compilation failure SHALL leave the map, stance and turn context available.
+
+#### Scenario: A vault sets its own skills bounds
+
+- **WHEN** a vault's activation-conventions override sets `budgets.skills_max_chars` and `budgets.skill_summary_max_chars`
+- **THEN** the skills block fits within that block size and cuts each summary at that length, and a vault with no override keeps 3500 and 200
+
+#### Scenario: An invalid bound keeps the shipped value
+
+- **WHEN** an override sets a bound that is not a whole number inside its range
+- **THEN** the shipped value applies and `generation.conventions_findings` names the rejected bound
 
 #### Scenario: The first turn of a conversation receives the catalogue
 

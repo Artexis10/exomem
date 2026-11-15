@@ -4051,6 +4051,10 @@ def guard_working_set(
                 from .. import stance
 
                 guarded["stance"] = stance.guard_block(vault_root, caller, guarded["stance"])
+            if "skills" in guarded:
+                from .. import skills_context
+
+                guarded["skills"] = skills_context.guard_block(vault_root, caller, guarded["skills"])
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
             )

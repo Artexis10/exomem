@@ -327,6 +327,72 @@ def test_unknown_resolution_key_is_ignored_with_a_finding(vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Budgets: the size bounds of what the server serves each session
+# --------------------------------------------------------------------------- #
+
+
+def test_no_override_keeps_the_shipped_budgets(vault: Path) -> None:
+    registry = ac.load_conventions(vault)
+
+    assert registry.conventions.budget("skills_max_chars") == 3500
+    assert registry.conventions.budget("skill_summary_max_chars") == 200
+
+
+def test_a_vault_sets_its_own_budgets(vault: Path) -> None:
+    _override(vault, {"schema_version": 1, "budgets": {"skills_max_chars": 5000, "skill_summary_max_chars": 120}})
+    registry = ac.load_conventions(vault)
+
+    assert registry.findings == ()
+    assert registry.conventions.budget("skills_max_chars") == 5000
+    assert registry.conventions.budget("skill_summary_max_chars") == 120
+
+
+@pytest.mark.parametrize(
+    ("name", "bad_value"),
+    [
+        ("skills_max_chars", 8001),
+        ("skills_max_chars", -1),
+        ("skills_max_chars", "3500"),
+        ("skills_max_chars", 3500.5),
+        ("skill_summary_max_chars", 39),
+        ("skill_summary_max_chars", 1001),
+        ("skill_summary_max_chars", True),
+    ],
+)
+def test_a_budget_out_of_range_or_not_a_whole_number_keeps_the_shipped_value(vault: Path, name: str, bad_value: object) -> None:
+    shipped = ac.shipped_conventions().conventions.budget(name)
+    _override(vault, {"schema_version": 1, "budgets": {name: bad_value}})
+    registry = ac.load_conventions(vault)
+
+    assert registry.conventions.budget(name) == shipped
+    assert any(finding["code"] == "invalid_budget" and finding["field"] == f"budgets.{name}" for finding in registry.findings)
+
+
+def test_one_bad_budget_does_not_void_the_other_or_the_file(vault: Path) -> None:
+    _override(
+        vault,
+        {"schema_version": 1, "budgets": {"skills_max_chars": 99999, "skill_summary_max_chars": 120, "bogus": 1}, "stopwords": {"add": ["der"]}},
+    )
+    registry = ac.load_conventions(vault)
+
+    assert registry.conventions.budget("skills_max_chars") == 3500
+    assert registry.conventions.budget("skill_summary_max_chars") == 120
+    assert "der" in registry.conventions.stopwords
+    assert {finding["field"] for finding in registry.findings} == {"budgets.skills_max_chars", "budgets.bogus"}
+
+
+def test_a_budget_change_moves_the_save_hash_but_neither_the_index_nor_the_turn_digest(vault: Path) -> None:
+    """A bound rebuilds no sidecar and strands no conversation, yet a stale save proposal over it is refused."""
+    shipped = ac.shipped_conventions()
+    _override(vault, {"schema_version": 1, "budgets": {"skills_max_chars": 5000}})
+    changed = ac.load_conventions(vault)
+
+    assert changed.conventions_hash == shipped.conventions_hash
+    assert changed.turn_hash == shipped.turn_hash
+    assert changed.content_hash != shipped.content_hash
+
+
+# --------------------------------------------------------------------------- #
 # The digest is over EFFECTIVE values, never file bytes
 # --------------------------------------------------------------------------- #
 

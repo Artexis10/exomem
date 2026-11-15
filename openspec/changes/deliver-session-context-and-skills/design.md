@@ -29,6 +29,7 @@ The catalogue is session context, like a native skill listing in a system prompt
 Measured on a 19-skill vault, full descriptions take about 8,000 characters, first sentences about 3,300 and names alone about 300.
 Names alone do not let an agent choose; full descriptions every turn would crowd out turn context.
 The block therefore carries first sentences under its own bound and is sent only when its generation differs from the one in the caller's continuity token.
+The bound and the summary length are the vault's `budgets` in its activation conventions (shipped defaults 3500 and 200), because a vault's skill count and phrasing set the right size, not the product.
 Later turns receive `unchanged` and spend nothing.
 The `max_chars` allowance keeps its meaning: it bounds turn context.
 

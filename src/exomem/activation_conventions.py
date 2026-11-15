@@ -80,6 +80,15 @@ MAX_ADDED_FILLER = 128
 RARE_TERM_MIN = 1
 RARE_TERM_MAX = 3
 
+#: The per-vault size bounds of what the server serves each session, with the range a vault may set
+#: (shipped defaults live in the `budgets:` section of the shipped file, never here). A bound is a resource
+#: limit on one served block, so a vault tunes it to its own skill count and page style; the range keeps a
+#: typo from serving nothing or flooding the client. One entry per bound.
+BUDGET_BOUNDS: dict[str, tuple[int, int]] = {
+    "skills_max_chars": (0, 8000),
+    "skill_summary_max_chars": (40, 1000),
+}
+
 #: The two anchor kinds this registry governs. `entity` stays with the entity
 #: registry; `collection`, `plan` and `project` come from their own manifests
 #: (design.md decision 3) — none of the five is configurable here.
@@ -93,12 +102,13 @@ _STATE_FIELDS_ALLOWED = frozenset({"prefer_state_fields", "drop_state_fields"})
 _STOPWORDS_FIELDS_ALLOWED = frozenset({"add"})
 _RESOLUTION_FIELDS_ALLOWED = frozenset({"rare_term_max_anchors"})
 _REFERENTIAL_FIELDS_ALLOWED = frozenset({"add_cues", "drop_cues", "add_filler", "drop_filler"})
+_BUDGETS_FIELDS_ALLOWED = frozenset(BUDGET_BOUNDS)
 #: What a provenance mapping on an added cue or filler word may carry: the
 #: entry itself, the reason, the day it was learned and the advisory that
 #: proposed it. Nothing else, so the file never grows a free-form record.
 _PROVENANCE_KEYS = frozenset({"value", "why", "at", "evidence"})
 _TOP_LEVEL_FIELDS = frozenset(
-    {"schema_version", "anchors", "state", "stopwords", "resolution", "referential"}
+    {"schema_version", "anchors", "state", "stopwords", "resolution", "referential", "budgets"}
 )
 
 
@@ -141,6 +151,13 @@ class Conventions:
     #: One mapping per ADDED entry, in file order: `field`, `value`, and any
     #: of `why`, `at` and `evidence` the owner's agent recorded.
     referential_provenance: tuple[Mapping[str, str], ...] = ()
+    #: The effective size bounds by `BUDGET_BOUNDS` key: the shipped values, with a vault's valid overrides.
+    budgets: Mapping[str, int] = field(default_factory=dict)
+
+    def budget(self, name: str) -> int:
+        """One bound by name; a registry built without the section reads the shipped value."""
+        value = self.budgets.get(name)
+        return value if value is not None else shipped_conventions().conventions.budgets[name]
 
     @property
     def referential(self) -> Any:
@@ -180,13 +197,16 @@ class ConventionsRegistry:
     #: turn is analysed. It joins the packet cache key and nothing else, so a
     #: learned cue costs no rebuild and strands no conversation.
     turn_hash: str = ""
+    #: The BUDGETS digest: the served-block size bounds. Neither the index nor a turn reads them, so it joins
+    #: `content_hash` alone: a bound change rebuilds no sidecar and strands no conversation.
+    budgets_hash: str = ""
 
     @property
     def content_hash(self) -> str:
-        """The whole registry's identity, both digests together: what a
+        """The whole registry's identity, every digest together: what a
         governed save's `expected_hash` is checked against, so a concurrent
-        change to either half refuses a stale proposal."""
-        return _hash(f"{self.conventions_hash}:{self.turn_hash}")
+        change to any part refuses a stale proposal."""
+        return _hash(f"{self.conventions_hash}:{self.turn_hash}:{self.budgets_hash}")
 
     def generation_block(self) -> dict[str, Any]:
         """What the packet's `generation` block reports about conventions."""
@@ -244,13 +264,27 @@ def turn_payload(conventions: Conventions) -> dict[str, Any]:
     }
 
 
+def budgets_payload(conventions: Conventions) -> dict[str, int]:
+    """The JSON-safe view of the size bounds the budgets digest reads, one entry per `BUDGET_BOUNDS` key."""
+    return {name: conventions.budget(name) for name in sorted(BUDGET_BOUNDS)}
+
+
 def registry_payload(conventions: Conventions) -> dict[str, Any]:
-    """Everything a `diff` compares: the index values and the vocabulary."""
-    return {**conventions_payload(conventions), "referential": turn_payload(conventions)}
+    """Everything a `diff` compares: the index values, the vocabulary and the size bounds."""
+    return {
+        **conventions_payload(conventions),
+        "referential": turn_payload(conventions),
+        "budgets": budgets_payload(conventions),
+    }
 
 
 def _turn_digest(conventions: Conventions) -> str:
     raw = json.dumps(turn_payload(conventions), sort_keys=True, separators=(",", ":"))
+    return _hash(raw)
+
+
+def _budgets_digest(conventions: Conventions) -> str:
+    raw = json.dumps(budgets_payload(conventions), sort_keys=True, separators=(",", ":"))
     return _hash(raw)
 
 
@@ -263,6 +297,7 @@ def _registry(
         conventions_hash=_conventions_digest(conventions),
         findings=tuple(findings),
         turn_hash=_turn_digest(conventions),
+        budgets_hash=_budgets_digest(conventions),
     )
 
 
@@ -485,6 +520,15 @@ def _parse_shipped(data: Any) -> tuple[Conventions, tuple[dict[str, str], ...]]:
     )
     if not referential_cues:
         findings.append(_finding("invalid_referential", "referential.cues", "must list the seed cues"))
+    budgets_raw = data.get("budgets")
+    budgets_raw = budgets_raw if isinstance(budgets_raw, Mapping) else {}
+    budgets: dict[str, int] = {}
+    for name in BUDGET_BOUNDS:
+        value = budgets_raw.get(name)
+        if _in_budget_range(name, value):
+            budgets[name] = value
+        else:
+            findings.append(_finding("invalid_budget", f"budgets.{name}", _budget_message(name, value)))
     conventions = Conventions(
         anchors=anchors,
         skip_folders=skip_folders,
@@ -494,6 +538,7 @@ def _parse_shipped(data: Any) -> tuple[Conventions, tuple[dict[str, str], ...]]:
         rare_term_max_anchors=int(rare_term_max_anchors),
         referential_cues=referential_cues,
         referential_filler=referential_filler,
+        budgets=budgets,
     )
     return conventions, tuple(findings)
 
@@ -771,6 +816,38 @@ def _merge_resolution(
     return int(value)
 
 
+def _in_budget_range(name: str, value: object) -> bool:
+    low, high = BUDGET_BOUNDS[name]
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _budget_message(name: str, value: object) -> str:
+    low, high = BUDGET_BOUNDS[name]
+    return f"rejected value {value!r}; must be an integer {low}..{high}"
+
+
+def _merge_budgets(
+    shipped: Conventions, raw: Any, findings: list[dict[str, str]]
+) -> Mapping[str, int]:
+    """Each named bound takes the override's value when it is in range, else keeps the shipped one."""
+    if raw is None:
+        return shipped.budgets
+    if not isinstance(raw, Mapping):
+        findings.append(_finding("invalid_budgets", "budgets", "must be a mapping"))
+        return shipped.budgets
+    for key in sorted(set(raw) - _BUDGETS_FIELDS_ALLOWED, key=str):
+        findings.append(_finding("unknown_field", f"budgets.{key}", "unknown budget"))
+    budgets = dict(shipped.budgets)
+    for name in BUDGET_BOUNDS:
+        if name not in raw:
+            continue
+        if _in_budget_range(name, raw[name]):
+            budgets[name] = raw[name]
+        else:
+            findings.append(_finding("invalid_budget", f"budgets.{name}", _budget_message(name, raw[name])))
+    return budgets
+
+
 def _referential_entries(
     value: object, *, field_name: str, findings: list[dict[str, str]]
 ) -> list[tuple[str, dict[str, str]]]:
@@ -960,6 +1037,8 @@ def _merge(shipped: Conventions, data: Any) -> ConventionsRegistry:
         shipped, data.get("referential"), stopwords=stopwords, findings=findings
     )
 
+    budgets = _merge_budgets(shipped, data.get("budgets"), findings)
+
     conventions = Conventions(
         anchors=anchors,
         skip_folders=skip_folders,
@@ -970,6 +1049,7 @@ def _merge(shipped: Conventions, data: Any) -> ConventionsRegistry:
         referential_cues=cues,
         referential_filler=filler,
         referential_provenance=provenance,
+        budgets=budgets,
     )
     return _registry(conventions, source="vault", findings=findings)
 

@@ -424,6 +424,7 @@ def encode_continuity(
     salt: str = "",
     map_generation: str | None = None,
     method_versions: Sequence[Mapping[str, str]] = (),
+    skills_generation: str | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
@@ -466,6 +467,8 @@ def encode_continuity(
         payload["map_generation"] = str(map_generation)
     if method_versions:
         payload["method_versions"] = [dict(item) for item in method_versions]
+    if skills_generation:
+        payload["skills_generation"] = str(skills_generation)
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
     if thread:
@@ -593,6 +596,9 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     }
     if isinstance(payload.get("map_generation"), str):
         decoded["map_generation"] = payload["map_generation"]
+    # Optional: a token minted before the skills block rode the packet holds none, and its holder is sent the catalogue.
+    if isinstance(payload.get("skills_generation"), str):
+        decoded["skills_generation"] = payload["skills_generation"]
     # Optional: a token minted before the capture policy rode the packet names none.
     if isinstance(payload.get("capture_policy"), str):
         decoded["capture_policy"] = payload["capture_policy"]

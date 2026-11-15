@@ -7,12 +7,12 @@
 
 ## 2. Recognize and catalogue skills
 
-- [ ] 2.1 Add the `skill` flag and frontmatter description to the context catalogue; verify recognition, the malformed case, the Source exclusion and a catalogue rebuild from an older version.
-- [ ] 2.2 Serve the `skills` block in maps responses with its own bound, continuity generation and `unchanged` state; verify first delivery, the unchanged turn, an edited skill and the off switch.
-- [ ] 2.3 Accept `native_skills` and omit matching names from the catalogue only; verify a projected method still appears for an omitted skill.
-- [ ] 2.4 Project admitted skill pages as `kind: "skill"` method items with the full description; verify against a real turn that names no skill.
-- [ ] 2.5 List a skill's visible directory files when `read_page` opens a skill page; verify a hidden file is neither listed nor counted.
-- [ ] 2.6 Render the catalogue and skill methods in the start-of-turn hook and pass the client's native skill names; verify the hook output for a Claude Code and a Codex home.
+- [x] 2.1 Add the `skill` flag and frontmatter description to the context catalogue; verify recognition, the malformed case, the Source exclusion and a catalogue rebuild from an older version.
+- [x] 2.2 Serve the `skills` block in maps responses with its own bound, continuity generation and `unchanged` state; verify first delivery, the unchanged turn, an edited skill and the off switch.
+- [x] 2.3 Accept `native_skills` and omit matching names from the catalogue only; verify a projected method still appears for an omitted skill.
+- [x] 2.4 Project admitted skill pages as `kind: "skill"` method items with the full description; verify against a real turn that names no skill.
+- [x] 2.5 List a skill's visible directory files when `read_page` opens a skill page; verify a hidden file is neither listed nor counted.
+- [x] 2.6 Render the catalogue and skill methods in the start-of-turn hook and pass the client's native skill names; verify the hook output for a Claude Code and a Codex home.
 - [ ] 2.7 Prove recall latency before and after on the recall latency instrument.
 
 ## 3. Deliver context on every turn
