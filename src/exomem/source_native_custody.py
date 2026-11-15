@@ -460,6 +460,23 @@ class NativeCustody:
             self._save(conn, value.model_copy(update={"outcome": outcome}))
         self._live_allocations.pop(value.binding_id, None)
 
+    def record_retirement(self, reservation: NativeReservation, witness: held_fs.RetirementWitness) -> None:
+        """Acknowledge the old installed allocation after its publisher closes the last named version."""
+        if not isinstance(witness, held_fs.RetirementWitness) or not witness.authentic():
+            raise ValueError("native retirement requires a held publisher witness")
+        with self._connect() as conn:
+            value = self._reservation(conn, reservation)
+            if (value.state != "installed" or value.outcome not in (None, "removed")
+                    or value.destination_relative is None or value.version != witness.before
+                    or not _same(witness.root_identity, value.root_identity)
+                    or value.destination_parent_identity is None
+                    or not _same(witness.parent_identity, value.destination_parent_identity)
+                    or witness.leaf != _parts(value.destination_relative)[1]
+                    or not _same(witness.observed.identity, value.identity)
+                    or witness.observed.identity.link_count != 0 or witness.observed.delete_pending is False):
+                raise ValueError("native retirement differs from its installed allocation")
+            self._save(conn, value.model_copy(update={"outcome": "removed"}))
+
     def _live_version(self, value: _Binding) -> FileVersion | None:
         file = self._live_allocations.get(value.binding_id)
         if file is None:

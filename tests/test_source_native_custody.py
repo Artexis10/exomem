@@ -29,6 +29,58 @@ def reserve(custody, data=b"complete payload", **kwargs):
                            expected_size=len(data), **kwargs)
 
 
+def test_retirement_closes_only_the_matching_canonical_copy(vault):
+    from exomem import generated_fragment_store, native_copy_custody
+
+    references = [f"exomem://memory/{uuid.UUID(int=value)}" for value in (31, 32)]
+    with owner(vault) as custody:
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        store.initialize()
+        copies = native_copy_custody.NativeCopyCustody(vault, store=store, native=custody)
+        allocations = []
+        try:
+            with held_fs.acquire(vault).require() as filesystem, filesystem.parent(".", access="mutate").require() as parent:
+                durable = filesystem.name_changes_flush_parents or filesystem.flush_directory(parent).ok
+                for name, reference in zip(("first", "second"), references, strict=True):
+                    data = name.encode()
+                    digest = hashlib.sha256(data).hexdigest()
+                    image = store.begin_whole_image(whole_source_ref=reference, image_sha256=digest, image_size=len(data))
+                    allocation = copies.reserve(image, logical_path=vault / f"{name}.txt", relative_path=f"{name}.tmp",
+                                                destination=f"{name}.txt", removable=False)
+                    with filesystem.file(parent, f"{name}.tmp", access="write", create=True, exclusive=True).require() as file:
+                        custody.bind(allocation.native, file)
+                        filesystem.write(file, data).require()
+                        copies.verified(allocation, file, digest)
+                        version = file.version()
+                    held_fs.install_temporary(
+                        filesystem, parent, f"{name}.tmp", f"{name}.txt",
+                        expected_identity=version.identity, expected_version=version,
+                        after_install=lambda witness, allocation=allocation: copies.installed(allocation, witness),
+                    ).require()
+                    copies.present(allocation)
+                    allocations.append(allocation)
+                before = custody.get(allocations[1].native.binding_id).version
+                witnesses = []
+                held_fs.publish_bytes(filesystem, parent, "second.txt", b"replacement",
+                                      expected_identity=before.identity, after_retire=witnesses.append).require()
+                assert bool(witnesses) == durable
+                if witnesses:
+                    wrong = native_copy_custody.CopyAllocation(allocations[0].canonical, allocations[1].native)
+                    with pytest.raises(ValueError, match="canonical copy differs"):
+                        copies.retired(wrong, witnesses[0])
+                    assert custody.lookup(source_ref=references[1]).reservations
+                    copies.retired(allocations[1], witnesses[0])
+                    copies.retired(allocations[1], witnesses[0])
+                    assert custody.observe(allocations[1].native.binding_id).outcome == "removed"
+                    assert store.lookup(references[1], None).copies == ()
+                else:
+                    assert store.lookup(references[1], None).copies
+                assert store.lookup(references[0], None).copies[0].outcome == "present"
+                assert custody.observe(allocations[0].native.binding_id, destination=True).matching is True
+        finally:
+            store.close()
+
+
 def test_partial_cleanup_after_restart_preserves_bytes_without_live_allocation_proof(vault):
     unrelated = vault / "unrelated.txt"
     unrelated.write_bytes(b"keep")

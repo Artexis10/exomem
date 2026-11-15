@@ -26,6 +26,101 @@ def _module():
 
 
 @_requires_native_route
+@pytest.mark.parametrize("retained", ["reader", "alias", "moved"])
+def test_replacement_retirement_requires_zero_names_and_allows_an_overlapping_reader(tmp_path, monkeypatch, retained):
+    held_fs = _module()
+    target = tmp_path / "current.txt"
+    target.write_bytes(b"old bytes")
+    witnesses = []
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".", access="mutate").require() as parent:
+        durable = fs.name_changes_flush_parents or fs.flush_directory(parent).ok
+        with fs.file(parent, "current.txt").require() as reader:
+            before = reader.version()
+            rename = fs.rename
+
+            def retain_old(source, destination, leaf, **options):
+                if retained == "alias":
+                    os.link(target, tmp_path / "retained.txt")
+                elif retained == "moved":
+                    target.rename(tmp_path / "retained.txt")
+                return rename(source, destination, leaf, **options)
+
+            monkeypatch.setattr(fs, "rename", retain_old)
+            held_fs.publish_bytes(fs, parent, "current.txt", b"new bytes", expected_identity=before.identity,
+                                  after_retire=witnesses.append).require()
+            state = reader.retirement_state().require()
+            assert state.identity.link_count == (0 if retained == "reader" else 1)
+            assert os.read(reader.descriptor, 100) == b"old bytes"
+            if retained == "reader" and durable:
+                assert len(witnesses) == 1 and witnesses[0].authentic()
+                assert witnesses[0].before == before and witnesses[0].observed.identity.link_count == 0
+            else:
+                assert witnesses == []
+                if retained != "reader":
+                    assert (tmp_path / "retained.txt").read_bytes() == b"old bytes"
+    assert target.read_bytes() == b"new bytes"
+
+
+@_requires_native_route
+@pytest.mark.parametrize("publication", ["bytes", "temporary"])
+def test_retirement_is_reported_after_old_close_even_when_new_installation_callback_fails(tmp_path, monkeypatch, publication):
+    held_fs = _module()
+    (tmp_path / "current.txt").write_bytes(b"before")
+    original_files = []
+    witnesses = []
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".", access="mutate").require() as parent:
+        durable = fs.name_changes_flush_parents or fs.flush_directory(parent).ok
+        file = fs.file
+
+        def opened(directory, leaf, **options):
+            result = file(directory, leaf, **options)
+            if result.ok and leaf == "current.txt":
+                original_files.append(result.require())
+            return result
+
+        def installed(witness):
+            raise RuntimeError("new acknowledgement unavailable")
+
+        def retired(witness):
+            assert original_files[0].closed
+            witnesses.append(witness)
+
+        with file(parent, "current.txt").require() as original:
+            expected = original.version()
+        if publication == "temporary":
+            with file(parent, "prepared.txt", access="write", create=True, exclusive=True).require() as prepared:
+                fs.write(prepared, b"after").require()
+                version = prepared.version()
+        monkeypatch.setattr(fs, "file", opened)
+        with pytest.raises(RuntimeError, match="new acknowledgement unavailable"):
+            if publication == "bytes":
+                held_fs.publish_bytes(fs, parent, "current.txt", b"after", expected_identity=expected.identity,
+                                      after_install=installed, after_retire=retired)
+            else:
+                held_fs.install_temporary(fs, parent, "prepared.txt", "current.txt", expected_identity=version.identity,
+                                          expected_version=version, expected_destination=expected,
+                                          after_install=installed, after_retire=retired)
+        assert bool(witnesses) == durable
+    assert (tmp_path / "current.txt").read_bytes() == b"after"
+
+
+@_requires_native_route
+def test_missing_retirement_evidence_keeps_publication_successful(tmp_path, monkeypatch):
+    held_fs = _module()
+    (tmp_path / "current.txt").write_bytes(b"before")
+    witnesses = []
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".", access="mutate").require() as parent:
+        with fs.file(parent, "current.txt").require() as original:
+            expected = original.identity
+            monkeypatch.setattr(type(original), "retirement_state", lambda self: held_fs.HeldResult(
+                error=held_fs.HeldFsError("UNSUPPORTED", "native retirement observation is unavailable"),
+            ))
+        held_fs.publish_bytes(fs, parent, "current.txt", b"after", expected_identity=expected,
+                              after_retire=witnesses.append).require()
+    assert (tmp_path / "current.txt").read_bytes() == b"after" and witnesses == []
+
+
+@_requires_native_route
 def test_bounded_read_rejects_oversized_input_without_returning_truncated_bytes(tmp_path):
     """A growing candidate must not become a truncated held correction or an unbounded allocation."""
     held_fs = _module()

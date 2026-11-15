@@ -39,6 +39,7 @@ from .held_fs import (
     PROBE_ENTRY_PREFIX,
     Capabilities,
     Chunks,
+    FileRetirementState,
     FileVersion,
     HeldDirectory,
     HeldFile,
@@ -84,6 +85,7 @@ FILE_LINK_INFORMATION = 11
 FILE_DISPOSITION_INFORMATION = 4
 FILE_BOTH_DIRECTORY_INFORMATION = 3
 FILE_BASIC_INFO_CLASS = 0
+FILE_STANDARD_INFO_CLASS = 1
 FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 FILE_ID_INFO_CLASS = 18
 INVALID_HANDLE_VALUE = c_void_p(-1).value
@@ -124,6 +126,15 @@ class FILE_BASIC_INFO(Structure):
         ("LastWriteTime", c_longlong),
         ("ChangeTime", c_longlong),
         ("FileAttributes", c_ulong),
+    ]
+
+
+class FILE_STANDARD_INFO(Structure):
+    """The native FileStandardInfo ABI reports non-deleted links and pending deletion."""
+
+    _fields_ = [
+        ("AllocationSize", c_longlong), ("EndOfFile", c_longlong),
+        ("NumberOfLinks", c_uint32), ("DeletePending", c_ubyte), ("Directory", c_ubyte),
     ]
 
 
@@ -588,6 +599,25 @@ class WindowsHeldFile(HeldFile):
         # ChangeTime detects ordinary writes; a hostile host can explicitly alter these timestamps.
         return FileVersion(self.identity, os.fstat(self.descriptor).st_size,
                            int(info.LastWriteTime) * 100, int(info.ChangeTime) * 100)
+
+    def retirement_state(self) -> HeldResult[FileRetirementState]:
+        try:
+            if self.closed or self.filesystem.closed:
+                raise OSError(errno.ESTALE, "held file is closed")
+            current = _identity(_native(self.descriptor))
+            if (not _same_object(current, self.identity) or current.kind != "file"
+                    or not _same_object(_identity(_native(self.parent_descriptor)), self.parent_identity)):
+                raise OSError(errno.ESTALE, "held allocation changed")
+            assert GetFileInformationByHandleEx is not None
+            info = FILE_STANDARD_INFO()
+            if not GetFileInformationByHandleEx(_native(self.descriptor), FILE_STANDARD_INFO_CLASS, byref(info), sizeof(info)):
+                raise OSError("FileStandardInfo is unavailable")
+            if info.Directory:
+                raise OSError(errno.ESTALE, "held allocation is not a file")
+            identity = StableIdentity(current.device, current.inode, current.kind, int(info.NumberOfLinks))
+            return HeldResult(value=FileRetirementState(identity, bool(info.DeletePending)))
+        except OSError as error:
+            return HeldResult(error=_error(error))
 
     def close(self) -> None:
         if not self.closed:

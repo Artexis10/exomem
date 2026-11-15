@@ -20,6 +20,7 @@ from .held_fs import (
     PROBE_ENTRY_PREFIX,
     Capabilities,
     Chunks,
+    FileRetirementState,
     FileVersion,
     HeldDirectory,
     HeldFile,
@@ -325,6 +326,18 @@ class PosixHeldFile(HeldFile):
         self.check()
         info = _fstat(self.descriptor)
         return FileVersion(_identity(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def retirement_state(self) -> HeldResult[FileRetirementState]:
+        try:
+            if self.closed or self.filesystem.closed:
+                raise OSError(errno.ESTALE, "held file is closed")
+            current = _identity(_fstat(self.descriptor))
+            if (not _same_object(current, self.identity) or current.kind != "file"
+                    or not _same_object(_identity(_fstat(self.parent_descriptor)), self.parent_identity)):
+                raise OSError(errno.ESTALE, "held allocation changed")
+            return HeldResult(value=FileRetirementState(current))
+        except OSError as error:
+            return HeldResult(error=_error(error))
 
     def close(self) -> None:
         if not self.closed:

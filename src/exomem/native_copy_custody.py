@@ -24,6 +24,14 @@ class NativeCopyCustody:
         self.root, self.store, self.native = root, store, native
         self.ledger_id, self.physical_scope = native.ledger_id, native.physical_scope
 
+    def _check_allocation(self, copy: CopyAllocation) -> None:
+        if (copy.canonical.owner.owner != source_native_custody.OWNER
+                or copy.canonical.owner.version != copy.native.binding_id
+                or copy.canonical.origin_ledger != self.ledger_id
+                or copy.canonical.copy_id != copy.native.generated_copy_id
+                or copy.canonical.image_id != copy.native.image_id):
+            raise ValueError("canonical copy differs from its native allocation")
+
     def reserve(self, image: generated_fragment_store.ImageHeader, *, logical_path: Path,
                 relative_path: str, destination: str | None = None, removable: bool = True,
                 publication_id: str | None = None) -> CopyAllocation:
@@ -47,16 +55,25 @@ class NativeCopyCustody:
         return CopyAllocation(canonical, native)
 
     def verified(self, copy: CopyAllocation, file: held_fs.HeldFile, digest: str) -> None:
+        self._check_allocation(copy)
         self.native.verified(copy.native, file, sha256=digest)
 
     def present(self, copy: CopyAllocation) -> None:
+        self._check_allocation(copy)
         self.store.ack_copy(copy.canonical.copy_id, owner=copy.canonical.owner, outcome="present")
 
     def installed(self, copy: CopyAllocation, witness: held_fs.InstallationWitness) -> None:
+        self._check_allocation(copy)
         self.native.record_installation(copy.native, witness)
+
+    def retired(self, copy: CopyAllocation, witness: held_fs.RetirementWitness) -> None:
+        self._check_allocation(copy)
+        self.native.record_retirement(copy.native, witness)
+        self.store.ack_copy(copy.canonical.copy_id, owner=copy.canonical.owner, outcome="retired")
 
     def closed(self, copy: CopyAllocation, identity: held_fs.StableIdentity | None,
                outcome: Literal["not_written", "removed", "installed"]) -> None:
+        self._check_allocation(copy)
         reservation = self.native.get(copy.native.binding_id)
         if reservation.identity is None and outcome != "installed":
             # Binding always precedes bytes; a live unbound reservation cannot have copied its payload.

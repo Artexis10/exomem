@@ -29,6 +29,7 @@ _PUBLISH_TEMP_RE = re.compile(rf"{re.escape(PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}"
 _CAPABILITY_CACHE: dict[tuple[int, str, int, int], Capabilities] = {}
 _CAPABILITY_CACHE_LOCK = threading.Lock()
 _INSTALLATION_SEAL = object()
+_RETIREMENT_SEAL = object()
 
 
 @dataclass(slots=True)
@@ -155,6 +156,29 @@ class InstallationWitness:
         return self._seal is _INSTALLATION_SEAL
 
 
+@dataclass(frozen=True, slots=True)
+class FileRetirementState:
+    """Native namespace state observed from the original retained allocation."""
+
+    identity: StableIdentity
+    delete_pending: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetirementWitness:
+    """Durable name retirement, delivered after this publisher closes the old handle."""
+
+    root_identity: StableIdentity
+    parent_identity: StableIdentity
+    leaf: str
+    before: FileVersion
+    observed: FileRetirementState
+    _seal: object = field(repr=False, compare=False)
+
+    def authentic(self) -> bool:
+        return self._seal is _RETIREMENT_SEAL
+
+
 def _same_file_identity(first: StableIdentity, second: StableIdentity) -> bool:
     return (
         first.device == second.device
@@ -202,6 +226,9 @@ class HeldFile:
 
     def version(self) -> FileVersion:
         raise NotImplementedError
+
+    def retirement_state(self) -> HeldResult[FileRetirementState]:
+        return HeldResult(error=HeldFsError("UNSUPPORTED", "held retirement observation is unavailable"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,6 +576,38 @@ def _published_identity(
         return HeldResult(value=after.identity)
 
 
+def _close_replaced(
+    filesystem: HeldFilesystem, parent: HeldDirectory, leaf: str,
+    existing: HeldFile | None, before: FileVersion | None, completed: bool,
+    after_retire: Callable[[RetirementWitness], None] | None,
+) -> None:
+    if existing is None:
+        return
+    observed = None
+    try:
+        if after_retire is not None and before is not None and completed:
+            state = existing.retirement_state()
+            if state.ok:
+                current = state.require()
+                if (_same_file_identity(current.identity, before.identity) and current.identity.link_count == 0
+                        and current.delete_pending is not False
+                        and (filesystem.name_changes_flush_parents or filesystem.flush_directory(parent).ok)):
+                    observed = current
+    except (OSError, HeldFsError):
+        # Missing native or durability evidence keeps the old copy unresolved without blocking publication.
+        pass
+    finally:
+        existing.close()
+    if observed is not None:
+        assert before is not None and after_retire is not None
+        witness = RetirementWitness(filesystem.root_identity, parent.identity, leaf, before, observed, _RETIREMENT_SEAL)
+        try:
+            after_retire(witness)
+        except CustodyAcknowledgementPending:
+            # The old allocation retired; its canonical obligation remains open until the owner persists acknowledgement.
+            pass
+
+
 def install_temporary(
     filesystem: HeldFilesystem,
     parent: HeldDirectory,
@@ -560,6 +619,7 @@ def install_temporary(
     expected_destination: FileVersion | None = None,
     before_install: Callable[[], None] | None = None,
     after_install: Callable[[InstallationWitness], None] | None = None,
+    after_retire: Callable[[RetirementWitness], None] | None = None,
 ) -> HeldResult[StableIdentity]:
     """Install a temporary that the caller already wrote and verified, without copying its bytes.
 
@@ -569,6 +629,7 @@ def install_temporary(
     writer boundary and binds a completed content verification to both supplied versions.
     ``before_install`` rechecks the owner's publication right at the native effect boundary.
     ``after_install`` receives the destination version while the original allocation remains held.
+    ``after_retire`` reports durable retirement after the old destination handle closes; missing proof leaves its obligation open.
     """
 
     def publication_error(error: HeldFsError | None) -> HeldResult[StableIdentity]:
@@ -582,6 +643,8 @@ def install_temporary(
     if expected_version is not None and expected_version.identity != expected_identity:
         return HeldResult(error=HeldFsError("INVALID_INPUT", "temporary version names a different identity"))
     existing: HeldFile | None = None
+    existing_before: FileVersion | None = None
+    replaced_old = False
     try:
         current = filesystem.file(parent, leaf)
         if expected_destination is None:
@@ -627,19 +690,22 @@ def install_temporary(
                         return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "destination version changed"))
                 if before_install is not None:
                     before_install()
+                existing_before = existing.version()
+                if existing_before != expected_destination:
+                    return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "destination version changed"))
                 before = staged.version()
                 if before != expected_version:
                     return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "temporary version changed"))
                 replaced = filesystem.rename(staged, parent, leaf, replace=True)
                 if not replaced.ok:
                     return publication_error(replaced.error)
+                replaced_old = True
             return _published_identity(filesystem, parent, leaf, staged, before, after_install)
     except OSError as error:
         code = "IDENTITY_CHANGED" if error.errno == errno.ESTALE else "IO_REFUSED"
         return publication_error(HeldFsError(code, "temporary installation was refused", cause=error))
     finally:
-        if existing is not None:
-            existing.close()
+        _close_replaced(filesystem, parent, leaf, existing, existing_before, replaced_old, after_retire)
 
 
 def publish_bytes(
@@ -655,6 +721,7 @@ def publish_bytes(
     custody: TemporaryCustody | None = None,
     before_install: Callable[[], None] | None = None,
     after_install: Callable[[InstallationWitness], None] | None = None,
+    after_retire: Callable[[RetirementWitness], None] | None = None,
 ) -> HeldResult[StableIdentity]:
     """Atomically publish bytes, or `Chunks` of them, under one held parent.
 
@@ -669,11 +736,13 @@ def publish_bytes(
     the callback must neither close nor mutate it.
     ``before_install`` rechecks the owner's publication right after copying, before native installation.
     ``after_install`` receives the destination version while the original allocation remains held.
+    ``after_retire`` reports durable retirement after the old destination handle closes; missing proof leaves its obligation open.
     """
 
     if not isinstance(data, bytes | Chunks):
         return HeldResult(error=HeldFsError("INVALID_INPUT", "data must be bytes"))
     existing: HeldFile | None = None
+    existing_before: FileVersion | None = None
     staged: HeldFile | None = None
     writable: HeldFile | None = None
     temporary = publish_temporary_name()
@@ -781,6 +850,8 @@ def publish_bytes(
                 validate_existing(existing)
             if before_install is not None:
                 before_install()
+            assert existing is not None
+            existing_before = existing.version() if after_retire is not None else None
             before = staged.version()
             replaced = filesystem.rename(staged, parent, leaf, replace=True)
             if not replaced.ok:
@@ -789,27 +860,28 @@ def publish_bytes(
 
         return _published_identity(filesystem, parent, leaf, staged, before, after_install)
     finally:
-        if existing is not None:
-            existing.close()
         try:
-            released = "installed" if installed else "not_written" if not copy_started else None
-            cleanup = filesystem.file(parent, temporary, access="mutate")
-            if cleanup.ok:
-                with cleanup.require() as residue:
-                    if temporary_identity is not None and residue.identity == temporary_identity:
-                        if filesystem.unlink(residue).ok:
-                            released = "removed"
-            if custody is not None and custody_reserved and released is not None:
-                try:
-                    custody.release(temporary, temporary_identity, released)
-                except CustodyAcknowledgementPending:
-                    # Acknowledgement failure preserves the durable reservation for owner reconciliation.
-                    pass
+            _close_replaced(filesystem, parent, leaf, existing, existing_before, installed, after_retire)
         finally:
-            if staged is not None:
-                staged.close()
-            if writable is not None:
-                writable.close()
+            try:
+                released = "installed" if installed else "not_written" if not copy_started else None
+                cleanup = filesystem.file(parent, temporary, access="mutate")
+                if cleanup.ok:
+                    with cleanup.require() as residue:
+                        if temporary_identity is not None and residue.identity == temporary_identity:
+                            if filesystem.unlink(residue).ok:
+                                released = "removed"
+                if custody is not None and custody_reserved and released is not None:
+                    try:
+                        custody.release(temporary, temporary_identity, released)
+                    except CustodyAcknowledgementPending:
+                        # Acknowledgement failure preserves the durable reservation for owner reconciliation.
+                        pass
+            finally:
+                if staged is not None:
+                    staged.close()
+                if writable is not None:
+                    writable.close()
 
 
 def publish_sqlite_identities(

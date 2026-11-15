@@ -2057,6 +2057,7 @@ class _ArtifactCustody:
     verified: Callable[[held_fs.HeldFile, str], None]
     before_install: Callable[[], None] | None = None
     installed: Callable[[held_fs.InstallationWitness], None] | None = None
+    retired: Callable[[held_fs.RetirementWitness], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -2923,7 +2924,8 @@ class _BatchWorkspace:
             with acquired.require() as filesystem:
                 parent_relative = relative.parent.as_posix()
                 parent_result = filesystem.parent(
-                    parent_relative if parent_relative != "." else "."
+                    parent_relative if parent_relative != "." else ".",
+                    **({"access": "mutate"} if custody is not None and custody.retired is not None else {}),
                 )
                 if not parent_result.ok:
                     raise PathGuardError(
@@ -3034,6 +3036,7 @@ class _BatchWorkspace:
                             custody=custody.temporary if custody is not None else None,
                             before_install=before_install if custody is not None or inverse_recheck is not None else None,
                             after_install=after_install if custody is not None else None,
+                            after_retire=custody.retired if custody is not None else None,
                         )
                         if (
                             not published.ok

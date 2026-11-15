@@ -94,6 +94,11 @@ Installation retains the original allocation handle through the native effect an
 A later observation requires that version; equal bytes cannot recover a missing witness or reconnect a reused file identity.
 Partial-file cleanup requires the original live allocation handle. After restart, missing continuity leaves the copy unresolved and preserves its bytes.
 This limit prevents deleting an unrelated replacement. Its cost falls only on that copy's cleanup, without blocking ordinary capture.
+Replacement retirement retains the old allocation through the native rename and observes its zero-link state before closing that handle.
+The publisher emits a sealed retirement witness only after that close and proven durability of the name change.
+An alias, moved old name or missing native evidence leaves the old copy open; ordinary publication can still succeed.
+An overlapping reader may finish from its borrowed handle without becoming a reusable managed copy.
+Canonical retirement requires the exact saved installed version and matching native allocation, rather than displacement from a slot.
 This follows [How we contain Claude](https://www.anthropic.com/research/how-we-contain-claude): native capabilities bound destruction while canonical records preserve obligations.
 
 Keep one canonical slot for each generated-file locator and physical owner scope.
