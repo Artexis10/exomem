@@ -174,6 +174,19 @@ def read(conn: Connection) -> Registry:
     return Registry(REBUILDING, reflected, changed)
 
 
+def recorded_revisions(conn: Connection) -> dict[str, str | None]:
+    """The two revisions as ``store_meta`` records them, by key, with None for a key it lacks: the
+    last overlay change, which its commit records, and the overlay that the derived rows reflect,
+    which a finished pass records. A reader that caches what the overlay shapes compares them."""
+    meta = dict(
+        conn.execute(
+            "SELECT key, value FROM store_meta WHERE key IN (?, ?)",
+            (OVERLAY_REVISION, REGISTRY_REVISION),
+        )
+    )
+    return {key: meta.get(key) for key in (OVERLAY_REVISION, REGISTRY_REVISION)}
+
+
 def owner_schema_behind(conn: Connection, *, required_version: int | None = None) -> bool:
     """Whether the store's owner objects are older than this build's, so some of the rows that this
     build reads may not exist yet. The pass creates the objects in its first batch and fills them
