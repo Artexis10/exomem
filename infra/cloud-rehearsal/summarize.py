@@ -107,7 +107,7 @@ def large_import(report: dict) -> None:
 
 def release_rollout(report: dict) -> None:
     run = report["stages"]["release_rollout"]
-    print("## Cloud release rollout (automate-cloud-releases 1.15, 2.1, 3.1)\n")
+    print("## Cloud release rollout (automate-cloud-releases 1.13, 1.15, 2.1, 3.1)\n")
     print(f"- result: **{run.get('status', 'none: the run did not finish')}** (a partial proof; it never gates a node)")
     print(f"- release set by: {run.get('principal', 'not recorded')}; hold budget {run.get('hold_budget_seconds', 'not recorded')} s; "
           f"idle {run.get('idle_minutes', 'not recorded')} min; force {run.get('force_minutes', 'not recorded')} min")

@@ -1,4 +1,4 @@
-"""The release mode: automate-cloud-releases tasks 1.15, 2.1 and 3.1 on the disposable cluster.
+"""The release mode: automate-cloud-releases tasks 1.13, 1.15, 2.1 and 3.1 on the disposable cluster.
 
 Three cells run on the local storage domain: the canary A and two disposable cells, B (left idle)
 and C (kept busy, then left idle). The harness sets the release image as the cloud-deploy workflow
@@ -21,6 +21,9 @@ import datetime as dt
 import importlib.util
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -45,7 +48,7 @@ from cellctl.manifests import (
 from cellctl.storage_config import GIB, LocalStorage
 from mcp.shared.exceptions import McpError
 
-from . import build, images
+from . import build, images, tls
 from .mcp_client import MeasuredSession, refusal_text, session_gone
 from .platform import CLOUD_NAMESPACE
 from .report import (
@@ -58,6 +61,16 @@ from .report import (
     failure_record,
     innermost,
     percentile,
+)
+from .runbook_commands import (
+    BLOCK_TIMEOUT_SECONDS,
+    FORWARD_ONLY_HOLD,
+    PAUSED_ROLLOUT,
+    ROTATE_KEY,
+    RUNBOOK,
+    RunbookRunner,
+    redact,
+    runbook_blocks,
 )
 from .scenarios import (
     RELEASE_BROKEN,
@@ -302,6 +315,41 @@ def pause_alert_lines(log: str, cell_id: str) -> int:
     (reconcile.py), and a failed delivery names the alert with no colon after it."""
 
     return sum(1 for line in log.splitlines() if f"cellctl: {ROLLOUT_PAUSED_ALERT}: {cell_id}" in line)
+
+
+# What each runbook command is expected to print. Each check returns the problem it found, or None.
+
+
+def view_shows_paused(stdout: str, paused: bool) -> str | None:
+    try:
+        view = json.loads(stdout)
+    except ValueError:
+        return f"printed no JSON view: {stdout.strip()[:200]!r}"
+    shown = view.get("paused") if isinstance(view, dict) else None
+    return None if shown is paused else f"the view shows paused={shown!r}, not {paused}"
+
+
+def prints_true(stdout: str) -> str | None:
+    return None if stdout.strip() == "true" else f"printed {stdout.strip()[:200]!r}, not true"
+
+
+def lists_start_times(stdout: str, cell_ids: list[str]) -> str | None:
+    """Every cell's namespace shows a pod with a start time. The listing is kubectl's two custom columns."""
+
+    started: dict[str, list[str]] = {}
+    for line in stdout.splitlines()[1:]:
+        columns = line.split()
+        if len(columns) == 2:
+            started.setdefault(columns[0], []).append(columns[1])
+    unlisted = []
+    for cell_id in cell_ids:
+        try:
+            parsed = [dt.datetime.fromisoformat(value) for value in started.get(namespace_name(cell_id), [])]
+        except ValueError:
+            parsed = []
+        if not parsed:
+            unlisted.append(namespace_name(cell_id))
+    return f"no pod with a start time in {unlisted}" if unlisted else None
 
 
 # --- the upgrade window, held by hand ------------------------------------------------------
@@ -777,8 +825,8 @@ class Rollout:
         if problems:
             raise StepFailure("; ".join(problems))
 
-    # 22 (bullet 6)
-    async def pause_is_cleared_only_by_the_admin_token(self, record: StepRecord) -> None:
+    # 22 (bullet 6, the deploy token's half; step 24's runbook clear is the admin token's)
+    async def deploy_token_cannot_clear_the_pause(self, record: StepRecord) -> None:
         ctx = self.ctx
         before = await ctx.deploy_rollout()
         payload = {"cellImage": ctx.images.cell_v2, "release": RELEASE_RESUMED, "clearRolloutPause": True}
@@ -795,11 +843,6 @@ class Rollout:
             problems.append("the pause or the release image changed after the refused request")
         if problems:
             raise StepFailure("; ".join(problems))
-        await ctx.admin_release(payload)
-        cleared = await ctx.deploy_rollout()
-        record.evidence["paused_after_admin_token"] = cleared.get("paused")
-        if cleared.get("paused") is not False:
-            raise StepFailure("the admin token's clearRolloutPause did not clear the pause")
 
     # 23 (bullet 3)
     async def switch_polls_never_failed(self, record: StepRecord) -> None:
@@ -821,6 +864,66 @@ class Rollout:
             raise StepFailure("; ".join(problems))
 
 
+    # 24 (task 1.13)
+    async def runbook_commands_run_as_written(self, record: StepRecord) -> None:
+        """The runbook's commands for a paused rollout, a forward-only hold and a key rotation, run unedited.
+
+        The pause from step 19 must still be set: the read, the fix forward and the clear are the operator's
+        answer to it. Step 22 leaves it set, and the final read shows the admin token's clear.
+        """
+
+        ctx = self.ctx
+        a, b, c = ctx.a.cell_id, ctx.b.cell_id, ctx.c.cell_id
+        kubeconfig = ctx.stack.k3s.kubeconfig
+        missing = [tool for tool in ("bash", "curl", "jq", "kubectl") if shutil.which(tool) is None]
+        if missing or kubeconfig is None:
+            raise StepFailure(f"the runbook's commands need {missing or 'the cluster kubeconfig'} on the runner")
+        blocks = runbook_blocks(RUNBOOK.read_text())
+        record.evidence["blocks_per_heading"] = {heading: len(found) for heading, found in blocks.items()}
+        # Choose only a release the canary already runs (the runbook's rule for a cell's own image).
+        canary_image = (await ctx.cell(a))["observed_image"]
+        if canary_image != ctx.images.cell_v2:
+            raise StepFailure(f"the canary runs {canary_image!r} after the restore, not the v2 image: "
+                              "there is no release it already runs to fix forward to")
+        secrets = ctx.substrate.secrets
+        runner = RunbookRunner(blocks, kubeconfig, ctx.stack.workdir / "runbook-home", os.environ["PATH"],
+                               (secrets.admin_token, secrets.deploy_token))
+        runner.configure_curl(ctx.resolver, tls.SUBSTRATE_HOST)
+        loaded = {"EXOMEM_ADMIN_TOKEN": secrets.admin_token, "EXOMEM_SUBSTRATE_URL": PUBLIC_BASE_URL}
+        fix_forward = {**loaded, "FIXED_IMAGE": canary_image, "FIXED_TAG": RELEASE_RESUMED}
+        held_cell = {**loaded, "CELL_ID": b, "FIXED_IMAGE": canary_image}
+        # (heading, block counted from 1, the variables loaded, what it must print)
+        sequence: list[tuple[str, int, dict[str, str], Callable[[str], str | None]]] = [
+            (PAUSED_ROLLOUT, 1, loaded, lambda out: view_shows_paused(out, True)),
+            (PAUSED_ROLLOUT, 2, loaded, lambda out: None if pause_alert_lines(out, a) else
+                f"no log line says {ROLLOUT_PAUSED_ALERT} fires for the canary {a}"),
+            (PAUSED_ROLLOUT, 3, fix_forward, prints_true),
+            (PAUSED_ROLLOUT, 4, loaded, prints_true),
+            (PAUSED_ROLLOUT, 1, loaded, lambda out: view_shows_paused(out, False)),
+            (FORWARD_ONLY_HOLD, 1, held_cell, prints_true),
+            (FORWARD_ONLY_HOLD, 2, held_cell, prints_true),
+            (ROTATE_KEY, 1, loaded, lambda out: lists_start_times(out, [a, b, c])),
+        ]
+        findings: list[str] = []
+        record.evidence["runbook_findings"] = findings
+        record.evidence["fixed_image"] = canary_image
+        for heading, number, variables, check in sequence:
+            where = f"{heading!r} block {number}"
+            try:
+                ran = await asyncio.to_thread(runner.run, heading, number, variables)
+            except subprocess.TimeoutExpired:
+                findings.append(f"{where} did not finish in {BLOCK_TIMEOUT_SECONDS}s")
+                continue
+            record.evidence["blocks"] = [shown.evidence(runner.secrets) for shown in runner.runs]
+            if ran.exit_code != 0:
+                findings.append(f"{where} exited {ran.exit_code}: {redact(ran.stderr.strip()[-200:], runner.secrets)}")
+            elif problem := check(ran.stdout):
+                findings.append(f"{where} {problem}")
+        if findings:
+            raise StepFailure("a runbook command does not run as written (a runbook finding; no command was adapted): "
+                              + "; ".join(findings))
+
+
 # The step that starts each switch's poller.
 POLLER_STARTED_BY = {"A": 14, "C_busy": 16, "B": 16, "C": 17}
 
@@ -835,9 +938,11 @@ PROOFS: list[tuple[int, Callable[[Rollout, StepRecord], Awaitable[None]], tuple[
     (19, Rollout.forced_readiness_failure_pauses_and_restores_the_canary, (18,)),
     (20, Rollout.workflow_fails_with_the_code_alone, (19,)),
     (21, Rollout.acknowledged_write_survives_and_no_broken_file_remains, (19,)),
-    (22, Rollout.pause_is_cleared_only_by_the_admin_token, (19,)),
+    (22, Rollout.deploy_token_cannot_clear_the_pause, (19,)),
     # It reads what the pollers saw, whichever later proof failed, so it needs only the step that starts the first poller.
     (23, Rollout.switch_polls_never_failed, (14,)),
+    # The runbook's clear, in its own order: after step 22, with the pause from step 19 still set.
+    (24, Rollout.runbook_commands_run_as_written, (19,)),
 ]
 
 

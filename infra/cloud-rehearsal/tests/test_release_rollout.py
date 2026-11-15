@@ -35,6 +35,7 @@ from cloud_rehearsal.release_rollout import (
     SLOTS_AT_REST,
     deploy_settings,
     deploy_transport,
+    lists_start_times,
     load_cloud_deploy,
     pause_alert_lines,
     poll_failures,
@@ -256,6 +257,16 @@ def test_only_the_line_where_the_pause_alert_fires_for_the_canary_counts() -> No
     log = "\n".join([delivery_failure, other_cell, fires])
     assert pause_alert_lines(delivery_failure + "\n" + other_cell, "aaaaaaaaaaaaaaaa") == 0
     assert pause_alert_lines(log, "aaaaaaaaaaaaaaaa") == 1
+
+
+def test_the_key_rotation_listing_passes_only_with_a_start_time_for_every_cell() -> None:
+    """A pod that is still Pending lists `<none>` as its start, and a cell missing from the listing leaves the
+    runbook's wait for a restart with nothing to read."""
+    cells = ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"]
+    listing = "NAMESPACE              STARTED\nexo-cell-aaaaaaaaaaaaaaaa   2026-11-15T10:00:00Z\nexo-cell-bbbbbbbbbbbbbbbb   {}\n"
+    assert lists_start_times(listing.format("2026-11-15T10:01:00Z"), cells) is None
+    assert "exo-cell-bbbbbbbbbbbbbbbb" in lists_start_times(listing.format("<none>"), cells)
+    assert "exo-cell-bbbbbbbbbbbbbbbb" in lists_start_times(listing.split("exo-cell-bbbb")[0], cells)
 
 
 class _Session:
