@@ -73,6 +73,22 @@ SNAPSHOT_CLASS_API = "snapshot.storage.k8s.io/v1/VolumeSnapshotClass"
 TRANSFER_TOOLS_ENABLED = False
 
 
+@dataclass(frozen=True)
+class CataloguePrewarm:
+    """The chart's `cellctl.cataloguePrewarm` values for the catalogue-prewarm mode.
+
+    The build profile and timeout are the chart's shipped defaults, so the run measures what a
+    cell gets by turning the feature on. The upgrade window's idle and force minutes are cut to the
+    schema's 1-minute floor so a scenario finishes inside one UTC hour.
+    """
+
+    timeout_seconds: int = 1800
+    cpu: str = "2"
+    memory: str = "3Gi"
+    idle_minutes: int = 1
+    force_minutes: int = 1
+
+
 @dataclass
 class PlatformConfig:
     cellctl_image: str
@@ -87,6 +103,7 @@ class PlatformConfig:
     # Selects the local domain (design D1): new cells run on TopoLVM, their volume capped at this size.
     local_storage_cell_gib: int | None = None
     operator_restore_abort: bool = False
+    catalogue_prewarm: CataloguePrewarm | None = None
 
     @property
     def renders_local_storage(self) -> bool:
@@ -151,6 +168,14 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
     # window lands, so the render carries the complement.
     upgrade_start, upgrade_end = upgrade_default_range(config.backup_window)
     cellctl["upgradeWindow"] = {"defaultHourStart": upgrade_start, "defaultHourEnd": upgrade_end}
+    if (prewarm := config.catalogue_prewarm) is not None:
+        cellctl["cataloguePrewarm"] = True
+        cellctl["catalogueBuildTimeoutSeconds"] = prewarm.timeout_seconds
+        cellctl["catalogueBuildResources"] = {
+            "requests": {"cpu": prewarm.cpu, "memory": prewarm.memory},
+            "limits": {"cpu": prewarm.cpu, "memory": prewarm.memory},
+        }
+        cellctl["upgradeWindow"] |= {"idleMinutes": prewarm.idle_minutes, "forceMinutes": prewarm.force_minutes}
     values = {
         "cellctl": cellctl,
         "cellData": cell_data_values(stack),
