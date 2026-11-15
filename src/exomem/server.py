@@ -9,6 +9,7 @@ tools from the command registry.
 from __future__ import annotations
 
 import gc
+import inspect
 import logging
 import os
 import signal
@@ -240,6 +241,23 @@ class _Terminated(BaseException):
     """SIGTERM, raised where uvicorn sends it again, so the frames above it unwind and close."""
 
 
+def _take_the_action(action, signum: int, frame) -> None:
+    """Do for one signal what ``action``, a saved signal disposition, does, without delivering it
+    again: a handler is called with the signal's own number and frame, and an ignored signal does
+    nothing. The default action ends the process by the signal. On POSIX the signal goes to the
+    process, so any thread that does not block it takes it; sent to this thread, it would wait while
+    this thread blocks it.
+    """
+    if callable(action):
+        action(signum, frame)
+    elif action == signal.SIG_DFL:
+        signal.signal(signum, signal.SIG_DFL)
+        if os.name == "nt":
+            signal.raise_signal(signum)
+        else:
+            os.kill(os.getpid(), signum)
+
+
 def _uvicorn_replay():
     """The code of uvicorn's signal capture, which sends a captured signal again as it ends.
 
@@ -353,9 +371,10 @@ class ExomemFastMCP(FastMCP):
         Raised as an exception here instead, the signal unwinds through that hold, which runs the
         teardown. Then the SIGTERM meets the action that was installed before serving, as uvicorn's
         own replay did: a handler runs, an ignored signal is ignored, and the default action ends
-        the process by the signal. A SIGTERM at another time meets that action at once, and a
-        process that survives it still converts the later replay. An action that Python cannot
-        name, such as one installed from C, is taken as the default action.
+        the process by the signal. A SIGTERM at another time meets that action at once, also when
+        the main thread blocks SIGTERM, and a process that survives it still converts the later
+        replay. An action that Python cannot name, such as one installed from C, is taken as the
+        default action.
         """
         if threading.current_thread() is not threading.main_thread():
             await super().run_http_async(*args, **kwargs)  # only the main thread takes signals
@@ -364,17 +383,13 @@ class ExomemFastMCP(FastMCP):
         previous = signal.getsignal(signal.SIGTERM)
         previous = signal.SIG_DFL if previous is None else previous
 
-        def end_after_teardown(_signum, frame) -> None:
+        def end_after_teardown(signum, frame) -> None:
             if frame is None or frame.f_code is not replay:
-                # Any other SIGTERM, such as one while the lifespan starts, does what it did
-                # before: raised here, it could land in the event loop and end the process with 1.
-                # The earlier action runs inside `raise_signal`. A process that survives it re-arms
-                # this handler, which uvicorn then captures, so its later replay is still converted.
-                signal.signal(signal.SIGTERM, previous)
-                try:
-                    signal.raise_signal(signal.SIGTERM)
-                finally:
-                    signal.signal(signal.SIGTERM, end_after_teardown)
+                # Any other SIGTERM, such as one while the lifespan starts, meets the earlier action
+                # at once: raised here, it could land in the event loop and end the process with 1.
+                # A process that survives it keeps this handler, which uvicorn then captures, so its
+                # later replay is still converted.
+                _take_the_action(previous, signum, frame)
                 return
             # A second SIGTERM while the teardown runs ends the process at once, as one did before.
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
@@ -385,7 +400,7 @@ class ExomemFastMCP(FastMCP):
             await super().run_http_async(*args, **kwargs)
         except _Terminated:
             signal.signal(signal.SIGTERM, previous)
-            signal.raise_signal(signal.SIGTERM)
+            _take_the_action(previous, signal.SIGTERM, inspect.currentframe())
         finally:
             # This runner's own actions give way to the earlier one on every path, a teardown that
             # raised included: the replay left the default action in place.

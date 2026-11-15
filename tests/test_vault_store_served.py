@@ -726,24 +726,38 @@ def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path)
 
 
 SERVES_UNDER_AN_EARLIER_ACTION = """
-import asyncio, signal, sys
+import asyncio, signal, sys, threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from exomem.server import ExomemFastMCP
 
 marks, port, action, startup = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
-starting = marks.with_suffix(".starting")
+starting, raised = marks.with_suffix(".starting"), marks.with_suffix(".raised")
+if startup == "masked":  # the main thread blocks SIGTERM, as an embedding caller can
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
 
 def mark(word):
     with marks.open("a", encoding="utf-8") as out:
         out.write(word + "\\n")
 
+def raise_on_a_worker():
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+    signal.raise_signal(signal.SIGTERM)
+    raised.touch()
+    threading.Event().wait()  # it stays, a thread that takes the process's SIGTERM
+
 @asynccontextmanager
 async def lifespan(_server):
-    if startup == "held":  # the startup awaits until the test removes the file
+    if startup != "free":  # the startup awaits until the test removes the file
         starting.touch()
+        if startup == "masked":
+            threading.Thread(target=raise_on_a_worker, daemon=True).start()
         while starting.exists():
             await asyncio.sleep(0.05)
+        if startup == "masked":
+            if signal.SIGTERM in signal.sigpending():
+                mark("pending")
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     mark("started")
     yield
     mark("torn down")
@@ -771,6 +785,10 @@ mark("returned")
         # A SIGTERM while the startup awaits meets the handler at once and the process survives;
         # the SIGTERM once serving still meets the handler only after the teardown.
         ("handler", "held", ["handler", "started", "torn down", "handler", "returned"], 0),
+        # A worker's SIGTERM while the main thread blocks it meets the earlier action at once too:
+        # nothing is left pending on the main thread for its own handler to meet later.
+        ("handler", "masked", ["handler", "started", "torn down", "handler", "returned"], 0),
+        ("default", "masked", [], -signal.SIGTERM),
     ],
 )
 def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
@@ -779,7 +797,8 @@ def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
     """A service whose SIGTERM conversion drops the action that its caller installed: the caller's
     handler never runs and an ignored signal ends the process, or the teardown does not run. Or a
     conversion that a SIGTERM during the startup disarms, so the later one meets the handler
-    before the teardown."""
+    before the teardown. Or one that sends a worker's SIGTERM again to a main thread that blocks
+    it, so the earlier action waits there."""
     import socket
     import subprocess
 
@@ -805,21 +824,28 @@ def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
             return False
 
     def until(condition, failure):
+        """Whether ``condition`` came true; False once the process ended, as the final assertion
+        then shows."""
         deadline = time.monotonic() + 120
         while not condition():
-            assert process.poll() is None, process.stdout.read().decode()[-3000:]
+            if process.poll() is not None:
+                return False
             assert time.monotonic() < deadline, failure
             time.sleep(0.05)
+        return True
 
     try:
+        starting = written.with_suffix(".starting")
         if startup == "held":
-            starting = written.with_suffix(".starting")
             until(starting.exists, "the startup did not begin")
             process.terminate()
             until(lambda: marked() == ["handler"], "the SIGTERM during the startup met no handler")
-            starting.unlink()
-        until(listens, "the service did not start")  # uvicorn listens once it took the signals
-        process.terminate()
+            starting.unlink(missing_ok=True)
+        elif startup == "masked":
+            until(written.with_suffix(".raised").exists, "the worker raised no SIGTERM")
+            starting.unlink(missing_ok=True)
+        if until(listens, "the service did not start"):  # uvicorn listens once it took the signals
+            process.terminate()
         output, _ = process.communicate(timeout=60)
     finally:
         if process.poll() is None:
