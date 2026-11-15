@@ -13,12 +13,15 @@ from test_collection_store_writer import store as store
 
 from exomem.collection_store import (
     connection,
+    edit_back,
     governance,
     history,
     index_migrations,
     schema,
+    source_dependencies,
     tables,
     typed_storage,
+    views,
     writer,
 )
 from exomem.collection_store.writer import CollectionWriter
@@ -28,6 +31,24 @@ from exomem.governance.principal import library_scope
 def previous_release(patch):
     """Seed the historical schema-10 identity and payload wire through the maintained writer."""
     patch.setattr(schema, "SCHEMA_VERSION", 10)
+    # Schema 10 writes v1 events and predates the version-Source association table.
+    columns = tuple(column.name for column in tables.txns.c if column.name != "event_version")
+    patch.setattr(tables, "INSERT_TXN", text(
+        f"INSERT INTO txns({','.join(columns)}) VALUES({','.join(':' + name for name in columns)})"))
+    current_txn = writer.CollectionWriter._txn
+
+    def historical_txn(self, *args, **kwargs):
+        kwargs.pop("_source_inputs", None)
+        return current_txn(self, *args, **kwargs)
+
+    patch.setattr(writer.CollectionWriter, "_txn", historical_txn)
+
+    def historical_dependencies(current, prepared, _arguments):
+        identity = views.store_identity(current.connection)
+        return source_dependencies.DependencyPlan("historical-seed", identity["store_id"], identity["instance_id"],
+            prepared.manifest.collection_id, (), edit_back.NativeInputs((), True))
+
+    patch.setattr(source_dependencies, "_bulk_plan", historical_dependencies)
 
     def historical_watermark(conn, cid, **_options):
         # This producer predates the canonical verifier; only the current reader verifies after upgrade.
@@ -93,7 +114,13 @@ def test_schema10_upgrade_binds_exact_history_and_preserves_source_spine(histori
         assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         for name, rows in before.items():
             after = conn.execute(f"SELECT * FROM {name}").fetchall()
-            assert [row[:6] for row in after] == rows if name == "version_identity" else after == rows
+            if name == "version_identity":
+                assert [row[:6] for row in after] == rows
+            elif name == "txns":
+                assert [row[:-1] for row in after] == rows
+                assert all(row[-1] == 1 for row in after)
+            else:
+                assert after == rows
         assert conn.execute("SELECT encoding,payload_generation FROM version_identity ORDER BY row_version").fetchall() == [
             ("json-v1", None), ("typed-v1", layout.generation)]
         writer = CollectionWriter(root, handle)

@@ -89,6 +89,14 @@ Keep only one generated-owner locator in each Source manifest, rather than rewri
 A whole Source page or sealed original uses an immutable `whole_source_ref` on its image header, without textual fragment pages.
 The allocation and sealed original declaration establish that ownership; matching bytes, Markdown markers and nearby paths do not.
 Binary originals therefore reuse image and copy custody without passing through UTF-8 fragment validation.
+The Source manifest retains bounded, immutable original SHA-256 and size declarations before either storage mode publishes capture payloads.
+Missing declarations mean unknown ownership; an explicitly empty declaration means the capture had no originals.
+An undeclared rehydrated payload keeps an opaque image and its finite uncertainty horizon; matching bytes cannot upgrade it to whole-Source ownership.
+Rehydration proves the current Source incarnation and its sealed declaration before reserving a copy and creating temporary bytes.
+It retains exact native custody for partial plaintext, installation and cleanup, including unresolved copies after failed cleanup.
+Acquire and pin required originals outside the collection checkout before admitting effective collection dependencies.
+Commit revalidation opens present originals without hydration; acquisition failure preserves the existing per-row rejection semantics.
+An original can survive a rejected collection row only under its Source copy owner, without a collection dependency admission.
 Opaque result images use explicit producer-declared Source membership in their bounded headers, without textual fragment pages.
 Their hashes bind exact serialized payload bytes; membership never comes from parsing or matching those bytes.
 The existing metadata byte bound and positive-membership index also cover this variant.
@@ -203,11 +211,52 @@ Partial rollback cannot transfer a failed replacement's inputs to an independent
 Store version associations bind exact references, epoch and operation to immutable row versions and the authenticated event.
 Producer checkpoints bind logical store identity, physical instance, immutable transition and effect membership; paths and transaction integers cannot supply that identity.
 
-Reserve imports before derived staging. Canonical member publication proves dependence; missing progress does not prove cleanup.
-An aborted member records its exact closure in the final revert transaction, with FULL durability established before that transaction.
-The closure binds the Source, epoch, job, member and physical derived instance, then mirrors into matching terminal job custody.
+An import job binds the SHA-256 of its exact input bytes, and an incarnation reference can come only from those bytes.
+A restart that proves the bound bytes therefore cannot adopt another incarnation, and a recaptured Source carries a new reference.
+Import inputs carry no canonical incarnation today: export manifests are plain JSON, and raw row files have no frontmatter.
+Their store effects record incomplete current dependency. Derived member rows live outside the store, behind import log rows only.
+The census therefore reports import ownership as missing evidence, never as independence.
+Member witnesses and a durable derived revert closure arrive with the first import input that proves an incarnation.
 Filesystem rollback needs the publication owner's exact cleanup outcome; SQL rollback and a suppressed cleanup exception cannot establish absence.
 Close active SQL snapshots and release request checkouts before canonical Source metadata work; retain only detached preparation between phases.
+
+Keep ordered presentation citations in `item_sources`; existing v1 events authenticate their exact order and duplicates.
+Add canonical version associations inside the existing store, with one row per immutable version and Source reference.
+The existing citation table lacks incarnation identity; extending it with synthetic origin rows would change legacy readers and audit material.
+The added maintenance cost is one indexed association table, a v2 event envelope and a held-body descriptor.
+An association names its authenticating transition and effect, owner version, Source reference, operation and optional admission epoch.
+Persist a verified canonical reference even when its Source is unenrolled; absence of admission cannot erase known provenance.
+The v2 envelope authenticates newly established associations through logical item keys, owner payload hashes and owner creation transitions.
+An update can authenticate a previously unrepresented prior version without assigning its inputs to the replacement version.
+Reuse existing associations for that exact owner instead of adding them again on every update.
+Record current and prior membership completeness on the effect; missing legacy membership remains visibly unknown.
+Held descriptors bind their own publication identifier and exact candidate/body hashes, including replacements with equal bytes.
+Carry the corresponding descriptor into existing projection ownership when a stage or displaced input outlives its held row.
+
+Reuse the existing detached view observations and extend them to exact native versions and recovery slots.
+The input phase selects accepted rows, held overrides and every native payload preservation can retain, then closes its SQL snapshot.
+The runtime releases request borrowing for canonical custody, then supplies the current writer for one uninterrupted mutation unit.
+Advance the epoch before that unit and retain the actual boundary through preservation, staging and SQL commit.
+An unobserved or changed native input waits for a fresh admitted observation before preservation can retain it.
+Preparation cannot call the current staging-and-abort path or hydrate an original as if that were a pure read.
+
+Run the Records or Planning command envelope on a bounded request worker when its stored operation needs detached input acquisition.
+Reuse the store request's acceptance, completion and acknowledgement deadlines; an accepted request keeps its resources until execution ends.
+The worker sends only preparation and final publication units to the store thread, so downloads cannot occupy that thread.
+Preparation returns plain candidate values and exact basis fingerprints, with no writer, cursor, authorization object or borrowed resource.
+Before publication, reauthorize and compare store identity, physical instance, manifest, container, item, held input and native input versions.
+Transport each unit's committed state explicitly; a copied execution context cannot propagate that state to the command envelope.
+Keep the actual guard from final effective dependency reservation through the effect, commit and producer settlement.
+Process bulk candidates in order, claiming natural keys and filenames only after successful input acquisition and remaining row checks.
+An import tick that needs acquisition hands the batch to the same bounded worker path; its final checkpoint remains inside the collection transaction.
+Direct writer calls reuse these phases synchronously and preserve any actual guard their caller explicitly owns.
+
+Preview lifetime access resolves each fresh checkout; saved methods, SQL cursors and authorization objects expire with their original checkout.
+The preview owner closes the checkout instead of removing borrower counters or reactivating an expired scope.
+An active caller snapshot prevents departure without rolling back caller work.
+Canonical custody uses a trusted producer binding on the same idle handle because its reserved records can live in the vault store.
+The runtime rechecks that handle's authority and accounts for metadata commits before opening the fresh request checkout.
+Collection-only replicas retain their existing scope; this boundary does not claim whole-store snapshot or erasure coverage.
 
 Semantic writes include resolved claims whose Source back-reference was skipped, retained origin bindings and historical before-images.
 Restricted writers still publish service-owned custody in the same batch when they cannot write the Source back-reference.

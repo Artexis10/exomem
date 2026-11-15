@@ -7597,6 +7597,7 @@ class LeaseManager:
         `routed` is the first routing's store server.
         """
         from .collection_store import runtime as store_runtime
+        from .collection_store.source_dependencies import needs_acquisition_request
 
         # Every attempt is one request: one id in the logs and in the one journal row.
         request_id = kwargs.get("mutation_request_id") or str(uuid.uuid4())
@@ -7635,10 +7636,11 @@ class LeaseManager:
             try:
                 if server is None:
                     return run()
-                return server.call(
+                call = (server.call_record_request if needs_acquisition_request(command.name, kwargs)
+                        else partial(server.call, read_only=False))
+                return call(
                     run,
                     wake_maintenance=True,
-                    read_only=False,
                     extend=extend,
                     # The queue refuses a write it never took, or still holds, before `invoke` can journal it.
                     on_refusal=partial(_record_store_queue_refusal, command, call_kwargs, server.root),
@@ -8794,6 +8796,14 @@ def _collection_store_thread(func):
         if injected and isinstance(injected[0], (str, os.PathLike)):
             from . import foreground_priority
             from .collection_store import runtime as store_runtime
+            from .collection_store.source_dependencies import (
+                needs_acquisition_request,
+                request_server,
+            )
+
+            current = request_server()
+            if current is not None and current.root == Path(injected[0]).resolve():
+                return func(command, *injected, **kwargs)
 
             import_request = kwargs.get("import_request")
             # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
@@ -8812,6 +8822,11 @@ def _collection_store_thread(func):
                 )
                 server = routing.server
                 if server is not None:
+                    if needs_acquisition_request(command.name, kwargs):
+                        return server.call_record_request(
+                            lambda: func(command, *injected, **kwargs),
+                            on_refusal=partial(_record_store_queue_refusal, command, kwargs, server.root),
+                        )
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
                         # A read hands the proof that routed it to the store thread, which skips its own.

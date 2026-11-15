@@ -10,7 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from . import memory_refs, reserved_paths, source_capture, source_corrections, vault
 from .cli_ops import OpError
@@ -20,6 +29,7 @@ OWNER = "source_custody"
 # These are bounded metadata I/O and work limits, not a content vocabulary.
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_OWNER_FAMILIES = 32
+MAX_ORIGINAL_BINDINGS = 64
 _Hash = Annotated[str, AfterValidator(source_capture.validate_sha256)]
 _Opaque = Annotated[str, Field(min_length=1, max_length=1024)]
 
@@ -35,6 +45,12 @@ class RetirementFence(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     operation_id: _Opaque
     source_hash: _Hash
+
+
+class OriginalBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    sha256: _Hash
+    size: Annotated[int, Field(ge=0)]
 
 
 # State literals belong to this custody protocol; producer families and locators remain data.
@@ -101,6 +117,7 @@ class Manifest(BaseModel):
     version: Literal[2] = 2
     source_ref: _Opaque
     allocated_hash: _Hash
+    originals: Annotated[tuple[OriginalBinding, ...], Field(max_length=MAX_ORIGINAL_BINDINGS)] | None = None
     publication: Literal["allocated", "published"] = "allocated"
     dependency: DependencyLatch = Field(default_factory=DependencyLatch)
     coverage_complete: bool = False
@@ -110,6 +127,12 @@ class Manifest(BaseModel):
     legacy_dependency_uncertain: bool = False
     dependency_epochs: Annotated[dict[str, DependencyEpoch], Field(max_length=MAX_OWNER_FAMILIES)] = Field(default_factory=dict)
     retirement: RetirementFence | None = None
+
+    @field_validator("originals", mode="before")
+    @classmethod
+    def json_originals(cls, value, info: ValidationInfo):
+        # JSON arrays encode tuple metadata; Python callers must still supply a tuple.
+        return tuple(value) if info.mode == "json" and isinstance(value, list) else value
 
     @model_validator(mode="before")
     @classmethod
@@ -245,6 +268,29 @@ def require_publishable(root: Path, reference: str) -> None:
     manifest, _ = read_manifest(root, reference)
     if manifest is not None and manifest.retirement is not None:
         raise OpError("SOURCE_RETIRED", "the Source incarnation is retired")
+
+
+def bind_originals(root: Path, *, reference: str, source_hash: str,
+                   originals: tuple[OriginalBinding, ...]) -> None:
+    """Retain the trusted capture's original declarations against its exact allocation."""
+    _boundary(root)
+    if type(originals) is not tuple or any(type(item) is not OriginalBinding for item in originals):
+        raise ValueError("Source original declarations require typed bindings")
+    checked = (OriginalBinding(sha256=item.sha256, size=item.size) for item in originals)
+    declarations = tuple(sorted(set(checked), key=lambda item: (item.sha256, item.size)))
+    manifest, guard = read_manifest(root, reference)
+    if manifest is None:
+        raise OpError("SOURCE_CUSTODY_UNAVAILABLE", "Source allocation custody is unavailable")
+    if manifest.allocated_hash != source_hash:
+        raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "Source allocation differs from canonical custody")
+    require_publishable(root, reference)
+    if manifest.originals is not None:
+        if manifest.originals == declarations:
+            return
+        # An issued Source cannot silently switch originals; the caller must retry the correct allocation.
+        raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "Source originals differ from their issued binding")
+    updated = Manifest.model_validate({**manifest.model_dump(), "originals": declarations})
+    publish(root, PlannedCustody((_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES),)))
 
 
 def register_owner(root: Path, reference: str, owner: OwnerLocator) -> None:

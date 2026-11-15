@@ -396,19 +396,19 @@ def test_verified_prefix_reuses_only_accounted_committed_work_and_a_new_handle_r
     _correct(store, 2)
     assert len(checked) == 1
     checked.clear()
-    insert = store._insert_txn
+    insert = type(store)._insert_txn
 
     manifest = store._projection_manifest(CID)
     page = history.main_path(manifest)
     rendered = history.render_page(store.connection, store.root, manifest, page, cache=store.handle.release_cache)
 
-    def interrupted(txn, receipt):
-        insert(txn, receipt)
+    def interrupted(writer, txn, receipt):
+        insert(writer, txn, receipt)
         assert "correct count to 3" in history.render_page(
             store.connection, store.root, manifest, page, cache=store.handle.release_cache)[1]
         raise RuntimeError("interrupt before commit")
 
-    monkeypatch.setattr(store, "_insert_txn", interrupted)
+    monkeypatch.setattr(type(store), "_insert_txn", interrupted)
     watermark = store.connection.execute("SELECT verified_through_txn FROM collections").fetchone()
     with pytest.raises(RuntimeError, match="interrupt"):
         _correct(store, 3)

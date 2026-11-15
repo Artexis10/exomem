@@ -33,6 +33,7 @@ class NativePublication:
     prepared: PreparedCopy
     custody: vault._ArtifactCustody | None = None
     allocation: CopyAllocation | None = None
+    temporary: CopyAllocation | None = None
     installation: held_fs.InstallationWitness | None = None
     retirement: held_fs.RetirementWitness | None = None
     allocation_started: bool = False
@@ -181,6 +182,7 @@ class NativeCopyCustody:
             if current.state != "observed" or not isinstance(current.value, generated_fragment_store.ImageHeader):
                 raise ValueError("native publication image is unavailable")
             temporary = self.reserve(current.value, logical_path=path, relative_path=relative)
+            attempt.temporary = temporary
 
         def bind(name, file):
             assert temporary is not None and attempt.allocation is not None

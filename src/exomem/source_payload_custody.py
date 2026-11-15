@@ -27,16 +27,37 @@ class _Payload:
     path: Path
 
 
+def _bind_declarations(root: Path, reference: str, primary: vault.PlannedWrite,
+                       writes: Sequence[vault.PlannedWrite], auxiliaries) -> dict[Path, source_custody.OriginalBinding]:
+    if not isinstance(primary.content, str) or memory_refs.ref_from_markdown(primary.content) != reference:
+        raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "Source payload differs from its allocation")
+    source_hash = vault.content_hash(primary.content)
+    originals = vocabulary_auxiliaries.declared_originals(root, auxiliaries)
+    sealed = auxiliaries if isinstance(auxiliaries, tuple) else () if auxiliaries is None else (auxiliaries,)
+    primary_relative = primary.path.relative_to(root).as_posix()
+    if not sealed or any(item.primary_path != primary_relative or item.primary_after_sha256 != source_hash for item in sealed):
+        raise ValueError("Source primary differs from its sealed declaration")
+    by_path = {write.path.relative_to(root).as_posix(): write for write in writes}
+    if len(by_path) != len(writes) or primary_relative not in by_path or by_path[primary_relative].content != primary.content:
+        raise ValueError("Source payload plan differs from its sealed primary")
+    payloads = {primary.path: source_custody.OriginalBinding(sha256=source_hash, size=len(primary.content.encode("utf-8")))}
+    declarations = []
+    for relative, (digest, owner_path) in originals.items():
+        write = by_path.get(relative)
+        if (owner_path != primary_relative or write is None or not isinstance(write.content, vault.PreparedBinaryContent)
+                or write.content.sha256 != digest):
+            raise ValueError("Source original differs from its sealed declaration")
+        binding = source_custody.OriginalBinding(sha256=digest, size=write.content.size)
+        declarations.append(binding)
+        payloads[write.path] = binding
+    source_custody.bind_originals(root, reference=reference, source_hash=source_hash, originals=tuple(declarations))
+    return payloads
+
+
 class _CaptureCopies:
-    def __init__(self, root: Path, reference: str, primary: vault.PlannedWrite,
-                 writes: Sequence[vault.PlannedWrite], auxiliaries):
+    def __init__(self, root: Path, reference: str, payloads: dict[Path, source_custody.OriginalBinding],
+                 writes: Sequence[vault.PlannedWrite]):
         self.root, self.reference = root, reference
-        source_custody.require_publishable(root, reference)
-        manifest, _ = source_custody.read_manifest(root, reference)
-        if (manifest is None or not isinstance(primary.content, str)
-                or manifest.allocated_hash != vault.content_hash(primary.content)
-                or memory_refs.ref_from_markdown(primary.content) != reference):
-            raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "Source payload differs from its allocation")
         self.native = source_native_custody.NativeCustody(root)
         self.store = generated_fragment_store.GeneratedFragmentStore(root)
         self.copies = native_copy_custody.NativeCopyCustody(root, store=self.store, native=self.native)
@@ -49,27 +70,17 @@ class _CaptureCopies:
             source_custody.register_owner(root, reference, source_custody.OwnerLocator(
                 owner=generated_fragment_store.OWNER, locator=head.catalogue_id, version=str(head.version),
             ))
-            originals = vocabulary_auxiliaries.declared_originals(root, auxiliaries)
-            primary_relative = primary.path.relative_to(root).as_posix()
             for write in writes:
-                relative = write.path.relative_to(root).as_posix()
-                if write.path == primary.path:
-                    digest, size = manifest.allocated_hash, len(primary.content.encode("utf-8"))
-                elif relative in originals:
-                    digest, owner_path = originals[relative]
-                    if (owner_path != primary_relative or not isinstance(write.content, vault.PreparedBinaryContent)
-                            or write.content.sha256 != digest):
-                        raise ValueError("Source original differs from its sealed declaration")
-                    size = write.content.size
-                else:
+                binding = payloads.get(write.path)
+                if binding is None:
                     continue
                 from .source_result_custody import record_target
 
-                record_target(reference, relative)
+                record_target(reference, write.path.relative_to(root).as_posix())
                 if not write.create_only or write.expected_hash != vault.MISSING_CONTENT_HASH:
                     raise ValueError("fresh Source payload custody requires a missing destination")
                 image = self.store.begin_whole_image(
-                    whole_source_ref=reference, image_sha256=digest, image_size=size,
+                    whole_source_ref=reference, image_sha256=binding.sha256, image_size=binding.size,
                 )
                 self.payloads[write.path] = _Payload(image, write.path)
         except BaseException:
@@ -129,13 +140,17 @@ class _CaptureCopies:
 @contextmanager
 def capture(root: Path, *, reference: str, primary: vault.PlannedWrite,
             writes: Sequence[vault.PlannedWrite], auxiliaries, enabled: bool) -> Iterator[vault._BatchPayloadCustody | None]:
-    """Bind fresh file-mode Source copies; other persistence owners retain their own integration."""
+    """Bind sealed declarations in every mode, then retain fresh file-mode copies."""
     from .vault_store import availability
 
-    if not enabled or availability.page_writer(root) is not None:
+    if not enabled:
         yield None
         return
-    owner = _CaptureCopies(root, reference, primary, writes, auxiliaries)
+    payloads = _bind_declarations(root, reference, primary, writes, auxiliaries)
+    if availability.page_writer(root) is not None:
+        yield None
+        return
+    owner = _CaptureCopies(root, reference, payloads, writes)
     try:
         yield vault._BatchPayloadCustody(owner.stage, owner.publication, owner.removed, owner.finished)
     finally:

@@ -17,6 +17,7 @@ from contextlib import closing
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_media_store import selected_store as selected_store
 from test_vault_store_migration import ALPHA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
@@ -91,6 +92,96 @@ def edge_targets(root, source):
 
 def planned(root, rel, text, **keywords):
     return vault_module.PlannedWrite(root / rel, text, **keywords)
+
+
+def test_source_metadata_between_request_checkouts_uses_canonical_store_without_a_projection(served, writer):  # noqa: F811
+    from exomem import memory_refs, source_custody, writer_lease
+
+    reference = memory_refs.memory_ref(memory_refs.new_id())
+    manager = writer_lease.active_manager()
+    with preview.preview_store(served, writer.handle) as access:
+        saved_connection = access.connection
+        with manager.mutation_guard(served, operation="enroll_test_source"):
+            with preview.source_metadata_phase(served).source_metadata():
+                assert manager._store_borrowers == {}
+                assert not writer.connection.in_transaction
+                source_custody.publish(served, source_custody.prepare_enrollment(
+                    served, reference=reference, source_hash="1" * 64))
+                admissions = source_custody.reserve_dependencies(served, [reference],
+                    producer=source_custody.OwnerLocator(owner="collection_records", locator="test-store", version="2"),
+                    operation_id="test-operation", checkpoint="before:test-operation")
+                source_custody.begin_dependency_effect(served, admissions)
+            manifest, _ = source_custody.read_manifest(served, reference)
+            assert manifest.dependency_epochs["collection_records"].revision == 2
+        with pytest.raises(connection.CollectionStoreError, match="CHECKOUT_CLOSED"):
+            saved_connection.execute("SELECT 1")
+        assert access.connection.execute("SELECT 1").fetchone() == (1,)
+    assert not source_custody.manifest_path(served, reference).exists()
+
+
+def test_source_capture_stores_sealed_original_declarations_without_manifest_files(
+        served, writer, source_schema, selected_store, monkeypatch):  # noqa: F811
+    from test_media_store import _offload
+
+    from exomem import add, media_store, source_custody, writer_lease
+
+    monkeypatch.setenv("EXOMEM_SOURCE_ERASURE_POLICY", '{"enabled_systems":["archive"]}')
+    original = b"Sealed transcript retained by the canonical store.\n"
+    manager = writer_lease.active_manager()
+    with manager.mutation_guard(served):
+        saved = add.add(served, source_schema, title="Stored attachment", content="", source_type="session",
+            artifact=add.SourceArtifact(io.BytesIO(original), "transcript.txt", "text/plain"),
+            source_identity={"system": "archive", "record_id": "stored-attachment", "revision": "one"})
+        manifest, _ = source_custody.read_manifest(served, saved.ref)
+        assert manifest.publication == "published"
+        assert manifest.originals == (source_custody.OriginalBinding(
+            sha256=hashlib.sha256(original).hexdigest(), size=len(original)),)
+    assert (served / saved.artifact_path).read_bytes() == original
+    assert not source_custody.manifest_path(served, saved.ref).exists()
+    with read.snapshot(served) as view:
+        assert view.page(saved.path).body
+    retained, _ = source_custody.read_manifest(served, saved.ref)
+    assert retained.originals == manifest.originals
+    path = served / saved.artifact_path
+    _offload(served, path)
+    assert media_store.evict(served, path)
+    writer.connection.execute("BEGIN")
+    try:
+        with pytest.raises(OpError, match="SOURCE_CUSTODY_BOUNDARY_REQUIRED"):
+            with media_store.open_original(served, path):
+                pytest.fail("a caller-owned SQL transaction cannot hold original acquisition")
+        assert writer.connection.in_transaction
+        assert not path.exists()
+    finally:
+        writer.connection.rollback()
+    with media_store.open_original(served, path) as hydrated:
+        assert hydrated.stream.read() == original
+    assert not source_custody.manifest_path(served, saved.ref).exists()
+
+
+def test_unenrolled_original_hydration_preserves_a_callers_sql_transaction(
+        served, writer, source_schema, selected_store, monkeypatch):  # noqa: F811
+    from test_media_store import _offload
+
+    from exomem import add, media_store, source_custody, writer_lease
+
+    monkeypatch.delenv("EXOMEM_SOURCE_ERASURE_POLICY", raising=False)
+    original = b"Ordinary original with Source custody disabled.\n"
+    with writer_lease.active_manager().mutation_guard(served):
+        saved = add.add(served, source_schema, title="Ordinary attachment", content="", source_type="session",
+            artifact=add.SourceArtifact(io.BytesIO(original), "ordinary.txt", "text/plain"))
+    assert source_custody.read_manifest(served, saved.ref)[0] is None
+    path = served / saved.artifact_path
+    _offload(served, path)
+    assert media_store.evict(served, path)
+    writer.connection.execute("BEGIN")
+    try:
+        with media_store.open_original(served, path) as hydrated:
+            assert hydrated.stream.read() == original
+        assert writer.connection.in_transaction
+    finally:
+        writer.connection.rollback()
+    assert source_custody.read_manifest(served, saved.ref)[0] is None
 
 
 def sha(text):

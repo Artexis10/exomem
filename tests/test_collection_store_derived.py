@@ -587,6 +587,13 @@ def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_t
             raw.execute(f"DROP TABLE {table}")
         for table in ("item_references", "item_reference_state"):  # schema 17 added these
             raw.execute(f"DROP TABLE {table}")
+        # Schema 18 added the Source dependency columns, their indexes and the version bindings.
+        raw.execute("DROP TABLE version_source_bindings")
+        for index in ("held_candidates_by_publication", "projection_state_by_dependency_window"):
+            raw.execute(f"DROP INDEX {index}")
+        for table, column in (("txns", "event_version"), ("audit_effects", "dependency_current_complete"),
+                              ("audit_effects", "dependency_prior_complete"), ("held_candidates", "dependency_json")):
+            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
         raw.execute("UPDATE store_meta SET value='13' WHERE key=?", (schema.META_SCHEMA_VERSION,))
         raw.execute("UPDATE alembic_version SET version_num='13'")
 
