@@ -687,11 +687,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from exomem.server import ExomemFastMCP
 
+started = Path(sys.argv[1])
+
 @asynccontextmanager
 async def lifespan(_server):
-    Path(sys.argv[1]).write_text("starting")
-    await asyncio.Event().wait()  # a startup that awaits, as the schema publication can
+    started.write_text("starting")
+    while started.exists():  # a startup that awaits, as the schema publication can
+        await asyncio.sleep(0.05)
     yield
+    started.with_suffix(".torn-down").touch()
 
 ExomemFastMCP("startup", lifespan=lifespan).run(
     transport="http", host="127.0.0.1", port=0, show_banner=False
@@ -700,9 +704,9 @@ ExomemFastMCP("startup", lifespan=lifespan).run(
 
 
 def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path):
-    """A SIGTERM that lands while the lifespan's startup awaits, before uvicorn takes the signals:
-    raised as the exception that runs the teardown, it lands in the event loop instead and the
-    process ends with 1, which a supervisor reads as a crash."""
+    """A SIGTERM that lands while the lifespan's startup awaits: met at once, it ends the process
+    without the teardown of what the startup began, or, raised as an exception that lands in the
+    event loop, with 1, which a supervisor reads as a crash."""
     import subprocess
 
     started = tmp_path / "started"
@@ -717,44 +721,68 @@ def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path)
             assert time.monotonic() < deadline, "the service did not start its lifespan"
             time.sleep(0.05)
         process.terminate()
+        started.unlink()  # the startup finishes
         output, _ = process.communicate(timeout=60)
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(10)
-    assert process.returncode == -signal.SIGTERM, output.decode()[-3000:]
+    torn_down = started.with_suffix(".torn-down").exists()
+    assert (torn_down, process.returncode) == (True, -signal.SIGTERM), output.decode()[-3000:]
 
 
 SERVES_UNDER_AN_EARLIER_ACTION = """
 import asyncio, signal, sys, threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from exomem.server import ExomemFastMCP
 
 marks, port, action, startup = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
 starting, raised = marks.with_suffix(".starting"), marks.with_suffix(".raised")
-if startup == "masked":  # the main thread blocks SIGTERM, as an embedding caller can
+blocked = startup in ("masked", "all blocked")
+if blocked:  # the main thread blocks SIGTERM, as an embedding caller can, and so every later thread
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+from exomem.server import ExomemFastMCP
 
 def mark(word):
     with marks.open("a", encoding="utf-8") as out:
         out.write(word + "\\n")
 
+joining = threading.Event()
+
 def raise_on_a_worker():
+    if startup == "all blocked":
+        joining.wait()
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     signal.raise_signal(signal.SIGTERM)
+    if startup == "all blocked":
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     raised.touch()
-    threading.Event().wait()  # it stays, a thread that takes the process's SIGTERM
+    if startup == "masked":
+        threading.Event().wait()  # it stays, a thread that takes the process's SIGTERM
+
+def replacing(_signum, _frame):
+    mark("handler")
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 @asynccontextmanager
 async def lifespan(_server):
     if startup != "free":  # the startup awaits until the test removes the file
         starting.touch()
-        if startup == "masked":
-            threading.Thread(target=raise_on_a_worker, daemon=True).start()
+        if blocked:
+            worker = threading.Thread(target=raise_on_a_worker, daemon=True)
+            switching = sys.getswitchinterval()
+            if startup == "all blocked":
+                # No forced thread switch: the worker raises only once the main thread waits in
+                # the join, so the main thread meets the signal once every thread blocks it.
+                sys.setswitchinterval(1e6)
+            worker.start()
+            if startup == "all blocked":
+                joining.set()
+                worker.join()
+                sys.setswitchinterval(switching)
         while starting.exists():
             await asyncio.sleep(0.05)
-        if startup == "masked":
+        if blocked:
             if signal.SIGTERM in signal.sigpending():
                 mark("pending")
             signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
@@ -762,8 +790,8 @@ async def lifespan(_server):
     yield
     mark("torn down")
 
-earlier = {"handler": lambda _signum, _frame: mark("handler"), "ignore": signal.SIG_IGN,
-           "default": signal.SIG_DFL}[action]
+earlier = {"handler": lambda _signum, _frame: mark("handler"), "replacing": replacing,
+           "ignore": signal.SIG_IGN, "default": signal.SIG_DFL}[action]
 signal.signal(signal.SIGTERM, earlier)
 ExomemFastMCP("earlier", lifespan=lifespan).run(
     transport="http", host="127.0.0.1", port=port, show_banner=False
@@ -776,29 +804,33 @@ mark("returned")
     ("action", "startup", "marks", "status"),
     [
         # The handler runs once and the runner returns, as on main; main ran it before the outer
-        # teardown, and here it runs once the teardown has unwound.
+        # teardown, and here it runs after the teardown.
         ("handler", "free", ["started", "torn down", "handler", "returned"], 0),
         # As on main: the ignored signal is ignored, and the runner returns.
         ("ignore", "free", ["started", "torn down", "returned"], 0),
         # Main ends here without the teardown; this change runs it, then ends by the signal.
         ("default", "free", ["started", "torn down"], -signal.SIGTERM),
-        # A SIGTERM while the startup awaits meets the handler at once and the process survives;
-        # the SIGTERM once serving still meets the handler only after the teardown.
-        ("handler", "held", ["handler", "started", "torn down", "handler", "returned"], 0),
-        # A worker's SIGTERM while the main thread blocks it meets the earlier action at once too:
-        # nothing is left pending on the main thread for its own handler to meet later.
-        ("handler", "masked", ["handler", "started", "torn down", "handler", "returned"], 0),
-        ("default", "masked", [], -signal.SIGTERM),
+        # A SIGTERM while the startup awaits stops the service once the startup has finished: the
+        # teardown runs, then the handler, once.
+        ("handler", "held", ["started", "torn down", "handler", "returned"], 0),
+        # Also when the handler replaces the action as it runs.
+        ("replacing", "held", ["started", "torn down", "handler", "returned"], 0),
+        # So does a worker's SIGTERM while the main thread blocks it.
+        ("handler", "masked", ["started", "torn down", "handler", "returned"], 0),
+        ("default", "masked", ["started", "torn down"], -signal.SIGTERM),
+        # And one that a worker raised before every thread blocked it.
+        ("default", "all blocked", ["started", "torn down"], -signal.SIGTERM),
     ],
 )
 def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
     tmp_path, action, startup, marks, status
 ):
-    """A service whose SIGTERM conversion drops the action that its caller installed: the caller's
-    handler never runs and an ignored signal ends the process, or the teardown does not run. Or a
-    conversion that a SIGTERM during the startup disarms, so the later one meets the handler
-    before the teardown. Or one that sends a worker's SIGTERM again to a main thread that blocks
-    it, so the earlier action waits there."""
+    """A service that stops on SIGTERM without its teardown, or whose stop drops the action that
+    its caller installed: the handler never runs or runs before the teardown, or an ignored signal
+    ends the process. A SIGTERM while the startup awaits is the same stop once the startup has
+    finished, also when a worker raised it while the main thread or every thread blocks it. Met at
+    once, it skips the teardown, waits pending, or leaves a service that serves on and whose
+    handler may have replaced the action that the stop meets."""
     import socket
     import subprocess
 
@@ -839,13 +871,12 @@ def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
         if startup == "held":
             until(starting.exists, "the startup did not begin")
             process.terminate()
-            until(lambda: marked() == ["handler"], "the SIGTERM during the startup met no handler")
-            starting.unlink(missing_ok=True)
-        elif startup == "masked":
+        elif startup != "free":
             until(written.with_suffix(".raised").exists, "the worker raised no SIGTERM")
-            starting.unlink(missing_ok=True)
-        if until(listens, "the service did not start"):  # uvicorn listens once it took the signals
-            process.terminate()
+        starting.unlink(missing_ok=True)
+        serves = until(listens, "the service did not start")  # it listens once it took the signals
+        if serves and (startup == "free" or marked()[:1] == ["handler"]):
+            process.terminate()  # a runner that met the startup's SIGTERM at once serves on
         output, _ = process.communicate(timeout=60)
     finally:
         if process.poll() is None:
