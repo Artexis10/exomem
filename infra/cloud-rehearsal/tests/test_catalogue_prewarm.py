@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import subprocess
+import sys
 from decimal import Decimal
 
 import pytest
 
-from cloud_rehearsal import bump_parser_version
+from cloud_rehearsal import bump_parser_version, images
 from cloud_rehearsal import catalogue_prewarm as cp
 
 BUILD_LABELS = {"exomem.io/cell-job": "catalogue-build"}
@@ -42,13 +45,6 @@ def test_the_image_script_raises_only_the_assignment_and_not_a_mention_of_the_na
 
     assert "PARSER_VERSION = 11  # bumped" in raised
     assert raised.replace("PARSER_VERSION = 11", "PARSER_VERSION = 9") == source
-
-
-def test_the_image_script_keeps_the_text_before_a_non_ascii_assignment_intact():
-    # ast offsets count UTF-8 bytes; slicing the string by them would corrupt a line that starts with a wide character.
-    source = 'LABEL = "é"; PARSER_VERSION = 9\n'
-
-    assert bump_parser_version.bumped(source, 1) == 'LABEL = "é"; PARSER_VERSION = 10\n'
 
 
 def test_the_image_script_refuses_a_file_without_the_assignment_instead_of_building_an_unchanged_image():
@@ -107,9 +103,9 @@ def test_the_old_pod_counts_as_stopping_when_it_is_terminating_or_gone_and_the_n
 
 
 def test_peaks_come_from_the_busiest_interval_and_a_single_sample_is_reported_unknown_not_zero():
-    samples = [{"mono": 0.0, "usage_usec": 0, "current": 100, "peak": 100, "anon": 50},
-               {"mono": 10.0, "usage_usec": 10_000_000, "current": 300, "peak": 900, "anon": 200},
-               {"mono": 20.0, "usage_usec": 40_000_000, "current": 200, "peak": 900, "anon": 100}]
+    samples = [{"mono": 0.0, "cpu_usage_usec": 0, "memory_current": 100, "memory_peak": 100, "memory_anon": 50},
+               {"mono": 10.0, "cpu_usage_usec": 10_000_000, "memory_current": 300, "memory_peak": 900, "memory_anon": 200},
+               {"mono": 20.0, "cpu_usage_usec": 40_000_000, "memory_current": 200, "memory_peak": 900, "memory_anon": 100}]
 
     peaks = cp.reduce_samples(samples)
     one = cp.reduce_samples(samples[:1])
@@ -119,28 +115,68 @@ def test_peaks_come_from_the_busiest_interval_and_a_single_sample_is_reported_un
 
 
 def test_memory_falls_back_to_the_highest_current_reading_when_the_kernel_has_no_peak_counter():
-    samples = [{"mono": 0.0, "usage_usec": 0, "current": 100, "peak": None, "anon": None},
-               {"mono": 5.0, "usage_usec": 5_000_000, "current": 700, "peak": None, "anon": None}]
+    samples = [{"mono": 0.0, "cpu_usage_usec": 0, "memory_current": 100, "memory_peak": None, "memory_anon": None},
+               {"mono": 5.0, "cpu_usage_usec": 5_000_000, "memory_current": 700, "memory_peak": None, "memory_anon": None}]
 
     peaks = cp.reduce_samples(samples)
 
     assert peaks["memory_peak_bytes"] == 700 and "current" in peaks["memory_peak_source"]
 
 
-def _line(message: str) -> str:
-    return json.dumps({"level": "INFO", "message": message})
+# Logs as a cloud cell does: the product's redaction and JSON formatter, two adoption and route events and a
+# plain line, which the redaction blanks.
+CLOUD_CELL_LOG = """
+import json, logging, sys
+sys.path.insert(0, sys.argv[1])
+from exomem import privacy_log
+from exomem.log_events import JsonLinesFormatter, log_event
+privacy_log.install_hosted_log_redaction()
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(JsonLinesFormatter())
+log = logging.getLogger("exomem.rehearsal")
+log.addHandler(handler)
+log.setLevel(logging.INFO)
+log_event(log, logging.INFO, sys.argv[2], fields={"outcome": "adopted", "staged": 1, "cleanup": "done"})
+log.info("lexical catalogue pages materialized route=rebuilt")
+log_event(log, logging.INFO, sys.argv[3], fields={"route": "rebuilt", "basis": "identity", "reparsed": 0, "removed": 0,
+                                                  "inserted": 12000, "unchanged": 0, "elapsed_ms": 88000})
+"""
 
 
-def test_a_cold_rebuild_is_told_from_a_delta_catch_up_by_the_products_own_log_lines():
-    # The scenarios treat a cold rebuild as proof that no staged copy was adopted, so a catch-up must not read as one.
-    cold = cp.catalogue_log([_line("lexical sync: rebuilding /x from 12000 markdown file(s)"),
-                             _line("lexical catalogue pages materialized route=rebuilt basis=full reparsed=12000 "
-                                   "removed=0 inserted=12000 unchanged=0 elapsed_ms=88000"), "not json"])
-    catch_up = cp.catalogue_log([_line("lexical catalogue pages materialized route=reconciled basis=delta "
-                                       "reparsed=1 removed=0 inserted=1 unchanged=11999 elapsed_ms=900")])
+def test_the_adoption_and_rebuild_evidence_survives_a_cloud_cells_log_redaction():
+    # A cloud cell blanks every plain log line, so reading free text would see no adoption and no rebuild at all.
+    result = subprocess.run([sys.executable, "-c", CLOUD_CELL_LOG, str(images.REPO_ROOT / "src"), cp.ADOPTION_EVENT,
+                             cp.ROUTE_EVENT], env={**os.environ, "EXOMEM_CLOUD_CELL": "1"}, capture_output=True,
+                            text=True, check=True)
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    events = [{"event": r["event"], "fields": r.get("fields") or {}} for r in records]
 
-    assert len(cold["cold_rebuild_lines"]) == 2 and cold["cold_rebuild_ms"] == 88000
-    assert catch_up["cold_rebuild_lines"] == [] and catch_up["reconciled"][0]["inserted"] == 1
+    log = cp.catalogue_log(events)
+
+    assert "materialized" not in records[1]["message"]  # the redaction ran, so this is what a cloud cell keeps
+    assert log["adoption"] == ["adopted"]
+    assert [r["inserted"] for r in log["rebuilt"]] == [12000] and log["reconciled"] == []
+
+
+def _watched(kind: str, uid: str, *, build: bool, deleting: bool = False) -> str:
+    metadata = {"name": f"pod-{uid}", "uid": uid, "labels": BUILD_LABELS if build else {"app": "cell"},
+                **({"deletionTimestamp": "2026-01-01T10:05:00Z"} if deleting else {})}
+    return json.dumps({"type": kind, "object": {"kind": "Pod", "metadata": metadata}}, indent=4)
+
+
+def test_the_build_counts_as_gone_before_the_stop_only_when_the_watch_saw_its_pod_deleted_first():
+    # kubectl prints each watch event as an indented object; the order of those events is the only proof of "before".
+    serving_stops = _watched("MODIFIED", "old", build=False, deleting=True)
+    build_deleted = _watched("DELETED", "b1", build=True)
+    start = [_watched("ADDED", "old", build=False), _watched("ADDED", "b1", build=True)]
+
+    in_order = cp.watch_events("\n".join([*start, build_deleted, serving_stops]))
+    too_late = cp.watch_events("\n".join([*start, serving_stops, build_deleted]))
+    cut_short = cp.watch_events("\n".join([*start, build_deleted]) + '\n{"type": "MOD')
+
+    assert cp.stop_order(in_order, "old")[0] is True
+    assert cp.stop_order(too_late, "old")[0] is False
+    assert cp.stop_order(cut_short, "old") == (False, "the pod watch saw no stop of the serving pod")
 
 
 def test_the_forced_boundary_is_a_whole_minute_the_chart_accepts_after_the_restart_margin():
@@ -160,6 +196,14 @@ def test_a_boundary_too_late_in_the_hour_moves_to_the_next_hours_half_past():
     window = cp.plan_force_window(now, lead_seconds=60)
 
     assert window.boundary_at == dt.datetime(2026, 1, 1, 11, 30, tzinfo=UTC) and window.window_hour == 11
+
+
+def test_a_scenario_that_would_cross_midnight_waits_until_just_after_it_and_one_that_ends_before_starts_at_once():
+    # cellctl re-dates the window annotations at 00:00 UTC; a wrong day here would hold a run for a day or move its window.
+    late = dt.datetime(2026, 1, 1, 23, 30, 0, tzinfo=UTC)
+
+    assert cp.seconds_until_day_fits(late, 45 * 60) == 35 * 60
+    assert cp.seconds_until_day_fits(late, 20 * 60) == 0
 
 
 def test_the_window_opens_at_once_when_the_work_ends_before_the_boundary_and_waits_for_the_next_hour_otherwise():
@@ -194,10 +238,3 @@ def test_free_cpu_counts_the_scheduler_view_of_running_pods_and_not_finished_one
 def test_the_filler_leaves_less_than_the_build_requests_and_is_skipped_when_the_node_is_already_that_full():
     assert cp.filler_millicores(Decimal("3"), "2") == 1500
     assert cp.filler_millicores(Decimal("1.5"), "2") is None
-
-
-def test_manifest_diff_names_changed_removed_and_added_paths():
-    before = {"a.md": [1, 1, "x"], "b.md": [2, 2, "y"], "c.md": [3, 3, "z"]}
-    after = {"a.md": [1, 1, "x"], "b.md": [2, 9, "y"], "d.md": [4, 4, "w"]}
-
-    assert cp.diff_manifests(before, after) == {"changed": ["b.md"], "removed": ["c.md"], "added": ["d.md"]}

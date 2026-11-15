@@ -7,12 +7,15 @@ identity (the parser version, raised one step per release), opens the cell's upg
 and watches the cell's namespace until the cell runs the new image:
 
 1. completed build: the idle cell's attempt waits for the running build, the cell adopts the staged
-   catalogue, an edit made after the build is caught up at restart, and no other vault file changes;
+   catalogue, an edit made after the build is caught up at restart, and nothing but the edit changes
+   the vault;
 2. unfinished build: the forced-attempt boundary falls while the build runs, cellctl cancels the build
    before the stop, and the cell rebuilds cold;
 3. insufficient capacity: a filler pod leaves the node too little CPU for the build, the waiting build
    does not defer the idle attempt, and cellctl cancels it before the stop.
 
+The cell's own structured log events (`staged_catalogue_adoption`, `lexical_catalogue_materialized`)
+are the adoption and rebuild evidence; they keep their fields through a cloud cell's log redaction.
 For each scenario the receipt holds the build Job's start, end and outcome, the stop and ready times,
 the build container's CPU and memory peaks and the configured build timeout. The receipt holds counts,
 timings, hashes and the synthetic fixture's invented names; it never holds note contents.
@@ -23,8 +26,9 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
-import re
 import secrets
+import subprocess
+import tempfile
 import time
 import traceback
 from collections.abc import Callable
@@ -45,6 +49,8 @@ from cellctl.manifests import (
 )
 
 from . import substrate as substrate_mod
+from .large_import import SAMPLE_SCRIPT
+from .operator_restore_abort import MCP_PROBE
 from .platform import CLOUD_NAMESPACE, CataloguePrewarm
 from .report import StepFailure
 from .scenarios import _running_ready
@@ -53,13 +59,25 @@ if TYPE_CHECKING:
     from .scenarios import Context
 
 DEFAULT_NOTES = 12000
-SECTIONS_PER_NOTE = 12  # about 4 KiB a note, the size the build time was calibrated on
+# A cold rebuild of more notes would outlast the rehearsal's 10-minute upgrade ready deadline if the build
+# time scales from the default's (an unverified estimate until a run measures it).
+MAX_NOTES = 30000
+SECTIONS_PER_NOTE = 12  # about 4 KiB a note
 # One release per scenario. Substrate takes ascending vMAJOR.MINOR.PATCH tags and the P3 steps that use
 # v0.0.1 to v0.0.4 do not run in this mode.
 RELEASES = ("v0.0.2", "v0.0.3", "v0.0.4")
-SCENARIOS = ("completed_build", "unfinished_build", "insufficient_capacity")
 CELLCTL_DEPLOYMENT = "cellctl"
 STATEFULSET = "cell"  # CellManifestSpec.statefulset_name
+# cellctl's environment contract (infra/helm/platform/templates/cellctl.yaml): the build profile the chart
+# renders, read back rather than assumed, and the window minutes this mode sets.
+TIMEOUT_ENV = "CELLCTL_CATALOGUE_BUILD_TIMEOUT_SECONDS"
+RESOURCES_ENV = "CELLCTL_CATALOGUE_BUILD_RESOURCES"
+FORCE_ENV = "CELLCTL_UPGRADE_WINDOW_FORCE_MINUTES"
+CELLCTL_SETTINGS = ("CELLCTL_CATALOGUE_PREWARM", TIMEOUT_ENV, RESOURCES_ENV, "CELLCTL_UPGRADE_WINDOW_IDLE_MINUTES", FORCE_ENV)
+# The product's cataloged log events and the closed `route` tokens it emits (log_events.EVENT_CATALOG,
+# lexstore._log_catalogue_materialized): protocol names, not a reading of anyone's words.
+ADOPTION_EVENT = "staged_catalogue_adoption"
+ROUTE_EVENT = "lexical_catalogue_materialized"
 DEFER_MARGIN = 35  # idle seconds beyond the idle minutes that cover cellctl's longest wait between passes (30 s)
 SHORT_BUILD_SECONDS = 120  # below this the build can end before the deferral has been observed
 LONG_BUILD_SECONDS = 330  # above this a cold rebuild risks the 10-minute upgrade ready deadline
@@ -67,6 +85,10 @@ WINDOW_BUDGET_SECONDS = LONG_BUILD_SECONDS + 240  # the longest scenario 1 needs
 CAPACITY_BUDGET_SECONDS = 360
 FORCE_RESTART_MARGIN = 120  # cellctl's Recreate rollout after its force minutes change
 WINDOW_OPEN_MARGIN = 5
+DAY_MARGIN = dt.timedelta(minutes=5)  # cellctl re-dates the window annotations after 00:00 UTC; start after it
+# Longer than a scenario's span from opening the window to the new pod's readiness (about 20 minutes, an
+# estimate); it also ends a watch the harness could not stop.
+WATCH_SECONDS = 2700
 POLL_SECONDS = 2.0
 TOUCH_SECONDS = 15.0  # well inside the idle minute, so a touch keeps the cell busy
 BIND_TIMEOUT = 240
@@ -77,8 +99,9 @@ CATCH_UP_SLACK = 150  # seconds beyond the idle minute within which an undeferre
 FILLER_FREE_FRACTION = Decimal("0.75")  # the filler leaves this share of the build's CPU request free
 MAX_LISTED_PATHS = 20
 DEVIATIONS = (
-    "the build's resource profile and timeout are the chart's shipped defaults, and the upgrade window's "
-    "idle and force minutes are the schema's 1-minute floor, so a scenario fits inside one UTC hour",
+    "the build's resource profile and timeout are the chart's values, read back from cellctl's Deployment; "
+    "the upgrade window's idle and force minutes are the schema's 1-minute floor, so a scenario fits inside "
+    "one UTC hour",
     "the cell image's parser version is raised by one per release with a derived image, not by a source "
     "change; a release that changes the parser also changes the embedding drain's key, which adds "
     "background work after each start that a real parser release would add too",
@@ -86,10 +109,12 @@ DEVIATIONS = (
     "annotations cellctl keeps, and parks it twelve hours away between scenarios",
     "scenario 2 reaches the unfinished build through the forced-attempt boundary (`forceMinutes`); the "
     "build timeout path is covered by cellctl's unit tests, and the timeout is recorded, not reached",
-    "peaks come from the build container's cgroup counters sampled with `kubectl exec` about every poll, "
-    "so they are lower bounds; the memory figure is the kernel's peak counter, which includes page cache",
-    "the order of the build's cancellation and the stop is observed at poll precision (a few seconds), "
-    "and Job times have the Kubernetes API's one-second precision",
+    "peaks come from the build container's own cgroup, read with `kubectl exec` about every poll: memory is "
+    "the kernel's high-water mark (`memory.peak`, which includes page cache), or the highest sampled "
+    "`memory.current` where the kernel keeps no peak; CPU is the highest mean rate between two samples, so "
+    "a shorter burst reads lower",
+    "the order of the build pod's deletion and the serving pod's stop comes from one pod watch on the cell's "
+    "namespace, whose events arrive in commit order; Job times have the Kubernetes API's one-second precision",
     "the cell serves no tenant traffic besides the rehearsal's own in-pod MCP calls, which keep it busy "
     "or idle on purpose",
 )
@@ -122,36 +147,6 @@ for index in range(count):
 print(json.dumps({'notes': count, 'bytes': size}))
 """
 
-# Runs inside the cell with its own bearer: one search, or one governed note write.
-MCP = """
-import asyncio, json, os, sys
-import httpx
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-
-async def main():
-    operation, first, second = sys.argv[1], sys.argv[2], sys.argv[3]
-    headers = {"Authorization": "Bearer " + os.environ["EXOMEM_CLOUD_CELL_TOKEN"]}
-    async with httpx.AsyncClient(headers=headers, timeout=120) as http, streamable_http_client(
-        "http://127.0.0.1:8765/mcp", http_client=http
-    ) as streams:
-        async with ClientSession(streams[0], streams[1]) as session:
-            await session.initialize()
-            if operation == "search":
-                result = await session.call_tool("search_memory", {"query": first})
-            else:
-                result = await session.call_tool(
-                    "create_note", {"title": first, "content": second, "unlinked_reason": "A rehearsal note that links nothing."})
-            structured = getattr(result, "structuredContent", None) or getattr(result, "structured_content", None) or {}
-            text = " ".join(getattr(part, "text", "") for part in result.content)
-            error = structured.get("error") if isinstance(structured, dict) else None
-            if getattr(result, "isError", False):
-                error = error or text[:200] or "the tool reported an error"
-            print(json.dumps({"found": first in json.dumps(structured, default=str) or first in text, "error": error}))
-
-asyncio.run(main())
-"""
-
 # Runs inside the cell: its catalogue identity, whether the live catalogue holds it, and the catalogue files.
 FACTS = """
 import json, os
@@ -165,7 +160,18 @@ print(json.dumps({'identity': identity,
                   'files': sorted(entry.name for entry in store.path.parent.glob('.lexical*'))}))
 """
 
-# Runs inside the cell: size, mtime and hash of every vault file, to compare before and after the restart.
+# Runs inside the cell, read-only: whether the live catalogue holds a page for each vault-relative path.
+CATALOGUED = """
+import json, os, sqlite3, sys
+from pathlib import Path
+from exomem import lexstore
+store = lexstore.LexicalStore(Path(os.environ['EXOMEM_VAULT_PATH']))
+conn = sqlite3.connect(store.path.as_uri() + '?mode=ro', uri=True)
+print(json.dumps({path: conn.execute('SELECT 1 FROM pages WHERE path = ?', (path,)).fetchone() is not None
+                  for path in sys.argv[1:]}))
+"""
+
+# Runs inside the cell: size, mtime and hash of every vault file, to compare across the scenario.
 MANIFEST = """
 import hashlib, json, os
 from pathlib import Path
@@ -182,15 +188,27 @@ for directory, _, names in os.walk(root):
 print(json.dumps(files, separators=(',', ':')))
 """
 
-# Runs inside the cell: the log lines that mention the lexical catalogue, from the current pod's log files.
+# Runs inside the cell: the current pod's log events named in argv, oldest first. RotatingFileHandler keeps
+# backups as exomem.log.1 (newest) to exomem.log.N (oldest), so those come first and the live file last.
 LOG = """
-import glob, json, os
+import json, os, sys
 directory = os.environ.get('EXOMEM_LOG_DIR', '/tmp/exomem-logs')
-lines = []
-for path in sorted(glob.glob(os.path.join(directory, 'exomem.log*'))):
-    with open(path, encoding='utf-8', errors='replace') as handle:
-        lines += [line.strip() for line in handle if 'lexical' in line]
-print(json.dumps(lines[-400:]))
+backups = [name for name in os.listdir(directory) if name.startswith('exomem.log.') and name[11:].isdigit()]
+wanted, found = set(sys.argv[1:]), []
+for name in [*sorted(backups, key=lambda name: -int(name[11:])), 'exomem.log']:
+    try:
+        handle = open(os.path.join(directory, name), encoding='utf-8', errors='replace')
+    except OSError:
+        continue
+    with handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and record.get('event') in wanted:
+                found.append({'ts': record.get('ts'), 'event': record['event'], 'fields': record.get('fields') or {}})
+print(json.dumps(found[-400:]))
 """
 
 # Runs inside the cell: the `traffic` block of the readiness answer cellctl reads for its idle rule.
@@ -204,45 +222,6 @@ except urllib.error.HTTPError as refused:  # a cell that is not ready still answ
 print(json.dumps({'traffic': json.loads(body).get('traffic')}))
 """
 
-# Runs inside the build container: its cgroup's CPU time and memory counters (cgroup v2, then v1).
-CGROUP = """
-import json, time
-
-def read(path):
-    try:
-        with open(path) as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-def number(*paths):
-    for path in paths:
-        text = read(path)
-        if text and text.strip().isdigit():
-            return int(text)
-    return None
-
-usage = None
-stat = read('/sys/fs/cgroup/cpu.stat')
-if stat:
-    usage = next((int(line.split()[1]) for line in stat.splitlines() if line.startswith('usage_usec ')), None)
-else:
-    legacy = number('/sys/fs/cgroup/cpuacct/cpuacct.usage')
-    usage = None if legacy is None else legacy // 1000
-anon = None
-memory = read('/sys/fs/cgroup/memory.stat')
-if memory:
-    anon = next((int(line.split()[1]) for line in memory.splitlines() if line.startswith('anon ')), None)
-print(json.dumps({'mono': time.monotonic(), 'usage_usec': usage, 'anon': anon,
-                  'current': number('/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory/memory.usage_in_bytes'),
-                  'peak': number('/sys/fs/cgroup/memory.peak', '/sys/fs/cgroup/memory/memory.max_usage_in_bytes')}))
-"""
-
-# The two messages a cold catalogue rebuild logs and the one a delta catch-up logs are the product's own
-# fixed text (lexstore.py), so this is a check of our own log format, not a reading of anyone's words.
-COLD_PREFIXES = ("lexical sync: rebuilding ", "lexical catch-up declined")
-PAGES_PREFIX = "lexical catalogue pages materialized"
-PAGES_COUNTS = re.compile(r"\b(reparsed|removed|inserted|unchanged|elapsed_ms)=(\d+)")
 STAGED_PREFIX = ".lexical-staged-"  # reserved_paths' staged-copy name, a closed set the product fixes
 
 
@@ -422,17 +401,17 @@ def build_outcome(last: dict[str, Any] | None, vanished_at: dt.datetime | None) 
 
 
 def reduce_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """CPU and memory peaks from cgroup samples. A figure the samples cannot give is None with its reason."""
+    """CPU and memory peaks from the build container's samples. A figure the samples cannot give is None with its reason."""
 
-    cpu = [s for s in samples if s.get("usage_usec") is not None]
+    cpu = [s for s in samples if s.get("cpu_usage_usec") is not None]
     rates = [
-        (b["usage_usec"] - a["usage_usec"]) / 1e6 / (b["mono"] - a["mono"])
+        (b["cpu_usage_usec"] - a["cpu_usage_usec"]) / 1e6 / (b["mono"] - a["mono"])
         for a, b in zip(cpu, cpu[1:], strict=False)
         if b["mono"] > a["mono"]
     ]
-    peaks = [s["peak"] for s in samples if s.get("peak") is not None]
-    current = [s["current"] for s in samples if s.get("current") is not None]
-    anon = [s["anon"] for s in samples if s.get("anon") is not None]
+    peaks = [s["memory_peak"] for s in samples if s.get("memory_peak") is not None]
+    current = [s["memory_current"] for s in samples if s.get("memory_current") is not None]
+    anon = [s["memory_anon"] for s in samples if s.get("memory_anon") is not None]
     span = cpu[-1]["mono"] - cpu[0]["mono"] if len(cpu) > 1 else 0
     unknown = {}
     if not rates:
@@ -442,31 +421,63 @@ def reduce_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "samples": len(samples),
         "cpu_cores_peak": round(max(rates), 2) if rates else None,
-        "cpu_cores_mean": round((cpu[-1]["usage_usec"] - cpu[0]["usage_usec"]) / 1e6 / span, 2) if rates and span else None,
+        "cpu_cores_mean": round((cpu[-1]["cpu_usage_usec"] - cpu[0]["cpu_usage_usec"]) / 1e6 / span, 2) if rates and span else None,
         "memory_peak_bytes": max(peaks) if peaks else max(current) if current else None,
         "memory_peak_source": "memory.peak" if peaks else "memory.current, highest sample" if current else None,
         "anon_peak_bytes": max(anon) if anon else None,
         "unknown": unknown,
-        "kind": "lower bounds from samples of the build container's cgroup, taken with kubectl exec about every poll",
     }
 
 
-def catalogue_log(lines: list[str]) -> dict[str, Any]:
-    """The cold-rebuild and catch-up evidence in a cell's catalogue log lines (JSONL, newest last)."""
+def catalogue_log(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """The adoption outcomes and the catalogue builds in a pod's structured log events, oldest first."""
 
-    cold: list[str] = []
-    pages: list[dict[str, Any]] = []
-    for raw in lines:
+    routes = [e["fields"] for e in events if e["event"] == ROUTE_EVENT]
+    return {
+        "adoption": [e["fields"].get("outcome") for e in events if e["event"] == ADOPTION_EVENT],
+        "rebuilt": [r for r in routes if r.get("route") == "rebuilt"],
+        "reconciled": [r for r in routes if r.get("route") == "reconciled"],
+    }
+
+
+def watch_events(text: str) -> list[dict[str, Any]]:
+    """The pod events of a `--watch --output-watch-events --output=json` stream, in arrival order.
+
+    kubectl prints each event as an indented JSON object; a stream cut inside an object ends at the last whole one.
+    """
+
+    decoder, events, index = json.JSONDecoder(), [], 0
+    while True:
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            return events
         try:
-            message = str(json.loads(raw).get("message", ""))
+            event, index = decoder.raw_decode(text, index)
         except ValueError:
-            continue
-        if message.startswith(COLD_PREFIXES) or (message.startswith(PAGES_PREFIX) and "route=rebuilt" in message):
-            cold.append(message[:240])
-        elif message.startswith(PAGES_PREFIX):
-            pages.append({key: int(value) for key, value in PAGES_COUNTS.findall(message)})
-    elapsed = [int(m.group(1)) for line in cold if (m := re.search(r"\belapsed_ms=(\d+)", line))]
-    return {"cold_rebuild_lines": cold, "cold_rebuild_ms": max(elapsed) if elapsed else None, "reconciled": pages}
+            return events
+        pod = event.get("object") or {}
+        metadata = pod.get("metadata") or {}
+        events.append({"type": event.get("type"), "uid": metadata.get("uid"), "name": metadata.get("name"),
+                       "build": _labels(pod).get(JOB_KIND_LABEL) == JOB_KIND_CATALOGUE_BUILD,
+                       "deleting": bool(metadata.get("deletionTimestamp"))})
+
+
+def stop_order(events: list[dict[str, Any]], old_uid: str | None) -> tuple[bool, str]:
+    """Whether every build pod the watch saw was DELETED before the serving pod's first stopping event.
+
+    Watch events have a total order, so a tie cannot pass; a build pod or stop the watch never saw fails.
+    """
+
+    builds = {e["uid"] for e in events if e["build"]}
+    stop = next((i for i, e in enumerate(events) if e["uid"] == old_uid and (e["deleting"] or e["type"] == "DELETED")), None)
+    deleted = {e["uid"]: i for i, e in enumerate(events) if e["build"] and e["type"] == "DELETED"}
+    if not builds:
+        return False, "the pod watch saw no build pod"
+    if stop is None:
+        return False, "the pod watch saw no stop of the serving pod"
+    late = [uid for uid in builds if deleted.get(uid, len(events)) > stop]
+    return not late, f"{len(late)} of {len(builds)} build pod(s) were not deleted before the serving pod began to stop"
 
 
 def diff_manifests(before: dict[str, list], after: dict[str, list]) -> dict[str, list[str]]:
@@ -477,6 +488,15 @@ def diff_manifests(before: dict[str, list], after: dict[str, list]) -> dict[str,
         "removed": sorted(path for path in before if path not in after),
         "added": sorted(path for path in after if path not in before),
     }
+
+
+def seconds_until_day_fits(now: dt.datetime, span_seconds: float) -> float:
+    """Zero when `span_seconds` from now end before 00:00 UTC, else the wait until just after it."""
+
+    midnight = (now + dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if now + dt.timedelta(seconds=span_seconds) < midnight:
+        return 0.0
+    return (midnight + DAY_MARGIN - now).total_seconds()
 
 
 def seconds_until_window_fits(now: dt.datetime, need_seconds: float, force_minutes: int) -> float:
@@ -544,6 +564,20 @@ def cellctl_setting(deployment: dict[str, Any], name: str) -> str | None:
     return next((e.get("value") for c in containers for e in c.get("env") or [] if e["name"] == name), None)
 
 
+def build_profile(environment: dict[str, str | None]) -> dict[str, Any]:
+    """The build timeout and CPU request cellctl runs with; a value it does not hold is None."""
+
+    try:
+        timeout = int(environment.get(TIMEOUT_ENV) or "")
+    except ValueError:
+        timeout = None
+    try:
+        cpu = str(json.loads(environment.get(RESOURCES_ENV) or "")["requests"]["cpu"])
+    except (ValueError, KeyError, TypeError):
+        cpu = None
+    return {"timeout_seconds": timeout, "cpu_request": cpu}
+
+
 def _iso(moment: dt.datetime | None) -> str | None:
     return moment.isoformat(timespec="seconds") if moment else None
 
@@ -551,11 +585,38 @@ def _iso(moment: dt.datetime | None) -> str | None:
 # --- the run ---
 
 
+class PodWatch:
+    """One `kubectl get pods --watch` stream over the cell's namespace, kept in a file until it is stopped."""
+
+    def __init__(self, container: str, namespace: str) -> None:
+        self.output = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        self.process = subprocess.Popen(
+            ["docker", "exec", container, "kubectl", "get", "pods", "--namespace", namespace, "--watch",
+             "--output-watch-events", "--output=json", f"--request-timeout={WATCH_SECONDS}s"],
+            stdout=self.output, stderr=subprocess.DEVNULL)
+
+    def stop(self) -> dict[str, Any]:
+        ended = self.process.poll()  # a watch that ended by itself may have missed later events
+        if ended is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        self.output.seek(0)
+        events = watch_events(self.output.read())
+        self.output.close()
+        return {"events": events, "ended_by_itself": ended is not None}
+
+
 class Run:
     """One scenario's view of the cell: polls, timeline, checks and the cell's in-pod probes."""
 
-    def __init__(self, ctx: Context, plan: CataloguePlan, record: dict[str, Any], name: str) -> None:
+    def __init__(self, ctx: Context, plan: CataloguePlan, record: dict[str, Any], name: str,
+                 profile: dict[str, Any] | None = None) -> None:
         self.ctx, self.plan, self.name = ctx, plan, name
+        self.profile = profile or {}
         self.cell_id = ctx.b.cell_id or ""
         self.namespace = namespace_name(self.cell_id)
         self.record = record
@@ -573,12 +634,15 @@ class Run:
         self.cancelled_seen: str | None = None
         self.last_touch = 0.0
         self.pinned: str | None = None
+        self.window_hour: dt.datetime | None = None
+        self.pod_watch: PodWatch | None = None
+        self.watched: dict[str, Any] | None = None
         self.unpinned_ticks = 0
         self.ticks = 0
 
     # checks
 
-    def observe(self, name: str, ok: bool, detail: str) -> None:
+    def observe(self, name: str, ok: bool | None, detail: str) -> None:
         """A figure worth reading in the receipt that does not decide the scenario: a failure is recorded, never raised."""
 
         self.record.setdefault("observations", {})[name] = {"ok": ok, "detail": None if ok else detail}
@@ -602,14 +666,11 @@ class Run:
             raise StepFailure(f"{what} exited {result.returncode}: {tail[0][:300]}")
         return json.loads(result.stdout.strip().splitlines()[-1])
 
-    def mcp(self, operation: str, first: str, second: str = "", *, what: str) -> dict[str, Any]:
-        return self.in_cell(MCP, operation, first, second, what=what)
-
     def touch(self) -> bool:
         """One MCP request, which restarts the cell's idle clock. False when the cell cannot answer."""
 
         try:
-            self.mcp("search", "rehearsal touch", what="a touch")
+            self.in_cell(MCP_PROBE, "rehearsal touch", "search", what="a touch")
         except StepFailure:
             return False
         self.last_touch = time.monotonic()
@@ -677,7 +738,7 @@ class Run:
     def _sample(self, build: dict[str, Any]) -> None:
         pod = next(p for p in build["pods"] if p["container_running"])
         result = self.ctx.kubectl("exec", "--namespace", self.namespace, pod["name"], "--container",
-                                  JOB_KIND_CATALOGUE_BUILD, "--", "python3", "-c", CGROUP, check=False)
+                                  JOB_KIND_CATALOGUE_BUILD, "--", "python3", "-c", SAMPLE_SCRIPT, check=False)
         if result.returncode == 0 and result.stdout.strip():
             self.samples.append(json.loads(result.stdout.strip().splitlines()[-1]))
 
@@ -734,7 +795,9 @@ class Run:
                 await asyncio.sleep(wait)
         if not self.touch():
             raise StepFailure(f"scenario {self.name}: the cell could not answer the touch that precedes opening its window")
-        self.pinned = self.annotate_window(dt.datetime.now(dt.UTC).hour if hour is None else hour)
+        now = dt.datetime.now(dt.UTC)
+        self.window_hour = now.replace(minute=0, second=0, microsecond=0)
+        self.pinned = self.annotate_window(now.hour if hour is None else hour)
         self.record["window"] = {"annotation": self.pinned, "pinned_at": _iso(dt.datetime.now(dt.UTC))}
 
     def set_force_minutes(self, minutes: int) -> None:
@@ -756,13 +819,27 @@ class Run:
         return self.in_cell(FACTS, what=what)
 
     def catalogue_log(self) -> dict[str, Any]:
-        return catalogue_log(self.in_cell(LOG, what="the catalogue log read"))
+        """The current pod's adoption and catalogue-build events."""
+
+        log = catalogue_log(self.in_cell(LOG, ADOPTION_EVENT, ROUTE_EVENT, what="the catalogue log read"))
+        self.record["new_pod_catalogue_log"] = log
+        return log
+
+    def watch_pods(self) -> None:
+        self.pod_watch = PodWatch(self.ctx.stack.k3s.container, self.namespace)
+
+    def stop_watch(self) -> dict[str, Any] | None:
+        """The pod watch's events; the first call stops it."""
+
+        if self.pod_watch is not None and self.watched is None:
+            self.watched = self.pod_watch.stop()
+        return self.watched
 
     # evidence
 
     def finish(self) -> dict[str, Any]:
         build = build_outcome(self.last_view, self.vanished_at)
-        build["timeout_seconds"] = self.plan.settings.timeout_seconds
+        build["timeout_seconds"] = self.profile.get("timeout_seconds")
         stop = {
             "hold_started_at": _iso(self.hold_started),
             "old_pod_stop_seen_at": (self.events.get("old_stopping") or {}).get("at"),
@@ -771,15 +848,22 @@ class Run:
         }
         stop["hold_to_ready_seconds"] = _seconds(stop["hold_started_at"], stop["new_pod_ready_at"])
         stop["stop_seen_to_ready_seconds"] = _seconds(stop["old_pod_stop_seen_at"], stop["new_pod_ready_at"])
-        self.record.update({"build": build, "stop": stop, "peaks": reduce_samples(self.samples),
+        ran = self.samples or (self.last_view or {}).get("bound")
+        watched = self.stop_watch()
+        if watched is not None:
+            relevant = [e for e in watched["events"] if e["build"] or e["uid"] == self.old_uid]
+            self.record["pod_watch"] = {"events": len(watched["events"]), "ended_by_itself": watched["ended_by_itself"],
+                                        "build_and_serving_events": relevant[:40]}
+        self.record.update({"build": build, "stop": stop,
+                            "peaks": reduce_samples(self.samples) if ran else {"state": "no build container ran"},
                             "build_annotations": {"outcome": self.outcome_seen, "cancelled": self.cancelled_seen},
                             "polls": self.ticks, "timeline": {k: v["at"] for k, v in self.events.items()}})
         return self.record
 
     def order(self, earlier: str, later: str) -> bool:
-        """The first poll to see `earlier` is not after the first to see `later`; false when either is unseen."""
+        """A poll before the first to see `later` saw `earlier`; false when either is unseen or one poll first saw both."""
 
-        return earlier in self.events and later in self.events and self.events[earlier]["mono"] <= self.events[later]["mono"]
+        return earlier in self.events and later in self.events and self.events[earlier]["mono"] < self.events[later]["mono"]
 
 
 # --- scenarios ---
@@ -790,12 +874,16 @@ def _node_capacity(run: Run) -> dict[str, Any]:
 
     nodes = run.ctx.kube_json("get", "nodes")["items"]
     pods = run.ctx.kube_json("get", "pods", "--all-namespaces")["items"]
-    return {"nodes": len(nodes), "build_cpu_request": run.plan.settings.cpu,
+    return {"nodes": len(nodes), "build_cpu_request": run.profile.get("cpu_request"),
             "free_cpu": float(free_cpu(nodes[0], pods)) if len(nodes) == 1 else None}
 
 
 async def _begin(run: Run, index: int) -> None:
     run.record["phase"] = "release"
+    force = _cellctl_environment(run.ctx)[FORCE_ENV]
+    if force != str(run.plan.settings.force_minutes):
+        raise StepFailure(f"scenario {run.name}: cellctl runs with force minutes {force}, not the mode's "
+                          f"{run.plan.settings.force_minutes}; an earlier scenario did not restore them")
     await run.settle()
     run.park_window()
     run.record["before"] = run.facts("the catalogue facts before the release")
@@ -824,21 +912,27 @@ async def _wait_ready_on_target(run: Run) -> Tick:
         timeout=READY_TIMEOUT, what="the cell to run the target image and be ready")
 
 
-def _common_checks(run: Run, tick: Tick) -> None:
+def _common_checks(run: Run, tick: Tick, *, peaks: bool = True) -> None:
     run.check("cell_runs_the_target_image", tick.row["observed_image"] == run.record["image"])
     run.check("window_stayed_pinned", run.unpinned_ticks == 0, blocking=False,
               said=f"{run.unpinned_ticks} poll(s) saw another window annotation than the one pinned")
-    run.check("peaks_measured", not reduce_samples(run.samples)["unknown"], blocking=False,
-              said=json.dumps(reduce_samples(run.samples)["unknown"]))
+    if peaks:
+        unknown = reduce_samples(run.samples)["unknown"]
+        run.check("peaks_measured", not unknown, blocking=False, said=json.dumps(unknown))
 
 
 def _staged_names(files: list[str]) -> list[str]:
     return [name for name in files if name.startswith(STAGED_PREFIX)]
 
 
+def _manifest(run: Run, when: str) -> dict[str, list]:
+    return run.in_cell(MANIFEST, what=f"the vault manifest {when}")
+
+
 async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     idle_seconds = run.plan.settings.idle_minutes * 60
     await _begin(run, 0)
+    baseline = _manifest(run, "before the window opens")
     await run.open_window(need_seconds=WINDOW_BUDGET_SECONDS)
 
     run.record["phase"] = "build_start"
@@ -874,9 +968,9 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     run.check("build_completed", view.get("state") == "complete", said=f"the build ended as {view.get('state')}")
     seconds = _seconds(view.get("started_at"), view.get("completed_at"))
     shared["build_seconds"] = seconds
-    run.check("build_time_in_range", seconds is not None and SHORT_BUILD_SECONDS <= seconds <= LONG_BUILD_SECONDS,
-              said=f"the build took {seconds} s; it must take {SHORT_BUILD_SECONDS} to {LONG_BUILD_SECONDS} s so "
-                   "scenario 2 can end it unfinished and a cold rebuild stays inside the ready deadline")
+    run.observe("build_time_in_range", seconds is not None and SHORT_BUILD_SECONDS <= seconds <= LONG_BUILD_SECONDS,
+                f"the build took {seconds} s; {SHORT_BUILD_SECONDS} to {LONG_BUILD_SECONDS} s lets scenario 2 end it "
+                "unfinished and keeps a cold rebuild inside the ready deadline")
 
     run.record["phase"] = "evidence_before_stop"
     output = run.ctx.kubectl("logs", "--namespace", run.namespace, f"job/{view.get('job')}", "--tail=2", check=False)
@@ -887,12 +981,15 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     run.check("one_staged_copy_after_the_build", len(copies) == 1, said=f"staged files: {copies}")
     prefix = copies[0].removeprefix(STAGED_PREFIX).split(".")[0]
     run.check("staged_copy_is_a_new_identity", bool(prefix) and not run.record["before"]["identity"].startswith(prefix))
-    before = run.in_cell(MANIFEST, what="the vault manifest before the stop")
+    before_edit = _manifest(run, "before the edit")
     phrase = f"Edited after the build {secrets.token_hex(4)}"
-    edit = run.mcp("create", phrase, f"{phrase}.\n\n## Observations\n\n- [rehearsal] an edit after the build #rehearsal\n",
-                   what="the edit after the build")
+    edit = run.in_cell(MCP_PROBE, phrase, "write", what="the edit after the build")
     run.last_touch = time.monotonic()
-    run.check("edit_after_the_build_written", edit["error"] is None, said=str(edit["error"]))
+    run.check("edit_after_the_build_written", not edit["is_error"], said=json.dumps(edit["result"])[:300])
+    # The edit's own footprint: what it wrote is the only change the vault may show after the restart.
+    footprint = diff_manifests(before_edit, _manifest(run, "after the edit"))
+    run.check("edit_created_one_note", len(footprint["added"]) == 1 and not footprint["removed"],
+              said=json.dumps({key: value[:MAX_LISTED_PATHS] for key, value in footprint.items()}))
 
     run.record["phase"] = "attempt"
     attempt = await run.watch(lambda t: t.attempting, timeout=idle_seconds + CATCH_UP_SLACK + 60,
@@ -901,39 +998,56 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     ready = await _wait_ready_on_target(run)
     _common_checks(run, ready)
     after = _after_restart(run)
-
-    log = run.catalogue_log()
-    run.record["new_pod_catalogue_log"] = log
     run.check("staged_catalogue_is_the_new_identity", after["identity"].startswith(prefix))
     run.check("live_catalogue_holds_the_new_identity", after["live_matches"])
-    run.check("staged_copy_consumed", not _staged_names(after["files"]), said=f"files: {after['files']}")
-    run.check("no_cold_rebuild_after_adoption", not log["cold_rebuild_lines"], said="; ".join(log["cold_rebuild_lines"][:3]))
-    parsed = [c.get("reparsed", 0) + c.get("inserted", 0) for c in log["reconciled"]]
-    limit = max(10, run.plan.notes // 20)
-    run.record["catch_up_parsed_pages"] = parsed
-    run.check("catch_up_parsed_only_the_changes", all(n <= limit for n in parsed), blocking=False,
-              said=f"a catch-up parsed {max(parsed, default=0)} pages; the limit is {limit}")
-    began, found = time.monotonic(), False
-    while not found and time.monotonic() - began < CATCH_UP_TIMEOUT:
-        found = run.mcp("search", phrase, what="the recall of the edit")["found"]
-        if not found:
+
+    run.record["phase"] = "catch_up"
+    note, began, held = footprint["added"][0], time.monotonic(), False
+    while not held and time.monotonic() - began < CATCH_UP_TIMEOUT:
+        run.touch()  # a request lets a lazy catch-up run, as a user's would
+        held = run.in_cell(CATALOGUED, note, what="the live catalogue read")[note]
+        if not held:
             await asyncio.sleep(3)
-    run.record["catch_up_seconds"] = round(time.monotonic() - began, 1) if found else None
-    run.check("edit_after_the_build_recalled", found, said=f"not found within {CATCH_UP_TIMEOUT} s of the restart")
+    run.record["catch_up_seconds"] = round(time.monotonic() - began, 1) if held else None
+    log = run.catalogue_log()
+    run.check("staged_catalogue_adopted", "adopted" in log["adoption"], said=f"the adoption events read {log['adoption']}")
+    run.check("no_full_parse_after_adoption", not log["rebuilt"], said=json.dumps(log["rebuilt"][:3]))
+    run.check("edit_caught_up_in_the_live_catalogue", held,
+              said=f"the live catalogue held no page for the edit {CATCH_UP_TIMEOUT} s after the restart")
+    parsed = [r.get("reparsed", 0) + r.get("inserted", 0) for r in log["reconciled"]]
+    limit = max(10, run.plan.notes // 20)
+    run.observe("catch_up_parsed_only_the_changes", all(n <= limit for n in parsed) if parsed else None,
+                f"catalogue builds parsed {parsed} pages; the limit is {limit}" if parsed
+                else "unknown: the new pod logged no reconciled catalogue build")
     run.check("build_outcome_recorded_succeeded", run.outcome_seen == "succeeded", blocking=False,
               said=f"the outcome annotation read {run.outcome_seen}")
 
     run.record["phase"] = "unrelated_state"
-    changes = diff_manifests(before, run.in_cell(MANIFEST, what="the vault manifest after the restart"))
+    changes = diff_manifests(baseline, _manifest(run, "after the restart"))
+    edited = set(footprint["added"]) | set(footprint["changed"])
+    touched = set(changes["added"]) | set(changes["changed"])
+    unexpected = {"removed": changes["removed"], "beyond_the_edit": sorted(touched - edited),
+                  "edit_lost": sorted(edited - touched)}
     folder = f"/{shared['fixture_folder']}/"
-    seeded = [path for path in [*changes["changed"], *changes["removed"]] if folder in f"/{path}"]
-    run.record["vault_changes"] = {"seeded_notes_changed": len(seeded), "changed": changes["changed"][:MAX_LISTED_PATHS],
-                                   "removed": changes["removed"][:MAX_LISTED_PATHS], "added": changes["added"][:MAX_LISTED_PATHS],
-                                   "counts": {key: len(value) for key, value in changes.items()}}
-    run.check("seeded_notes_unchanged", not seeded, said=f"{len(seeded)} seeded note(s) changed or vanished: {seeded[:3]}")
-    run.observe("vault_gained_only_the_edit", len(changes["added"]) == 1,
-                f"{len(changes['added'])} paths were added: {changes['added'][:MAX_LISTED_PATHS]}")
+    run.record["vault_changes"] = {
+        "files_before": len(baseline), "edit": sorted(edited)[:MAX_LISTED_PATHS],
+        "seeded_notes_changed_or_removed": sum(folder in f"/{path}" for path in [*changes["changed"], *changes["removed"]]),
+        "unexpected": {key: value[:MAX_LISTED_PATHS] for key, value in unexpected.items()},
+        "counts": {key: len(value) for key, value in unexpected.items()}}
+    run.check("vault_changed_only_by_the_edit", not any(unexpected.values()),
+              said=json.dumps(run.record["vault_changes"]["counts"]))
     run.finish()
+
+
+def _restore_force_minutes(run: Run) -> bool:
+    """Put cellctl's force minutes back without raising, so a failed restore never hides the scenario's own failure."""
+
+    try:
+        run.set_force_minutes(run.plan.settings.force_minutes)
+        return True
+    except Exception as error:  # noqa: BLE001 - recorded here; the next scenario refuses to start on the wrong value
+        run.record["force_minutes_restore_failure"] = _where(error)
+        return False
 
 
 async def _unfinished_build(run: Run, shared: dict[str, Any]) -> None:
@@ -952,8 +1066,9 @@ async def _unfinished_build(run: Run, shared: dict[str, Any]) -> None:
     try:
         run.set_force_minutes(window.force_minutes)
         wait = max((window.start_at - dt.datetime.now(dt.UTC)).total_seconds(), 0)
-        run.record["waits"] = [{"for": "the window to open before the forced boundary", "seconds": round(wait)}]
+        run.record.setdefault("waits", []).append({"for": "the window to open before the forced boundary", "seconds": round(wait)})
         await asyncio.sleep(wait)
+        run.watch_pods()
         await run.open_window(need_seconds=0, hour=window.window_hour)
 
         run.record["phase"] = "forced_attempt"
@@ -967,36 +1082,42 @@ async def _unfinished_build(run: Run, shared: dict[str, Any]) -> None:
                        "while the cell was kept busy and the build still ran")
         ready = await _wait_ready_on_target(run)
     finally:
-        run.set_force_minutes(run.plan.settings.force_minutes)
+        restored = _restore_force_minutes(run)
+    if not restored:
+        raise StepFailure(f"scenario unfinished_build: cellctl's force minutes were not restored: "
+                          f"{run.record['force_minutes_restore_failure']}")
     _common_checks(run, ready)
-    _cold_fallback(run, ready)
+    _cold_fallback(run)
     run.finish()
 
 
-def _cold_fallback(run: Run, ready: Tick) -> None:
-    """The checks both cancelled-build scenarios share: the build ended cancelled and gone before the stop,
-    no staged copy was adopted, and the cell rebuilt its catalogue cold."""
+def _cold_fallback(run: Run) -> None:
+    """The checks both cancelled-build scenarios share: the build ended cancelled, its pods were deleted
+    before the stop, and the new pod rebuilt its catalogue cold without adopting a staged copy."""
 
     view = run.last_view or {}
     run.check("build_ended_as_cancelled", view.get("state") in ("running", "waiting") and run.vanished_at is not None,
               said=f"last build state {view.get('state')}, gone {run.vanished_at is not None}")
-    run.check("build_gone_before_the_stop", run.order("build_gone", "old_stopping"),
-              said="a poll saw the old pod stopping while the build Job or its pods still existed")
+    watched = run.stop_watch() or {"events": [], "ended_by_itself": None}
+    gone_first, detail = stop_order(watched["events"], run.old_uid)
+    run.check("build_gone_before_the_stop", gone_first, said=detail)
     run.check("build_outcome_recorded_cancelled", run.outcome_seen == "cancelled", blocking=False,
               said=f"the outcome annotation read {run.outcome_seen}")
     named = view.get("job") in (json.loads(run.cancelled_seen).get("jobs", []) if run.cancelled_seen else [])
     run.check("cancelled_job_recorded", named, blocking=False, said=f"the cancellation record read {run.cancelled_seen}")
     after = _after_restart(run)
-    run.check("no_staged_copy_adopted", not _staged_names(after["files"]), said=f"files: {after['files']}")
     log = run.catalogue_log()
-    run.record["new_pod_catalogue_log"] = log
-    run.check("cold_rebuild_after_cancellation", bool(log["cold_rebuild_lines"]),
-              said="the new pod's log shows no cold rebuild; either the log detector or the fallback failed")
+    run.check("cold_rebuild_after_cancellation", bool(log["adoption"]) and "adopted" not in log["adoption"] and bool(log["rebuilt"]),
+              said=f"adoption events {log['adoption']}, full catalogue builds {len(log['rebuilt'])}")
     run.check("live_catalogue_holds_the_new_identity", after["live_matches"])
 
 
 async def _insufficient_capacity(run: Run, shared: dict[str, Any]) -> None:
     settings, idle_seconds = run.plan.settings, run.plan.settings.idle_minutes * 60
+    request = run.profile.get("cpu_request")
+    if request is None:
+        raise StepFailure(f"scenario insufficient_capacity sizes its filler from the build's CPU request, and "
+                          f"cellctl's {RESOURCES_ENV} could not be read")
     await _begin(run, 2)
     namespace = f"exo-filler-{run.ctx.stack.run_id}"
     try:
@@ -1004,16 +1125,17 @@ async def _insufficient_capacity(run: Run, shared: dict[str, Any]) -> None:
             raise StepFailure(f"scenario insufficient_capacity expects one node, found {run.record['capacity']['nodes']}")
         nodes = run.ctx.kube_json("get", "nodes")["items"]
         free = free_cpu(nodes[0], run.ctx.kube_json("get", "pods", "--all-namespaces")["items"])
-        size = filler_millicores(free, settings.cpu)
+        size = filler_millicores(free, request)
         run.record["capacity"].update({"free_cpu_before_filler": float(free), "filler_millicores": size})
         if size is not None:
             run.record["phase"] = "filler"
             _create_filler(run, namespace, size, run.ctx.images.cell_v1)
         free_after = free_cpu(nodes[0], run.ctx.kube_json("get", "pods", "--all-namespaces")["items"])
         run.record["capacity"]["free_cpu_after_filler"] = float(free_after)
-        run.check("node_cpu_below_the_build_request", free_after < quantity(settings.cpu),
-                  said=f"{free_after} CPU is free against a build request of {settings.cpu}")
+        run.check("node_cpu_below_the_build_request", free_after < quantity(request),
+                  said=f"{free_after} CPU is free against a build request of {request}")
 
+        run.watch_pods()
         await run.open_window(need_seconds=CAPACITY_BUDGET_SECONDS)
         run.record["phase"] = "waiting_build"
         await run.watch(lambda t: any(p["unschedulable"] for p in t.build["pods"]) or t.attempting,
@@ -1032,10 +1154,16 @@ async def _insufficient_capacity(run: Run, shared: dict[str, Any]) -> None:
                   said=f"the attempt began {run.record['idle_to_attempt_seconds']} s after the last request")
         run.check("build_never_bound", not (run.last_view or {}).get("bound"), said="the build was scheduled during the scenario")
         ready = await _wait_ready_on_target(run)
+        # The hour's forced boundary starts the attempt whatever the build does, so the idle rule must win first.
+        # A stop first seen by a poll is later than the attempt's start, so it bounds it from above.
+        began = run.hold_started or _time((run.events.get("old_stopping") or {}).get("at"))
+        force_at = run.window_hour + dt.timedelta(minutes=60 - settings.force_minutes) if run.window_hour else None
+        run.check("attempt_began_before_the_force_boundary", began is not None and force_at is not None and began < force_at,
+                  said=f"the attempt began at {_iso(began)}, the forced boundary is {_iso(force_at)}")
     finally:
         run.ctx.kubectl("delete", "namespace", namespace, "--ignore-not-found", "--wait=false", check=False)
-    _common_checks(run, ready)
-    _cold_fallback(run, ready)
+    _common_checks(run, ready, peaks=False)
+    _cold_fallback(run)
     run.finish()
 
 
@@ -1057,10 +1185,12 @@ def _create_filler(run: Run, namespace: str, millicores: int, image: str) -> Non
     run.ctx.kubectl("wait", "--namespace", namespace, "--for=condition=Ready", "pod/cpu-filler", "--timeout=180s")
 
 
-SCENARIO_RUNNERS = {
-    "completed_build": _completed_build,
-    "unfinished_build": _unfinished_build,
-    "insufficient_capacity": _insufficient_capacity,
+# Each scenario's runner and its longest span from parking the window to the new pod's readiness, which must
+# not cross 00:00 UTC (unverified estimates until a run measures them).
+SCENARIOS: dict[str, tuple[Callable[[Run, dict[str, Any]], Any], int]] = {
+    "completed_build": (_completed_build, 45 * 60),
+    "unfinished_build": (_unfinished_build, 55 * 60),
+    "insufficient_capacity": (_insufficient_capacity, 35 * 60),
 }
 
 
@@ -1083,7 +1213,8 @@ async def _provision(ctx: Context, plan: CataloguePlan, record: dict[str, Any]) 
     began = time.monotonic()
     while True:
         try:
-            if run.mcp("search", sentinel, what="the first recall of the seeded notes")["found"]:
+            reply = run.in_cell(MCP_PROBE, sentinel, "search", what="the first recall of the seeded notes")
+            if sentinel in json.dumps(reply["result"]):
                 break
         except StepFailure:
             pass  # the first search may hold the cell for the whole catalogue sync, past the client's timeout
@@ -1094,13 +1225,16 @@ async def _provision(ctx: Context, plan: CataloguePlan, record: dict[str, Any]) 
     return folder
 
 
-def _configuration(ctx: Context, plan: CataloguePlan) -> dict[str, Any]:
-    """What the cluster holds for the feature, read back from cellctl's Deployment."""
+def _cellctl_environment(ctx: Context) -> dict[str, str | None]:
+    """The feature's settings as cellctl's Deployment holds them."""
 
     deployment = ctx.kube_json("get", "deployment", CELLCTL_DEPLOYMENT, "--namespace", CLOUD_NAMESPACE)
-    names = ("CELLCTL_CATALOGUE_PREWARM", "CELLCTL_CATALOGUE_BUILD_TIMEOUT_SECONDS", "CELLCTL_CATALOGUE_BUILD_RESOURCES",
-             "CELLCTL_UPGRADE_WINDOW_IDLE_MINUTES", "CELLCTL_UPGRADE_WINDOW_FORCE_MINUTES")
-    return {"asked": asdict(plan.settings), "cellctl_environment": {name: cellctl_setting(deployment, name) for name in names}}
+    return {name: cellctl_setting(deployment, name) for name in CELLCTL_SETTINGS}
+
+
+def _configuration(ctx: Context, plan: CataloguePlan) -> dict[str, Any]:
+    environment = _cellctl_environment(ctx)
+    return {"asked": asdict(plan.settings), "cellctl_environment": environment, "build_profile": build_profile(environment)}
 
 
 def _where(error: BaseException) -> str:
@@ -1130,13 +1264,19 @@ async def run_catalogue_prewarm(ctx: Context, plan: CataloguePlan) -> dict:
         record["configuration"] = _configuration(ctx, plan)
         shared: dict[str, Any] = {"fixture_folder": await _provision(ctx, plan, record)}
         save()
-        for name in SCENARIOS:
+        for name, (runner, span) in SCENARIOS.items():
             scenario: dict[str, Any] = {"state": "RUNNING", "phase": "start", "checks": {}}
             record["scenarios"][name] = scenario
             record["phase"] = name
-            run = Run(ctx, plan, scenario, name)
+            save()
+            if wait := seconds_until_day_fits(dt.datetime.now(dt.UTC), span):
+                # cellctl re-dates the window annotations at 00:00 UTC, which would move the pinned window.
+                scenario["waits"] = [{"for": "00:05 UTC, so the scenario does not cross a date change", "seconds": round(wait)}]
+                save()
+                await asyncio.sleep(wait)
+            run = Run(ctx, plan, scenario, name, record["configuration"]["build_profile"])
             try:
-                await SCENARIO_RUNNERS[name](run, shared)
+                await runner(run, shared)
                 scenario["state"] = "PASS" if not run.problems else "PARTIAL"
             except StepFailure as error:
                 scenario["state"] = "FAILED"

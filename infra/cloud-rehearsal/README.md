@@ -226,24 +226,29 @@ Set the workflow inputs `original_fixity_originals` and `original_fixity_mean_ki
 ## Catalogue pre-warm
 
 `--catalogue-prewarm` rehearses `cellctl.cataloguePrewarm` for `warm-cell-catalogue` task 3.1. It runs only on demand, as the `catalogue-prewarm` mode of the `Cloud rehearsal` workflow, after steps 1 and 2.
-It adds a second synthetic tenant, seeds its cell with 12,000 generated notes, and publishes three releases in turn.
+It adds a second synthetic tenant, seeds its cell with 12,000 generated notes by default, and publishes three releases in turn.
 Each release's image holds the same product with the parser version raised by one, so the cell's catalogue identity changes as it does for a release that changes how pages are parsed.
-The platform renders `cataloguePrewarm` with the chart's shipped build timeout and resources, and with the 1-minute floor for the upgrade window's idle and force minutes.
+The platform turns `cataloguePrewarm` on and sets the upgrade window's idle and force minutes to the 1-minute floor.
+The build timeout and resources stay the chart's values. The stage reads them back from cellctl's Deployment, records the timeout and sizes scenario 3's filler pod from the CPU request.
+The stage reads adoption and rebuilds from the cell's structured log events `staged_catalogue_adoption` and `lexical_catalogue_materialized`, which keep their fields through a cloud cell's log redaction.
 
 | Scenario | Precondition the stage sets up | What the stage asserts |
 |---|---|---|
-| Completed build | An idle cell with a running build. The stage keeps the cell busy until the build pod runs, then lets it go idle. | The idle attempt waits for the build. The cell adopts the staged catalogue without a cold rebuild. An edit made after the build is caught up at restart. No other vault file changes. |
-| Unfinished build | A forced-attempt boundary that falls while the build runs. The stage keeps the cell busy so only the boundary can start the attempt. | cellctl cancels the build and removes its pod before the stop. The cell rebuilds cold. |
-| Insufficient capacity | A filler pod that leaves the node less free CPU than the build requests, so the build pod stays unschedulable. | The waiting build does not defer the idle attempt. cellctl cancels it before the stop. The cell rebuilds cold. |
+| Completed build | An idle cell with a running build. The stage keeps the cell busy until the build pod runs, then lets it go idle. | The idle attempt waits for the build. The new pod logs adoption outcome `adopted` and no catalogue build with route `rebuilt`. Its live catalogue holds a page for a note written after the build. The vault manifest (size, mtime and SHA-256 of every file) taken before the window opens differs from the one after the restart only in the paths that the edit wrote. Manifests just before and after the edit measure those paths. |
+| Unfinished build | A forced-attempt boundary that falls while the build runs. The stage keeps the cell busy so only the boundary can start the attempt. | cellctl cancels the build. One pod watch on the cell's namespace shows every build pod deleted before the serving pod begins to stop. The new pod adopts nothing and logs a catalogue build with route `rebuilt`. |
+| Insufficient capacity | A filler pod that leaves the node less free CPU than the build requests, so the build pod stays unschedulable. | The waiting build does not defer the idle attempt, which starts before the hour's forced boundary. The pod watch shows the build pod deleted before the stop. The new pod adopts nothing and logs a catalogue build with route `rebuilt`. |
 
 A scenario whose precondition does not hold fails. It never passes without the proof it was built to give.
 For each scenario the report records the build Job's start, end and outcome, the stop and ready times, the build container's CPU and memory peaks and the configured build timeout.
+Scenario 3's build never runs, so its peaks read "no build container ran".
 `summarize.py` shows them in the job summary.
 The stage's `deviations` list each place where the rehearsal differs from a production upgrade.
 
-Set the workflow input `catalogue_prewarm_notes` to change the vault size. The default build time is calibrated on 12,000 notes of about 4 KiB, and the completed-build scenario fails when the build takes under 120 s (too short to observe the deferral) or over 330 s (a cold rebuild would risk the upgrade's ready deadline).
-A typical run takes about an hour and a half. The unfinished-build scenario waits for a forced boundary between :30 and :59 of a UTC hour, so a run can take up to the 140-minute step limit.
-Avoid starting a run so that it crosses 00:00 UTC, because the window annotation carries a date.
+Set the workflow input `catalogue_prewarm_notes` to change the vault size, from 1 to 30,000 notes.
+The default of 12,000 notes of about 4 KiB aims at a build of 120 to 330 s; no run has measured that yet.
+The completed-build scenario records the build time as an observation. It fails when the build ends before the cell has been idle long enough to show the deferral.
+A run is estimated at about an hour and a half; no run has measured that yet. The unfinished-build scenario waits for a forced boundary between :30 and :59 of a UTC hour.
+cellctl re-dates the window annotations at 00:00 UTC, so a scenario that would cross that time waits until 00:05 UTC. Each wait counts against the 140-minute step limit.
 The stage never gates the node. Until a real run passes all three scenarios, task 3.1 stays open.
 
 ## Report

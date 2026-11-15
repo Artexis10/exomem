@@ -161,10 +161,12 @@ def catalogue_prewarm(report: dict) -> None:
           "| new pod ready | hold to ready s | CPU peak (cores) | memory peak MiB |\n" + "|---" * 12 + "|")
     for name, scenario in (run.get("scenarios") or {}).items():
         build, stop, peaks = scenario.get("build") or {}, scenario.get("stop") or {}, scenario.get("peaks") or {}
-        print(f"| {name} | {scenario.get('state')} | {build.get('outcome', 'unknown')} | {build.get('started_at')} "
-              f"| {build.get('ended_at')} | {build.get('seconds')} | {build.get('timeout_seconds')} | {stop.get('hold_started_at')} "
-              f"| {stop.get('new_pod_ready_at')} | {stop.get('hold_to_ready_seconds')} | {peaks.get('cpu_cores_peak', 'unknown')} "
-              f"| {_mib(peaks.get('memory_peak_bytes'))} |")
+        cells = [scenario.get("state"), build.get("outcome"), build.get("started_at"), build.get("ended_at"),
+                 build.get("seconds"), build.get("timeout_seconds"), stop.get("hold_started_at"),
+                 stop.get("new_pod_ready_at"), stop.get("hold_to_ready_seconds")]
+        # A scenario whose build never ran records that state instead of peaks.
+        figures = [peaks["state"]] * 2 if "state" in peaks else [peaks.get("cpu_cores_peak"), _mib(peaks.get("memory_peak_bytes"))]
+        print(f"| {name} | " + " | ".join("unknown" if cell is None else str(cell) for cell in [*cells, *figures]) + " |")
     for name, scenario in (run.get("scenarios") or {}).items():
         failed = [check for check, passed in (scenario.get("checks") or {}).items() if not passed]
         if scenario.get("failure") or failed:

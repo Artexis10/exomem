@@ -75,16 +75,12 @@ TRANSFER_TOOLS_ENABLED = False
 
 @dataclass(frozen=True)
 class CataloguePrewarm:
-    """The chart's `cellctl.cataloguePrewarm` values for the catalogue-prewarm mode.
-
-    The build profile and timeout are the chart's shipped defaults, so the run measures what a
-    cell gets by turning the feature on. The upgrade window's idle and force minutes are cut to the
-    schema's 1-minute floor so a scenario finishes inside one UTC hour.
+    """The values the catalogue-prewarm mode sets over the chart: the feature on, and the upgrade
+    window's idle and force minutes cut to the schema's 1-minute floor so a scenario finishes inside
+    one UTC hour. The build timeout and resources stay the chart's own; the mode reads them back
+    from cellctl's Deployment.
     """
 
-    timeout_seconds: int = 1800
-    cpu: str = "2"
-    memory: str = "3Gi"
     idle_minutes: int = 1
     force_minutes: int = 1
 
@@ -170,11 +166,6 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
     cellctl["upgradeWindow"] = {"defaultHourStart": upgrade_start, "defaultHourEnd": upgrade_end}
     if (prewarm := config.catalogue_prewarm) is not None:
         cellctl["cataloguePrewarm"] = True
-        cellctl["catalogueBuildTimeoutSeconds"] = prewarm.timeout_seconds
-        cellctl["catalogueBuildResources"] = {
-            "requests": {"cpu": prewarm.cpu, "memory": prewarm.memory},
-            "limits": {"cpu": prewarm.cpu, "memory": prewarm.memory},
-        }
         cellctl["upgradeWindow"] |= {"idleMinutes": prewarm.idle_minutes, "forceMinutes": prewarm.force_minutes}
     values = {
         "cellctl": cellctl,

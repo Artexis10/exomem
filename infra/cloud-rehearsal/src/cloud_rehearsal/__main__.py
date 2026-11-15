@@ -198,8 +198,8 @@ def main(argv: list[str] | None = None) -> int:
             ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps)) if chosen]
         if others:
             parser.error(f"--catalogue-prewarm runs alone; remove {', '.join(others)}")
-        if args.catalogue_prewarm_notes < 1:
-            parser.error("--catalogue-prewarm needs at least one note")
+        if not 1 <= args.catalogue_prewarm_notes <= catalogue_prewarm.MAX_NOTES:
+            parser.error(f"--catalogue-prewarm-notes takes 1 to {catalogue_prewarm.MAX_NOTES} notes")
     if args.command == "local-storage-drill":
         return asyncio.run(drill.run_drill(args))
     if args.command == "k3s-link":
