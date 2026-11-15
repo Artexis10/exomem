@@ -4529,12 +4529,13 @@ def _collect_schema_issues(
     """Run the shipped per-field schema rules field by field, in declared order."""
     value = dict(values)
     for name, spec in schema.fields.items():
-        if spec.required and name not in value:
+        if spec.required and value.get(name) is None:
+            gap = "missing" if name not in value else "null"
             issues.append(
                 _Issue(
                     field=name,
                     code="SCHEMA_REQUIRED_FIELD",
-                    reason=f"required field is missing: {name}",
+                    reason=f"required field is {gap}: {name}",
                     received="null",
                 )
             )

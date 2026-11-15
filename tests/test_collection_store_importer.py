@@ -1346,6 +1346,39 @@ def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(sto
     assert (counts["imported"], counts["duplicates"], counts["rejected"]) == (12, 1, 0)
 
 
+NULL_TAIL_FIELDS = (
+    "  natural_key: [list_id, position]\n  fields:\n"
+    "    list_id: {type: string, required: true}\n    position: {type: integer, required: true}\n"
+    "    title: {type: string}\n"
+)
+NULL_TAIL_MAPPING = {
+    "fields": {"list_id": "list", "position": "position", "title": "title"},
+    "on_invalid": "skip",
+    "coverage": {name: {"classification": None} for name in ("list", "position", "title")},
+}
+
+
+def null_tail_rows(valid_rows=25, null_rows=12):
+    ordered = [{"list": "a", "position": index, "title": f"track {index}"} for index in range(1, valid_rows + 1)]
+    return ordered + [{"list": "a", "position": None, "title": f"loved {index}"} for index in range(null_rows)]
+
+
+def test_a_null_required_key_part_rejects_each_row_and_never_collapses_the_tail(store, monkeypatch):
+    """A null position admitted into the key stores the whole tail as one row and counts the rest as duplicates."""
+    setup(store, ndjson(null_tail_rows()), fields=NULL_TAIL_FIELDS)
+    small(monkeypatch, rows=10)
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    result = status(store, job)
+    assert result["state"] == "complete"
+    assert (result["rows"]["imported"], result["rows"]["rejected"], result["rows"]["duplicates"]) == (25, 12, 0)
+    stored = [values for _, values in typed_storage.collection_values(store.connection, CID)]
+    assert sorted(values["position"] for values in stored) == list(range(1, 26))
+    assert [(entry["row"], entry["code"]) for entry in result["rejections"]] == [
+        (ordinal, "SCHEMA_REQUIRED_FIELD") for ordinal in range(25, 37)
+    ]
+
+
 @pytest.mark.parametrize("change,before,after,refusal", [
     ("boolean", {"distance_m": 1}, {"distance_m": True}, "SCHEMA_FIELD_TYPE"),
     ("integer", {"distance_m": False}, {"distance_m": 0}, None),

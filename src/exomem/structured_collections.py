@@ -946,6 +946,8 @@ class ItemSchema:
         if unknown:
             raise CollectionError("SCHEMA_UNKNOWN_FIELD", f"field is not declared: {unknown[0]}")
         for name, spec in self.fields.items():
+            # A stored row is checked as it was written, so a read or a legacy migration asks for presence only.
+            # The non-null rule for new values lives in `records._collect_schema_issues`.
             if spec.required and name not in value:
                 raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {name}")
             if name in value:
@@ -1646,6 +1648,14 @@ def _parse_item_ref(prefix: str, value: str) -> tuple[str, str] | None:
     return normalized, key
 
 
+def _require_key_component(values: Mapping[str, Any], name: str) -> None:
+    """A natural key is complete only when every component holds a value; `null` is no value."""
+    if name not in values:
+        raise ValueError(f"natural key field is missing: {name}")
+    if values[name] is None:
+        raise ValueError(f"natural key field is null: {name}")
+
+
 def natural_key_serialization(
     schema_version: int,
     fields_in_order: Iterable[str],
@@ -1680,6 +1690,8 @@ def manifest_natural_key(manifest: CollectionManifest, values: Mapping[str, Any]
     schema-version / field-order / field-type triple is assembled here once
     instead of at each call site.
     """
+    for name in manifest.schema.natural_key:
+        _require_key_component(values, name)
     return natural_key_serialization(
         manifest.schema.version,
         manifest.schema.natural_key,
@@ -1709,8 +1721,7 @@ def _ordered_components(manifest: CollectionManifest, values: Mapping[str, Any])
     """The natural key's `(field type, normalised value)` in declared order, as the hashed scheme normalises them."""
     components = []
     for name in manifest.schema.natural_key:
-        if name not in values:
-            raise ValueError(f"natural key field is missing: {name}")
+        _require_key_component(values, name)
         field_type = manifest.schema.fields[name].type
         components.append((field_type, _natural_key_value(values[name], field_type)))
     return components
