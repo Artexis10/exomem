@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -119,13 +120,16 @@ class CanonicalCapturePages:
     snapshots: dict[str, bytes]
     parsed: dict[str, dict]
     frontmatter_free: frozenset[str]
+    store_revision: int | None = None
 
 
-def canonical_pages(root: Path) -> CanonicalCapturePages:
+def canonical_pages(root: Path, *, join_request: bool = True) -> CanonicalCapturePages:
     """Classify raw-lane pages without trusting declarations from bound originals."""
     from .client_artifacts import _expected_companion_paths
+    from .collection_store import connection
     from .governance import companions, raw_protection
     from .preserve import _sidecar_path
+    from .vault_store import mode, read
 
     snapshots: dict[str, bytes] = {}
     parsed: dict[str, dict] = {}
@@ -133,13 +137,50 @@ def canonical_pages(root: Path) -> CanonicalCapturePages:
     errors: set[str] = set()
     edges: dict[str, set[str]] = {}
     types = note_types.Basis(root)
+    store_mode = mode.store_mode_for_reads(root)
+    store_revision = None
 
     def unavailable(_error: object = None) -> None:
         raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical Source lookup is incomplete")
 
+    def parse_page(relative: str, data: bytes) -> None:
+        try:
+            text = data.decode("utf-8")
+            fields, _body, marker = vault.parse_frontmatter(text, strict=True)
+            if marker is None:
+                lines = text.removeprefix("\ufeff").splitlines()
+                # The fixed YAML frontmatter opener cannot become catalog prose.
+                if lines and lines[0] == "---":
+                    errors.add(relative)
+                else:
+                    frontmatter_free.add(relative)
+            else:
+                parsed[relative] = fields
+        except (UnicodeError, RecursionError, vault.FrontmatterError):
+            errors.add(relative)
+
     try:
+        if store_mode:
+            metadata = {}
+            with read.snapshot(root, join_request=join_request) as view:
+                for lane in vault.APPEND_ONLY_KB_SUBPATHS:
+                    prefix = (vault.kb_root(root) / lane).relative_to(root).as_posix() + "/"
+                    lane_metadata = {item.path: item for item in view.pages(prefix) if Path(item.path).suffix.lower() == ".md"}
+                    bodies = view.bodies(lane_metadata)
+                    if bodies.keys() != lane_metadata.keys():
+                        unavailable()
+                    metadata.update(lane_metadata)
+                    snapshots.update(bodies)
+                store_revision = view.revision
+            for relative, data in snapshots.items():
+                meta = metadata[relative]
+                if (not isinstance(data, bytes) or len(data) != meta.size
+                        or hashlib.sha256(data).hexdigest() != meta.sha256):
+                    unavailable()
+                edges[relative] = set()
+                parse_page(relative, data)
         # These are the schema's two canonical raw-material lanes, not vocabulary.
-        for lane in vault.APPEND_ONLY_KB_SUBPATHS:
+        for lane in (() if store_mode else vault.APPEND_ONLY_KB_SUBPATHS):
             directory = vault.kb_root(root) / lane
             try:
                 info = directory.lstat()
@@ -162,17 +203,7 @@ def canonical_pages(root: Path) -> CanonicalCapturePages:
                     try:
                         data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=page.lstat().st_size)
                         snapshots[relative] = data
-                        text = data.decode("utf-8")
-                        fields, _body, marker = vault.parse_frontmatter(text, strict=True)
-                        if marker is None:
-                            lines = text.removeprefix("\ufeff").splitlines()
-                            # The fixed YAML frontmatter opener cannot become catalog prose.
-                            if lines and lines[0] == "---":
-                                errors.add(relative)
-                            else:
-                                frontmatter_free.add(relative)
-                        else:
-                            parsed[relative] = fields
+                        parse_page(relative, data)
                     except (OSError, UnicodeError, RecursionError, vault.PathGuardError, vault.FrontmatterError):
                         errors.add(relative)
 
@@ -207,8 +238,12 @@ def canonical_pages(root: Path) -> CanonicalCapturePages:
                     errors.add(owner)
                     continue
                 try:
-                    data, _guard = vault.read_bounded_guarded_bytes(root, target, limit=size, expected_hash=digest)
-                    if len(data) != size or data != snapshots.get(target):
+                    if store_mode:
+                        data = snapshots[target]
+                    else:
+                        data, _guard = vault.read_bounded_guarded_bytes(root, target, limit=size, expected_hash=digest)
+                    if (len(data) != size or data != snapshots.get(target)
+                            or store_mode and hashlib.sha256(data).hexdigest() != digest):
                         errors.add(owner)
                         continue
                     if governed:
@@ -233,14 +268,15 @@ def canonical_pages(root: Path) -> CanonicalCapturePages:
 
         if canonical & errors:
             unavailable()
-        return CanonicalCapturePages(frozenset(canonical), snapshots, parsed, frozenset(frontmatter_free))
-    except (OSError, UnicodeError, vault.PathGuardError, vault.FrontmatterError, ValidationError):
+        return CanonicalCapturePages(frozenset(canonical), snapshots, parsed, frozenset(frontmatter_free), store_revision)
+    except (OSError, UnicodeError, sqlite3.Error, connection.CollectionStoreError,
+            vault.PathGuardError, vault.FrontmatterError, ValidationError):
         unavailable()
 
 
 def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
     """Scan under the caller's mutation guard; derived state cannot prove absence."""
-    classified = canonical_pages(root)
+    classified = canonical_pages(root, join_request=False)
     canonical, snapshots, parsed, frontmatter_free = classified.canonical, classified.snapshots, classified.parsed, classified.frontmatter_free
     match: tuple[str, str, str] | None = None
     types = note_types.Basis(root)
