@@ -41,7 +41,7 @@ from typing import BinaryIO
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
-from . import local_ingress, private_state
+from . import private_state
 from .governance import principal
 
 #: The `download_url` scheme of a held handle. Never fetched.
@@ -111,6 +111,9 @@ def _bindings() -> tuple[str, ...]:
     bound = principal_binding(principal.effective_principal())
     if bound is not None:
         bindings.append(bound)
+    # Imported here: the tool schema reads this module's limits, and CLI prompt hooks must not load the MCP stack.
+    from . import local_ingress
+
     grant = local_ingress.current_grant()
     if grant is not None and grant.session_id:
         bindings.append(f"mcp-local:{grant.session_id}")

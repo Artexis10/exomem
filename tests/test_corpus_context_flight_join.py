@@ -711,6 +711,11 @@ _DECLARED_UNBOUNDED_JOINS = {
         "self.child.wait",
     ): "enclosed by asyncio.wait_for with the remaining migration/handoff deadline",
     (
+        "service_manager.py",
+        "WorkerRuntime.cleanup_cancellations",
+        "self.child.wait",
+    ): "enclosed by asyncio.wait_for with the remaining downgrade-cleanup deadline",
+    (
         "collection_store/admission.py",
         "_offline_owner",
         "renewer.join",

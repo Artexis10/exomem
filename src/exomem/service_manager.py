@@ -1707,12 +1707,13 @@ class WorkerRuntime:
             return False
         root = Path(vault)
         recorded = state_migration.recorded_descriptor_ids(root) or ()
+        cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
         _, optional = state_migration.partition_state_descriptor_ids(recorded)
+        # Only a recorded format the target lacks needs cleanup; every other upgrade skips the store reads.
+        if cancellation not in optional or cancellation in verified[1]:
+            return False
         required = optional | required_state_compatibility_ids(root) | raw_protection.required_compatibility(root)
         missing = required - verified[1]
-        cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
-        if cancellation not in missing:
-            return False
         if missing != {cancellation}:
             raise ValueError("candidate lacks other required state formats")
         _require_store_schema(root, verified[2])
