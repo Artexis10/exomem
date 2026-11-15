@@ -128,7 +128,7 @@ def test_a_path_that_custody_refuses_is_one_finding_and_a_refused_repair(
 
     With a media store bound, the custody reader refuses a path it cannot hold (a colon, a link)
     by raising, and that used to escape the audit; without one, a `path:line` citation read as
-    a missing file.
+    a missing file. A folder link mid-path once read as a healthy file that a repair accepted.
     """
     config = tmp_path / "media-store.json"
     config.write_text(json.dumps({"vaults": {str(vault.resolve()): {"store": "test-store"}}}))
@@ -137,12 +137,20 @@ def test_a_path_that_custody_refuses_is_one_finding_and_a_refused_repair(
     link = vault / SOURCES / "Other" / "tides.json"
     link.symlink_to(vault / "nowhere.json")
     linked = _card(vault, f"{SOURCES}/Other/linked.md", f"evidence_file: {SOURCES}/Other/tides.json\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "tides.json").write_bytes(b"[1]")
+    (vault / SOURCES / "Other" / "Linked").symlink_to(elsewhere, target_is_directory=True)
+    through = _card(
+        vault, f"{SOURCES}/Other/through.md", f"evidence_file: {SOURCES}/Other/Linked/tides.json\nbinary_size: 3\n"
+    )
     report = _write(vault, f"{SOURCES}/Other/report.pdf", b"%PDF-1.7")
     _card(vault, f"{SOURCES}/Other/cited.md", body=f"See `{report}:3` for the table.\n")
 
     assert {f.path: f.meta["problem"] for f in _drift(vault)} == {
         colon: "unreadable",
         linked: "unreadable",
+        through: "unreadable",
     }
 
     from exomem import commands
@@ -156,6 +164,11 @@ def test_a_path_that_custody_refuses_is_one_finding_and_a_refused_repair(
         commands.op_manage_memory_file(
             vault, operation="reclassify", path=linked,
             artifact_path=f"{SOURCES}/Other/tides.json", reason="repair",
+        )
+    with pytest.raises(ValueError, match="^POINTER_INVALID"):
+        commands.op_manage_memory_file(
+            vault, operation="reclassify", path=through,
+            artifact_path=f"{SOURCES}/Other/Linked/tides.json", reason="repair",
         )
 
 

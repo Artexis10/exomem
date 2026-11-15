@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import stat
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -151,7 +150,8 @@ def withheld_filter(vault_root: Path) -> Callable[[str], bool] | None:
 def locate(vault_root: Path, rel: str, withheld: Callable[[str], bool] | None) -> Located:
     """The state of the bytes at `rel`, with their size when they are present.
 
-    It reads one `lstat`, and the media store's binding only for a path with no file.
+    Custody opens the path without reading a byte, and the media store's binding is read only
+    for a path with no file.
     """
     if canonical_relative(rel) is None:
         return Located(OUTSIDE_VAULT)
@@ -160,15 +160,15 @@ def locate(vault_root: Path, rel: str, withheld: Callable[[str], bool] | None) -
     if withheld is not None and withheld(rel):
         return Located(MISSING)
     try:
-        info = os.lstat(Path(vault_root) / rel)
-    except (FileNotFoundError, NotADirectoryError):
-        return _stored(vault_root, rel)
+        # Custody refuses a link at any depth, a folder and a reserved name, as it does for a read.
+        reserved_paths.inspect_generic_file(vault_root, rel)
+        size = os.lstat(Path(vault_root) / rel).st_size
+    except reserved_paths.ReservedPathLeafError as error:
+        # MISSING is the custody code for an absent name; every other code is a refusal.
+        return _stored(vault_root, rel) if error.code == "MISSING" else Located(UNREADABLE)
     except OSError:
         return Located(UNREADABLE)
-    # Custody never follows a link, and a folder is no file: neither is the card's bytes.
-    if not stat.S_ISREG(info.st_mode):
-        return Located(UNREADABLE)
-    return Located(PRESENT, info.st_size)
+    return Located(PRESENT, size)
 
 
 def _stored(vault_root: Path, rel: str) -> Located:

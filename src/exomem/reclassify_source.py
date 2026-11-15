@@ -364,7 +364,8 @@ def _rewrite_classification(
     front, _, _ = parse_frontmatter(text)
     for key, value in (("source_type", kind), ("domain", domain)):
         if value == _recorded(front, key):
-            continue  # a field the correction leaves as stated keeps its bytes, a list domain included
+            # A field the correction leaves as stated keeps its bytes, a list domain included.
+            continue
         if value is None:
             deletes.append(key)
         else:
@@ -901,7 +902,9 @@ def reclassify(
     history = _history(front)
 
     pointer_changes, pointer_previous = (
-        _plan_pointer(vault_root, rel, front, artifact_path) if artifact_path is not None else ({}, {})
+        _plan_pointer(vault_root, rel, front, artifact_path)
+        if artifact_path is not None
+        else ({}, {})
     )
     previous: dict[str, Any] = {
         "path": rel,
