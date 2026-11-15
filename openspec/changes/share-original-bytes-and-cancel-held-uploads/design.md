@@ -48,6 +48,8 @@ Keep byte transfer and hashing outside the canonical mutation lease. Retain the 
 
 Extend the existing media ledger and reader pins to the resolved object identity. Pins, active jobs, hydration reservations, and eviction checks must include every filing using that object. Index the derived object identity; do not inspect each filing during a request. Canonical bindings remain authoritative, so no independent reference-count database is added.
 
+Keep the existing private identity inventory and generation checks. Use persistent maps for per-object publication and immutable request snapshots. The existing `rpds-py` dependency supplies these maps; declare it directly without adding a database. Warm metadata work must avoid whole-map copies and overlap scans. Startup and recovery retain the existing inventory walk, with their cost reported separately. This adds a direct dependency declaration and small index maintenance inside the current owner boundary.
+
 A read through one filing must prevent eviction initiated through another. Concurrent hydration publishes one verified local object. Shared corruption returns an explicit unavailable or corrupt state and preserves verified recovery copies. It never silently substitutes another version.
 
 Every binding also contributes its residency requirement. Retain the local object if any binding is resident-only or lacks its own usable recovery reference. A Source's remote copy cannot make a separately governed dataset evictable. Maintain this derived eligibility through existing indexed metadata and its invalidation; do not scan filings during eviction.

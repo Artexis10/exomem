@@ -391,6 +391,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "media-jobs-store",
         "procedure-approval-key",
         "procedure-approvals",
+        "original-pool",
         "references-store",
         "refs-store",
         "review-state",
@@ -4858,3 +4859,30 @@ def test_every_generic_command_path_role_routes_every_private_family() -> None:
                 assert hit is not None, (command.name, role.argument, descriptor_id)
                 assert hit.role == role
                 assert hit.classification.descriptor_id == descriptor_id
+
+
+def test_delayed_owner_cleanup_cannot_withdraw_a_replacement_publication(tmp_path: Path) -> None:
+    """Cleanup of a replaced temporary must not make its new private identity readable through an alias."""
+    pool = tmp_path / "Knowledge Base" / reserved_paths.ORIGINAL_POOL_DIRNAME
+    pool.mkdir(parents=True)
+    path = pool / "pending"
+    path.write_bytes(b"earlier stage")
+    previous = reserved_paths._lstat_identity(path)
+    name = path.relative_to(tmp_path).as_posix()
+    with reserved_paths._subsystem_authority_scope("original_pool"):
+        with reserved_paths._identity_coordination_scope(tmp_path, descriptor_ids=("original-pool",)):
+            reserved_paths._publish_owner_identity_delta(tmp_path, "original-pool", put={name: previous}, remove={})
+        replacement = pool / "replacement"
+        replacement.write_bytes(b"new private stage")
+        replacement.replace(path)
+        current = reserved_paths._lstat_identity(path)
+        assert current != previous
+        with reserved_paths._identity_coordination_scope(tmp_path, descriptor_ids=("original-pool",)):
+            reserved_paths._publish_owner_identity_delta(tmp_path, "original-pool", put={name: current}, remove={})
+            reserved_paths._publish_owner_identity_delta(tmp_path, "original-pool", put={}, remove={name: previous})
+    catalogue = reserved_paths._published_identity_catalogue(tmp_path)
+    assert catalogue.descriptor_for(current) == "original-pool"
+    assert catalogue.descriptor_for(previous) is None
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
+        reserved_paths.read_generic_bytes(tmp_path, name)
+    assert refused.value.code == "RESERVED_PATH"

@@ -21,12 +21,14 @@ from collections import ChainMap
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from dataclasses import replace as dataclass_replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from typing import IO, TYPE_CHECKING
+
+from rpds import HashTrieMap, HashTrieSet
 
 from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
@@ -38,6 +40,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 REGISTRY_VERSION = 1
+# The canonical original-storage format fixes this reserved directory name.
+ORIGINAL_POOL_DIRNAME = "_Originals"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
@@ -448,6 +452,10 @@ def _sqlite_family(name: str) -> tuple[str, ...]:
 
 
 _REGISTRY = (
+    InternalStateDescriptor(
+        "original-pool", "original_pool", StatePlacement.VAULT_CANONICAL,
+        trees=(ORIGINAL_POOL_DIRNAME.casefold(),),
+    ),
     InternalStateDescriptor(
         "served-context", "served_context", StatePlacement.EXTERNAL_STATE,
         exact=_sqlite_family(".served-context.sqlite"),
@@ -3210,6 +3218,8 @@ class IdentityCatalogue:
     :func:`revalidate_identity_catalogue_generation` still agrees with it.
     """
     _components: tuple[IdentityCatalogue, ...] = ()
+    _merge_baseline: IdentityCatalogue | None = None
+    _conflicts: HashTrieSet[_IdentityKey] | None = None
 
     @classmethod
     def from_vault(cls, vault_root: Path) -> IdentityCatalogue:
@@ -3331,20 +3341,34 @@ class IdentityCatalogue:
         root = self.vault_root
         if root is None:
             return None
+        reachable: set[str] = set()
         for candidate_descriptor, logical_name in self.published_paths.get(key, ()):
             try:
                 current = _lstat_identity(root / logical_name)
             except (FileNotFoundError, OSError):
                 continue
             if _identity_key(current) == key:
-                return candidate_descriptor
-        return None
+                reachable.add(candidate_descriptor)
+        if len(reachable) > 1:
+            raise RuntimeError("one private filesystem identity maps to multiple owners")
+        return next(iter(reachable), None)
 
 
 _PUBLISHED_IDENTITY_LOCK = threading.RLock()
-_PUBLISHED_OWNER_IDENTITIES: dict[
-    str, dict[str, dict[str, held_fs.StableIdentity]]
-] = {}
+
+
+@dataclass
+class _PublicationIndex:
+    """Immutable publication snapshots with updates proportional to changed names."""
+
+    owners: HashTrieMap = field(default_factory=HashTrieMap)
+    identities: HashTrieMap = field(default_factory=HashTrieMap)
+    paths: HashTrieMap = field(default_factory=HashTrieMap)
+    conflicts: HashTrieSet = field(default_factory=HashTrieSet)
+    baseline: IdentityCatalogue | None = None
+
+
+_PUBLISHED_OWNER_IDENTITIES: dict[str, _PublicationIndex] = {}
 _BASELINE_IDENTITY_CATALOGUES: dict[str, IdentityCatalogue] = {}
 
 
@@ -3728,92 +3752,123 @@ def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
         return _stamp_identity_generation(candidate, generation)
 
 
+def _validate_owner_publication(descriptor_id: str, logical_name: str, identity: held_fs.StableIdentity) -> None:
+    classification = classify_logical(logical_name)
+    if classification.disposition is not PathDisposition.RESERVED or classification.descriptor_id != descriptor_id:
+        raise RuntimeError("private identity publication does not match its descriptor")
+    if identity.kind not in {"file", "directory"} or identity.kind == "file" and identity.link_count != 1:
+        raise RuntimeError("private identity publication is ambiguous")
+
+
+def _publication_conflict(index: _PublicationIndex, key: _IdentityKey) -> None:
+    claims = {owner for owner, _name in index.paths.get(key, ())}
+    baseline = index.baseline
+    if baseline is not None and key in baseline.identities:
+        if baseline.published_paths is None:
+            claims.add(baseline.identities[key])
+        else:
+            claims.update(owner for owner, _name in baseline.published_paths.get(key, ()))
+    index.conflicts = index.conflicts.insert(key) if len(claims) > 1 else index.conflicts.discard(key)
+
+
+def _publication_baseline(index: _PublicationIndex, baseline: IdentityCatalogue | None) -> None:
+    if index.baseline is baseline:
+        return
+    index.baseline = baseline
+    index.conflicts = HashTrieSet()
+    # A startup/recovery inventory is installed once; live deltas inspect only affected keys.
+    for key in index.paths:
+        _publication_conflict(index, key)
+
+
+def _update_owner_publications(
+    index: _PublicationIndex, descriptor_id: str, *,
+    put: Mapping[str, held_fs.StableIdentity], remove: Mapping[str, held_fs.StableIdentity],
+) -> None:
+    current = index.owners.get(descriptor_id, HashTrieMap())
+    affected: set[_IdentityKey] = set()
+
+    def drop(name: str, identity: held_fs.StableIdentity) -> None:
+        key = _identity_key(identity)
+        paths = index.paths.get(key, HashTrieSet()).discard((descriptor_id, name))
+        affected.add(key)
+        if paths:
+            index.paths = index.paths.insert(key, paths)
+            index.identities = index.identities.insert(key, next(iter(paths))[0])
+        else:
+            index.paths = index.paths.discard(key)
+            index.identities = index.identities.discard(key)
+
+    for name, expected in remove.items():
+        if current.get(name) == expected:
+            drop(name, expected)
+            current = current.discard(name)
+    for name, identity in put.items():
+        previous = current.get(name)
+        if previous is not None:
+            drop(name, previous)
+        key = _identity_key(identity)
+        index.paths = index.paths.insert(key, index.paths.get(key, HashTrieSet()).insert((descriptor_id, name)))
+        index.identities = index.identities.insert(key, descriptor_id)
+        current = current.insert(name, identity)
+        affected.add(key)
+    index.owners = index.owners.insert(descriptor_id, current)
+    for key in affected:
+        _publication_conflict(index, key)
+
+
+def _publish_owner_identity_delta(
+    vault_root: Path, descriptor_id: str, *,
+    put: Mapping[str, held_fs.StableIdentity],
+    remove: Mapping[str, held_fs.StableIdentity],
+) -> None:
+    """Publish changed owner names; delayed cleanup cannot remove a replacement's identity."""
+    if not owner_authorized(descriptor_id):
+        raise RuntimeError("private identity publication lacks exact owner authority")
+    if not _identity_coordination_active(vault_root, descriptor_id):
+        raise RuntimeError("private identity publication lacks coordination")
+    for name, identity in put.items():
+        _validate_owner_publication(descriptor_id, name, identity)
+    key = _vault_identity_key(vault_root)
+    with _PUBLISHED_IDENTITY_LOCK:
+        index = _PUBLISHED_OWNER_IDENTITIES.setdefault(key, _PublicationIndex())
+        _publication_baseline(index, _BASELINE_IDENTITY_CATALOGUES.get(key))
+        _update_owner_publications(index, descriptor_id, put=put, remove=remove)
+
+
 def _publish_owner_identities(
     vault_root: Path,
     descriptor_id: str,
     identities: Mapping[str, held_fs.StableIdentity],
 ) -> None:
-    """Atomically replace one owner's published stable-identity set.
-
-    The caller must already hold both its exact opaque owner authority and the
-    cooperative identity boundary.  Logical names are evidence that the
-    identities belong to this descriptor; generic leaves consume only the
-    stable keys and never trust these names as an authorization path.
-    """
-
+    """Replace one owner's whole family; large immutable pools use per-name deltas."""
     if not owner_authorized(descriptor_id):
         raise RuntimeError("private identity publication lacks exact owner authority")
     if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("private identity publication lacks coordination")
-
-    published: dict[str, held_fs.StableIdentity] = {}
-    seen_keys: set[_IdentityKey] = set()
-    for logical_name, identity in identities.items():
-        classification = classify_logical(logical_name)
-        if (
-            classification.disposition is not PathDisposition.RESERVED
-            or classification.descriptor_id != descriptor_id
-        ):
-            raise RuntimeError("private identity publication does not match its descriptor")
-        if identity.kind not in {"file", "directory"} or (
-            identity.kind == "file" and identity.link_count != 1
-        ):
-            raise RuntimeError("private identity publication is ambiguous")
+    seen: set[_IdentityKey] = set()
+    for name, identity in identities.items():
+        _validate_owner_publication(descriptor_id, name, identity)
         key = _identity_key(identity)
-        if key in seen_keys:
+        if key in seen:
             raise RuntimeError("private identity publication is ambiguous")
-        seen_keys.add(key)
-        published[logical_name] = identity
-
+        seen.add(key)
     vault_key = _vault_identity_key(vault_root)
     with _PUBLISHED_IDENTITY_LOCK:
-        owners = _PUBLISHED_OWNER_IDENTITIES.setdefault(vault_key, {})
-        owners[descriptor_id] = published
+        index = _PUBLISHED_OWNER_IDENTITIES.setdefault(vault_key, _PublicationIndex())
+        _publication_baseline(index, _BASELINE_IDENTITY_CATALOGUES.get(vault_key))
+        _update_owner_publications(index, descriptor_id, put=identities,
+                                   remove=index.owners.get(descriptor_id, HashTrieMap()))
 
 
 def _published_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
-    """Return currently reachable identities from process-local publications.
-
-    WAL/SHM and rebuild files can disappear when their last owner handle closes,
-    and their inode/file-id can be reused immediately.  Revalidate each
-    publication at its reserved no-follow spelling before admitting the key to
-    a generic-leaf snapshot; a stale ephemeral identity must never reserve an
-    unrelated later file.
-    """
-
+    """Take a constant-size immutable snapshot; validate names only for encountered keys."""
     vault_key = _vault_identity_key(vault_root)
     with _PUBLISHED_IDENTITY_LOCK:
-        by_descriptor = {
-            descriptor_id: dict(identities)
-            for descriptor_id, identities in _PUBLISHED_OWNER_IDENTITIES.get(
-                vault_key, {}
-            ).items()
-        }
-
-    root = Path(os.path.abspath(vault_root))
-    merged: dict[_IdentityKey, str] = {}
-    published_paths: dict[_IdentityKey, list[tuple[str, str]]] = {}
-    for descriptor_id, identities in by_descriptor.items():
-        for logical_name, expected in identities.items():
-            key = _identity_key(expected)
-            prior = merged.get(key)
-            if prior is not None and prior != descriptor_id:
-                # A link-count-one identity can only move between names over
-                # time. Keep every candidate and let descriptor_for validate
-                # which reserved spelling still owns it now.
-                pass
-            else:
-                merged[key] = descriptor_id
-            published_paths.setdefault(key, []).append(
-                (descriptor_id, logical_name)
-            )
-    return IdentityCatalogue(
-        MappingProxyType(merged),
-        MappingProxyType(
-            {key: tuple(values) for key, values in published_paths.items()}
-        ),
-        root,
-    )
+        index = _PUBLISHED_OWNER_IDENTITIES.setdefault(vault_key, _PublicationIndex())
+        _publication_baseline(index, _BASELINE_IDENTITY_CATALOGUES.get(vault_key))
+        return IdentityCatalogue(index.identities, index.paths, Path(os.path.abspath(vault_root)),
+                                 _merge_baseline=index.baseline, _conflicts=index.conflicts)
 
 
 def _reachable_owner_publications(
@@ -3835,10 +3890,7 @@ def _reachable_owner_publications(
     vault_key = _vault_identity_key(root)
     with _PUBLISHED_IDENTITY_LOCK:
         candidates = dict(
-            _PUBLISHED_OWNER_IDENTITIES.get(vault_key, {}).get(
-                descriptor_id,
-                {},
-            )
+            _PUBLISHED_OWNER_IDENTITIES.get(vault_key, _PublicationIndex()).owners.get(descriptor_id, HashTrieMap())
         )
 
     current: dict[str, held_fs.StableIdentity] = {}
@@ -3877,12 +3929,17 @@ def _merge_identity_catalogues(
             return {catalogue.identities[key]}
         return {descriptor for descriptor, _name in catalogue.published_paths.get(key, ())}
 
-    conflicts: set[_IdentityKey] = set()
-    for index, catalogue in enumerate(components):
-        for prior in components[:index]:
-            for key in catalogue.identities.keys() & prior.identities.keys():
-                if len(claims(catalogue, key) | claims(prior, key)) > 1:
-                    conflicts.add(key)
+    if (len(components) == 2 and components[1]._merge_baseline is components[0]
+            and components[1]._conflicts is not None):
+        # Normal warm reads reuse conflicts maintained with each publication delta.
+        conflicts = components[1]._conflicts
+    else:
+        conflicts = set()
+        for index, catalogue in enumerate(components):
+            for prior in components[:index]:
+                for key in catalogue.identities.keys() & prior.identities.keys():
+                    if len(claims(catalogue, key) | claims(prior, key)) > 1:
+                        conflicts.add(key)
     merged = IdentityCatalogue(
         MappingProxyType(ChainMap(*(catalogue.identities for catalogue in components))),
         _components=components,
