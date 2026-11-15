@@ -690,7 +690,7 @@ def dependency_inputs(root, projections, *, observations=(), limit=512, byte_lim
                                 value = NativeInput(path, native_path, token, slot, "absent")
                             else:
                                 with opened as file:
-                                    version, raw = _read_native(fs, file, min(_read_bound(projection), byte_limit - consumed))
+                                    version, raw = _read_native(fs, file, byte_limit - consumed)
                                 value = NativeInput(path, native_path, token, slot, "present", version, raw)
                         except (held_fs.HeldFsError, OSError):
                             value = NativeInput(path, native_path, token, slot, "unavailable")
@@ -722,6 +722,14 @@ def _read_native(fs, file, bound, *, before=None):
     if file.version() != before:
         raise held_fs.HeldFsError("INPUT_CHANGED", "view changed during observation")
     return before, raw
+
+
+def _read_render(fs, file, *, before=None):
+    """Read a view the store rendered, or its aside or stage copy, whole.
+
+    A kind's parser bound limits untrusted owner edits; the history and summary renderers grow pages
+    past it, so applying it here would strand those pages unpublished."""
+    return _read_native(fs, file, None, before=before)
 
 
 def _open_view(fs, stack, parents, path):

@@ -291,7 +291,7 @@ class PublicationBatch:
                 with result.require() as file:
                     from . import edit_back
 
-                    _, raw = edit_back._read_native(self._fs(), file, edit_back._read_bound(previous))
+                    _, raw = edit_back._read_render(self._fs(), file)
                     digest = _digest(raw)
                 pair = next((pair for pair in pairs if pair[1] == digest), None)
                 if pair is not None:
@@ -361,7 +361,7 @@ class PublicationBatch:
                 with opened.require() as file:
                     from . import edit_back
 
-                    native_version, raw = edit_back._read_native(self._fs(), file, edit_back._read_bound(previous))
+                    native_version, raw = edit_back._read_render(self._fs(), file)
                 digest = _digest(raw)
                 if digest in self.accepted_digests(path, descriptor):
                     # An earlier transaction adopted or preserved these bytes; this install may displace them.
@@ -675,8 +675,7 @@ class PublicationBatch:
                         if plan is not None:
                             from . import edit_back
 
-                            basis = publication.projection or self.captured[publication.path]
-                            version, raw = edit_back._read_native(fs, file, edit_back._read_bound(basis))
+                            version, raw = edit_back._read_render(fs, file)
                             if not plan.native_input(publication.path, None, "offline", raw, version):
                                 raise held_fs.HeldFsError("INPUT_CHANGED", "projection target lacks its admitted native observation")
                         if os.name == "nt":

@@ -15,7 +15,7 @@ from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import mutation_terminal, record_formats, record_history, records
 from exomem import structured_collections as collections
-from exomem.collection_store import chain
+from exomem.collection_store import chain, edit_back
 from exomem.collection_store.preview import preview_store
 from exomem.governance.principal import request_scope
 
@@ -251,6 +251,29 @@ def test_history_pages_are_queued_then_repair_generated_edits(store):
     store.reconcile_views()
     assert (store.root / path).read_text() == content
     assert not store.connection.execute("SELECT 1 FROM held_candidates").fetchone()
+
+
+def test_a_history_page_larger_than_the_item_parser_bound_republishes_after_a_write(store, monkeypatch):
+    """Defect: a write re-read the store's own history page under the item parser bound, so a page that the
+    renderer had grown past that bound stayed pending and never showed the new entry."""
+    create(store)
+    _append(store)
+    for count in range(2, 8):
+        _correct(store, count)
+    store.reconcile_views()
+    store.reconcile_views()
+    path = "Knowledge Base/Records/Work/_history.md"
+    page = store.root / path
+    bound, size = edit_back._read_bound, page.stat().st_size
+    # The renderer grows a history page past its kind's parser bound; model that bound below this page.
+    monkeypatch.setattr(edit_back, "_read_bound", lambda row: size // 2 if row["kind"] == "history" else bound(row))
+
+    _correct(store, 99)
+    store.reconcile_views()
+    store.reconcile_views()
+
+    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?", (path,)).fetchone() == ("current",)
+    assert "correct count to 99" in page.read_text()
 
 
 def test_history_page_partition_grows_only_at_its_tail_and_policy_repairs_old_pages(store, monkeypatch):

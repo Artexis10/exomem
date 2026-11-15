@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .. import origin_bindings, provenance, records
 from .. import structured_collections as collections
-from . import summary, tokens, typed_storage, version_sources
+from . import summary, tokens, typed_storage, version_sources, views
 
 
 @dataclass
@@ -65,8 +65,7 @@ def detach(writer, collection, arguments):
                     if manifest.item_filename and manifest.storage.strategy != "markdown-log"
                     and manifest.view_mode != summary.SUMMARY else {})
         candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"])
-        identity = dict(writer.connection.execute(
-            "SELECT key,value FROM store_meta WHERE key IN ('store_id','instance_id')"))
+        identity = views.store_identity(writer.connection)
     return PreparedBulk(manifest, before, uuid.uuid4().hex[:12], candidates, occupied, identity,
                         _digest, arguments), None
 

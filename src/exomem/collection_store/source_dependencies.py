@@ -12,7 +12,16 @@ from dataclasses import dataclass, field
 from functools import wraps
 
 from .. import record_source_custody, records, source_custody, writer_lease
-from . import bulk_inputs, connection, edit_back, held_sources, record_inputs, version_sources
+from . import (
+    bulk_inputs,
+    connection,
+    edit_back,
+    held_sources,
+    history,
+    record_inputs,
+    version_sources,
+    views,
+)
 
 _REQUEST_SERVER = ContextVar("source_record_request_server", default=None)
 _ACQUISITION_PHASE = ContextVar("source_record_acquisition_phase", default=None)
@@ -197,8 +206,7 @@ class DependencyPlan:
 
     def witnesses(self, writer):
         """Detach only authenticated versions or exact held publications this operation wrote."""
-        identity = dict(writer.connection.execute(
-            "SELECT key,value FROM store_meta WHERE key IN ('store_id','instance_id')"))
+        identity = views.store_identity(writer.connection)
         if identity != {"store_id": self.store_id, "instance_id": self.instance_id}:
             raise connection.CollectionStoreError("COLLECTION_STORE_INPUT_CHANGED", "dependency producer instance changed")
         result = []
@@ -207,7 +215,8 @@ class DependencyPlan:
             "json_extract(value,'$[1]') AS row_version,json_extract(value,'$[2]') AS canonical_ref FROM json_each(?)) "
             "SELECT b.canonical_ref,t.transition_id,t.event_hash,b.auth_effect_ordinal,i.item_key,b.row_version,"
             "v.payload_hash,creation.transition_id "
-            "FROM requested r JOIN items i ON i.collection_id=? AND i.item_key=r.item_key "
+            # CROSS JOIN keeps the request driving: stores keep no planner statistics, which would scan the collection.
+            "FROM requested r CROSS JOIN items i ON i.collection_id=? AND i.item_key=r.item_key "
             "JOIN version_source_bindings b ON b.row_id=i.row_id AND b.row_version=r.row_version AND b.canonical_ref=r.canonical_ref "
             "JOIN txns t ON t.txn_id=b.auth_txn_id "
             "JOIN version_identity v ON v.row_id=b.row_id AND v.row_version=b.row_version "
@@ -312,8 +321,7 @@ def _bulk_plan(writer, prepared, arguments):
     with writer.read_snapshot(mutation=True):
         row, actual, _ = writer._collection(manifest.collection_id, facade_profile="records")
         writer._rows_writable(actual, "bulk_upsert")
-        identity = dict(writer.connection.execute(
-            "SELECT key,value FROM store_meta WHERE key IN ('store_id','instance_id')"))
+        identity = views.store_identity(writer.connection)
         if (identity != prepared.store_identity or writer._container(row) != prepared.before_hash
                 or actual.manifest_version != manifest.manifest_version):
             raise connection.CollectionStoreError("COLLECTION_STORE_INPUT_CHANGED", "bulk candidate basis changed")
@@ -326,28 +334,41 @@ def _bulk_plan(writer, prepared, arguments):
             (json.dumps(requested),)).fetchall())
         if effective:
             targets = [path for _key, _values, _body, path, _before, _source in prepared.plans if path is not None]
-            cursor = writer.connection.execute(
-                "SELECT * FROM projection_state WHERE path IN (SELECT value FROM json_each(?))", (json.dumps(targets),))
-            try:
-                names = [value[0] for value in cursor.description]
-                projections = [dict(zip(names, value, strict=True)) for value in cursor.fetchall()]
-            finally:
-                cursor.close()
-            # Projection kinds belong to the store protocol; the covering index bounds aggregate lookup.
-            cursor = writer.connection.execute(
-                "SELECT * FROM projection_state WHERE collection_id=? AND kind IN ('manifest','summary','log','history') "
-                "ORDER BY kind,path LIMIT 512", (manifest.collection_id,))
-            try:
-                projections.extend(dict(zip(names, value, strict=True)) for value in cursor.fetchall()
-                                   if value[0] not in targets)
-            finally:
-                cursor.close()
+            projections = dependency_window(writer.connection, manifest, targets)
     native = edit_back.dependency_inputs(writer.root, projections)
     for value in native.values:
         if value.raw is not None:
             references.extend(held_sources.raw_facts(value.raw).references)
     return DependencyPlan(str(uuid.uuid4()), identity["store_id"], identity["instance_id"], manifest.collection_id,
         tuple(dict.fromkeys(references)), native, current_references=tuple(dict.fromkeys(current)))
+
+
+def dependency_window(conn, manifest, targets):
+    """The projections a write can displace: its own views, the aggregate views and the two live history pages.
+
+    A numbered history page never changes after it fills, so only the main page and the newest page are read.
+    """
+    main = history.main_path(manifest)
+    cid = manifest.collection_id
+    statements = (
+        ("SELECT * FROM projection_state WHERE path IN (SELECT value FROM json_each(?))", (json.dumps([*targets, main]),)),
+        # The projection schema fixes these aggregate kinds; the dependency-window index bounds each lookup.
+        ("SELECT * FROM projection_state WHERE collection_id=? AND kind IN ('manifest','summary','log')", (cid,)),
+        # Page numbers grow past four digits, so order by length before text to find the newest page.
+        ("SELECT * FROM projection_state WHERE collection_id=? AND kind='history' AND path<>? "
+         "ORDER BY length(path) DESC, path DESC LIMIT 1", (cid, main)),
+    )
+    found = {}
+    for statement, parameters in statements:
+        cursor = conn.execute(statement, parameters)
+        try:
+            names = [value[0] for value in cursor.description]
+            for value in cursor.fetchall():
+                row = dict(zip(names, value, strict=True))
+                found.setdefault(row["path"], row)
+        finally:
+            cursor.close()
+    return list(found.values())
 
 
 def _write_bulk(original, method, collection, arguments):
@@ -457,22 +478,7 @@ def _dependency_rows(writer, candidate):
     targets = [before["view_path"]] if before is not None else []
     if held is not None:
         targets.append(held["view_path"])
-    cursor = writer.connection.execute(
-        "SELECT * FROM projection_state WHERE path IN (SELECT value FROM json_each(?))", (json.dumps(targets),))
-    try:
-        names = [value[0] for value in cursor.description]
-        projections = [dict(zip(names, value, strict=True)) for value in cursor.fetchall()]
-    finally:
-        cursor.close()
-    # The projection schema fixes these aggregate kinds; unrelated item/held rows are never scanned.
-    cursor = writer.connection.execute(
-        "SELECT * FROM projection_state WHERE collection_id=? AND kind IN ('manifest','summary','log','history') "
-        "ORDER BY kind,path LIMIT 512", (manifest.collection_id,))
-    try:
-        projections.extend(dict(zip(names, value, strict=True)) for value in cursor.fetchall()
-                           if value[0] not in targets)
-    finally:
-        cursor.close()
+    projections = dependency_window(writer.connection, manifest, targets)
     return DependencyRows(candidate.store_identity, manifest.collection_id, references, current_references,
                           explicit, tuple(arguments["sources"]), sources_prepared, projections)
 

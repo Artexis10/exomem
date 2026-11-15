@@ -1612,7 +1612,7 @@ class CollectionWriter:
                 if result.error is not None and result.error.code == "MISSING":
                     continue
                 with result.require() as file:
-                    native_version, raw = edit_back._read_native(batch._fs(), file, edit_back._read_bound(previous))
+                    native_version, raw = edit_back._read_render(batch._fs(), file)
                 found = True
                 digest = hashlib.sha256(raw).hexdigest()
                 # Keep token ownership through cleanup, including an editor changing the aside again.
@@ -1628,7 +1628,7 @@ class CollectionWriter:
         result = batch._fs().file(parent, stage_leaf)
         if result.ok:
             with result.require() as file:
-                native_version, raw = edit_back._read_native(batch._fs(), file, edit_back._read_bound(previous))
+                native_version, raw = edit_back._read_render(batch._fs(), file)
                 link_count = file.identity.link_count
             digest = hashlib.sha256(raw).hexdigest()
             ready = descriptor.get("install_ready") or (views.source_pair(previous, "pending")
@@ -1786,7 +1786,7 @@ class CollectionWriter:
                     raw = None
                     if opened.ok:
                         with opened.require() as file:
-                            native_version, raw = edit_back._read_native(batch._fs(), file, edit_back._read_bound(projection))
+                            native_version, raw = edit_back._read_render(batch._fs(), file)
                     elif opened.error.code != "MISSING":
                         raise opened.error
                     digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
