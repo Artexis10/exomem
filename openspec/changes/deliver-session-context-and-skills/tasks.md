@@ -20,6 +20,8 @@
 - [ ] 3.1 From the 1.1 results, choose the start-of-turn delivery for the hook and the server instructions; add the `retrieve-inject-hook` delta before code.
 - [ ] 3.2 Implement and prove it on follow-up turns with real models, including a provider outage and a Codex case.
 
+- [ ] 3.3 Evaluate pick-by-problem routing tables (a note whose rows map a problem to the method or source to use) as a method carrier beside skills; specify before code.
+
 ## 4. Verify and deliver
 
 - [ ] 4.1 Run real-model cases: a skill-shaped task in a client without native skills loads the vault skill before acting; an unrelated task loads none.
