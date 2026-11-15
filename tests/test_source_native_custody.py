@@ -29,7 +29,7 @@ def reserve(custody, data=b"complete payload", **kwargs):
                            expected_size=len(data), **kwargs)
 
 
-def test_root_allocation_works_with_the_windows_parent_access_policy(vault, monkeypatch):
+def test_root_binding_and_observation_use_supported_parent_access(vault, monkeypatch):
     with held_fs.acquire(vault).require() as filesystem:
         implementation = type(filesystem)
     parent = implementation.parent
@@ -49,8 +49,8 @@ def test_root_allocation_works_with_the_windows_parent_access_policy(vault, monk
                 filesystem.write(file, data).require()
                 custody.verified(allocated, file, sha256=hashlib.sha256(data).hexdigest())
         assert custody.observe(allocated.binding_id).matching is True
-        assert custody.cleanup(allocated.binding_id).outcome == "removed"
-        assert not (vault / "private.tmp").exists()
+        assert custody.cleanup(allocated.binding_id).state == "unknown"
+        assert (vault / "private.tmp").read_bytes() == data
 
 
 @pytest.mark.parametrize("late_alias", [False, True])
