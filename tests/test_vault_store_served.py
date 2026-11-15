@@ -885,6 +885,67 @@ def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
     assert (marked(), process.returncode) == (marks, status), output.decode()[-3000:]
 
 
+ENDS_WITHOUT_UVICORNS_SHUTDOWN = """
+import asyncio, sys
+from contextlib import asynccontextmanager
+import uvicorn
+from exomem.server import ExomemFastMCP
+
+ending, marks = sys.argv[1], []
+
+@asynccontextmanager
+async def lifespan(_server):
+    marks.append("started")
+    yield
+    await asyncio.sleep(0.2)  # a teardown that awaits, as the stop drain does
+    marks.append("torn down")
+
+async def main():
+    serving, serve = asyncio.Event(), uvicorn.Server.main_loop
+
+    async def main_loop(server):
+        serving.set()
+        if ending == "the server loop raises":
+            raise RuntimeError("the server loop failed")
+        await serve(server)
+
+    uvicorn.Server.main_loop = main_loop
+    runner = asyncio.create_task(ExomemFastMCP("embedded", lifespan=lifespan).run_http_async(
+        transport="http", host="127.0.0.1", port=0, show_banner=False))
+    if ending == "the caller cancels":
+        await serving.wait()
+        runner.cancel()
+    try:
+        await runner
+    except BaseException as error:
+        marks.append(type(error).__name__)
+    await asyncio.sleep(0.5)  # the caller's event loop lives on
+
+asyncio.run(main())
+print(marks)  # after the loop closed, so a teardown left to that close shows last
+"""
+
+
+@pytest.mark.parametrize(
+    ("ending", "raised"),
+    [("the caller cancels", "CancelledError"), ("the server loop raises", "RuntimeError")],
+)
+def test_an_http_runner_that_ends_without_uvicorns_shutdown_tears_down_before_it_raises(
+    ending, raised
+):
+    """An embedding caller whose awaited runner was cancelled or failed while the teardown has not
+    run: the workers and the writer lease outlive the runner until the event loop closes, or the
+    teardown runs twice."""
+    import subprocess
+
+    finished = subprocess.run(
+        [sys.executable, "-c", ENDS_WITHOUT_UVICORNS_SHUTDOWN, ending],
+        capture_output=True, text=True, timeout=120,
+    )
+    lines = finished.stdout.splitlines()
+    assert lines[-1:] == [repr(["started", "torn down", raised])], finished.stderr[-3000:]
+
+
 def trashed_once(root, rel, body):
     """Where a trashed binary's bytes are now: every file under the trash that holds them."""
     return [

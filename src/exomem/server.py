@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import logging
 import os
 import time
@@ -252,6 +253,8 @@ class ExomemFastMCP(FastMCP):
         kwargs["lifespan"] = _publishing_tool_input_schemas(kwargs.get("lifespan"))
         super().__init__(*args, **kwargs)
         self._http_runner: asyncio.Task | None = None
+        self._app_lifespan: asyncio.Task | None = None
+        self._closing_app_lifespan = False
         self._lifespan_failure: Exception | None = None
 
     async def publish_tool_input_schemas(self) -> None:
@@ -339,8 +342,16 @@ class ExomemFastMCP(FastMCP):
         the teardown at uvicorn's lifespan shutdown. Then uvicorn restores the earlier SIGTERM
         action and sends the signal again, as before. uvicorn only logs a lifespan failure, so a
         runner that survives the signal raises it, as the outer hold did.
+
+        uvicorn skips the app's lifespan shutdown when the runner is cancelled, the server loop
+        raises or a second SIGINT forces the exit. The runner then closes the app's hold itself, so
+        the teardown completes before the runner returns or raises, as under the outer hold. With
+        uvicorn's lifespan "off", the outer hold is the only one, as before.
         """
-        self._http_runner, self._lifespan_failure = asyncio.current_task(), None
+        call = inspect.signature(FastMCP.run_http_async).bind(self, *args, **kwargs).arguments
+        app_lifespan = (call.get("uvicorn_config") or {}).get("lifespan") != "off"
+        self._http_runner = asyncio.current_task() if app_lifespan else None
+        self._closing_app_lifespan, self._lifespan_failure = False, None
         try:
             await super().run_http_async(*args, **kwargs)
         finally:
@@ -353,15 +364,41 @@ class ExomemFastMCP(FastMCP):
         # FastMCP's HTTP runner holds the lifespan from its own task, around uvicorn; the app holds
         # it from uvicorn's lifespan task. Drift: this relies on both FastMCP internals, the private
         # name and the runner's hold from its own task; the served SIGTERM tests fail without them.
-        if asyncio.current_task() is self._http_runner:
-            yield
+        task = asyncio.current_task()
+        if task is self._http_runner:
+            try:
+                yield
+            finally:
+                await self._close_app_lifespan()
             return
+        app_hold = self._http_runner is not None and self._app_lifespan is None
+        if app_hold:
+            self._app_lifespan = task
         try:
             async with super()._lifespan_manager():
-                yield
+                try:
+                    yield
+                except asyncio.CancelledError:
+                    if not (app_hold and self._closing_app_lifespan and task):
+                        raise
+                    task.uncancel()  # the runner's close: the shutdown that uvicorn skipped
         except Exception as failure:
-            self._lifespan_failure = failure
+            if app_hold:
+                self._lifespan_failure = failure
             raise
+        finally:
+            if app_hold:
+                self._app_lifespan = None
+
+    async def _close_app_lifespan(self) -> None:
+        """Run the teardown that uvicorn skipped: the app's hold still waits for uvicorn's lifespan
+        shutdown, so the runner ends that wait and awaits the hold's exit."""
+        holder = self._app_lifespan
+        if holder is None or holder.done():
+            return
+        self._closing_app_lifespan = True
+        holder.cancel()
+        await asyncio.wait({holder})
 
     async def run_stdio_async(
         self,
