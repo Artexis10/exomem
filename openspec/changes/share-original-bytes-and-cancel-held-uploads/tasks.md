@@ -12,10 +12,10 @@ All tasks describe future implementation. This design authorizes no code changes
 
 ## 2. Shared lifetime and governance
 
-- [ ] 2.1 Extend existing pins, residency requirements, reservations, jobs, and eviction selection to indexed physical-object identities. Prove cross-filing reader protection and resident-dataset retention without per-filing queries.
+- [ ] 2.1 Extend existing pins, residency requirements, reservations, jobs, and eviction selection to indexed physical-object identities. Prove the latest owner read sets idle age and every binding's job, read, pin, or drain latch retains bytes, without per-filing queries.
 - [ ] 2.2 Share verified hydration while preserving separate filings and unchanged companion bytes. Prove independent revocation, owner repeat reads, and no granted-content transfer between filings.
 - [ ] 2.3 Extend the existing raw-protected dataset owner/ungranted-reader workflow to shared originals. Exercise warmed owner access, distinct ungranted metadata/query/stream requests, and unchanged original and sidecar hashes.
-- [ ] 2.4 Integrate existing Cloud reference reuse without changing cell prefixes, keys, random names, release ordering, or retained-backup protection. Reuse current provider proof and test only changed binding and lifecycle boundaries.
+- [ ] 2.4 Integrate existing Cloud reference reuse without changing cell prefixes, keys, random names, release ordering, or retained-backup protection. Prove every binding has its own current recovery reference before eviction; retain existing remote accounting units.
 - [ ] 2.5 Document the admission guarantee and existing Cloud resource-oracle limitation. Verify that receipts do not promise global resource noninterference or expose hidden pool identities.
 
 ## 3. Conversion, export, and recovery
@@ -39,7 +39,7 @@ All tasks describe future implementation. This design authorizes no code changes
 
 - [ ] 5.1 Measure metadata paths before and after on the same 100,000-filing fixture and representative shared objects. Verify indexed plans, bounded query counts, and p95 below one second.
 - [ ] 5.2 Measure a maximum cancellation batch beside 10,000 unrelated holds. Verify work depends on submitted handles, not payload size; exercise busy responses and the existing budget alert.
-- [ ] 5.3 Run the combined disposable custody workflow: independent protected and ordinary filings, one object, exact export/restore, and failed-upload cancellation. Report partial or unknown results explicitly.
+- [ ] 5.3 Run the combined disposable custody workflow: independent protected and ordinary filings, one object, exact export/restore, and failed-upload cancellation. Verify drain counts name physical objects and zero proves every binding has local bytes.
 - [ ] 5.4 Run scoped author checks, public privacy validation, strict OpenSpec validation, and the normal completion CI. Obtain one independent adversarial review covering correctness, security, C4/C6, scale, and proof weight.
 - [ ] 5.5 Deliver the approved implementation as one cohesive batch through normal release and installed verification. Keep existing live archives unconverted and preserve explicit live-conversion authority boundaries.
-- [ ] 5.6 After all mandatory work is evidenced, sync canonical specs, archive through the OpenSpec CLI, and validate strictly before and after. Leave optional live conversion or cleanup outside closure claims.
+- [ ] 5.6 After all mandatory work is evidenced and `add-cloud-media-store` archives, sync canonical specs and archive through the OpenSpec CLI. Validate strictly before and after; leave optional live conversion or cleanup outside closure claims.

@@ -52,6 +52,8 @@ A read through one filing must prevent eviction initiated through another. Concu
 
 Every binding also contributes its residency requirement. Retain the local object if any binding is resident-only or lacks its own usable recovery reference. A Source's remote copy cannot make a separately governed dataset evictable. Maintain this derived eligibility through existing indexed metadata and its invalidation; do not scan filings during eviction.
 
+Decide eviction and hydration per physical object across every binding. The latest owner read through any binding sets idle age. A pending or claimed job, access pin, active read, or drain latch on any binding retains the local object. Eviction requires every binding's own current Cloud reference.
+
 ### Physical reuse grants no admission credit
 
 Preserve existing declared-byte allowance admission and full session-held charges. A new filing stages and verifies its supplied bytes on destination storage before a physical pool hit can save allocation. A miss promotes that stage; a hit releases it after the filing commits. Existing logical reuse is not a new filing and keeps its current path.
@@ -78,11 +80,17 @@ Compatibility export writes a separate ordinary-file archive through the existin
 
 Reuse the existing Cloud reference mechanism within one cell and compatible encryption context. Do not introduce a digest-derived object name or a shared bucket namespace. A new protection record keeps its random name; reusing a live version copies its existing reference without another upload.
 
+Local pool membership creates no new Cloud reuse rule. Each binding keeps its own reference and protection custody, even when existing confirmed-live-version reuse gives two bindings the same remote version.
+
 Each filing retains its own authorization and reference. Retiring one reference records its release before removing that reference. Another live filing, protection record, retained backup, or running export must keep the shared version recoverable. Preserve the collection manifest and release-ledger contracts in `cloud-media-collection`.
 
 Cell deletion purges a complete cell prefix. Shared originals must never cross cell prefixes, credentials, or encryption contexts. Running services gain no version-deletion capability; this design does not change deletion grants or retention grace periods.
 
 Keep two storage figures distinct. The owner allowance counts each referenced plaintext version once, including Trash. The provider meter counts physical versions and retained copies within the cell prefix. Unknown census results remain unknown. Releasing one of several references must neither erase usage nor charge the shared version twice.
+
+Report the drain census and evicted count per physical object, with that unit explicit. A drained cell's zero count must still prove every binding has local bytes. Local pool accounting counts each object once; remote reference and provider accounting keep their existing units.
+
+`add-cloud-media-store` remains active through canary and fleet adoption. Add these integration requirements to this change's own capability. Archive this change after `add-cloud-media-store`; modify its requirements only once they are canonical.
 
 The local storage design must resolve logical original addresses through `originals.py`. For store-owned pages, the canonical store decides whether the filing exists; a stale or missing disk projection cannot decide existence. Physical payload reuse must not bypass that boundary.
 

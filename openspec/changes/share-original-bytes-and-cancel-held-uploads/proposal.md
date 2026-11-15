@@ -33,7 +33,7 @@ New archives use the pooled layout. Existing archives keep their layout until th
 - `client-artifact-preservation`: Explicit cancellation of held uploads; preserve truthful per-file outcomes and current logical duplicate behavior.
 - `attachment-source-ingestion`: Separate a filing's logical address from its physical bytes while preserving custody and compatible export.
 
-The existing Cloud collection and original fixity contracts remain binding. Their requirements must change only if the completed design demonstrates a concrete gap.
+The existing Cloud collection and original fixity contracts remain binding. Cloud integration requirements live as additions to `shared-original-storage` while `add-cloud-media-store` remains active. This change archives after `add-cloud-media-store`; it modifies that capability only after its requirements become canonical.
 
 ## Impact
 

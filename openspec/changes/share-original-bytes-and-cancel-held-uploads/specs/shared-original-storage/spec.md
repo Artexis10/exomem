@@ -87,6 +87,30 @@ The system SHALL confirm durable original bytes before committing a filing that 
 - **THEN** eviction retains the local object for the dataset
 - **AND** the Source's recovery reference does not broaden the dataset's offload policy
 
+### Requirement: Shared object eligibility aggregates every binding
+
+Eviction and hydration SHALL decide per physical object over every binding. The latest owner read through any binding SHALL set idle age. A pending or claimed job, access pin, active read, or drain latch on any binding SHALL retain local bytes. Eviction SHALL require every binding's own current usable Cloud reference. Eligibility SHALL use maintained indexed metadata rather than per-binding queries.
+
+#### Scenario: Another binding was read recently
+
+- **WHEN** one binding is idle but an owner recently read another binding of the same object
+- **THEN** eviction uses the latest owner read and retains the object until its idle threshold passes
+
+#### Scenario: Another binding retains the local object
+
+- **WHEN** any binding has a pending or claimed job, access pin, active read, drain latch, or missing current recovery reference
+- **THEN** eviction retains the local object for every binding
+
+### Requirement: Drain results identify physical objects
+
+The drain census and evicted count SHALL report physical objects and explicitly name that unit. A completed drain with zero evicted objects SHALL prove that every binding has its local bytes. Local pool accounting SHALL count each physical object once. Cloud reference and provider accounting SHALL retain their existing units.
+
+#### Scenario: Two bindings share an evicted object
+
+- **WHEN** a drain restores the object needed by two bindings
+- **THEN** its census counts one physical object
+- **AND** completion verifies local bytes through both bindings before reporting zero evicted objects
+
 ### Requirement: Existing archives convert explicitly and remain recoverable
 
 New archives SHALL use the pooled format. Existing archives SHALL retain their layout until an owner with whole-namespace authority requests conversion. Conversion SHALL declare compatibility before relocation, preserve companion bytes and grants, and resume safely across mixed layouts. Retained or re-enrolled compatibility state SHALL prevent unsupported managed downgrade.
@@ -132,7 +156,7 @@ A compatibility export SHALL materialize verified originals at their logical fil
 
 ### Requirement: Shared Cloud originals remain within one cell
 
-Cloud reuse SHALL retain existing per-cell credentials, object prefixes, random object names, encryption, and pinned versions. Reuse SHALL require compatible verified byte identity and encryption context. A new protection record SHALL retain the naming rules of `cloud-media-collection`; reuse of a live version SHALL copy that version's reference without uploading another version. Sharing SHALL NOT cross cells.
+Cloud reuse SHALL retain existing per-cell credentials, object prefixes, random object names, encryption, and pinned versions. Reuse SHALL require compatible verified byte identity and encryption context. A new protection record SHALL retain the naming rules of `cloud-media-collection`; reuse of a live version SHALL copy that version's reference without uploading another version. Each binding SHALL retain its own reference and protection custody. Local pool membership SHALL create no additional remote reuse rule. Sharing SHALL NOT cross cells.
 
 #### Scenario: Matching bytes belong to different cells
 
