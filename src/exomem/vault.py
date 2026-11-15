@@ -30,7 +30,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -56,6 +56,7 @@ from .kbdir import kb_dirname, kb_prefix
 from .log_events import log_event
 
 if TYPE_CHECKING:
+    from .generated_output_plan import GeneratedImagePlan
     from .graph_sync import GraphSyncCheckpoint
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
@@ -2018,6 +2019,7 @@ class _BatchReplaceContext:
     inverse_recheck: Callable[[], None] | None = None
     expected_content_hash: str | None = None
     custody: _ArtifactCustody | None = None
+    custody_factory: Callable[[], _ArtifactCustody | None] | None = None
 
 
 _BATCH_REPLACE_CONTEXT: ContextVar[_BatchReplaceContext | None] = ContextVar(
@@ -2034,13 +2036,14 @@ def _batch_replace_context(
     inverse_recheck: Callable[[], None] | None = None,
     expected_content_hash: str | None = None,
     custody: _ArtifactCustody | None = None,
+    custody_factory: Callable[[], _ArtifactCustody | None] | None = None,
 ) -> Iterator[None]:
     """Carry held-publication inputs without widening the legacy test seam."""
 
     token = _BATCH_REPLACE_CONTEXT.set(
         _BatchReplaceContext(
             vault_root, expected_destination, published_metadata,
-            inverse_recheck, expected_content_hash, custody,
+            inverse_recheck, expected_content_hash, custody, custody_factory,
         )
     )
     try:
@@ -2882,6 +2885,7 @@ class _BatchWorkspace:
         custody: _ArtifactCustody | None = None,
     ) -> PathIdentity:
         context = _BATCH_REPLACE_CONTEXT.get()
+        custody_factory = context.custody_factory if context is not None else None
         inverse_recheck = context.inverse_recheck if context is not None else None
         expected_content_hash = context.expected_content_hash if context is not None else None
         if context is not None:
@@ -2893,7 +2897,7 @@ class _BatchWorkspace:
                 published_metadata = context.published_metadata
             if custody is None:
                 custody = context.custody
-        artifact.requires_installation_witness = custody is not None
+        artifact.requires_installation_witness = custody is not None or custody_factory is not None
         if inverse_recheck is not None:
             inverse_recheck()
         self.recheck()
@@ -2989,6 +2993,8 @@ class _BatchWorkspace:
 
                     def publish_once() -> None:
                         nonlocal published, temporary_witness
+                        attempt_custody = custody_factory() if custody_factory is not None else custody
+                        artifact.requires_installation_witness = attempt_custody is not None
                         temporary_witness = None
                         if inverse_recheck is not None:
                             inverse_recheck()
@@ -2997,8 +3003,8 @@ class _BatchWorkspace:
                             nonlocal temporary_witness
                             if published_metadata is not None:
                                 _apply_held_snapshot_metadata(file, published_metadata)
-                            if custody is not None:
-                                custody.verified(file, artifact.content_hash)
+                            if attempt_custody is not None:
+                                attempt_custody.verified(file, artifact.content_hash)
                             if witnessed:
                                 # Link and rename keep size and mtime, so the installed file
                                 # must still show what the verified copy left in the temporary.
@@ -3006,8 +3012,8 @@ class _BatchWorkspace:
                                 temporary_witness = (temporary.size, temporary.mtime_ns)
 
                         def before_install() -> None:
-                            if custody is not None and custody.before_install is not None:
-                                custody.before_install()
+                            if attempt_custody is not None and attempt_custody.before_install is not None:
+                                attempt_custody.before_install()
                             recheck_publish_precondition()
 
                         def after_install(witness: held_fs.InstallationWitness) -> None:
@@ -3016,8 +3022,8 @@ class _BatchWorkspace:
                             after = witness.after
                             if STAT_GENERATION_TRUSTED:
                                 artifact.installed_generation = (after.size, after.mtime_ns, after.change_time_ns)
-                            if custody is not None and custody.installed is not None:
-                                custody.installed(witness)
+                            if attempt_custody is not None and attempt_custody.installed is not None:
+                                attempt_custody.installed(witness)
 
                         _before_batch_destination_published(
                             final, restoring=published_metadata is not None
@@ -3032,10 +3038,10 @@ class _BatchWorkspace:
                             expected_identity=expected_stable,
                             expected_sha256=expected_content_hash,
                             prepare=prepare_published,
-                            custody=custody.temporary if custody is not None else None,
-                            before_install=before_install if custody is not None or inverse_recheck is not None else None,
-                            after_install=after_install if custody is not None else None,
-                            after_retire=custody.retired if custody is not None else None,
+                            custody=attempt_custody.temporary if attempt_custody is not None else None,
+                            before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
+                            after_install=after_install if attempt_custody is not None else None,
+                            after_retire=attempt_custody.retired if attempt_custody is not None else None,
                         )
                         if (
                             not published.ok
@@ -3510,6 +3516,9 @@ def _restore_bound_source_timestamps(
     before = os.fstat(descriptor)
     if not _same_identity(source.identity, before):
         raise PathGuardError("PATH_GUARD_CHANGED", "batch source changed")
+    if (before.st_atime_ns, before.st_mtime_ns) == (atime_ns, mtime_ns):
+        # Even an unchanged utime moves the native version and invalidates retained installation evidence.
+        return
     if os.utime in getattr(os, "supports_fd", set()):
         os.utime(descriptor, ns=(atime_ns, mtime_ns))
     elif os.utime in getattr(os, "supports_follow_symlinks", set()):
@@ -3675,7 +3684,10 @@ def _reset_restored_timestamps(
             or not _same_identity(expected_identity, info)
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "restored batch artifact changed")
-        if os.utime in getattr(os, "supports_fd", set()):
+        if (info.st_atime_ns, info.st_mtime_ns) == (snapshot.atime_ns, snapshot.mtime_ns):
+            # Preserve exact native versions when snapshot timestamps already match.
+            pass
+        elif os.utime in getattr(os, "supports_fd", set()):
             os.utime(descriptor, ns=(snapshot.atime_ns, snapshot.mtime_ns))
         elif os.name == "nt":
             _set_windows_path_timestamps(
@@ -4856,6 +4868,7 @@ class PlannedWrite:
     guard: PathGuard | None = None
     expected_hash: str | None = None
     ensure_directories: tuple[Path, ...] = ()
+    generated_image: GeneratedImagePlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -5753,7 +5766,8 @@ def batch_atomic_write(
 
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
-            if _payload_custody is not None:
+            writes = list(writes)
+            if _payload_custody is not None or any(write.generated_image is not None for write in writes):
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")
             return store_batch.commit_batch(
@@ -5764,12 +5778,15 @@ def batch_atomic_write(
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
             )
-    with _BATCH_COMMIT_LOCK:
+    with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
                 "defer_graph_completion requires vault_root and post_commit_fanout=False"
             )
         caller_writes = list(writes)
+        from . import generated_output_custody
+
+        _payload_custody = custody_stack.enter_context(generated_output_custody.batch(vault_root, caller_writes, _payload_custody))
         if _prepare is not None:
             from . import vocabulary_gate
 
@@ -6434,7 +6451,7 @@ def _batch_atomic_write_locked(
             with _batch_replace_context(
                 Path(vault_root) if vault_root is not None else None,
                 expected_destination,
-                custody=_payload_custody.publication(writes[index], artifact, False) if _payload_custody is not None else None,
+                custody_factory=functools.partial(_payload_custody.publication, writes[index], artifact, False) if _payload_custody is not None else None,
             ):
                 try:
                     installed_identity = workspace.replace_artifact(artifact, final)
@@ -6561,7 +6578,7 @@ def _batch_atomic_write_locked(
                         snapshot,
                         inverse_recheck=recheck_inverse,
                         expected_content_hash=final_guard.content_hash,
-                        custody=_payload_custody.publication(writes[replaced_index], restore, True) if _payload_custody is not None else None,
+                        custody_factory=functools.partial(_payload_custody.publication, writes[replaced_index], restore, True) if _payload_custody is not None else None,
                     ):
                         restored_identity = workspace.replace_artifact(restore, final)
                     _BatchArtifactGuard.capture(

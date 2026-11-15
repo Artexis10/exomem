@@ -156,3 +156,174 @@ def test_equal_byte_change_while_loading_map_preserves_uncertainty(installed, mo
     assert before.current is None and before.mapping.after.fragments == ()
     assert before.mapping.unknown_through_epoch == before.checkpoint
     assert before.binding.current.copy_id == copy.canonical.copy_id
+
+
+def test_auxiliary_replay_binds_ownership_even_when_output_bytes_are_equal(installed):
+    from exomem import relation_review
+
+    store, native, _, path, _ = installed
+    text, guard = vault_module.read_guarded_text(store.root, path)
+    before = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+    current_plan = generated_output_plan.seal(before, content=text, rendered=before.mapping)
+    current = vault_module.PlannedWrite(path, text, guard=guard, generated_image=current_plan)
+    reference = generated_fragments.SourceRef(f"exomem://memory/{uuid.UUID(int=43)}")
+    other_map = generated_fragments._Image(text).own(reference).plan(before.mapping.before_sha256)
+    different_plan = generated_output_plan.seal(before, content=text, rendered=other_map)
+    different = vault_module.PlannedWrite(path, text, guard=guard, generated_image=different_plan)
+    assert relation_review._auxiliary_hash((current,), store.root) != relation_review._auxiliary_hash((different,), store.root)
+    assert relation_review._all_auxiliaries_match((current,), store.root)
+    assert not relation_review._all_auxiliaries_match((different,), store.root)
+    detached, = relation_review._detach_auxiliaries(store.root, (current,), primary="primary.md", artifact="record.json")
+    assert detached.generated_image is current_plan
+    assert detached.generated_image.fingerprint == current_plan.fingerprint
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_common_batch_publishes_equal_bytes_with_new_ownership_and_fresh_inverse(installed, monkeypatch, rollback):
+    """Equal hashes cannot preserve a displaced map or reuse the old allocation during rollback."""
+    store, native, old, path, old_reference = installed
+    text, guard = vault_module.read_guarded_text(store.root, path)
+    before = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+    reference = generated_fragments.SourceRef(f"exomem://memory/{uuid.UUID(int=44)}")
+    rendered = generated_fragments._Image(text).own(reference).plan(before.mapping.before_sha256)
+    plan = generated_output_plan.seal(before, content=text, rendered=rendered)
+    write = vault_module.PlannedWrite(path, text, guard=guard, generated_image=plan)
+    published = []
+
+    def after_install(target):
+        if target == path:
+            current = native.lookup(limit=128).reservations
+            candidates = [copy for copy in current if copy.destination_relative == path.name
+                          and native.observe(copy.binding_id, destination=True).matching is True]
+            assert len(candidates) == 1
+            published.append(candidates[0])
+            if rollback:
+                raise RuntimeError("parent operation failed")
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", after_install)
+    if rollback:
+        with pytest.raises(RuntimeError, match="parent operation failed"):
+            vault_module.batch_atomic_write([write], vault_root=store.root, post_commit_fanout=False)
+    else:
+        vault_module.batch_atomic_write([write], vault_root=store.root, post_commit_fanout=False)
+    text, guard = vault_module.read_guarded_text(store.root, path)
+    final = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+    assert text == "A retained café entry.\r\n"
+    assert final.current is not None and final.binding.slot.pending is None
+    assert final.current.canonical.copy_id != old.canonical.copy_id
+    assert {item.source_ref for item in final.mapping.after.fragments} == {old_reference.value if rollback else reference.value}
+    assert store.copy_record(old.canonical.copy_id).value.outcome == "retired"
+    assert len(published) == 1
+    if rollback:
+        assert final.current.canonical.copy_id != published[0].generated_copy_id
+        assert store.copy_record(published[0].generated_copy_id).value.outcome == "retired"
+    else:
+        assert final.current.canonical.copy_id == published[0].generated_copy_id
+    assert native.observe(final.current.native.binding_id, destination=True).matching is True
+
+
+def test_native_retry_uses_a_fresh_candidate_and_closes_the_refused_copy(installed, monkeypatch):
+    """A sharing refusal must not rebind a closed candidate to the retry's new allocation."""
+    store, native, old, path, _ = installed
+    text, guard = vault_module.read_guarded_text(store.root, path)
+    before = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+    reference = generated_fragments.SourceRef(f"exomem://memory/{uuid.UUID(int=45)}")
+    plan = generated_output_plan.seal(before, content=text,
+        rendered=generated_fragments._Image(text).own(reference).plan(before.mapping.before_sha256))
+    with held_fs.acquire(store.root).require() as filesystem:
+        backend = type(filesystem)
+    rename = backend.rename
+    refused = []
+
+    def refuse_first(filesystem, source, parent, leaf, **options):
+        if leaf == path.name and not refused:
+            binding = store.read_slot(owner=old.canonical.owner.owner, locator=old.canonical.owner.locator,
+                                      physical_scope=native.physical_scope)
+            refused.append(binding.candidate)
+            return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "transient sharing refusal",
+                                                               cause=PermissionError("sharing refusal")))
+        return rename(filesystem, source, parent, leaf, **options)
+
+    def retry_once(publish, *, recheck):
+        # Exercise the existing retry seam on this host; native Windows qualification remains separate.
+        try:
+            publish()
+        except PermissionError:
+            recheck()
+            publish()
+
+    monkeypatch.setattr(backend, "rename", refuse_first)
+    monkeypatch.setattr(vault_module, "replace_tolerating_transient_sharing", retry_once)
+    write = vault_module.PlannedWrite(path, text, guard=guard, generated_image=plan)
+    vault_module.batch_atomic_write([write], vault_root=store.root, post_commit_fanout=False)
+    current = store.read_slot(owner=old.canonical.owner.owner, locator=old.canonical.owner.locator,
+                              physical_scope=native.physical_scope)
+    assert len(refused) == 1 and store.copy_record(refused[0].copy_id).value.closed
+    assert current.slot.pending is None and current.current.copy_id != refused[0].copy_id
+    assert current.current.owner.version != refused[0].owner.version
+    observed = native.observe(current.current.owner.version, destination=True)
+    assert observed.matching is True and observed.state == "installed"
+    text, guard = vault_module.read_guarded_text(store.root, path)
+    final = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+    assert {item.source_ref for item in final.mapping.after.fragments} == {reference.value}
+
+
+def test_new_generated_destination_rollback_retires_its_copy_and_settles_absence(installed, monkeypatch):
+    store, native, _, _, _ = installed
+    path = store.root / "fresh-log.md"
+    guard = vault_module.PathGuard.capture(store.root, path.name, leaf_policy="absent")
+    before = generated_output_plan.read_before(store, native, path=path, text="", guard=guard)
+    reference = generated_fragments.SourceRef(f"exomem://memory/{uuid.UUID(int=46)}")
+    text = "A fresh generated entry.\r\n"
+    plan = generated_output_plan.seal(before, content=text,
+        rendered=generated_fragments._Image(text).own(reference).plan(before.mapping.before_sha256))
+    installed_copy = []
+
+    def fail_after_install(target):
+        if target == path:
+            binding = store.read_slot(owner=source_native_custody.OWNER,
+                locator=generated.file_locator(before.catalogue_id, path.name), physical_scope=native.physical_scope)
+            installed_copy.append(binding.candidate)
+            raise RuntimeError("parent operation failed")
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", fail_after_install)
+    write = vault_module.PlannedWrite(path, text, guard=guard, create_only=True, generated_image=plan)
+    with pytest.raises(RuntimeError, match="parent operation failed"):
+        vault_module.batch_atomic_write([write], vault_root=store.root, post_commit_fanout=False)
+    binding = store.read_slot(owner=source_native_custody.OWNER,
+        locator=generated.file_locator(before.catalogue_id, path.name), physical_scope=native.physical_scope)
+    assert not path.exists() and binding.current is None and binding.slot.pending is None
+    assert len(installed_copy) == 1 and store.copy_record(installed_copy[0].copy_id).value.outcome == "retired"
+    assert all(copy.destination_relative != path.name for copy in native.lookup(limit=128).reservations)
+
+
+def test_failed_stage_closes_a_publication_whose_native_reservation_never_started(installed, monkeypatch):
+    store, native, _, _, _ = installed
+    path = store.root / "not-staged.md"
+    guard = vault_module.PathGuard.capture(store.root, path.name, leaf_policy="absent")
+    before = generated_output_plan.read_before(store, native, path=path, text="", guard=guard)
+    text = "The producer never staged these bytes."
+    reference = generated_fragments.SourceRef(f"exomem://memory/{uuid.UUID(int=47)}")
+    plan = generated_output_plan.seal(before, content=text,
+        rendered=generated_fragments._Image(text).own(reference).plan(before.mapping.before_sha256))
+    create = vault_module._BatchWorkspace.create_artifact
+    refused = []
+
+    def refuse_stage(workspace, name, content, **options):
+        if content == text.encode():
+            binding = store.read_slot(owner=source_native_custody.OWNER,
+                locator=generated.file_locator(before.catalogue_id, path.name), physical_scope=native.physical_scope)
+            refused.append(binding.candidate)
+            raise RuntimeError("stage admission failed")
+        return create(workspace, name, content, **options)
+
+    monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", refuse_stage)
+    write = vault_module.PlannedWrite(path, text, guard=guard, create_only=True, generated_image=plan)
+    with pytest.raises(RuntimeError, match="stage admission failed"):
+        vault_module.batch_atomic_write([write], vault_root=store.root, post_commit_fanout=False)
+    assert len(refused) == 1 and store.copy_record(refused[0].copy_id).value.outcome == "no_effect"
+    with pytest.raises(source_native_custody.NativeCustodyUnavailable):
+        native.get(refused[0].owner.version)
+    binding = store.read_slot(owner=source_native_custody.OWNER,
+        locator=generated.file_locator(before.catalogue_id, path.name), physical_scope=native.physical_scope)
+    assert not path.exists() and binding.current is None and binding.slot.pending is None

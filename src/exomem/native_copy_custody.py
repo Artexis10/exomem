@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import generated_fragment_store, held_fs, source_custody, source_native_custody
+from . import generated_fragment_store, held_fs, source_custody, source_native_custody, vault
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,18 @@ class PreparedCopy:
     image: generated_fragment_store.ImageHeader
     logical_path: Path
     _seal: object = field(repr=False, compare=False)
+
+
+@dataclass
+class NativePublication:
+    """One native attempt retains its actual allocation and witnesses before acknowledgements."""
+
+    prepared: PreparedCopy
+    custody: vault._ArtifactCustody | None = None
+    allocation: CopyAllocation | None = None
+    installation: held_fs.InstallationWitness | None = None
+    retirement: held_fs.RetirementWitness | None = None
+    allocation_started: bool = False
 
 
 class NativeCopyCustody:
@@ -118,3 +132,113 @@ class NativeCopyCustody:
             copy.canonical.copy_id, owner=copy.canonical.owner,
             outcome="no_effect" if outcome == "not_written" else "retired",
         )
+
+    def stage_artifact(self, image: generated_fragment_store.ImageHeader, *, logical_path: Path,
+                       temporary_parent: Path, check: Callable[[], None] | None = None) -> vault._ArtifactCustody:
+        copies: dict[str, CopyAllocation] = {}
+        active: CopyAllocation | None = None
+
+        def reserve(name):
+            nonlocal active
+            if check is not None:
+                check()
+            active = self.reserve(image, logical_path=logical_path,
+                                  relative_path=(temporary_parent / name).relative_to(self.root).as_posix())
+            copies[name] = active
+
+        def verified(file, digest):
+            assert active is not None
+            self.verified(active, file, digest)
+            self.present(active)
+
+        def release(name, identity, outcome):
+            try:
+                self.closed(copies[name], identity, outcome)
+            except (sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
+                raise held_fs.CustodyAcknowledgementPending("native stage acknowledgement is pending") from None
+
+        return vault._ArtifactCustody(held_fs.TemporaryCustody(
+            reserve, lambda name, file: self.native.bind(copies[name].native, file), release), verified)
+
+    def publication_artifact(self, prepared: PreparedCopy, *, publication_id: str | None = None,
+                             retiring: CopyAllocation | None = None,
+                             check: Callable[[], None] | None = None) -> NativePublication:
+        attempt = NativePublication(prepared)
+        if retiring is not None:
+            self._check_allocation(retiring)
+        temporary: CopyAllocation | None = None
+        path = prepared.logical_path
+
+        def reserve(name):
+            nonlocal temporary
+            if check is not None:
+                check()
+            relative = (path.parent / name).relative_to(self.root).as_posix()
+            attempt.allocation_started = True
+            attempt.allocation = self.allocate(prepared, relative_path=relative,
+                destination=path.relative_to(self.root).as_posix(), removable=False, publication_id=publication_id)
+            current = self.store.image_header(prepared.image.image_id)
+            if current.state != "observed" or not isinstance(current.value, generated_fragment_store.ImageHeader):
+                raise ValueError("native publication image is unavailable")
+            temporary = self.reserve(current.value, logical_path=path, relative_path=relative)
+
+        def bind(name, file):
+            assert temporary is not None and attempt.allocation is not None
+            self.native.bind(temporary.native, file)
+            self.native.bind(attempt.allocation.native, file)
+
+        def verified(file, digest):
+            assert temporary is not None and attempt.allocation is not None
+            for copy in (temporary, attempt.allocation):
+                self.verified(copy, file, digest)
+            self.present(temporary)
+
+        def before_install():
+            if check is not None:
+                check()
+            assert attempt.allocation is not None
+            observed = self.native.observe(attempt.allocation.native.binding_id)
+            if observed.state != "verified" or observed.matching is not True:
+                raise ValueError("native publication differs from its verified allocation")
+
+        def installed(witness):
+            attempt.installation = witness
+            assert attempt.allocation is not None
+            self.installed(attempt.allocation, witness)
+
+        def retired(witness):
+            attempt.retirement = witness
+            assert retiring is not None
+            try:
+                self.retired(retiring, witness)
+            except ValueError:
+                # A changed old version withholds retirement; it cannot refuse the new publication.
+                raise held_fs.CustodyAcknowledgementPending("native retirement no longer has exact version evidence") from None
+            except (sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
+                raise held_fs.CustodyAcknowledgementPending("native retirement acknowledgement is pending") from None
+
+        def release(name, identity, outcome):
+            assert temporary is not None and attempt.allocation is not None
+            try:
+                self.closed(temporary, identity, outcome)
+                if attempt.installation is not None:
+                    observed = self.native.observe(attempt.allocation.native.binding_id, destination=True)
+                    if observed.state != "installed" or observed.matching is not True:
+                        raise held_fs.CustodyAcknowledgementPending("native installation acknowledgement is pending")
+                    self.present(attempt.allocation)
+                else:
+                    self.closed(attempt.allocation, identity, outcome)
+            except (sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
+                raise held_fs.CustodyAcknowledgementPending("native publication acknowledgement is pending") from None
+
+        attempt.custody = vault._ArtifactCustody(held_fs.TemporaryCustody(reserve, bind, release), verified,
+            before_install, installed, retired if retiring is not None else None)
+        return attempt
+
+    def unstarted(self, attempt: NativePublication) -> None:
+        """Close a live attempt only when its native reservation was never invoked."""
+        if attempt.prepared._seal is not self._seal:
+            raise ValueError("publication belongs to another producer")
+        if not attempt.allocation_started:
+            copy = attempt.prepared.canonical
+            self.store.ack_copy(copy.copy_id, owner=copy.owner, outcome="no_effect")

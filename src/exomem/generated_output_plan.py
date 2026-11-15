@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ class GeneratedInput:
     guard: vault.PathGuard
     binding: generated.SlotBinding
     mapping: generated_fragments.FragmentPlan
+    image_size: int
     current: native_copy_custody.CopyAllocation | None = None
     native_version: held_fs.FileVersion | None = None
     _seal: object = field(repr=False, compare=False, default=None)
@@ -38,6 +40,25 @@ class GeneratedImagePlan:
     inputs: tuple[GeneratedInput, ...]
     after: generated_fragments.FragmentPlan
     _seal: object = field(repr=False, compare=False, default=None)
+
+    @property
+    def fingerprint(self) -> str:
+        if self._seal is not _PLAN_SEAL:
+            raise ValueError("generated plan is not producer-bound")
+        # This private fingerprint fixes its fields; every identity and map comes from bound producer data.
+        inputs = [
+            {
+                "catalogue_id": item.catalogue_id, "physical_scope": item.physical_scope,
+                "target": item.guard.target, "checkpoint": item.checkpoint,
+                "slot_revision": item.binding.slot.revision if item.binding.slot is not None else None,
+                "current_copy_id": item.binding.current.copy_id if item.binding.current is not None else None,
+                "candidate_copy_id": item.binding.candidate.copy_id if item.binding.candidate is not None else None,
+                "before": item.mapping.model_dump(mode="json"),
+            }
+            for item in self.inputs
+        ]
+        return hashlib.sha256(json.dumps({"inputs": inputs, "after": self.after.model_dump(mode="json")},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
 
     def validate(self, root: Path, write: vault.PlannedWrite) -> None:
         if (self._seal is not _PLAN_SEAL or self.before._seal is not _INPUT_SEAL
@@ -127,7 +148,7 @@ def read_before(store: generated.GeneratedFragmentStore, native: source_native_c
         mapping = generated_fragments.FragmentMap(image_sha256=digest)
     plan = generated_fragments.FragmentPlan(before_sha256=digest, after=mapping,
         coverage_complete=not unknown, unknown=unknown, unknown_through_epoch=horizon)
-    return GeneratedInput(root, path, head.catalogue_id, head.epoch, scope, guard, binding, plan,
+    return GeneratedInput(root, path, head.catalogue_id, head.epoch, scope, guard, binding, plan, len(data),
                           selected, version, _INPUT_SEAL)
 
 
@@ -148,3 +169,24 @@ def seal(before: GeneratedInput, *, content: str, rendered: generated_fragments.
     checkpoint = max(item.checkpoint for item in bound)
     horizon = max(checkpoint if value is None else value for value in horizons)
     return GeneratedImagePlan(before, bound, rendered.model_copy(update={"unknown_through_epoch": horizon}), _PLAN_SEAL)
+
+
+def already_installed(root: Path, write: vault.PlannedWrite) -> bool:
+    """Qualify replay through the native current map, never through equal content hashes alone."""
+    plan = write.generated_image
+    if not isinstance(plan, GeneratedImagePlan):
+        return False
+    plan.validate(root, write)
+    store = generated.GeneratedFragmentStore(root)
+    try:
+        text, guard = vault.read_guarded_text(root, write.path)
+        native = source_native_custody.NativeCustody(root)
+        observed = read_before(store, native, path=write.path, text=text, guard=guard)
+        return (observed.current is not None and observed.catalogue_id == plan.before.catalogue_id
+                and observed.physical_scope == plan.before.physical_scope and observed.mapping.after == plan.after.after
+                and observed.mapping.unknown_through_epoch is not None and plan.after.unknown_through_epoch is not None
+                and observed.mapping.unknown_through_epoch >= plan.after.unknown_through_epoch)
+    except (OSError, ValueError, sqlite3.Error, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
+        return False
+    finally:
+        store.close()

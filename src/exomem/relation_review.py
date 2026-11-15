@@ -727,6 +727,7 @@ def _auxiliary_hash(writes: tuple[vault.PlannedWrite, ...], root: Path) -> str:
                 {
                     "path": write.path.relative_to(root).as_posix(),
                     "content_hash": hashlib.sha256(write.content.encode("utf-8")).hexdigest(),
+                    **({"generated_image": write.generated_image.fingerprint} if write.generated_image is not None else {}),
                 }
                 for write in writes
             ],
@@ -3838,6 +3839,15 @@ def _detach_auxiliaries(
                 "INVALID_AUXILIARY_WRITE", "auxiliary content is invalid Unicode"
             ) from error
         absolute, relative = _normalize_auxiliary_path(root, value.path)
+        if value.generated_image is not None:
+            from .generated_output_plan import GeneratedImagePlan
+
+            if not isinstance(value.generated_image, GeneratedImagePlan):
+                raise RelationReviewError("INVALID_AUXILIARY_WRITE", "generated auxiliary plan is invalid")
+            try:
+                value.generated_image.validate(root, value)
+            except ValueError as error:
+                raise RelationReviewError("INVALID_AUXILIARY_WRITE", "generated auxiliary plan changed") from error
         alias = _portable_alias(relative)
         if alias in seen:
             raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary targets collide")
@@ -3869,6 +3879,7 @@ def _detach_auxiliaries(
                 guard=value.guard,
                 expected_hash=value.expected_hash,
                 ensure_directories=value.ensure_directories,
+                generated_image=value.generated_image,
             )
         )
     return tuple(detached)
@@ -3914,6 +3925,12 @@ def _serialize_record(record: RelationReviewRecord) -> str:
 
 def _all_auxiliaries_match(writes: tuple[vault.PlannedWrite, ...], root: Path) -> bool:
     for write in writes:
+        if write.generated_image is not None:
+            from . import generated_output_plan
+
+            if not generated_output_plan.already_installed(root, write):
+                return False
+            continue
         if not os.path.lexists(write.path):
             return False
         relative = write.path.relative_to(root).as_posix()
@@ -4387,6 +4404,7 @@ def commit_prepared_creation_draft(
                         guard=guard,
                         expected_hash=auxiliary.expected_hash,
                         ensure_directories=auxiliary.ensure_directories,
+                        generated_image=auxiliary.generated_image,
                     )
                 )
             writes.extend(guarded_auxiliaries)
