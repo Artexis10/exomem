@@ -744,10 +744,7 @@ def _recover_from_trash_local(
     if lifecycle_operation is not None and not lifecycle.finish_recovery(
         lifecycle_operation, index_report=index_feedback
     ):
-        warnings.append(
-            "recovery staged but governed derived state is not exact; "
-            "content remains tombstoned until reconcile"
-        )
+        warnings.append(lifecycle.RECOVERY_NOT_EXACT)
 
     log_warning = log_plan.warning
     if not catalog_published:

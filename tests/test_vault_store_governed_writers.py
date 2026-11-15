@@ -34,6 +34,7 @@ from exomem import (
 )
 from exomem import vault as vault_module
 from exomem.collection_store import connection
+from exomem.collection_store import preview as store_preview
 from exomem.governance import (
     authorization_custody,
     catalog_publication,
@@ -47,7 +48,7 @@ from exomem.governance import (
 from exomem.governance.principal import owner_principal
 from exomem.governance.recovery import reconcile_governance_operations
 from exomem.governance.tool import GovernanceCrash, GovernanceError, op_govern_memory
-from exomem.vault_store import read
+from exomem.vault_store import availability, read
 from exomem.vault_store import write as store_write
 
 pytestmark = pytest.mark.skipif(
@@ -441,6 +442,27 @@ def test_a_store_mode_companion_backfill_resumes_at_each_crash_point_as_file_mod
     )
     assert [row["phase"] for row in receipts.event_records(served)] == expected_phases
     assert not (served / SECRET_PAGE).exists()
+
+
+def test_a_backfill_that_the_store_refuses_records_nothing_and_the_next_commit_lands(served):
+    """A backfill whose commit the store refuses after the attempt was reserved and its receipt
+    begun: the refusal leaves an intent receipt for a write that never could run."""
+    payload = legacy_companion(served)
+    preview = backfill(served, "preview", payload, now=300.0)
+    unserved = store_preview._BOUND.set(None)  # this call does not run on the store's thread
+    try:
+        with pytest.raises(Exception) as refused:
+            backfill(served, "commit", payload, proposal_id=preview["proposal_id"], now=301.0)
+    finally:
+        store_preview._BOUND.reset(unserved)
+    events_after_refusal = [row["phase"] for row in receipts.event_records(served)]
+
+    backfill(served, "commit", payload, proposal_id=preview["proposal_id"], now=302.0)
+
+    assert getattr(refused.value, "code", None) == availability.OFF_THREAD, refused.value
+    assert events_after_refusal == []
+    assert [row["phase"] for row in receipts.event_records(served)] == ["intent", "committed"]
+    assert b"governance_companion:" in read.owned_bytes(served, SECRET_PAGE)
 
 
 def test_a_backfill_planned_before_the_companion_changed_in_the_store_refuses_as_stale(served):

@@ -42,6 +42,16 @@ TOMBSTONE_DIR = "deletion-tombstones"
 RECOVERY_DIR = "recovery"
 FAIL_CLOSED_TOMBSTONE = "__governance_lifecycle_state_unavailable__"
 MAX_MARKER_BYTES = 256 * 1024
+#: What a trash or a recovery reports when ``finish_deletion`` or ``finish_recovery`` finds governed
+#: derived state left; every writer, in either vault mode, reports these words.
+TRASH_NOT_EXACT = (
+    "trash succeeded but governed derived state is not exact; "
+    "content remains tombstoned until reconcile"
+)
+RECOVERY_NOT_EXACT = (
+    "recovery staged but governed derived state is not exact; "
+    "content remains tombstoned until reconcile"
+)
 
 
 @dataclass

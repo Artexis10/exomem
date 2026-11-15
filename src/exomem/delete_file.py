@@ -732,10 +732,7 @@ def _delete_file_local(
     if not lifecycle.finish_deletion(
         lifecycle_operation, index_report=index_feedback
     ):
-        warnings.append(
-            "trash succeeded but governed derived state is not exact; "
-            "content remains tombstoned until reconcile"
-        )
+        warnings.append(lifecycle.TRASH_NOT_EXACT)
 
     if catalog_target is not None:
         try:
