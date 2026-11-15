@@ -141,6 +141,8 @@ def _binding(
     except ValueError:  # A live page's `DisplacedReference` goes to `bound_references`, which confirms it.
         if not PurePosixPath(path).is_relative_to(PurePosixPath(kb_dirname()) / trash_metadata.TRASH_SUBPATH):
             raise
+    # A Trash page that sat away from its companion path before its deletion goes to the same confirmation.
+    displaced: originals.DisplacedReference | None = None
     from .relation_review import parse_exact_json_object
 
     current = PurePosixPath(path)
@@ -173,15 +175,19 @@ def _binding(
             meta = placements[key]
             historical = trash_metadata.original_path(meta, trash_root=root.as_posix(), current_path=path)
             return originals.referenced_binding(fields, sidecar_path=historical, store=store)
+        except originals.DisplacedReference as error:
+            displaced = error
         except (ValueError, UnicodeError):
             continue
+    if displaced is not None:
+        raise displaced
     raise ValueError("stored Trash reference has no trustworthy placement")
 
 
 def bound_references(
     vault: Path, store: originals.StoreBinding, *, unreadable: Callable[[str, Exception], None] | None = None,
-) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject]]:
-    """Every reference to `store` under the Knowledge Base, as the companion's path and what it binds.
+) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject, bool]]:
+    """Every reference to `store` under the Knowledge Base: the companion's path, what it binds, and if displaced.
 
     The caller holds the consistency guard around the whole iteration, and takes any read failure as an
     unknown census: a failed read never ends the walk early and reads as complete. A caller that passes
@@ -189,9 +195,10 @@ def bound_references(
     prepare within the note's own budget, or one that does not parse or bind. The walk then goes on to the next note, and that caller must treat
     the census as unknown once told. Without it, the first such note raises.
 
-    A live page that binds a reference away from its original's companion path, as a confined move leaves
+    A page that binds a reference away from its original's companion path, as a confined move leaves
     one, counts only when the media ledger records that exact version at the original's path; those pages
-    come after the walk, from one batched ledger read.
+    come after the walk, from one batched ledger read, with True last. Such a page holds no original
+    beside it: its original stays at `binary.path`, and several pages may name the same one.
     """
     metadata: dict[str, str] = {}
     placements: dict[str, dict[str, object]] = {}
@@ -238,7 +245,7 @@ def bound_references(
             finally:
                 del entry
             if bound is not None:
-                yield path, bound[0], bound[1]
+                yield path, bound[0], bound[1], False
     if displaced:
         from . import media_store
 
@@ -248,7 +255,7 @@ def bound_references(
             raise OSError("the media ledger that confirms a moved page's reference cannot be read") from error
         for (path, item), confirmed in zip(displaced, recorded, strict=True):
             if confirmed:
-                yield path, item.binary, item.reference
+                yield path, item.binary, item.reference, True
             elif unreadable is None:
                 raise item
             else:
@@ -287,7 +294,7 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
         if store is None:
             raise ValueError("no selected media store")
         with get_manager().consistency_guard(vault, operation="media_reference_usage", holder_kind="background"):
-            for path, binary, reference in bound_references(vault, store, unreadable=blocked_by):
+            for path, binary, reference, displaced in bound_references(vault, store, unreadable=blocked_by):
                 key = _key(reference)
                 if key in versions:
                     try:
@@ -296,7 +303,8 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                         blocked_by(path, error)
                         continue
                 versions[key] = (binary, reference)
-                if not trash_metadata.is_trash_path(path):
+                # A displaced page's original reads missing at its path, so it is no candidate for reuse.
+                if not displaced and not trash_metadata.is_trash_path(path):
                     live_paths.setdefault(key, binary.path)
     except UNREADABLE:  # The walk itself failed, so any note named so far is not the whole reason: name none.
         return ReferenceUsage(None, datetime.now(UTC).isoformat())

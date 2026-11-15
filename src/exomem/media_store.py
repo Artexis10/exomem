@@ -1402,12 +1402,13 @@ def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO) 
     return _decrypt_into(store_for(vault), reference, str(_settings(vault)["identity_path"]), sink)
 
 
-def _payload_path(companion: str, binary: originals.BinaryBinding) -> str:
+def _payload_path(companion: str, binary: originals.BinaryBinding, displaced: bool) -> str:
     """Where an original's bytes belong: a live original's bound path, or a Trash payload's path beside its companion.
 
-    A Trash companion of a deleted folder binds the path that the original had before the deletion.
+    A Trash companion of a deleted folder binds the path that the original had before the deletion. A
+    displaced page (`media_allowance.bound_references`) sits away from its original, which stays at its bound path.
     """
-    if trash_metadata.is_trash_path(companion):
+    if not displaced and trash_metadata.is_trash_path(companion):
         return (PurePosixPath(companion).parent / PurePosixPath(binary.path).name).as_posix()
     return binary.path
 
@@ -1415,19 +1416,21 @@ def _payload_path(companion: str, binary: originals.BinaryBinding) -> str:
 def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
     """Each original whose bytes are not on the volume and whose version the store holds, Trash included.
 
-    Yields the path that the archive gives it: a live original's bound path, or a Trash payload's path
-    beside its companion. A companion that cannot be read binds nothing, so the ledger, which keeps a row
+    Yields the path that the archive gives it, once however many pages bind it: a live original's bound path,
+    or a Trash payload's path beside its companion. A companion that cannot be read binds nothing, so the ledger, which keeps a row
     for each evicted path, gives the version of an original behind one. Raises `MEDIA_LEDGER_UNRESOLVED`
     when such a row does not hold a version of this store with its size. The caller holds the consistency guard.
     """
     ledger = MediaJobStore(vault)
     counted: set[str] = set()
     unreadable: set[str] = set()
-    for companion, binary, reference in media_allowance.bound_references(
+    yielded: set[str] = set()
+    for companion, binary, reference, displaced in media_allowance.bound_references(
             vault, binding, unreadable=lambda path, _error: unreadable.add(path)):
         counted.add(ledger._relative(ledger.vault_root / binary.path))
-        path = _payload_path(companion, binary)
-        if not _on_volume(vault, path):
+        path = _payload_path(companion, binary, displaced)
+        if path not in yielded and not _on_volume(vault, path):
+            yielded.add(path)
             yield path, binary, reference
     if not unreadable:
         return
@@ -2111,10 +2114,10 @@ def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str
     Raises when a companion or a path cannot be read: an incomplete census is unknown, never a lower count.
     """
     found: dict[str, tuple[originals.BinaryBinding, StoredObject]] = {}
-    for companion, binary, reference in media_allowance.bound_references(vault, binding):
-        path = _payload_path(companion, binary)
+    for companion, binary, reference, displaced in media_allowance.bound_references(vault, binding):
+        path = _payload_path(companion, binary, displaced)
         if not _on_volume(vault, path):
-            found[path] = (binary, reference)
+            found.setdefault(path, (binary, reference))  # As in `evicted_members`, the first page to bind a path wins.
     return found
 
 

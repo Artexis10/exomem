@@ -192,8 +192,9 @@ def _recover_from_trash_local(
         allow_curated=allow_curated,
         fold=_fold,
     )
-    # Every admission that the bytes on the volume can decide runs before a commit fetches an
-    # original, so a refused recovery reads nothing from the store.
+    # A file entry's commit fetches its original once every other check has passed, so a refused
+    # recovery reads nothing from the store. A folder fetches before its census guards, which must see
+    # the fetched files, so its census and semantic checks are the ones that come after its fetch.
     restored: tuple[tuple[str, str], ...]
     if trash_kind == "file":
         if trash_file_snapshot is not None:
@@ -285,16 +286,19 @@ def _recover_from_trash_local(
                 reason=str(error),
             ) from error
 
-    if not validate_only:
-        # The fetched originals are on the volume from here, before the census guards and the
-        # transition read them; the transition checks them against `initial_restore_state`.
+    def fetch_file() -> None:
+        # The transition reads the fetched original and checks it against `initial_restore_state`.
         _materialize(vault_root, originals_context, trash_rel, trash_kind)
         if stored_original is not None and restore_rel.lower().endswith(".md"):
+            # Only a page's membership needs the original's bytes, so it is the one check after the fetch.
             try:
                 fetched = reserved_paths.read_generic_bytes(vault_root, trash_rel)
             except reserved_paths.ReservedPathLeafError as error:
                 raise _unacquired_source(error) from None
             _admit_publication(vault_root, restore_rel, fetched.data)
+
+    if trash_kind == "directory" and not validate_only:
+        _materialize(vault_root, originals_context, trash_rel, trash_kind)
 
     semantic: dict | None = None
     lifecycle_operation: lifecycle.LifecycleOperation | None = None
@@ -412,6 +416,8 @@ def _recover_from_trash_local(
                     warnings=[],
                     semantic=preflight.as_dict(),
                 )
+            if trash_kind == "file":
+                fetch_file()
 
             try:
                 graph_transition = graph_sync.begin_recovery_transition(
@@ -531,6 +537,8 @@ def _recover_from_trash_local(
                     code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                     reason=str(error),
                 ) from error
+        if trash_kind == "file":
+            fetch_file()
         try:
             graph_transition = graph_sync.begin_recovery_transition(
                 vault_root,

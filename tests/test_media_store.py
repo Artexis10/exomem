@@ -1324,12 +1324,15 @@ def test_moving_a_companion_page_fetches_its_evicted_original_only_for_a_caller_
         assert originals.bound_path(fields) == destination[:-3]
 
 
+@pytest.mark.parametrize("then", ["nothing", "delete the page", "offload the same bytes"])
 def test_a_page_moved_alone_from_its_withheld_original_keeps_offloads_working(
-        vault: Path, selected_store, monkeypatch):
+        vault: Path, selected_store, monkeypatch, then):
     """Catches a census that cannot read the reference which a confined move leaves in a page that it moved
     alone, away from its withheld evicted original: the owner's census turned unknown, and an unrelated
-    original's offload failed with MEDIA_ALLOWANCE_UNKNOWN."""
+    original's offload failed with MEDIA_ALLOWANCE_UNKNOWN. The census also turned unknown once the owner
+    deleted the moved page, and an offload of a file with the original's bytes failed the same way."""
     from exomem import (
+        delete_file,
         media_allowance,
         media_jobs,
         media_processing,
@@ -1338,6 +1341,49 @@ def test_a_page_moved_alone_from_its_withheld_original_keeps_offloads_working(
         preserve,
     )
     from exomem.governance import egress, principal
+
+    def captured(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"original bytes")
+        media_processing.reconcile_media(vault, path)
+        preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text",
+                                           engine="text")
+        media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
+    captured(path)
+    companion = path.with_name(path.name + ".md")
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    original = path.relative_to(vault).as_posix()
+    moved = "Knowledge Base/Notes/Media/renamed.md"
+    with monkeypatch.context() as confined:
+        confined.setattr(egress, "restricted_release_filter",
+                         lambda *_args, **_kwargs: lambda candidate: candidate != original)
+        with principal.request_scope(principal.most_restrictive_principal(surface="mcp")):
+            move_file.move_file(vault, old_path=companion.relative_to(vault).as_posix(), new_path=moved)
+    assert not companion.exists() and originals.original_state(vault, path).state == "missing"
+    if then == "delete the page":
+        delete_file.delete_file(vault, path=moved, confirm=True)
+        assert not (vault / moved).exists()
+    if then == "offload the same bytes":
+        unrelated = vault / "Knowledge Base" / "Notes" / "Media" / "copy.txt"
+        captured(unrelated)
+    else:
+        unrelated = _preserved(vault, category="unrelated")
+
+    usage = media_allowance.reference_usage(vault)
+    _offload(vault, unrelated)
+
+    assert usage.used_bytes == len(b"original bytes")
+    assert originals.original_state(vault, unrelated).state == "cached"
+
+
+def test_a_copy_of_a_companion_page_lists_its_evicted_original_once(vault: Path, selected_store):
+    """Catches an export plan that lists an evicted original once for each page that binds it: with a copy of
+    its companion page elsewhere, as an editor's duplicate makes, the plan listed the path twice, so the Cloud
+    export refused with CASE_COLLISION and counted the bytes twice."""
+    from exomem import media_allowance, media_jobs, media_processing, media_store, preserve
 
     path = vault / "Knowledge Base" / "Notes" / "Media" / "sample.txt"
     path.parent.mkdir(parents=True)
@@ -1348,21 +1394,15 @@ def test_a_page_moved_alone_from_its_withheld_original_keeps_offloads_working(
     media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
     _offload(vault, path)
     assert media_store.evict(vault, path)
-    original = path.relative_to(vault).as_posix()
-    with monkeypatch.context() as confined:
-        confined.setattr(egress, "restricted_release_filter",
-                         lambda *_args, **_kwargs: lambda candidate: candidate != original)
-        with principal.request_scope(principal.most_restrictive_principal(surface="mcp")):
-            move_file.move_file(vault, old_path=companion.relative_to(vault).as_posix(),
-                                new_path="Knowledge Base/Notes/Media/renamed.md")
-    assert not companion.exists() and originals.original_state(vault, path).state == "missing"
-    unrelated = _preserved(vault, category="unrelated")
+    (vault / "Knowledge Base" / "Notes" / "sample copy.md").write_bytes(companion.read_bytes())
+    binding = originals.binding_for(vault)
+    assert binding is not None
 
     usage = media_allowance.reference_usage(vault)
-    _offload(vault, unrelated)
+    listed = [member for member, _binary, _reference in media_store.evicted_members(vault, binding)]
 
     assert usage.used_bytes == len(b"original bytes")
-    assert originals.original_state(vault, unrelated).state == "cached"
+    assert listed == [path.relative_to(vault).as_posix()]
 
 
 def test_a_page_recovered_alone_from_its_withheld_original_keeps_offloads_working(
@@ -1670,11 +1710,13 @@ def test_recovering_a_companion_page_fetches_its_evicted_original_only_for_a_cal
 
 
 @pytest.mark.parametrize("online", [True, False])
-def test_resident_page_publication_refuses_before_fetch(
-        vault: Path, selected_store, configured_boundary, monkeypatch, online):
-    """Catches a recovery that fetches before an admission that the page on the volume decides: the owner's
-    recovery of a protected companion page into the capture folder fetched its evicted original and cached
-    its plaintext before it refused, and in an outage answered with the store's error instead of the refusal."""
+@pytest.mark.parametrize("refusal", ["publication", "semantic"])
+def test_a_refusal_that_the_page_decides_comes_before_fetch(
+        vault: Path, selected_store, configured_boundary, monkeypatch, refusal, online):
+    """Catches a recovery that fetches before a refusal that the page on the volume decides: the owner's
+    recovery of a companion page fetched its evicted original and cached its plaintext before it refused,
+    and in an outage answered with the store's error instead of the refusal. The publication check refuses
+    a protected page in the capture folder; the semantic preflight refuses a review for no recovered page."""
     from exomem import (
         delete_file,
         media_jobs,
@@ -1700,7 +1742,18 @@ def test_resident_page_publication_refuses_before_fetch(
             pass  # a read records the cache binding that an eviction at the trash path needs
         assert media_store.evict(vault, entry)
     companion = entry.with_name(entry.name + ".md")
-    text = companion.read_text(encoding="utf-8").replace("---\n", "---\nproject: private-project\n", 1)
+    text = companion.read_text(encoding="utf-8")
+    if refusal == "publication":
+        text = text.replace("---\n", "---\nproject: private-project\n", 1)
+        request: dict = {"restore_path": "Knowledge Base/Capture/sample-notes.md"}
+        (vault / "Knowledge Base/Capture").mkdir(parents=True, exist_ok=True)
+        expected = {"code": "WRITE_REFUSED", "reason": "target is unavailable"}
+    else:
+        review = {"transition_token": "token", "transition_hash": "0" * 64, "reason": "kept"}
+        request = {"restore_path": "Knowledge Base/Notes/Media/sample-notes.md",
+                   "relation_reviews": {"00000000-0000-4000-8000-000000000099": review}}
+        expected = {"code": "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
+                    "reason": "recovery review mapping contains an unvalidated page identity"}
     companion.write_text(text + "\nNotes a person kept about the sample.\n", encoding="utf-8")
     opened = []
     store_open = media_store.FilesystemStore.open
@@ -1712,18 +1765,16 @@ def test_resident_page_publication_refuses_before_fetch(
         return store_open(self, *args, **kwargs)
 
     monkeypatch.setattr(media_store.FilesystemStore, "open", counted)
-    capture = "Knowledge Base/Capture/sample-notes.md"
-    (vault / capture).parent.mkdir(parents=True, exist_ok=True)
 
     refusals = []
     with principal.request_scope(principal.owner_principal(surface="cli")):
         for validate_only in (True, False):
             with pytest.raises(recover_from_trash.RecoverError) as refused:
                 recover_from_trash.recover_from_trash(vault, trash_path=companion.relative_to(vault).as_posix(),
-                                                      restore_path=capture, validate_only=validate_only)
+                                                      validate_only=validate_only, **request)
             refusals.append(refused.value.as_dict())
 
-    assert refusals == [{"code": "WRITE_REFUSED", "reason": "target is unavailable"}] * 2
+    assert refusals == [expected] * 2
     assert opened == [] and not entry.exists() and companion.exists()
 
 
