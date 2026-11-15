@@ -10,7 +10,7 @@ Three facts shape this change:
 
 The object name is today an HMAC of the original's SHA-256 under a per-cell name key. The same bytes added twice therefore get one name and two versions. A bucket rule that removes non-current versions would destroy the first, which a retained snapshot can still reference.
 
-Provider behaviour in this document marked † is not yet confirmed on the provider. Task 1 confirms each such point on a disposable bucket and records the result here.
+Task 1 checked the provider behaviour that this document marked † on a disposable bucket. Each result is recorded where the point is stated.
 
 ## Goals / Non-Goals
 
@@ -47,11 +47,24 @@ Privacy gain: identical plaintexts no longer share a name that the provider can 
 
 The media bucket keeps its one rule that cancels unfinished multipart uploads. The rule gains `days_from_hiding_to_deleting`, set from `var.cloud_media_condemned_days`. The variable has no default for a stack with the media bucket, so a plan of that bucket without a value fails. A stack without the media bucket needs no value, so its plans do not wait for a grace that it never uses. No rule hides a version by age.
 
-† The provider deletes a version that a hide or a newer upload made non-current once the configured days pass. It keeps a current version. Task 1 confirms both, and confirms that deleting a hide marker keeps the version.
+Confirmed (task 1.1): the provider deletes a version that a hide or a newer upload made non-current after the configured days. It keeps a current version. Deleting a hide marker keeps the version.
 
 With D1, a hide is the only way to make a referenced version non-current. The rule therefore removes only what D3 and D5 condemned, plus unreferenced duplicate attempts.
 
 No process in the cluster deletes versions. The edge key keeps `readFiles` and `writeFiles`. A hide needs `writeFiles`, which that key already holds, so the key gains no capability.
+
+**Provider check results (task 1.1).** The check ran on a disposable bucket in the founder account, with a 1-day hide-to-delete rule and two bucket-only keys. It ran from 2026-11-09 to 2026-11-12, and the bucket and keys were deleted afterwards.
+- A condemn through the media edge hid the name. HEAD by name then returned 404.
+- A second condemn through the edge returned 200 with `hidden: false`, so it is a no-op. A direct `b2_hide_file` on a hidden name returned 400, a known error.
+- GET by version ID through the edge returned the hidden version's bytes (200).
+- Deleting the hide marker made the version current again.
+- The check recorded the name and version ID of each subject at setup. It then compared them with a listing after the lifecycle pass:
+  - The provider deleted the hidden version and its hide marker.
+  - The provider deleted the superseded version, and kept the newer upload of that name.
+  - The provider kept the current version.
+  - The provider kept both rescued versions: the one from the check and the one from the runbook.
+- Before the pass, the bucket held 7 versions, with 1 hide marker. After it, the bucket held 4 versions, with no hide marker.
+- The lifecycle pass had not run 31 h after setup. It had run by 2026-11-12 18:04 UTC. The provider documents one lifecycle run per day, at the first run after the configured days.
 
 ### D3. The backup Job condemns, through the edge, with its own credential
 
@@ -139,6 +152,6 @@ The undo is the grace period (D4). Taking a cell off `mediaEdge.collectCells` st
 ## Open questions
 
 - **Grace period N and hide budget.** The operator chooses them. The grace period must exceed the watcher interval plus the operator's response time, and the longest export deadline.
-- **Provider behaviour.** Task 1 confirms every point marked †, and also whether a hide of an already hidden name is an error or a no-op.
+- **Provider behaviour.** Resolved by task 1.1: through the edge, a hide of an already hidden name is a no-op; a direct provider hide of it is a known 400 error.
 - **The name key.** Whether the per-cell name key can be retired once no cell holds a keyed name. Settled after the canary's names are re-offloaded or confirmed single-version.
 - **Rescue of a released name.** D4 rescues names that something still references. A name that the cell released by mistake is hidden again at the next hold. Whether such a mistake needs a per-name exclusion list is settled by the first rescue.

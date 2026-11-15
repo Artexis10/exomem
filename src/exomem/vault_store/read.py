@@ -611,7 +611,7 @@ def request_snapshot(vault_root: Path) -> Iterator[None]:
 
 
 @contextmanager
-def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
+def snapshot(vault_root: Path, *, join_request: bool = True) -> Iterator[StoreSnapshot]:
     """Open one consistent view of a store-mode vault's store.
 
     The first read pins the WAL snapshot, so ``revision`` is the revision that every later read
@@ -622,9 +622,10 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
 
     Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned.
     A worker with inherited context must see that revision too, or refuse so the caller can retry the request.
+    Under a mutation guard, ``join_request=False`` reads commits made after request preflight.
     """
     root = Path(vault_root)
-    scope = _REQUEST.get()
+    scope = _REQUEST.get() if join_request else None
     if scope is not None and scope.thread == threading.get_ident() and scope.root == root:
         yield scope.view
         return
