@@ -532,7 +532,12 @@ The scheduler places it beside the serving pod with required pod affinity. Each 
 A running build includes image pull after the scheduler binds its pod. A pod waiting for node capacity does not defer an idle attempt.
 Build activity defers the idle stop before the final force minutes, which still default to 10.
 The canary and disabled-window rules remain unchanged; an immediate attempt may have no build opportunity.
-Build activity reduces attempts per window hour while attempts remain fleet-serial.
+Build activity reduces attempts per window hour; `config.upgrade_concurrency_per_node` limits attempts independently on each node.
+Before a serving stop or replacement, cellctl also cancels other cells' unfinished, unbound builds targeting that node.
+Each cancellation uses its own cell's window record. The stop waits until a later census shows no waiting builds on that node.
+Bound builds on other cells continue, including bound, terminating pods. A stopped cell uses its volume node when its serving pod is absent.
+Cells with desired state `running` or `read_only` reserve nodes only during holds or pending starts that stop or replace serving pods.
+Hourly snapshot backups and snapshot-backup holds do not reserve nodes against new builds. A fresh build gets one pass to bind before cancellation.
 
 Cellctl cancels unfinished builds on timeout, pause, target change, window closure or flag disable.
 Pending backups, imports, exports, row changes and digest changes take precedence over a build.

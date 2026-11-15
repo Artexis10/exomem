@@ -529,7 +529,8 @@ class ClusterClient:
             observed.setdefault(namespace, []).append(BuildJob(
                 name, spec.containers[0].image, node,
                 _parse_timestamp(job.metadata.creation_timestamp) if job is not None else None,
-                running=running, succeeded=bool(status and status.succeeded),
+                running=running, bound=any(p.spec.node_name for p in family),
+                succeeded=bool(status and status.succeeded),
                 failed=bool(status and (status.failed or any(c.type == "Failed" and c.status == "True"
                                                            for c in (status.conditions or [])))),
             ))

@@ -23,6 +23,11 @@ class BuildJob:
     running: bool = False
     succeeded: bool = False
     failed: bool = False
+    bound: bool = False
+
+    @property
+    def waiting(self) -> bool:
+        return not (self.bound or self.running or self.succeeded or self.failed)
 
     @property
     def outcome(self) -> str:
