@@ -143,7 +143,6 @@ LIVE_CONFIG = ReconcileConfig(
     # headroom while still exercising the real D8 timeout branch elsewhere.
     backup_deadline=timedelta(seconds=180),
     upgrade_ready_deadline=timedelta(seconds=20),
-    backup_interval=timedelta(hours=24),  # only a never-backed-up cell's first backup fires
     # D8's production window is 02:00-05:00 UTC; the live run needs the nightly
     # path to be eligible whenever the suite happens to run.
     backup_window=(0, 24),
@@ -2369,6 +2368,7 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
         "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
         "--set-json", f'artifactBroker.cellIds=["{labelled_id}"]',
         "--set", "mediaEdge.enabled=true",
+        "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
         "--set-string", f"mediaEdge.endpoint={endpoint}",
         "--set-string", "mediaEdge.bucket=media-bucket",
         "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
@@ -2457,6 +2457,7 @@ def test_cellctl_may_write_only_the_deletion_grants_config_map_and_its_one_key(k
         "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
         "--set-json", f'artifactBroker.cellIds=["{_cell_id()}"]',
         "--set", "mediaEdge.enabled=true",
+        "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
         "--set-string", "mediaEdge.endpoint=http://10.43.0.30:8769",
         "--set-string", "mediaEdge.bucket=media-bucket",
         "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
@@ -2521,6 +2522,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
     endpoint = "http://10.43.0.30:8769"
     documents = _render_platform("templates/cellctl.yaml", settings=(
         "--set", "mediaEdge.enabled=true",
+        "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
         "--set-string", f"artifactBroker.image={image}",
         "--set-string", f"mediaEdge.endpoint={endpoint}",
         "--set-string", "mediaEdge.bucket=media-bucket",
@@ -3248,15 +3250,19 @@ def test_the_operator_access_runbook_on_real_k3s(
 def test_local_storage_admission_confines_backup_clones_and_retains_before_a_claim_delete(k3s: K3sCluster) -> None:
     from cellctl.manifests import (
         CORDON_TOLERATION,
+        SNAPSHOT_NAME,
         CellManifestSpec,
+        clone_claim_name,
         render_backup_job,
         render_clone_claim,
         render_namespace,
         render_network_policies,
+        render_prepare_job,
         render_pvc,
         render_resource_quota,
         render_statefulset,
         render_volume_snapshot,
+        snapshot_backup_name,
     )
     from cellctl.reconcile import RETAINED_DELETE_POLICY_NAME
     from cellctl.storage_config import LocalStorage
@@ -3274,6 +3280,9 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
                             hold_started_at="2026-01-01T00:00:00+00:00")
     _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
 
+    snapshot_name = snapshot_backup_name(SNAPSHOT_NAME, spec.cell_id, spec.hold_started_at)
+    clone_name = clone_claim_name(snapshot_name)
+
     def as_cellctl(*args: str, document: dict | None = None) -> subprocess.CompletedProcess[str]:
         return _kubectl(k3s.name, [*args, "--dry-run=server", cellctl],
                         documents=None if document is None else [document], check=False)
@@ -3288,12 +3297,49 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
             if status.get("observedGeneration") != policy["metadata"]["generation"]:
                 return False
             assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        return create(render_clone_claim(spec, clone_class=local.clone_class)).returncode == 0
+        return create(render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class)).returncode == 0
 
     _wait_for(policies_ready, timeout=60, description="local storage admission")
 
+    prepare = render_prepare_job(spec, node="selected-agent", image=spec.image)
+    result = create(prepare)
+    assert result.returncode == 0, result.stderr
+    for secret_field in (
+        {"containers": [{**prepare["spec"]["template"]["spec"]["containers"][0],
+                         "env": [{"name": "FETCH_SECRET", "valueFrom": {
+                             "secretKeyRef": {"name": "cell-object-store-key", "key": "key"}}}]}]},
+        {"containers": [{**prepare["spec"]["template"]["spec"]["containers"][0],
+                         "envFrom": [{"secretRef": {"name": "cell-object-store-key"}}]}]},
+        {"imagePullSecrets": [{"name": "cell-object-store-key"}]},
+    ):
+        with_secret = copy.deepcopy(prepare)
+        with_secret["spec"]["template"]["spec"].update(secret_field)
+        result = create(with_secret)
+        assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
+    with_init = copy.deepcopy(prepare)
+    init = copy.deepcopy(with_init["spec"]["template"]["spec"]["containers"][0])
+    init.update(name="extra-init", command=["sh", "-c", "echo arbitrary-code"])
+    with_init["spec"]["template"]["spec"]["initContainers"] = [init]
+    result = create(with_init)
+    assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
+    # Kubernetes fixes these lifecycle fields; every hook can execute beyond the prepare no-op.
+    for event in ("postStart", "preStop"):
+        for handler in ({"exec": {"command": ["sh", "-c", "echo arbitrary-code"]}},
+                        {"httpGet": {"host": "127.0.0.1", "path": "/", "port": 8080}}):
+            with_hook = copy.deepcopy(prepare)
+            with_hook["spec"]["template"]["spec"]["containers"][0]["lifecycle"] = {event: handler}
+            result = create(with_hook)
+            assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
+    # An exec probe also runs its own command in the container.
+    for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
+        with_probe = copy.deepcopy(prepare)
+        with_probe["spec"]["template"]["spec"]["containers"][0][probe] = {
+            "exec": {"command": ["sh", "-c", "echo arbitrary-code"]}}
+        result = create(with_probe)
+        assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
+
     for admitted in (render_pvc(spec), render_resource_quota(spec),
-                     render_volume_snapshot(spec, snapshot_class=local.snapshot_class)):
+                     render_volume_snapshot(spec, snapshot_name=snapshot_name, snapshot_class=local.snapshot_class)):
         result = create(admitted)
         assert result.returncode == 0, result.stderr
     # Tasks 6.4 and 7.3: a local backup Job tolerates its node's cordon, so a
@@ -3307,7 +3353,7 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
     every_taint["spec"]["template"]["spec"]["tolerations"][0].pop("key")
     serving = render_statefulset(spec)
     serving["spec"]["template"]["spec"]["tolerations"] = [dict(CORDON_TOLERATION)]
-    foreign = render_clone_claim(spec, clone_class=local.clone_class)
+    foreign = render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class)
     foreign["spec"]["dataSourceRef"]["name"] = "cell-snapshot-" + "0" * 10
     unconfigured = render_pvc(spec)
     unconfigured["spec"]["storageClassName"] = "local-path"
@@ -3345,6 +3391,164 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
     assert under_delete.returncode != 0 and RETAINED_DELETE_POLICY_NAME in under_delete.stderr, under_delete.stderr
     _kubectl(k3s.name, ["patch", "persistentvolume", cell_volume, "--type=merge", f"--patch={json.dumps(retain)}"])
     _wait_for(lambda: delete_claim().returncode == 0, timeout=30, description="the claim delete once its volume is retained")
+
+
+# === automate-cloud-releases 3.1: the clone restore Job on real K3s ===
+
+
+def test_clone_restore_copy_command_on_real_k3s(k3s: K3sCluster) -> None:
+    """Prove the copy command on mounted local-path claims in CI.
+
+    The command copies prepared files, removes target-only files, and keeps
+    the volume root intact. This test takes no VolumeSnapshot, stops no cell,
+    and does not prove the acknowledged-write or TopoLVM flush contract.
+    """
+
+    from cellctl.manifests import (
+        CellManifestSpec,
+        render_clone_restore_job,
+        render_namespace,
+        render_network_policies,
+    )
+
+    image = _import_image(k3s.name, _build_standin_image(IMAGE_DIR), repository=STANDIN_REPOSITORY)
+    spec = CellManifestSpec(
+        cell_id=_cell_id(),
+        image=image,
+        replicas=0,
+        read_only=False,
+        storage_class="local-path",
+        local_volume=True,
+        hold_started_at="2026-01-01T00:00:00+00:00",
+    )
+    namespace = spec.namespace
+    # A pod in a labelled cell namespace is admitted only once the
+    # default-deny NetworkPolicy exists, so the seed lands the policies the
+    # same way reconcile renders them before any Job.
+    _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
+
+    # The restore Job's env resolves the two Secrets a live cell namespace
+    # holds -- cell-credentials' backup-password and the custodian's
+    # cell-object-store-key -- even though the clone command never calls
+    # restic. Without them the pod waits in CreateContainerConfigError.
+    def secret(name: str, data: dict[str, str]) -> dict:
+        return {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": namespace},
+            "type": "Opaque",
+            "stringData": data,
+        }
+
+    _apply_server_side(
+        k3s.name,
+        [
+            secret("cell-credentials", {"backup-password": "k3s-test-password"}),
+            secret("cell-object-store-key", {"keyId": "k3s-test-key", "applicationKey": "k3s-test-secret"}),
+        ],
+    )
+
+    def claim(name: str) -> dict:
+        return {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "storageClassName": "local-path",
+                "resources": {"requests": {"storage": "64Mi"}},
+            },
+        }
+
+    clone_claim = "cell-clone-acknowledged"
+    _apply_server_side(k3s.name, [claim(spec.pvc_name), claim(clone_claim)])
+
+    def helper_job(name: str, command: str) -> dict:
+        # The namespace enforces the restricted Pod Security the chart sets,
+        # so the helper runs as the runtime identity the real Jobs do, and
+        # the files it seeds are already owned the way a target's are.
+        return {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": {
+                "backoffLimit": 0,
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "securityContext": {
+                            "runAsNonRoot": True,
+                            "runAsUser": 10001,
+                            "runAsGroup": 10001,
+                            "fsGroup": 10001,
+                            "fsGroupChangePolicy": "OnRootMismatch",
+                            "seccompProfile": {"type": "RuntimeDefault"},
+                        },
+                        "containers": [
+                            {
+                                "name": "helper",
+                                "image": image,
+                                "command": ["sh", "-c", command],
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": False,
+                                    "readOnlyRootFilesystem": True,
+                                    "capabilities": {"drop": ["ALL"]},
+                                },
+                                "volumeMounts": [
+                                    {"name": "data", "mountPath": "/data"},
+                                    {"name": "clone", "mountPath": "/clone"},
+                                ],
+                            }
+                        ],
+                        "volumes": [
+                            {"name": "data", "persistentVolumeClaim": {"claimName": spec.pvc_name}},
+                            {"name": "clone", "persistentVolumeClaim": {"claimName": clone_claim}},
+                        ],
+                    }
+                },
+            },
+        }
+
+    def run_job(document: dict, description: str) -> None:
+        _kubectl(k3s.name, ["create", "--filename=-"], documents=[document])
+        name = document["metadata"]["name"]
+        _kubectl(
+            k3s.name,
+            [
+                "wait",
+                "--for=condition=complete",
+                f"job/{name}",
+                f"--namespace={namespace}",
+                "--timeout=120s",
+            ],
+        )
+
+    acknowledged = "k3s-acknowledged-write"
+    run_job(
+        helper_job(
+            "clone-restore-seed",
+            "mkdir -p /clone/vault /clone/host /data/vault /data/host && "
+            f"printf %s {acknowledged} > /clone/vault/ack && "
+            "printf %s keeper > /data/keeper && "
+            "printf %s target > /data/vault/created-by-target",
+        ),
+        "seeding the clone and the cell volume",
+    )
+
+    # The manifest reconcile renders for the attempt's clone restore; the
+    # forced failure that would have run it lives at the decision level, in
+    # test_upgrade_snapshot_restore.py.
+    run_job(render_clone_restore_job(spec, snapshot_claim=clone_claim), "the clone restore Job")
+
+    run_job(
+        helper_job(
+            "clone-restore-verify",
+            f'test "$(cat /data/vault/ack)" = {acknowledged} && '
+            "test ! -e /data/vault/created-by-target && "
+            'test "$(cat /data/keeper)" = keeper',
+        ),
+        "the acknowledged write and the volume root surviving the restore",
+    )
 
 
 def test_topolvm_node_agent_writes_only_its_own_node_and_volumes(k3s: K3sCluster) -> None:
@@ -3400,3 +3604,60 @@ def test_topolvm_node_agent_writes_only_its_own_node_and_volumes(k3s: K3sCluster
     assert other_node.returncode != 0 and "exomem-topolvm-node-self" in other_node.stderr, other_node.stderr
     relabel = as_agent_on(node, "label", "node", node, "node-restriction.kubernetes.io/exomem-local-storage=true")
     assert relabel.returncode != 0 and "exomem-topolvm-node-self" in relabel.stderr, relabel.stderr
+
+
+def test_catalogue_build_admission_denies_placement_and_volume_forgery(k3s: K3sCluster) -> None:
+    """A genuine build is admitted; a stolen controller token cannot widen its placement or mounts."""
+    from cellctl.manifests import (
+        CellManifestSpec,
+        ResourceSettings,
+        render_catalogue_build_job,
+        render_namespace,
+        render_network_policies,
+        render_resource_quota,
+    )
+
+    image = STANDIN_REPOSITORY + "@sha256:" + "a" * 64
+    documents = _render_platform("templates/cellctl.yaml", settings=(
+        "--set", "cellctl.cataloguePrewarm=true",
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    spec = CellManifestSpec(_cell_id(), image, 1, False,
+                            catalogue_build_resources=ResourceSettings("2", "2", "3Gi", "3Gi"))
+    _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
+    build = render_catalogue_build_job(spec, deadline_seconds=1800, node=k3s.name)
+    controller = "--as=system:serviceaccount:exomem-cloud:cellctl"
+
+    def dry_run(document):
+        return _kubectl(k3s.name, ["create", "--dry-run=server", "--filename=-", controller],
+                        documents=[document], check=False)
+
+    def policy_settled():
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        # Type-check status can precede enforcement of the updated placement rule.
+        return dry_run(build).returncode == 0
+
+    _wait_for(policy_settled, timeout=60, description="admission to admit the catalogue build")
+    for document in (build, render_resource_quota(spec)):
+        admitted = dry_run(document)
+        assert admitted.returncode == 0, admitted.stderr
+    for described, mutate in (
+        ("nodeName", lambda pod: pod.update(nodeName=k3s.name)),
+        ("priorityClassName", lambda pod: pod.update(priorityClassName="system-cluster-critical")),
+        ("extra volume", lambda pod: pod["volumes"].append({"name": "extra", "emptyDir": {}})),
+        ("arbitrary affinity", lambda pod: pod.update(affinity={"podAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [{"topologyKey": "kubernetes.io/hostname",
+                                                                  "labelSelector": {"matchLabels": {"app": "other"}}}]}})),
+        ("missing affinity", lambda pod: pod.pop("affinity")),
+        ("arbitrary entrypoint", lambda pod: pod["containers"][0].update(command=["sleep", "600"])),
+    ):
+        attack = copy.deepcopy(build)
+        mutate(attack["spec"]["template"]["spec"])
+        denied = dry_run(attack)
+        assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, (described, denied.stderr)

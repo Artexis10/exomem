@@ -41,6 +41,36 @@ async def test_select_all_rows_returns_the_seeded_cell(cell_db: CellDatabase) ->
     assert rows[0].observed_state is None
 
 
+@pytest.mark.parametrize("observed,requested", [
+    ("cleanup_running", "requested"),
+    ("cleanup_stopping", "requested"),
+    ("cleanup_discard_stopping", "discard_requested"),
+    ("cleanup_pending", "requested"),
+    ("done", "discard_requested"),
+])
+async def test_open_import_cleanup_or_discard_prevents_optional_builds(
+    cell_db: CellDatabase, observed: str, requested: str,
+) -> None:
+    """A cleanup or discard that read_import still owns must keep its claim ahead of optional builds."""
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "import-cleanup")
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await owner.execute(
+            "INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files,observed_state,requested_state) "
+            "VALUES($1,'adopt',4,1,$2,$3)", cell_id, observed, requested,
+        )
+        assert await db.read_import(controller, cell_id) is not None
+        assert await db.read_content_start_cells(controller, [cell_id]) == {cell_id}
+        await owner.execute("UPDATE exomem_cloud_imports SET observed_state='discarded' WHERE cell_id=$1", cell_id)
+        assert await db.read_import(controller, cell_id) is None
+        assert await db.read_content_start_cells(controller, [cell_id]) == set()
+    finally:
+        await controller.close()
+        await owner.close()
+
+
 async def test_select_all_rows_reads_tenant_id_as_the_tenants_uuid(cell_db: CellDatabase) -> None:
     # C1's tenant_id is uuid REFERENCES exomem_tenants(id); asyncpg hands it
     # back as uuid.UUID, never as text.

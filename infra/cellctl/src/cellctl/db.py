@@ -16,6 +16,8 @@ from datetime import datetime
 import asyncpg
 
 from .capacity import NodeCapacity
+from .exports import ExportRow
+from .imports import ImportRow
 from .state import CellRow, RolloutRow
 
 logger = logging.getLogger("cellctl")
@@ -78,6 +80,7 @@ MEDIA_KEY_MIGRATION = "0081_exomem_cloud_media_keys"
 MEDIA_STORE_RECORD = "media_store"
 
 ROLLOUT_COLUMNS = ("paused", "error_code", "held_cell_id", "last_good_image")
+ROLLOUT_READ_COLUMNS = (*ROLLOUT_COLUMNS, "id")
 
 CELL_COLUMNS = (
     "cell_id",
@@ -222,6 +225,7 @@ async def retire_content_keys(connection: asyncpg.Connection, now: datetime, *, 
 # published release; Substrate migration 0085). cellctl's role reads it and
 # never writes it.
 IMAGE_HISTORY_TABLE = "exomem_cloud_image_history"
+IMAGE_HISTORY_COLUMNS = ("image", "release_tag")
 
 
 async def read_image_releases(connection: asyncpg.Connection) -> dict[str, str]:
@@ -232,9 +236,12 @@ async def read_image_releases(connection: asyncpg.Connection) -> dict[str, str]:
     from .barriers import image_digest
 
     records = await connection.fetch(
-        f"SELECT image, release_tag FROM {IMAGE_HISTORY_TABLE} WHERE release_tag IS NOT NULL"
+        f"SELECT {', '.join(IMAGE_HISTORY_COLUMNS)} FROM {IMAGE_HISTORY_TABLE} WHERE release_tag IS NOT NULL"
     )
     return {image_digest(record["image"]) or record["image"]: record["release_tag"] for record in records}
+
+
+SETTINGS_COLUMNS = ("key", "value")
 
 
 async def read_cell_image(connection: asyncpg.Connection) -> str | None:
@@ -355,6 +362,10 @@ async def try_advisory_lock(connection: asyncpg.Connection) -> bool:
     return bool(await connection.fetchval("SELECT pg_try_advisory_lock($1)", ADVISORY_LOCK_KEY))
 
 
+CAPACITY_COLUMNS = ("node", "cell_slots", "attachments_used", "observed_at")
+CAPACITY_UPDATE_COLUMNS = CAPACITY_COLUMNS[1:]
+
+
 async def write_capacity(
     connection: asyncpg.Connection,
     *,
@@ -364,7 +375,7 @@ async def write_capacity(
     observed_at: datetime,
 ) -> None:
     await connection.execute(
-        "INSERT INTO exomem_cloud_capacity (node, cell_slots, attachments_used, observed_at) "
+        f"INSERT INTO exomem_cloud_capacity ({', '.join(CAPACITY_COLUMNS)}) "
         "VALUES ($1, $2, $3, $4) "
         "ON CONFLICT (node) DO UPDATE SET "
         "cell_slots = EXCLUDED.cell_slots, "
@@ -407,6 +418,15 @@ async def write_capacity_snapshot(
 # reads it, so a request row read with `SELECT *` from a control database that predates the migration has no
 # such column; the grant then reads as absent and the Job runs without one.
 OPERATION_GRANT_COLUMN = "operation_grant"
+# Row reads require every dataclass field except the backward-compatible signed grant.
+IMPORT_READ_COLUMNS = frozenset(ImportRow.__dataclass_fields__) - {OPERATION_GRANT_COLUMN}
+EXPORT_READ_COLUMNS = frozenset(ExportRow.__dataclass_fields__) - {OPERATION_GRANT_COLUMN}
+# These queries use SELECT *, so they also need SELECT on every column that exists.
+SELECT_ALL_TABLES = frozenset({"exomem_cloud_imports", "exomem_cloud_exports"})
+IMPORT_COLUMNS = frozenset({
+    "recipient", "upload_id", "part_urls", "urls_expire_at", "observed_state", "error_code",
+    "staged_files", "staged_bytes",
+})
 
 
 def _request_fields(record: asyncpg.Record, row_type: type) -> dict:
@@ -415,14 +435,18 @@ def _request_fields(record: asyncpg.Record, row_type: type) -> dict:
     return fields
 
 
-async def read_import(connection: asyncpg.Connection, cell_id: str):
-    from .imports import ImportRow
+# Migration 0061 fixes this open-import predicate for reads and optional-build admission.
+_OPEN_IMPORT_PREDICATE = (
+    "i.observed_state IS NULL OR "
+    "i.observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_discard_stopping','cleanup_pending') OR "
+    "(i.requested_state='discard_requested' AND i.observed_state IS DISTINCT FROM 'discarded')"
+)
 
+
+async def read_import(connection: asyncpg.Connection, cell_id: str):
     # Migration 0061 fixes the open predicate; terminal history only repairs an orphan C1 hold.
     record = await connection.fetchrow(
-        "SELECT * FROM (SELECT i.*, (observed_state IS NULL OR "
-        "observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_discard_stopping','cleanup_pending') OR "
-        "(requested_state='discard_requested' AND observed_state IS DISTINCT FROM 'discarded')) AS is_open "
+        f"SELECT * FROM (SELECT i.*, ({_OPEN_IMPORT_PREDICATE}) AS is_open "
         "FROM exomem_cloud_imports i WHERE cell_id=$1) requests WHERE is_open OR "
         "EXISTS (SELECT 1 FROM exomem_cloud_cells c WHERE c.cell_id=$1 AND c.hold_kind='import') "
         "ORDER BY is_open DESC, created_at DESC, import_id DESC LIMIT 1", cell_id,
@@ -441,11 +465,9 @@ async def write_import(connection: asyncpg.Connection, import_id: str, updates: 
     import uuid
 
     # C5 column grants fix this controller-owned subset.
-    allowed = {"recipient", "upload_id", "part_urls", "urls_expire_at", "observed_state", "error_code",
-               "staged_files", "staged_bytes"}
     if not updates:
         return
-    if set(updates) - allowed:
+    if set(updates) - IMPORT_COLUMNS:
         raise ValueError("not an import observation column")
     values = {name: json.dumps(value) if name == "part_urls" and value is not None else value
               for name, value in updates.items()}
@@ -497,8 +519,6 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
     every ready one (links, expiry, supersede), every ended one whose upload
     removal is still pending, and the newest one, whose ending releases an
     export hold."""
-    from .exports import ExportRow
-
     records = await connection.fetch(
         "SELECT * FROM exomem_cloud_exports WHERE cell_id=$1 AND ("
         "observed_state IS NULL OR observed_state IN ('packing','ready') OR upload_id IS NOT NULL "
@@ -514,6 +534,19 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
     return rows
 
 
+async def read_content_start_cells(connection: asyncpg.Connection, cell_ids: list[str]) -> set[str]:
+    """One indexed fleet query finds content operations that take precedence over optional builds."""
+    # These open states come from the import/export SQL schemas, not a content vocabulary.
+    records = await connection.fetch(
+        "SELECT cell_id FROM exomem_cloud_cells c WHERE cell_id=ANY($1::text[]) AND ("
+        "EXISTS (SELECT 1 FROM exomem_cloud_imports i WHERE i.cell_id=c.cell_id AND "
+        f"({_OPEN_IMPORT_PREDICATE})) OR "
+        "EXISTS (SELECT 1 FROM exomem_cloud_exports e WHERE e.cell_id=c.cell_id AND "
+        "(e.observed_state IS NULL OR e.observed_state='packing')))", cell_ids,
+    )
+    return {str(record["cell_id"]) for record in records}
+
+
 async def read_packing_export_cells(connection: asyncpg.Connection) -> set[str]:
     """The cells with an export in packing, each of which holds its node's export slot (D8)."""
 
@@ -526,6 +559,9 @@ EXPORT_COLUMNS = frozenset({
     "observed_state", "error_code", "archive_bytes", "archive_sha256", "archive_version_id", "upload_id",
     "ready_at", "expires_at", "download_url", "download_url_expires_at", "packing_report",
 })
+
+
+EXPORT_UPDATE_COLUMNS = EXPORT_COLUMNS | {"link_issued_at"}
 
 
 async def write_export(connection: asyncpg.Connection, export_id: str, updates: dict, *, link_issued: bool = False) -> None:

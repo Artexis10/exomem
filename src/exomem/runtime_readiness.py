@@ -850,6 +850,8 @@ def runtime_readiness(
             from . import lexstore
 
             progress = lexstore.repair_progress(configured_vault)
+            if progress is None and lexstore.await_repairs_idle(configured_vault, timeout=0):
+                progress = {"phase": "idle", "age_seconds": 0.0}
         except Exception:  # noqa: BLE001 - diagnostics must not break readiness
             progress = None
         if progress is not None:

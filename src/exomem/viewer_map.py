@@ -16,7 +16,7 @@ from typing import Any, Literal
 from typing_extensions import TypedDict
 
 from . import epistemic_graph as graph
-from . import find, freshness, memory_refs, request_budget, traversal_profiles
+from . import find, freshness, memory_refs, request_budget, state_paths, traversal_profiles
 from .governance import egress
 from .retrieval_models import ToolFailureEnvelope
 from .vault_store import mode as store_mode
@@ -102,9 +102,18 @@ def op_viewer_map(
         truncation. Graph keys identify the current snapshot; memory_ref carries
         a persistent identity when known. Path keys do not promise rename stability.
     """
+    started = time.monotonic()
+    # One request reads the host configuration once: without the scope each page decision rereads
+    # it. Freshness and page reads are evidence, so the scope never holds them.
+    with state_paths.resolution_scope():
+        return _viewer_map(vault_root, max_nodes, max_edges, purpose, started)
+
+
+def _viewer_map(
+    vault_root: Path, max_nodes: int, max_edges: int, purpose: str | None, started: float,
+) -> ViewerMap | ToolFailureEnvelope:
     from . import extraction_parts
 
-    started = time.monotonic()
     seconds = _limit("EXOMEM_VIEWER_MAP_BUDGET_SECONDS", _SECONDS)
     budget = request_budget.RequestBudget(seconds=seconds, entry=started)
     outer = request_budget.current()

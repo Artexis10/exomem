@@ -208,14 +208,21 @@ Deployment record and the `cloud-deploy` dispatch as one command (automate-cloud
 Each review step stops the command before anything changes. `EXOMEM_UPGRADE_DIR` is a private
 directory outside the repository; the command keeps the tag's checkout, the render and the
 dry run there. A render holds the private values, so keep it out of tickets and chat.
+Helm and kubectl must reach the cluster API from the machine that runs the command.
+
+With `EXOMEM_CELLCTL_DSN` set, the command runs the tag's schema check locally against that DSN.
+Without it, the command streams the tag's cellctl package into the running cellctl pod's writable `/tmp`.
+It runs `/opt/cellctl/bin/python -m cellctl.schema_check --dsn-env CELLCTL_DATABASE_DSN` with `PYTHONPATH` pointing to the temporary copy, then removes it.
+A failed check stops at `schema-check` before the upgrade changes anything. This path needs a running cellctl pod.
+The command's review line says which path ran. In the pod, the tag's code runs on the live image's libraries.
+An import error there means the tag needs a library that the running image lacks.
+In that case, run the check from a one-off pod on the tag's cellctl image, with the cellctl DSN Secret.
 
 ```bash
 : "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"
 : "${EXOMEM_UPGRADE_DIR:?set a private upgrade directory outside the repository}"
-: "${EXOMEM_CELLCTL_DSN:?set the control database DSN for the schema check}"
 umask 077
-uv run --frozen python infra/scripts/platform_upgrade.py "$TAG" \
-  --crossed <barrier-id>   # repeat for each barrier the upgrade crosses, after its runbook step
+uv run --frozen python infra/scripts/platform_upgrade.py "$TAG"
 ```
 
 - The command reads the live release's tag from the Helm release description it writes on every
@@ -223,6 +230,7 @@ uv run --frozen python infra/scripts/platform_upgrade.py "$TAG" \
 - A barrier is open when it lies after the live release and at or below the tag, or when it is
   at or below the tag and the newest successful platform Deployment does not record it. An open `platform` barrier needs its runbook step done first,
   then `--crossed <id>`; a `one-way` barrier removes `--atomic` for that upgrade.
+  Append one `--crossed` argument with the barrier ID for each completed runbook step.
 - An open `cell` barrier accepts `--crossed <id>` too: only a platform Deployment's
   `barriers_crossed` records a crossing, and `cloud-deploy` stops on an unrecorded entry of either
   scope. Record it here once its runbook step is done; the command prints a note while one is open.
@@ -510,6 +518,43 @@ Each release that succeeds on its tag starts the `cloud-deploy` workflow
 (`.github/workflows/cloud-deploy.yml`). The workflow verifies the cell image's attestation and sets it as
 Substrate's `cell_image` with the deploy token. cellctl then rolls the canary at once, and every other cell in its
 own upgrade window. The workflow never clears a pause and never sends an older release. Its log prints codes only.
+
+### Build a catalogue before the cell stops
+
+`cellctl.cataloguePrewarm` defaults to `false`. With this flag off, cellctl schedules no catalogue build Jobs and keeps ordinary upgrade timing.
+Release the cell image with the narrow builder and boot adoption before enabling scheduling. Rehearsal and rollout remain separate acceptance work.
+
+When enabled, cellctl starts a build Job from the target image when a running candidate's upgrade window opens.
+The scheduler places it beside the serving pod with required pod affinity. Each cell gets one extra quota slot; each node admits one build at a time.
+`cellctl.catalogueBuildResources` requests and limits default to 2 CPU and 3 GiB, the conservative estimate from the serving limits.
+`cellctl.catalogueBuildTimeoutSeconds` defaults to 1800 seconds. Rehearsal must measure the peak and set the real timeout before rollout.
+
+A running build includes image pull after the scheduler binds its pod. A pod waiting for node capacity does not defer an idle attempt.
+Build activity defers the idle stop before the final force minutes, which still default to 10.
+The canary and disabled-window rules remain unchanged; an immediate attempt may have no build opportunity.
+Build activity reduces attempts per window hour while attempts remain fleet-serial.
+
+Cellctl cancels unfinished builds on timeout, pause, target change, window closure or flag disable.
+Pending backups, imports, exports, row changes and digest changes take precedence over a build.
+The cancellation record in `exomem.io/catalogue-build-cancelled` prevents another build for that target in the same window, including after controller restarts.
+Enabling, disabling or retuning the build profile does not change serving pod templates or restart the fleet.
+When an attempt becomes due, cellctl starts its existing hold clock and deletes the build Job with foreground propagation.
+It waits until the Job and all its pods disappear before stopping the serving pod. The attempt records the build outcome in `exomem.io/catalogue-build-outcome`.
+Cellctl records `exomem.io/catalogue-build-job` before Job creation and clears it only after the Job and its pods disappear.
+A disabled controller reads build inventory only while this current Job record remains; historical outcomes add no upgrade dependency.
+The backup and stall deadlines remain unchanged. An unavailable, cancelled or invalid staged copy keeps the cold-rebuild fallback.
+
+Tenant-locked cells skip the build, including while unlocked. The build never joins the custody key channel.
+The skip reads the custody mode, not the current unlock state. Non-running cells also skip it.
+The narrow builder exits successfully in store mode; store-mode cells keep their existing boot path.
+
+The build holds one stable lock while it removes superseded staged copies and builds its target.
+At boot, the replacement validates staged copies read-only and installs a match through the existing whole-set SQLite publication path.
+Ordinary restart reconcile handles subsequent vault edits. Boot removes every unadopted staged copy, including matching duplicates.
+For a planned replacement, cellctl ends build pods before the stop. After a crash, the staged-build lock makes boot decline adoption while a builder survives.
+Released temporary-file locks permit boot cleanup without an age delay.
+Every restic backup excludes staged and temporary catalogue families, with SQLite sidecars, only under the external state directory.
+Vault notes and the live catalogue stay in the backup.
 
 ### Enable the workflow
 

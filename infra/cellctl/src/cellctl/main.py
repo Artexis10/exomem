@@ -117,6 +117,12 @@ def build_reconcile_config() -> ReconcileConfig:
             if amount <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(**{unit: amount})
+    # automate-cloud-releases D4: required, like the readiness deadline. The
+    # chart renders cellctl.upgradeConcurrencyPerNode and bounds it; without
+    # it cellctl refuses to start rather than guess a rollout pace.
+    kwargs["upgrade_concurrency_per_node"] = _positive_integer_env("CELLCTL_UPGRADE_CONCURRENCY_PER_NODE")
+    # automate-cloud-releases D9: the chart's off switch for the prepare Job.
+    kwargs["upgrade_prepare_enabled"] = _required_env("CELLCTL_UPGRADE_PREPARE_ENABLED") == "true"
     kwargs["upgrade_window"] = build_upgrade_window(kwargs.get("backup_window", DEFAULT_BACKUP_WINDOW))
     # automate-cloud-releases D3: the chart's copy of the barrier file. An entry cellctl
     # cannot read stops it here, rather than letting an attempt cross it unseen.
@@ -294,6 +300,19 @@ def build_media_listing() -> B2ObjectStorage | None:
     )
 
 
+def build_catalogue_prewarm():
+    """The chart owns the conservative profile and bounded timeout; absent selects the old path."""
+    from .catalogue_build import BuildConfig
+
+    if os.environ.get("CELLCTL_CATALOGUE_PREWARM", "false") != "true":
+        return None
+    profile = json.loads(_required_env("CELLCTL_CATALOGUE_BUILD_RESOURCES"))
+    return BuildConfig(ResourceSettings(
+        cpu_request=profile["requests"]["cpu"], cpu_limit=profile["limits"]["cpu"],
+        memory_request=profile["requests"]["memory"], memory_limit=profile["limits"]["memory"],
+    ), _positive_integer_env("CELLCTL_CATALOGUE_BUILD_TIMEOUT_SECONDS"))
+
+
 def build_cluster_config() -> ClusterConfig:
     model_env_raw = os.environ.get("CELLCTL_CELL_MODEL_ENV")
     job_egress_except_raw = os.environ.get("CELLCTL_JOB_EGRESS_EXCEPT")
@@ -339,6 +358,7 @@ def build_cluster_config() -> ClusterConfig:
     # A bad chart value fails cellctl at startup, not on every render.
     check_model_env(model_env)
     return ClusterConfig(
+        catalogue_prewarm=build_catalogue_prewarm(),
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
         cell_data_backup_bucket=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME"],

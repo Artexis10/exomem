@@ -894,8 +894,14 @@ The batch SHALL raise only while nothing of it is on disk. Once the batch is wri
 
 ### Requirement: Retained Interpretations Record The Writing Release
 
+The parent of a compiled-history entry SHALL be a page other than a Source or
+Evidence page that the semantic writer changes, or an episode page whose
+previous text the episode recorder or the recap fold step retains. No other
+Source or Evidence page SHALL have an entry.
+
 Each compiled-history entry that the semantic writer retains for a changed
-interpretation SHALL record `exomem_version`, the release of the Exomem server
+interpretation, and each entry that the episode recorder or the recap fold step
+retains for an episode page, SHALL record `exomem_version`, the release of the Exomem server
 that planned the transition, carried in the transition token so that an exact
 retry re-plans identical history bytes. A history read SHALL return that field with the revision.
 Entries retained before this field existed SHALL keep their stored bytes and
@@ -917,6 +923,16 @@ system SHALL NOT record a model identity, because the server cannot know it.
   the field
 - **AND** no stored entry is rewritten to add it
 
+#### Scenario: A recap revision retains the previous episode text
+
+- **WHEN** the episode recorder revises an episode page in place
+- **THEN** one entry holds the page's previous bytes and records the Exomem release that wrote it
+- **AND** a history read of the episode page returns the entry with that release
+
+#### Scenario: Another Source page has no entry
+
+- **WHEN** any writer changes a Source or Evidence page that is not an episode page
+- **THEN** no compiled-history entry is created for that page
 ### Requirement: A shown link title is accepted in an edit and in an observation
 
 On the public tool shape, `edit_note` (`replace_text` and `edits[]`) SHALL count `old_text` in the body as `read_page` shows it, and SHALL replace the stored bytes of each match. Only when that count is 0 SHALL it count the stored bytes, so a snippet in the stored form still applies, and then it SHALL NOT count an occurrence that covers only part of a link shown by title. A caller that is not on the public tool shape SHALL count the stored bytes only. A match that starts or ends inside a shown link SHALL be refused: with `STRING_NOT_FOUND` and a hint that `old_text` must include whole links when every occurrence is of that kind, and with `AMBIGUOUS_MATCH` and a hint to add surrounding text when others are outside links. `replace_all`, `AMBIGUOUS_MATCH` and the validate-only preview SHALL count the same way, and the preview SHALL show the line of each occurrence that it counts, as `read_page` shows that line, so that a preview holds no stored path of a link shown by title. The page SHALL keep the stored link form after the edit, and a link that `new_text` repeats unchanged from the matched text SHALL keep its stored bytes, without normalization, where that link is live in the page as edited. `add_observation` and `edit_observation` SHALL store a `[[Title]]` in a unit as the same path form that a note body stores, and SHALL return the unresolved-link warnings that a body write returns.

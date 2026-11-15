@@ -46,6 +46,7 @@ EDGE = (
     "--set-string", "mediaEdge.endpoint=http://10.43.0.30:8769",
     "--set-string", "mediaEdge.bucket=media-bucket",
     "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
+    "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
     "--set-json", f'mediaEdge.cellIds=["{CANARY}"]',
 )
 NAMESPACE = "exomem-cloud"
@@ -296,6 +297,13 @@ def test_the_default_object_bound_admits_a_5_gib_file_at_the_edge_and_in_cellctl
     assert cellctl_env["CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES"] == str(5 * 2**30 + 2 * 2**20)
 
 
+def test_an_enabled_edge_needs_an_explicit_state_storage_class() -> None:
+    result = _helm_template_result(*EDGE, "--set-string", "mediaEdge.state.storageClassName=")
+
+    assert result.returncode != 0
+    assert "/mediaEdge/state/storageClassName" in result.stderr
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -428,3 +436,44 @@ def test_turning_the_edge_off_renders_once_the_live_active_set_lists_no_cell(
     result = _upgrade_with_the_edge_off(active_set_json, tmp_path)
 
     assert result.returncode == 0, result.stderr
+
+
+_WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
+
+
+def _pod_specs(documents: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    specs = []
+    for doc in documents:
+        if doc.get("kind") not in _WORKLOAD_KINDS:
+            continue
+        template = doc["spec"]["jobTemplate"]["spec"]["template"] if doc["kind"] == "CronJob" else doc["spec"]["template"]
+        specs.append((f"{doc['kind']}/{doc['metadata']['name']}", template["spec"]))
+    return specs
+
+
+def test_every_non_root_pod_can_read_the_secret_and_configmap_files_it_mounts() -> None:
+    """A non-root pod cannot open a mounted Secret file whose mode keeps "other" out unless an fsGroup
+    gives it group read (Kubernetes writes those files as root). cellctl crashed at startup this way when
+    the media edge was turned on: it could not read its 0440 signing key."""
+    unreadable = []
+    for name, pod in _pod_specs(_helm_template(*EDGE)):
+        context = pod.get("securityContext", {})
+        volumes = {volume["name"]: volume for volume in pod.get("volumes", [])}
+        for container in [*(pod.get("containers") or []), *(pod.get("initContainers") or [])]:
+            effective = context | container.get("securityContext", {})
+            if not effective.get("runAsNonRoot", False) and effective.get("runAsUser", 0) == 0:
+                continue
+            for mount in container.get("volumeMounts", []):
+                volume = volumes[mount["name"]]
+                projected = volume.get("projected", {})
+                for entry in projected.get("sources", [volume]):
+                    source = entry.get("secret") or entry.get("configMap")
+                    if source is None:
+                        continue
+                    default = source.get("defaultMode", projected.get("defaultMode", 0o644))
+                    modes = [item.get("mode", default) for item in source.get("items", [])] or [default]
+                    for mode in modes:
+                        readable = bool(mode & 0o004) or (bool(mode & 0o040) and "fsGroup" in context)
+                        if not readable:
+                            unreadable.append((name, container["name"], volume["name"], oct(mode)))
+    assert unreadable == []

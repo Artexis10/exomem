@@ -1645,7 +1645,8 @@ def task_candidates(
             break
         started = time.monotonic()
         with (
-            find_types.timing_span(timings, "working_set.task_context_methods"),
+            call_spans.meter(call_spans.STATS_REBUILT, call_spans.UNIT_PARENTS_INTERPRETED) as measured,
+            find_types.timing_span(timings, "working_set.task_context_methods", measured=measured),
             request_budget.leaving(kept),
             lexstore.stopping_at_budget(),
         ):
