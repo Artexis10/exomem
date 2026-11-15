@@ -250,7 +250,7 @@ def _identity(vault: Path, path: Path) -> str:
 
 
 def _recorded_identity(vault: Path, path: Path, snapshot: OriginalSnapshot) -> str | None:
-    """The cache identity that a record holds for this cached original's reference and digest, else None.
+    """The verified physical identity for this digest; ordinary rows also retain their reference check.
 
     Reads without creating state or a store client.
     """
@@ -263,8 +263,12 @@ def _recorded_identity(vault: Path, path: Path, snapshot: OriginalSnapshot) -> s
     try:
         if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_cache' AND type = 'table'").fetchone() is None:
             return None
-        row = conn.execute("SELECT * FROM media_cache WHERE binary_rel = ?", (store._relative(path),)).fetchone()
-        if row is None or row["reference"] != _reference_key(snapshot.reference) or row["sha256"] != snapshot.binary_sha256:
+        from . import media_bindings
+
+        key = media_bindings.snapshot_key(vault, snapshot)
+        row = conn.execute("SELECT * FROM media_cache WHERE binary_rel = ?", (key,)).fetchone()
+        if (row is None or row["sha256"] != snapshot.binary_sha256
+                or key == store._relative(path) and row["reference"] != _reference_key(snapshot.reference)):
             return None
         return row["identity"]
     finally:
@@ -352,15 +356,20 @@ def recover_cache(vault: Path, path: Path, snapshot: OriginalSnapshot) -> bool:
 def _record_cache(conn, store: MediaJobStore, snapshot: OriginalSnapshot, source: reserved_paths.GenericBinarySource) -> None:
     assert snapshot.reference is not None
     source.require_current()
+    from . import media_bindings
+
+    key = media_bindings.snapshot_key(store.vault_root, snapshot)
     # `last_read` is the legacy record time; only `owner_read` decides idleness (D3, M4).
     conn.execute(
         "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size, evicted) "
         "VALUES (?, ?, ?, ?, ?, ?, 0) "
         "ON CONFLICT(binary_rel) DO UPDATE SET reference=excluded.reference, sha256=excluded.sha256, "
         "identity=excluded.identity, last_read=excluded.last_read, size=excluded.size, evicted=0",
-        (store._relative(snapshot.path), _reference_key(snapshot.reference), snapshot.binary_sha256,
+        (key, _reference_key(snapshot.reference), snapshot.binary_sha256,
          _source_identity(source), time.time(), snapshot.binary_size),
     )
+    if snapshot.local_path is not None:
+        media_bindings.coalesce_cache(conn, (key,))
 
 
 def _clear_dead_access(conn, store: MediaJobStore, rows) -> int:
@@ -412,19 +421,17 @@ def clear_dead_reservations(vault: Path) -> int:
 
 
 @contextmanager
-def _pin(vault: Path, path: Path, *, read: bool = False):
+def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None = None):
     """Keep an original on the volume; `read` marks an owner's playback, download or viewing (D3, M4)."""
     store = MediaJobStore(vault)
-    from . import media_bindings
-
     relative = store._relative(path)
     token = uuid.uuid4().hex
     conn = store._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        # Admit before canonical resolution. An unmapped legacy pin conservatively
-        # retains pooled objects until background inventory recovery proves its key.
-        captured = media_bindings.capture_pin(conn, relative)
+        # A logical lookup can race canonical rebinding. NULL retains pooled
+        # objects until acquisition binds this token to the actual held bytes.
+        captured = object_key
         conn.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start, object_key) VALUES (?, ?, ?, ?, ?)",
                      (token, relative, os.getpid(), process_start(os.getpid()), captured))
         conn.commit()
@@ -437,12 +444,30 @@ def _pin(vault: Path, path: Path, *, read: bool = False):
         try:
             with conn:
                 if read:
-                    conn.execute("UPDATE media_cache SET owner_read = ? WHERE binary_rel = ?",
-                                 (time.time(), store._relative(path)))
+                    conn.execute("UPDATE media_cache SET owner_read = MAX(COALESCE(owner_read, :read_at), :read_at) "
+                                 "WHERE binary_rel = "
+                                 "(SELECT object_key FROM media_access WHERE token = :token) "
+                                 "AND identity = (SELECT object_identity FROM media_access WHERE token = :token) "
+                                 "AND ((SELECT object_sha256 FROM media_access WHERE token = :token) IS NULL "
+                                 "OR sha256 = (SELECT object_sha256 FROM media_access WHERE token = :token))",
+                                 {"token": token, "read_at": time.time()})
                 # A row that still names a temporary keeps it reserved until a clear removes the file.
                 conn.execute("DELETE FROM media_access WHERE token = ? AND temporary_name IS NULL", (token,))
         finally:
             conn.close()
+
+
+def _bind_pin(store: MediaJobStore, token: str, snapshot: OriginalSnapshot,
+              source: reserved_paths.GenericBinarySource) -> None:
+    """Narrow an unresolved pin only while the caller holds the acquired original."""
+    from . import media_bindings
+
+    source.require_current()
+    key = media_bindings.snapshot_key(store.vault_root, snapshot)
+    with closing(store._connect()) as conn, conn:
+        conn.execute("UPDATE media_access SET object_key = ?, object_identity = ?, object_sha256 = ? "
+                     "WHERE token = ? AND object_key IS NULL",
+                     (key, _source_identity(source), snapshot.binary_sha256, token))
 
 
 def _reserve(store: MediaJobStore, token: str, needed: int, limits: media_capacity.HydrationLimits, *,
@@ -1545,6 +1570,9 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
             current = original_state(root, snapshot.path)
             if current.state == "evicted":
                 _hydrate(root, current, ledger, token)
+                current = original_state(root, snapshot.path)
+            with _open_local_original(root, relative, current) as source:
+                _bind_pin(ledger, token, current, source)
         yield
 
 
@@ -1632,6 +1660,7 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
             _hydrate(vault, snapshot, ledger, token)
             snapshot = original_state(vault, target)
         with _open_local_original(vault, relative, snapshot, physical=physical) as source:
+            _bind_pin(ledger, token, snapshot, source)
             if snapshot.reference is not None and not cache_matches(vault, target, snapshot=snapshot):
                 if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                     raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the cached original differs")
@@ -1855,8 +1884,7 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
             conn.rollback()
             return KEPT
         original_pool.evict_object(vault, facts.sha256, expected_version=version)
-        conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel IN "
-                     "(SELECT binary_rel FROM media_bindings WHERE object_key = ?)", (key,))
+        conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (key,))
         conn.commit()
         return EVICTED
 

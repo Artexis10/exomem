@@ -87,6 +87,11 @@ def initialize(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN object_key TEXT")
         if columns:
             conn.execute(f"CREATE INDEX IF NOT EXISTS {table}_object_key ON {table}(object_key)")
+        if table == "media_access":
+            # These are fixed acquisition-proof columns in the media ledger schema.
+            for field in ("object_identity", "object_sha256"):
+                if field not in columns:
+                    conn.execute(f"ALTER TABLE media_access ADD COLUMN {field} TEXT")
 
 
 def checkpoint(conn: sqlite3.Connection) -> Checkpoint:
@@ -158,6 +163,44 @@ def object_key(vault: Path, binary_rel: str, digest: str | None = None, *, poole
     return binary_rel
 
 
+def snapshot_key(vault: Path, snapshot: originals.OriginalSnapshot) -> str:
+    """Name the physical cache row without borrowing another filing's recovery reference."""
+    return (snapshot.local_path or snapshot.path).relative_to(vault).as_posix()
+
+
+def coalesce_cache(conn: sqlite3.Connection, keys: Iterable[str] | None = None) -> None:
+    """Merge affected physical rows, retaining read age but never inventing byte verification.
+
+    The caller owns the ledger transaction. A full merge belongs only to the
+    background census; publication passes indexed affected object keys.
+    """
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS cache_objects (object_key TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM cache_objects")
+    if keys is not None:
+        conn.executemany("INSERT OR IGNORE INTO cache_objects VALUES (?)", ((key,) for key in keys))
+    scope = "" if keys is None else (
+        " WHERE c.binary_rel IN (SELECT object_key FROM cache_objects) OR c.binary_rel IN "
+        "(SELECT b.binary_rel FROM media_bindings b JOIN cache_objects k ON k.object_key = b.object_key)")
+    conn.execute("DROP TABLE IF EXISTS temp.cache_merge")
+    conn.execute(
+        "CREATE TEMP TABLE cache_merge AS SELECT c.binary_rel AS previous, "
+        "CASE WHEN c.sha256 = b.sha256 AND (c.size IS NULL OR c.size = b.size) "
+        "THEN b.object_key ELSE c.binary_rel END AS physical, c.* "
+        "FROM media_cache c LEFT JOIN media_bindings b ON b.binary_rel = c.binary_rel" + scope)
+    if conn.execute("SELECT 1 FROM cache_merge GROUP BY physical "
+                    "HAVING MIN(sha256) != MAX(sha256) OR MIN(size) != MAX(size) LIMIT 1").fetchone():
+        raise ValueError("physical cache rows disagree about one original")
+    conn.execute("DELETE FROM media_cache WHERE binary_rel IN (SELECT previous FROM cache_merge)")
+    conn.execute(
+        "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size, evicted, owner_read) "
+        "SELECT physical, MIN(reference), MIN(sha256), "
+        # Moving a row is not a byte verification: only an existing physical proof survives.
+        "MAX(CASE WHEN previous = physical THEN identity ELSE '' END), MAX(last_read), "
+        "CASE WHEN MIN(size) = MAX(size) THEN MAX(size) ELSE NULL END, MIN(evicted), MAX(owner_read) "
+        "FROM cache_merge GROUP BY physical")
+    conn.execute("DROP TABLE cache_merge")
+
+
 def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = None) -> Binding | None:
     """Derive one companion's facts without reading any original bytes."""
     from .vault import canonical_vault_rel, parse_frontmatter
@@ -202,6 +245,7 @@ def apply_delta(vault: Path, paths: Iterable[str], bindings: Iterable[Binding], 
                 expected: Checkpoint, revision: int | None = None, seq: int | None = None) -> bool:
     """Replace exact path facts and their source checkpoint in one ledger transaction."""
     ledger = _ledger(vault)
+    bindings = tuple(bindings)
     with closing(ledger._connect()) as conn:
         with conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -211,6 +255,7 @@ def apply_delta(vault: Path, paths: Iterable[str], bindings: Iterable[Binding], 
             conn.executemany("DELETE FROM media_bindings WHERE companion_rel = ? OR binary_rel = ?",
                              ((rel, rel) for rel in paths))
             _put(conn, bindings)
+            coalesce_cache(conn, (binding.object_key for binding in bindings))
             _record(conn, Checkpoint(current.generation, expected.complete, revision, seq, expected.policy))
     return True
 
@@ -462,6 +507,7 @@ def rebuild(vault: Path) -> bool:
                     raise ValueError("canonical companions disagree about one filing")
                 conn.execute("DELETE FROM media_bindings")
                 conn.execute("INSERT INTO media_bindings SELECT * FROM binding_census")
+                coalesce_cache(conn)
                 _record(conn, Checkpoint(before.generation + 1, True, *source, policy))
                 conn.commit()
                 return True
@@ -485,7 +531,7 @@ def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
     row = conn.execute(
         "SELECT COUNT(*), MIN(b.sha256), MAX(b.sha256), MIN(b.size), MAX(b.size), "
         "MAX(b.resident_only), MIN(b.reference IS NOT NULL), MAX(c.owner_read) "
-        "FROM media_bindings b LEFT JOIN media_cache c ON c.binary_rel = b.binary_rel WHERE b.object_key = ?",
+        "FROM media_bindings b LEFT JOIN media_cache c ON c.binary_rel = b.object_key WHERE b.object_key = ?",
         (key,)).fetchone()
     if row[0] == 0 or row[1] != row[2] or row[3] != row[4]:
         return None

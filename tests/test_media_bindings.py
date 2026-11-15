@@ -16,6 +16,7 @@ from exomem import (
     media_jobs,
     media_store,
     original_pool,
+    originals,
     preserve,
 )
 from exomem.governance.principal import library_scope
@@ -176,12 +177,13 @@ def test_claimed_job_and_read_pin_keep_the_object_they_acquired_after_a_binding_
     ledger.enqueue(media_jobs.MediaJob(vault / item.path, vault / item.sidecar_path, "text", do_ocr=True))
     job = ledger.claim_next()
     assert job is not None
-    with media_store._pin(vault, vault / item.path) as (_ledger, token):
+    with media_store._pin(vault, vault / item.path) as (_ledger, token), media_store.open_original(vault, item.path) as source:
+        media_store._bind_pin(ledger, token, originals.original_state(vault, item.path), source)
         before = media_bindings.withdraw(vault)
         replacement = replace(binding, object_key="Knowledge Base/Evidence/replacement.bin")
         assert media_bindings.apply_delta(vault, (item.sidecar_path,), (replacement,), expected=before)
         with closing(ledger._connect(readonly=True)) as conn:
-            assert conn.execute("SELECT object_key FROM media_access WHERE token = ?", (token,)).fetchone()[0] == item.path
+            assert conn.execute("SELECT object_key FROM media_access WHERE binary_rel = ?", (item.path,)).fetchone()[0] == item.path
             pinned = conn.execute("SELECT object_key, pinned FROM jobs WHERE id = ?", (job.id,)).fetchone()
             assert tuple(pinned) == (item.path, 1)
         # A claimed job returned to pending retains its existing physical pin.
@@ -192,6 +194,7 @@ def test_claimed_job_and_read_pin_keep_the_object_they_acquired_after_a_binding_
         assert reclaimed is not None and reclaimed.id == job.id
         with closing(ledger._connect(readonly=True)) as conn:
             assert conn.execute("SELECT object_key FROM jobs WHERE id = ?", (job.id,)).fetchone()[0] == item.path
+        assert source.stream.read() == b"a pending extraction"
 
 
 def test_object_lifetime_aggregates_residency_recovery_owner_age_and_existing_pins(vault):
@@ -212,6 +215,8 @@ def test_object_lifetime_aggregates_residency_recovery_owner_age_and_existing_pi
             for binding, read in ((first, 2.0), (second, 8.0)):
                 conn.execute("INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, owner_read) "
                              "VALUES (?, ?, ?, '', 0, ?)", (binding.binary_rel, reference, binding.sha256, read))
+            media_bindings.coalesce_cache(conn, (key,))
+        assert conn.execute("SELECT COUNT(*) FROM media_cache WHERE binary_rel = ?", (key,)).fetchone()[0] == 1
         facts = media_bindings.object_facts(conn, key)
         assert facts is not None and facts.bindings == 2
         assert facts.resident_only and not facts.recoverable and facts.owner_read == 8.0 and not facts.pinned

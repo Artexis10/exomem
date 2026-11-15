@@ -165,10 +165,15 @@ def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks) -> Iterat
     """Stage every supplied byte before examining physical reuse; retain custody through commit."""
     if not enabled(vault):
         raise ValueError("shared originals require explicit format activation")
+    from .media_store import _pin
+
+    target = object_path(vault, digest)
     with reserved_paths._subsystem_authority_scope(OWNER):
-        with reserved_paths._stage_owner_chunks(vault, object_path(vault, digest), DESCRIPTOR_ID,
+        with reserved_paths._stage_owner_chunks(vault, target, DESCRIPTOR_ID,
                 data, expected_sha256=digest, expected_size=size) as staged:
-            with ExitStack() as handles:
+            # An OS handle alone does not exclude eviction. Keep the ledger pin
+            # outside winner handles so confirmation retries cannot release it.
+            with _pin(vault, target, object_key=target.relative_to(vault).as_posix()), ExitStack() as handles:
                 prepared = PreparedOriginal(vault, digest, size, staged, handles)
                 prepared.confirm_existing()
                 yield prepared
