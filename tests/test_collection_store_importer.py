@@ -1404,9 +1404,14 @@ def test_a_null_required_key_part_rejects_each_row_and_never_collapses_the_tail(
     assert (result["rows"]["imported"], result["rows"]["rejected"], result["rows"]["duplicates"]) == (25, 12, 0)
     stored = [values for _, values in typed_storage.collection_values(store.connection, CID)]
     assert sorted(values["position"] for values in stored) == list(range(1, 26))
-    assert [(entry["row"], entry["code"]) for entry in result["rejections"]] == [
-        (ordinal, "SCHEMA_REQUIRED_FIELD") for ordinal in range(25, 37)
+    assert [(entry["row"], entry["code"], entry["at"]) for entry in result["rejections"]] == [
+        (ordinal, "SCHEMA_REQUIRED_FIELD", "position") for ordinal in range(25, 37)
     ]
+    # The default stop policy names the same field where it fails.
+    stopped = start(store, mapping={name: value for name, value in NULL_TAIL_MAPPING.items() if name != "on_invalid"})
+    run(store)
+    error = status(store, stopped)["error"]
+    assert (error["code"], error["at"], error["row"]) == ("SCHEMA_REQUIRED_FIELD", "position", 25)
 
 
 def test_job_totals_equal_its_receipts_plus_the_batches_that_committed_nothing(store, monkeypatch):

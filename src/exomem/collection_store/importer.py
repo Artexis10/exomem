@@ -2558,6 +2558,18 @@ class _PreparedRow:
     token: bytes | None
 
 
+# A rejection whose first issue names no field, such as a key conflict or a missing source, refuses the whole row.
+_WHOLE_ROW = "item"
+
+
+def _rejected_at(outcome: Mapping[str, Any]) -> str:
+    """The field path a rejected row's first validation issue names, as preview reports it, else the whole row."""
+    issues = outcome.get("fields")
+    first = issues[0] if isinstance(issues, list) and issues else None
+    field = first.get("field") if isinstance(first, Mapping) else None
+    return field if isinstance(field, str) and field else _WHOLE_ROW
+
+
 def _identify(
     manifest, values: Mapping[str, Any], source_ref: str
 ) -> tuple[str | None, dict[str, Any] | None, tuple[str, str, dict[str, Any]] | None]:
@@ -2675,7 +2687,7 @@ def _record(
         for outcome in (result or {}).get("rows", ()):
             if outcome["outcome"] == "rejected":
                 rejections.append(
-                    (kept[outcome["index"]][0], outcome.get("code", "IMPORT_ROW_REJECTED"), "item")
+                    (kept[outcome["index"]][0], outcome.get("code", "IMPORT_ROW_REJECTED"), _rejected_at(outcome))
                 )
         if tally is None:
             tally = _batch_tally(writer, job, batch, superseded, result)
@@ -2946,7 +2958,7 @@ class _Settlement:
                 writer,
                 self.job,
                 self.batch,
-                fail=(row, first.get("code", "IMPORT_ROW_REJECTED"), "item"),
+                fail=(row, first.get("code", "IMPORT_ROW_REJECTED"), _rejected_at(first)),
             )
         else:
             _record(
@@ -3196,8 +3208,12 @@ def _derived_items(
         preparation = prepared[position[id(row)]]
         key, stored = preparation.key, preparation.stored
         if stored is None:
-            code = preparation.refusal[0] if preparation.refusal is not None else "IMPORT_ROW_REJECTED"
-            refused.append({"index": index, "outcome": "rejected", "code": code})
+            refusal = preparation.refusal
+            code = refusal[0] if refusal is not None else "IMPORT_ROW_REJECTED"
+            issues = refusal[2].get("issues") if refusal is not None and isinstance(refusal[2], Mapping) else None
+            # The same shape as the writer's rejected outcome, so ``_rejected_at`` reads both.
+            refused.append({"index": index, "outcome": "rejected", "code": code,
+                            **({"fields": issues} if isinstance(issues, list) else {})})
             continue
         if key is None:
             at = row.after
@@ -3226,7 +3242,7 @@ def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: li
     outcomes = derived_rows.apply(conn, goal, items, scope=scope, undo=undo)
     entries = _logged(batch, kept, {"rows": [*outcomes, *refused]}, prepared, manifest.schema.version)
     rejections = [(row.ordinal, row.start, code, at) for row, code, at in batch.rejections] + [
-        (kept[outcome["index"]][0].ordinal, kept[outcome["index"]][0].start, outcome["code"], "item")
+        (kept[outcome["index"]][0].ordinal, kept[outcome["index"]][0].start, outcome["code"], _rejected_at(outcome))
         for outcome in refused
     ]
     return _Applied(outcomes, entries, rejections, superseded)
