@@ -208,6 +208,12 @@ class LocalRuntimeActivation:
     def _activate(self) -> None:
         if self._shutdown.is_set():
             return
+        from .cloud_cell import cloud_mode_enabled
+
+        if cloud_mode_enabled():
+            from .catalogue_prewarm import adopt_at_boot
+
+            self._start_component("staged catalogue", adopt_at_boot)
         self._start_component("derived drain", self._start_derived_drain)
         if self._shutdown.is_set():
             self._stop_background_workers()

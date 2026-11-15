@@ -201,6 +201,16 @@ cellctl:
   # cell, longer on a larger vault. A broken image keeps the canary cell down for the
   # whole deadline. The schema allows 5 to 120.
   upgradeReadyDeadlineMinutes: 30
+  # warm-cell-catalogue: rehearsal sets the measured profile and real timeout before enabling.
+  cataloguePrewarm: false
+  catalogueBuildTimeoutSeconds: 1800
+  catalogueBuildResources:
+    requests:
+      cpu: "2"
+      memory: 3Gi
+    limits:
+      cpu: "2"
+      memory: 3Gi
   upgradeConcurrencyPerNode: 1
   upgradePrepareEnabled: true
   # automate-cloud-releases D4: each cell upgrades in its own quiet UTC hour,
