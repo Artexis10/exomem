@@ -1767,6 +1767,7 @@ class _BatchArtifactGuard:
     guard: PathGuard
     #: A generation guard carries no digest; rollback still compares the planned one.
     planned_hash: str | None = None
+    native_version: held_fs.FileVersion | None = None
 
     @property
     def path(self) -> Path:
@@ -1794,10 +1795,15 @@ class _BatchArtifactGuard:
         expected_content_hash: str | None = None,
         expected_identity: PathIdentity | None = None,
         expected_generation: tuple[int, int, int] | None = None,
+        expected_native_version: held_fs.FileVersion | None = None,
     ) -> _BatchArtifactGuard:
         absolute = Path(os.path.abspath(path))
         root = absolute.parent
-        if expected_generation is not None:
+        if expected_native_version is not None:
+            if expected_content_hash is None:
+                raise PathGuardError("PATH_GUARD_INVALID", "a native version guard keeps the planned hash")
+            guard = PathGuard.capture(root, absolute.name, leaf_policy="stable")
+        elif expected_generation is not None:
             if expected_content_hash is None:
                 raise PathGuardError("PATH_GUARD_INVALID", "a generation guard keeps the planned hash")
             # The caller proved the bytes when it copied them in and read this generation
@@ -1830,13 +1836,28 @@ class _BatchArtifactGuard:
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
         # `PathGuard.capture` has just rechecked the guard it returned.
-        return cls(
+        captured = cls(
             root,
             guard,
-            planned_hash=expected_content_hash if expected_generation is not None else None,
+            planned_hash=expected_content_hash if expected_generation is not None or expected_native_version is not None else None,
+            native_version=expected_native_version,
         )
+        if expected_native_version is not None:
+            captured.recheck()
+        return captured
 
     def recheck(self) -> None:
+        if self.native_version is not None:
+            self.guard.recheck(self.root)
+            try:
+                with held_fs.acquire(self.root).require() as filesystem, filesystem.parent(".").require() as parent:
+                    with filesystem.file(parent, self.guard.target).require() as file:
+                        if file.version() != self.native_version:
+                            raise PathGuardError("PATH_GUARD_CHANGED", "native batch artifact version changed")
+                self.guard.recheck(self.root)
+            except (OSError, held_fs.HeldFsError) as error:
+                raise PathGuardError("PATH_GUARD_CHANGED", "native batch artifact is unavailable") from error
+            return
         try:
             self.guard.recheck(self.root)
             return
@@ -2045,6 +2066,7 @@ class _BatchPayloadCustody:
     stage: Callable[[PlannedWrite, _BatchWorkspace, bool], _ArtifactCustody | None]
     publication: Callable[[PlannedWrite, _WorkspaceArtifact, bool], _ArtifactCustody | None]
     removed: Callable[[PlannedWrite, PathIdentity], None]
+    finished: Callable[[], None] | None = None
 
 
 @dataclass(slots=True)
@@ -2991,7 +3013,8 @@ class _BatchWorkspace:
                             # Save the native fact before an owner acknowledgement can fail.
                             artifact.installation_witness = witness
                             after = witness.after
-                            artifact.installed_generation = (after.size, after.mtime_ns, after.change_time_ns)
+                            if STAT_GENERATION_TRUSTED:
+                                artifact.installed_generation = (after.size, after.mtime_ns, after.change_time_ns)
                             if custody is not None and custody.installed is not None:
                                 custody.installed(witness)
 
@@ -6427,6 +6450,7 @@ def _batch_atomic_write_locked(
                             final,
                             expected_content_hash=artifact.content_hash,
                             expected_identity=installed_identity,
+                            expected_native_version=artifact.installation_witness.after if artifact.installation_witness is not None else None,
                         )
                     raise
             if publication_intents_enabled:
@@ -6437,6 +6461,7 @@ def _batch_atomic_write_locked(
                 expected_content_hash=artifact.content_hash,
                 expected_identity=installed_identity,
                 expected_generation=artifact.installed_generation,
+                expected_native_version=artifact.installation_witness.after if artifact.installation_witness is not None else None,
             )
             _after_batch_destination_published(final)
             workspace.recheck()
@@ -6541,8 +6566,12 @@ def _batch_atomic_write_locked(
                         final,
                         expected_content_hash=snapshot.content_hash,
                         expected_identity=restored_identity,
+                        expected_generation=restore.installed_generation,
+                        expected_native_version=restore.installation_witness.after if restore.installation_witness is not None else None,
                     )
-                    _reset_restored_timestamps(final, restored_identity, snapshot)
+                    if not restore.requires_installation_witness:
+                        # Held custody applied metadata before its witness; another utime would invalidate that version.
+                        _reset_restored_timestamps(final, restored_identity, snapshot)
                     workspace.recheck()
                 final_guards.pop(final, None)
                 restored_paths.add(final)
@@ -6603,6 +6632,12 @@ def _batch_atomic_write_locked(
     finally:
         if additive_guard is not None:
             additive_guard.abort()
+        if _payload_custody is not None and _payload_custody.finished is not None:
+            try:
+                _payload_custody.finished()
+            except held_fs.CustodyAcknowledgementPending:
+                # Native rollback and cleanup finished; the owner retains its unresolved canonical reservations.
+                pass
 
     if vault_root is not None:
         # Before the write acknowledges, so the free-text census names every

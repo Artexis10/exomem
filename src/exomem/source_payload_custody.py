@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from . import (
     generated_fragment_store,
     held_fs,
     memory_refs,
+    native_copy_custody,
     source_custody,
     source_native_custody,
     vault,
@@ -27,12 +27,6 @@ class _Payload:
     path: Path
 
 
-@dataclass(frozen=True)
-class _Copy:
-    canonical: generated_fragment_store.Copy
-    native: source_native_custody.NativeReservation
-
-
 class _CaptureCopies:
     def __init__(self, root: Path, reference: str, primary: vault.PlannedWrite,
                  writes: Sequence[vault.PlannedWrite], auxiliaries):
@@ -44,10 +38,10 @@ class _CaptureCopies:
                 or memory_refs.ref_from_markdown(primary.content) != reference):
             raise OpError("SOURCE_CUSTODY_TARGET_CHANGED", "Source payload differs from its allocation")
         self.native = source_native_custody.NativeCustody(root)
-        self.ledger_id, self.physical_scope = self.native.ledger_id, self.native.physical_scope
         self.store = generated_fragment_store.GeneratedFragmentStore(root)
+        self.copies = native_copy_custody.NativeCopyCustody(root, store=self.store, native=self.native)
         self.payloads: dict[Path, _Payload] = {}
-        self.destinations: dict[Path, _Copy] = {}
+        self.destinations: dict[Path, native_copy_custody.CopyAllocation] = {}
         try:
             head = self.store.initialize()
             # This locator names the catalogue protocol, rather than each retained physical copy.
@@ -82,40 +76,11 @@ class _CaptureCopies:
         self.store.close()
 
     def _reserve(self, payload: _Payload, relative: str, *, destination: str | None = None,
-                 removable: bool = True) -> _Copy:
+                 removable: bool = True) -> native_copy_custody.CopyAllocation:
         source_custody.require_publishable(self.root, self.reference)
-        binding_id = uuid.uuid4().hex
-        owner = source_custody.OwnerLocator(
-            owner=source_native_custody.OWNER, locator=binding_id, version=self.physical_scope,
-        )
-        canonical = self.store.reserve_copy(
-            payload.image.image_id, owner=owner, origin_ledger=self.ledger_id,
-            expected_header=payload.image, expected_root=self.root,
-        )
-        # A failed private reservation leaves its canonical Copy unresolved; local absence cannot close it.
-        native = self.native.reserve(
-            relative_path=relative, expected_sha256=payload.image.image_sha256,
-            expected_size=payload.image.image_size, source_ref=self.reference,
-            image_id=payload.image.image_id, generated_copy_id=canonical.copy_id,
-            destination_relative=destination, removable=removable, binding_id=binding_id,
-        )
-        return _Copy(canonical, native)
-
-    def _verified(self, copy: _Copy, file: held_fs.HeldFile, digest: str) -> None:
-        self.native.verified(copy.native, file, sha256=digest)
-
-    def _present(self, copy: _Copy) -> None:
-        self.store.ack_copy(copy.canonical.copy_id, owner=copy.canonical.owner, outcome="present")
-
-    def _closed(self, copy: _Copy, identity: held_fs.StableIdentity | None, outcome: str) -> None:
-        reservation = self.native.get(copy.native.binding_id)
-        if reservation.identity is None and outcome != "installed":
-            # Every binding precedes bytes; an unbound reservation cannot have published its payload.
-            identity, outcome = None, "not_written"
-        self.native.acknowledge(reservation, identity, outcome)
-        self.store.ack_copy(
-            copy.canonical.copy_id, owner=copy.canonical.owner,
-            outcome="no_effect" if outcome == "not_written" else "retired",
+        return self.copies.reserve(
+            payload.image, logical_path=payload.path, relative_path=relative,
+            destination=destination, removable=removable,
         )
 
     def stage(self, write: vault.PlannedWrite, workspace: vault._BatchWorkspace,
@@ -125,7 +90,7 @@ class _CaptureCopies:
             return None
         if restoring:
             raise ValueError("a fresh Source allocation has no before-image to restore")
-        copies: dict[str, _Copy] = {}
+        copies: dict[str, native_copy_custody.CopyAllocation] = {}
         active_name: str | None = None
 
         def reserve(name):
@@ -140,12 +105,12 @@ class _CaptureCopies:
         def verified(file, digest):
             assert active_name is not None
             copy = copies[active_name]
-            self._verified(copy, file, digest)
-            self._present(copy)
+            self.copies.verified(copy, file, digest)
+            self.copies.present(copy)
 
         def release(name, identity, outcome):
             try:
-                self._closed(copies[name], identity, outcome)
+                self.copies.closed(copies[name], identity, outcome)
             except (sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
                 raise held_fs.CustodyAcknowledgementPending("Source stage acknowledgement is pending") from None
 
@@ -158,7 +123,7 @@ class _CaptureCopies:
             return None
         if restoring:
             raise ValueError("a fresh Source allocation cannot publish an inverse image")
-        copies: dict[str, tuple[_Copy, _Copy]] = {}
+        copies: dict[str, tuple[native_copy_custody.CopyAllocation, native_copy_custody.CopyAllocation]] = {}
         active_name: str | None = None
 
         def reserve(name):
@@ -177,8 +142,8 @@ class _CaptureCopies:
         def verified(file, digest):
             assert active_name is not None
             for copy in copies[active_name]:
-                self._verified(copy, file, digest)
-            self._present(copies[active_name][0])
+                self.copies.verified(copy, file, digest)
+            self.copies.present(copies[active_name][0])
 
         def before_install():
             source_custody.require_publishable(self.root, self.reference)
@@ -189,21 +154,21 @@ class _CaptureCopies:
 
         def installed(witness):
             assert active_name is not None
-            self.native.record_installation(copies[active_name][1].native, witness)
+            self.copies.installed(copies[active_name][1], witness)
 
         def release(name, identity, outcome):
             temporary, candidate = copies[name]
             try:
-                self._closed(temporary, identity, outcome)
+                self.copies.closed(temporary, identity, outcome)
                 if outcome == "installed":
                     observed = self.native.observe(candidate.native.binding_id, destination=True)
                     if observed.state != "installed" or observed.matching is not True:
                         raise held_fs.CustodyAcknowledgementPending("Source installation evidence is pending")
                     # Installation keeps destination bytes present; only its temporary-name obligation closed.
-                    self._present(candidate)
+                    self.copies.present(candidate)
                 else:
                     # Native removal of the exclusive single-link temporary leaves no destination alias.
-                    self._closed(candidate, identity, outcome)
+                    self.copies.closed(candidate, identity, outcome)
             except (sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
                 raise held_fs.CustodyAcknowledgementPending("Source publication acknowledgement is pending") from None
 
@@ -218,7 +183,7 @@ class _CaptureCopies:
         if (native_identity is None or native_identity.device != identity.device
                 or native_identity.inode != identity.inode):
             raise ValueError("Source inverse removal has a different native allocation")
-        self._closed(copy, native_identity, "removed")
+        self.copies.closed(copy, native_identity, "removed")
 
 
 @contextmanager

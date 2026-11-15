@@ -106,6 +106,15 @@ A takeover changes the slot revision and cancels delayed forward or inverse publ
 Displacing a copy does not retire its physical obligation; slot references also pin its image until the owner closes them.
 Missing canonical custody remains different from a missing derived cache.
 
+An authorized writer can replace an exact pending publication right without proving what its earlier native publication did.
+The takeover preserves every displaced copy and records uncertainty; it grants no ownership, absence or cleanup fact about the earlier allocation.
+The new publisher reads guarded current bytes and receives its own installation witness instead of selecting an earlier map by hash.
+
+Direct reads combine each image's canonical uncertainty horizon with a global floor on the catalogue head.
+The head records the checkpoint through which that summary is complete; recovery folds uncertainty before clearing its pending metadata unit.
+A legacy catalogue without summary coverage starts conservatively at its existing epoch, without scanning history before ordinary capture.
+Repeated observation of the same recorded uncertainty does not raise that finite floor.
+
 An inverse publication creates a fresh native file, even when it restores the before-image bytes.
 First settle the exactly observed installed candidate to consume its forward publication right, without claiming batch success.
 Reserve a fresh restore copy on the before-image, then prepare and install it under a new slot publication right.

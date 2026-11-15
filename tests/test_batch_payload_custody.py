@@ -13,6 +13,103 @@ import pytest
 from exomem import held_fs, vault
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+def test_payload_settlement_observes_final_native_bytes_after_cleanup(tmp_path, monkeypatch, rollback):
+    root = tmp_path / "vault"
+    root.mkdir()
+    target = root / "managed.md"
+    target.write_bytes(b"before")
+    observed = []
+
+    def fail_after_install(path):
+        if rollback and path == target:
+            raise RuntimeError("parent failed")
+
+    def finished():
+        observed.append(target.read_bytes())
+        assert not any(path.is_dir() and path.name.startswith(vault.VAULT_SCAN_SKIP_DIR_PREFIXES) for path in root.iterdir())
+        if rollback:
+            raise held_fs.CustodyAcknowledgementPending("owner retains its reservation")
+
+    monkeypatch.setattr(vault, "_after_batch_destination_published", fail_after_install)
+    custody = vault._BatchPayloadCustody(lambda *args: None, lambda *args: None, lambda *args: None, finished)
+    if rollback:
+        with pytest.raises(RuntimeError, match="parent failed"):
+            vault.batch_atomic_write([vault.PlannedWrite(target, "after")], vault_root=root,
+                                     post_commit_fanout=False, _payload_custody=custody)
+    else:
+        vault.batch_atomic_write([vault.PlannedWrite(target, "after")], vault_root=root,
+                                 post_commit_fanout=False, _payload_custody=custody)
+    assert observed == [b"before" if rollback else b"after"]
+
+
+@pytest.mark.parametrize("external_edit", [False, True])
+def test_custodied_rollback_preserves_native_versions_and_external_edits(vault, external_edit):
+    from exomem import source_native_custody, writer_lease
+    from exomem import vault as vault_api
+    from exomem.governance.principal import owner_principal, request_scope
+
+    root = vault
+    target = root / "managed.md"
+    target.write_bytes(b"before image")
+    before = target.stat()
+    bindings = []
+    manager = writer_lease.active_manager()
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(root):
+        native = source_native_custody.NativeCustody(root)
+
+        def publication(write, artifact, restoring):
+            if write.path != target:
+                return None
+            active = []
+
+            def reserve(name):
+                active.append(native.reserve(
+                    relative_path=name, expected_sha256=artifact.content_hash,
+                    expected_size=artifact.held_file.version().size,
+                    destination_relative="managed.md", removable=False,
+                ))
+                bindings.append((active[-1], restoring))
+
+            def verified(file, digest):
+                native.verified(active[-1], file, sha256=digest)
+
+            return vault_api._ArtifactCustody(
+                held_fs.TemporaryCustody(reserve, lambda name, file: native.bind(active[-1], file),
+                                         lambda name, identity, outcome: None),
+                verified, installed=lambda witness: native.record_installation(active[-1], witness),
+            )
+
+        def fail_after_install(path):
+            if path == target:
+                if external_edit:
+                    path.write_bytes(b"after image")
+                    changed = path.stat().st_mtime_ns + 1_000_000
+                    os.utime(path, ns=(changed, changed))
+                raise RuntimeError("rollback required")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(vault_api, "_after_batch_destination_published", fail_after_install)
+            error = vault_api.BatchWriteError if external_edit else RuntimeError
+            message = "BATCH_ROLLBACK_INCOMPLETE" if external_edit else "rollback required"
+            with pytest.raises(error, match=message):
+                vault_api.batch_atomic_write(
+                    [vault_api.PlannedWrite(target, "after image")], vault_root=root,
+                    _payload_custody=vault_api._BatchPayloadCustody(lambda *args: None, publication, lambda *args: None),
+                    post_commit_fanout=False,
+                )
+        if external_edit:
+            assert not any(restoring for binding, restoring in bindings)
+            assert native.observe(bindings[-1][0].binding_id, destination=True).state == "unknown"
+        else:
+            restored = next(binding for binding, restoring in reversed(bindings) if restoring)
+            observed = native.observe(restored.binding_id, destination=True)
+            assert observed.state == "installed" and observed.matching is True
+            after = target.stat()
+            assert (after.st_mode, after.st_mtime_ns, after.st_atime_ns) == (before.st_mode, before.st_mtime_ns, before.st_atime_ns)
+    assert target.read_bytes() == (b"after image" if external_edit else b"before image")
+
+
 def test_partial_workspace_copy_binds_custody_before_source_bytes(tmp_path, monkeypatch):
     """A full-disk stage stays discoverable until its exact native allocation is removed."""
     root = tmp_path / "vault"

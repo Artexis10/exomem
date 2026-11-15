@@ -108,6 +108,16 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **THEN** the old forward publication and rollback cannot reuse their cancelled publication right
 - **AND** displaced physical copies remain outstanding until their owners acknowledge them
 
+#### Scenario: Pending native evidence disappears before another write
+- **WHEN** an authorized writer takes over the exact pending slot after the earlier installation evidence becomes unavailable
+- **THEN** it revokes the earlier publication right and preserves every unresolved copy
+- **AND** it binds guarded current input as uncertain instead of choosing an earlier map by matching bytes
+
+#### Scenario: Canonical uncertainty survives loss of its derived index
+- **WHEN** a renderer reads a slot after canonical uncertainty was recorded and its local index became unavailable
+- **THEN** it carries the effective image and catalogue horizons from direct canonical records
+- **AND** an absent legacy summary qualifies no zero horizon and requires no history scan before a later writer
+
 #### Scenario: Rollback creates a fresh copy of the before-image
 - **WHEN** an inverse publication restores earlier bytes through a newly created native file
 - **THEN** it binds a fresh copy and publication right instead of reusing the earlier file's identity

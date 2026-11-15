@@ -111,14 +111,16 @@ def test_capture_retains_canonical_copy_when_the_native_binding_disappears(vault
             assert lookup.state == "unknown" and len(lookup.copies) == 1
             copy = lookup.copies[0]
             assert copy.outcome == "present" and copy.origin_ledger == native.ledger_id
-            assert native.observe(copy.owner.locator, destination=True).matching is True
+            assert native.observe(copy.owner.version, destination=True).matching is True
             image = store.image_header(copy.image_id).value
+            assert copy.owner.locator == generated_fragment_store.file_locator(image.catalogue_id, captured["source"]["path"])
+            assert copy.owner.version == native.get(copy.owner.version).binding_id
             assert image.whole_source_ref == target["source_ref"]
             assert image.image_sha256 == target["source_hash"]
             with manager.idempotency._connect() as conn:
-                conn.execute("DELETE FROM source_native_bindings WHERE binding_id=?", (copy.owner.locator,))
+                conn.execute("DELETE FROM source_native_bindings WHERE binding_id=?", (copy.owner.version,))
             assert native.lookup(source_ref=target["source_ref"]).reservations == ()
-            assert native.observe(copy.owner.locator, destination=True).state == "unknown"
+            assert native.observe(copy.owner.version, destination=True).state == "unknown"
             retained = store.lookup(target["source_ref"], None)
             assert retained.state == "unknown" and retained.copies == (copy,)
             assert not copy.closed
@@ -158,7 +160,7 @@ def test_sealed_binary_original_uses_whole_source_custody(vault, source_schema, 
                 image = store.image_header(copy.image_id).value
                 assert image.whole_source_ref == saved.ref and image.page_count == 0
                 assert copy.outcome == "present"
-                assert native.observe(copy.owner.locator, destination=True).matching is True
+                assert native.observe(copy.owner.version, destination=True).matching is True
                 if image.image_sha256 == hashlib.sha256(original).hexdigest():
                     originals.append(copy)
             assert len(originals) == 1

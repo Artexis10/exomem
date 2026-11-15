@@ -64,6 +64,8 @@ class Head(_Record):
     epoch: _Epoch = 0
     change_floor: Annotated[int, Field(ge=1)] = 1
     collected_through: _Epoch = 0
+    unknown_through_epoch: _Epoch = 0
+    summarized_through_epoch: _Epoch | None = None
     pending: Pending | None = None
 
 
@@ -84,7 +86,7 @@ class Change(_Record):
     unit_id: _Id
     # Operations describe this owner's fixed metadata protocol.
     operation: Literal["image_begin", "image_page", "image_seal", "copy_reserve", "copy_ack",
-                       "uncertainty", "birth", "collect", "no_effect", "slot_prepare", "slot_settle", "slot_remove"]
+                       "uncertainty", "birth", "collect", "no_effect", "slot_prepare", "slot_takeover", "slot_settle", "slot_remove"]
     objects: Annotated[tuple[ObjectChange, ...], Field(max_length=3)] = ()
 
 
@@ -195,6 +197,7 @@ class SlotBinding:
     candidate: Copy | None = None
     images: tuple[ImageHeader, ...] = ()
     publication: SlotPublication | None = None
+    unknown_through_epoch: int | None = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +225,7 @@ class ImageBuild:
 class Observation:
     state: Literal["observed", "missing", "pending", "unknown"]
     value: ImageHeader | ImagePage | Copy | None = None
+    unknown_through_epoch: int | None = None
 
 
 @dataclass(frozen=True)
@@ -257,6 +261,14 @@ class CopyPage:
 
 def canonical_root(root: Path) -> Path:
     return source_custody.manifest_root(root).parent / "generated"
+
+
+def file_locator(catalogue_id: str, relative: str) -> str:
+    """One opaque logical-file locator, shared by its retained native copy versions."""
+    normalized = "/".join(vault._safe_guard_target(relative))
+    if normalized != relative:
+        raise ValueError("generated_file_locator_path_invalid")
+    return uuid.uuid5(uuid.UUID(hex=_opaque(catalogue_id)), relative).hex
 
 
 def cache_path(root: Path) -> Path:
@@ -369,7 +381,16 @@ class GeneratedFragmentStore:
             raise ValueError("generated_head_invalid")
         if value.pending is not None and value.pending.change_epoch != value.epoch:
             raise ValueError("generated_pending_epoch_invalid")
+        if (value.unknown_through_epoch > value.epoch
+                or (value.summarized_through_epoch is not None and value.summarized_through_epoch > value.epoch)):
+            raise ValueError("generated_summary_epoch_invalid")
         return value
+
+    @staticmethod
+    def _global_horizon(head: Head) -> int:
+        # Missing legacy coverage is unknown through the prior catalogue, never an empty summary.
+        uncovered = head.summarized_through_epoch is None or head.summarized_through_epoch < head.epoch
+        return max(head.unknown_through_epoch, head.epoch if uncovered else 0)
 
     def _write(self, path: Path, value: BaseModel, guard: vault.PathGuard | None = None):
         if guard is None:
@@ -595,7 +616,7 @@ class GeneratedFragmentStore:
         _boundary(self.root)
         head, guard = self._read(self.path / "head.json", Head)
         if head is None:
-            head = Head(catalogue_id=_id())
+            head = Head(catalogue_id=_id(), summarized_through_epoch=0)
             self._install((self._write(self.path / "head.json", head, guard),))
             try:
                 with self._connect() as conn:
@@ -678,7 +699,8 @@ class GeneratedFragmentStore:
         if writes:
             self._install(writes)
         self._observe(change)
-        settled = self._set_head(pending, pending.model_copy(update={"pending": None}))
+        summary = self._summarize(pending, change)
+        settled = self._set_head(pending, summary.model_copy(update={"pending": None}))
         self._refresh(change, settled)
         self._trim_changes(limit=1)
         return self.head()
@@ -722,8 +744,50 @@ class GeneratedFragmentStore:
                     guard = vault.PathGuard.capture(self.root, path.relative_to(self.root).as_posix(), leaf_policy="stable")
             self._install((self._write(path, value, guard),))
 
+    def _summarize(self, head: Head, change: Change | None) -> Head:
+        """Fold this bounded metadata unit before its pending head can clear."""
+        declared = {item.object_id: item for item in change.objects if item.kind == "uncertainty"} if change else {}
+        identities = {head.pending.unit_id}
+        identities.update(declared)
+        horizon = head.unknown_through_epoch
+        for identity in identities:
+            try:
+                path = self.path / "uncertain" / f"{identity}.json"
+                value, guard = self._read(path, Uncertainty)
+                if value is None:
+                    item = declared.get(identity)
+                    if item is None:
+                        continue
+                    # The pending descriptor already records this loss, even if its marker was never installed.
+                    value = Uncertainty(unit_id=identity, catalogue_id=head.catalogue_id,
+                                        unknown_through_epoch=head.epoch, image_id=item.image_id,
+                                        revision=item.after_revision)
+                    self._install((self._write(path, value, guard),))
+                if (value.catalogue_id != head.catalogue_id or value.unit_id != identity
+                        or value.unknown_through_epoch > head.epoch):
+                    raise ValueError("generated_uncertainty_binding_invalid")
+                if value.image_id is None:
+                    horizon = max(horizon, value.unknown_through_epoch)
+                    continue
+                image = self._image(value.image_id)
+                if image.unknown_through_epoch < value.unknown_through_epoch:
+                    item = ObjectChange(kind="image", object_id=image.image_id, image_id=image.image_id)
+                    # The construction revision stays stable: replay only raises U, never changes the image or map.
+                    updated = image.model_copy(update={"unknown_through_epoch": value.unknown_through_epoch})
+                    self._install((self._write(self._object_path(item), updated),))
+            except (ValueError, OSError, vault.PathGuardError):
+                # An unavailable scoped header cannot hide its uncertainty from direct readers.
+                horizon = max(horizon, head.epoch)
+        return head.model_copy(update={"unknown_through_epoch": horizon,
+                                       "summarized_through_epoch": head.epoch})
+
     def _recover(self) -> None:
         head = self.head()
+        covered_before = head.epoch - int(head.pending is not None)
+        if head.summarized_through_epoch is None or head.summarized_through_epoch < covered_before:
+            head = self._set_head(head, head.model_copy(update={
+                "unknown_through_epoch": self._global_horizon(head), "summarized_through_epoch": head.epoch,
+            }))
         if head.pending is not None:
             change = None
             try:
@@ -734,7 +798,8 @@ class GeneratedFragmentStore:
             except (ValueError, OSError, vault.PathGuardError):
                 pass
             self._observe(change)
-            settled = self._set_head(head, head.model_copy(update={"pending": None}))
+            summary = self._summarize(head, change)
+            settled = self._set_head(head, summary.model_copy(update={"pending": None}))
             if change is not None:
                 self._refresh(change, settled, allow_before=True)
             else:
@@ -758,7 +823,9 @@ class GeneratedFragmentStore:
                 unit_id=change.unit_id, change_epoch=change.epoch,
                 change_record_hash=hashlib.sha256(encode(change)).hexdigest(),
             )}))
-            settled = self._set_head(pending, pending.model_copy(update={"pending": None}))
+            settled = self._set_head(pending, pending.model_copy(update={
+                "pending": None, "summarized_through_epoch": pending.epoch,
+            }))
             self._refresh(change, settled)
 
     def allocate_birth(self) -> ProducerBirth:
@@ -931,8 +998,8 @@ class GeneratedFragmentStore:
             if slot is None:
                 guard.recheck(self.root)
                 if self.head() != head or head.pending is not None:
-                    return SlotBinding("pending")
-                return SlotBinding("missing")
+                    return SlotBinding("pending", unknown_through_epoch=self._global_horizon(head))
+                return SlotBinding("missing", unknown_through_epoch=self._global_horizon(head))
             if slot.slot_id != identity:
                 raise ValueError("generated slot key differs")
             copies, images = self._slot_records(slot)
@@ -950,7 +1017,9 @@ class GeneratedFragmentStore:
             return SlotBinding("pending" if head.pending is not None else "observed", slot,
                                by_id.get(slot.current_copy_id),
                                by_id.get(slot.pending.candidate_copy_id) if slot.pending else None,
-                               images, publication)
+                               images, publication,
+                               max((self._global_horizon(head),
+                                    *(image.unknown_through_epoch for image in images))))
         except (ValueError, OSError, vault.PathGuardError):
             return SlotBinding("unknown", slot)
 
@@ -985,6 +1054,36 @@ class GeneratedFragmentStore:
         return SlotPublication(self.root, owner, locator, physical_scope, identity, value.revision,
                                publication_id, expected_current_copy_id, candidate.copy_id, _SLOT_SEAL)
 
+    def takeover_slot(self, previous: SlotPublication, *, candidate: Copy,
+                      publication_id: str) -> SlotPublication:
+        """Revoke an exact pending right without claiming what its native publication did."""
+        _boundary(self.root)
+        self._recover()
+        _opaque(publication_id)
+        binding = self.check_slot(previous)
+        item = ObjectChange(kind="copy", object_id=candidate.copy_id, image_id=candidate.image_id)
+        reserved, copy_guard = self._read(self._object_path(item), Copy)
+        guards = [copy_guard]
+        image = self._image(candidate.image_id, guards=guards)
+        if (reserved != candidate or candidate.outcome != "reserved"
+                or candidate.copy_id in (previous.before_copy_id, previous.candidate_copy_id)
+                or candidate.owner.owner != previous.owner or candidate.owner.locator != previous.locator
+                or image.state != "ready" or publication_id == previous.publication_id):
+            raise ValueError("generated takeover requires a fresh reserved candidate and publication")
+        for guard in guards:
+            guard.recheck(self.root)
+        self._uncertain_slot(binding)
+        binding = self.check_slot(previous)
+        value = binding.slot.model_copy(update={
+            "pending": SlotPending(publication_id=publication_id, candidate_copy_id=candidate.copy_id),
+            "revision": _id(),
+        })
+        self._run("slot_takeover", ((ObjectChange(kind="slot", object_id=value.slot_id,
+                   expected_revision=previous.revision, after_revision=value.revision), value),))
+        return SlotPublication(self.root, previous.owner, previous.locator, previous.physical_scope,
+                               value.slot_id, value.revision, publication_id, value.current_copy_id,
+                               candidate.copy_id, _SLOT_SEAL)
+
     def check_slot(self, publication: SlotPublication) -> SlotBinding:
         """Fence both forward installation and inverse publication against a superseded slot."""
         _boundary(self.root)
@@ -1017,8 +1116,14 @@ class GeneratedFragmentStore:
     def _uncertain_slot(self, binding: SlotBinding) -> SlotBinding:
         images = tuple(image.image_id for image in binding.images)
         for image_id in images or (None,):
-            self.mark_uncertain(image_id)
-        return SlotBinding("unknown", binding.slot, binding.current, binding.candidate, binding.images)
+            # One slot revision describes one observed loss, even across retries and restarts.
+            identity = uuid.uuid5(uuid.UUID(hex=binding.slot.revision), image_id or "global").hex
+            self.mark_uncertain(image_id, unit_id=identity)
+        head = self.head()
+        headers = tuple(self._image(image_id) for image_id in images)
+        return SlotBinding("unknown", binding.slot, binding.current, binding.candidate, headers,
+                           unknown_through_epoch=max((self._global_horizon(head),
+                                                      *(image.unknown_through_epoch for image in headers))))
 
     def settle_slot(self, publication: SlotPublication, *,
                     witness: Callable[[SlotBinding], NativeSlotWitness]) -> SlotBinding:
@@ -1030,7 +1135,7 @@ class GeneratedFragmentStore:
         binding = self.check_slot(publication)
         if proof.physical_scope != publication.physical_scope or proof.selection == "foreign":
             return SlotBinding("pending", binding.slot, binding.current, binding.candidate,
-                               binding.images, binding.publication)
+                               binding.images, binding.publication, binding.unknown_through_epoch)
         if proof.selection == "mismatch":
             return self._uncertain_slot(binding)
         if proof.selection == "before":
@@ -1064,7 +1169,8 @@ class GeneratedFragmentStore:
         if checked.state != "observed" or checked.slot != binding.slot:
             raise ValueError("generated slot binding changed during its native witness")
         if proof.physical_scope != physical_scope or proof.selection == "foreign":
-            return SlotBinding("pending", binding.slot, binding.current, images=binding.images)
+            return SlotBinding("pending", binding.slot, binding.current, images=binding.images,
+                               unknown_through_epoch=binding.unknown_through_epoch)
         if proof.selection != "absence":
             return self._uncertain_slot(binding)
         self._run("slot_remove", ((ObjectChange(kind="slot", object_id=binding.slot.slot_id,
@@ -1091,13 +1197,20 @@ class GeneratedFragmentStore:
                    expected_revision=current.revision, after_revision=value.revision), value),))
         return value
 
-    def mark_uncertain(self, image_id: str | None = None) -> Uncertainty:
+    def mark_uncertain(self, image_id: str | None = None, *, unit_id: str | None = None) -> Uncertainty:
         _boundary(self.root)
         self._recover()
         head = self.head()
         if image_id is not None:
             _opaque(image_id)
-        value = Uncertainty(unit_id=_id(), catalogue_id=head.catalogue_id,
+        if unit_id is not None:
+            _opaque(unit_id)
+            existing, _ = self._read(self.path / "uncertain" / f"{unit_id}.json", Uncertainty)
+            if existing is not None:
+                if existing.catalogue_id != head.catalogue_id or existing.image_id != image_id:
+                    raise ValueError("generated uncertainty identity differs")
+                return existing
+        value = Uncertainty(unit_id=unit_id or _id(), catalogue_id=head.catalogue_id,
                             unknown_through_epoch=head.epoch + 1, image_id=image_id, revision=_id())
         self._run("uncertainty", ((ObjectChange(kind="uncertainty", object_id=value.unit_id,
                    image_id=image_id, after_revision=value.revision), value),))
@@ -1107,7 +1220,9 @@ class GeneratedFragmentStore:
         """Read bounded image binding evidence without loading its map or native bytes."""
         try:
             value = self._image(image_id)
-            return Observation("observed" if value.state == "ready" else "pending", value)
+            head = self.head()
+            return Observation("observed" if value.state == "ready" and head.pending is None else "pending", value,
+                               max(value.unknown_through_epoch, self._global_horizon(head)))
         except FileNotFoundError:
             return Observation("missing")
         except (ValueError, OSError, vault.PathGuardError):
@@ -1145,6 +1260,14 @@ class GeneratedFragmentStore:
         if value.image_id is not None:
             conn.execute("UPDATE images SET horizon=max(horizon,?),exact=0,loss_recorded=1 WHERE image_id=?",
                          (value.unknown_through_epoch, value.image_id))
+            if canonical:
+                try:
+                    header = self._image(value.image_id)
+                except (ValueError, OSError, vault.PathGuardError):
+                    pass
+                else:
+                    conn.execute("UPDATE images SET header=? WHERE image_id=?",
+                                 (encode(header).decode(), value.image_id))
 
     def _cache_object(self, conn, item: ObjectChange, epoch: int, *, allow_before: bool = False) -> None:
         path = self._object_path(item)
@@ -1488,7 +1611,7 @@ class GeneratedFragmentStore:
                                 "ON 1 ORDER BY c.copy_id",
                                 (source_ref, image_cursor, image_cursor, copy_cursor, image_cursor,
                                  copy_cursor, limit + 1, source_ref)).fetchall()
-            uncertain, has_unknown = [], False
+            uncertain, has_unknown = [], birth_qualified and self._global_horizon(head) >= birth.birth_epoch
             if birth_qualified:
                 uncertainty_after = uncertainty_cursor or (-1, "")
                 uncertainty_rows = conn.execute(
@@ -1505,7 +1628,7 @@ class GeneratedFragmentStore:
                      *uncertainty_after, limit + 1, limit + 1, birth.birth_epoch, birth.birth_epoch),
                 ).fetchall()
                 uncertain = [(row[0], row[1]) for row in uncertainty_rows if row[0] is not None]
-                has_unknown = any(row[2] for row in uncertainty_rows)
+                has_unknown |= any(row[2] for row in uncertainty_rows)
             page, unknown_page = rows[:limit], uncertain[:limit]
             copies = tuple(Copy.model_validate_json(row[4]) for row in page if row[4] is not None)
             state = "ready"
