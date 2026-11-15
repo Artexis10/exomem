@@ -351,7 +351,7 @@ def test_an_argument_outside_arguments_is_refused_in_the_text_a_host_reads(build
     text = " ".join(getattr(block, "text", "") for block in result.content)
     refusal = json.loads(text)["error"]
     assert refusal["code"] == "INVALID_ARGUMENT"
-    assert "path" in refusal["message"] and "arguments" in refusal["message"]
+    assert "path is not a field" in refusal["message"]
 
 
 def test_a_note_without_an_observation_is_refused_with_the_syntax_to_add(build, vault) -> None:
