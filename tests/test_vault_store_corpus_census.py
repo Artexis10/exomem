@@ -26,7 +26,7 @@ from test_vault_store_rederive import (
 )
 from test_vault_store_write_cost import create, edit, grow, page_count
 
-from exomem import delete_file, recover_from_trash
+from exomem import activation_manifest, delete_file, recover_from_trash
 from exomem import semantic_contract as sc
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
@@ -121,6 +121,24 @@ def test_a_create_and_an_edit_are_deltas_that_equal_a_cold_build(
     assert_equal(edited, cold(stored, monkeypatch))
 
 
+def test_a_delta_refuses_the_frontmatter_that_a_cold_build_refuses(
+    stored, writer, monkeypatch, corpus_cache_on  # noqa: F811
+):
+    """The cold build strict-parses a page's frontmatter for its identity. A delta that read it
+    leniently accepted the page, so clearing the cache turned accepted data into a refusal."""
+    sc.build_corpus_context(stored)
+    write.commit(writer, write.StoreChange(
+        write.Origin.OUTSIDE_EDITOR, "an outside change",
+        puts=(write.PagePut(GAMMA, b"---\ntitle: Gamma\ntitle: Gamma again\n---\n# Gamma\n"),),
+    ))
+
+    with pytest.raises(activation_manifest.ActivationManifestError) as warm:
+        sc.build_corpus_context(stored)
+    with pytest.raises(activation_manifest.ActivationManifestError) as rebuilt:
+        cold(stored, monkeypatch)
+    assert warm.value.code == rebuilt.value.code == "DUPLICATE_FRONTMATTER_KEY"
+
+
 def test_a_move_drops_the_old_path_and_equals_a_cold_build(
     stored, writer, monkeypatch, corpus_cache_on  # noqa: F811
 ):
@@ -157,6 +175,32 @@ def test_a_deleted_withheld_page_leaves_the_context_that_a_restricted_caller_rea
     assert builds.take() == (0, 0)
     assert HIDDEN not in repr(cached.as_dict())
     assert HIDDEN not in repr(_resolver_maps(cached))
+    assert_equal(cached, cold(stored, monkeypatch))
+
+
+def test_a_page_deleted_while_an_event_publishes_leaves_the_restricted_context(
+    stored, writer, monkeypatch, corpus_cache_on  # noqa: F811
+):
+    """An event's pages and their census entries must read one store state. A deletion between the
+    two reads dropped the page's entry and kept the page, so no later walk named it again."""
+    restrict_external(stored, 'tags: ["secret"]')
+    commit(writer, puts=[(HIDDEN, HIDDEN_TEXT), (LINKER, LINKER_TEXT)])
+    sc.build_corpus_context(stored)
+    commit(writer, puts=[(HIDDEN, HIDDEN_TEXT.replace(b"Private.", b"Private, edited."))])
+    real = sc._patch_markdown_census
+
+    def deleted_first(*args, **kwargs):
+        commit(writer, deletes=[HIDDEN])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sc, "_patch_markdown_census", deleted_first)
+    sc.publish_corpus_files_changed(stored, changed=[HIDDEN])
+    monkeypatch.setattr(sc, "_patch_markdown_census", real)
+
+    with request_scope(EXTERNAL):
+        assert egress.visible_page_filter(stored)(HIDDEN)
+        cached = sc.build_corpus_context(stored)
+    assert HIDDEN not in repr(cached.as_dict())
     assert_equal(cached, cold(stored, monkeypatch))
 
 

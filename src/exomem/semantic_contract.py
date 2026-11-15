@@ -2911,7 +2911,8 @@ def _reconcile_markdown_delta(
     validation types instead of blessing partial state.
 
     In store mode a stored page is read from the store, as the cold build reads
-    it, and judged by the cold build's rules for a stored page.
+    it, and judged by the cold build's rules for a stored page, its strict
+    frontmatter parse included.
     """
     request_budget.checkpoint()
     states = dict(context.pages)
@@ -2959,6 +2960,10 @@ def _reconcile_markdown_delta(
                 source = None if raw is None else raw.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise _unreadable_identity_page(root, rel_path, source_path) from error
+            if source is not None:
+                # The cold build's refusal, so that whether a page is accepted never depends on
+                # the cache. A parse that it accepts reads the identity that the state below holds.
+                _strict_page_identity(rel_path, source)
         else:
             identity_member = in_kb and not reference_only_path
             included = not vault.in_excluded_scan_dir(rel_path) and (
@@ -3270,19 +3275,24 @@ def _patch_corpus_files_changed_locked(
     )
     relation_definitions = relation_registry.core_registry()
     language = semantic_language_registry.core_registry()
-    context = _reconcile_markdown_delta(
-        root,
-        entry[1],
-        reconcile_paths,
-        relation_definitions=relation_definitions,
-        language=language,
-    )
-    census = _patch_markdown_census(
-        root,
-        entry[0],
-        changed_paths=changed_paths,
-        deleted_paths=deleted_paths,
-    )
+    from .vault_store import read
+
+    # The pages and their census entries read one store state. A commit between two reads would
+    # leave a page in the context that its entry no longer names, so no later walk would see it.
+    with read.request_snapshot(root):
+        context = _reconcile_markdown_delta(
+            root,
+            entry[1],
+            reconcile_paths,
+            relation_definitions=relation_definitions,
+            language=language,
+        )
+        census = _patch_markdown_census(
+            root,
+            entry[0],
+            changed_paths=changed_paths,
+            deleted_paths=deleted_paths,
+        )
     with _CORPUS_CONTEXT_CACHE_LOCK:
         if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
             _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
@@ -4181,6 +4191,23 @@ def _unreadable_identity_page(
     )
 
 
+def _strict_page_identity(rel: str, source: str) -> str | None:
+    """The stable identity that the identity census reads from a page's text, by its strict parse:
+    frontmatter that the parse refuses refuses the census."""
+    # Newlines as `_parse_page_state` and the reference scan read them:
+    # on raw bytes a CR-only page shows no frontmatter, so no identity.
+    logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
+    try:
+        frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
+    except vault.FrontmatterError as error:
+        raise activation_manifest.ActivationManifestError(
+            error.code,
+            f"could not safely inspect stable identity at {rel}",
+        ) from error
+    raw_identity = frontmatter.get(ID_FIELD)
+    return None if raw_identity is None else normalize_id(raw_identity)
+
+
 def _build_identity_census(
     root: Path,
     *,
@@ -4193,21 +4220,7 @@ def _build_identity_census(
     owned = _store_census_owns(root)
 
     def admit(rel: str, source: str, path: Path) -> None:
-        # Newlines as `_parse_page_state` and the reference scan read them:
-        # on raw bytes a CR-only page shows no frontmatter, so no identity.
-        logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
-        try:
-            frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
-        except vault.FrontmatterError as error:
-            raise activation_manifest.ActivationManifestError(
-                error.code,
-                f"could not safely inspect stable identity at {rel}",
-            ) from error
-        raw_identity = frontmatter.get(ID_FIELD)
-        identity: str | None = None
-        if raw_identity is not None:
-            identity = normalize_id(raw_identity)
-        entries.append(StableIdentityEntry(rel, identity))
+        entries.append(StableIdentityEntry(rel, _strict_page_identity(rel, source)))
         if consume is not None:
             consume(rel, source)
 
