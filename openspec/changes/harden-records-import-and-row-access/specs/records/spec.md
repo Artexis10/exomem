@@ -6,8 +6,12 @@ A `required` field SHALL be present and non-null. A `null` natural-key component
 On append, update, bulk upsert and import, a row whose required field is `null` SHALL be rejected `SCHEMA_REQUIRED_FIELD`, naming the field path. A row whose optional natural-key component is `null` SHALL take the generated identity that an incomplete natural key already receives. No stored natural key SHALL be written with a `null` component.
 
 #### Scenario: A null required key part is rejected
-- **WHEN** an import maps 4,061 rows with integer positions and 734 rows whose required `position` is `null`, into a collection whose natural key includes `position`
+- **WHEN** an import with `on_invalid: skip` maps 4,061 rows with integer positions and 734 rows whose required `position` is `null`, into a collection whose natural key includes `position`
 - **THEN** 4,061 rows are imported, 734 are rejected `SCHEMA_REQUIRED_FIELD` naming `position` and their source coordinates, and no row is counted as a duplicate
+
+#### Scenario: The default policy stops at the first invalid row
+- **WHEN** the same import runs with the default `on_invalid: stop`
+- **THEN** the job fails `SCHEMA_REQUIRED_FIELD` at the first `null` position, keeps the batches committed before it, and stores no `null` key part
 
 #### Scenario: A null optional key part does not collapse rows
 - **WHEN** a bulk upsert submits two rows that differ in other fields and both carry `null` in an optional natural-key field
@@ -40,7 +44,10 @@ Import status and receipts SHALL report `collapsed_in_source` for rows whose ide
 - **THEN** its inserted, updated, unchanged, rejected, collapsed and restated totals each equal the sum of the same field over its ten batch receipts
 
 ### Requirement: A row id resolves one row
-`edit_record` and every action that takes a row id SHALL resolve the id to one row without reading, rendering or returning the other rows of the collection. The result and any refusal SHALL NOT depend on the collection's size up to its row ceiling.
+`edit_record` and every action that takes a row id SHALL resolve the id to one row without rendering or returning the other rows of the collection.
+
+- For a caller who can read every row of a store collection, the id SHALL resolve with one key-and-version read. The result and any refusal SHALL NOT depend on the collection's size up to its row ceiling.
+- For a caller with row-level restrictions, the id's version covers the rows released to that caller. The binder SHALL read those rows in pages that each fit the response cap.
 
 A row withheld from the caller SHALL be reported exactly as an absent row. A stale id SHALL be refused with the row's current id. The mutation receipt SHALL describe only the edited row.
 

@@ -83,10 +83,11 @@ Using the batch's own preparation means preview and import cannot disagree.
 A row id is `<head>.<version>`, where `head` is a fixed digest prefix of the item key.
 
 - The binder reads only `item_key, row_version, payload_hash` for the collection in one statement. It finds the head and checks the version, with no rendering and no response cap.
-- It caches the head map per collection generation, so repeated edits after one import pay the pass once.
+- It caches the head map per collection generation. A write starts a new generation, so the first bind after a write rebuilds the map.
 - The found row must pass the caller's read decision. A withheld row reports `ITEM_NOT_FOUND`, exactly like an absent one, so the binder is not an existence oracle.
+- This fast path serves a caller who can read every row. A restricted caller's row version is a digest over the rows released to that caller, so the binder keeps the paged scan for that caller. Each page of the scan now fits the response cap (task 3.3).
 
-The cost is one indexed range read plus one short hash per row: measured once at 100,000 rows, and kept under the edit budget.
+The cost is one indexed range read plus one short hash per row. On a generated store, a rebuild takes about 9.5 ms at 4,061 rows and about 120 ms at 100,000 rows, inside the edit budget.
 
 **Rejected alternatives:**
 
