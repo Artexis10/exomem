@@ -21,13 +21,13 @@ import pytest
 from test_collection_store_schema import _populated
 from test_collection_store_writer import CID, manifest_path, manifest_text
 from test_collection_store_writer import store as store
+from test_query_engine_legacy_sql import engine_result
 from test_records_bulk_upsert import EVIDENCE, _evidence
 
 from exomem import query_data
 from exomem.collection_store import connection, schema, tokens, views
 from exomem.collection_store.reader import StoreAdapter
-from exomem.query_engine import legacy, runtime
-from exomem.query_engine import sqlite as legacy_sql
+from exomem.query_engine import runtime
 from exomem.query_engine.scalars import scalar_key
 from exomem.query_engine.validation import normalize_query
 
@@ -97,10 +97,7 @@ def typed_page(store, *, select, order_by=None):
 
 
 def legacy_read(store, **arguments):
-    with runtime.read_session(store.root, store.handle.path) as session:
-        admitted = session.admit(CID)
-        plan = legacy.normalize(columns_available=admitted.fields, **arguments)
-        return legacy_sql.execute_legacy(admitted, plan, path="source", format="markdown-items").as_dict()
+    return engine_result(store, **arguments).as_dict()
 
 
 def history(store, row_id):

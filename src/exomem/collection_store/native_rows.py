@@ -171,7 +171,9 @@ def _add_value(values: dict, name: str, value, remaining: int) -> int:
     return remaining
 
 
-def decode_row(connection, layout: NativeLayout, columns, *, max_bytes: int | None = None, database: str = "main") -> dict:
+def decode_row(connection, layout: NativeLayout, columns, *, max_bytes: int | None = None, database: str = "main",
+               metadata=None) -> dict:
+    """``metadata`` is a `snapshot_fields` map shared by the rows of one read, or None for per-row reads."""
     columns = tuple(columns)
     masks = _masks(layout, columns)
     extent = columns[0]
@@ -188,8 +190,9 @@ def decode_row(connection, layout: NativeLayout, columns, *, max_bytes: int | No
             if cell is not None:
                 raise TypedStorageError("missing native field has a payload")
             continue
-        metadata = FieldMetadata(connection, layout.collection_id, layout.generation, ordinal, database)
-        remaining = _add_value(values, name, decode_cell(codec, cell, metadata, max_bytes=remaining), remaining)
+        field = (FieldMetadata(connection, layout.collection_id, layout.generation, ordinal, database)
+                 if metadata is None else metadata[ordinal])
+        remaining = _add_value(values, name, decode_cell(codec, cell, field, max_bytes=remaining), remaining)
     residual = columns[-1]
     if residual is not None:
         if type(residual) is not str:
@@ -234,7 +237,10 @@ def _selected_masks(layout, masks, values):
 
 def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_bytes: int, check,
                             semantic_fields=frozenset()):
-    """Share one bounded physical decoder across an admitted scalar scan."""
+    """Share one bounded physical decoder across an admitted scalar scan.
+
+    Returns the selected column expressions, in the order the decoder reads its row, and the decoder.
+    """
     from .field_admission import WHOLE_SUBTREE
 
     if type(max_bytes) is not int or max_bytes < 2:
@@ -336,7 +342,7 @@ def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_
             result[name] = value
         return result
 
-    return ",".join(columns), decode
+    return tuple(columns), decode
 
 
 def _stream_selected_json(connection, layout, row_id, column, selection, *, extent, max_bytes, check, prefix=0,
@@ -367,7 +373,7 @@ def selected_current_values(connection, layout: NativeLayout, row_id: int, selec
         columns, decode = prepared
         check()
         physical = connection.execute(
-            f"SELECT {columns} FROM {layout.items} i "
+            f"SELECT {','.join(columns)} FROM {layout.items} i "
             f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id "
             "WHERE i.row_id=? AND i.collection_id=?", (row_id, layout.collection_id)).fetchone()
         check()

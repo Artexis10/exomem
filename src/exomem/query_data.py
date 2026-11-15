@@ -174,13 +174,27 @@ def _locate_array(
     raise QueryDataError("BAD_JSON", "JSON root is neither an array nor an object")
 
 
+#: Rows whose keys name a dataset's columns when a query names none.
+INFERENCE_ROWS = 500
+
+
 def _infer_columns(
     rows: list[dict],
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> list[str]:
     cols: list[str] = []
-    seen: set[str] = set()
-    for r in rows[:500]:
+    extend_columns(cols, set(), rows[:INFERENCE_ROWS], project_values)
+    return cols
+
+
+def extend_columns(
+    cols: list[str],
+    seen: set[str],
+    rows: list[dict],
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+) -> None:
+    """Append to ``cols`` each key of ``rows`` not in ``seen``, in order; ``seen`` tracks ``cols``."""
+    for r in rows:
         if isinstance(r, dict):
             candidates = r
             if project_values is not None:
@@ -192,7 +206,6 @@ def _infer_columns(
                 if k not in seen:
                     seen.add(k)
                     cols.append(k)
-    return cols
 
 
 def load_generic_rows(
@@ -638,25 +651,10 @@ def evaluate_rows(
             agg: Any = _profile_payload(matched_rows, cols, format, path)
         else:
             agg = _aggregate(matched_rows, aggregate, date_col)
-        bounded_agg, aggregate_truncated = _bounded_aggregate(agg, overhead=overhead)
-        if overhead + len(json.dumps(bounded_agg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_RESPONSE_BYTES:
-            provenance, provenance_truncated = None, True
-            warnings.append("provenance unavailable: source descriptor exceeds response size cap")
-            bounded_agg, aggregate_truncated = _bounded_aggregate(agg)
-        if aggregate_truncated:
-            warnings.append("response size cap truncated aggregate")
-        return QueryDataResult(
-            path=path,
-            format=format,
-            total_rows=total_rows,
-            total_matched=total_matched,
-            returned=0,
-            columns=cols,
-            rows=[],
-            aggregate=bounded_agg,
-            truncated=aggregate_truncated or provenance_truncated,
-            warnings=warnings,
-            provenance=provenance,
+        return present_aggregate(
+            agg, path=path, format=format, total_rows=total_rows, total_matched=total_matched,
+            columns=cols, warnings=warnings, provenance=provenance, overhead=overhead,
+            provenance_truncated=provenance_truncated,
         )
 
     if sort_by:
@@ -664,7 +662,67 @@ def evaluate_rows(
 
     limit = _bounded_limit(limit)
     offset = max(0, int(offset))
-    window = matched[offset : offset + limit]
+    return present_rows(
+        matched[offset : offset + limit], path=path, format=format, total_rows=total_rows,
+        total_matched=total_matched, offset=offset, columns=columns, available=cols, warnings=warnings,
+        provenance=provenance, overhead=overhead, provenance_truncated=provenance_truncated,
+        project_values=project_values,
+    )
+
+
+def present_aggregate(
+    agg: Any,
+    *,
+    path: str,
+    format: str,
+    total_rows: int,
+    total_matched: int,
+    columns: list[str],
+    warnings: list[str],
+    provenance: dict[str, Any] | None = None,
+    overhead: int = 0,
+    provenance_truncated: bool = False,
+) -> QueryDataResult:
+    """The bounded result of an aggregate, however its rows were selected."""
+    bounded_agg, aggregate_truncated = _bounded_aggregate(agg, overhead=overhead)
+    if overhead + len(json.dumps(bounded_agg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_RESPONSE_BYTES:
+        provenance, provenance_truncated = None, True
+        warnings.append("provenance unavailable: source descriptor exceeds response size cap")
+        bounded_agg, aggregate_truncated = _bounded_aggregate(agg)
+    if aggregate_truncated:
+        warnings.append("response size cap truncated aggregate")
+    return QueryDataResult(
+        path=path,
+        format=format,
+        total_rows=total_rows,
+        total_matched=total_matched,
+        returned=0,
+        columns=columns,
+        rows=[],
+        aggregate=bounded_agg,
+        truncated=aggregate_truncated or provenance_truncated,
+        warnings=warnings,
+        provenance=provenance,
+    )
+
+
+def present_rows(
+    window: list[tuple[int, dict]],
+    *,
+    path: str,
+    format: str,
+    total_rows: int,
+    total_matched: int,
+    offset: int,
+    columns: list[str] | None,
+    available: list[str],
+    warnings: list[str],
+    provenance: dict[str, Any] | None = None,
+    overhead: int = 0,
+    provenance_truncated: bool = False,
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+) -> QueryDataResult:
+    """The bounded result of one page: ``window`` holds its ``(row index, row)`` pairs in answer order."""
     truncated = (offset + len(window)) < total_matched
 
     if project_values is not None:
@@ -674,7 +732,7 @@ def evaluate_rows(
         out_cols = list(columns)
     else:
         out_rows = [r for _, r in window]
-        out_cols = cols
+        out_cols = available
     row_indices = [i for i, _ in window] if provenance is not None else None
     out_rows, response_truncated = _bounded_response_rows(
         out_rows, overhead=overhead, row_indices=row_indices,

@@ -384,10 +384,11 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
     log = tmp_path / "metadata-timeout.jsonl"
     real_assess, real_target = derived_rows.assess, derived_rows.target
     real_time = runtime.time
-    real_flag, real_clock, real_check = derived_rows.is_derived, real_time.monotonic, runtime.ReadSession.check
+    real_flag, real_clock, real_check = derived_rows.is_derived, real_time.thread_time, runtime.ReadSession.check
     offset, errors = [0.0], []
-    clock = SimpleNamespace(monotonic=lambda: offset[0], perf_counter=real_time.perf_counter,
-                            thread_time=real_time.thread_time, process_time=real_time.process_time,
+    # The deadline counts the thread's CPU time; the offset spends it without burning any.
+    clock = SimpleNamespace(monotonic=real_time.monotonic, perf_counter=real_time.perf_counter,
+                            thread_time=lambda: real_clock() + offset[0], process_time=real_time.process_time,
                             time_ns=real_time.time_ns)
     # Baseline and recovery reads use the same clock as the injected deadline.
     monkeypatch.setattr(runtime, "time", clock)
@@ -418,7 +419,7 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
         assert derived_rows.assess is assess
         assert derived_rows.is_derived is real_flag
         assert derived_rows.target is real_target
-        assert real_time.monotonic is real_clock
+        assert real_time.thread_time is real_clock
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
     phases = record["phases"]
     parent = phases["derived.row_source"]
