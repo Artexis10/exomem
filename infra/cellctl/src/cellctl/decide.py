@@ -1436,22 +1436,20 @@ def _restore_step(
         # by its TTL is never re-run against an already-restored volume.
         return hold(restored_snapshot=restore_point, row_updates={"observed_state": "stopping"})
 
-    # The restored image stays running through Ready and cleanup; only the
-    # hold's exit applies the desired replicas.
     target_applied = (
         observation.statefulset_image == previous_image
-        and (observation.statefulset_replicas or 0) == 1
+        and (observation.statefulset_replicas or 0) == desired_replicas
     )
     if not target_applied:
         return hold(
-            replicas=1,
+            replicas=desired_replicas,
             restored_snapshot=restore_point,
-            row_updates={"observed_state": "provisioning"},
+            row_updates={"observed_state": "provisioning" if desired_replicas > 0 else "stopping"},
         )
 
-    if not observation.pod_ready:
+    if desired_replicas > 0 and not observation.pod_ready:
         return hold(
-            replicas=1,
+            replicas=desired_replicas,
             restored_snapshot=restore_point,
             row_updates={"observed_state": "provisioning"},
         )
@@ -1460,10 +1458,10 @@ def _restore_step(
         # automate-cloud-releases D6: the attempt's clone and snapshot go
         # while the hold still owns them, so a clone never outlives its hold.
         return hold(
-            replicas=1,
+            replicas=desired_replicas,
             restored_snapshot=restore_point,
             delete_snapshot_backup=True,
-            row_updates={"observed_state": "provisioning"},
+            row_updates={"observed_state": "provisioning" if desired_replicas > 0 else "stopping"},
         )
 
     # D4: hold exits observe; they do not declare. The next routine pass

@@ -385,28 +385,31 @@ def test_a_finished_clone_restore_restarts_the_previous_image_and_releases_the_p
     recorded = _step(_upgrade(**base, restore_job_succeeded=True), hold_row)
     assert (recorded.restored_snapshot, recorded.replicas) == (VOL_NAME, 0)
 
-    # Restart resume: the marker alone says the restore ran; the cell starts
-    # on its previous image and the pair goes once the cell is provisioning.
+    # Restart resume: the marker alone says the restore ran; the cell returns
+    # to its previous image at its desired replicas (plain-cells D4: a hold
+    # honours the desired state, so a stopped cell is not started), and the
+    # pair goes once that is in place.
+    want = 0 if desired_state == "stopped" else 1
     restarting = _step(_upgrade(**base, statefulset_restored_snapshot=VOL_NAME), hold_row)
-    assert (restarting.replicas, restarting.image, restarting.restored_snapshot) == (1, IMAGE_A, VOL_NAME)
+    assert (restarting.replicas, restarting.image, restarting.restored_snapshot) == (want, IMAGE_A, VOL_NAME)
     assert restarting.read_only is (desired_state == "read_only")
 
-    waiting = _step(_upgrade(**{**base, "statefulset_image": IMAGE_A, "statefulset_replicas": 1,
-                                "pod_ready": False}, statefulset_restored_snapshot=VOL_NAME), hold_row)
-    assert (waiting.hold_kind, waiting.replicas, waiting.delete_snapshot_backup) == ("restore", 1, False)
+    if want:
+        waiting = _step(_upgrade(**{**base, "statefulset_image": IMAGE_A, "statefulset_replicas": 1,
+                                    "pod_ready": False}, statefulset_restored_snapshot=VOL_NAME), hold_row)
+        assert (waiting.hold_kind, waiting.replicas, waiting.delete_snapshot_backup) == ("restore", 1, False)
 
-    running = _step(_upgrade(**{**base, "statefulset_image": IMAGE_A, "statefulset_replicas": 1,
-                                "pod_ready": True, "ready_pod_image": IMAGE_A},
-                             statefulset_restored_snapshot=VOL_NAME), hold_row)
+    live = {"statefulset_image": IMAGE_A, "statefulset_replicas": want}
+    if want:
+        live.update(pod_ready=True, ready_pod_image=IMAGE_A)
+    running = _step(_upgrade(**{**base, **live}, statefulset_restored_snapshot=VOL_NAME), hold_row)
     assert running.delete_snapshot_backup is True
-    assert running.replicas == 1
+    assert running.replicas == want
 
-    gone = _step(_upgrade(**{**base, "snapshot_exists": False, "clone_exists": False,
-                             "statefulset_image": IMAGE_A, "statefulset_replicas": 1,
-                             "pod_ready": True, "ready_pod_image": IMAGE_A},
+    gone = _step(_upgrade(**{**base, "snapshot_exists": False, "clone_exists": False, **live},
                           statefulset_restored_snapshot=VOL_NAME), hold_row)
     assert gone.row_updates["hold_kind"] is None
-    assert gone.replicas == (0 if desired_state == "stopped" else 1)
+    assert gone.replicas == want
 
 
 def test_a_restart_resumes_each_step_from_the_annotations() -> None:
