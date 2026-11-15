@@ -286,7 +286,7 @@ def stage(
                 path, metadata = _resolve(root, selected)
                 stack.enter_context(media_store.local_originals(root, (path,), read=True))
                 held = stack.enter_context(
-                    reserved_paths.hold_generic_file(
+                    media_store.hold_original(
                         root,
                         path,
                         recorded_sha256=lambda version: media_store.cached_sha256(root, path, version),

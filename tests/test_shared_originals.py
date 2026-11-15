@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
 
 import pytest
@@ -163,3 +164,81 @@ def test_interrupted_marker_publication_retains_compatibility_and_resumes(vault,
     monkeypatch.setattr(held_fs, "flush_directory_path", real_flush)
     original_pool.enable(vault)
     assert original_pool.enabled(vault)
+
+
+def test_independent_dataset_filings_resolve_one_object_for_queries_and_range_reads(vault, monkeypatch) -> None:
+    """Retiring logical binaries must preserve each exact companion, dataset answer and retained download."""
+    from exomem import artifact_recovery, commands, media_store, originals, preserve, writer_lease
+    from exomem.governance.principal import library_scope, local_owner_principal
+
+    content = b"item,value\nsample,7\n"
+    with library_scope():
+        public = preserve.preserve_stream(vault, scope="Archive", category="datasets", filename="table.csv",
+                                         stream=io.BytesIO(content))
+        protected = preserve.preserve_stream(vault, scope="Archive", category="datasets", filename="private-table.csv",
+                                            stream=io.BytesIO(content), raw_protection=True)
+    sidecars = {item.path: (vault / item.sidecar_path).read_bytes() for item in (public, protected)}
+    assert not original_pool.enabled(vault)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    digest = hashlib.sha256(content).hexdigest()
+    with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(lambda: [content])) as staged:
+        with writer_lease.get_manager().mutation_guard(vault, operation="shared_original_test_publication"):
+            staged.publish()
+            for item in (public, protected):
+                (vault / item.path).unlink()
+            staged.require_current()
+    with library_scope():
+        for item in (public, protected):
+            snapshot = originals.original_state(vault, item.path)
+            assert snapshot.path == vault / item.path
+            assert snapshot.local_path == original_pool.object_path(vault, digest)
+            assert snapshot.present and not snapshot.offloadable
+            assert originals.resolve_original_relative(vault, item.path) == item.path
+            assert commands.op_query_dataset(vault, path=item.path)["rows"] == [{"item": "sample", "value": "7"}]
+            with artifact_recovery.stage(vault, item.path, local_owner_principal(surface="mcp")) as (held, descriptor):
+                assert reserved_paths.read_held(held, 5, 8) == content[5:13]
+                assert descriptor["size"] == len(content)
+            assert media_store.read_original_bytes(vault, item.path).data == content
+            assert (vault / item.sidecar_path).read_bytes() == sidecars[item.path]
+    assert len(list((original_pool.pool_root(vault) / "sha256").rglob("*.blob"))) == 1
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    fields, body, _marker = parse_frontmatter(sidecars[protected.path].decode(), custody=True)
+    fields["binary_sha256"] = "0" * 64
+    (vault / protected.sidecar_path).write_text(render_frontmatter_document(serialize_frontmatter(fields), body))
+    with library_scope():
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_query_dataset(vault, path=protected.path)
+        assert media_store.read_original_bytes(vault, public.path).data == content
+
+
+def test_frame_sampling_reads_the_pooled_stream_and_keeps_the_logical_video_path(vault, monkeypatch) -> None:
+    """A frame decoder must receive retained original bytes after the filing's binary path is retired."""
+    from test_video_frames import _img, _patch_decode
+
+    from exomem import embeddings, preserve, video_frames
+    from exomem.governance.principal import library_scope
+
+    content = b"synthetic video container"
+    with library_scope():
+        saved = preserve.preserve_stream(vault, scope="Archive", category="videos", filename="clip.mp4",
+                                        stream=io.BytesIO(content))
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    with original_pool.prepare(vault, hashlib.sha256(content).hexdigest(), len(content),
+                               held_fs.Chunks(lambda: [content])) as prepared:
+        prepared.publish()
+        (vault / saved.path).unlink()
+    _patch_decode(monkeypatch, duration=20.0)
+
+    def decode(stream, timestamps):
+        stream.seek(0)
+        assert stream.read() == content
+        return [_img(index) for index, _timestamp in enumerate(timestamps)]
+
+    monkeypatch.setattr(embeddings, "_decode_frames_at", decode)
+    result = video_frames.get_frames(vault, saved.path, max_frames=2)
+    assert result.path == saved.path
+    assert len(result.frames) == 2
+    assert all(frame.jpeg == b"\xff\xd8fake" for frame in result.frames)

@@ -1545,6 +1545,35 @@ def moved_originals(vault: Path, rel: str):
 
 
 @contextmanager
+def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot, *, physical: bool = False):
+    """Resolve an authorized logical filing to bytes; private pool addresses stay below this boundary."""
+    if snapshot.local_path is None:
+        with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
+            yield source
+        return
+    from . import original_pool
+
+    def require_binding() -> None:
+        current = originals.bound_companion(vault, relative)
+        if (current is None or vault / current[0] != snapshot.sidecar_path
+                or hashlib.sha256(current[2]).hexdigest() != snapshot.sidecar_hash):
+            raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
+
+    try:
+        require_binding()
+        assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+        with original_pool.open_object(vault, snapshot.binary_sha256, snapshot.binary_size) as source:
+            def require_current() -> None:
+                source.require_current()
+                require_binding()
+
+            yield reserved_paths.GenericBinarySource(source.stream, source.version, require_current, source.current_version)
+            require_current()
+    except held_fs.HeldFsError as error:
+        raise reserved_paths.ReservedPathLeafError(error.code) from error
+
+
+@contextmanager
 def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False):
     """Pin before resolution; retain verified bytes through the caller's read.
 
@@ -1556,15 +1585,24 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
         target = vault / target
     relative = target.relative_to(vault).as_posix()
     if originals.binding_for(vault) is None:
-        with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
-            yield source
-        return
+        with ExitStack() as local:
+            try:
+                source = local.enter_context(reserved_paths.open_generic_binary(vault, relative, physical=physical))
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code != "MISSING":
+                    raise
+                snapshot = original_state(vault, target)
+                if snapshot.local_path is None:
+                    raise error
+            else:
+                yield source
+                return
     with _pin(vault, target, read=read) as (ledger, token):
         snapshot = original_state(vault, target)
         if snapshot.state == "evicted":
             _hydrate(vault, snapshot, ledger, token)
             snapshot = original_state(vault, target)
-        with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
+        with _open_local_original(vault, relative, snapshot, physical=physical) as source:
             if snapshot.reference is not None and not cache_matches(vault, target, snapshot=snapshot):
                 if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                     raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the cached original differs")
@@ -1577,6 +1615,32 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
                     conn.close()
                 source.stream.seek(0)
             yield source
+
+
+def hold_original(vault: Path, path: str, *, recorded_sha256: Callable[[held_fs.FileVersion], str | None],
+                  deadline: float | None = None):
+    """Retain a logical original for checked whole-file and range delivery, including pooled bytes."""
+    return reserved_paths._hold_binary_file(vault, path, open_original(vault, path, read=True),
+                                           recorded_sha256=recorded_sha256, deadline=deadline)
+
+
+def read_original_bytes(vault: Path, path: str, *, max_bytes: int | None = None) -> reserved_paths.GenericFileSnapshot:
+    """Read one authorized logical original, retaining its physical version through the complete read."""
+    stored = reserved_paths._read_stored_generic(vault, path, physical=False)
+    if stored is not None:
+        if max_bytes is not None and len(stored.data) > max_bytes:
+            raise reserved_paths.ReservedPathLeafError("TOO_LARGE")
+        return stored
+    with open_original(vault, path) as source:
+        if max_bytes is not None and source.version.size > max_bytes:
+            raise reserved_paths.ReservedPathLeafError("TOO_LARGE")
+        data = source.stream.read() if max_bytes is None else source.stream.read(max_bytes + 1)
+        if max_bytes is not None and len(data) > max_bytes:
+            raise reserved_paths.ReservedPathLeafError("TOO_LARGE")
+        source.require_current()
+        version = source.version
+        return reserved_paths.GenericFileSnapshot(data, version.identity, version.mtime_ns / 1e9,
+            (version.size, version.mtime_ns, version.change_time_ns))
 
 
 # The outcomes of one eviction attempt, a closed set that `evict_to_target` branches on (D3, M3).

@@ -2283,6 +2283,13 @@ def _page_bytes(vault_root: Path, rel_path: str) -> bytes:
     from ..vault_store import read
 
     stored = read.owned_bytes(vault_root, rel_path)
+    if stored is None and not _is_markdown_path(rel_path):
+        from .. import media_store, reserved_paths
+
+        try:
+            return media_store.read_original_bytes(vault_root, rel_path).data
+        except reserved_paths.ReservedPathLeafError as error:
+            raise OSError("original bytes are unavailable") from error
     return (vault_root / rel_path).read_bytes() if stored is None else stored
 
 

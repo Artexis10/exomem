@@ -42,6 +42,8 @@ log = logging.getLogger(__name__)
 REGISTRY_VERSION = 1
 # The canonical original-storage format fixes this reserved directory name.
 ORIGINAL_POOL_DIRNAME = "_Originals"
+ORIGINAL_POOL_DESCRIPTOR_ID = "original-pool"
+ORIGINAL_POOL_OWNER = "original_pool"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
@@ -453,7 +455,7 @@ def _sqlite_family(name: str) -> tuple[str, ...]:
 
 _REGISTRY = (
     InternalStateDescriptor(
-        "original-pool", "original_pool", StatePlacement.VAULT_CANONICAL,
+        ORIGINAL_POOL_DESCRIPTOR_ID, ORIGINAL_POOL_OWNER, StatePlacement.VAULT_CANONICAL,
         trees=(ORIGINAL_POOL_DIRNAME.casefold(),),
     ),
     InternalStateDescriptor(
@@ -1743,8 +1745,16 @@ def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
         raise ReservedPathLeafError("IO_REFUSED") from error
 
 
-@contextmanager
 def hold_generic_file(vault_root: Path, value: object, *,
+                      recorded_sha256: Callable[[held_fs.FileVersion], str | None],
+                      deadline: float | None = None):
+    """Retain one ordinary file for checked delivery, reusing a proven digest when available."""
+    return _hold_binary_file(vault_root, value, open_generic_binary(vault_root, value),
+                             recorded_sha256=recorded_sha256, deadline=deadline)
+
+
+@contextmanager
+def _hold_binary_file(vault_root: Path, value: object, open_source, *,
                       recorded_sha256: Callable[[held_fs.FileVersion], str | None],
                       deadline: float | None = None):
     """Hold the canonical source open and prove its bytes with no private copy.
@@ -1756,7 +1766,7 @@ def hold_generic_file(vault_root: Path, value: object, *,
     _copy_deadline(deadline)
     finished = False
     try:
-        with open_generic_binary(vault_root, value) as source:
+        with open_source as source:
             try:
                 version = source.version
                 descriptor = source.stream.fileno()
@@ -1839,6 +1849,12 @@ def require_generic_copy_source_version(copied: GenericFileCopy) -> held_fs.File
     """Check retained canonical identity and change time without reading its bytes."""
     try:
         _copy_deadline(copied.deadline)
+        if copied.held is not None:
+            copied.held.require_current()
+            current = copied.held.current_version()
+            if current != copied.source_version:
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+            return current
         with _generic_copy_source(copied.vault_root, copied.relative_path) as (_, _, _, source):
             current = source.version()
             if current != copied.source_version:
@@ -4374,6 +4390,7 @@ def _open_owner_binary(vault_root: Path, path: Path, descriptor_id: str) -> Iter
     """Retain an exact owner's stream without holding coordination while the caller reads."""
     root = Path(os.path.abspath(vault_root))
     route = _owner_relative_path(root, path, descriptor_id, operation="binary read")
+    authority = _active_owner_authority()
     with ExitStack() as stack:
         with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,), identity_may_change=False):
             filesystem = stack.enter_context(held_fs.acquire(route.trust_root).require())
@@ -4388,13 +4405,18 @@ def _open_owner_binary(vault_root: Path, path: Path, descriptor_id: str) -> Iter
                     put={route.logical_relative.as_posix(): file.identity}, remove={})
 
         def require_current() -> None:
-            with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,), identity_may_change=False):
-                if file.version() != version:
-                    raise held_fs.HeldFsError("IDENTITY_CHANGED", "private original changed")
-                _require_owner_parent(filesystem, route, parent)
-                with filesystem.file(parent, route.held_relative.name).require() as current:
-                    if current.version() != version:
+            # Release checks run in a fresh Context; retain only this acquisition's opaque owner authority.
+            token = _ACTIVE_OWNER_AUTHORITY.set(authority)
+            try:
+                with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,), identity_may_change=False):
+                    if file.version() != version:
                         raise held_fs.HeldFsError("IDENTITY_CHANGED", "private original changed")
+                    _require_owner_parent(filesystem, route, parent)
+                    with filesystem.file(parent, route.held_relative.name).require() as current:
+                        if current.version() != version:
+                            raise held_fs.HeldFsError("IDENTITY_CHANGED", "private original changed")
+            finally:
+                _ACTIVE_OWNER_AUTHORITY.reset(token)
 
         require_current()
         with os.fdopen(os.dup(file.descriptor), "rb") as stream:

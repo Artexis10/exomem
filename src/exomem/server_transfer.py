@@ -45,7 +45,7 @@ from . import (
 )
 from .governance import egress
 from .governance import principal as principal_module
-from .vault import VaultPathError, resolve_under_vault
+from .vault import VaultPathError
 
 DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 #: Loopback uploads never cross the Cloudflare edge, whose ~100 MB cap sets the public
@@ -447,19 +447,8 @@ def load_transfer_config() -> TransferConfig:
 
 
 def _download_target(vault_root: Path, path: str) -> tuple[Path, str]:
-    """Resolve a download path; an evicted original resolves by its binding (D1)."""
-    try:
-        return resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
-    except VaultPathError as missing:
-        if missing.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
-            raise
-        try:
-            abs_path, rel = resolve_under_vault(vault_root, path, must_be_file=True)
-            if originals.evicted(vault_root, rel):
-                return abs_path, rel
-        except (VaultPathError, reserved_paths.ReservedPathLeafError):
-            pass
-        raise missing
+    """Resolve a download by logical identity, including evicted and pooled originals."""
+    return originals.resolve_original_path(vault_root, path)
 
 
 def download_principal(
@@ -1543,7 +1532,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 # The grant route's pin: hydrate only after the release gate, and
                 # keep eviction out until the bytes are read.
                 with media_store.local_originals(vault_root, (rel,), read=True):
-                    snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                    snapshot = media_store.read_original_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
             except media_store.MediaStoreError as error:

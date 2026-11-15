@@ -911,7 +911,7 @@ class PageStat:
 
 def page_stat(path: Path, vault_root: Path) -> PageStat:
     """What a stat of the page at ``path`` gives: the store's row when the store serves that page,
-    else the file's own stat.
+    else the file's own stat. A pooled original uses its bound object's held metadata.
 
     A stored page's file may lag a commit, be damaged or be absent, so a cache key built on its stat
     would key on the wrong bytes. A page that the store serves but lacks raises
@@ -924,7 +924,21 @@ def page_stat(path: Path, vault_root: Path) -> PageStat:
         meta = read.owned_meta(vault_root, rel)
         if meta is not None:
             return PageStat(meta.mtime, meta.mtime_ns, meta.size)
-    found = path.stat()
+    try:
+        found = path.stat()
+    except FileNotFoundError:
+        from . import held_fs, original_pool, originals, reserved_paths
+
+        try:
+            original = originals.original_state(vault_root, path)
+            if original.local_path is None:
+                raise
+            assert original.binary_sha256 is not None and original.binary_size is not None
+            with original_pool.open_object(vault_root, original.binary_sha256, original.binary_size) as source:
+                version = source.version
+                return PageStat(version.mtime_ns / 1e9, version.mtime_ns, version.size)
+        except (ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+            raise OSError("original metadata is unavailable") from error
     return PageStat(found.st_mtime, found.st_mtime_ns, found.st_size)
 
 

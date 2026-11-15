@@ -157,6 +157,10 @@ def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
     if not parts or not is_managed_root_name(parts[0], key=str.casefold):
         return False
     classification = reserved_paths.classify_logical(path)
+    if classification.descriptor_id == reserved_paths.ORIGINAL_POOL_DESCRIPTOR_ID:
+        from . import original_pool
+
+        return not original_pool.is_canonical_member(path)
     if classification.descriptor_id == "compiled-history":
         from . import compiled_history
 

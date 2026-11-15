@@ -8,6 +8,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from exomem import commands, dataset_values, find, preserve
 from exomem.governance import egress, membership, policy
 from exomem.governance.principal import RequestPrincipal, local_owner_principal, request_scope
@@ -105,19 +107,46 @@ def test_governed_reader_at_full_level_finds_the_value(vault):
     assert ACCOUNT in hits[0]["passage"]["text"]
 
 
-def test_raw_protected_dataset_stays_private_after_owner_warms_value_search(vault):
+@pytest.mark.parametrize("pooled", [False, True])
+def test_raw_protected_dataset_stays_private_after_owner_warms_value_search(vault, monkeypatch, pooled):
+    """An owner's warmed shared object must not grant metadata, query or stream access to another reader."""
+    from exomem import (
+        artifact_lifecycle,
+        artifact_recovery,
+        held_fs,
+        media_store,
+        original_pool,
+        writer_lease,
+    )
+
     owner = local_owner_principal(surface="mcp")
     with request_scope(owner):
         result = preserve.preserve_stream(
             vault, scope="Test", category="exports", filename="protected-profile.json",
             stream=io.BytesIO(PROFILE), raw_protection=True,
         )
+    if pooled:
+        with request_scope(owner):
+            other = preserve.preserve_stream(
+                vault, scope="Test", category="exports", filename="other-protected-profile.json",
+                stream=io.BytesIO(PROFILE), raw_protection=True,
+            )
+        other_sidecar = (vault / other.sidecar_path).read_bytes()
+        monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+        original_pool.enable(vault)
+        with original_pool.prepare(vault, hashlib.sha256(PROFILE).hexdigest(), len(PROFILE),
+                                   held_fs.Chunks(lambda: [PROFILE])) as prepared:
+            with writer_lease.get_manager().mutation_guard(vault, operation="shared_dataset_test_publication"):
+                prepared.publish()
+                (vault / result.path).unlink()
+                (vault / other.path).unlink()
+                prepared.require_current()
     _note(vault, "Notes/shared/control.md", "Brightwater account number directory", updated="2026-11-01", number=91)
     reader = _as_external(vault, selector='paths: ["**"]', ceiling=egress.LEVEL_FULL)
     reader = RequestPrincipal(
         audience_id=reader.audience_id, surface="mcp", issuer_family="mcp-oauth:synthetic-reader",
     )
-    original_before = (vault / result.path).read_bytes()
+    original_before = media_store.read_original_bytes(vault, result.path).data
     card_before = (vault / result.sidecar_path).read_bytes()
     with request_scope(owner):
         owner_hits = _find(vault, "Brightwater account number")
@@ -126,6 +155,13 @@ def test_raw_protected_dataset_stays_private_after_owner_warms_value_search(vaul
 
     with request_scope(reader):
         response = _find_response(vault, "Brightwater account number")
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_read_memory(vault, path=result.sidecar_path, frontmatter_only=True)
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_query_dataset(vault, path=result.path)
+        with pytest.raises(artifact_recovery.RecoveryUnavailable):
+            with artifact_recovery.stage(vault, result.path, reader):
+                pytest.fail("an ungranted reader obtained a protected stream")
     rendered = json.dumps(response, ensure_ascii=False)
     assert "Knowledge Base/Notes/shared/control.md" in rendered
     for protected in (
@@ -136,10 +172,14 @@ def test_raw_protected_dataset_stays_private_after_owner_warms_value_search(vaul
 
     with request_scope(owner):
         repeated = _find(vault, "Brightwater account number")
+        assert ACCOUNT in json.dumps(commands.op_query_dataset(vault, path=result.path))
     assert result.path in _paths(repeated)
     assert ACCOUNT in json.dumps(repeated, ensure_ascii=False)
-    assert (vault / result.path).read_bytes() == original_before == PROFILE
+    assert media_store.read_original_bytes(vault, result.path).data == original_before == PROFILE
     assert (vault / result.sidecar_path).read_bytes() == card_before
+    if pooled:
+        assert media_store.read_original_bytes(vault, other.path).data == PROFILE
+        assert (vault / other.sidecar_path).read_bytes() == other_sidecar
 
 
 def test_reader_below_full_level_gets_no_value_hit_while_the_card_is_found(vault, monkeypatch):

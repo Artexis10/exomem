@@ -62,6 +62,8 @@ class OriginalSnapshot:
     reference: StoredObject | None = None
     sidecar_hash: str | None = None
     offloadable: bool = False
+    #: Physical pool storage, when the ordinary logical binary path has been retired.
+    local_path: Path | None = None
 
     @property
     def present(self) -> bool:
@@ -117,6 +119,17 @@ def binary_binding(fields: dict[str, object]) -> BinaryBinding | None:
     path = bound_path(fields)
     digest = fields.get("binary_sha256")
     size = fields.get("binary_size")
+    descriptor = fields.get("governance_companion")
+    if isinstance(descriptor, dict):
+        # Existing companion schemas carry either legacy binary fields or the bound artifact fields.
+        if "binary_sha256" not in fields:
+            digest = descriptor.get("artifact_sha256")
+        elif "artifact_sha256" in descriptor and descriptor["artifact_sha256"] != digest:
+            return None
+        if "binary_size" not in fields:
+            size = descriptor.get("artifact_size")
+        elif "artifact_size" in descriptor and descriptor["artifact_size"] != size:
+            return None
     if path is None or not is_sha256(digest) or type(size) is not int or size < 0:
         return None
     return BinaryBinding(path, digest, size)
@@ -211,9 +224,27 @@ def resolve_original_relative(vault: Path, value: str) -> str:
         if error.code != "MISSING":
             raise
         relative = canonical_vault_rel(vault, value)
-        if original_state(vault, relative).state != "evicted":
+        snapshot = original_state(vault, relative)
+        if snapshot.state != "evicted" and snapshot.local_path is None:
             raise
         return relative
+
+
+def resolve_original_path(vault: Path, value: str) -> tuple[Path, str]:
+    """Resolve an ordinary path or a canonically bound original whose bytes live elsewhere."""
+    from . import reserved_paths
+    from .vault import VaultPathError, resolve_under_vault
+
+    try:
+        return resolve_under_vault(vault, value, must_exist=True, must_be_file=True)
+    except VaultPathError as missing:
+        if missing.code != "NOT_FOUND":
+            raise
+        try:
+            relative = resolve_original_relative(vault, value)
+            return resolve_under_vault(vault, relative, must_be_file=True)
+        except (ValueError, VaultPathError, reserved_paths.ReservedPathLeafError):
+            raise missing from None
 
 
 def sidecar_path(path: Path) -> Path:
@@ -336,6 +367,14 @@ def original_state(
     binary_binding_value = binary_binding(fields)
     if binary_binding_value is None:
         return OriginalSnapshot("local" if physical else "missing", binary, sidecar)
+    local_path = None
+    if not physical and not store_read.serves(vault, relative):
+        from . import original_pool
+
+        if (original_pool.enabled(vault) and original_pool.locally_present(
+                vault, binary_binding_value.sha256, binary_binding_value.size)):
+            physical = True
+            local_path = original_pool.object_path(vault, binary_binding_value.sha256)
     reference = stored_reference(fields.get("stored_object"))
     selected = binding if binding is not None else binding_for(vault)
     if selected is None or (reference is not None and reference.store != selected.store):
@@ -346,6 +385,7 @@ def original_state(
         reference, hashlib.sha256(data).hexdigest(),
         # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
         offloadable=not is_note_path(relative) and "data_file" not in fields,
+        local_path=local_path,
     )
 
 

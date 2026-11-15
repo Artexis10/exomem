@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import reserved_paths
+from exomem import media_store, reserved_paths
 
 
 def test_retained_copy_rechecks_bytes_even_with_unchanged_mtime(vault, tmp_path):
@@ -458,7 +458,7 @@ def test_authority_changed_during_staging_refuses_before_headers(
         handoff = commands.op_transfer_artifact(
             vault, operation="download", artifact=stored["path"]
         )
-    hold = reserved_paths.hold_generic_file
+    hold = media_store.hold_original
 
     @contextmanager
     def invalidate(*args, **kwargs):
@@ -491,7 +491,7 @@ def test_authority_changed_during_staging_refuses_before_headers(
     from exomem import server_transfer
 
     monkeypatch.setattr(server_transfer, "run_in_threadpool", run_in_threadpool)
-    monkeypatch.setattr(reserved_paths, "hold_generic_file", invalidate)
+    monkeypatch.setattr(media_store, "hold_original", invalidate)
     denied = client.get(handoff["deliveries"]["https"]["url"])
     assert denied.status_code == 404
     assert denied.content == client.get("/download", params={"grant": "unavailable"}).content
@@ -650,7 +650,7 @@ def test_held_original_is_released_when_the_stream_is_interrupted(vault, monkeyp
         )
     grant = parse_qs(urlsplit(handoff["deliveries"]["https"]["url"]).query)["grant"][0]
     streams = []
-    hold = reserved_paths.hold_generic_file
+    hold = media_store.hold_original
 
     @contextmanager
     def capture(*args, **kwargs):
@@ -658,7 +658,7 @@ def test_held_original_is_released_when_the_stream_is_interrupted(vault, monkeyp
             streams.append(held.held.stream)
             yield held
 
-    monkeypatch.setattr(reserved_paths, "hold_generic_file", capture)
+    monkeypatch.setattr(media_store, "hold_original", capture)
 
     async def disconnected():
         async def receive():
@@ -831,7 +831,7 @@ def test_cancelled_stage_entry_returns_handle_and_slot_without_garbage_collectio
     started = threading.Event()
     resume = threading.Event()
     finished = threading.Event()
-    hold = reserved_paths.hold_generic_file
+    hold = media_store.hold_original
     streams = []
     # A single slot proves that cancellation returns capacity without waiting for GC.
     monkeypatch.setattr(artifact_recovery, "_SLOTS", threading.BoundedSemaphore(1))
@@ -847,7 +847,7 @@ def test_cancelled_stage_entry_returns_handle_and_slot_without_garbage_collectio
         finally:
             finished.set()
 
-    monkeypatch.setattr(reserved_paths, "hold_generic_file", blocked_hold)
+    monkeypatch.setattr(media_store, "hold_original", blocked_hold)
 
     async def cancel_during_enter():
         async def enter():

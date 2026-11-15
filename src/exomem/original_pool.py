@@ -7,13 +7,13 @@ import json
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import artifact_lifecycle, held_fs, originals, reserved_paths, state_migration
 from .kbdir import kb_dirname
 
-DESCRIPTOR_ID = "original-pool"
-OWNER = "original_pool"
+DESCRIPTOR_ID = reserved_paths.ORIGINAL_POOL_DESCRIPTOR_ID
+OWNER = reserved_paths.ORIGINAL_POOL_OWNER
 # The versioned storage protocol fixes the marker name and its complete contents.
 _MARKER_NAME = "format.json"
 _MARKER_BYTES = (json.dumps({"schema": 1, "format": state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID},
@@ -24,10 +24,30 @@ def pool_root(vault: Path) -> Path:
     return Path(vault) / kb_dirname() / reserved_paths.ORIGINAL_POOL_DIRNAME
 
 
-def object_path(vault: Path, digest: str) -> Path:
+def _object_relative(digest: str) -> PurePosixPath:
     if not originals.is_sha256(digest):
         raise ValueError("an original requires a lowercase SHA-256 digest")
-    return pool_root(vault) / "sha256" / digest[:2] / f"{digest}.blob"
+    return PurePosixPath("sha256") / digest[:2] / f"{digest}.blob"
+
+
+def object_path(vault: Path, digest: str) -> Path:
+    return pool_root(vault) / _object_relative(digest)
+
+
+def is_canonical_member(path: str) -> bool:
+    """Only the format marker and schema-shaped objects enter backups; stages remain disposable."""
+    candidate = PurePosixPath(path)
+    if candidate.as_posix() != path:
+        return False
+    try:
+        relative = candidate.relative_to(PurePosixPath(kb_dirname()) / reserved_paths.ORIGINAL_POOL_DIRNAME)
+    except ValueError:
+        return False
+    if relative == PurePosixPath(_MARKER_NAME):
+        return True
+    # The storage protocol fixes SHA-256 names and their shard; these are not semantic categories.
+    digest = relative.name.removesuffix(".blob")
+    return originals.is_sha256(digest) and relative == _object_relative(digest)
 
 
 def enabled(vault: Path) -> bool:

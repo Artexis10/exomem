@@ -377,35 +377,34 @@ def _child(vault: Path) -> int:
         target, relative = resolve_under_vault(vault, request.path)
         if access.refuse_if_excluded(vault, relative):
             _fail("NOT_FOUND", "video does not exist")
-        with media_store.open_original(vault, target, read=True):
-            with reserved_paths.hold_generic_file(
-                vault, relative,
-                recorded_sha256=lambda version: media_store.cached_sha256(vault, target, version),
-                deadline=request.deadline,
-            ) as held:
-                sys.stdout.buffer.write(_wire(_Prepared(path=relative, version=held.source_version,
-                                                       sha256=held.sha256, size=held.size)))
-                sys.stdout.buffer.flush()
-                _read_message(sys.stdin.buffer, _Permission, lambda: None)
-                reserved_paths.require_current_generic_copy(held)
-                held.held.stream.seek(0)
-                result = sample_stream(held.held.stream, relative, max_frames=request.max_frames,
-                                       start_sec=request.start_sec, end_sec=request.end_sec,
-                                       resize_candidates=True, max_side=CLOUD_MAX_SIDE)
-                reserved_paths.require_current_generic_copy(held)
-                per_frame, total = _payload_limits(request.max_frames)
-                if (any(len(frame.jpeg) > per_frame for frame in result.frames)
-                        or sum(len(frame.jpeg) for frame in result.frames) > total):
-                    _fail("VIDEO_PROTOCOL", "the encoded frames exceed the worker allocation ceiling")
-                sys.stdout.buffer.write(_wire(_Result(
-                    path=result.path, duration_sec=result.duration_sec,
-                    frames=[_Frame(timestamp_sec=f.timestamp_sec, size=len(f.jpeg)) for f in result.frames],
-                    candidates=result.candidates, dedup_dropped=result.dedup_dropped,
-                    max_frames_effective=result.max_frames_effective,
-                )))
-                for frame in result.frames:
-                    sys.stdout.buffer.write(frame.jpeg)
-                sys.stdout.buffer.flush()
+        with media_store.hold_original(
+            vault, relative,
+            recorded_sha256=lambda version: media_store.cached_sha256(vault, target, version),
+            deadline=request.deadline,
+        ) as held:
+            sys.stdout.buffer.write(_wire(_Prepared(path=relative, version=held.source_version,
+                                                   sha256=held.sha256, size=held.size)))
+            sys.stdout.buffer.flush()
+            _read_message(sys.stdin.buffer, _Permission, lambda: None)
+            reserved_paths.require_current_generic_copy(held)
+            held.held.stream.seek(0)
+            result = sample_stream(held.held.stream, relative, max_frames=request.max_frames,
+                                   start_sec=request.start_sec, end_sec=request.end_sec,
+                                   resize_candidates=True, max_side=CLOUD_MAX_SIDE)
+            reserved_paths.require_current_generic_copy(held)
+            per_frame, total = _payload_limits(request.max_frames)
+            if (any(len(frame.jpeg) > per_frame for frame in result.frames)
+                    or sum(len(frame.jpeg) for frame in result.frames) > total):
+                _fail("VIDEO_PROTOCOL", "the encoded frames exceed the worker allocation ceiling")
+            sys.stdout.buffer.write(_wire(_Result(
+                path=result.path, duration_sec=result.duration_sec,
+                frames=[_Frame(timestamp_sec=f.timestamp_sec, size=len(f.jpeg)) for f in result.frames],
+                candidates=result.candidates, dedup_dropped=result.dedup_dropped,
+                max_frames_effective=result.max_frames_effective,
+            )))
+            for frame in result.frames:
+                sys.stdout.buffer.write(frame.jpeg)
+            sys.stdout.buffer.flush()
     except Exception as error:  # noqa: BLE001 - disposable decode errors become bounded terminal replies.
         from .video_frames import VideoFramesError
 
