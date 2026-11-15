@@ -344,9 +344,9 @@ class ExomemFastMCP(FastMCP):
         runner that survives the signal raises it, as the outer hold did.
 
         uvicorn skips the app's lifespan shutdown when the runner is cancelled, the server loop
-        raises or a second SIGINT forces the exit. The runner then closes the app's hold itself, so
-        the teardown completes before the runner returns or raises, as under the outer hold. With
-        uvicorn's lifespan "off", the outer hold is the only one, as before.
+        raises or a second SIGINT forces the exit. The runner then closes the app's hold itself and
+        stays until the teardown has ended, through any further cancellation, as under the outer
+        hold. With uvicorn's lifespan "off", the outer hold is the only one, as before.
         """
         call = inspect.signature(FastMCP.run_http_async).bind(self, *args, **kwargs).arguments
         app_lifespan = (call.get("uvicorn_config") or {}).get("lifespan") != "off"
@@ -356,20 +356,24 @@ class ExomemFastMCP(FastMCP):
             await super().run_http_async(*args, **kwargs)
         finally:
             self._http_runner = None
-        if self._lifespan_failure is not None:
-            raise self._lifespan_failure
 
     @asynccontextmanager
     async def _lifespan_manager(self):
         # FastMCP's HTTP runner holds the lifespan from its own task, around uvicorn; the app holds
         # it from uvicorn's lifespan task. Drift: this relies on both FastMCP internals, the private
-        # name and the runner's hold from its own task; the served SIGTERM tests fail without them.
+        # name and the runner's hold from its own task. These tests in test_vault_store_served.py
+        # fail without them:
+        #   test_a_service_stopped_before_it_activated_still_projects_the_write_it_accepted
+        #   test_a_second_replica_that_takes_the_lease_and_stops_at_once_leaves_nothing_queued
+        #   test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal
+        #   test_a_sigterm_meets_the_action_installed_before_the_http_service_ran
+        #   test_an_http_runner_that_ends_without_uvicorns_shutdown_tears_down_before_it_raises
         task = asyncio.current_task()
         if task is self._http_runner:
             try:
                 yield
             finally:
-                await self._close_app_lifespan()
+                await self._finish_app_lifespan()
             return
         app_hold = self._http_runner is not None and self._app_lifespan is None
         if app_hold:
@@ -390,15 +394,28 @@ class ExomemFastMCP(FastMCP):
             if app_hold:
                 self._app_lifespan = None
 
-    async def _close_app_lifespan(self) -> None:
-        """Run the teardown that uvicorn skipped: the app's hold still waits for uvicorn's lifespan
-        shutdown, so the runner ends that wait and awaits the hold's exit."""
-        holder = self._app_lifespan
-        if holder is None or holder.done():
-            return
-        self._closing_app_lifespan = True
-        holder.cancel()
-        await asyncio.wait({holder})
+    async def _finish_app_lifespan(self) -> None:
+        """Run the teardown that uvicorn skipped, and raise the teardown's failure, which uvicorn
+        only logs.
+
+        A skipped shutdown leaves the app's hold waiting for it, so the runner ends that wait. The
+        runner stays until the hold has exited, also when it is cancelled again, and raises that
+        cancellation afterwards. A teardown failure is raised instead: workers that did not stop and
+        a lease that was not handed back matter more to the caller than how the runner ended, which
+        stays as the failure's context."""
+        holder, cancelled = self._app_lifespan, None
+        if holder is not None and not holder.done():
+            self._closing_app_lifespan = True
+            holder.cancel()
+            while not holder.done():
+                try:
+                    await asyncio.wait({holder})
+                except asyncio.CancelledError as cancel:
+                    cancelled = cancel
+        if self._lifespan_failure is not None:
+            raise self._lifespan_failure
+        if cancelled is not None:
+            raise cancelled
 
     async def run_stdio_async(
         self,
