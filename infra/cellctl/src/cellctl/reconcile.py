@@ -1426,33 +1426,45 @@ async def _cancel_catalogue_builds(cluster: ClusterGateway, cell_id: str, observ
     # Persist before deletion: a crash between these operations must not re-create a cancelled build.
     if outcome not in ("succeeded", "failed"):  # Closed Job outcomes from the controller protocol.
         outcome = "cancelled"
-    await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace_name(cell_id), {
-        CATALOGUE_BUILD_CANCELLED_ANNOTATION: record, CATALOGUE_BUILD_OUTCOME_ANNOTATION: outcome,
-    })
+    # A deleted owner has no metadata record left to preserve before deleting its Job.
+    if observation.statefulset_exists:
+        await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace_name(cell_id), {
+            CATALOGUE_BUILD_CANCELLED_ANNOTATION: record, CATALOGUE_BUILD_OUTCOME_ANNOTATION: outcome,
+        })
     for name in sorted(jobs):
         await asyncio.to_thread(cluster.delete_catalogue_build_job, namespace_name(cell_id), name)
-    return dataclass_replace(observation, catalogue_build_cancelled=record, catalogue_build_outcome=outcome)
+    return (dataclass_replace(observation, catalogue_build_cancelled=record, catalogue_build_outcome=outcome)
+            if observation.statefulset_exists else observation)
 
 
 def _with_waiting_catalogue_builds(
     observations: dict[str, ClusterObservation], builds: dict | None, *, blocked: frozenset[str] = frozenset(),
+    unknown_nodes: frozenset[str] = frozenset(),
 ) -> dict[str, ClusterObservation]:
     """Index the existing census once; a serving stop must not release capacity to a waiting peer."""
     from .catalogue_build import BuildJob
 
-    waiting: dict[str | None, dict[str, tuple[BuildJob, ...]]] = {}
-    unknown = {obs.pod_node for obs in observations.values() if obs.catalogue_build_job} if builds is None else set()
-    for cell_id, obs in observations.items():
-        for job in (builds or {}).get(namespace_name(cell_id), ()):
-            if job.waiting:
-                if cell_id in blocked:
-                    # Preserve the existing ownership guard when a peer requests cancellation.
-                    unknown.add(job.node or obs.pod_node)
-                    continue
-                node = waiting.setdefault(job.node or obs.pod_node, {})
-                node[cell_id] = (*node.get(cell_id, ()), job)
+    waiting: dict[str, dict[str, tuple[BuildJob, ...]]] = {}
+    unknown = set(unknown_nodes)
+    if builds is None:
+        unknown.update(node for obs in observations.values() if obs.catalogue_build_job
+                       and (node := obs.pod_node or obs.pv_node) is not None)
+    cells = {namespace_name(cell_id): cell_id for cell_id in observations}
+    for namespace, family in (builds or {}).items():
+        cell_id = cells.get(namespace)
+        obs = observations.get(cell_id)
+        for job in family:
+            node = job.node or (obs.pod_node or obs.pv_node if obs else None)
+            if not job.waiting or node is None:
+                continue
+            if cell_id is None or cell_id in blocked:
+                # A missing observation or conflicting owner cannot authorize a peer cancellation.
+                unknown.add(node)
+                continue
+            peers = waiting.setdefault(node, {})
+            peers[cell_id] = (*peers.get(cell_id, ()), job)
     return {cell_id: dataclass_replace(obs, catalogue_waiting_builds=(
-        None if None in unknown or obs.pod_node in unknown else waiting.get(obs.pod_node, {})
+        None if (obs.pod_node or obs.pv_node) in unknown else waiting.get(obs.pod_node or obs.pv_node, {})
     )) for cell_id, obs in observations.items()}
 
 
@@ -1486,8 +1498,14 @@ async def _sync_catalogue_builds(
             for cell, obs in observations.items()}, None)
     occupied = {job.node for family in builds.values() for job in family if job.node and
                 (not (job.succeeded or job.failed))}
+    for row in rows:
+        obs = observations[row.cell_id]
+        if _active_hold(row, obs) is not None or row.cell_id in pending_starts:
+            if (node := obs.pv_node or obs.pod_node) is not None:
+                occupied.add(node)
     updated = dict(observations)
     created = False
+    created_nodes = set()
     failed_cells = set()
     blocked = set()
     live_rows = [row for row in rows if row.desired_state != "deleted"]
@@ -1555,6 +1573,7 @@ async def _sync_catalogue_builds(
                                                    catalogue_build_job=catalogue_build_name(target))
             # An uncertain create may have reached the API; reserve its slot until the next census.
             occupied.add(obs.pod_node)
+            created_nodes.add(obs.pod_node)
             cluster.apply_all([render_resource_quota(spec),
                                next(policy for policy in render_network_policies(spec)
                                     if policy["metadata"]["name"] == "job-egress")])
@@ -1576,7 +1595,9 @@ async def _sync_catalogue_builds(
             builds = None
             updated = {cell: dataclass_replace(obs, catalogue_builds=None) if obs.catalogue_build_job else obs
                        for cell, obs in updated.items()}
-    return _with_waiting_catalogue_builds(updated, builds, blocked=frozenset(blocked))
+    # Let a new builder bind before deciding whether it must yield to a stop.
+    return _with_waiting_catalogue_builds(updated, builds, blocked=frozenset(blocked),
+                                        unknown_nodes=frozenset(created_nodes))
 
 async def _due_cells(
     cluster: ClusterGateway,

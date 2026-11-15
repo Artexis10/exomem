@@ -495,6 +495,53 @@ async def test_build_request_annotation_failure_preserves_known_absence_of_jobs(
     assert not cluster.jobs
 
 
+@pytest.mark.parametrize("held", [False, True])
+async def test_held_or_pending_cell_reserves_its_volume_node_against_new_peer_builds(held):
+    """A serving stop keeps replacement capacity reserved even while its pod is absent."""
+    other = "bbbbbbbbbbbbbbbb"
+    cluster = BuildCluster()
+    observations = {CELL: _observation(pod_node=None, pv_node="worker-one",
+                                      statefulset_image=IMAGE_B, ready_pod_image=None,
+                                      statefulset_hold_kind="upgrade" if held else None),
+                    other: _observation()}
+    await reconcile._sync_catalogue_builds(
+        cluster, [_row(), _row(other)], observations, RolloutRow(), IMAGE_B, NOW, WINDOWS, CONFIG,
+        allow_schedule=True, pending_starts=frozenset() if held else frozenset({CELL}))
+    assert not cluster.jobs
+
+
+@pytest.mark.parametrize("unobserved", [False, True])
+async def test_waiting_build_without_a_node_or_owner_observation_does_not_authorize_cancellation(unobserved):
+    """An unlocated builder is not a node's peer; an unobserved owner makes only its known node uncertain."""
+    cluster = BuildCluster()
+    peer = "bbbbbbbbbbbbbbbb"
+    observations = {CELL: _observation()}
+    rows = [replace(_row(), desired_image=IMAGE_A)]
+    if not unobserved:
+        rows.append(_row(peer))
+        observations[peer] = _observation(pod_node=None, pv_node=None)
+    cluster.builds[namespace_name(peer)] = (BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B,
+                                                   "worker-one" if unobserved else None, NOW),)
+    result = await reconcile._sync_catalogue_builds(cluster, rows, observations, RolloutRow(), IMAGE_B,
+                                                   NOW, WINDOWS, CONFIG, allow_schedule=False)
+    expected = None if unobserved else {}
+    assert result[CELL].catalogue_waiting_builds == expected
+    if not unobserved:
+        assert result[peer].catalogue_waiting_builds == {}
+
+
+async def test_build_cancellation_deletes_job_when_the_owning_statefulset_is_gone():
+    """A removed peer cannot make every serving stop fail on an annotation patch to a missing object."""
+    cluster = BuildCluster()
+    def missing(namespace, annotations):
+        raise RuntimeError("StatefulSet not found")
+    cluster.patch_statefulset_annotations = missing
+    job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW)
+    obs = _observation(statefulset_exists=False, catalogue_builds=(job,))
+    await reconcile._cancel_catalogue_builds(cluster, CELL, obs, NOW, jobs={job.name})
+    assert cluster.events == [("delete_catalogue_build_job", namespace_name(CELL), job.name)]
+
+
 async def _build_fleet(cell_db):
     from .test_rollout_automation import OWNER, TENANT, _observe, _windowed_fleet
 
@@ -598,6 +645,155 @@ async def test_another_cells_waiting_build_yields_only_to_a_same_node_stop(cell_
         assert not any(build["metadata"]["namespace"] == namespace_name(TENANT_2)
                        and build["metadata"]["labels"].get(JOB_KIND_LABEL) == JOB_KIND_CATALOGUE_BUILD
                        for build in cluster.jobs)
+    finally:
+        await fleet.close()
+
+
+async def test_fresh_unbound_peer_build_survives_when_it_binds_before_the_next_stop_pass(cell_db):
+    """A completed build must not make an idle cell cancel each peer's new build in turn."""
+    from .test_rollout_automation import (
+        BUSY,
+        IDLE,
+        OWNER,
+        TENANT,
+        TENANT_2,
+        TENANT_3,
+        _annotations,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT, TENANT_2, TENANT_3)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    create = cluster.run_job
+    def create_unbound(manifest):
+        create(manifest)
+        namespace = manifest["metadata"]["namespace"]
+        if manifest["metadata"]["labels"].get(JOB_KIND_LABEL) == JOB_KIND_CATALOGUE_BUILD:
+            cluster.builds[namespace] = tuple(replace(job, running=False) for job in cluster.builds[namespace])
+    cluster.run_job = create_unbound
+    try:
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=ANY($2::text[])",
+                                  IMAGE_B, [TENANT, TENANT_2, TENANT_3])
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, pod_node="worker-two")
+            _observe(cluster, TENANT, TENANT_2, TENANT_3, pod_node="worker-one", pv_node="worker-one")
+        cluster.readiness.update({TENANT: IDLE, TENANT_2: BUSY, TENANT_3: BUSY})
+        completed = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, succeeded=True)
+        cluster.builds[namespace_name(TENANT)] = (completed,)
+        _annotations(cluster, TENANT).update({"exomem.io/catalogue-build-job": completed.name,
+                                              "exomem.io/catalogue-build-outcome": "succeeded"})
+        _observe(cluster, TENANT, pod_node="worker-one", pv_node="worker-one")
+        cluster.events.clear()
+        await fleet.run(NOW, cluster_config=CONFIG)
+
+        peer = cluster.builds[namespace_name(TENANT_2)][0]
+        assert peer.waiting
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        assert not any(event[0] == "delete_catalogue_build_job" and event[1] == namespace_name(TENANT_2)
+                       for event in cluster.events)
+        assert "exomem.io/catalogue-build-cancelled" not in _annotations(cluster, TENANT_2)
+
+        # The scheduler had room; its newly bound builder must keep that capacity.
+        cluster.builds[namespace_name(TENANT_2)] = (replace(peer, running=True, bound=True),)
+        cluster.builds.pop(namespace_name(TENANT))
+        _observe(cluster, TENANT, TENANT_2, TENANT_3, pod_node="worker-one", pv_node="worker-one")
+        await fleet.run(NOW + timedelta(seconds=5), cluster_config=CONFIG)
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 0
+        assert cluster.builds[namespace_name(TENANT_2)][0].bound
+        assert namespace_name(TENANT_3) not in cluster.builds
+        assert "exomem.io/catalogue-build-cancelled" not in _annotations(cluster, TENANT_2)
+    finally:
+        await fleet.close()
+
+
+async def test_stopped_cell_cancels_waiting_peer_on_its_volume_node_before_target_apply(cell_db):
+    """A stopped local-volume replacement needs its node protected after the serving pod disappears."""
+    from .test_reconcile import _ATTEMPT_SNAPSHOT
+    from .test_rollout_automation import (
+        BUSY,
+        IDLE,
+        OWNER,
+        TENANT,
+        TENANT_2,
+        _annotations,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT, TENANT_2)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    try:
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=ANY($2::text[])",
+                                  IMAGE_B, [TENANT, TENANT_2])
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15))
+            _observe(cluster, OWNER, TENANT, TENANT_2, pod_node="worker-one", pv_node="worker-one")
+        cluster.readiness.update({TENANT: IDLE, TENANT_2: BUSY})
+        await fleet.run(NOW)
+        _observe(cluster, TENANT, pod_node=None, pv_node="worker-one")
+        await fleet.run(NOW + timedelta(seconds=5))
+        _observe(cluster, TENANT, pod_node=None, pv_node="worker-one", backup_job_succeeded=True,
+                 backup_job_snapshot_id=_ATTEMPT_SNAPSHOT)
+        await fleet.run(NOW + timedelta(seconds=35))
+        _observe(cluster, TENANT, pod_node=None, pv_node="worker-one")
+        peer = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW)
+        cluster.builds[namespace_name(TENANT_2)] = (peer,)
+        _annotations(cluster, TENANT_2)["exomem.io/catalogue-build-job"] = peer.name
+        _observe(cluster, TENANT_2, pod_node="worker-one", pv_node="worker-one")
+        cluster.events.clear()
+        await fleet.run(NOW + timedelta(seconds=40), cluster_config=CONFIG)
+
+        assert ("delete_catalogue_build_job", namespace_name(TENANT_2), peer.name) in cluster.events
+        assert json.loads(_annotations(cluster, TENANT_2)["exomem.io/catalogue-build-cancelled"])["jobs"] == [peer.name]
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 0
+        cluster.builds.clear()
+        _observe(cluster, TENANT, pod_node=None, pv_node="worker-one")
+        _observe(cluster, TENANT_2, pod_node="worker-one", pv_node="worker-one")
+        await fleet.run(NOW + timedelta(seconds=45), cluster_config=CONFIG)
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        assert _statefulset(cluster, TENANT)["spec"]["template"]["spec"]["containers"][0]["image"] == IMAGE_B
+    finally:
+        await fleet.close()
+
+
+async def test_census_failure_for_a_recorded_build_without_a_node_does_not_freeze_other_cells(cell_db):
+    """An unlocated recorded build cannot turn a fleet census failure into a global stop barrier."""
+    from .test_rollout_automation import (
+        OWNER,
+        TENANT,
+        TENANT_2,
+        _annotations,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT, TENANT_2)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    try:
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+            _observe(cluster, TENANT_2, pod_node=None)
+        _annotations(cluster, TENANT_2)["exomem.io/catalogue-build-job"] = catalogue_build_name(IMAGE_B)
+        _observe(cluster, TENANT_2, pod_node=None)
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_state='stopped', generation=generation+1 WHERE cell_id=$1",
+                                  TENANT)
+        def unavailable():
+            raise RuntimeError("census unavailable")
+        cluster.observe_catalogue_builds = unavailable
+        await fleet.run(NOW, cluster_config=CONFIG)
+        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 0
     finally:
         await fleet.close()
 

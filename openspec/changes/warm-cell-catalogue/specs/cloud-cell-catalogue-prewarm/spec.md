@@ -39,10 +39,13 @@ Before the final force minutes, `cellctl` SHALL count a running build Job as act
 
 - **WHEN** a cell will stop or replace its serving pod and another cell has an unfinished, unbound build targeting that node
 - **THEN** cellctl records the cancellation in the build's own cell's current window before deleting its Job
-- **AND** the stop waits until a later census proves the build's pods absent; unknown inventory also defers the stop
+- **AND** the stop waits until a later census shows no waiting builds on that node; unknown inventory also defers the stop
 - **AND** that target receives no further build in the same window and retains its cold-rebuild fallback
 - **AND** bound builds and builds targeting other nodes remain untouched
 - **AND** a cell without its own builds or waiting builds on its node stops in the same pass
+- **AND** a stopped cell uses its volume's node when its serving pod is absent
+- **AND** cellctl reserves nodes with an active hold or pending start against new builds
+- **AND** a new build makes its node's waiting inventory unknown for the rest of that pass, allowing it to bind before cancellation
 
 #### Scenario: The build Job fails, expires or no longer applies
 
