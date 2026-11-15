@@ -16,7 +16,9 @@ from urllib.parse import quote, unquote
 
 import httpx
 
-AUTHORIZE_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
+# B2 refuses a key limited to a list of buckets, the kind Terraform creates, on API versions 2 and 3.
+_API = "b2api/v4"
+AUTHORIZE_URL = f"https://api.backblazeb2.com/{_API}/b2_authorize_account"
 _INFO_HEADER = "x-bz-info-"
 _OCTET_STREAM = "application/octet-stream"
 
@@ -129,7 +131,7 @@ class B2:
     async def _call(self, endpoint: str, body: dict) -> httpx.Response:
         session = await self._authorized()
         try:
-            return await self._client.post(f"{session.api_url}/b2api/v3/{endpoint}", json=body,
+            return await self._client.post(f"{session.api_url}/{_API}/{endpoint}", json=body,
                                            headers={"Authorization": session.token})
         except httpx.HTTPError as error:
             raise ProviderUncertain(f"{endpoint} failed") from error
@@ -257,7 +259,7 @@ class B2:
         session = await self._authorized()
         headers = {"Authorization": session.token, **({"Range": byte_range} if byte_range else {})}
         request = self._client.build_request(
-            "GET", f"{session.download_url}/b2api/v3/b2_download_file_by_id",
+            "GET", f"{session.download_url}/{_API}/b2_download_file_by_id",
             params={"fileId": file_id}, headers=headers)
         try:
             return await self._client.send(request, stream=True)
