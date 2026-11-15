@@ -139,6 +139,18 @@ def test_the_first_prompt_gets_the_session_blocks_before_the_activation_text(
     assert context.endswith(hook._mcp_activation_context())
 
 
+def test_an_upkeep_item_the_service_attached_is_shown_not_lost(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The service records an upkeep item delivered when it attaches it; a hook that drops it loses it for good."""
+    upkeep = {"items": [{"ref": "exomem://review/upkeep/item-one", "label": "stale link", "title": "Depot Ledger"}]}
+    _serve(monkeypatch, _packet(upkeep=upkeep))
+
+    context = _prompt(monkeypatch, capsys)
+
+    assert "exomem://review/upkeep/item-one" in context
+
+
 def test_a_later_prompt_with_nothing_changed_gets_the_activation_text_alone(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
