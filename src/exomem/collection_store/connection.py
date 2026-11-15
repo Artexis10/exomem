@@ -277,9 +277,9 @@ class WriterConnection:
         # how many checks in a row failed.
         self.import_retry: dict[str, tuple[float, int]] = {}
         self.import_readers: dict[str, Any] = {}
-        # Each collection's row-id heads at the generation they were read (``row_binding``); a write
-        # advances the generation, and a new handle starts with none.
-        self.row_heads: dict[str, tuple[tuple[int, str], dict[str, list[int]]]] = {}
+        # Each collection's row-id head map at the generation it was read, or None for a collection
+        # too large to keep one (``row_binding``); a write advances the generation, and a new handle starts with none.
+        self.row_heads: dict[str, tuple[tuple[int, str], Any]] = {}
         self.import_last_turn: tuple[str, str] | None = None
         # This handle's connection to the derived-rows file (``derived_rows``), opened and
         # reconciled on first use, so a new handle, as after a takeover, reconciles again.
