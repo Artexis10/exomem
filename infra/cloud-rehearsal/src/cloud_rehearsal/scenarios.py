@@ -1440,7 +1440,8 @@ def post_checks(ctx: Context) -> dict[str, Any]:
     """Content-free logs: no distinctive phrase in any cell, gateway or cellctl log."""
 
     snapshot_logs(ctx)
-    phrases = [tenant.phrase for tenant in ctx.tenants]
+    # A tenant that never got a cell wrote no phrase, so it counts as no check.
+    phrases = [tenant.phrase for tenant in ctx.tenants if tenant.cell_id]
     haystack = "\n".join(ctx.log_snapshots)
     leaked = [phrase for phrase in phrases if phrase in haystack]
     return {"log_bytes_scanned": len(haystack), "phrases_checked": len(phrases), "phrases_leaked": len(leaked)}

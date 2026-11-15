@@ -25,7 +25,7 @@ from mcp.types import ErrorData
 
 from cloud_rehearsal import build, platform, release_rollout, substrate
 from cloud_rehearsal.__main__ import _parser, main
-from cloud_rehearsal.mcp_client import read_refusal_body, refusal_text
+from cloud_rehearsal.mcp_client import ToolResult, read_refusal_body, refusal_text
 from cloud_rehearsal.release_rollout import (
     CELL_GIB,
     HOLD_BUDGET_SECONDS,
@@ -33,13 +33,17 @@ from cloud_rehearsal.release_rollout import (
     MIN_MINUTES_LEFT,
     POOL_GIB,
     SLOTS_AT_REST,
+    WriteLoop,
     deploy_settings,
     deploy_transport,
     lists_start_times,
     load_cloud_deploy,
+    missing_writes,
+    parse_marker_probe,
     pause_alert_lines,
     poll_failures,
     require_admission_room,
+    seconds_until_next_day,
     seconds_until_quiet_hour,
     summarize_calls,
     window_annotations,
@@ -345,3 +349,137 @@ def test_a_refused_call_names_the_gateways_error_code_and_the_next_poll_opens_a_
     summary = _poll(connector, calls=3)
     assert summary["sessions"] == 2
     assert summary["error_kinds"] == {"HTTP 429 RATE_LIMITED": 1}
+
+
+class _Writer:
+    """A session whose writes answer its script in order and repeat the last answer."""
+
+    def __init__(self, *script: ToolResult) -> None:
+        self.script = list(script)
+        self.calls = 0
+
+    async def governed_write(self, arguments):
+        self.calls += 1
+        return self.script.pop(0) if len(self.script) > 1 else self.script[0]
+
+
+ACKNOWLEDGED = ToolResult({"status": "created"}, False, 0.0)
+REFUSED = ToolResult({"error": {"code": "CELL_STOPPED"}}, True, 0.0)
+
+
+def _write_loop(monkeypatch, session: _Writer, hold_after_calls: int) -> WriteLoop:
+    """A loop on the canary whose row shows the upgrade hold once `session` has been called `hold_after_calls` times."""
+    monkeypatch.setattr(release_rollout, "WRITE_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(release_rollout, "WRITE_WATCH_SECONDS", 0.005)
+    held_at = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=30)  # after every write this test acknowledges
+
+    async def cell(_cell_id):
+        return {"hold_kind": "upgrade", "hold_started_at": held_at} if session.calls >= hold_after_calls else {"hold_kind": None}
+
+    tenant = SimpleNamespace(cell_id="aaaa", phrase="ultramarine-1234abcd-heron", client=_Connector(session))
+    return WriteLoop(SimpleNamespace(cell=cell), tenant)
+
+
+def test_the_write_loop_never_counts_a_refused_write_and_still_records_the_stop_after_it(monkeypatch) -> None:
+    """Step 21 looks for every counted write in the restored canary: a write the cell refused is not in it, and the
+    stop is what the last acknowledgement is measured against, whichever way the loop ended."""
+
+    async def run() -> dict:
+        loop = _write_loop(monkeypatch, _Writer(ACKNOWLEDGED, ACKNOWLEDGED, ACKNOWLEDGED, REFUSED), hold_after_calls=4)
+        loop.start()
+        while loop.hold_seen_at is None:
+            await asyncio.sleep(0.005)
+        assert [write.token for write in loop.acknowledged] == [f"ultramarine-1234abcd-heron-w000{n}" for n in (1, 2, 3)]
+        return await loop.finish()
+
+    summary = asyncio.run(run())
+    assert summary["acknowledged_writes"] == 3
+    assert summary["ended_by"] == "a write the cell refused: CELL_STOPPED"
+    assert summary["seconds_from_last_acknowledgement_to_hold_started"] > 0
+
+
+def test_the_write_loop_ends_at_the_canarys_stop_when_no_write_was_refused(monkeypatch) -> None:
+    """A gateway that holds a write through the stop acknowledges it late: the watch, not a refusal, must end the loop
+    and give step 21 the instant that the last acknowledgement is measured against."""
+
+    async def run() -> dict:
+        session = _Writer(ACKNOWLEDGED)
+        loop = _write_loop(monkeypatch, session, hold_after_calls=3)
+        loop.start()
+        while loop.hold_seen_at is None:
+            await asyncio.sleep(0.005)
+        calls_at_the_stop = session.calls
+        await asyncio.sleep(0.05)
+        assert session.calls <= calls_at_the_stop + 1
+        return await loop.finish()
+
+    summary = asyncio.run(run())
+    assert summary["ended_by"] == "the canary's stop for its attempt"
+    assert summary["acknowledged_writes"] >= 3
+    assert summary["seconds_from_last_acknowledgement_to_hold_started"] > 0
+
+
+def test_a_found_write_needs_no_second_search_and_the_last_write_is_looked_for_by_itself() -> None:
+    class Searcher:
+        def __init__(self, shown: dict[str, str]) -> None:
+            self.shown, self.queries = shown, []
+
+        async def call(self, _name, arguments):
+            self.queries.append(arguments["query"])
+            return SimpleNamespace(text=lambda: self.shown.get(arguments["query"], ""))
+
+    tokens = ["heron-w0001", "heron-w0002", "heron-w0003"]
+    # The shared search lists w0001 only; w0002 is found by itself; the last write is lost.
+    session = Searcher({"heron": "heron-w0001", "heron-w0002": "heron-w0002"})
+    missing = asyncio.run(missing_writes(session, "heron", tokens, last_timeout=0))
+    assert missing == ["heron-w0003"]
+    assert session.queries == ["heron-w0003", "heron", "heron-w0002"]
+
+
+def test_the_marker_probe_is_read_as_a_json_object_or_not_at_all() -> None:
+    assert parse_marker_probe('{"/data": true, "/data/host": false}') == {"/data": True, "/data/host": False}
+    assert parse_marker_probe("Traceback (most recent call last)") is None
+    assert parse_marker_probe("[1, 2]") is None
+
+
+@pytest.mark.parametrize(
+    ("clock", "waits"),
+    [("2026-11-15T21:00:00", False), ("2026-11-15T23:15:00", False), ("2026-11-15T23:16:00", True)],
+)
+def test_the_steps_that_hold_cached_windows_wait_past_midnight_when_the_day_is_nearly_over(clock, waits) -> None:
+    now = dt.datetime.fromisoformat(clock).replace(tzinfo=dt.UTC)
+    wait = seconds_until_next_day(now)
+    assert (wait > 0) is waits
+    if waits:
+        assert (now + dt.timedelta(seconds=wait)).date() == now.date() + dt.timedelta(days=1)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "passes"),
+    [
+        (403, {"error": {"code": "OPERATOR_SCOPE_DENIED"}}, True),
+        (401, {"error": {"code": "OPERATOR_UNAUTHORIZED"}}, False),
+        (403, {"error": {"code": "SOMETHING_ELSE"}}, False),
+        (200, {"success": True}, False),
+    ],
+)
+def test_only_a_403_with_the_scope_code_proves_the_deploy_token_cannot_clear_the_pause(status, body, passes) -> None:
+    from cloud_rehearsal import report as report_module
+
+    async def deploy_rollout():
+        return {"paused": True, "cell_image": "image@sha256:1"}
+
+    async def release_request(_token, _payload):
+        return httpx.Response(status, json=body)
+
+    ctx = SimpleNamespace(
+        deploy_rollout=deploy_rollout, release_request=release_request,
+        images=SimpleNamespace(cell_v2="image@sha256:2"),
+        substrate=SimpleNamespace(secrets=SimpleNamespace(deploy_token="deploy-token")))
+    record = report_module.StepRecord(22, "deploy_token_cannot_clear_the_pause")
+    proof = release_rollout.Rollout(ctx).deploy_token_cannot_clear_the_pause(record)
+    if passes:
+        asyncio.run(proof)
+    else:
+        with pytest.raises(report_module.StepFailure, match="not 403 OPERATOR_SCOPE_DENIED"):
+            asyncio.run(proof)

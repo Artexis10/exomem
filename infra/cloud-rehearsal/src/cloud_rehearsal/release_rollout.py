@@ -114,6 +114,9 @@ FORCE_MINUTES = 1
 HOLD_BUDGET_SECONDS = 40
 # A window must stay open through B's and C's attempts, so it opens only with this much of the UTC hour left.
 MIN_MINUTES_LEFT = 20
+# cellctl drops a cell's cached window when the UTC day moves on, so steps 14 to 17 must end on the day they start:
+# the canary's roll, the closed-window observation, the wait for a quiet hour and the two cells' rolls.
+MIN_MINUTES_LEFT_IN_DAY = 45
 CLOSED_OBSERVATION_SECONDS = 120
 BUSY_POLL_SECONDS = 20
 BUSY_HOLD_SECONDS = 75
@@ -121,6 +124,15 @@ BUSY_HOLD_SECONDS = 75
 # harness stamps its last request when the call returns: the rule is only violated by a hold this much early.
 IDLE_TOLERANCE_SECONDS = 5
 POLL_QUERY = "release rollout poll"
+# 3.1's writes to the canary, from the moment the broken release lands until cellctl stops the canary for its attempt.
+# Beside the poller on cell C they stay under the gateway's 120 requests a minute for the harness's address.
+WRITE_INTERVAL_SECONDS = 2.0
+WRITE_WATCH_SECONDS = 0.5
+# The last acknowledged write must come this close to the stop (before it, or after it for a pod still shutting down),
+# or the loop ended for another reason and the proof says nothing about the snapshot.
+WRITE_GAP_LIMIT_SECONDS = 10
+# Between the searches that look for each acknowledged write by itself, to stay under the gateway's request bucket.
+WRITE_SEARCH_PACE_SECONDS = 0.6
 # What the broken target is expected to leave in the cell's backed-up paths (build.BROKEN_SHIM writes it).
 MARKER_PROBE = (
     "import json, os, sys; print(json.dumps({path: os.path.exists(os.path.join(path, sys.argv[1])) "
@@ -317,6 +329,16 @@ def pause_alert_lines(log: str, cell_id: str) -> int:
     return sum(1 for line in log.splitlines() if f"cellctl: {ROLLOUT_PAUSED_ALERT}: {cell_id}" in line)
 
 
+def parse_marker_probe(stdout: str) -> dict[str, bool] | None:
+    """The marker probe's JSON object as {path: whether the marker is there}; None when it printed anything else."""
+
+    try:
+        found = json.loads(stdout)
+    except ValueError:
+        return None
+    return {path: bool(there) for path, there in found.items()} if isinstance(found, dict) else None
+
+
 # What each runbook command is expected to print. Each check returns the problem it found, or None.
 
 
@@ -352,6 +374,167 @@ def lists_start_times(stdout: str, cell_ids: list[str]) -> str | None:
     return f"no pod with a start time in {unlisted}" if unlisted else None
 
 
+# --- the canary's acknowledged writes ------------------------------------------------------
+
+
+@dataclass
+class AcknowledgedWrite:
+    token: str
+    acknowledged_at: dt.datetime
+
+
+@dataclass
+class WriteLoop:
+    """Writes to the canary through its switch about every WRITE_INTERVAL_SECONDS, and keeps each write it acknowledged.
+
+    3.1: a write that returned success must be in the canary after its failed attempt's snapshot and restore. The
+    loop starts when the broken release lands. It ends at the first write that is refused or errors, which is
+    not counted, or when its watch sees cellctl hold the canary for an upgrade, which is when cellctl stops the cell.
+    The watch goes on after a refusal, so the stop is recorded whichever way the loop ended.
+    """
+
+    ctx: Context
+    tenant: Tenant
+    acknowledged: list[AcknowledgedWrite] = field(default_factory=list)
+    ended_by: str | None = None
+    hold_started_at: dt.datetime | None = None
+    hold_seen_at: dt.datetime | None = None
+    task_errors: list[str] = field(default_factory=list)
+    _halt: asyncio.Event = field(default_factory=asyncio.Event)
+    _done: asyncio.Event = field(default_factory=asyncio.Event)
+    _tasks: list[asyncio.Task[None]] = field(default_factory=list)
+    _unanswered: int = 0
+    _finished: bool = False
+
+    def start(self) -> None:
+        self._tasks = [asyncio.create_task(self._write()), asyncio.create_task(self._watch())]
+
+    def _end(self, reason: str) -> None:
+        if self.ended_by is None:
+            self.ended_by = reason
+        self._halt.set()
+
+    async def finish(self, timeout: float = 120.0) -> dict[str, Any]:
+        """Stop both tasks, waiting for a write in flight; a write that stays unanswered is cancelled and not counted."""
+
+        if not self._finished:
+            self._finished = True
+            self._end("the harness, after the restore")
+            self._done.set()
+            _, pending = await asyncio.wait(self._tasks, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            self._unanswered = len(pending)
+            for task in self._tasks:
+                if task.done() and not task.cancelled() and task.exception() is not None:
+                    self.task_errors.append(f"{type(task.exception()).__name__}: {task.exception()}"[:200])
+        return self.summary()
+
+    async def _write(self) -> None:
+        assert self.tenant.client is not None
+        # The server said the session is gone before it saw the call: a client initializes another and repeats it, once.
+        retrying = False
+        in_flight = False
+        try:
+            while not self._halt.is_set():
+                async with self.tenant.client.mcp() as session:
+                    while not self._halt.is_set():
+                        began = time.perf_counter()
+                        token = f"{self.tenant.phrase}-w{len(self.acknowledged) + 1:04d}"
+                        in_flight = True
+                        try:
+                            result = await session.governed_write({
+                                "title": f"Release rollout write {token}",
+                                "content": f"Release rollout write {token}, made while the canary served.\n\n"
+                                           "## Observations\n\n- [rehearsal] acknowledged write #rehearsal\n",
+                            })
+                        except McpError as error:
+                            if session_gone(error) and not retrying:
+                                retrying = True
+                                break
+                            raise
+                        in_flight = False
+                        retrying = False
+                        if result.is_error or result.error_code:
+                            self._end(f"a write the cell refused: {result.error_code or 'tool error'}")
+                            return
+                        self.acknowledged.append(AcknowledgedWrite(token, dt.datetime.now(dt.UTC)))
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(
+                                self._halt.wait(), max(0.0, WRITE_INTERVAL_SECONDS - (time.perf_counter() - began)))
+        except Exception as raised:  # noqa: BLE001 - an errored write is the loop's end, not a failure of the harness
+            if not in_flight and self._halt.is_set():
+                return  # the session closing after the last write, with no write to blame
+            self._end(f"a write that errored: {refusal_text(innermost(raised)) or _flatten(innermost(raised))[:200]}")
+
+    async def _watch(self) -> None:
+        while not self._done.is_set():
+            row = await self.ctx.cell(self.tenant.cell_id)
+            if row.get("hold_kind") == "upgrade":
+                self.hold_started_at = row["hold_started_at"]
+                self.hold_seen_at = dt.datetime.now(dt.UTC)
+                self._end("the canary's stop for its attempt")
+                return
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._done.wait(), WRITE_WATCH_SECONDS)
+
+    def seconds_from_last_acknowledgement(self, instant: dt.datetime | None) -> float | None:
+        """Seconds from the last acknowledged write to `instant`; negative when the write came after it."""
+
+        if instant is None or not self.acknowledged:
+            return None
+        return round(seconds_between(instant, self.acknowledged[-1].acknowledged_at), 1)
+
+    def summary(self) -> dict[str, Any]:
+        def shown(instant: dt.datetime | None) -> str | None:
+            return instant.isoformat() if instant else None
+
+        return {
+            "acknowledged_writes": len(self.acknowledged),
+            "first_acknowledged_at": shown(self.acknowledged[0].acknowledged_at if self.acknowledged else None),
+            "last_acknowledged_at": shown(self.acknowledged[-1].acknowledged_at if self.acknowledged else None),
+            "ended_by": self.ended_by,
+            "canary_hold_started_at": shown(self.hold_started_at),
+            "seconds_from_last_acknowledgement_to_hold_started": self.seconds_from_last_acknowledgement(self.hold_started_at),
+            "seconds_from_last_acknowledgement_to_hold_seen": self.seconds_from_last_acknowledgement(self.hold_seen_at),
+            "tasks_unanswered_at_the_end": self._unanswered,
+            "task_errors": self.task_errors,
+        }
+
+
+async def search_finds(session: MeasuredSession, query: str, token: str, *, timeout: float = 0.0) -> bool:
+    """Whether a search for `query` returns `token`, asking again every 3 s up to `timeout` while it does not."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        result = await session.call("search_memory", {"query": query})
+        if token in result.text():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(3)
+
+
+async def missing_writes(session: MeasuredSession, phrase: str, tokens: list[str], *, last_timeout: float = 90.0) -> list[str]:
+    """The acknowledged writes that a search of the restored canary does not find.
+
+    The last write is looked for by itself first and given `last_timeout`, because a restored cell may still be
+    warming its index. Then a single search over the shared phrase finds most of the rest, and each token that
+    answer lacks is looked for by itself, so the verdict never depends on how many hits a single search returns.
+    """
+
+    missing = [] if await search_finds(session, tokens[-1], tokens[-1], timeout=last_timeout) else [tokens[-1]]
+    batch = await session.call("search_memory", {"query": phrase, "limit": len(tokens) + 5})
+    shown = batch.text()
+    for token in tokens[:-1]:
+        if token in shown:
+            continue
+        if not await search_finds(session, token, token):
+            missing.append(token)
+        await asyncio.sleep(WRITE_SEARCH_PACE_SECONDS)
+    return missing
+
+
 # --- the upgrade window, held by hand ------------------------------------------------------
 
 
@@ -369,6 +552,14 @@ def seconds_until_quiet_hour(now: dt.datetime, minutes_needed: int = MIN_MINUTES
 
     next_hour = now.replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
     remaining = (next_hour - now).total_seconds()
+    return 0.0 if remaining >= minutes_needed * 60 else remaining + 5.0
+
+
+def seconds_until_next_day(now: dt.datetime, minutes_needed: int = MIN_MINUTES_LEFT_IN_DAY) -> float:
+    """0 when this UTC day has `minutes_needed` left, else the wait to the start of the next day."""
+
+    next_day = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+    remaining = (next_day - now).total_seconds()
     return 0.0 if remaining >= minutes_needed * 60 else remaining + 5.0
 
 
@@ -514,8 +705,7 @@ class Rollout:
     pollers: dict[str, SwitchPoller] = field(default_factory=dict)
     switches: dict[str, dict[str, Any]] = field(default_factory=dict)
     last_request: dict[str, dt.datetime] = field(default_factory=dict)
-    note_title: str = ""
-    note_ack: dict[str, Any] = field(default_factory=dict)
+    writes: WriteLoop | None = None
     broken_attempt: dict[str, Any] = field(default_factory=dict)
     closed_hour: int = 0
     put_at: dt.datetime | None = None
@@ -536,6 +726,9 @@ class Rollout:
         for label, poller in self.pollers.items():
             if label not in self.switches:
                 self.switches[label] = await poller.stop(timeout=30.0)
+
+    async def stop_writes(self) -> dict[str, Any]:
+        return await self.writes.finish() if self.writes else {}
 
     # 13
     async def provision_disposable_cells(self, record: StepRecord) -> None:
@@ -571,7 +764,11 @@ class Rollout:
     # 14 (task 1.15)
     async def deploy_token_sets_the_release_image(self, record: StepRecord) -> None:
         ctx = self.ctx
-        # Stamped again in case a UTC midnight passed since provisioning, which would let cellctl pick new hours.
+        wait = seconds_until_next_day(dt.datetime.now(dt.UTC))
+        record.evidence["waited_for_the_next_utc_day_seconds"] = round(wait)
+        if wait:
+            await asyncio.sleep(wait)
+        # Stamped again for the day this step runs on: a UTC midnight since provisioning would let cellctl pick new hours.
         await set_windows(ctx, [ctx.b, ctx.c], self.closed_hour)
         self.start_poller("A", ctx.a)
         self.put_at = dt.datetime.now(dt.UTC)
@@ -644,9 +841,6 @@ class Rollout:
     # 18 (bullet 4)
     async def second_release_leaves_the_running_attempt_pinned(self, record: StepRecord) -> None:
         ctx = self.ctx
-        # 3.1: the acknowledged write, made while the canary serves v2 and before anything stops it. It comes
-        # first so the second release can land as soon as C's target is in effect, with the attempt still running.
-        await self.write_note()
 
         async def applied() -> str | None:
             row = await ctx.cell(ctx.c.cell_id)
@@ -661,17 +855,19 @@ class Rollout:
         if record.evidence["pin_when_second_release_arrived"] != ctx.images.cell_v2:
             raise StepFailure("cell C's attempt is pinned to something other than the release under test")
         await ctx.deploy_release(ctx.images.cell_broken, RELEASE_BROKEN)
+        # 3.1: from here the canary is written to until cellctl stops it for the broken release (step 19 ends the loop).
+        self.writes = WriteLoop(ctx, ctx.a)
+        self.writes.start()
         # An attempt still running after the request landed was running when it landed.
         during = await ctx.cell(ctx.c.cell_id)
         record.evidence["c_hold_after_second_release_landed"] = during.get("hold_kind")
         if during.get("hold_kind") != "upgrade":
             raise StepFailure("cell C's attempt was over before the second release landed, so the pin was not tested")
         view = await ctx.deploy_rollout()
-        record.evidence["view_after_second_release"] = {key: view.get(key) for key in ("release", "paused")}
+        record.evidence["view_after_second_release"] = {key: view.get(key) for key in ("release", "paused", "cell_image")}
         if view.get("release") != RELEASE_BROKEN:
             raise StepFailure("Substrate did not record the second release")
-        row = await wait_rolled(ctx, ctx.c, ctx.images.cell_v2)
-        record.evidence["row_desired_image_is_second_release"] = row.get("desired_image") == ctx.images.cell_broken
+        await wait_rolled(ctx, ctx.c, ctx.images.cell_v2)
         record.evidence["c_attempt_seconds"] = round(seconds_between(dt.datetime.now(dt.UTC), self.c_hold_started_at), 1)
         images_now = await pod_images(ctx, ctx.c.cell_id)
         record.evidence["c_pod_images_after"] = images_now
@@ -679,20 +875,6 @@ class Rollout:
             raise StepFailure(f"cell C does not run the release its attempt was pinned to: {images_now}")
         await asyncio.sleep(5)
         await self.stop_poller("C")
-
-    async def write_note(self) -> None:
-        ctx = self.ctx
-        self.note_title = f"Release rollout note {ctx.a.phrase}"
-        assert ctx.a.client is not None
-        async with ctx.a.client.mcp() as session:
-            write = await session.governed_write({
-                "title": self.note_title,
-                "content": f"{self.note_title}: written before the canary's failed attempt.\n\n"
-                           "## Observations\n\n- [rehearsal] acknowledged write #rehearsal\n",
-            })
-        if write.error_code:
-            raise StepFailure(f"the acknowledged write to the canary failed: {write.error_code}")
-        self.note_ack = {"acknowledged": True, "response_keys": sorted(write.structured)}
 
     # 19 (bullet 5, 3.1)
     async def forced_readiness_failure_pauses_and_restores_the_canary(self, record: StepRecord) -> None:
@@ -726,15 +908,17 @@ class Rollout:
             if time.monotonic() > deadline:
                 raise StepFailure(f"timed out after {FAILED_ATTEMPT_TIMEOUT}s: the canary's failed attempt did not end "
                                   f"restored on v2; holds seen {sorted(seen)}, last row {row.get('observed_state')}")
-            await asyncio.sleep(3)
+            # The restore Job can be short-lived, and its claim is what the proof reads: look more often while it may run.
+            await asyncio.sleep(1 if row.get("hold_kind") == "restore" else 3)
         rollout = await ctx.rollout()
+        record.evidence["writes_to_the_canary"] = await self.stop_writes()
         clones = {clone_claim_name(snapshot) for snapshot in snapshots}
         self.broken_attempt = {"snapshots": sorted(snapshots), "marker_paths_seen": sorted(path for path, there in marker.items() if there)}
         record.evidence.update({
             "seconds_to_restored": round(time.monotonic() - started, 1),
             "holds_observed": sorted(seen),
             f"{PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION}_values": sorted(snapshots),
-            "restore_job_mounted_the_attempts_clone": bool(clones & claims_in_restore) if claims_in_restore else None,
+            "restore_job_mounted_the_attempts_clone": bool(clones & claims_in_restore),
             "restore_job_claims": sorted(claims_in_restore),
             "rollout": {key: rollout.get(key) for key in ("paused", "error_code", "held_cell_id")},
         })
@@ -744,6 +928,10 @@ class Rollout:
             problems.append(f"the rollout is not paused on the canary with UPGRADE_READINESS_TIMEOUT: {record.evidence['rollout']}")
         if not snapshots:
             problems.append(f"{PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION} was never set on the canary's attempt")
+        elif not claims_in_restore:
+            problems.append("the restore Job's volume claims were never seen, so its source is unproven")
+        elif not clones & claims_in_restore:
+            problems.append(f"the restore Job mounted {sorted(claims_in_restore)}, not the attempt's clone {sorted(clones)}")
         logs = await asyncio.to_thread(ctx.kubectl, "logs", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, "--tail=-1")
         alert_lines = pause_alert_lines(logs.stdout, a)
         record.evidence["cellctl_log_lines_for_the_pause_alert"] = alert_lines
@@ -764,10 +952,7 @@ class Rollout:
             build.BROKEN_MARKER, check=False)
         if probe.returncode != 0:
             return None
-        try:
-            return {path: bool(there) for path, there in json.loads(probe.stdout).items()}
-        except ValueError:
-            return None
+        return parse_marker_probe(probe.stdout)
 
     # 20 (bullet 5, the workflow)
     async def workflow_fails_with_the_code_alone(self, record: StepRecord) -> None:
@@ -796,17 +981,32 @@ class Rollout:
             raise StepFailure("; ".join(problems))
 
     # 21 (3.1)
-    async def acknowledged_write_survives_and_no_broken_file_remains(self, record: StepRecord) -> None:
+    async def acknowledged_writes_survive_and_no_broken_file_remains(self, record: StepRecord) -> None:
         ctx = self.ctx
-        assert ctx.a.client is not None
-        async with ctx.a.client.mcp() as session:
-            recall = await session.call("search_memory", {"query": ctx.a.phrase})
-        record.evidence.update({"write_ack": self.note_ack, "note_found_after_restore": ctx.a.phrase in recall.text(),
-                                "marker_paths_seen_during_attempt": self.broken_attempt["marker_paths_seen"]})
+        assert ctx.a.client is not None and self.writes is not None
+        writes = self.writes
+        record.evidence["writes_to_the_canary"] = await self.stop_writes()
+        tokens = [write.token for write in writes.acknowledged]
         problems = []
-        if ctx.a.phrase not in recall.text():
-            problems.append("the acknowledged note is not in the restored canary")
+        if not tokens:
+            problems.append("no write to the canary was acknowledged before its stop, so no acknowledged write is left to find")
+        else:
+            gap = writes.seconds_from_last_acknowledgement(writes.hold_started_at)
+            if gap is None:
+                problems.append("the write loop never saw cellctl hold the canary for its attempt")
+            elif gap > WRITE_GAP_LIMIT_SECONDS:
+                problems.append(f"the last acknowledged write came {gap:.0f} s before the canary's stop, after which the loop "
+                                f"ended by {writes.ended_by}: no write close to the snapshot was acknowledged")
+            async with ctx.a.client.mcp() as session:
+                missing = await missing_writes(session, ctx.a.phrase, tokens)
+            record.evidence.update({"acknowledged_writes_missing_after_restore": len(missing),
+                                    "last_acknowledged_write_present": tokens[-1] not in missing,
+                                    "missing_samples": missing[:5]})
+            if missing:
+                problems.append(f"{len(missing)} of {len(tokens)} acknowledged write(s) are not in the restored canary"
+                                f"{', and the last write is among them' if tokens[-1] in missing else ''}: {missing[:3]}")
         seen = self.broken_attempt["marker_paths_seen"]
+        record.evidence["marker_paths_seen_during_attempt"] = seen
         if not seen:
             problems.append("the broken target's marker was never seen during its attempt, so its absence proves nothing")
         pod = await asyncio.to_thread(ctx.runtime_pod, ctx.a.cell_id)
@@ -816,12 +1016,17 @@ class Rollout:
             probe = await asyncio.to_thread(
                 ctx.exec_in, namespace_name(ctx.a.cell_id), pod["metadata"]["name"], "python3", "-c", MARKER_PROBE,
                 build.BROKEN_MARKER, check=False)
-            record.evidence["marker_probe_after_restore"] = probe.stdout.strip()[-200:]
-            remaining = [path for path in seen if f'"{path}": true' in probe.stdout]
-            if probe.returncode != 0:
-                problems.append("the restored canary's marker probe failed")
-            if remaining:
-                problems.append(f"the broken target's file remains after the restore in {remaining}")
+            after = parse_marker_probe(probe.stdout) if probe.returncode == 0 else None
+            record.evidence["marker_probe_after_restore"] = after
+            if after is None:
+                problems.append("the restored canary's marker probe failed or printed no JSON object")
+            else:
+                unreported = [path for path in seen if path not in after]
+                remaining = [path for path in seen if after.get(path)]
+                if unreported:
+                    problems.append(f"the marker probe did not report {unreported}")
+                if remaining:
+                    problems.append(f"the broken target's file remains after the restore in {remaining}")
         if problems:
             raise StepFailure("; ".join(problems))
 
@@ -832,13 +1037,17 @@ class Rollout:
         payload = {"cellImage": ctx.images.cell_v2, "release": RELEASE_RESUMED, "clearRolloutPause": True}
         refused = await ctx.release_request(ctx.substrate.secrets.deploy_token, payload)
         after = await ctx.deploy_rollout()
+        body = _safe_body(refused)
+        error = body.get("error") if isinstance(body, dict) else None
+        code = error.get("code") if isinstance(error, dict) else None
         record.evidence["deploy_token_status"] = refused.status_code
-        record.evidence["deploy_token_body"] = _safe_body(refused)
+        record.evidence["deploy_token_body"] = body
         problems = []
         if before.get("paused") is not True:
             problems.append("the rollout was not paused before the deploy token tried to clear it")
-        if refused.status_code == 200:
-            problems.append("Substrate accepted a deploy-token request that clears the pause")
+        if (refused.status_code, code) != (403, "OPERATOR_SCOPE_DENIED"):
+            problems.append(f"Substrate answered the deploy token's clear with {refused.status_code} {code}, "
+                            "not 403 OPERATOR_SCOPE_DENIED")
         if after.get("paused") is not True or after.get("cell_image") != before.get("cell_image"):
             problems.append("the pause or the release image changed after the refused request")
         if problems:
@@ -918,7 +1127,8 @@ class Rollout:
             if ran.exit_code != 0:
                 findings.append(f"{where} exited {ran.exit_code}: {redact(ran.stderr.strip()[-200:], runner.secrets)}")
             elif problem := check(ran.stdout):
-                findings.append(f"{where} {problem}")
+                # A check quotes what the block printed, which can carry a credential.
+                findings.append(f"{where} {redact(problem, runner.secrets)}")
         if findings:
             raise StepFailure("a runbook command does not run as written (a runbook finding; no command was adapted): "
                               + "; ".join(findings))
@@ -937,7 +1147,7 @@ PROOFS: list[tuple[int, Callable[[Rollout, StepRecord], Awaitable[None]], tuple[
     (18, Rollout.second_release_leaves_the_running_attempt_pinned, (17,)),
     (19, Rollout.forced_readiness_failure_pauses_and_restores_the_canary, (18,)),
     (20, Rollout.workflow_fails_with_the_code_alone, (19,)),
-    (21, Rollout.acknowledged_write_survives_and_no_broken_file_remains, (19,)),
+    (21, Rollout.acknowledged_writes_survive_and_no_broken_file_remains, (19,)),
     (22, Rollout.deploy_token_cannot_clear_the_pause, (19,)),
     # It reads what the pollers saw, whichever later proof failed, so it needs only the step that starts the first poller.
     (23, Rollout.switch_polls_never_failed, (14,)),
@@ -990,5 +1200,6 @@ async def run_release_rollout(ctx: Context) -> None:
             print(f"[rehearsal] step {number} {name}: {record.status.upper()} in {record.seconds}s{detail}", flush=True)
     finally:
         await rollout.stop_all_pollers()
+        await rollout.stop_writes()
         out["switches"] = rollout.switches
         out["status"] = "passed" if all(status == PASSED for status in outcome.values()) and len(outcome) == len(PROOFS) else "failed"
