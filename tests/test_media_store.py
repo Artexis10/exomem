@@ -3214,7 +3214,7 @@ def test_a_retained_store_that_cannot_hold_its_evicted_originals_evicts_a_hydrat
     first, second, evicted = _evicted_pair(vault)
     _retained(selected_store, vault)
     newcomer = _preserved(vault, category="newcomer")
-    # 450 bytes in use; the growth threshold of 800 leaves room for 350 of the evicted bytes.
+    # 450 bytes in use; the growth threshold of 800 leaves room for 350 of the evicted bytes, 250 after the margin.
     monkeypatch.setattr(shutil, "disk_usage", _volume(1_000, 450, first, second))
 
     with media_store.open_original(vault, first, read=True):
@@ -3228,7 +3228,7 @@ def test_a_retained_store_that_cannot_hold_its_evicted_originals_evicts_a_hydrat
         media_store.offload(vault, newcomer)
     assert originals.original_state(vault, newcomer).state == "local"
     status = commands.op_adoption_studio(vault, action="status")
-    assert status["retained_store"]["shortfall"] == {"bytes": evicted - 350}
+    assert status["retained_store"]["shortfall"] == {"bytes": evicted - 250}
 
 
 def test_a_retained_store_whose_evicted_originals_fit_keeps_a_hydrated_copy(vault: Path, selected_store, monkeypatch):
@@ -3246,7 +3246,8 @@ def test_a_retained_store_whose_evicted_originals_fit_keeps_a_hydrated_copy(vaul
 
     assert media_store.evict_to_target(vault) == 0
     assert originals.original_state(vault, first).state == "cached"
-    assert commands.op_adoption_studio(vault, action="status")["retained_store"]["shortfall"] == {"bytes": 0}
+    # The 400 evicted bytes fit in the 440 of room, so eviction keeps the copy; the drain needs the margin too.
+    assert commands.op_adoption_studio(vault, action="status")["retained_store"]["shortfall"] == {"bytes": 60}
 
 
 def test_a_retained_store_with_an_unreadable_ledger_reports_its_shortfall_as_unknown(vault: Path, selected_store, monkeypatch):
@@ -3750,8 +3751,9 @@ def test_an_evicted_original_in_trash_is_counted_and_drained_back_into_trash(vau
 
 
 def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vault: Path, selected_store, monkeypatch):
-    """Pins the band rule: no hydration, and no eviction, while the evicted bytes leave less than the margin of room."""
-    from exomem import media_store
+    """Pins the band rule: no hydration, and no eviction, while the evicted bytes leave less than the margin of room.
+    The status names the bytes that keep the store from draining, never 0 while it cannot drain."""
+    from exomem import commands, media_store
 
     first, second, kept = _stored(vault, "first", 250), _stored(vault, "second", 300), _stored(vault, "kept", 200)
     assert media_store.evict(vault, first) and media_store.evict(vault, second)
@@ -3764,6 +3766,7 @@ def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vaul
     assert media_store.evict_to_target(vault) == 0
 
     assert [originals.original_state(vault, path).state for path in (first, second, kept)] == ["evicted", "evicted", "cached"]
+    assert commands.op_adoption_studio(vault, action="status")["retained_store"]["shortfall"] == {"bytes": 50}
 
 
 def test_the_drain_stops_when_an_owners_write_takes_the_room_below_the_growth_threshold(vault: Path, selected_store, monkeypatch):
