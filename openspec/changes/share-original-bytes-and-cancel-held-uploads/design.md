@@ -64,6 +64,10 @@ Every binding also contributes its residency requirement. Retain the local objec
 
 Decide eviction and hydration per physical object across every binding. The latest owner read through any binding sets idle age. An existing job pin, access pin, active read, or drain latch on any binding retains the local object. Claimed jobs keep their pin when returned to pending; an unclaimed pending job does not retain bytes. Eviction requires every binding's own current Cloud reference.
 
+Use that complete binding projection for drain completeness, including resident-only and unbacked bindings. Validate permitted companion placement and normalize historical Trash pointers before publishing the projection. Reuse the existing identity and Trash placement readers; keep displaced-reference admission tied to its exact recorded recovery version. Before replacing an inventory, reconcile omitted bindings against canonical deletion or release. An existing blank or damaged companion must not erase the previous witness.
+
+Stage a grouped physical availability census in temporary tables in the same ledger, outside the canonical guard. Probe each physical object through its existing owner, then publish only while the binding checkpoint, source frontier, and policy still match. Count a missing object once and hydrate through a binding with its own usable reference. A missing object without any usable reference makes the census unknown. Report the unit as physical objects, and invalidate older censuses and latches before accepting them as this all-binding proof. Retain the existing three-token external drain record format and coordinate its reporting labels through the current consumers.
+
 ### Physical reuse grants no admission credit
 
 Preserve existing declared-byte allowance admission and full session-held charges. A new filing stages and verifies its supplied bytes on destination storage before a physical pool hit can save allocation. A miss promotes that stage; a hit releases it after the filing commits. Existing logical reuse is not a new filing and keeps its current path.
