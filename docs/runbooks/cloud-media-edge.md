@@ -94,6 +94,13 @@ procedure instead of `kubectl`.
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and
 the canary reads and writes media through the edge.
 
+The owner's download of one original (`exomem cloud download`, and ranged playback) has a
+separate switch: the cell must be in `cloudGateway.uploadCellIds` ("Configuration" in
+`cloud-upload-handoff.md`). Without it, `GET /download` answers Traefik's `404 page not found`.
+The first non-empty list restarts Traefik once, because the chart then requires its read timeout
+of at least `900s`. It also restarts the gateway, and every cell once in its own window, because
+cellctl then gives all cells the proof key.
+
 Offload runs with the chart's default store policy. Eviction stays off until the operator sets all six keys
 below in `mediaEdge.storePolicy`. The chart sets none of them. The canary's target, margin and minimum idle age are set after two to four
 weeks of its hydration records (task 6.2 and the design's open question on eviction settings).
@@ -332,10 +339,13 @@ it keeps its key bundle, its credential, its egress to the edge, its namespace l
 `"enabled":false`, so it offloads nothing more. Every evicted original stays readable,
 because the cell still hydrates it through the edge.
 
-Known gap: the current cell image evicts only while its store is enabled, so a draining
-cell evicts nothing. Each original that it hydrates stays on its volume, and a cell with
-more evicted originals than free space can fill its volume. A follow-up change to the
-cell runtime lets a draining cell evict and report its shortfall.
+A draining cell hydrates its evicted originals back onto its volume, smallest first, while
+each one fits below the growth threshold less `eviction_margin`. It waits until the owner's
+last read is `minimum_idle_seconds` old and yields to pending media jobs. An original above
+`max_temporary_bytes`, or one that does not fit, stays evicted and counted. The drain needs
+`eviction_enabled: true`, so keep the eviction keys in `mediaEdge.storePolicy` until the cell
+has drained. In the rehearsal on 2026-11-15, an evicted 40 MB original was back on the volume
+about two minutes after the cell restarted with its store off.
 
 cellctl removes the edge access only after a backup report that the cell captured after
 the turn-off shows no evicted original. The current cell image reports `unknown` for
@@ -346,7 +356,8 @@ counts its evicted originals.
    `mediaEdge.enabled=true`.
 2. Deploy the chart:
    `helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform --values "$EXOMEM_PLATFORM_VALUES" --atomic --wait --timeout 10m`
-3. Wait for cellctl to re-render the cell. Its pod restarts once.
+3. Wait for cellctl to re-render the cell. Its pod restarts once. As in step 6 of the turn-on, the
+   re-render waits for the cell's upgrade window, so it can take up to one day.
 4. Read the cell's store settings:
    `kubectl -n exo-cell-<cell> get secret cell-credentials -o jsonpath='{.data.media-store\.json}' | base64 -d`
    Expect `"enabled":false` beside the cell's `key_version` and `recipient`.
