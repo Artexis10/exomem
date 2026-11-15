@@ -253,7 +253,7 @@
 
 ## 6. Rollout (D11)
 
-- [ ] 6.1 Rehearse on a rehearsal cell: capture, offload, evict, hydrate, play, download, export, turn off and drain, then delete the cell. Verify: the evidence is recorded in this change.
+- [x] 6.1 Rehearse on a rehearsal cell: capture, offload, evict, hydrate, play, download, export, turn off and drain, then delete the cell. Verify: the evidence is recorded in this change.
   - Rehearsed on 2026-11-15 on a disposable production cell with a 10.4 GB volume. The rehearsal store policy set an eviction target of 0.002, a margin of 0.001 and a minimum idle age of 120 seconds, so that one file would evict.
   - Capture: `exomem cloud import` filed a 40,572,044-byte WAV. The first filing failed, because adoption restarts the cell before the CLI files; a rerun filed it.
   - Offload: the first attempts failed with `MEDIA_STORE_UNAVAILABLE` (edge 503). B2 refused the bucket-limited keys on API v3 (#2836 moved the edge to v4). After the edge ran that image, offload stored one 40,582,148-byte object under the cell's prefix, and the edge reported no pending write.
@@ -263,6 +263,6 @@
   - Turn off and drain: removing the cell from `mediaEdge.cellIds` turned its store off at the next re-render. The drain record shows `turned_off_at`, and the cell hydrated the evicted original back within about two minutes. It kept its credential and edge access while it drained.
   - Drained: the next backup carried a count of 0 evicted originals, captured one minute after the turn-off. The render after it removed the cell's credential, its egress to the edge and its namespace label. The edge loaded the new active set, with no cell in it.
   - Download note: by the time the download route existed, the drain had already hydrated the original, so the download served a local copy. The export proved reads of an evicted original.
-  - Open: the cell's deletion, requested and confirmed by its owner, must reach `deleted`.
+  - Delete: the owner requested and confirmed the deletion through the emailed link. About two minutes later the cell row read `deleted` and its namespace was gone. The edge's deletion grant lists the cell with its purge time, and the edge's purge pass is on, so the purge hides the cell's stored names after that time.
 - [ ] 6.2 Enable one canary cell, back-fill and evict to target. Collect hydration records for two to four weeks, then set the eviction target, margin and minimum idle age. Verify: the measurements and settings are recorded in design.md D3.
 - [ ] 6.3 After 5.5 and the change `collect-released-media`, turn on the fleet switch under an operator-approved live change, with the drain as its undo. The operator chose "Build it next; test cell now" on 2026-11-06: until the follow-on ships, only the canary cell uses the media store. Verify: every selected cell reports an empty offload backlog, and a rehearsal export delivers the largest selected cell's media.
