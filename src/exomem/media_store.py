@@ -1859,6 +1859,36 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
             yield source
 
 
+@contextmanager
+def logical_view(vault: Path, path: str | Path, *, job: MediaJob | None = None):
+    """A readable path with the original's own filename, for a decoder that dispatches on it.
+
+    An ordinary file is its own view. Shared or evicted bytes stay pinned for the whole use and
+    appear under the logical name in a private directory; nothing appears at the logical path.
+    """
+    vault = Path(vault).resolve()
+    target = Path(path) if Path(path).is_absolute() else vault / path
+    if target.is_file():
+        yield target
+        return
+    with open_original(vault, target, job=job) as source, reserved_paths.private_copy_directory() as private:
+        if target.is_file():
+            yield target  # Hydration restored an unpooled original at its own path.
+            return
+        view = private / target.name
+        local = original_state(vault, target).local_path
+        try:
+            if local is None:
+                raise OSError("no shared object to link")
+            os.symlink(local, view)
+        except OSError:
+            # A platform without unprivileged links copies the pinned bytes instead.
+            source.stream.seek(0)
+            with open(view, "xb") as sink:
+                shutil.copyfileobj(source.stream, sink, 1024 * 1024)
+        yield view
+
+
 def hold_original(vault: Path, path: str, *, recorded_sha256: Callable[[held_fs.FileVersion], str | None],
                   deadline: float | None = None):
     """Retain a logical original for checked whole-file and range delivery, including pooled bytes."""

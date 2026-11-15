@@ -315,3 +315,45 @@ def test_a_refused_capture_publishes_no_original(vault, tmp_path, monkeypatch) -
                        artifact=add_module.SourceArtifact(staged_path=stage / "notes.txt", filename="notes.txt"),
                        today=dt.date(2026, 11, 15))
     assert not list((original_pool.pool_root(vault) / "sha256").rglob("*.blob"))
+
+
+def _pooled_capture(vault, tmp_path, monkeypatch, name: str, data: bytes):
+    import datetime as dt
+
+    from exomem import add as add_module
+    from exomem import schema
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    if not original_pool.enabled(vault):
+        original_pool.enable(vault)
+    stage = tmp_path / f"stage-{name}"
+    stage.mkdir()
+    (stage / name).write_bytes(data)
+    return add_module.add(vault, schema.load_source_schema(vault), content="", title=f"Capture {name}",
+                          source_type="session", today=dt.date(2026, 11, 15),
+                          artifact=add_module.SourceArtifact(staged_path=stage / name, filename=name))
+
+
+def test_a_pooled_original_is_available_although_its_logical_path_holds_no_file(vault, tmp_path, monkeypatch) -> None:
+    """Sweeps that ask whether an original is gone must not read a pooled filing as deleted."""
+    from exomem import originals
+
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"minutes of the meeting")
+    assert not (vault / added.artifact_path).exists()
+    assert originals.available(vault, added.artifact_path)
+    assert originals.available(vault, vault / added.artifact_path)
+    assert not originals.available(vault, "Knowledge Base/Sources/never-filed.txt")
+
+
+def test_a_decoder_view_keeps_the_logical_filename_and_disappears_after_use(vault, tmp_path, monkeypatch) -> None:
+    """Decoders dispatch on the filename; a pooled object's digest name would select no decoder."""
+    from exomem import media_store
+
+    data = b"WEBVTT\n\n00:00.000 --> 00:01.000\nhello"
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "talk.vtt", data)
+    with media_store.logical_view(vault, added.artifact_path) as view:
+        assert view.name == Path(added.artifact_path).name and view.suffix == ".vtt"
+        assert view.read_bytes() == data
+        assert not view.is_relative_to(vault / "Knowledge Base" / "Sources")
+    assert not view.exists()
+    assert not (vault / added.artifact_path).exists()

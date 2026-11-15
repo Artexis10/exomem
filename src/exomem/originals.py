@@ -271,6 +271,18 @@ def sidecar_path(path: Path) -> Path:
     return _sidecar_path(path, protected=marked(path.as_posix()))
 
 
+def available(vault: Path, path: str | Path) -> bool:
+    """Whether the archive holds this original's bytes: an ordinary file, a shared pool object or a stored version.
+
+    A sweep that asks whether an original is gone asks this, never whether its logical path is a file:
+    a pooled filing has no file there.
+    """
+    target = Path(path) if Path(path).is_absolute() else Path(vault) / path
+    if target.is_file():
+        return True
+    return original_state(vault, target).state in {"local", "cached", "evicted"}
+
+
 def evicted(vault: Path, path: str | Path) -> bool:
     """Whether a path names an evicted original; an unbound vault and a note never do."""
     if binding_for(vault) is None:
