@@ -1,4 +1,4 @@
-"""Editing a Records row by its id on a store collection (OpenSpec harden-records-import-and-row-access)."""
+"""Finding and editing a Records row by its id on a store collection (OpenSpec harden-records-import-and-row-access)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from test_collection_store_writer import CID, KEY, OTHER, create
 from test_collection_store_writer import store as store
 from test_governance_egress import write_scope
 
-from exomem import page_ids, record_governance
+from exomem import page_ids, query_data, record_governance
 from exomem.cli_ops import OpError
 from exomem.collection_store import typed_storage
 from exomem.collection_store.preview import bind_row, preview_store
@@ -59,6 +59,25 @@ def test_edit_by_row_id_binds_one_row_of_a_large_collection_without_paging_it(st
     assert len(stored) == ROWS and stored["r0777"] == "tempo" and stored["r0776"] == "run"
     assert stale.value.code == "STALE_ITEM"
     assert page_ids.is_page_id(stale.value.details["current_id"]) and stale.value.details["current_id"] != row_id
+
+
+def test_a_query_page_that_fits_as_rows_but_not_as_rendered_shrinks_and_continues(store):
+    """The cap counts the rendered page, with its envelope and source list: rows alone under it still overflowed it."""
+    setup(store, ndjson({"id": f"r{index:04}", "kind": "run"} for index in range(ROWS)))
+    start(store, mapping=MAPPING)
+    run(store)
+    seen, pages, token = [], 0, None
+    with request_scope(owner_principal()), preview_store(store.root, store.handle):
+        while True:
+            page = record_memory(store.root, "query", collection=WORKOUTS, columns=["exercise_id", "item_version"],
+                                 limit=query_data.HARD_ROW_CAP, continuation=token)
+            assert len(page["rendered"].encode()) <= query_data.MAX_RESPONSE_BYTES
+            seen += [row["exercise_id"] for row in page["rows"]]
+            pages, token = pages + 1, page["continuation"]
+            if token is None:
+                break
+    assert pages > 1
+    assert sorted(seen) == [f"r{index:04}" for index in range(ROWS)]
 
 
 def test_a_withheld_row_id_is_refused_like_an_absent_one(store, tmp_path, monkeypatch):
