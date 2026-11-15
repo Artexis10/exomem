@@ -20,7 +20,7 @@ Exomem SHALL expose one bounded cancellation operation across MCP, REST, and CLI
 
 ### Requirement: Cancellation preserves upload ownership and nondisclosure
 
-Cancellation SHALL require a verified session and the held upload's opaque handle. It SHALL use the existing upload binding. A foreign, absent, expired, or already spent handle SHALL return the same unavailable outcome, without disclosing another session's upload or any canonical filing. The operation SHALL accept no arbitrary filesystem path and SHALL fetch no external URL.
+Cancellation SHALL require a verified session and the held upload's opaque handle. It SHALL use the existing upload binding. A foreign, absent, expired active, or already spent handle SHALL return the same unavailable outcome, without disclosing another session's upload or any canonical filing. An authenticated retry MAY finish a cancellation that committed before expiry. The operation SHALL accept no arbitrary filesystem path and SHALL fetch no external URL.
 
 #### Scenario: Another session presents a known handle
 
@@ -57,6 +57,18 @@ The operation SHALL return one ordered outcome per supplied file identifier. A c
 - **WHEN** storage prevents removal of the owned temporary payload
 - **THEN** the result reports failure without claiming released capacity
 - **AND** the hold record remains available for a later cancellation attempt
+
+#### Scenario: Cleanup remains incomplete beyond the original expiry
+
+- **WHEN** a committed cancellation cannot remove its payload and the original hold expiry passes
+- **THEN** its cleanup record and quota charge remain until payload removal is confirmed
+- **AND** its verified owner can retry cleanup without restoring redemption
+
+#### Scenario: A crash interrupts cancellation cleanup
+
+- **WHEN** the service restarts after cancellation commits but before cleanup completes
+- **THEN** its durable record still owns any remaining temporary payload and its quota charge
+- **AND** recovery cannot remove that record before confirmed payload removal
 
 #### Scenario: The client loses the cancellation acknowledgement
 

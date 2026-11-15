@@ -34,6 +34,18 @@ Keeping ordinary binary files preserves today's filesystem layout. Hard links ca
 
 Cloud reference sharing remains the existing mechanism. Backups, staging, recovery replicas, and historical encryption versions must remain visible in storage accounting. Sharing does not mean a single physical copy across every recovery tier.
 
+### Shared ownership preserves collection and cell isolation
+
+Reuse the existing Cloud reference mechanism within one cell and compatible encryption context. Do not introduce a digest-derived object name or a shared bucket namespace. A new protection record keeps its random name; reusing a live version copies its existing reference without another upload.
+
+Each filing retains its own authorization and reference. Retiring one reference records its release before removing that reference. Another live filing, protection record, retained backup, or running export must keep the shared version recoverable. Preserve the collection manifest and release-ledger contracts in `cloud-media-collection`.
+
+Cell deletion purges a complete cell prefix. Shared originals must never cross cell prefixes, credentials, or encryption contexts. Running services gain no version-deletion capability; this design does not change deletion grants or retention grace periods.
+
+Keep two storage figures distinct. The owner allowance counts each referenced plaintext version once, including Trash. The provider meter counts physical versions and retained copies within the cell prefix. Unknown census results remain unknown. Releasing one of several references must neither erase usage nor charge the shared version twice.
+
+The local storage design must resolve logical original addresses through `originals.py`. For store-owned pages, the canonical store decides whether the filing exists; a stale or missing disk projection cannot decide existence. Physical payload reuse must not bypass that boundary.
+
 ### Cancellation uses the existing private upload store
 
 Expose `cancel_uploads` through one leaf and the generated surfaces. Accept only held-upload handles and verify their existing session binding. Use the transfer commands' dispatch shape outside the canonical writer. Do not fetch handles, run the global expiry sweep, or trigger indexing.
@@ -42,15 +54,17 @@ A bounded claim wait returns busy with a retry hint. A missing, foreign, expired
 
 ### A cancellation marker preserves cleanup ownership
 
-Under the existing upload lock, authenticate the active record and require its unclaimed payload. Atomically rename the existing record to `<key>.cancelling.json`. This commits the cancellation intent without allocating another record or copying bytes.
+Under the existing upload lock, authenticate the active record and require its unclaimed payload. Flush the authenticated record's contents before atomically renaming it to `<key>.cancelling.json`. Flush the directory after the rename. Only then may cleanup remove bytes. A failed flush or rename leaves the upload intact and reports failure.
 
 The marker keeps the original binding, size, and expiry. The existing quota scan already includes its `.json` suffix. Redemption cannot find the former active record.
 
-Flush the directory after the rename, then strictly remove the payload and marker. Flush removal before acknowledging completion. Use the existing cross-platform directory flush; do not use the helper that suppresses removal errors.
+Strictly remove the payload, flush its removal, then remove the marker and flush that removal before acknowledging completion. Use the existing cross-platform directory flush; do not use the helper that suppresses removal errors. The ordering prevents a crash from persisting marker removal while retaining an untracked payload.
 
 A retry authenticates the marker and can finish after payload deletion succeeded but marker deletion failed. It reports released quota only after cleanup is confirmed. A lost acknowledgement can later produce unavailable; it must not invent a successful release count.
 
-The expiry sweep must recognize cancellation markers and remove their original payload. Ordinary failure restoration keeps its current behavior. Cancellation never follows a claim or a canonical object reference.
+The expiry sweep must recognize cancellation markers before its generic expired-record branch. It must remove the original payload before removing the marker, with the same durability ordering. A cleanup error retains the marker and its quota charge even after the original expiry. Ordinary expiry must not treat `<key>.cancelling.bin` as the payload or discard the only cleanup owner.
+
+The original expiry still governs an active hold. An authenticated retry of an already committed cancellation may finish marker cleanup after that expiry. Foreign markers remain indistinguishable from unavailable handles. Ordinary failure restoration keeps its current behavior. Cancellation never follows a claim or a canonical object reference.
 
 ### Upload identity cannot be reassigned during cancellation
 
