@@ -518,6 +518,25 @@ def prepare_sample(root, monkeypatch, request, sample):
     if sample == "schema_memory:census":
         from exomem import relation_census
         monkeypatch.setattr(relation_census, "_cohort_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    if sample == "maintain_memory:fix":
+        # The fix plan backfills a missing date with today, and its audit ages sources from today.
+        # Both answers read one today, so a run that crosses midnight compares them.
+        from exomem import audit, audit_fix
+
+        today = dt.date.today()
+
+        class AnyDate(type):
+            # The modules check values with isinstance; every real date stays an instance.
+            def __instancecheck__(cls, value):
+                return isinstance(value, dt.date)
+
+        class PinnedDate(dt.date, metaclass=AnyDate):
+            @classmethod
+            def today(cls):
+                return today
+
+        for module in (audit, audit_fix):
+            monkeypatch.setattr(module, "dt", SimpleNamespace(**{**vars(dt), "date": PinnedDate}))
     write_pages(root)
     write_pages(root, UNIT_PAGES)
     write_pages(root, {

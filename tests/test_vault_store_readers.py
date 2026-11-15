@@ -1110,39 +1110,49 @@ def test_a_spelling_that_two_pages_share_once_case_is_folded_is_released_only_wh
     ]}
 
 
-def test_a_case_folded_reference_reads_a_folder_of_two_hundred_pages_in_as_many_statements_as_one_of_twenty(
+def test_a_case_folded_reference_costs_the_same_work_beside_ten_times_as_many_other_pages(
     stored, writer  # noqa: F811
 ):
-    """The terminal filter listed a folder's stored names with one statement per page, so the
-    statements of a single case-folded reference grew with the pages beside it."""
-    folder = "Knowledge Base/Notes/Crowd"
+    """The terminal filter lists the folders on a case-folded reference's path. Its listing joined
+    the folder's children to the metadata of every page in the vault, so one reference into a
+    folder of twenty pages cost work that grew with the pages in unrelated folders."""
+    folder, bulk = "Knowledge Base/Notes/Crowd", "Knowledge Base/Notes/Bulk"
     restrict_external(stored, f'paths: ["{folder}/**"]')
     page = b"---\ntitle: P\ntype: note\n---\n# P\n\nA page.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
+        write.PagePut(f"{folder}/Page-{number:04d}.md", page) for number in range(20)
+    )))
 
-    def statements():
-        seen = []
+    def vm_steps():
+        steps = [0]
+
+        def tick() -> int:
+            steps[0] += 1
+            return 0
+
         with read.request_snapshot(stored), read.snapshot(stored) as view:
-            view.connection.set_trace_callback(seen.append)
+            view.connection.set_progress_handler(tick, 1)
             try:
                 with request_scope(EXTERNAL):
                     kept = egress.filter_withheld_entries(
                         stored, {"entries": [{"path": f"{folder}/PAGE-0000.MD"}]}
                     )
             finally:
-                view.connection.set_trace_callback(None)
+                view.connection.set_progress_handler(None, 0)
         assert kept == {"entries": []}
-        return len(seen)
+        return steps[0]
 
-    counts = []
-    for first, last in ((0, 20), (20, 200)):
+    work = []
+    for first, last in ((0, 200), (200, 2000)):
         write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
-            write.PagePut(f"{folder}/Page-{number:04d}.md", page) for number in range(first, last)
+            write.PagePut(f"{bulk}/Page-{number:04d}.md", page) for number in range(first, last)
         )))
-        if not counts:
-            statements()  # the first filter reads the page's body once more than later ones
-        counts.append(statements())
+        vm_steps()  # the first filter after a commit reads the page's body once more than later ones
+        work.append(vm_steps())
 
-    assert counts[0] == counts[1]
+    assert work[1] < 2 * work[0], (
+        f"one reference took {work[0]} VM steps beside 200 other pages and {work[1]} beside 2,000"
+    )
 
 
 def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_yet(

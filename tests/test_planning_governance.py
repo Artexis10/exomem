@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -678,3 +679,206 @@ def test_a_writer_validates_a_revision_whose_history_an_archive_withholds_as_the
         committed.value.reason,
     )
     assert "title: Planning work" in (vault / collection).read_text(encoding="utf-8")
+
+
+#: The writable scope through which a test grants its writer one log archive.
+ARCHIVE_GRANT_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5F07"
+#: An archive path that no rotation of these tests writes.
+OTHER_ARCHIVE = "Knowledge Base/_archive/logs/log-00000000000000000000.md"
+
+
+def _rotation_due_with_a_writable_log(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next log write rotates, and the log lies in a scope released to `external` in full."""
+    (vault / "Knowledge Base").mkdir(parents=True)
+    entries = "".join(f"## [2026-01-01] note | Notes/n{i}\n\nEntry {i}.\n\n" for i in range(201))
+    (vault / "Knowledge Base" / "log.md").write_text(f"# Log\n\n---\n{entries}", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "64")
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir(parents=True)
+    (governance / "scopes" / "log.yaml").write_text(
+        f'governance_version: 1\nid: {LOG_SCOPE_ID}\nname: log\npaths: ["log.md"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "log-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5F04\n"
+        f'scope_ids: ["{LOG_SCOPE_ID}"]\naudience: external\nceiling: 6\n',
+        encoding="utf-8",
+    )
+
+
+def _archive_a_rehearsal_writes(vault: Path, tmp_path: Path, commit: Callable[[Path], object]) -> str:
+    """The archive that the owner's `commit` writes in a vault with no policy that holds a copy of
+    `vault`'s log and Planning folder. An archive's name depends on the collection, the request and
+    the log alone, so the same commit in `vault` writes the same archive."""
+    import shutil
+
+    rehearsal = tmp_path / "rehearsal"
+    (rehearsal / "Knowledge Base").mkdir(parents=True)
+    shutil.copy2(vault / "Knowledge Base" / "log.md", rehearsal / "Knowledge Base" / "log.md")
+    if (vault / "Knowledge Base" / "Planning").exists():
+        shutil.copytree(vault / "Knowledge Base" / "Planning", rehearsal / "Knowledge Base" / "Planning")
+    with request_scope(owner_principal(surface="library")):
+        commit(rehearsal)
+    [archive] = (rehearsal / "Knowledge Base" / "_archive" / "logs").glob("*.md")
+    return archive.relative_to(rehearsal).as_posix()
+
+
+def _writer_granted_one_archive(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive: str
+) -> RequestPrincipal:
+    """A writer of Planning and the log that may write the one log archive at `archive`. The archive
+    folder is the writer's inbox, so an archive that the writer may not write does not exist for it."""
+    from granted_writer import grant_writer
+
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes" / "archive-grant.yaml").write_text(
+        f"governance_version: 1\nid: {ARCHIVE_GRANT_SCOPE_ID}\nname: archive grant\n"
+        f'paths: ["{archive.removeprefix("Knowledge Base/")}"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "archive-grant-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5F08\n"
+        f'scope_ids: ["{ARCHIVE_GRANT_SCOPE_ID}"]\naudience: external\nceiling: 6\n',
+        encoding="utf-8",
+    )
+    return grant_writer(
+        vault, tmp_path, monkeypatch,
+        writable_paths=["Planning/**"],
+        capture_paths=["Knowledge Base/Planning", "Knowledge Base/_archive/logs"],
+        writable_scopes=[LOG_SCOPE_ID, ARCHIVE_GRANT_SCOPE_ID],
+    )("external")
+
+
+@pytest.mark.parametrize("granted", ("the archive the create writes", "another archive"))
+def test_a_writer_granted_one_log_archive_validates_a_create_as_the_create_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, granted: str
+) -> None:
+    """A due rotation writes one archive, and a writer may hold a grant to that archive alone.
+    Granted the archive that the create writes, the writer's validation is valid and its create
+    commits on unchanged state; granted another archive, both refuse alike. Validation that names
+    its archive from a manifest hash the commit does not compute refuses a create that commits."""
+    from exomem.planning import create_collection, validate
+    from exomem.structured_collections import CollectionError
+
+    vault = tmp_path / "vault"
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    _rotation_due_with_a_writable_log(vault, monkeypatch)
+    archive = _archive_a_rehearsal_writes(
+        vault, tmp_path,
+        lambda rehearsal: create_collection(rehearsal, collection, _manifest(), why="create planning collection"),
+    )
+    writer = _writer_granted_one_archive(
+        vault, tmp_path, monkeypatch, archive if granted == "the archive the create writes" else OTHER_ARCHIVE
+    )
+
+    with request_scope(writer):
+        if granted == "the archive the create writes":
+            assert validate(vault, mode="create", manifest_text=_manifest(), manifest_path=collection)["valid"]
+            created = create_collection(vault, collection, _manifest(), why="create planning collection")
+            assert created["outcome"] == "committed", created
+            assert (vault / archive).is_file()
+            return
+        with pytest.raises(CollectionError) as validated:
+            validate(vault, mode="create", manifest_text=_manifest(), manifest_path=collection)
+        with pytest.raises(CollectionError) as committed:
+            create_collection(vault, collection, _manifest(), why="create planning collection")
+
+    assert committed.value.code == "COLLECTION_NOT_FOUND"
+    assert (validated.value.code, validated.value.reason) == (committed.value.code, committed.value.reason)
+    assert not (vault / collection).exists()
+    assert not (vault / archive).exists()
+
+
+@pytest.mark.parametrize("granted", ("the archive the revision writes", "another archive"))
+def test_a_writer_granted_one_log_archive_validates_a_revision_as_the_revision_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, granted: str
+) -> None:
+    """A revision's due rotation writes one archive too. Granted the archive that the revision
+    writes, the writer's validation is valid and its revision commits on unchanged state; granted
+    another archive, both refuse alike. Validation that names its archive from a stand-in
+    container hash refuses a revision that commits."""
+    from conftest import initialize_vault_state_offline
+
+    from exomem.planning import create_collection, revise, validate
+    from exomem.structured_collections import CollectionError
+
+    vault = tmp_path / "vault"
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    _rotation_due_with_a_writable_log(vault, monkeypatch)
+    # The writer's arming needs the archive name, which needs the collection, which needs state.
+    initialize_vault_state_offline(vault, source="archive grant vault")
+    # The owner creates the collection before the rotation is due, so no archive holds history.
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "100000000")
+    with request_scope(owner_principal(surface="library")):
+        create_collection(vault, collection, _manifest(), why="create planning collection")
+        proposal = (vault / collection).read_text(encoding="utf-8").replace(
+            "title: Planning work", "title: Product programme", 1
+        )
+        guards = validate(vault, mode="revision", collection=collection, manifest_text=proposal)[
+            "lifecycle_guards"
+        ]
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "64")
+    archive = _archive_a_rehearsal_writes(
+        vault, tmp_path,
+        lambda rehearsal: revise(rehearsal, collection, manifest_text=proposal, **guards, why="rename the programme"),
+    )
+    writer = _writer_granted_one_archive(
+        vault, tmp_path, monkeypatch, archive if granted == "the archive the revision writes" else OTHER_ARCHIVE
+    )
+
+    with request_scope(writer):
+        if granted == "the archive the revision writes":
+            validated = validate(vault, mode="revision", collection=collection, manifest_text=proposal)
+            assert validated["valid"] and validated["lifecycle_guards"] == guards
+            revised = revise(vault, collection, manifest_text=proposal, **guards, why="rename the programme")
+            assert revised["outcome"] == "committed", revised
+            assert (vault / archive).is_file()
+            assert "title: Product programme" in (vault / collection).read_text(encoding="utf-8")
+            return
+        with pytest.raises(CollectionError) as refused:
+            validate(vault, mode="revision", collection=collection, manifest_text=proposal)
+        with pytest.raises(CollectionError) as committed:
+            revise(vault, collection, manifest_text=proposal, **guards, why="rename the programme")
+
+    assert committed.value.code == "COLLECTION_NOT_FOUND"
+    assert (refused.value.code, refused.value.reason) == (committed.value.code, committed.value.reason)
+    assert "title: Planning work" in (vault / collection).read_text(encoding="utf-8")
+    assert not (vault / archive).exists()
+
+
+def test_each_rotation_of_one_collection_writes_its_own_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every event below rotates the log. Two revisions in a row, and a create repeated after its
+    collection was deleted, each write a new archive. An archive named by the request alone would
+    collide with the earlier rotation's archive and refuse the repeated create."""
+    import shutil
+
+    from exomem.planning import create_collection, revise, validate
+
+    (tmp_path / "Knowledge Base").mkdir()
+    entries = "".join(f"## [2026-01-01] note | Notes/n{i}\n\nEntry {i}.\n\n" for i in range(201))
+    (tmp_path / "Knowledge Base" / "log.md").write_text(f"# Log\n\n---\n{entries}", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "64")
+    archives = tmp_path / "Knowledge Base" / "_archive" / "logs"
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+
+    def rename(old: str, new: str) -> None:
+        proposal = (tmp_path / collection).read_text(encoding="utf-8").replace(
+            f"title: {old}", f"title: {new}", 1
+        )
+        guards = validate(tmp_path, mode="revision", collection=collection, manifest_text=proposal)[
+            "lifecycle_guards"
+        ]
+        revised = revise(tmp_path, collection, manifest_text=proposal, **guards, why=f"rename to {new}")
+        assert revised["outcome"] == "committed", revised
+
+    create_collection(tmp_path, collection, _manifest(), why="create planning collection")
+    rename("Planning work", "Product programme")
+    rename("Product programme", "Product roadmap")
+    assert len(list(archives.glob("*.md"))) == 3
+    shutil.rmtree(tmp_path / "Knowledge Base" / "Planning" / "Work")
+    created = create_collection(tmp_path, collection, _manifest(), why="create planning collection")
+    assert created["outcome"] == "committed", created
+    assert len(list(archives.glob("*.md"))) == 4

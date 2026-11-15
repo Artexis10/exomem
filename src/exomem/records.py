@@ -2107,12 +2107,17 @@ def _plan_create_audit(
     root: Path,
     manifest: collections.CollectionManifest,
     *,
+    proposed_manifest_hash: str,
     scaffold: bool,
     transition_id: str,
     why: str,
 ) -> tuple[str | None, str, vault.LogWritePlan]:
     """A file create's after item and container hashes, and the log writes of its event, the
-    archive of a rotation it makes due included."""
+    archive of a rotation it makes due included.
+
+    ``proposed_manifest_hash`` is the hash of the caller's manifest before the commit marks it.
+    It names that archive, so validation and the commit name the same one.
+    """
     if not scaffold or manifest.storage.strategy == "dataset":
         after_item_hash = None
         after_container_hash = _absent_source_container_hash(manifest)
@@ -2143,10 +2148,17 @@ def _plan_create_audit(
         payload_hash=None,
         why=why,
     )
+    token = _collection_archive_token(
+        root,
+        manifest.collection_id,
+        action="create",
+        before_container_hash=None,
+        proposed_manifest_hash=proposed_manifest_hash,
+    )
     return (
         after_item_hash,
         after_container_hash,
-        _plan_required_audit(root, manifest, "collection", audit, after_container_hash),
+        _plan_required_audit(root, manifest, "collection", audit, token),
     )
 
 
@@ -2177,6 +2189,7 @@ def create_collection(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
         )
         _require_activity_log(root)
+        proposed_manifest_hash = manifest.manifest_version.hash
         audit_correlation = _transition_id()
         marked_manifest_text = record_formats.render_manifest_audit_head(
             manifest_text, audit_correlation, semantic_profile=manifest.semantic_profile
@@ -2217,7 +2230,12 @@ def create_collection(
                 root, manifest.storage.source, leaf_policy="absent"
             )
         after_item_hash, after_container_hash, log_plan = _plan_create_audit(
-            root, manifest, scaffold=scaffold, transition_id=audit_correlation, why=why
+            root,
+            manifest,
+            proposed_manifest_hash=proposed_manifest_hash,
+            scaffold=scaffold,
+            transition_id=audit_correlation,
+            why=why,
         )
         record_governance.precommit_authorize_mutation(
             root,
@@ -2374,7 +2392,12 @@ def _validate_collection_create_for_profile(
         # Its rationale is a commit input, so validation plans the largest event: a rotation that
         # any commit's event could make due adds its archive here as it would at the commit.
         *_after_hashes, audit = _plan_create_audit(
-            root, manifest, scaffold=scaffold, transition_id=_transition_id(), why=_LARGEST_WHY
+            root,
+            manifest,
+            proposed_manifest_hash=manifest.manifest_version.hash,
+            scaffold=scaffold,
+            transition_id=_transition_id(),
+            why=_LARGEST_WHY,
         )
         # The commit's own authorization of every planned write, a due rotation's archive
         # included, so validation refuses a withheld write as the commit does, without naming it.
@@ -2463,9 +2486,9 @@ def _validate_collection_revision_for_profile(
     # writes and checks the log write as a create's validation does. The snapshot's inventory
     # already holds the item pages a presentation revision rewrites.
     guards = lifecycle_guards(current, snapshot)
-    # The event is planned at its largest, as a create's validation plans it. Every hash has one
-    # length, so stand-ins replace the after hashes that the commit computes. The container hash
-    # also names the rotation archive: no state has this one, so it names no archive a commit wrote.
+    # The event is planned at its largest, as a create's validation plans it. The commit computes
+    # the after hashes from its own transition id, so the before hashes, of equal length, size the
+    # event here. The archive's name comes from the inputs that validation and the commit share.
     _payload_hash, audit = _plan_lifecycle_audit(
         root,
         current,
@@ -2474,7 +2497,7 @@ def _validate_collection_revision_for_profile(
         proposed=proposed,
         transition_id=_transition_id(),
         after_manifest_hash=guards["expected_manifest_hash"],
-        after_container_hash=hashlib.sha256(b"validate").hexdigest(),
+        after_container_hash=guards["expected_container_hash"],
         why=_LARGEST_WHY,
         continuity=True,
         acknowledged_gap_codes=(),
@@ -3156,7 +3179,8 @@ def _plan_lifecycle_audit(
     checkpoint_snapshot_hash: str | None,
 ) -> tuple[str, vault.LogWritePlan]:
     """A lifecycle request's payload hash and the log writes of its event, the archive of a
-    rotation it makes due included."""
+    rotation it makes due included. The request's before state names that archive, so a
+    validation's plan names the archive that its commit writes."""
     payload_hash = lifecycle_request_hash(
         action=action,
         collection_id=current.collection_id,
@@ -3182,7 +3206,14 @@ def _plan_lifecycle_audit(
         gap_fingerprint=gap_fingerprint,
         checkpoint_snapshot_hash=checkpoint_snapshot_hash,
     )
-    return payload_hash, _plan_required_audit(root, current, "collection", event, after_container_hash)
+    token = _collection_archive_token(
+        root,
+        current.collection_id,
+        action=action,
+        before_container_hash=guards["expected_container_hash"],
+        proposed_manifest_hash=proposed.manifest_version.hash,
+    )
+    return payload_hash, _plan_required_audit(root, current, "collection", event, token)
 
 
 def _lifecycle_audit_body(
@@ -5705,6 +5736,40 @@ def _plan_required_audit(
             "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
         )
     return plan
+
+
+def _collection_archive_token(
+    root: Path,
+    collection_id: str,
+    *,
+    action: str,
+    before_container_hash: str | None,
+    proposed_manifest_hash: str,
+) -> str:
+    """Name the log archive that a collection event's rotation writes, from state before the event.
+
+    A collection's validation and its commit call this with the same inputs, so validation
+    authorizes the archive that the commit writes. The event's after hashes cannot name it: the
+    commit draws its transition id inside the commit. The live log's bytes give two rotations of
+    one unchanged request two archives, because each earlier event changed the log.
+    """
+    try:
+        log_bytes, _guard = vault.read_guarded_bytes(root, vault.kb_root(root) / "log.md")
+    except FileNotFoundError as error:
+        raise collections.CollectionError(
+            "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
+        ) from error
+    return hashlib.sha256(
+        _canonical_json(
+            [
+                collection_id,
+                action,
+                before_container_hash,
+                proposed_manifest_hash,
+                hashlib.sha256(log_bytes).hexdigest(),
+            ]
+        )
+    ).hexdigest()
 
 
 def _require_audit_writable(root: Path, plan: vault.LogWritePlan) -> None:
