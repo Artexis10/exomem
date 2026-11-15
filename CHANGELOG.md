@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.180.0](https://github.com/Artexis10/exomem/compare/v0.179.2...v0.180.0) (2026-11-15)
+
+
+### Features
+
+* **cloud:** shorten the cell upgrade stop and refuse a partial schema ([#2746](https://github.com/Artexis10/exomem/issues/2746)) ([f520521](https://github.com/Artexis10/exomem/commit/f520521da207ed0ec895d65e47e0cbe9ef37db17))
+
+
+### Bug Fixes
+
+* **cloud:** let cellctl read the media edge signing key ([#2828](https://github.com/Artexis10/exomem/issues/2828)) ([06a181a](https://github.com/Artexis10/exomem/commit/06a181ac53ce9e6ac5dfd8c2271c01e7fba4ca43))
+* resolve capture identity from current canonical store ([#2823](https://github.com/Artexis10/exomem/issues/2823)) ([4d81a48](https://github.com/Artexis10/exomem/commit/4d81a48d9d662fc572b98a491cc3acfc3310d813))
+
 ## [0.179.2](https://github.com/Artexis10/exomem/compare/v0.179.1...v0.179.2) (2026-11-15)
 
 
