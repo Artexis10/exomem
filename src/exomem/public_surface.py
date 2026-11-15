@@ -417,7 +417,9 @@ def _door_call(
     extra = sorted(set(body) - {"operation", "arguments", *({"detail"} if writes else set())})
     operation = body.get("operation")
     if extra or not isinstance(operation, str):
-        refusal = OpError("INVALID_ARGUMENT", f"{door} takes operation, arguments{' and detail' if writes else ''}.")
+        takes = f"{door} takes operation, arguments{' and detail' if writes else ''}"
+        refusal = OpError("INVALID_ARGUMENT", f"{takes}; move {', '.join(extra)} into arguments." if extra
+                          else f"{takes}; operation must name one of its operations.")
         refusal.writes = writes
         raise refusal
     if operation not in operations:
