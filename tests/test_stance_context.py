@@ -545,3 +545,19 @@ def test_a_vault_budget_caps_the_stance_lines(stance_vault):
     capped = _stance(stance_vault, limit=4000)
     assert [item["text"] for item in capped["items"]] == ["Keep a source for each claim."]
     assert capped["omitted"] == 1
+
+
+def test_a_renamed_stance_page_is_decided_at_its_new_path(stance_vault):
+    """A warm cache must not judge a renamed stance page by an unrelated page now at its old path."""
+    from exomem import state_migration
+
+    state_migration.record_collection_store_compatibility(stance_vault, authority_check=lambda: True)
+    identity = "stance: true\nexomem_id: 6c1f0a3e-2b7d-4e59-8a14-3d9e0c7b5f21\n"
+    old = _page(stance_vault, "global", identity, body="- [rule] Keep a source for each claim. ^source\n")
+    assert _stance(stance_vault, who=_external())["state"] == "ready"
+    _page(stance_vault, "moved", identity, body="- [rule] Keep a source for each claim. ^source\n")
+    _page(stance_vault, "global", "", body="- [rule] An unrelated page. ^other\n")
+    _withhold(stance_vault, old, ceiling=0)
+    renamed = _stance(stance_vault, who=_external())
+    assert renamed["state"] == "ready"
+    assert [item["text"] for item in renamed["items"]] == ["Keep a source for each claim."]

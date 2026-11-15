@@ -101,7 +101,9 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
     admitted = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
     configured = activation_conventions.load_conventions(root).conventions.budget("stance_max_chars")
     limit = max(0, max_chars if configured is None else min(configured, max_chars))
-    inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance)) for item in admitted]
+    # The source path and anchor join the key: terminal egress re-decides the page they name, so a
+    # rename must not leave a cached entry pointing at whatever page now holds the old path.
+    inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance), item.path, item.anchor) for item in admitted]
     key = (str(root), caller.binding, _digest(inputs), limit)
     with _LOCK:
         cached = _CACHE.get(key)
