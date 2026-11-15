@@ -1465,6 +1465,31 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
 
 
 @contextmanager
+def moved_originals(vault: Path, rel: str):
+    """Fetch the original that moving the file `rel` carries, and pin it until the move returns.
+
+    An original carries itself. A page carries the binding of the original beside it, which the
+    move would strand: a resident one is pinned, and an evicted one is fetched only when the caller
+    may see it (`originals.evicted_visible_original`), so a withheld one stays in the store and the
+    page moves as if no original were there. Only that exact file is selected, so a page's name
+    never selects a folder of originals beside it.
+    """
+    carried: str | None = rel
+    if originals.is_note_path(rel):
+        carried = rel[:-3]
+        if not carried or originals.is_note_path(carried):
+            carried = None
+        elif not (Path(vault) / carried).is_file():
+            stored = originals.evicted_visible_original(vault, carried)
+            carried = None if stored is None else stored[1]
+    if carried is None:
+        yield
+        return
+    with local_originals(vault, (carried,)):
+        yield
+
+
+@contextmanager
 def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False):
     """Pin before resolution; retain verified bytes through the caller's read.
 

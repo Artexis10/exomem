@@ -324,7 +324,9 @@ def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, Origina
         stored = original_state(vault, abs_path)
     except (VaultPathError, reserved_paths.ReservedPathLeafError):
         return None
-    visible = egress.restricted_release_filter(vault)
+    # A bound store filters the owner's walk too (it leaves out the trash); a door withholds nothing
+    # from the owner, as `egress.write_target_withheld` decides.
+    visible = egress.restricted_release_filter(vault) if egress.caller_restricted(vault) else None
     if stored.state != "evicted" or (visible is not None and not visible(rel_path)):
         return None
     return abs_path, rel_path, stored

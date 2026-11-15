@@ -200,6 +200,7 @@ def folder_files(
     operation: str,
     error_class: Callable[..., Exception],
     failed_code: str,
+    evicted: Callable[[str], bool] | None = None,
 ) -> FolderFiles:
     """The files and folders below ``folder`` that move on disk beside its stored ``pages``.
 
@@ -213,6 +214,8 @@ def folder_files(
     mode's folder read refuses one: neither form follows a link out of the folder or leaves it
     behind. A binary that the store records and the disk no longer holds raises ``failed_code``,
     which names the file to a caller that may see it; the importer's next sweep drops the record.
+    A recorded binary that ``evicted`` accepts is listed as if the disk held it: the media store
+    holds its bytes, and a writer that fetches nothing (a dry run) judges it from its record.
     An empty folder that holds no stored page moves whole, as file mode's rename keeps it.
     """
     root = Path(vault_root)
@@ -254,6 +257,8 @@ def folder_files(
                 files.add(rel)
     if unheld:
         raise availability.unrouted(operation, _NOT_HELD)
+    if evicted is not None:
+        files.update(rel for rel in recorded if rel not in files and evicted(rel))
     gone = [rel for rel in recorded if rel not in files]
     if gone:
         raise error_class(code=failed_code, reason=_gone_reason(root, gone))

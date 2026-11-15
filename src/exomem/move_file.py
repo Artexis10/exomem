@@ -233,7 +233,8 @@ def _paired_artifact(
     Returns None for an ordinary page, which is the common case: a source page
     whose stem happens to have no sibling file is not a pair. ``page_held`` says
     whether a page exists; a store-mode vault answers it from the store, where a
-    page may have no file yet.
+    page may have no file yet. An evicted original that the caller may not see is
+    no pair either: it stays in the store, and its page moves alone.
     """
     from .governance.raw_protection import marked
 
@@ -248,7 +249,9 @@ def _paired_artifact(
         binary_rel = rel[:-3]
         if not binary_rel or binary_rel.lower().endswith(".md"):
             return None
-        present = (vault_root / binary_rel).is_file() or originals.evicted(vault_root, binary_rel)
+        present = (vault_root / binary_rel).is_file() or (
+            originals.evicted_visible_original(vault_root, binary_rel) is not None
+        )
         return (rel, binary_rel) if present else None
     page_rel = f"{rel}.md"
     held = (vault_root / page_rel).is_file() if page_held is None else page_held(page_rel)
@@ -431,9 +434,9 @@ def move_file(
 
 def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: str) -> None:
     """Hydrate an evicted original only once the move is about to rename it."""
-    from .media_store import local_originals
+    from .media_store import moved_originals
 
-    originals_context.enter_context(local_originals(vault_root, (rel,)))
+    originals_context.enter_context(moved_originals(vault_root, rel))
 
 
 def _refuse_taken_destination(vault_root: Path, new_rel: str) -> None:

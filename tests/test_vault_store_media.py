@@ -27,6 +27,8 @@ from test_vault_store_migration import build_indexes, migrate_apply
 from test_vault_store_projector import NOTES
 
 from exomem import (
+    delete_directory,
+    delete_file,
     extract,
     file_watcher,
     media_jobs,
@@ -34,6 +36,8 @@ from exomem import (
     media_store,
     media_worker,
     move_file,
+    preserve,
+    recover_from_trash,
     reserved_paths,
 )
 from exomem.collection_store import runtime
@@ -280,6 +284,99 @@ def test_moving_an_evicted_original_fetches_it_first_and_the_media_store_still_k
     swept = importer.Importer(vault, run=original_thread.run).sweep()
     assert swept.removed == [] and swept.imported == []
     assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", moved) == [(moved,)]
+
+
+ORIGINAL_BYTES = b"original bytes"
+
+
+def offloaded(vault, rel):
+    """An original at ``rel`` that file mode extracted and offloaded to the media store."""
+    path = vault / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(ORIGINAL_BYTES)
+    with library_scope():
+        media_processing.reconcile_media(vault, path)
+        preserve.update_sidecar_extraction(
+            vault, path.with_name(f"{path.name}.md"), text="extracted text", engine="text"
+        )
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    return path
+
+
+def enter_store_mode(vault):
+    stop_writer()  # file mode's writes started this process's writer; the offline route refuses it
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+
+
+def on_store_thread(thread, work):
+    """Run a write door on the store thread, with its writer bound, as the service runs it."""
+    results = []
+    thread.run(lambda _writer: results.append(work()))
+    return results[0]
+
+
+def test_an_original_evicted_before_store_mode_comes_back_from_the_trash_without_a_record(
+    vault, selected_store, monkeypatch
+):
+    """A store-mode recovery that looks for a binary only in the store's records: an original that
+    was evicted in the trash before the vault entered store mode has none, and its dry run and its
+    recovery answered NOT_FOUND although the media store holds its bytes."""
+    rel = f"{NOTES}/Media/loose.txt"
+    offloaded(vault, rel)
+    trashed = delete_file.delete_file(vault, path=rel, confirm=True)
+    with media_store.open_original(vault, vault / trashed.trash_path):
+        pass  # a read records the cache binding that an eviction at the trash path needs
+    assert media_store.evict(vault, vault / trashed.trash_path)
+    enter_store_mode(vault)
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", trashed.trash_path) == []
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    try:
+        planned = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path, validate_only=True))
+        recovered = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path))
+    finally:
+        thread.close()
+
+    assert planned.restored_path == recovered.restored_path == rel
+    assert (vault / rel).read_bytes() == ORIGINAL_BYTES
+    assert not (vault / trashed.trash_path).exists()
+
+
+def test_a_trashed_folder_that_holds_a_recorded_evicted_original_comes_back_whole(
+    vault, selected_store, monkeypatch
+):
+    """A store-mode folder recovery that lists the folder before it fetches: the store records the
+    evicted original below the folder, the disk does not hold it, and the dry run and the recovery
+    refused with RECOVER_FAILED."""
+    folder = f"{NOTES}/Album"
+    rel = f"{folder}/sample.txt"
+    (vault / folder).mkdir(parents=True)
+    (vault / rel).write_bytes(ORIGINAL_BYTES)
+    trashed = delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True)
+    entry = f"{trashed.trash_path}/sample.txt"
+    offloaded(vault, entry)  # the media worker settles the original where it now lies
+    enter_store_mode(vault)
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", entry) == [(entry,)]
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    try:
+        with media_store.open_original(vault, vault / entry):
+            pass  # a read records the cache binding that an eviction needs
+        assert media_store.evict(vault, vault / entry)
+        planned = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path, validate_only=True))
+        recovered = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path))
+    finally:
+        thread.close()
+
+    assert planned.restored_path == recovered.restored_path == folder
+    assert (vault / rel).read_bytes() == ORIGINAL_BYTES
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", rel) == [(rel,)]
 
 
 def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and_restored(
