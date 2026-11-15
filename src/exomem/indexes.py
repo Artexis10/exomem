@@ -183,7 +183,7 @@ def compute_updates(
     tracked: dict[str, generated_fragments._Image] = {}
 
     def track(path: Path, text: str, guard: PathGuard) -> generated_fragments._Image | None:
-        if source_ref is None:
+        if source_ref is None and before_fragment_maps is None:
             return None
         relative = path.relative_to(vault_root).as_posix()
         image = generated_fragments._Image.before(

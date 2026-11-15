@@ -134,7 +134,7 @@ def _seed(root: Path) -> dict[str, fragments.FragmentMap | fragments.FragmentPla
 def _capture(
     root: Path,
     maps: dict,
-    reference: fragments.SourceRef,
+    reference: fragments.SourceRef | None,
     number: int,
     *,
     summary: str | None = None,
@@ -263,6 +263,22 @@ def test_real_capture_trim_keeps_old_source_ownership_inside_new_log_entry(tmp_p
     )
     assert not any(f.opaque_fragment_id == old_id for f in after_current.after.fragments)
     assert any(f.source_ref == old.value for f in after_current.after.fragments)
+
+
+def test_unenrolled_capture_preserves_previously_owned_generated_prose(tmp_path: Path) -> None:
+    maps = _seed(tmp_path)
+    reference = _reference(1)
+    _capture(tmp_path, maps, reference, 1, summary="Earlier café entry")
+    update = _capture(tmp_path, maps, None, 2, summary="New unenrolled entry")
+    assert update.fragment_plans
+    for relative, plan in update.fragment_plans.items():
+        text = (tmp_path / relative).read_bytes().decode("utf-8")
+        plan.after.validate_image(text.encode("utf-8"))
+        assert {fragment.source_ref for fragment in plan.after.fragments} == {reference.value}
+        without_old, _ = fragments.remove_source_fragments(text, plan, reference)
+        if relative == "Knowledge Base/index.md":
+            assert "Earlier café entry" not in without_old
+            assert "New unenrolled entry" in without_old
 
 
 @pytest.mark.parametrize("corruption", ["image", "payload", "crossing"])
