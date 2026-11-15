@@ -7,14 +7,13 @@ that noticed. Every fixture here is synthetic.
 
 from __future__ import annotations
 
-import hashlib
-import os
+import json
 from pathlib import Path
 
 import pytest
 
 from exomem import audit as audit_module
-from exomem import source_pointers
+from exomem import capabilities, lexstore, originals
 
 KB = "Knowledge Base"
 SOURCES = f"{KB}/Sources"
@@ -86,38 +85,10 @@ def test_a_descriptor_pointer_is_checked_like_the_scalar_ones(vault: Path, descr
     assert finding.meta["recorded_path"] == path
 
 
-def test_a_changed_file_is_hashed_only_when_its_stat_signature_changed(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The check must not re-read every original on every audit, yet must catch edited bytes."""
-    rel = _write(vault, f"{SOURCES}/Other/tides.json", b"[1, 2, 3]")
-    stat = (vault / rel).stat()
-    good = hashlib.sha256(b"[1, 2, 3]").hexdigest()
-    front = f"data_file: {rel}\nbinary_sha256: {good}\nbinary_size: {stat.st_size}\n"
-    front += f"binary_mtime_ns: {stat.st_mtime_ns}\n"
-    _card(vault, f"{SOURCES}/Other/tides-export.md", front)
-    reads: list[Path] = []
-    real = source_pointers._sha256
-    monkeypatch.setattr(source_pointers, "_sha256", lambda path: reads.append(path) or real(path))
-
-    assert _drift(vault) == []
-    assert reads == []
-
-    (vault / rel).write_bytes(b"[9, 9, 9]")  # same size, different bytes
-    os.utime(vault / rel, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
-    (finding,) = _drift(vault)
-
-    assert finding.meta["problem"] == "content"
-    assert reads == [vault / rel]
-
-
-def test_a_size_mismatch_is_drift_without_reading_the_file(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_file_whose_size_differs_from_the_recorded_size_is_drift(vault: Path) -> None:
+    """A pointer to a file of another size names bytes that are not the card's."""
     rel = _write(vault, f"{SOURCES}/Other/tides.json", b"[1, 2, 3, 4]")
-    front = f"data_file: {rel}\nbinary_sha256: {'0' * 64}\nbinary_size: 3\n"
-    _card(vault, f"{SOURCES}/Other/tides-export.md", front)
-    monkeypatch.setattr(source_pointers, "_sha256", lambda path: pytest.fail("hashed"))
+    _card(vault, f"{SOURCES}/Other/tides-export.md", f"data_file: {rel}\nbinary_size: 3\n")
 
     (finding,) = _drift(vault)
 
@@ -150,6 +121,44 @@ def test_a_folder_or_a_page_name_in_a_code_span_is_not_a_missing_file(vault: Pat
     assert _drift(vault) == []
 
 
+def test_a_path_that_custody_refuses_is_one_finding_and_a_refused_repair(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One odd path in one card must not fail the whole audit, nor read as a missing file.
+
+    With a media store bound, the custody reader refuses a path it cannot hold (a colon, a link)
+    by raising, and that used to escape the audit; without one, a `path:line` citation read as
+    a missing file.
+    """
+    config = tmp_path / "media-store.json"
+    config.write_text(json.dumps({"vaults": {str(vault.resolve()): {"store": "test-store"}}}))
+    monkeypatch.setenv(originals.CONFIG_ENV, str(config))
+    colon = _card(vault, f"{SOURCES}/Other/colon.md", f"evidence_file: {SOURCES}/Other/a:b.json\n")
+    link = vault / SOURCES / "Other" / "tides.json"
+    link.symlink_to(vault / "nowhere.json")
+    linked = _card(vault, f"{SOURCES}/Other/linked.md", f"evidence_file: {SOURCES}/Other/tides.json\n")
+    report = _write(vault, f"{SOURCES}/Other/report.pdf", b"%PDF-1.7")
+    _card(vault, f"{SOURCES}/Other/cited.md", body=f"See `{report}:3` for the table.\n")
+
+    assert {f.path: f.meta["problem"] for f in _drift(vault)} == {
+        colon: "unreadable",
+        linked: "unreadable",
+    }
+
+    from exomem import commands
+
+    with pytest.raises(ValueError, match="^POINTER_INVALID"):
+        commands.op_manage_memory_file(
+            vault, operation="reclassify", path=colon,
+            artifact_path=f"{SOURCES}/Other/a:b.json", reason="repair",
+        )
+    with pytest.raises(ValueError, match="^POINTER_INVALID"):
+        commands.op_manage_memory_file(
+            vault, operation="reclassify", path=linked,
+            artifact_path=f"{SOURCES}/Other/tides.json", reason="repair",
+        )
+
+
 def test_a_healthy_pointer_ends_the_finding_even_when_the_body_still_cites_a_stale_path(
     vault: Path,
 ) -> None:
@@ -162,6 +171,33 @@ def test_a_healthy_pointer_ends_the_finding_even_when_the_body_still_cites_a_sta
         body=f"`{SOURCES}/Other/tides.json`\n",
     )
 
+    assert _drift(vault) == []
+
+
+@pytest.mark.parametrize(
+    ("card", "recorded"),
+    [
+        # An Evidence card cannot be reclassified, so a repoint is no repair for it.
+        (f"{KB}/Evidence/Harbour/tide-proof.md", f"{KB}/Evidence/Harbour/tides.json"),
+        # A card beside its file is bound by that name; repointing it would break the binding.
+        (f"{SOURCES}/Other/tides.json.md", f"{SOURCES}/Other/tides.json"),
+    ],
+)
+def test_the_fix_for_a_card_that_cannot_be_repointed_moves_the_file_back(
+    vault: Path, card: str, recorded: str
+) -> None:
+    """Every proposed fix must be a step that succeeds; a repoint is refused for these cards."""
+    from exomem import commands
+
+    moved = _write(vault, f"{recorded.rsplit('/', 1)[0]}/archive/tides.json", b"[1]")
+    _card(vault, card, f"evidence_file: {recorded}\n")
+
+    (finding,) = _drift(vault)
+
+    assert finding.proposed_fix == capabilities.active_call_text(
+        "manage_memory_file", {"operation": "move", "old_path": moved, "new_path": recorded}
+    )
+    commands.op_manage_memory_file(vault, operation="move", old_path=moved, new_path=recorded)
     assert _drift(vault) == []
 
 
@@ -307,7 +343,7 @@ def _move(vault: Path, old: str, new: str) -> dict:
 def test_moving_raw_bytes_follows_their_path_into_notes_and_audit_reaches_zero_drift(
     vault: Path,
 ) -> None:
-    """The workflow that left four live cards naming a file that had moved.
+    """The workflow that left hand-authored cards naming a file that had moved.
 
     An unpaired Source card cites its JSON by vault path and records no pointer. A move of the
     JSON must rename the path in every page that may change, report the captured card it cannot
@@ -321,6 +357,7 @@ def test_moving_raw_bytes_follows_their_path_into_notes_and_audit_reaches_zero_d
     card = _card(vault, f"{SOURCES}/Other/tides-export.md", body=f"## Raw artifact\n\n`{old}`\n")
     note = _note(vault, f"{KB}/Notes/harbour.md", f"The tide export is stored at `{old}`.\n")
     assert _drift(vault) == []
+    lexstore.ensure_fresh(vault)
 
     moved = _move(vault, old, new)
 
@@ -338,39 +375,45 @@ def test_moving_raw_bytes_follows_their_path_into_notes_and_audit_reaches_zero_d
 
 
 def test_a_move_renames_only_the_exact_path_in_body_prose(vault: Path) -> None:
-    """A longer path or file name that merely starts with the moved path must keep its bytes."""
+    """A longer path, a sibling's name or a URL that contains the moved path must keep its bytes."""
     old = f"{SOURCES}/Other/tides.json"
     new = f"{SOURCES}/Other/Media/tides.json"
     _write(vault, old, b"[1]")
+    _write(vault, f"{old} copy.json", b"[1]")
+    longer = f"{old}.bak and {old}2 and {SOURCES}/Other/old-tides.json and {old} copy.json"
+    url = "https://viewer.example/open?p=Sources/Other/tides.json"
     note = _note(
         vault,
         f"{KB}/Notes/harbour.md",
-        f"Exact: {old}.\nBackup: {old}.bak and {old}2 and {SOURCES}/Other/old-tides.json.\n",
+        f"Exact: {old}.\nLonger: {longer}.\nLink: <{url}>.\n",
         front=f"export: {old}\n",
     )
+    lexstore.ensure_fresh(vault)
 
     moved = _move(vault, old, new)
 
     text = (vault / note).read_text(encoding="utf-8")
     assert moved["path_mentions_updated"] == 1
     assert f"Exact: {new}." in text
-    assert f"Backup: {old}.bak and {old}2 and {SOURCES}/Other/old-tides.json." in text
+    assert f"Longer: {longer}." in text
+    assert f"Link: <{url}>." in text
     assert f"export: {old}\n" in text  # frontmatter pointers are not body prose
 
 
-def test_a_move_says_so_when_the_catalogue_cannot_name_the_pages_citing_the_path(
+def test_a_move_against_a_catalogue_that_is_not_current_warns_and_rebuilds_nothing(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unanswered lookup must not read as "no page cites the path"."""
-    from exomem import path_mentions
-
-    monkeypatch.setattr(
-        path_mentions, "find_pages", lambda *_a, **_k: path_mentions.Lookup((), False)
-    )
+    """Rebuilding the catalogue inside a move took seconds on a large vault; the move must say
+    instead that it did not check, and leave the catch-up to the background repair."""
+    # Hold the background repair back, so the catalogue stays behind for the whole move.
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_k: True)
     old = f"{SOURCES}/Other/tides.json"
     _write(vault, old, b"[1]")
+    note = _note(vault, f"{KB}/Notes/harbour.md", f"Stored at `{old}`.\n")
+    assert not lexstore.search_substring_result(vault, "tides.json").readiness.complete
 
     moved = _move(vault, old, f"{SOURCES}/Other/Media/tides.json")
 
     assert moved["path_mentions_updated"] == 0
     assert any("path mentions were not checked" in warning for warning in moved["warnings"])
+    assert f"`{old}`" in (vault / note).read_text(encoding="utf-8")

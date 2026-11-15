@@ -281,21 +281,21 @@ def _repoint_artifact(old_binary: str, new_binary: str):
         if block is None:
             return text
         changes: dict[str, Any] = {}
-        # These two pointer fields belong to the Source/Evidence companion schema.
-        for field in ("evidence_file", "data_file"):
+        for field in originals.SCALAR_POINTERS:
             if frontmatter.get(field) == old_binary:
                 changes[field] = new_binary
-        descriptor = frontmatter.get("governance_companion")
-        if isinstance(descriptor, dict) and descriptor.get("artifact_path") == old_binary:
-            moved_descriptor = {**descriptor, "artifact_path": new_binary}
+        path_key = originals.NESTED_PATH_KEY
+        descriptor = frontmatter.get(originals.GOVERNANCE_COMPANION)
+        if isinstance(descriptor, dict) and descriptor.get(path_key) == old_binary:
+            moved_descriptor = {**descriptor, path_key: new_binary}
             if "original_filename" in descriptor:
                 moved_descriptor["original_filename"] = Path(new_binary).name
-            changes["governance_companion"] = moved_descriptor
+            changes[originals.GOVERNANCE_COMPANION] = moved_descriptor
         if frontmatter.get("original_filename") == Path(old_binary).name:
             changes["original_filename"] = Path(new_binary).name
-        protection = frontmatter.get("raw_protection")
-        if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
-            changes["raw_protection"] = {**protection, "artifact_path": new_binary}
+        protection = frontmatter.get(originals.RAW_PROTECTION)
+        if isinstance(protection, dict) and protection.get(path_key) == old_binary:
+            changes[originals.RAW_PROTECTION] = {**protection, path_key: new_binary}
         if not changes:
             return text
         try:
@@ -361,8 +361,11 @@ def plan_inbound_rewrites(
     moved file's binary when the page moves with one; the mention rewrite covers both.
     """
     plans: list[InboundRewrite] = []
-    moves = [(old_rel, new_rel), *([paired] if paired is not None else [])]
-    for rel in sorted({hit.path for hit in inbound} | set(named_in)):
+    pages = sorted({hit.path for hit in inbound} | set(named_in))
+    moves = path_mentions.renames(
+        vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
+    ) if pages else ()
+    for rel in pages:
         if rel == old_rel:
             continue
         try:
@@ -969,10 +972,7 @@ def _move_file_local(
 
     warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
     if mention_lookup is not None and not mention_lookup.complete:
-        warnings.append(
-            "path mentions were not checked: the search index could not answer, so pages "
-            "that cite the old path in prose keep it"
-        )
+        warnings.append(path_mentions.NOT_CHECKED)
     if (
         stored_check is not None
         and stored_check.unimported

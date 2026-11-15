@@ -841,10 +841,7 @@ def audit(
                 metadata.setdefault("coverage", {})["original_fixity"] = fixity_coverage
     with stage('source_pointer_drift') as run:
         if run:
-            pointer_findings, pointer_coverage = _check_source_pointers(vault_root, pages)
-            findings.extend(pointer_findings)
-            if pointer_coverage is not None:
-                metadata.setdefault("coverage", {})["source_pointer_drift"] = pointer_coverage
+            findings.extend(_check_source_pointers(vault_root, pages))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     with stage(semantic_categories) as run:
         if run:
@@ -918,11 +915,8 @@ def _check_original_fixity(vault_root: Path) -> tuple[list[AuditFinding], str | 
 @call_spans.timed("audit.source_pointer_drift")
 def _check_source_pointers(
     vault_root: Path, pages: list[find_module.ParsedPage]
-) -> tuple[list[AuditFinding], str | None]:
-    """A Source or Evidence card whose recorded pointer no longer names its bytes.
-
-    Coverage is "unknown" when the run's hashing budget left a changed file unread.
-    """
+) -> list[AuditFinding]:
+    """A Source or Evidence card whose recorded pointer no longer names its bytes."""
     from . import source_pointers
 
     inspector = source_pointers.Inspector(vault_root)
@@ -931,38 +925,25 @@ def _check_source_pointers(
         if page.page_type != "source" or in_append_only_tree(page.rel_path) is None:
             continue
         request_budget.checkpoint()
+        card = str(page.rel_path)
         for drift in inspector.inspect_card(page.frontmatter, page.body):
             candidate = (
                 inspector.candidate(drift.recorded_path)
                 if drift.problem == source_pointers.MISSING
                 else None
             )
-            repointable = drift.field in (
-                *source_pointers.SCALAR_POINTERS,
-                source_pointers.BODY_FIELD,
-            )
-            if candidate and repointable:
-                fix = (
-                    f"Point the card at its bytes: reclassify_source with "
-                    f"artifact_path={candidate!r}."
-                )
-            elif candidate:
-                fix = f"Move the file {candidate!r} back to {drift.recorded_path!r} with move_file."
-            else:
-                fix = (
-                    f"Restore the file at {drift.recorded_path!r}, or point the card at its "
-                    "bytes with reclassify_source and artifact_path."
-                )
             findings.append(
                 AuditFinding(
                     category="source_pointer_drift",
-                    severity="error" if drift.problem == source_pointers.CONTENT else "warn",
-                    path=str(page.rel_path),
+                    severity="warn",
+                    path=card,
                     detail=(
                         f"{drift.field} names {drift.recorded_path}: "
                         f"{source_pointers.PROBLEM_TEXT[drift.problem]}"
                     ),
-                    proposed_fix=fix,
+                    proposed_fix=_source_pointer_fix(
+                        card, drift.field, drift.recorded_path, drift.problem, candidate
+                    ),
                     paths=[drift.recorded_path, *([candidate] if candidate else [])],
                     meta={
                         "field": drift.field,
@@ -972,7 +953,43 @@ def _check_source_pointers(
                     },
                 )
             )
-    return findings, "unknown" if inspector.unchecked else None
+    return findings
+
+
+def _source_pointer_fix(
+    card: str, field: str, recorded: str, problem: str, candidate: str | None
+) -> str:
+    """The one step that repairs a drifted pointer, spelled as the serving surface calls it.
+
+    Only a Source that does not follow its file by name can be repointed (reclassify refuses an
+    Evidence card and a bound one); for any other card the file moves back to the recorded path.
+    """
+    from . import source_pointers
+
+    repointable = in_append_only_tree(card) == source_taxonomy.SOURCES_ROOT and not (
+        source_pointers.bound(card, field, recorded)
+    )
+    if candidate is not None and not repointable:
+        return capabilities.active_call_text(
+            "manage_memory_file", {"operation": "move", "old_path": candidate, "new_path": recorded}
+        )
+    repoint = capabilities.active_call_text(
+        "manage_memory_file",
+        {
+            "operation": "reclassify",
+            "path": card,
+            "artifact_path": candidate or "<where the card's bytes are now>",
+            "reason": "<why the pointer changes>",
+        },
+    )
+    if candidate is not None:
+        return repoint
+    if problem == source_pointers.OUTSIDE_VAULT:
+        if repointable:
+            return f"Point the card at where its bytes are now with {repoint}."
+        return "No governed step repoints this card, and its pointer leaves the vault."
+    restore = f"Put the card's own bytes back as a plain file at {recorded!r}"
+    return f"{restore}, or point the card at where its bytes are now with {repoint}." if repointable else f"{restore}."
 
 
 @call_spans.timed("audit.bridge_review")

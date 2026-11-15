@@ -1,64 +1,49 @@
-"""The custody pointers of a Source card, and whether each still names its bytes.
+"""Whether each custody pointer of a Source card still names its bytes.
 
-A Source or Evidence card records where its raw artifact lives in structured fields: the
-scalar pointers `evidence_file` and `data_file`, and the `artifact_path` inside the
-`raw_protection` and `governance_companion` descriptors. A move that does not know the card
-(an unpaired card carries a name unlike its file's) leaves such a pointer naming a path that
-no longer exists. This module is the one place that names those fields and answers whether
-they still hold; `audit` reports the answer and `reclassify_source` repairs it.
+A Source or Evidence card records where its raw artifact lives in the structured pointer fields
+that `originals` names: the scalar pointers and the `artifact_path` inside a descriptor. A move
+that does not know the card (an unpaired card carries a name unlike its file's) leaves such a
+pointer naming a path that no longer exists. This module answers whether each pointer still
+holds; `audit` reports the answer and `reclassify_source` repairs it.
 
 A card with no structured pointer is read the other way round: the vault paths its body cites
 in a markdown code span under a custody tree. The body of a Source never changes, so a stale
 citation there can only be answered by giving the card a structured pointer.
+
+Each answer is the one the caller may know. A file the caller may not see reads as absent, as
+every write door answers it, and a path that custody refuses to read (a link, a reserved name,
+a folder) is unreadable, never missing.
 """
 
 from __future__ import annotations
 
 import hashlib
-import re
-from collections.abc import Iterator, Mapping
+import os
+import stat
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from . import originals
+from . import markdown_regions, originals, reserved_paths
 from .backfill import iter_kb_files
 from .kbdir import kb_prefix
 from .vault import APPEND_ONLY_KB_SUBPATHS, in_append_only_tree, kb_root
 
-# These are the closed field names of the Source/Evidence card schema, not vault vocabulary.
-SCALAR_POINTERS: tuple[str, ...] = ("evidence_file", "data_file")
-NESTED_POINTERS: tuple[str, ...] = ("raw_protection", "governance_companion")
-NESTED_PATH_KEY = "artifact_path"
 #: The card field that stands for a body citation in a finding.
 BODY_FIELD = "body"
 
-# The recorded identity of the bytes each pointer names: (sha256, size, mtime_ns) field names.
-# A nested descriptor records no mtime, and a raw-protection block records no size.
-_SCALAR_IDENTITY = ("binary_sha256", "binary_size", "binary_mtime_ns")
-_NESTED_IDENTITY: dict[str, tuple[str, str | None, str | None]] = {
-    "governance_companion": ("artifact_sha256", "artifact_size", None),
-    "raw_protection": ("artifact_sha256", None, None),
-}
-
+PRESENT = "present"
 MISSING = "missing"
 SIZE = "size"
-CONTENT = "content"
 OUTSIDE_VAULT = "outside_vault"
+UNREADABLE = "unreadable"
 #: One line per problem, for the finding that reports it.
 PROBLEM_TEXT = {
     MISSING: "no file exists at that path",
     SIZE: "the file's size differs from the recorded size",
-    CONTENT: "the file's SHA-256 differs from the recorded one",
     OUTSIDE_VAULT: "the path does not stay inside the vault",
+    UNREADABLE: "custody does not read a plain file there (a link, a reserved name or a folder)",
 }
-
-#: Bytes one audit run may hash, so a vault of large originals never makes the check unbounded.
-#: Hashing starts only when a stat signature changed; a run that reaches the cap says so.
-HASH_BYTE_BUDGET = 512 * 1024 * 1024
-_CHUNK = 1024 * 1024
-
-# A markdown inline code span: the syntax that delimits a cited path whole, spaces included.
-_CODE_SPAN = re.compile(r"`([^`\n]+)`")
 
 
 @dataclass(frozen=True)
@@ -75,6 +60,16 @@ class Drift:
     problem: str
 
 
+@dataclass(frozen=True)
+class Located:
+    """The bytes at one path as the caller may know them."""
+
+    state: str
+    size: int | None = None
+    #: The SHA-256 the media store's binding records, for an original it holds instead of the vault.
+    stored_sha256: str | None = None
+
+
 def is_nested(field: str) -> bool:
     return "." in field
 
@@ -82,16 +77,27 @@ def is_nested(field: str) -> bool:
 def pointers(frontmatter: Mapping[str, object]) -> list[Pointer]:
     """Every structured pointer the card records, in schema order."""
     found: list[Pointer] = []
-    for name in SCALAR_POINTERS:
+    for name in originals.SCALAR_POINTERS:
         value = frontmatter.get(name)
         if isinstance(value, str) and value:
             found.append(Pointer(name, value))
-    for name in NESTED_POINTERS:
+    for name in originals.NESTED_POINTERS:
         block = frontmatter.get(name)
-        value = block.get(NESTED_PATH_KEY) if isinstance(block, Mapping) else None
+        value = block.get(originals.NESTED_PATH_KEY) if isinstance(block, Mapping) else None
         if isinstance(value, str) and value:
-            found.append(Pointer(f"{name}.{NESTED_PATH_KEY}", value))
+            found.append(Pointer(f"{name}.{originals.NESTED_PATH_KEY}", value))
     return found
+
+
+def bound(card_rel: str, field: str, path: str) -> bool:
+    """Whether the card follows its bytes by name, so the repair moves the file, not the pointer.
+
+    A descriptor pointer follows the file's sibling name, and so does any pointer of a card
+    that sits at its file's companion path.
+    """
+    if is_nested(field):
+        return True
+    return canonical_relative(path) is not None and card_rel in originals.companion_paths(path)
 
 
 def body_citations(body: str) -> list[str]:
@@ -104,8 +110,12 @@ def body_citations(body: str) -> list[str]:
     prefix = kb_prefix()
     heads = tuple(f"{prefix}{tree}/" for tree in APPEND_ONLY_KB_SUBPATHS)
     cited: list[str] = []
-    for span in _CODE_SPAN.findall(body):
+    for span in markdown_regions.inline_code(body):
         candidate = span.strip()
+        head, colon, line = candidate.rpartition(":")
+        if colon and line.isascii() and line.isdigit():
+            # `path:<line>` is the editor convention for a line of the file; the line is no part of the path.
+            candidate = head
         if (
             candidate.startswith(heads)
             and PurePosixPath(candidate).suffix
@@ -124,47 +134,80 @@ def canonical_relative(path: str) -> str | None:
     return path
 
 
-def exists(vault_root: Path, rel: str) -> bool:
-    """Whether the bytes at `rel` are in the vault: a file here, or an original stored elsewhere."""
+def withheld_filter(vault_root: Path) -> Callable[[str], bool] | None:
+    """What this caller may not see, decided as `egress.write_target_withheld` decides it.
+
+    None for the owner and on an ungoverned vault. The decision reads the path alone, so a
+    withheld path reads the same whether or not a file is there.
+    """
+    from .governance import egress
+
+    if not egress.caller_restricted(vault_root):
+        return None
+    keep = egress.restricted_release_filter(vault_root)
+    return None if keep is None else (lambda rel: not keep(rel))
+
+
+def locate(vault_root: Path, rel: str, withheld: Callable[[str], bool] | None) -> Located:
+    """The state of the bytes at `rel`, with their size when they are present.
+
+    It reads one `lstat`, and the media store's binding only for a path with no file.
+    """
     if canonical_relative(rel) is None:
-        return False
-    if (vault_root / rel).is_file():
-        return True
-    return originals.evicted(vault_root, rel)
+        return Located(OUTSIDE_VAULT)
+    if reserved_paths.classify_logical(rel).blocked:
+        return Located(UNREADABLE)
+    if withheld is not None and withheld(rel):
+        return Located(MISSING)
+    try:
+        info = os.lstat(Path(vault_root) / rel)
+    except (FileNotFoundError, NotADirectoryError):
+        return _stored(vault_root, rel)
+    except OSError:
+        return Located(UNREADABLE)
+    # Custody never follows a link, and a folder is no file: neither is the card's bytes.
+    if not stat.S_ISREG(info.st_mode):
+        return Located(UNREADABLE)
+    return Located(PRESENT, info.st_size)
 
 
-def recorded_identity(
-    frontmatter: Mapping[str, object], pointer: Pointer
-) -> tuple[str | None, int | None, int | None]:
-    """The (sha256, size, mtime_ns) the card records for the bytes `pointer` names."""
-    if is_nested(pointer.field):
-        block_name = pointer.field.partition(".")[0]
-        sha_key, size_key, mtime_key = _NESTED_IDENTITY[block_name]
-        source = frontmatter.get(block_name)
-        if not isinstance(source, Mapping):
-            return None, None, None
+def _stored(vault_root: Path, rel: str) -> Located:
+    """An original the media store holds is present at the size its binding records."""
+    # Outside the guard: a malformed store configuration must fail loudly, never read as absence.
+    if originals.binding_for(vault_root) is None or originals.is_note_path(rel):
+        return Located(MISSING)
+    try:
+        snapshot = originals.original_state(vault_root, rel)
+    except reserved_paths.ReservedPathLeafError:
+        return Located(UNREADABLE)
+    if snapshot.state != "evicted":
+        return Located(MISSING)
+    return Located(PRESENT, snapshot.binary_size, snapshot.binary_sha256)
+
+
+def recorded_size(frontmatter: Mapping[str, object], pointer: Pointer) -> int | None:
+    """The byte size the card records for the bytes `pointer` names; a raw-protection block records none."""
+    if not is_nested(pointer.field):
+        value = frontmatter.get("binary_size")
+    elif pointer.field.partition(".")[0] == originals.GOVERNANCE_COMPANION:
+        block = frontmatter.get(originals.GOVERNANCE_COMPANION)
+        value = block.get("artifact_size") if isinstance(block, Mapping) else None
     else:
-        sha_key, size_key, mtime_key = _SCALAR_IDENTITY
-        source = frontmatter
-
-    def number(key: str | None) -> int | None:
-        value = source.get(key) if key else None
-        return value if type(value) is int else None
-
-    sha = source.get(sha_key)
-    valid = sha if isinstance(sha, str) and originals.is_sha256(sha) else None
-    return valid, number(size_key), number(mtime_key)
+        value = None
+    return value if type(value) is int else None
 
 
 def target_refusal(
     vault_root: Path, frontmatter: Mapping[str, object], target: str
 ) -> tuple[str, str] | None:
-    """The `(code, reason)` that refuses `target` as the file a card's pointer names, or None.
+    """The `(code, reason)` that refuses `target` as the file a card's scalar pointer names, or None.
 
-    A target is accepted only when it is a raw file under a custody tree that exists and fits
-    the identity the card records for its bytes. This reads the file once, because it answers
-    an explicit repair, not a sweep.
+    A target is accepted only when it is a plain raw file under a custody tree that the caller
+    may see and that fits the size and SHA-256 the card records. A file the caller may not see
+    is refused exactly as a missing one, so no answer reveals it. This reads the file once,
+    because it answers an explicit repair, not a sweep.
     """
+    vault_root = Path(vault_root)
     if canonical_relative(target) is None:
         return "POINTER_INVALID", f"{target!r} is not a vault-relative path inside the vault."
     if in_append_only_tree(target) is None:
@@ -172,35 +215,37 @@ def target_refusal(
         return "POINTER_OUTSIDE_CUSTODY", f"{target} is not under {trees}."
     if originals.is_note_path(target):
         return "POINTER_INVALID", f"{target} is a page; a custody pointer names the raw file."
-    if not exists(Path(vault_root), target):
+    found = locate(vault_root, target, withheld_filter(vault_root))
+    if found.state == UNREADABLE:
+        return "POINTER_INVALID", f"{target}: {PROBLEM_TEXT[UNREADABLE]}."
+    if found.state != PRESENT:
         return "POINTER_TARGET_MISSING", f"no file exists at {target}."
-    sha, size, _ = recorded_identity(frontmatter, Pointer(SCALAR_POINTERS[0], target))
-    path = Path(vault_root) / target
-    if path.is_file():
-        stored_size = path.stat().st_size
-    else:
-        stored_size = originals.original_state(Path(vault_root), target).binary_size
-    if size is not None and stored_size is not None and stored_size != size:
-        return "POINTER_MISMATCH", f"{target} is {stored_size} bytes; the card records {size}."
-    if sha is not None and path.is_file() and _sha256(path) != sha:
+    size = frontmatter.get("binary_size")
+    if type(size) is int and found.size is not None and found.size != size:
+        return "POINTER_MISMATCH", f"{target} is {found.size} bytes; the card records {size}."
+    sha = frontmatter.get("binary_sha256")
+    if not originals.is_sha256(sha):
+        return None
+    actual = found.stored_sha256 if found.stored_sha256 is not None else _sha256(vault_root, target)
+    if actual is None:
+        return "POINTER_INVALID", f"{target}: {PROBLEM_TEXT[UNREADABLE]}."
+    if actual != sha:
         return "POINTER_MISMATCH", f"{target} does not hash to the SHA-256 the card records."
     return None
 
 
 class Inspector:
-    """Judges the pointers of many cards in one run with a shared hashing budget.
+    """Judges the pointers of many cards in one audit run, as the calling principal may know them.
 
-    A pointer drifts when its path is missing, leaves the vault, or its recorded size or
-    SHA-256 no longer fits the bytes. The SHA-256 is read only when the recorded mtime no
-    longer matches the file's, and only while the run's byte budget lasts; `unchecked`
-    counts the pointers whose content stayed unread for that reason.
+    A pointer drifts when its path is missing, unreadable, leaves the vault, or names a file of
+    another size than the card records. Content fixity is `original_fixity`'s, so nothing here
+    reads a file's bytes.
     """
 
-    def __init__(self, vault_root: Path, *, hash_budget: int = HASH_BYTE_BUDGET) -> None:
-        self._vault = vault_root
-        self._budget = hash_budget
+    def __init__(self, vault_root: Path) -> None:
+        self._vault = Path(vault_root)
+        self._withheld = withheld_filter(self._vault)
         self._names: dict[str, dict[str, list[str]]] = {}
-        self.unchecked = 0
 
     def inspect_card(self, frontmatter: Mapping[str, object], body: str) -> list[Drift]:
         """The drift of one card: its structured pointers, or its body citations when it has none.
@@ -208,34 +253,34 @@ class Inspector:
         The structured pointer is the card's authority, so a card that has one never has its
         prose read: repairing a pointer must end the finding, and the body cannot be edited.
         """
-        found = pointers(frontmatter)
-        if not found:
-            return [
-                Drift(BODY_FIELD, cited, MISSING)
-                for cited in body_citations(body)
-                if not exists(self._vault, cited)
-            ]
+        found = pointers(frontmatter) or [Pointer(BODY_FIELD, cited) for cited in body_citations(body)]
         drifts: list[Drift] = []
         for pointer in found:
-            problem = self._problem(frontmatter, pointer)
+            located = locate(self._vault, pointer.path, self._withheld)
+            problem = located.state if located.state != PRESENT else None
+            if problem is None and pointer.field != BODY_FIELD:
+                size = recorded_size(frontmatter, pointer)
+                if size is not None and located.size is not None and located.size != size:
+                    problem = SIZE
             if problem is not None:
                 drifts.append(Drift(pointer.field, pointer.path, problem))
         return drifts
 
     def candidate(self, recorded_path: str) -> str | None:
-        """The one same-named file in the custody tree of `recorded_path`, or None.
+        """The one same-named file in the custody tree of `recorded_path` that the caller may see.
 
-        Two same-named files are ambiguous, and an ambiguous name proposes nothing.
+        Two same-named files are ambiguous, and an ambiguous name proposes nothing. A path outside
+        the custody trees has no tree to search.
         """
         tree = in_append_only_tree(recorded_path)
-        trees = (tree,) if tree is not None else APPEND_ONLY_KB_SUBPATHS
-        found = {
+        if tree is None:
+            return None
+        found = [
             rel
-            for name in trees
-            for rel in self._name_index(name).get(PurePosixPath(recorded_path).name, [])
-        }
-        found.discard(recorded_path)
-        return next(iter(found)) if len(found) == 1 else None
+            for rel in self._name_index(tree).get(PurePosixPath(recorded_path).name, ())
+            if rel != recorded_path and locate(self._vault, rel, self._withheld).state == PRESENT
+        ]
+        return found[0] if len(found) == 1 else None
 
     def _name_index(self, tree: str) -> dict[str, list[str]]:
         # Built once on first use: only a drifted pointer needs it, so a healthy vault never walks.
@@ -246,44 +291,16 @@ class Inspector:
             self._names[tree] = index
         return self._names[tree]
 
-    def _problem(self, frontmatter: Mapping[str, object], pointer: Pointer) -> str | None:
-        if canonical_relative(pointer.path) is None:
-            return OUTSIDE_VAULT
-        sha, size, mtime_ns = recorded_identity(frontmatter, pointer)
-        path = self._vault / pointer.path
-        try:
-            stat = path.stat() if path.is_file() else None
-        except OSError:
-            stat = None
-        if stat is None:
-            if not originals.evicted(self._vault, pointer.path):
-                return MISSING
-            # An evicted original keeps its size in the store; the fixity pass reads its bytes.
-            stored = originals.original_state(self._vault, pointer.path).binary_size
-            return SIZE if size is not None and stored is not None and stored != size else None
-        if size is not None and stat.st_size != size:
-            return SIZE
-        if sha is None or mtime_ns is None or mtime_ns == stat.st_mtime_ns:
-            return None
-        if stat.st_size > self._budget:
-            self.unchecked += 1
-            return None
-        self._budget -= stat.st_size
-        return None if _sha256(path) == sha else CONTENT
-
 
 def _custody_files(vault_root: Path, tree: str) -> Iterator[Path]:
     root = kb_root(vault_root) / tree
     return iter_kb_files(root) if root.is_dir() else iter(())
 
 
-def _sha256(path: Path) -> str | None:
-    digest = hashlib.sha256()
+def _sha256(vault_root: Path, rel: str) -> str | None:
+    """The SHA-256 of the plain file at `rel`, read through custody; None when custody refuses it."""
     try:
-        with open(path, "rb") as stream:
-            while chunk := stream.read(_CHUNK):
-                digest.update(chunk)
-    except OSError:
+        with reserved_paths.open_generic_binary(vault_root, rel) as source:
+            return hashlib.file_digest(source.stream, "sha256").hexdigest()
+    except reserved_paths.ReservedPathLeafError:
         return None
-    return digest.hexdigest()
-

@@ -23,6 +23,7 @@ import pytest
 import yaml
 
 from exomem import add as add_module
+from exomem import lexstore
 from exomem import reclassify_source as rc
 from exomem import schema as schema_module
 from exomem import source_taxonomy as st
@@ -641,6 +642,7 @@ def test_a_correction_into_known_vocabulary_stays_quiet(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     captured = _capture(vault, source_schema, title="Hedgerow notes", domain="media")
+    lexstore.ensure_fresh(vault)
 
     result = rc.reclassify(
         vault,
@@ -1092,8 +1094,10 @@ def test_a_reclassified_source_is_followed_by_prose_paths_in_notes_but_not_in_ev
     note = _write(
         vault,
         f"{KB}/Notes/Insights/tide-note.md",
-        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nThe table: `{source}`.\n",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nThe table: `{source}`.\n"
+        f"Read again from {source} on Monday.\n",
     )
+    lexstore.ensure_fresh(vault)
 
     preview = rc.propose(vault, source, source_kind="dataset", domain="travel")
     result = rc.reclassify(
@@ -1104,5 +1108,31 @@ def test_a_reclassified_source_is_followed_by_prose_paths_in_notes_but_not_in_ev
         rc.MENTION_FORM: (f"{KB}/Evidence/Harbor/tide-proof.md",)
     }
     assert preview.rewritten == (f"{KB}/Notes/Insights/tide-note.md",)
-    assert f"`{result.new_path}`" in note.read_text(encoding="utf-8")
+    assert note.read_text(encoding="utf-8").count(result.new_path) == 2
+    assert result.path_mentions_updated == 2
+    assert any("append-only" in warning for warning in result.warnings)
     assert evidence.read_bytes() == evidence_bytes
+
+
+def test_a_reclassification_says_so_when_it_could_not_check_path_mentions(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalogue that cannot answer must read as "not checked" in the preview and the result,
+    never as "no page cites the source"."""
+    # Hold the background repair back, so the catalogue stays behind for the whole correction.
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_k: True)
+    source = _legacy_source(vault)
+    note = _write(
+        vault,
+        f"{KB}/Notes/Insights/tide-note.md",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nAt `{source}`.\n",
+    )
+
+    preview = rc.propose(vault, source, source_kind="dataset", domain="travel")
+    result = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel", reason="a table of readings"
+    )
+
+    assert any("path mentions were not checked" in warning for warning in preview.warnings)
+    assert any("path mentions were not checked" in warning for warning in result.warnings)
+    assert f"`{source}`" in note.read_text(encoding="utf-8")
