@@ -348,9 +348,10 @@ has drained. In the rehearsal on 2026-11-15, an evicted 40 MB original was back 
 about two minutes after the cell restarted with its store off.
 
 cellctl removes the edge access only after a backup report that the cell captured after
-the turn-off shows no evicted original. The current cell image reports `unknown` for
-that count, so a cell that leaves the edge keeps its edge access until a later image
-counts its evicted originals.
+the turn-off shows no evicted original. The cell counts its evicted originals after the
+turn-off, and its next backup carries the count. In the rehearsal, the count was 0 one
+minute after the turn-off. The next backup ran when the cell's window opened, and the
+render after it removed the edge access.
 
 1. Remove the cell from `mediaEdge.cellIds` in the private values file. Keep
    `mediaEdge.enabled=true`.
