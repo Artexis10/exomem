@@ -3,7 +3,9 @@
 ### Requirement: Required values and natural keys are non-null
 A `required` field SHALL be present and non-null. A `null` natural-key component SHALL NOT complete the natural key.
 
-On append, update, bulk upsert and import, a row whose required field is `null` SHALL be rejected `SCHEMA_REQUIRED_FIELD`, naming the field path. A row whose optional natural-key component is `null` SHALL take the generated identity that an incomplete natural key already receives. No stored natural key SHALL be written with a `null` component.
+On append, update, bulk upsert and import, a written value that is `null` in a required field, including a required child of a nested object, SHALL be rejected `SCHEMA_REQUIRED_FIELD`, naming the field path. An update checks the values it writes. A row whose optional natural-key component is `null` SHALL take the generated identity that an incomplete natural key already receives. No stored natural key SHALL be written with a `null` component.
+
+The rule SHALL apply to written values only. A row stored before it with a `null` required value or key part SHALL stay readable, and a revise or rebaseline SHALL NOT be refused for it, unless the revise newly makes that field required. An update that completes a stored row's incomplete natural key SHALL be refused when another row already holds that key.
 
 #### Scenario: A null required key part is rejected
 - **WHEN** an import with `on_invalid: skip` maps 4,061 rows with integer positions and 734 rows whose required `position` is `null`, into a collection whose natural key includes `position`
@@ -17,8 +19,12 @@ On append, update, bulk upsert and import, a row whose required field is `null` 
 - **WHEN** a bulk upsert submits two rows that differ in other fields and both carry `null` in an optional natural-key field
 - **THEN** both are `inserted` with `identity: "generated"`, and neither is `updated`, `unchanged` or reported as a duplicate
 
-### Requirement: Import preview covers the whole source
-An import `preview` SHALL apply the job's own mapping, validation and identity derivation to every row of the source, write nothing, and report:
+#### Scenario: A stored null does not block other writes
+- **WHEN** a collection holds a row stored earlier with `null` in a required field, and the owner revises the collection's title
+- **THEN** the revision commits, and a query still returns that row
+
+### Requirement: Import preview counts the source within its hold budget
+An import `preview` SHALL apply the job's own mapping, validation and identity derivation to the rows of the source, write nothing, and report:
 
 - `rows_total`;
 - `would_insert`;
@@ -26,11 +32,15 @@ An import `preview` SHALL apply the job's own mapping, validation and identity d
 - `would_collapse`, the rows whose identity another row of the same source also produces, with up to 20 sample keys;
 - `coverage`.
 
-Coverage SHALL be `full` when every row was read. Above the documented source-size ceiling, preview SHALL read a sample, report `coverage: sampled` with the ceiling and the rows read, and SHALL NOT present the sample's counts as the source's.
+Preview runs on the collection store thread, so it SHALL stop reading when its elapsed time reaches the documented preview budget, checked between rows. Coverage SHALL be `full` when every row was read. A read that the budget or a malformed row stopped SHALL report `coverage: partial` with the rows read, the budget and its counts so far as `partial_counts`, and SHALL NOT present those counts as the source's. A preview without a valid mapping SHALL report `coverage: sampled`.
 
 #### Scenario: A malformed tail is found before the job starts
-- **WHEN** a 1.6 MB source holds its 734 invalid rows after 4,061 valid ones
+- **WHEN** preview reads a 1.6 MB source, which holds its 734 invalid rows after 4,061 valid ones, within its budget
 - **THEN** preview reports `coverage: full`, `rows_total: 4795`, `would_insert: 4061` and `would_reject` `SCHEMA_REQUIRED_FIELD: 734` with the first coordinates
+
+#### Scenario: A source too large for the budget
+- **WHEN** preview reaches its budget before the end of the source
+- **THEN** it reports `coverage: partial` with the rows read and the budget, `rows_total` and every `would_*` count are `null`, and its counts so far appear only as `partial_counts`
 
 #### Scenario: Preview and import agree
 - **WHEN** a job runs over a source that preview read in full
@@ -48,8 +58,8 @@ A batch that commits rows SHALL write its counts in its receipt. A batch that co
 ### Requirement: A row id resolves one row
 `edit_record` and every action that takes a row id SHALL resolve the id to one row without rendering or returning the other rows of the collection.
 
-- For a caller who can read every row of a store collection, the id SHALL resolve with one key-and-version read. The result and any refusal SHALL NOT depend on the collection's size up to its row ceiling.
-- For a caller with row-level restrictions, the id's version covers the rows released to that caller. The binder SHALL read those rows in pages that each fit the response cap.
+- On a store collection of up to 100,000 rows, for a caller who reads every field, the id SHALL resolve with one key-and-version read, filtered by the caller's read decision on each matching row. This includes a caller to whom some rows are withheld. The guards SHALL be the row's item version and the collection snapshot that the caller's query returns.
+- A derived collection, a collection above 100,000 rows, a caller limited to some fields, and a collection the store does not serve SHALL resolve the id through the collection's query, in pages that each fit the response cap.
 
 A row withheld from the caller SHALL be reported exactly as an absent row. A stale id SHALL be refused with the row's current id. The mutation receipt SHALL describe only the edited row.
 
@@ -71,15 +81,6 @@ A row withheld from the caller SHALL be reported exactly as an absent row. A sta
 #### Scenario: A filter on a 5,000-row collection
 - **WHEN** a caller filters a 5,000-row store collection with a limit of 10
 - **THEN** the page returns at p95 within 300 ms, and its rows equal the legacy evaluation of the same request
-
-### Requirement: A committed record can be retracted with history
-`record_memory(action="retract")` SHALL take a collection, a row id or item key, the current item and container guards, and a `why`. It SHALL remove the row from the collection's current state under the same write authority as an update, and keep every version of the row. It SHALL write a `retract` audit event that history reports with its reason.
-
-Retracting a withheld or absent row SHALL be refused identically. A later write with the same natural key SHALL insert a new current row.
-
-#### Scenario: Retracting a wrongly admitted row
-- **WHEN** an owner retracts a row whose natural key holds a `null` component, giving a reason
-- **THEN** the collection's count falls by one, the row no longer appears in queries, and the row's history shows its versions and the retraction with the reason
 
 ### Requirement: Import work holds the write boundary briefly and status stays available
 An import batch SHALL issue a number of store statements bounded by the tables it writes, not by its rows. It SHALL close when its elapsed time reaches the documented hold budget, as well as at its row and byte limits. Between batches it SHALL end its hold for a waiting interactive writer.

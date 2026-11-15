@@ -43,6 +43,7 @@ Design basis:
 - No change to file-canonical collections beyond validation.
 - No multi-collection bootstrap workflow.
 - No automatic cleanup of stored rows.
+- No governed retraction of a stored row: it needs a store schema upgrade, so it moves to the change `add-records-retraction`.
 
 ## Decisions
 
@@ -53,23 +54,31 @@ A `required` field must be present and non-null. A `null` key component leaves t
 - A required key part that is `null` rejects with `SCHEMA_REQUIRED_FIELD`, naming the field.
 - An optional key part that is `null` takes the generated identity that the bulk contract already gives an incomplete key.
 
-The rule lives in the one validation function that append, update, bulk upsert and import share. It is not repeated per path. A row already stored with a `null` key part stays readable and can be retracted.
+The rule lives in the one validation function that append, update, bulk upsert and import share. It is not repeated per path.
+
+- It applies to the values a write supplies, including a required child of a nested object. An update checks the fields it changes.
+- A stored row is read and re-checked as it was written. A row already stored with a `null` required value or key part stays readable, and a revise or rebaseline does not refuse it. A revise that newly makes a field required checks that field on every stored row.
+- A stored natural key never holds a `null` part. An update that completes a stored row's incomplete key onto another row's key is refused as a conflict.
 
 **Rejected alternatives:**
 
 - Coercing `null` to a default would invent data.
 - Keeping `null` as a key value is the defect itself.
 
-### 2. Import preview streams the whole source through the batch's own row preparation
+### 2. Import preview streams the source through the batch's own row preparation, within a hold budget
 
-Preview runs the same mapping, validation and key derivation as a batch, over every row, and writes nothing. It counts collapse with a set of key digests only.
+Preview runs the same mapping, validation and key derivation as a batch, and writes nothing. It counts collapse with a set of key digests only.
 
 - It reports `rows_total`, `would_insert`, `would_reject` by code with the first 20 source coordinates, `would_collapse` with up to 20 sample keys, and `coverage: full`.
-- Above a 256 MiB source ceiling it samples and says `coverage: sampled` with the ceiling.
+- Preview runs on the collection store thread, and every store write and status call waits behind it. The survey costs about 0.29 s per MB uncontended: 0.69 s at 1.65 MB and 4.81 s at 16.6 MB. So preview stops at a 1 s budget (`PREVIEW_HOLD_SECONDS`), checked between rows. A stopped read reports `coverage: partial` with the rows read, the budget and its counts so far as `partial_counts`, never as the source's.
+- A preview without a valid mapping reads only its sample and says `coverage: sampled`.
 
 Using the batch's own preparation means preview and import cannot disagree.
 
-**Rejected alternative:** a larger sample. It still misses a tail.
+**Rejected alternatives:**
+
+- A larger sample still misses a tail.
+- A survey off the store thread would keep full coverage, but preview is dispatched inside the store thread's call. Moving it needs a store runtime change outside this change.
 
 ### 3. Duplicates are split by cause
 
@@ -82,12 +91,17 @@ Using the batch's own preparation means preview and import cannot disagree.
 
 A row id is `<head>.<version>`, where `head` is a fixed digest prefix of the item key.
 
-- The binder reads only `item_key, row_version, payload_hash` for the collection in one statement. It finds the head and checks the version, with no rendering and no response cap.
-- It caches the head map per collection generation. A write starts a new generation, so the first bind after a write rebuilds the map.
-- The found row must pass the caller's read decision. A withheld row reports `ITEM_NOT_FOUND`, exactly like an absent one, so the binder is not an existence oracle.
-- This fast path serves a caller who can read every row. A restricted caller's row version is a digest over the rows released to that caller, so the binder keeps the paged scan for that caller. Each page of the scan now fits the response cap (task 3.3).
+- The binder keeps a head map per collection generation: each row's head number beside its row id, about 16 bytes a row. A write starts a new generation, so the first bind after a write rebuilds the map.
+- It finds the rows with the id's head, and reads their `item_key, row_version, payload_hash` in one statement. It checks the version with no rendering and no response cap.
+- Each found row must pass the caller's read decision on that row (`row_release`). A withheld row reports `ITEM_NOT_FOUND`, exactly like an absent one, so the binder is not an existence oracle.
+- The guards are the row's own item version and the collection snapshot that the caller's query returns. For a caller to whom some rows are withheld, that snapshot is the digest over the released rows, so the fast path also serves that caller.
+- The collection's query answers instead, in pages that each fit the response cap (task 3.3), for:
+  - a derived collection, whose rows the store does not hold;
+  - a caller limited to some fields, who sees public item versions;
+  - a collection above 100,000 rows, which keeps no head map and caches that verdict per generation;
+  - a collection that the store does not serve.
 
-The cost is one indexed range read plus one short hash per row. On a generated store, a rebuild takes about 9.5 ms at 4,061 rows and about 120 ms at 100,000 rows, inside the edit budget.
+The cost is one indexed range read plus one short hash per row. On a generated store, a rebuild takes about 9.5 ms at 4,061 rows and about 100 ms at 100,000 rows, inside the edit budget. A lookup scans the map in about 2 ms at 100,000 rows.
 
 **Rejected alternatives:**
 
@@ -106,29 +120,14 @@ This change completes Q1 1.7 to 1.9 in that change and routes `query_records` on
 
 The Q1 phase gate's other conditions stay with that change: typed v1, declared indexes and the reader RSS envelope.
 
-### 6. Retraction is a guarded update to "not current"
-
-`record_memory(action="retract")` takes a collection, a row id or item key, the current guards and a `why`.
-
-- It removes the row from the current state and writes a `retract` audit effect. It keeps the row's versions.
-- History shows the retraction. A later append with the same natural key inserts a new current row.
-- A migration widens the `audit_effects.effect` check to admit `retract`.
-
-Retraction follows the same governance as update. It needs write authority on the collection, and it is refused on a withheld row exactly as on an absent one.
-
-**Rejected alternatives:**
-
-- Hard delete loses history.
-- A status field would need a schema per collection.
-
-### 7. An import batch is short in statements and in time
+### 6. An import batch is short in statements and in time
 
 - **Statements.** One batch runs set-based reads for existing rows and natural-key twins, one `executemany` per table written, and one effects check for the event. Per-collection layout and epoch are read once per batch. This bounds GIL hand-offs by the number of tables, not the number of rows.
 - **Time.** A batch closes at 500 rows, at 4 MiB, or when its elapsed time reaches 250 ms. The time is measured between rows before the commit, so a contended process commits smaller batches.
 - **Interactive waiters.** The existing interactive-waiter yield still ends the tick between batches.
 - **Status.** Status reads the job row through the store's read snapshot on the caller's own connection, not through the store-thread queue, so it answers while a batch runs.
 
-### 8. Load target
+### 7. Load target
 
 These bounds hold for a collection of up to 100,000 rows: the items-mode ceiling. They hold on one personal service with the interactive profile.
 
@@ -152,9 +151,7 @@ Derived collections keep their own path.
 1. Release the validation, preview, counts, binder and query changes together.
 2. Release the batch statements and status separately or together.
 3. After installation:
-   - retract the one stored row with a `null` key part;
-   - verify the collection count and that no `null` key part remains, from stored state;
-   - re-run the dogfood edit;
+   - edit one row by id;
    - re-run a filtered query on the 154-row and 4,062-row collections.
 
-**Rollback:** revert the release. The migration only widens a check, so older code still reads the store.
+**Rollback:** this change has no store schema change, so reverting the release is safe.

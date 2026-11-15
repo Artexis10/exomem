@@ -9,18 +9,17 @@ A real import of a few thousand structured records showed that Records cannot ye
 
 ## What Changes
 
-- **Validation.** A `required` field is present **and non-null**. A `null` component does not complete a natural key. A required key part that is `null` rejects the row with `SCHEMA_REQUIRED_FIELD`. An optional key part that is `null` falls back to the generated identity that an incomplete key already gets. This holds for append, update, bulk upsert and import.
-- **Import preview reads the whole source before a job starts.**
+- **Validation.** A `required` field is present **and non-null**. A `null` component does not complete a natural key. A required key part that is `null` rejects the row with `SCHEMA_REQUIRED_FIELD`. An optional key part that is `null` falls back to the generated identity that an incomplete key already gets. This holds for the values that append, update, bulk upsert and import write; rows already stored stay readable.
+- **Import preview reads the source before a job starts, within a hold budget.**
   - It reports the row total, the rows that would be inserted, the rejects by code with their first source coordinates, and the rows that would collapse onto a key that another row of the same source also produces.
-  - It states whether its coverage is `full` or `sampled`.
-- **Import counts are honest.** `duplicates` splits into `collapsed_in_source` and `restated_existing`. The job's totals equal the sum of its batch receipts.
+  - It states whether its coverage is `full`, `partial` (stopped by its budget or a malformed row) or `sampled`.
+- **Import counts are honest.** `duplicates` splits into `collapsed_in_source` and `restated_existing`. The job's totals equal the sum of its batch receipts plus the counts of batches that committed nothing.
 - **Edit by row id resolves one row.** It never reads the rest of the collection, and its receipt carries only that row.
 - **Filtered and sorted queries cost the page, not the collection.**
   - `query_records` on a store collection runs through the SQL legacy executor that `add-collection-query-engine` Q1 already delivered and proved row for row.
   - Its remaining Q1 tasks 1.7 to 1.9 complete in that change.
   - The ownership proof is taken once per request.
   - The `rendered` copy of the rows counts once against the response cap.
-- **A committed record can be retracted.** A guarded retraction by row id takes the row out of the current state with a reason. Its versions and a `retract` audit event remain, and its history shows the retraction.
 - **Import batches hold the boundary briefly.**
   - Each batch runs a bounded number of set-based statements, not several per row.
   - Each hold is bounded by time and ends early for a waiting interactive writer.
@@ -36,20 +35,19 @@ None.
 
 ### Modified Capabilities
 
-- `records`: non-null required values and natural keys; full-source import preview; honest import counts; edit and retraction by row id; filtered queries bounded by the page; short import holds, available status and progress; a recorded load target.
+- `records`: non-null required values and natural keys; a budgeted import preview over the source; honest import counts; edit by row id; filtered queries bounded by the page; short import holds, available status and progress; a recorded load target.
 
 ## Impact
 
 - **Code:**
   - `records.py` and `structured_collections.py` (validation and keys);
   - `collection_store/importer.py` (preview, counts, status, progress);
-  - `collection_store/writer.py`, `history.py`, `typed_storage.py` and `native_metadata.py` (set-based batch statements, retraction);
+  - `collection_store/writer.py`, `history.py`, `typed_storage.py` and `native_metadata.py` (set-based batch statements);
   - `collection_refs.py` and `record_memory.py` (bind by id);
   - `record_formats.py`, `collection_store/governance.py` and `record_governance.py` (query path);
-  - `collection_store/schema.py` (a migration that admits the `retract` effect).
-- **Stored data:** no existing row changes. A migration widens the `audit_effects.effect` check to admit `retract`. A row already stored with a `null` key part stays readable and can be retracted.
+- **Stored data:** no existing row changes, and the store schema does not change. A row already stored with a `null` key part stays readable. Its governed retraction moves to the change `add-records-retraction`.
 - **Tools:**
-  - `edit_record` keeps its arguments, and `record_memory` gains `action: "retract"`.
+  - `edit_record` keeps its arguments.
   - `query_records` keeps its arguments and its continuation form.
   - Import status and preview gain fields; existing fields keep their meaning, except that `duplicates` becomes the sum of its two new parts.
-- **Rollback:** each delivery reverts on its own. The schema migration is additive.
+- **Rollback:** each delivery reverts on its own. The change has no store schema change, so reverting a release is safe.
