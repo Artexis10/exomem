@@ -618,7 +618,7 @@ class MediaWorker:
         # A store outage leaves its generation pending while extraction continues.
         if job.do_offload:
             try:
-                media_store.offload(self._vault_root, job.binary_path, batch=self._offload_batch)
+                media_store.offload(self._vault_root, job.binary_path, batch=self._offload_batch, job=job)
             except (media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, OSError) as error:
                 offload_error = error
             else:
@@ -636,7 +636,7 @@ class MediaWorker:
             # The read pin spans all processing, including child result capture.
             # Re-embedding reads only the sidecar and needs no original bytes.
             if job.do_ocr or job.do_clip:
-                original = (media_store.open_original(self._vault_root, job.binary_path)
+                original = (media_store.open_original(self._vault_root, job.binary_path, job=job)
                             if originals.binding_for(self._vault_root) is not None else contextlib.nullcontext())
                 with contextlib.ExitStack() as held:
                     try:

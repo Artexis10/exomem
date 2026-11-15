@@ -517,12 +517,6 @@ def rebuild(vault: Path) -> bool:
     return False
 
 
-def capture_pin(conn: sqlite3.Connection, binary_rel: str) -> str | None:
-    """Resolve one pin through the index; NULL means a legacy pin still needs recovery."""
-    row = conn.execute("SELECT object_key FROM media_bindings WHERE binary_rel = ?", (binary_rel,)).fetchone()
-    return None if row is None else row[0]
-
-
 def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
     """Aggregate one object's bindings and captured pins with indexed ledger reads."""
     state = checkpoint(conn)

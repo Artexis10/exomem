@@ -458,12 +458,15 @@ def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None 
 
 
 def _bind_pin(store: MediaJobStore, token: str, snapshot: OriginalSnapshot,
-              source: reserved_paths.GenericBinarySource) -> None:
+              source: reserved_paths.GenericBinarySource, *, job: MediaJob | None = None) -> None:
     """Narrow an unresolved pin only while the caller holds the acquired original."""
     from . import media_bindings
 
     source.require_current()
     key = media_bindings.snapshot_key(store.vault_root, snapshot)
+    if job is not None and not store.bind_original(job, key):
+        # A stale claim or changed acquired object cannot process replacement bytes.
+        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the job no longer owns these original bytes")
     with closing(store._connect()) as conn, conn:
         conn.execute("UPDATE media_access SET object_key = ?, object_identity = ?, object_sha256 = ? "
                      "WHERE token = ? AND object_key IS NULL",
@@ -566,7 +569,9 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             raise
 
 
-def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:
+def _status_candidates(vault: Path, table: str,
+                       query: str | Callable[[sqlite3.Connection], tuple[str, tuple[object, ...]]],
+                       parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:
     # These sources and states belong to this fixed status protocol; neither is vault vocabulary.
     coverage: dict[str, object] = {
         "source": table, "limit": STATUS_JOB_LIMIT, "coverage": "partial", "total": None,
@@ -580,6 +585,8 @@ def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[ob
         try:
             if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = ? AND type = 'table'", (table,)).fetchone() is None:
                 return [], {**coverage, "state": "unavailable"}
+            if callable(query):
+                query, parameters = query(conn)
             return conn.execute(query, (*parameters, STATUS_JOB_LIMIT)).fetchall(), coverage
         finally:
             conn.close()
@@ -623,11 +630,29 @@ def _processing_status_row(vault: Path, path: str | Path) -> dict[str, object]:
         return _unavailable_original(relative)
 
 
+def _logical_cache_members(vault: Path, conn) -> tuple[str, tuple[object, ...]]:
+    """Expand physical cache rows to filings, retaining each filing's own recovery reference."""
+    from . import original_pool
+
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone():
+        return "SELECT binary_rel, reference, sha256, size FROM media_cache ORDER BY binary_rel", ()
+    prefix = original_pool.pool_root(vault).relative_to(vault).as_posix() + "/"
+    return ("SELECT COALESCE(b.binary_rel, c.binary_rel) AS binary_rel, "
+            "CASE WHEN b.binary_rel IS NULL THEN c.reference ELSE b.reference END AS reference, "
+            "COALESCE(b.sha256, c.sha256) AS sha256, COALESCE(b.size, c.size) AS size "
+            "FROM media_cache c LEFT JOIN media_bindings b ON b.object_key = c.binary_rel "
+            "WHERE b.binary_rel IS NOT NULL OR substr(c.binary_rel, 1, length(?)) != ? "
+            "ORDER BY c.binary_rel, b.binary_rel", (prefix, prefix))
+
+
 def processing_status(vault: Path, *, path: str | None = None) -> tuple[list[dict[str, object]], dict[str, object]]:
     if path is not None:
         return [_processing_status_row(vault, path)], {"source": "sidecar", "coverage": "exact-path"}
-    candidates, coverage = _status_candidates(vault, "media_cache",
-        "SELECT binary_rel FROM media_cache ORDER BY binary_rel LIMIT ?")
+    def query(conn):
+        members, parameters = _logical_cache_members(vault, conn)
+        return members + " LIMIT ?", parameters
+
+    candidates, coverage = _status_candidates(vault, "media_cache", query)
     rows = [_processing_status_row(vault, row["binary_rel"]) for row in candidates]
     return [row for row in rows if row["state"] in {"stored", "unavailable"}], coverage
 
@@ -1183,7 +1208,8 @@ def _no_census() -> None:
     return None
 
 
-def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> StoredObject | None:
+def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None,
+            job: MediaJob | None = None) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
 
     None means that the original stays local: notes and datasets are never
@@ -1193,14 +1219,15 @@ def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> St
     if batch is not None:
         batch.begin()
     try:
-        return _offload_member(Path(vault).resolve(), path, batch)
+        return _offload_member(Path(vault).resolve(), path, batch, job=job)
     except BaseException:
         if batch is not None:
             batch.failed()
         raise
 
 
-def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> StoredObject | None:
+def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
+                    job: MediaJob | None = None) -> StoredObject | None:
     config = _settings(vault)
     if config.get("enabled") is not True:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
@@ -1221,8 +1248,10 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             head = _verified_head(backend, snapshot.reference)
             if head is not None and not head.condemned:
                 with ExitStack() as stack:
-                    source = (stack.enter_context(reserved_paths.open_generic_binary(vault, ledger._relative(path)))
+                    source = (stack.enter_context(_open_local_original(vault, ledger._relative(path), snapshot))
                               if snapshot.state == "cached" else None)
+                    if source is not None:
+                        _bind_pin(ledger, token, snapshot, source, job=job)
                     if source is not None and _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
                     def confirm() -> None:
@@ -1263,7 +1292,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
         key_version = str(config["key_version"])
         if reuse is not None and not _confirmed(backend, reuse.reference):
             reuse = None
-        with reserved_paths.open_generic_binary(vault, path.relative_to(vault).as_posix()) as source:
+        with _open_local_original(vault, path.relative_to(vault).as_posix(), snapshot) as source:
+            _bind_pin(ledger, token, snapshot, source, job=job)
             if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                 raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
             source.stream.seek(0)
@@ -1507,14 +1537,15 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
     with closing(ledger._connect(readonly=True)) as conn:
         # Every row, not only the marked ones: a row whose bytes went missing before a census marked it
         # still names the version that the store holds.
-        rows = conn.execute("SELECT binary_rel, reference, sha256, size FROM media_cache ORDER BY binary_rel").fetchall()
+        members, parameters = _logical_cache_members(vault, conn)
+        rows = conn.execute(members, parameters).fetchall()
     for relative, key, sha256, size in rows:
         if relative in counted or _on_volume(vault, relative) or not any(
                 companion in unreadable for companion, _data in originals.companion_candidates(vault, relative)):
             continue
         try:
             reference = originals.stored_reference(json.loads(key))
-        except ValueError:
+        except (ValueError, TypeError):
             reference = None
         if (reference is None or reference.store != binding.store or not isinstance(size, int) or size < 0
                 or not originals.is_sha256(sha256)):
@@ -1631,7 +1662,8 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
 
 
 @contextmanager
-def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False):
+def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False,
+                  job: MediaJob | None = None):
     """Pin before resolution; retain verified bytes through the caller's read.
 
     `read` marks an owner's playback or viewing; processing and imports record no read.
@@ -1652,6 +1684,10 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
                 if snapshot.local_path is None:
                     raise error
             else:
+                if job is not None:
+                    source.require_current()
+                    if not MediaJobStore(vault).bind_original(job, relative):
+                        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the job no longer owns these original bytes")
                 yield source
                 return
     with _pin(vault, target, read=read) as (ledger, token):
@@ -1660,7 +1696,7 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
             _hydrate(vault, snapshot, ledger, token)
             snapshot = original_state(vault, target)
         with _open_local_original(vault, relative, snapshot, physical=physical) as source:
-            _bind_pin(ledger, token, snapshot, source)
+            _bind_pin(ledger, token, snapshot, source, job=job)
             if snapshot.reference is not None and not cache_matches(vault, target, snapshot=snapshot):
                 if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                     raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the cached original differs")
@@ -1748,6 +1784,18 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
                     or original_state(vault, path) != snapshot):
                 conn.rollback()
                 return False
+            binding = conn.execute("SELECT object_key FROM media_bindings WHERE binary_rel = ?", (relative,)).fetchone()
+            if binding is not None and binding[0] != relative:
+                from . import media_bindings
+
+                # A representative filing cannot retire its siblings' shared cache proof.
+                if snapshot.state != "evicted" or not media_bindings.current(vault, conn):
+                    conn.rollback()
+                    return False
+                conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ? AND sha256 = ?",
+                             (binding[0], snapshot.binary_sha256))
+                conn.commit()
+                return True
             if snapshot.state == "evicted":
                 # The flag orders the claims of the original's jobs (D3, M4).
                 conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
@@ -1893,29 +1941,84 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
 DEMAND_LEASE_SECONDS = 15 * 60
 # Each read takes at most this many candidates, so a pass never loads the whole cache at once.
 _EVICTION_BATCH = 64
-_ELIGIBLE = (
-    "FROM media_cache WHERE evicted = 0 AND size IS NOT NULL AND size <= :hydration "
-    "AND (owner_read IS NULL OR owner_read <= :idle_before) "
-    "AND NOT EXISTS (SELECT 1 FROM media_access WHERE media_access.binary_rel = media_cache.binary_rel) "
-    f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel AND {_JOB_PINS})"
-)
 # Unread originals first, those with no pending job before those with one, each largest first;
 # then owner-read originals, largest first and longest idle on ties (D3, M4). The path makes the
 # order total, so a pass reads past the candidates it keeps by their count.
-_EVICTION_ORDER = (
-    "ORDER BY owner_read IS NOT NULL, "
-    "CASE WHEN owner_read IS NULL THEN EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel "
-    "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read, binary_rel"
-)
+def _cache_selection(vault: Path, conn, parameters: dict[str, object]) -> tuple[str, str, dict[str, object]]:
+    """Select physical candidates without treating unknown or resident shared bytes as reclaimable room."""
+    from . import media_bindings, original_pool
+
+    physical = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone()
+    access = "media_access.binary_rel = media_cache.binary_rel"
+    jobs = "jobs.binary_rel = media_cache.binary_rel"
+    pending = jobs
+    lifetime = ""
+    if physical:
+        pooled = "substr(media_cache.binary_rel, 1, length(:pool_prefix)) = :pool_prefix"
+        access = ("media_access.object_key = media_cache.binary_rel OR media_access.object_key IS NULL "
+                  f"AND (media_access.binary_rel = media_cache.binary_rel OR {pooled})")
+        jobs = ("jobs.object_key = media_cache.binary_rel OR jobs.object_key IS NULL "
+                f"AND (jobs.binary_rel = media_cache.binary_rel OR {pooled})")
+        pending = ("jobs.binary_rel = media_cache.binary_rel OR jobs.binary_rel IN "
+                   "(SELECT binary_rel FROM media_bindings WHERE object_key = media_cache.binary_rel)")
+        lifetime = (f" AND (NOT ({pooled}) OR (:bindings_current AND "
+                    "EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = media_cache.binary_rel) AND "
+                    "NOT EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = media_cache.binary_rel "
+                    "AND (b.resident_only = 1 OR b.reference IS NULL OR b.sha256 != media_cache.sha256 "
+                    "OR b.size != media_cache.size))))")
+        parameters = {**parameters, "pool_prefix": original_pool.pool_root(vault).relative_to(vault).as_posix() + "/",
+                      "bindings_current": media_bindings.current(vault, conn)}
+    eligible = ("FROM media_cache WHERE evicted = 0 AND size IS NOT NULL AND size <= :hydration "
+                "AND (owner_read IS NULL OR owner_read <= :idle_before) "
+                f"AND NOT EXISTS (SELECT 1 FROM media_access WHERE ({access})) "
+                f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE ({jobs}) AND {_JOB_PINS})" + lifetime)
+    order = ("ORDER BY owner_read IS NOT NULL, "
+             f"CASE WHEN owner_read IS NULL THEN EXISTS (SELECT 1 FROM jobs WHERE ({pending}) "
+             "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read, binary_rel")
+    return eligible, order, parameters
 
 
-# An offload job that no claimed, unfinished job pins; a pinned original is counted as job-pinned instead.
-_UNPINNED_OFFLOAD = (
-    "SELECT DISTINCT offload.binary_rel FROM jobs AS offload WHERE offload.media_type = :offload "
-    "AND offload.do_offload = 1 AND offload.state IN ('pending', 'running') "
-    f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = offload.binary_rel AND {_JOB_PINS})"
-)
-_PINNED_ORIGINALS = f"SELECT DISTINCT jobs.binary_rel FROM jobs WHERE {_JOB_PINS}"
+def _occupancy_paths(vault: Path, conn, *, pinned: bool):
+    """Count each physical job input once, keeping pending, cached and pinned bytes disjoint."""
+    from . import media_bindings, original_pool
+
+    physical = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone()
+    key, join = "jobs.binary_rel", ""
+    parameters = {"offload": OFFLOAD_MEDIA_TYPE}
+    if physical:
+        key = ("COALESCE(jobs.object_key, b.object_key, jobs.binary_rel)" if pinned else
+               "COALESCE(b.object_key, jobs.binary_rel)")
+        join = " LEFT JOIN media_bindings b ON b.binary_rel = jobs.binary_rel"
+        parameters.update(pool_prefix=original_pool.pool_root(vault).relative_to(vault).as_posix() + "/",
+                          bindings_current=media_bindings.current(vault, conn))
+    where = (_JOB_PINS if pinned else
+             "jobs.media_type = :offload AND jobs.do_offload = 1 AND jobs.state IN ('pending', 'running')")
+    query = f"SELECT {key} AS object_key FROM jobs{join} WHERE {where}"
+    if physical and pinned:
+        # An unresolved claimed pin conservatively retains every pooled object until acquisition.
+        query += (" UNION SELECT object_key FROM media_bindings WHERE EXISTS "
+                  f"(SELECT 1 FROM jobs WHERE {_JOB_PINS} AND object_key IS NULL)")
+    if physical:
+        pool = "substr(inputs.object_key, 1, length(:pool_prefix)) = :pool_prefix"
+        retained = (f" AND (NOT ({pool}) OR (:bindings_current AND "
+                    "EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = inputs.object_key) "
+                    "AND NOT EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = inputs.object_key "
+                    "AND b.resident_only = 1)))")
+        pin = ("jobs.object_key = inputs.object_key OR jobs.object_key IS NULL "
+               f"AND (jobs.binary_rel = inputs.object_key OR {pool})")
+    else:
+        retained, pin = "", "jobs.binary_rel = inputs.object_key"
+    if not pinned:
+        retained += f" AND NOT EXISTS (SELECT 1 FROM jobs WHERE ({pin}) AND {_JOB_PINS})"
+        if physical:
+            retained += (" AND NOT EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = inputs.object_key "
+                         "AND b.reference IS NULL AND NOT EXISTS (SELECT 1 FROM jobs j "
+                         "WHERE j.binary_rel = b.binary_rel AND j.do_offload = 1 AND j.state IN ('pending', 'running')))")
+        # A confirmed cached copy already belongs to the cache figure, even if an offload retry remains.
+        retained += (" AND NOT EXISTS (SELECT 1 FROM media_cache c WHERE c.binary_rel = inputs.object_key "
+                     "AND c.evicted = 0)")
+    return (row[0] for row in conn.execute(
+        f"WITH inputs AS ({query}) SELECT DISTINCT inputs.object_key FROM inputs WHERE 1{retained}", parameters))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1960,12 +2063,13 @@ def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_secon
         with closing(ledger._connect(readonly=True)) as conn:
             evictable = 0
             if eviction_idle_seconds is not None:
+                eligible, _order, parameters = _cache_selection(vault, conn,
+                    {"hydration": bounds.hydration_bytes, "idle_before": time.time() - eviction_idle_seconds})
                 evictable = int(conn.execute(
-                    "SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE,
-                    {"hydration": bounds.hydration_bytes, "idle_before": time.time() - eviction_idle_seconds},
+                    "SELECT COALESCE(SUM(size), 0) " + eligible, parameters,
                 ).fetchone()[0])
-            pending = _volume_bytes(vault, (row[0] for row in conn.execute(_UNPINNED_OFFLOAD, {"offload": OFFLOAD_MEDIA_TYPE})), largest)
-            pinned = _volume_bytes(vault, (row[0] for row in conn.execute(_PINNED_ORIGINALS)), largest)[1]
+            pending = _volume_bytes(vault, _occupancy_paths(vault, conn, pinned=False), largest)
+            pinned = _volume_bytes(vault, _occupancy_paths(vault, conn, pinned=True), largest)[1]
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     return Occupancy(evictable, pending[0], pending[1], pinned)
@@ -2133,9 +2237,13 @@ def _refresh_candidates(ledger: MediaJobStore) -> None:
 def _candidates(ledger: MediaJobStore, parameters: dict[str, object], offset: int) -> list[tuple[str, int]]:
     conn = ledger._connect()
     try:
-        rows = conn.execute("SELECT binary_rel, size " + _ELIGIBLE + " " + _EVICTION_ORDER + " LIMIT :batch OFFSET :offset",
+        eligible, order, parameters = _cache_selection(ledger.vault_root, conn, parameters)
+        # The physical row owns age and size; an indexed representative supplies the logical access path.
+        rows = conn.execute("SELECT COALESCE((SELECT b.binary_rel FROM media_bindings b "
+                            "WHERE b.object_key = media_cache.binary_rel ORDER BY b.binary_rel LIMIT 1), binary_rel) "
+                            "AS logical_rel, size " + eligible + " " + order + " LIMIT :batch OFFSET :offset",
                             {**parameters, "batch": _EVICTION_BATCH, "offset": offset}).fetchall()
-        return [(row["binary_rel"], int(row["size"])) for row in rows]
+        return [(row["logical_rel"], int(row["size"])) for row in rows]
     finally:
         conn.close()
 
@@ -2148,7 +2256,8 @@ def _room_covers(vault: Path, ledger: MediaJobStore, parameters: dict[str, objec
     """
     conn = ledger._connect()
     try:
-        if conn.execute("SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE, parameters).fetchone()[0] < shortfall:
+        eligible, _order, parameters = _cache_selection(vault, conn, parameters)
+        if conn.execute("SELECT COALESCE(SUM(size), 0) " + eligible, parameters).fetchone()[0] < shortfall:
             return False
     finally:
         conn.close()

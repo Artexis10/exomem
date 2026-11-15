@@ -14,6 +14,7 @@ from exomem import (
     artifact_lifecycle,
     held_fs,
     media_bindings,
+    media_capacity,
     media_jobs,
     media_store,
     original_pool,
@@ -60,13 +61,45 @@ def test_a_shared_object_evicts_only_after_every_filing_has_recovery_and_every_r
         assert [tuple(row) for row in rows] == [(original_pool.object_path(vault, digest).relative_to(vault).as_posix(), len(content))]
     if all_recoverable:
         assert all(media_store.cache_matches(vault, vault / item.path) for item in (first, second))
+    bounds = media_capacity.bounds_for(originals.configuration(vault), vault)
+    assert bounds is not None
+    ledger = media_jobs.MediaJobStore(vault)
+    with closing(ledger._connect(readonly=True)) as conn:
+        members, parameters = media_store._logical_cache_members(vault, conn)
+        references = {row["binary_rel"]: row["reference"] for row in conn.execute(members, parameters)}
+    assert set(references) == {first.path, second.path}
+    assert references[first.path] is not None
+    assert (references[second.path] is not None) is all_recoverable
+    figures = media_store.occupancy(vault, bounds, eviction_idle_seconds=0)
+    assert figures.evictable_bytes == (len(content) if all_recoverable else 0)
+    candidates = media_store._candidates(ledger, {"hydration": bounds.hydration_bytes, "idle_before": float("inf")}, 0)
+    assert candidates == ([(min(first.path, second.path), len(content))] if all_recoverable else [])
+    job = None
+    if all_recoverable:
+        ledger.enqueue(media_jobs.MediaJob(vault / second.path, vault / second.sidecar_path, "text"))
+        assert media_store.occupancy(vault, bounds, eviction_idle_seconds=0).evictable_bytes == len(content)
+        job = ledger.claim_next()
+        assert job is not None
+        figures = media_store.occupancy(vault, bounds, eviction_idle_seconds=0)
+        assert figures.evictable_bytes == 0 and figures.pinned_bytes == len(content)
+        with media_store.open_original(vault, second.path, job=job):
+            pass
+        assert ledger.defer(job)
+        assert media_store.occupancy(vault, bounds, eviction_idle_seconds=0).pinned_bytes == len(content)
+        job = ledger.claim_next()
+        assert job is not None
+        ledger.complete(job)
     with media_store.open_original(vault, second.path) as source:
+        assert media_store.occupancy(vault, bounds, eviction_idle_seconds=0).evictable_bytes == 0
         assert not media_store.evict(vault, vault / first.path)
         assert source.stream.read() == content
     if all_recoverable:
         assert media_store.evict(vault, vault / first.path)
         assert not original_pool.object_path(vault, digest).exists()
         assert all(originals.original_state(vault, item.path).state == "evicted" for item in (first, second))
+        rows, coverage = media_store.processing_status(vault)
+        assert coverage["coverage"] == "partial" and coverage["state"] == "available"
+        assert {row["path"] for row in rows} == {first.path, second.path}
     else:
         assert not media_store.evict(vault, vault / first.path)
         assert original_pool.object_path(vault, digest).read_bytes() == content
@@ -128,8 +161,9 @@ def test_a_new_filing_retains_the_shared_object_during_verification_and_until_co
     assert not target.exists()
 
 
+@pytest.mark.parametrize("claimed_job", [False, True])
 def test_rebinding_after_read_admission_pins_and_ages_the_bytes_actually_acquired(
-    vault, selected_store, monkeypatch,  # noqa: F811
+    vault, selected_store, monkeypatch, claimed_job,  # noqa: F811
 ):
     """A stale admission key must not leave replacement bytes evictable or age another physical object."""
     first_bytes, second_bytes = b"the first original", b"the replacement original with its own filing"
@@ -154,6 +188,13 @@ def test_rebinding_after_read_admission_pins_and_ages_the_bytes_actually_acquire
         with media_store.open_original(vault, filing.path) as source:
             source.require_current()
     ledger = media_jobs.MediaJobStore(vault)
+    job = None
+    if claimed_job:
+        ledger.enqueue(media_jobs.MediaJob(vault / filings[0].path, vault / filings[0].sidecar_path, "text"))
+        job = ledger.claim_next()
+        assert job is not None
+        with closing(ledger._connect(readonly=True)) as conn:
+            assert conn.execute("SELECT object_key FROM jobs WHERE id = ?", (job.id,)).fetchone()[0] is None
     with closing(ledger._connect()) as conn, conn:
         conn.executemany("UPDATE media_cache SET owner_read = ? WHERE binary_rel = ?", ((1.0, keys[0]), (2.0, keys[1])))
     first, second = filings
@@ -180,7 +221,7 @@ def test_rebinding_after_read_admission_pins_and_ages_the_bytes_actually_acquire
             yield pin
 
     monkeypatch.setattr(media_store, "_pin", rebind_after_admission)
-    with media_store.open_original(vault, first.path, read=True) as source:
+    with media_store.open_original(vault, first.path, read=True, job=job) as source:
         assert media_bindings.rebuild(vault)
         assert not media_store.evict(vault, vault / second.path)
         assert source.stream.read() == second_bytes
@@ -188,4 +229,14 @@ def test_rebinding_after_read_admission_pins_and_ages_the_bytes_actually_acquire
     with closing(ledger._connect(readonly=True)) as conn:
         ages = dict(conn.execute("SELECT binary_rel, owner_read FROM media_cache"))
     assert ages[keys[0]] == 1.0 and ages[keys[1]] > 2.0
+    if job is not None:
+        assert not media_store.evict(vault, vault / second.path)
+        assert ledger.defer(job)
+        reclaimed = ledger.claim_next()
+        assert reclaimed is not None and reclaimed.claim_revision != job.claim_revision
+        assert not ledger.bind_original(job, keys[0])  # The former worker cannot change the new claim.
+        assert not ledger.bind_original(reclaimed, keys[0])  # A slice cannot move an acquired pin.
+        with media_store.open_original(vault, first.path, job=reclaimed) as source:
+            assert source.stream.read() == second_bytes
+        ledger.complete(reclaimed)
     assert media_store.evict(vault, vault / second.path)

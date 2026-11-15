@@ -620,7 +620,7 @@ _FRESH = "NOT EXISTS (SELECT 1 FROM speech_progress WHERE speech_progress.job_id
 # The cache flag only orders the claim; the hydration itself reads the original's real state.
 # A pinned job's original stayed on the volume, so it never needs a hydration.
 _NEEDS_HYDRATION = (
-    "(pinned = 0 AND EXISTS (SELECT 1 FROM media_cache WHERE media_cache.binary_rel = jobs.binary_rel "
+    "(pinned = 0 AND EXISTS (SELECT 1 FROM media_cache WHERE media_cache.binary_rel = {key} "
     "AND media_cache.evicted = 1))"
 )
 # Claimed but unfinished jobs whose original the worker hydrated at the claim.
@@ -654,9 +654,13 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, m
     if not migrated:
         claimable, needs_hydration, groups, parameters = "state = 'pending'", "0", [_FRESH, "1"], skipped
     else:
+        physical = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone()
+        key = ("COALESCE((SELECT object_key FROM media_bindings WHERE binary_rel = jobs.binary_rel), jobs.binary_rel)"
+               if physical else "jobs.binary_rel")
+        hydration = _NEEDS_HYDRATION.format(key=key)
         # Placeholders bind in text order: the retry time in `_CLAIMABLE`, then the skipped media types.
-        claimable, needs_hydration, parameters = _CLAIMABLE, _NEEDS_HYDRATION, (time.time(), *skipped)
-        groups = ["do_offload = 1", f"NOT {_NEEDS_HYDRATION} AND {_FRESH}", f"NOT {_NEEDS_HYDRATION}"]
+        claimable, needs_hydration, parameters = _CLAIMABLE, hydration, (time.time(), *skipped)
+        groups = ["do_offload = 1", f"NOT {hydration} AND {_FRESH}", f"NOT {hydration}"]
         if max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations:
             groups += [_FRESH, "1"]
     for group in groups:
@@ -1359,9 +1363,6 @@ class MediaJobStore:
                 conn.commit()
                 return None
             now = time.time()
-            from . import media_bindings
-
-            captured = media_bindings.capture_pin(conn, row["binary_rel"])
             # A job that stays pinned across a slice keeps the flag from its first claim.
             changed = conn.execute(
                 """
@@ -1369,11 +1370,11 @@ class MediaJobStore:
                 SET state = 'running', attempts = attempts + 1,
                     claim_revision = claim_revision + 1,
                     hydrated = CASE WHEN pinned = 1 THEN hydrated ELSE ? END, pinned = 1,
-                    object_key = CASE WHEN pinned = 1 THEN object_key ELSE ? END,
+                    object_key = CASE WHEN pinned = 1 THEN object_key ELSE NULL END,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
-                (int(row["needs_hydration"]), captured, now, row["id"]),
+                (int(row["needs_hydration"]), now, row["id"]),
             ).rowcount
             conn.commit()
             if changed != 1:
@@ -1389,6 +1390,21 @@ class MediaJobStore:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def bind_original(self, job: MediaJob, object_key: str) -> bool:
+        """Bind a current claim to its first acquired bytes, retaining that key across slices."""
+        if job.id is None:
+            return True  # In-memory jobs have no durable claim to narrow.
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET object_key = ? WHERE id = ? AND claim_revision = ? "
+                    "AND state = 'running' AND pinned = 1 AND (object_key IS NULL OR object_key = ?)",
+                    (object_key, job.id, job.claim_revision, object_key),
+                ).rowcount == 1
         finally:
             conn.close()
 

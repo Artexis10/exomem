@@ -177,8 +177,10 @@ def test_claimed_job_and_read_pin_keep_the_object_they_acquired_after_a_binding_
     ledger.enqueue(media_jobs.MediaJob(vault / item.path, vault / item.sidecar_path, "text", do_ocr=True))
     job = ledger.claim_next()
     assert job is not None
+    with closing(ledger._connect(readonly=True)) as conn:
+        assert conn.execute("SELECT object_key FROM jobs WHERE id = ?", (job.id,)).fetchone()[0] is None
     with media_store._pin(vault, vault / item.path) as (_ledger, token), media_store.open_original(vault, item.path) as source:
-        media_store._bind_pin(ledger, token, originals.original_state(vault, item.path), source)
+        media_store._bind_pin(ledger, token, originals.original_state(vault, item.path), source, job=job)
         before = media_bindings.withdraw(vault)
         replacement = replace(binding, object_key="Knowledge Base/Evidence/replacement.bin")
         assert media_bindings.apply_delta(vault, (item.sidecar_path,), (replacement,), expected=before)
