@@ -601,12 +601,15 @@ def test_cloud_ready_route_gates_on_retrieval_admission(
         warming, ready = asyncio.run(scenario())
         assert warming.status_code == 503, warming.text
         assert warming.json()["status"] == "not_ready"
-        assert warming.json()["retrieval"] == {"state": "warming", "admitted": False}
+        assert warming.json()["retrieval"]["state"] == "warming"
+        assert warming.json()["retrieval"]["admitted"] is False
         assert str(vault) not in warming.text
 
         assert ready.status_code == 200, ready.text
         assert ready.json()["status"] == "ready"
-        assert ready.json()["retrieval"] == {"state": "ready", "admitted": True}
+        assert ready.json()["retrieval"]["state"] == "ready"
+        assert ready.json()["retrieval"]["admitted"] is True
+        assert ready.json()["retrieval"]["repair"]["phase"] == "idle"
         assert str(vault) not in ready.text
     finally:
         _teardown_activation(mcp)

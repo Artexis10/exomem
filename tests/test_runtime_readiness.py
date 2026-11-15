@@ -402,6 +402,15 @@ def test_runtime_readiness_measures_the_configured_vault(
         "retrieval_admission",
         lambda _vault_root=None: {"state": "unavailable", "admitted": False},
     )
+    # An adopted catalogue can serve before this worker schedules any repair.
+    snapshot = readiness_module.runtime_readiness(mcp_tool_surface_sha256="f" * 64)
+    assert snapshot["retrieval"]["repair"] == {
+        "phase": "idle",
+        "age_seconds": 0.0,
+        "last_duration_seconds": None,
+        "last_result": None,
+    }
+    observed.clear()
     monkeypatch.setattr(
         lexstore,
         "repair_progress",

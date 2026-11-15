@@ -20,6 +20,12 @@ def is_dir(root: Path, rel: str) -> bool:
     return (root / rel).is_dir()
 
 
+def stored_children(root: Path, rel: str) -> dict[str, Entry]:
+    """A folder's stored children by name, its pages and the folders that hold pages, read in one
+    statement."""
+    return Reader(root)._stored_entries(rel, None)
+
+
 @dataclass(frozen=True)
 class Entry:
     """A directory child, with stored metadata or its original filesystem entry."""
@@ -80,6 +86,8 @@ class Reader:
         # Each recursive step seeks past the previous child's subtree through the primary key.
         # LIMIT bounds the names visited, even when one child contains the whole vault.
         # The final join uses the covering metadata index, keeping large body overflow off this read.
+        # CROSS JOIN keeps the children as the outer loop, so each child seeks its metadata row by
+        # path; joined the other way, the read scans the metadata of every page in the vault.
         sql = """
             WITH RECURSIVE children(path, tail) AS (
                 SELECT path, substr(path, :start) FROM (
@@ -98,7 +106,7 @@ class Reader:
                 LIMIT :limit
             )
             SELECT children.tail, p.path, p.revision, p.sha256, p.size, p.mtime_ns, p.frontmatter_json
-            FROM children JOIN store_pages AS p INDEXED BY store_pages_meta ON p.path = children.path
+            FROM children CROSS JOIN store_pages AS p INDEXED BY store_pages_meta ON p.path = children.path
         """
         found = {}
         with read.snapshot(self.root) as view:

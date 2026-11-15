@@ -1861,7 +1861,8 @@ def test_a_family_addition_survives_the_compact_terminal(
 
 
 @pytest.mark.usefixtures("duplicate_index")
-def test_a_withheld_copy_reads_as_absent_to_a_restricted_caller(vault: Path) -> None:
+@pytest.mark.parametrize("legacy", [False, True])
+def test_a_withheld_copy_reads_as_absent_to_a_restricted_caller(vault: Path, legacy: bool) -> None:
     """Reuse is not an existence oracle: a caller who cannot read the only copy is answered as in a vault without it."""
     from test_governance_egress import EXTERNAL, write_rule, write_scope
 
@@ -1870,13 +1871,24 @@ def test_a_withheld_copy_reads_as_absent_to_a_restricted_caller(vault: Path) -> 
     from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
 
     with library_scope():
-        stored = preserve.preserve(vault, scope="case", category="raw", filename="proof.txt", content="withheld bytes")
+        if legacy:
+            import hashlib
+
+            from duplicate_fixtures import index, legacy_evidence_filing
+
+            rel = legacy_evidence_filing(vault, b"withheld bytes")
+            digest = hashlib.sha256(b"withheld bytes").hexdigest()
+            index(vault, rel)
+        else:
+            stored = preserve.preserve(vault, scope="case", category="raw", filename="proof.txt", content="withheld bytes")
+            rel, digest = stored.sidecar_path, stored.hash
         owner_view = duplicates.find_duplicate(
-            vault, sha256=stored.hash, lane=duplicates.EVIDENCE, protected=False
+            vault, sha256=digest, lane=duplicates.EVIDENCE, protected=False
         )
         assert owner_view.hit is not None
+        assert owner_view.hit.path == rel
         readable = preserve.preserve(vault, scope="open", category="raw", filename="open.txt", content="readable bytes")
-    page = vault / stored.sidecar_path
+    page = vault / rel
     before = page.read_bytes()
     write_scope(vault, paths="Evidence/case/**", name="Case evidence")
     write_rule(vault, ceiling=egress.LEVEL_NONE)
@@ -1886,7 +1898,7 @@ def test_a_withheld_copy_reads_as_absent_to_a_restricted_caller(vault: Path) -> 
 
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         lookup = duplicates.find_duplicate(
-            vault, sha256=stored.hash, lane=duplicates.EVIDENCE, protected=False
+            vault, sha256=digest, lane=duplicates.EVIDENCE, protected=False
         )
 
         control = duplicates.find_duplicate(

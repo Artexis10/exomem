@@ -274,7 +274,10 @@ def test_builds_and_unpacks_every_public_contract_distribution(
 
     # Wheel and sdist include the generic scaffold and runtime contract source.
     build_source = tmp_path / "build-source"
-    shutil.copytree(REPO_ROOT / "src", build_source / "src")
+    # CPython replaces cache files while parallel test workers import; they are not build inputs.
+    shutil.copytree(
+        REPO_ROOT / "src", build_source / "src", ignore=shutil.ignore_patterns("__pycache__")
+    )
     sample_kb = build_source / "src" / "exomem" / "_sample_vault" / "Knowledge Base"
     local_runtime_state = (
         sample_kb / ".refs.sqlite",

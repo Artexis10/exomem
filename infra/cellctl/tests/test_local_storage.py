@@ -480,17 +480,23 @@ def test_a_local_cells_quota_admits_the_clone_and_one_backup_job_beside_the_serv
 def test_the_backup_job_reads_the_clone_read_only_and_carries_no_node_selector() -> None:
     # D3: the clone's PV is pinned to the cell's node, so the Job follows it.
     from cellctl.manifests import (
+        SNAPSHOT_NAME,
         CellManifestSpec,
+        clone_claim_name,
         render_backup_job,
         render_clone_claim,
         render_volume_snapshot,
+        snapshot_backup_name,
     )
 
     spec = CellManifestSpec(cell_id="aaaaaaaaaaaaaaaa", image=IMAGE_A, replicas=1, read_only=False,
                             storage_class=LOCAL.class_name, local_volume=True, hold_kind="snapshot-backup",
                             hold_started_at=STARTED.isoformat())
-    snapshot = render_volume_snapshot(spec, snapshot_class=LOCAL.snapshot_class)
-    clone = render_clone_claim(spec, clone_class=LOCAL.clone_class)
+    snapshot_name = snapshot_backup_name(SNAPSHOT_NAME, spec.cell_id, spec.hold_started_at)
+    clone_name = clone_claim_name(snapshot_name)
+
+    snapshot = render_volume_snapshot(spec, snapshot_name=snapshot_name, snapshot_class=LOCAL.snapshot_class)
+    clone = render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=LOCAL.clone_class)
     job = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example", claim_name=clone["metadata"]["name"],
                             retention=None)
 

@@ -117,6 +117,12 @@ def build_reconcile_config() -> ReconcileConfig:
             if amount <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(**{unit: amount})
+    # automate-cloud-releases D4: required, like the readiness deadline. The
+    # chart renders cellctl.upgradeConcurrencyPerNode and bounds it; without
+    # it cellctl refuses to start rather than guess a rollout pace.
+    kwargs["upgrade_concurrency_per_node"] = _positive_integer_env("CELLCTL_UPGRADE_CONCURRENCY_PER_NODE")
+    # automate-cloud-releases D9: the chart's off switch for the prepare Job.
+    kwargs["upgrade_prepare_enabled"] = _required_env("CELLCTL_UPGRADE_PREPARE_ENABLED") == "true"
     kwargs["upgrade_window"] = build_upgrade_window(kwargs.get("backup_window", DEFAULT_BACKUP_WINDOW))
     # automate-cloud-releases D3: the chart's copy of the barrier file. An entry cellctl
     # cannot read stops it here, rather than letting an attempt cross it unseen.
