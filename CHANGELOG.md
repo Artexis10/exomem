@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.180.1](https://github.com/Artexis10/exomem/compare/v0.180.0...v0.180.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **readiness:** report idle before the first lexical repair ([#2827](https://github.com/Artexis10/exomem/issues/2827)) ([7a4d4f8](https://github.com/Artexis10/exomem/commit/7a4d4f8edcb5b0e8575dbc9019aaa15ea4a1d663))
+* **vault-store:** read stored pages in the maintenance scans and answer validation as the commit does ([#2811](https://github.com/Artexis10/exomem/issues/2811)) ([ca48e57](https://github.com/Artexis10/exomem/commit/ca48e5798e32a66ab8958a0f24de1e748214cf4a))
+
 ## [0.180.0](https://github.com/Artexis10/exomem/compare/v0.179.2...v0.180.0) (2026-11-15)
 
 
