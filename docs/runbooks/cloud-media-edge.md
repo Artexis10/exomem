@@ -96,10 +96,12 @@ the canary reads and writes media through the edge.
 
 The owner's download of one original (`exomem cloud download`, and ranged playback) has a
 separate switch: the cell must be in `cloudGateway.uploadCellIds` ("Configuration" in
-`cloud-upload-handoff.md`). Without it, `GET /download` answers Traefik's `404 page not found`.
-The first non-empty list restarts Traefik once, because the chart then requires its read timeout
-of at least `900s`. It also restarts the gateway, and every cell once in its own window, because
-cellctl then gives all cells the proof key.
+`cloud-upload-handoff.md`). While that list is empty, the chart renders no `/download` route,
+and `GET /download` answers Traefik's `404 page not found`. With `cloudIngress.enabled`, the chart
+refuses a non-empty list unless `traefik.ports.websecure.transport.respondingTimeouts.readTimeout`
+is at least `900s`. Raising it restarts Traefik once, a short edge outage. The first non-empty list
+also restarts the gateway and cellctl, and every cell once in its own window, because cellctl then
+gives all cells the proof key.
 
 Offload runs with the chart's default store policy. Eviction stays off until the operator sets all six keys
 below in `mediaEdge.storePolicy`. The chart sets none of them. The canary's target, margin and minimum idle age are set after two to four
@@ -339,18 +341,25 @@ it keeps its key bundle, its credential, its egress to the edge, its namespace l
 `"enabled":false`, so it offloads nothing more. Every evicted original stays readable,
 because the cell still hydrates it through the edge.
 
-A draining cell hydrates its evicted originals back onto its volume, smallest first, while
-each one fits below the growth threshold less `eviction_margin`. It waits until the owner's
-last read is `minimum_idle_seconds` old and yields to pending media jobs. An original above
-`max_temporary_bytes`, or one that does not fit, stays evicted and counted. The drain needs
-`eviction_enabled: true`, so keep the eviction keys in `mediaEdge.storePolicy` until the cell
-has drained. In the rehearsal on 2026-11-15, an evicted 40 MB original was back on the volume
-about two minutes after the cell restarted with its store off.
+A draining cell brings its evicted originals back only when all of them fit. The drain starts
+when the evicted bytes fit below the growth threshold (80% of the volume, set by cellctl) less
+`eviction_margin` times the volume. Until then the cell keeps evicting as a served cell does,
+and keeps its edge access. Once started, the drain hydrates the originals back, smallest first.
+It waits until the owner's last read is `minimum_idle_seconds` old and yields to pending media
+jobs. An original above `max_temporary_bytes` stays evicted, so the count stays above 0 and the
+cell keeps its edge access. The drain needs `eviction_enabled: true`, so keep the eviction keys in
+`mediaEdge.storePolicy` until the cell has drained.
+
+A cell whose evicted originals do not fit never drains by itself: grow its volume, or have the
+owner delete media. The owner's `inspect_memory` operation `media.status` shows the drain under
+`retained_store`: `shortfall` (the evicted bytes that do not fit), `drain_waiting` and
+`above_hydration_capacity`. In the rehearsal on 2026-11-15, an evicted 40 MB original on a
+10.4 GB volume was back within two minutes of the turn-off.
 
 cellctl removes the edge access only after a backup report that the cell captured after
 the turn-off shows no evicted original. The cell counts its evicted originals after the
-turn-off, and its next backup carries the count. In the rehearsal, the count was 0 one
-minute after the turn-off. The next backup ran when the cell's window opened, and the
+turn-off, and its next backup carries the count. In the rehearsal, the count was 0 within
+two minutes of the turn-off. The next backup ran when the cell's window opened, and the
 render after it removed the edge access.
 
 1. Remove the cell from `mediaEdge.cellIds` in the private values file. Keep

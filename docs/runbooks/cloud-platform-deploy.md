@@ -224,6 +224,10 @@ Give that pod what lets the cellctl pod reach the control database:
 - the same `nodeSelector` as the cellctl Deployment (`cellctl.nodeSelector`, a control-plane node in production);
 - the DSN from key `dsn` of Secret `exomem-cellctl-database-dsn` (`cellctl.databaseDsnSecretName`), in `CELLCTL_DATABASE_DSN`.
 
+Namespace `exomem-cloud` enforces the Pod Security `restricted` profile, so the pod also needs
+`runAsNonRoot`, the `RuntimeDefault` seccomp profile, `allowPrivilegeEscalation: false` and all
+capabilities dropped. A plain `kubectl run` is refused, and the refusal names the missing fields.
+
 ```bash
 : "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"
 : "${EXOMEM_UPGRADE_DIR:?set a private upgrade directory outside the repository}"
