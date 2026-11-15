@@ -38,9 +38,10 @@ from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import mode, projector, read, write
 
-#: The two folder-flush trials wrap the POSIX filesystem class and name each folder through /proc/self/fd.
+#: The folder-flush and parts-move trials wrap the POSIX filesystem class, which Windows lacks; the
+#: flush trials also name each folder through /proc/self/fd.
 posix_only_spy = pytest.mark.skipif(
-    sys.platform != "linux", reason="the spy names each flushed folder through /proc/self/fd"
+    sys.platform != "linux", reason="the spy wraps the Linux held filesystem"
 )
 
 NOTES = "Knowledge Base/Notes"
@@ -192,12 +193,14 @@ def test_a_grant_revoked_while_a_publication_stages_its_bytes_installs_nothing(
     assert temporaries(stored) == []
 
 
+@posix_only_spy
 def test_a_moved_pages_parts_follow_it_after_the_pass_that_moved_it_met_a_busy_boundary(
     stored, writer, projecting, monkeypatch
 ):
     """A projector that completes a move before it moves the page's parts: a busy boundary at the
     parts then leaves them at the old path with nothing queued to move them, and the moved page
     loses its extracted content for good."""
+    from exomem import _held_fs_posix
     from exomem.extraction_parts import folder_for
 
     commit(writer, **put(MOVE_FROM, b"# Drifter\n"))
