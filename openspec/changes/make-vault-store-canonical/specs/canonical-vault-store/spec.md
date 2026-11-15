@@ -81,7 +81,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **WHEN** the service stops cleanly with projection intents queued
 - **THEN** the projector works through the queue for a bounded time before the service releases the vault
 - **AND** an intent that it did not reach in that time stays queued, and the next start projects it
-- **AND** a service on an HTTP transport that its supervisor stops with SIGTERM does the same and hands back the writer lease; a SIGTERM before its startup completes ends it as before, and the stdio transport is unchanged
+- **AND** a service on an HTTP transport that its supervisor stops with SIGTERM does the same and hands back the writer lease, also when the SIGTERM arrives while its startup runs, once that startup has finished; the stdio transport is unchanged
 
 #### Scenario: Only a process that can record a projection writes it
 - **WHEN** a replica without the vault's writer lease runs a projector and projection intents are queued
