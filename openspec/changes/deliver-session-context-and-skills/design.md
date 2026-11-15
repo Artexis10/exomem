@@ -54,3 +54,31 @@ This is the third level of progressive disclosure: references stay one read away
 - A large vault of skills could exceed the catalogue bound. Whole items fit in name order and `omitted` reports the rest; the agent can still find omitted skills through task discovery.
 - A client that ignores continuity receives the catalogue on every turn. The bound caps that cost.
 - Adding a block to every maps response adds work: one indexed catalogue query for the skill rows and their admission checks, even when the caller already holds the block. The change proves recall latency before and after on the recall latency instrument; a per-caller cache waits for evidence that the query costs enough to need one.
+
+## Delivery on every turn
+
+### What the baseline showed
+
+A model-free replay sent 23 real operator turns from one week to the installed service and checked whether the page that answered each turn reached the response.
+`recall_context` on the raw turn delivered it in 3 of 23 cases; `search_memory` on the same text found it in the top ten in 7.
+Nine of the turns were a path to a handoff file plus fixed wording, which no lane can ground: the needed context is in the file the agent reads next.
+Every response reported its task candidates cut by budget, and the turn slice carried generic or wrong anchors on personal turns.
+An earlier replay showed queries written by the agent after it understood the task reached the needed page far more often than either lane on the raw turn.
+So pushing turn leads on every prompt would add a second of hook time for little gain, while the turn-independent context is cheap and always right.
+
+### Decision
+
+In native activation mode the start-of-turn hook does two things:
+
+1. It fetches session context: a `recall_context` call with an empty turn and the held continuity token. An empty turn runs no turn stage, so the response carries only the map, stance and skills blocks, each `unchanged` when the caller already holds its generation. Measured on the installed service, this takes about 50 ms of server time warm and 360 ms cold. The hook injects only the blocks that changed, under the existing data header, and then the activation text.
+2. It replaces "call `recall_context` once" with a per-subject pull: when the user's turn opens a subject the injected context does not cover, the agent calls `recall_context` with that subject as `conversation.focus`, or `search_memory` with its own query, before it answers. The server instructions carry the same rule for clients without hooks.
+
+The fetch has its own wall budget, separate from the turn packet's and never retried. A timeout, a transport failure or a host with no reachable REST or CLI lane injects the activation text alone, as today, and logs the outcome. Clients without a lane still receive session context from their first `recall_context` call.
+
+Working-set mode is unchanged. Turn leads stay pull-based until a lane grounds raw turns well enough to pay for its hook time; the presentation fixes in the next round are measured against the same replay.
+
+### Rejected
+
+- Push the full turn packet on every prompt (working-set mode everywhere): about 1.5 s median per prompt for a 3-in-23 delivery rate.
+- Keep "once": agents stop recalling after the first turn, so later subjects never reach memory.
+- Push `search_memory` hits for the raw turn: cheaper, but conversational turns rank recorded transcripts above notes.
