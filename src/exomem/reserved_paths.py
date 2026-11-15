@@ -4440,33 +4440,40 @@ class StagedOwnerFile:
 @contextmanager
 def _stage_owner_chunks(
     vault_root: Path, path: Path, descriptor_id: str, data: held_fs.Chunks,
-    *, expected_sha256: str, expected_size: int,
+    *, expected_sha256: str, expected_size: int, temporary_name: str | None = None,
+    on_created: Callable[[held_fs.StableIdentity], None] | None = None,
 ) -> Iterator[StagedOwnerFile]:
     """Copy and hash all supplied bytes outside identity coordination, including on a pool hit."""
     root = Path(os.path.abspath(vault_root))
     route = _owner_relative_path(root, path, descriptor_id, operation="binary staging")
     if not isinstance(data, held_fs.Chunks) or type(expected_size) is not int or expected_size < 0:
         raise ValueError("private staging requires chunks and a nonnegative size")
+    temporary = _owner_stage_name(temporary_name)
     with ExitStack() as stack:
-        with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
-            filesystem = stack.enter_context(held_fs.acquire(route.trust_root).require())
-            parent = stack.enter_context(filesystem.parent(
-                route.held_relative.parent.as_posix(), create=True, access="flush").require())
-            _require_owner_parent(filesystem, route, parent)
-            # The exact owner tree retains this stage; the generic publication family owns bare temporary names.
-            temporary = held_fs.publish_temporary_name() + ".stage"
-            writable = stack.enter_context(filesystem.file(
-                parent, temporary, access="write", create=True, exclusive=True).require())
-            identity = writable.identity
-            temporary_relative = route.logical_relative.with_name(temporary).as_posix()
-            if not route.external:
-                published = {temporary_relative: identity}
-                for directory in route.logical_relative.parents:
-                    if classify_logical(directory.as_posix()).descriptor_id == descriptor_id:
-                        with filesystem.parent(directory.as_posix()).require() as ancestor:
-                            published[directory.as_posix()] = ancestor.identity
-                _publish_owner_identity_delta(root, descriptor_id, put=published, remove={})
+        identity = None
         try:
+            with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
+                filesystem = stack.enter_context(held_fs.acquire(route.trust_root).require())
+                parent = stack.enter_context(filesystem.parent(
+                    route.held_relative.parent.as_posix(), create=True, access="flush").require())
+                _require_owner_parent(filesystem, route, parent)
+                writable = stack.enter_context(filesystem.file(
+                    parent, temporary, access="write", create=True, exclusive=True).require())
+                identity = writable.identity
+            # Cleanup takes the ledger before owner coordination. Persist custody
+            # outside coordination, before opening the plaintext source, to keep that order.
+            if on_created is not None:
+                on_created(identity)
+            temporary_relative = route.logical_relative.with_name(temporary).as_posix()
+            with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
+                _require_owner_parent(filesystem, route, parent)
+                if not route.external:
+                    published = {temporary_relative: identity}
+                    for directory in route.logical_relative.parents:
+                        if classify_logical(directory.as_posix()).descriptor_id == descriptor_id:
+                            with filesystem.parent(directory.as_posix()).require() as ancestor:
+                                published[directory.as_posix()] = ancestor.identity
+                    _publish_owner_identity_delta(root, descriptor_id, put=published, remove={})
             digest, size = hashlib.sha256(), 0
 
             def chunks() -> Iterator[bytes]:
@@ -4484,19 +4491,43 @@ def _stage_owner_chunks(
             version = writable.version()
             yield StagedOwnerFile(root, route, descriptor_id, filesystem, parent, temporary, version)
         finally:
-            with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
-                _require_owner_parent(filesystem, route, parent)
-                residue = filesystem.file(parent, temporary, access="mutate")
-                if residue.ok:
-                    with residue.require() as file:
-                        if file.identity != identity:
-                            raise held_fs.HeldFsError("IDENTITY_CHANGED", "private stage changed")
-                        filesystem.unlink(file).require()
-                        filesystem.flush_directory(parent).require()
-                elif residue.error is None or residue.error.code != "MISSING":
-                    residue.require()
-                if not route.external:
-                    _publish_owner_identity_delta(root, descriptor_id, put={}, remove={temporary_relative: identity})
+            if identity is not None:
+                _remove_owner_file(root, route.target.with_name(temporary), descriptor_id,
+                                   missing_ok=True, expected_identity=identity)
+
+
+def _owner_stage_name(name: str | None = None) -> str:
+    """The private stage protocol adds a suffix without expanding generic publish-name ownership."""
+    if name is None:
+        return held_fs.publish_temporary_name() + ".stage"
+    if not name.endswith(".stage") or not held_fs.is_publish_temporary(name.removesuffix(".stage")):
+        raise ValueError("private staging requires an exact owner stage name")
+    return name
+
+
+def _remove_owner_stage(vault_root: Path, path: Path, descriptor_id: str,
+                        identity: held_fs.StableIdentity | None) -> None:
+    """Remove only proven stage custody; an unrecorded existing file remains unresolved."""
+    _owner_stage_name(path.name)
+    if identity is None:
+        # Missing is safe after a flush; a name or rebuilt inventory alone proves no custody.
+        route = _owner_relative_path(vault_root, path, descriptor_id, operation="stage cleanup")
+        with _identity_coordination_scope(vault_root, descriptor_ids=(descriptor_id,)):
+            with held_fs.acquire(route.trust_root).require() as filesystem:
+                found = filesystem.parent(route.held_relative.parent.as_posix(), access="flush")
+                if not found.ok and found.error is not None and found.error.code == "MISSING":
+                    return
+                with found.require() as parent:
+                    _require_owner_parent(filesystem, route, parent)
+                    residue = filesystem.file(parent, path.name)
+                    if residue.ok:
+                        residue.require().close()
+                        raise held_fs.HeldFsError("IDENTITY_CHANGED", "private stage has no recorded custody")
+                    if residue.error is None or residue.error.code != "MISSING":
+                        residue.require()
+                    filesystem.flush_directory(parent).require()
+        return
+    _remove_owner_file(vault_root, path, descriptor_id, missing_ok=True, expected_identity=identity)
 
 
 def _install_staged_owner(
@@ -4822,6 +4853,7 @@ def _remove_owner_file(
     *,
     missing_ok: bool = False,
     expected_version: held_fs.FileVersion | None = None,
+    expected_identity: held_fs.StableIdentity | None = None,
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
@@ -4832,12 +4864,20 @@ def _remove_owner_file(
         operation="remove",
     )
     root = Path(os.path.abspath(vault_root))
+    expected = expected_version.identity if expected_version is not None else expected_identity
+
+    def forget_identity() -> None:
+        if not route.external:
+            if expected is not None:
+                _publish_owner_identity_delta(root, descriptor_id, put={},
+                    remove={route.logical_relative.as_posix(): expected})
+            else:
+                _replace_published_owner_path(root, descriptor_id, route.logical_relative, None)
+
     with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
         acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:
-            if missing_ok:
-                return False
-            raise OSError("private remove cannot acquire the vault")
+            acquired.require()
         with acquired.require() as filesystem:
             parent_text = route.held_relative.parent.as_posix()
             parent_access = "flush"
@@ -4851,10 +4891,7 @@ def _remove_owner_file(
                     and parent_result.error is not None
                     and parent_result.error.code == "MISSING"
                 ):
-                    if not route.external:
-                        _replace_published_owner_path(
-                            root, descriptor_id, route.logical_relative, None
-                        )
+                    forget_identity()
                     return False
                 raise OSError("private remove parent is unsafe")
             with parent_result.require() as parent:
@@ -4868,15 +4905,17 @@ def _remove_owner_file(
                     ):
                         if not missing_ok:
                             raise FileNotFoundError(path)
-                        if not route.external:
-                            _replace_published_owner_path(
-                                root, descriptor_id, route.logical_relative, None
-                            )
+                        filesystem.flush_directory(parent).require()
+                        forget_identity()
                         return False
                     raise OSError("private remove target is unsafe")
                 with file_result.require() as file:
                     if file.identity.link_count != 1:
                         raise OSError("private remove target is ambiguous")
+                    if expected_identity is not None:
+                        _require_owner_parent(filesystem, route, parent)
+                        if file.identity != expected_identity:
+                            raise held_fs.HeldFsError("IDENTITY_CHANGED", "private stage changed")
                     if expected_version is not None:
                         _require_owner_parent(filesystem, route, parent)
                         if file.version() != expected_version:
@@ -4899,12 +4938,7 @@ def _remove_owner_file(
                 if not _owner_directory_is_current(filesystem, parent):
                     raise OSError("private remove parent changed")
 
-        if not route.external:
-            if expected_version is not None:
-                _publish_owner_identity_delta(root, descriptor_id, put={},
-                    remove={route.logical_relative.as_posix(): expected_version.identity})
-            else:
-                _replace_published_owner_path(root, descriptor_id, route.logical_relative, None)
+        forget_identity()
         return True
 
 

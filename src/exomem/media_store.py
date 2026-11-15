@@ -23,7 +23,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, closing, contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol
@@ -378,14 +378,36 @@ def _clear_dead_access(conn, store: MediaJobStore, rows) -> int:
     for row in rows:
         if holder_alive(row["pid"], row["pid_start"]):
             continue
-        # Only a reserved publish name is removed, so a damaged row cannot name an original.
+        conn.execute("UPDATE media_access SET hydrating = 0 WHERE token = ?", (row["token"],))
         temporary = row["temporary_name"]
-        if temporary is not None and held_fs.is_publish_temporary(temporary) and not _remove_temporary(
-                store.vault_root, row["binary_rel"], temporary):
+        if temporary is not None and not _remove_reserved_temporary(store.vault_root, row):
             continue  # The row keeps its bytes reserved until a later clear removes the file.
         conn.execute("DELETE FROM media_access WHERE token = ?", (row["token"],))
         cleared += 1
     return cleared
+
+
+def _remove_reserved_temporary(vault: Path, row) -> bool:
+    """Use the reservation's recorded custody, never a filename alone, for private stages."""
+    from . import original_pool
+
+    key, name = row["hydration_key"], row["temporary_name"]
+    if key is not None and key != row["binary_rel"]:
+        try:
+            identity = None
+            if row["temporary_identity"] is not None:
+                values = json.loads(row["temporary_identity"])
+                # StableIdentity's closed filesystem schema fixes these four fields.
+                if (not isinstance(values, list) or len(values) != 4
+                        or type(values[0]) is not int or type(values[1]) is not int
+                        or values[2] != "file" or type(values[3]) is not int or values[3] != 1):
+                    return False
+                identity = held_fs.StableIdentity(*values)
+            original_pool.remove_stage(vault, key, name, identity)
+            return True
+        except (ValueError, TypeError, OSError, held_fs.HeldFsError):
+            return False
+    return held_fs.is_publish_temporary(name) and _remove_temporary(vault, row["binary_rel"], name)
 
 
 def _remove_temporary(vault: Path, binary_rel: str, name: str) -> bool:
@@ -474,7 +496,7 @@ def _bind_pin(store: MediaJobStore, token: str, snapshot: OriginalSnapshot,
 
 
 def _reserve(store: MediaJobStore, token: str, needed: int, limits: media_capacity.HydrationLimits, *,
-             hydration: bool, temporary: str | None = None) -> None:
+             hydration: bool, temporary: str | None = None, hydration_key: str | None = None) -> None:
     """Reserve `needed` bytes of the hydration capacity on this pin's row (D12, choice 3).
 
     A hydration reserves its plaintext, takes a slot and names its temporary file. An
@@ -486,15 +508,21 @@ def _reserve(store: MediaJobStore, token: str, needed: int, limits: media_capaci
         raise MediaStoreError(HYDRATION_TOO_LARGE_CODE, "the original exceeds the whole hydration capacity")
     conn = store._connect()
     try:
+        conn.execute("PRAGMA synchronous=FULL")
         conn.execute("BEGIN IMMEDIATE")
         _clear_dead_access(conn, store, conn.execute(
-            "SELECT * FROM media_access WHERE temporary_bytes > 0 OR hydrating = 1").fetchall())
+            "SELECT * FROM media_access WHERE temporary_bytes > 0 OR hydrating = 1 OR temporary_name IS NOT NULL").fetchall())
         row = conn.execute("SELECT COALESCE(SUM(temporary_bytes), 0), COALESCE(SUM(hydrating), 0) "
                            "FROM media_access WHERE temporary_bytes > 0 OR hydrating = 1").fetchone()
-        busy = needed + row[0] > maximum or hydration and row[1] >= concurrent
+        same_object = hydration_key is not None and conn.execute(
+            "SELECT 1 FROM media_access WHERE hydration_key = ? AND temporary_name IS NOT NULL AND token != ? LIMIT 1",
+            (hydration_key, token)).fetchone() is not None
+        busy = same_object or needed + row[0] > maximum or hydration and row[1] >= concurrent
         if not busy:
-            conn.execute("UPDATE media_access SET temporary_bytes = ?, hydrating = ?, temporary_name = ? "
-                         "WHERE token = ?", (needed, int(hydration), temporary, token))
+            # The destination coordinates downloads; only acquisition may establish object_key.
+            conn.execute("UPDATE media_access SET temporary_bytes = ?, hydrating = ?, temporary_name = ?, "
+                         "hydration_key = ?, temporary_identity = NULL WHERE token = ?",
+                         (needed, int(hydration), temporary, hydration_key, token))
         conn.commit()  # The cleared rows stay cleared when the capacity is busy.
     finally:
         conn.close()
@@ -1369,6 +1397,18 @@ def _hydrate(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, tok
     The reservation names the temporary before it exists, so a stop at any point
     leaves a row that names its file, and nothing at the original's path.
     """
+    from . import media_bindings
+
+    current = original_state(vault, snapshot.path)
+    if replace(current, state=snapshot.state, local_path=snapshot.local_path) != snapshot:
+        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed before hydration")
+    if current.state != "evicted":
+        return  # Another completed hydration needs no second provider read.
+    relative = ledger._relative(snapshot.path)
+    key = media_bindings.object_key(vault, relative, snapshot.binary_sha256)
+    if key != relative:
+        _hydrate_shared(vault, snapshot, ledger, token, key)
+        return
     temporary = held_fs.publish_temporary_name()
     try:
         _hydrate_reserved(vault, snapshot, ledger, token, temporary)
@@ -1387,10 +1427,81 @@ def _release(ledger: MediaJobStore, token: str, *, temporary_gone: bool = True) 
         with conn:
             conn.execute("UPDATE media_access SET hydrating = 0, temporary_bytes = "
                          "CASE WHEN :gone THEN 0 ELSE temporary_bytes END, temporary_name = "
-                         "CASE WHEN :gone THEN NULL ELSE temporary_name END WHERE token = :token",
+                         "CASE WHEN :gone THEN NULL ELSE temporary_name END, hydration_key = "
+                         "CASE WHEN :gone THEN NULL ELSE hydration_key END, temporary_identity = "
+                         "CASE WHEN :gone THEN NULL ELSE temporary_identity END WHERE token = :token",
                          {"gone": temporary_gone, "token": token})
     finally:
         conn.close()
+
+
+def _hydrate_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, token: str, key: str) -> None:
+    """Reserve one physical download, verify every byte, then publish without logical binary copies."""
+    from . import original_pool
+
+    config = _settings(vault)
+    assert snapshot.reference is not None and snapshot.binary_size is not None and snapshot.binary_sha256 is not None
+    limits = media_capacity.hydration_limits(config)
+    if limits is None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "media hydration limits are not configured")
+    temporary = reserved_paths._owner_stage_name()
+    _reserve(ledger, token, snapshot.binary_size, limits, hydration=True, temporary=temporary, hydration_key=key)
+    created = None
+    collision = False
+
+    def record_created(identity: held_fs.StableIdentity) -> None:
+        nonlocal created
+        created = identity  # Live failure cleanup retains proof even if the transaction fails.
+        encoded = json.dumps((identity.device, identity.inode, identity.kind, identity.link_count))
+        with closing(ledger._connect()) as conn:
+            conn.execute("PRAGMA synchronous=FULL")
+            with conn:
+                changed = conn.execute("UPDATE media_access SET temporary_identity = ? "
+                                       "WHERE token = ? AND temporary_name = ? AND hydration_key = ?",
+                                       (encoded, token, temporary, key)).rowcount
+                if changed != 1:
+                    raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the hydration reservation changed")
+
+    try:
+        current = original_state(vault, snapshot.path)
+        if replace(current, state=snapshot.state, local_path=snapshot.local_path) != snapshot:
+            raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed before hydration")
+        if current.state != "evicted":
+            return
+        with closing(_decrypted_chunks(store_for(vault), snapshot.reference, str(config["identity_path"]))) as chunks:
+            with original_pool.prepare(vault, snapshot.binary_sha256, snapshot.binary_size,
+                    held_fs.Chunks(lambda: chunks), temporary_name=temporary, on_created=record_created) as prepared:
+                for _attempt in range(3):
+                    try:
+                        with _guard(vault, "media_store_hydrate"):
+                            current = original_state(vault, snapshot.path)
+                            # Another filing can publish these same bytes while this download runs.
+                            if replace(current, state=snapshot.state, local_path=snapshot.local_path) != snapshot:
+                                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed during hydration")
+                            prepared.publish()
+                            current = original_state(vault, snapshot.path)
+                            if current.local_path != original_pool.object_path(vault, snapshot.binary_sha256):
+                                return  # A separately verified ordinary original won its logical destination.
+                            with closing(ledger._connect()) as conn, conn:
+                                _record_cache(conn, ledger, current, prepared.source)
+                            return
+                    except original_pool.PublicationRace:
+                        prepared.confirm_existing()  # Hash a concurrent winner outside the canonical guard.
+                raise MediaStoreError(STORE_BUSY_CODE, "shared original publication is in use")
+    except held_fs.HeldFsError as error:
+        collision = created is None and error.code == "DESTINATION_EXISTS"
+        raise
+    except ValueError as error:
+        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original failed authenticated verification") from error
+    finally:
+        gone = collision
+        if not collision:
+            try:
+                original_pool.remove_stage(vault, key, temporary, created)
+                gone = True
+            except (ValueError, OSError, held_fs.HeldFsError):
+                pass  # Unknown or replaced stages retain cleanup custody and their byte charge.
+        _release(ledger, token, temporary_gone=gone)
 
 
 def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, token: str,
@@ -1442,12 +1553,8 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
                 raise
 
 
-def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
-    """Download, decrypt and write in one pass; return the plaintext's head once both checks pass.
-
-    A thread feeds the download to `age` while this thread writes its output, so a
-    full local disk raises here as a local error, never as a store or verification failure.
-    """
+def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) -> Iterator[bytes]:
+    """Stream plaintext; exhaustion verifies the ciphertext and age's authenticated exit."""
     process = subprocess.Popen(["age", "--decrypt", "--identity", identity],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert process.stdin is not None and process.stdout is not None
@@ -1470,14 +1577,10 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
 
     feeder = threading.Thread(target=feed, name="media-hydration-feed", daemon=True)
     feeder.start()
-    plaintext, size = hashlib.sha256(), 0
     try:
         # read1 returns what age has written so far, so the file grows as the download arrives.
         while chunk := process.stdout.read1(1024 * 1024):
-            plaintext.update(chunk)
-            size += len(chunk)
-            sink.write(chunk)
-        sink.flush()
+            yield chunk
         returncode = process.wait()
     except BaseException:
         process.kill()
@@ -1490,6 +1593,17 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
         raise feed_errors[0]
     if returncode or ObjectHead(fed[0], ciphertext.hexdigest()) != ObjectHead(reference.ciphertext_size, reference.ciphertext_sha256):
         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext or its authenticated decryption failed")
+
+
+def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
+    """Download and decrypt in one pass; local sink failures remain local errors."""
+    plaintext, size = hashlib.sha256(), 0
+    with closing(_decrypted_chunks(backend, reference, identity)) as chunks:
+        for chunk in chunks:
+            plaintext.update(chunk)
+            size += len(chunk)
+            sink.write(chunk)
+        sink.flush()
     return ObjectHead(size, plaintext.hexdigest())
 
 

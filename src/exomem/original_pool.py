@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -159,9 +159,18 @@ class PreparedOriginal:
             raise RuntimeError("the original must be published before its filing commits")
         self._source.require_current()
 
+    @property
+    def source(self) -> reserved_paths.GenericBinarySource:
+        """Expose the verified published version without reopening a replaceable pathname."""
+        self.require_current()
+        assert self._source is not None
+        return self._source
+
 
 @contextmanager
-def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks) -> Iterator[PreparedOriginal]:
+def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks, *,
+            temporary_name: str | None = None,
+            on_created: Callable[[held_fs.StableIdentity], None] | None = None) -> Iterator[PreparedOriginal]:
     """Stage every supplied byte before examining physical reuse; retain custody through commit."""
     if not enabled(vault):
         raise ValueError("shared originals require explicit format activation")
@@ -170,7 +179,8 @@ def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks) -> Iterat
     target = object_path(vault, digest)
     with reserved_paths._subsystem_authority_scope(OWNER):
         with reserved_paths._stage_owner_chunks(vault, target, DESCRIPTOR_ID,
-                data, expected_sha256=digest, expected_size=size) as staged:
+                data, expected_sha256=digest, expected_size=size,
+                temporary_name=temporary_name, on_created=on_created) as staged:
             # An OS handle alone does not exclude eviction. Keep the ledger pin
             # outside winner handles so confirmation retries cannot release it.
             with _pin(vault, target, object_key=target.relative_to(vault).as_posix()), ExitStack() as handles:
@@ -198,6 +208,14 @@ def locally_present(vault: Path, digest: str, size: int) -> bool:
         if error.code == "MISSING":
             return False
         raise
+
+
+def remove_stage(vault: Path, object_key: str, name: str, identity: held_fs.StableIdentity | None) -> None:
+    """Clean a reserved hydration stage without granting custody over an unverified replacement."""
+    if not is_canonical_member(object_key) or not object_key.endswith(".blob"):
+        raise ValueError("hydration cleanup requires a canonical object destination")
+    with reserved_paths._subsystem_authority_scope(OWNER):
+        reserved_paths._remove_owner_stage(vault, (vault / object_key).with_name(name), DESCRIPTOR_ID, identity)
 
 
 def evict_object(vault: Path, digest: str, *, expected_version: held_fs.FileVersion) -> None:

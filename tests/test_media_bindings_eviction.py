@@ -100,6 +100,36 @@ def test_a_shared_object_evicts_only_after_every_filing_has_recovery_and_every_r
         rows, coverage = media_store.processing_status(vault)
         assert coverage["coverage"] == "partial" and coverage["state"] == "available"
         assert {row["path"] for row in rows} == {first.path, second.path}
+        downloads = []
+        actual_open = media_store.FilesystemStore.open
+
+        @contextmanager
+        def download_while_a_sibling_requests(self, name, version):
+            downloads.append((name, version))
+            with closing(ledger._connect(readonly=True)) as conn:
+                reservation = conn.execute("SELECT * FROM media_access WHERE hydrating = 1").fetchone()
+                assert reservation["hydration_key"] == original_pool.object_path(vault, digest).relative_to(vault).as_posix()
+                assert reservation["object_key"] is None  # A destination does not prove acquired bytes.
+                assert reservation["temporary_identity"] is not None
+                assert reservation["temporary_bytes"] == len(content)
+            # Two slots are available; the shared destination itself prevents the second download.
+            with pytest.raises(media_store.MediaStoreError, match="STORE_BUSY"):
+                with media_store.open_original(vault, second.path):
+                    pytest.fail("another download already owns these shared bytes")
+            with actual_open(self, name, version) as stream:
+                yield stream
+
+        monkeypatch.setattr(media_store.FilesystemStore, "open", download_while_a_sibling_requests)
+        for filing in (first, second):
+            with media_store.open_original(vault, filing.path) as source:
+                assert source.stream.read() == content
+                source.require_current()
+            assert not (vault / filing.path).exists()
+        assert len(downloads) == 1
+        assert original_pool.object_path(vault, digest).read_bytes() == content
+        with closing(ledger._connect(readonly=True)) as conn:
+            assert conn.execute("SELECT count(*) FROM media_access").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM media_cache WHERE evicted = 0").fetchone()[0] == 1
     else:
         assert not media_store.evict(vault, vault / first.path)
         assert original_pool.object_path(vault, digest).read_bytes() == content

@@ -58,6 +58,8 @@ Moves, Trash transitions, hydration, and eviction also withdraw completeness bef
 
 A read through one filing must prevent eviction initiated through another. Concurrent hydration publishes one verified local object. Shared corruption returns an explicit unavailable or corrupt state and preserves verified recovery copies. It never silently substitutes another version.
 
+Reserve the physical hydration destination in the existing ledger before creating its private stage. Keep this destination separate from the acquired-byte pin. Commit the created stage's stable file identity before consuming plaintext, outside identity coordination to preserve lock ordering. Cleanup removes only that identity and flushes its parent before releasing the byte charge. A crash before identity commit leaves at most an empty stage; preserve an existing unproven or replaced file with its cleanup charge. Release its hydration slot. A rebuilt private inventory proves present exclusion, not the reservation's historical custody.
+
 Every binding also contributes its residency requirement. Retain the local object if any binding is resident-only or lacks its own usable recovery reference. A Source's remote copy cannot make a separately governed dataset evictable. Maintain this derived eligibility through existing indexed metadata and its invalidation; do not scan filings during eviction.
 
 Decide eviction and hydration per physical object across every binding. The latest owner read through any binding sets idle age. An existing job pin, access pin, active read, or drain latch on any binding retains the local object. Claimed jobs keep their pin when returned to pending; an unclaimed pending job does not retain bytes. Eviction requires every binding's own current Cloud reference.

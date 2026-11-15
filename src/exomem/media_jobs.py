@@ -967,6 +967,12 @@ class MediaJobStore:
             conn.execute("ALTER TABLE media_access ADD COLUMN pid_start TEXT")
         if "temporary_name" not in access:
             conn.execute("ALTER TABLE media_access ADD COLUMN temporary_name TEXT")
+        if "hydration_key" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN hydration_key TEXT")
+        if "temporary_identity" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN temporary_identity TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydration_key ON media_access(hydration_key) "
+                     "WHERE temporary_name IS NOT NULL")
         if "pinned" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         # Whether the worker hydrated the original when it claimed the job.
