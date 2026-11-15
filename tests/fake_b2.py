@@ -1,4 +1,4 @@
-"""An in-process Backblaze B2 native API (v3) at the HTTP level, for the media edge tests.
+"""An in-process Backblaze B2 native API (v4) at the HTTP level, for the media edge tests.
 
 It answers real httpx requests through a mock transport. It enforces the rules the
 edge depends on: SHA-1 on every upload, token use, two or more parts with a
@@ -157,15 +157,13 @@ class FakeB2:
         if request.headers.get("authorization", "").startswith("Basic "):
             listing = base64.b64decode(request.headers["authorization"][6:]).decode().startswith(f"{LIST_KEY_ID}:")
             storage = {"apiUrl": API, "downloadUrl": DOWNLOAD, "absoluteMinimumPartSize": self.minimum_part,
-                       "recommendedPartSize": 100_000_000,
-                       "capabilities": ["listFiles"] if listing else ["readFiles", "writeFiles"]}
+                       "recommendedPartSize": 100_000_000}
             bucket = {"id": self.bucket_id, "name": self.bucket}
-            if self.shape == "single":
-                storage |= {"bucketId": self.bucket_id, "bucketName": self.bucket}
-            elif self.shape == "listed":
-                storage |= {"bucketId": None, "bucketName": None, "allowed": {"buckets": [bucket]}}
-            else:
-                storage |= {"bucketId": None, "bucketName": None}
+            storage["allowed"] = {
+                "capabilities": ["listFiles"] if listing else ["readFiles", "writeFiles"],
+                "buckets": None if self.shape == "unrestricted" else [bucket],
+                "namePrefix": None,
+            }
             token = self._list_token() if listing else self.account_token
             return self._json(200, {"accountId": "account", "authorizationToken": token,
                                     "apiInfo": {"storageApi": storage}})

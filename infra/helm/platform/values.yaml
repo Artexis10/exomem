@@ -404,7 +404,7 @@ mediaEdge:
   publicKeySecretKey: public-key
   state:
     size: 10Gi
-    # Empty uses the cluster default class. A cluster with no default class needs a name here.
+    # Required when enabled: these clusters have no default class. Usually exomem-cloud-encrypted, as for cells.
     storageClassName: ""
   resources:
     requests: {cpu: 100m, memory: 256Mi}
