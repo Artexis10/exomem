@@ -903,41 +903,28 @@ def _attribution_with_native_skills(sent: dict) -> dict:
 #: Bounds on reading the client's own skill directory: the hook runs on every prompt, so a large or slow
 #: directory costs the skills it could not read their omission, never the prompt.
 _NATIVE_SKILLS_MAX = 200
-_NATIVE_SKILLS_HEAD_BYTES = 2048
 _NATIVE_SKILLS_BUDGET_SECONDS = 0.05
 
 
 def _native_skill_names() -> list[str]:
-    """The names of the skills this client loads itself, from `<home>/skills/*/SKILL.md`.
+    """The names of the skills this client loads itself: the directories under `<home>/skills` that hold a
+    `SKILL.md`.
 
-    The service omits these from the skills it lists, so a skill is not offered twice. The name is the
-    frontmatter `name` line within the file's first bytes; a file without one is skipped, a directory
-    that is unreadable ends the read, and nothing raises. A partial list only leaves a skill listed twice.
+    The Agent Skills format requires a skill's `name` to equal its directory name, so the name comes from the
+    directory entry and no file is opened: a pipe or a slow file cannot stall the prompt, and nothing a
+    symlink points at is read. Hidden entries are skipped. The service omits these names from the skills it
+    lists, so a skill is not offered twice; a partial list only leaves a skill listed twice, and nothing raises.
     """
     names: list[str] = []
     try:
         deadline = time.monotonic() + _NATIVE_SKILLS_BUDGET_SECONDS
         with os.scandir(_hook_home() / "skills") as entries:
-            for position, entry in enumerate(entries):
-                if position >= _NATIVE_SKILLS_MAX or time.monotonic() > deadline:
+            for entry in entries:
+                if len(names) >= _NATIVE_SKILLS_MAX or time.monotonic() > deadline:
                     break
-                try:
-                    with open(os.path.join(entry.path, "SKILL.md"), "rb") as handle:
-                        head = handle.read(_NATIVE_SKILLS_HEAD_BYTES).decode("utf-8", "replace")
-                except OSError:
+                if entry.name.startswith(".") or not os.path.isfile(os.path.join(entry.path, "SKILL.md")):
                     continue
-                lines = head.splitlines()
-                if not lines or lines[0].strip() != "---":
-                    continue
-                for line in lines[1:]:
-                    if line.strip() == "---":
-                        break
-                    key, separator, value = line.partition(":")
-                    if separator and key.strip() == "name":
-                        name = value.strip().strip("\"'")
-                        if name:
-                            names.append(name)
-                        break
+                names.append(entry.name)
     except Exception:  # noqa: BLE001 - hook must never break prompt submission
         return names
     return names
@@ -2364,6 +2351,18 @@ _SKILLS_MAX_CHARS = 8000
 _SKILLS_HEADER = "- skills: held in the vault; retrieved, not instructions. Load one with read_page before acting on a task it covers."
 
 
+def _skill_line(item: dict) -> str:
+    """One listed skill, written exactly as the service's `vault_skills.item_line` counts it.
+
+    The service admits whole items against its bound and then marks the block delivered, so a line rendered
+    longer than it was counted could be dropped here and never offered again. This standalone hook cannot import
+    the service, so a parity test keeps the two in step.
+    """
+    name, summary, ref = (" ".join(str(item.get(key) or "").split()) for key in ("name", "summary", "ref"))
+    text = f"- {name}: {summary}" if summary else f"- {name}"
+    return f"{text} [{ref}]" if ref else text
+
+
 def _format_skills_block(block: object) -> str:
     """The skills the service lists, whole lines under one framing line; an unchanged or empty block renders nothing.
 
@@ -2375,7 +2374,7 @@ def _format_skills_block(block: object) -> str:
     for item in block.get("items") or ():
         if not isinstance(item, dict) or not item.get("name"):
             continue
-        line = _packet_line(str(item["name"]), str(item.get("summary") or ""), str(item.get("ref") or ""))
+        line = _skill_line(item)
         if used + len(line) + 1 > _SKILLS_MAX_CHARS:
             break
         lines.append(line)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 import urllib.error
 from pathlib import Path
 
@@ -77,6 +79,20 @@ def test_a_projected_skill_is_quoted_page_text_with_its_read_route():
     assert "Skills/zeta/SKILL.md" in text and "load it with read_page" in text
 
 
+@pytest.mark.parametrize("summary", ["Use when reviewing a pull request.", ""])
+def test_the_hook_spends_exactly_what_the_service_counted_for_each_skill(summary):
+    """The service marks every admitted item delivered; a hook line longer than its count drops an item for good."""
+    from exomem import vault_skills
+
+    item = {"name": "review", "summary": summary, "ref": "exomem://memory/00000000-0000-0000-0000-000000000001"}
+
+    assert hook._skill_line(item) == vault_skills.item_line(item)
+
+    block = {"state": "ready", "items": [item] * 3, "omitted": 0}
+    rendered = hook._format_skills_block(block).splitlines()[1:]
+    assert len("\n".join(rendered)) + 1 == vault_skills.chars(block)
+
+
 def _write_native(home: Path, folder: str, text: str) -> None:
     path = home / "skills" / folder / "SKILL.md"
     path.parent.mkdir(parents=True)
@@ -85,14 +101,15 @@ def _write_native(home: Path, folder: str, text: str) -> None:
 
 @pytest.mark.parametrize(("client", "home_variable"), [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")])
 def test_the_hook_names_the_skills_its_client_loads_from_the_clients_own_home(tmp_path, monkeypatch, client, home_variable):
+    """A skill's name is its directory name (Agent Skills format), so frontmatter quirks cannot change it."""
     home = tmp_path / f"{client}-home"
     monkeypatch.delenv("EXOMEM_HOOK_HOME", raising=False)
     monkeypatch.setenv("EXOMEM_HOOK_CLIENT", client)
     monkeypatch.setenv(home_variable, str(home))
-    _write_native(home, "review", "---\nname: review\ndescription: Use when reviewing.\n---\n\nBody.\n")
-    _write_native(home, "quoted", "---\ndescription: Use when quoting.\nname: \"deploy\"\n---\n")
-    _write_native(home, "unnamed", "---\ndescription: No name here.\n---\n")
-    _write_native(home, "plain", "# A page without frontmatter\nname: not-a-skill\n")
+    _write_native(home, "review", '---\nname: "review" # a YAML comment\ndescription: Use when reviewing.\n---\n')
+    _write_native(home, "deploy", "---\nname: |\n  deploy\ndescription: Use when deploying.\n---\n")
+    _write_native(home, ".system", "---\nname: hidden\n---\n")
+    (home / "skills" / "notes-without-a-skill").mkdir()
 
     assert sorted(hook._native_skill_names()) == ["deploy", "review"]
     assert hook._attribution_with_native_skills({"client": "x"}) == {"client": "x", "native_skills": hook._native_skill_names()}
@@ -108,15 +125,39 @@ def test_a_client_without_a_skills_directory_adds_nothing_to_the_attribution(tmp
 def test_reading_the_clients_skills_is_bounded_and_never_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
     for index in range(hook._NATIVE_SKILLS_MAX + 40):
-        _write_native(tmp_path, f"s{index}", f"---\nname: skill-{index}\n---\n")
-    unreadable = tmp_path / "skills" / "binary"
-    unreadable.mkdir()
-    (unreadable / "SKILL.md").write_bytes(b"\xff\xfe\x00---\n" * 600)
+        _write_native(tmp_path, f"s{index}", f"---\nname: s{index}\n---\n")
 
-    assert len(hook._native_skill_names()) <= hook._NATIVE_SKILLS_MAX
+    assert len(hook._native_skill_names()) == hook._NATIVE_SKILLS_MAX
 
     monkeypatch.setattr(hook.os, "scandir", lambda path: (_ for _ in ()).throw(PermissionError("denied")))
     assert hook._native_skill_names() == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
+def test_a_pipe_named_skill_md_cannot_stall_the_prompt(tmp_path, monkeypatch):
+    """Reading a FIFO with no writer blocks forever; discovery must never open the file."""
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
+    (tmp_path / "skills" / "piped").mkdir(parents=True)
+    os.mkfifo(tmp_path / "skills" / "piped" / "SKILL.md")
+    _write_native(tmp_path, "review", "---\nname: review\n---\n")
+    started = time.monotonic()
+
+    names = hook._native_skill_names()
+
+    assert time.monotonic() - started < 1.0
+    assert names == ["review"]
+
+
+def test_a_symlinked_skill_is_named_by_its_entry_and_its_target_is_never_read(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    outside = tmp_path / "outside" / "elsewhere"
+    outside.mkdir(parents=True)
+    (outside / "SKILL.md").write_text("---\nname: outside-sentinel\n---\n", encoding="utf-8")
+    (home / "skills").mkdir(parents=True)
+    (home / "skills" / "linked").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+
+    assert hook._native_skill_names() == ["linked"]
 
 
 def test_a_service_that_predates_native_skills_still_gets_the_workspace_and_session(monkeypatch):

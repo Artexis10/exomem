@@ -7164,7 +7164,7 @@ def op_activate_context(
         conversation: Relevant excerpts and refs; never full history.
         trigger: user_turn: initial recall. task_refresh: keep turn; task in focus.
         initiator: Caller label; no authority. Invalid labels ignored.
-        native_skills: Skill names the client loads itself; the skills block omits them.
+        native_skills: Skills the client loads itself; omitted from `skills`.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -8569,10 +8569,10 @@ def read_memory_stored(
         result["units"] = observe_memory_module.page_units(vault_root, result)
     if isinstance(result.get("path"), str) and vault_skills_module.recognise(result["path"], result.get("frontmatter")):
         caller = context_views_module.CallerView.current(vault_root)
-        files, cut = skills_context_module.skill_files(vault_root, result["path"], caller.sees)
+        files, partial = skills_context_module.skill_files(vault_root, result["path"], caller.sees)
         result["skill_files"] = files
-        if cut:
-            result["skill_files_omitted"] = cut
+        if partial:
+            result["skill_files_partial"] = True
     return result
 
 

@@ -88,11 +88,17 @@ Delivery SHALL grant no authority: the agent reads the skill and decides whether
 
 When `read_page` returns a skill page, the response SHALL list the caller-visible files in the skill's directory and its subdirectories, other than the skill page, as vault-relative paths in path order.
 Each listed path SHALL be readable with `read_page`. Hidden files SHALL be neither listed nor counted.
+The listing SHALL cost a bounded read: it examines a fixed maximum number of pages and lists a smaller maximum, and when either bound cuts it the response SHALL mark the list partial instead of counting pages it did not examine.
 
 #### Scenario: A skill's references are one read away
 
 - **WHEN** an agent opens a skill page whose directory holds `references/style.md`
 - **THEN** the response lists `references/style.md` with its vault-relative path
+
+#### Scenario: A skill above a large tree
+
+- **WHEN** an agent opens a skill page whose directory holds more pages than the listing examines
+- **THEN** the read examines at most the bound, lists at most the listing maximum and marks the list partial
 
 ### Requirement: Skills follow page admission and egress
 

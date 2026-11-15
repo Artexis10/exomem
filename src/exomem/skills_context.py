@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import itertools
 import json
 from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
@@ -122,15 +123,19 @@ def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any
     return copy.deepcopy(block)
 
 
-def skill_files(root: Path, skill_path: str, sees: Callable[[str], bool]) -> tuple[list[str], int]:
-    """The caller-visible pages in a skill's directory tree, other than the skill page, in path order, and how many were cut.
+def skill_files(root: Path, skill_path: str, sees: Callable[[str], bool]) -> tuple[list[str], bool]:
+    """The caller-visible pages in a skill's directory tree, other than the skill page, in path order, and whether a bound cut the list.
 
-    A page the caller cannot see is neither listed nor counted. A skill directly under the vault or the
-    knowledge base has no tree of its own, so it lists nothing instead of the whole corpus.
+    A page the caller cannot see is neither listed nor counted. The walk examines at most `SKILL_FILES_SCAN_MAX`
+    pages, so a skill placed above a large tree costs a bounded read; when that bound or `SKILL_FILES_MAX` cuts
+    the list, the answer says it is partial instead of counting what was not examined. A skill directly under the
+    vault or the knowledge base has no tree of its own, so it lists nothing instead of the whole corpus.
     """
     folder = skill_path.rpartition("/")[0]
     if folder in ("", kbdir.kb_dirname()):
-        return [], 0
-    admitted = recall_policy.admitted_relative_paths(root, find_corpus.walk_md(root / folder))
+        return [], False
+    walked = list(itertools.islice(find_corpus.walk_md(root / folder), vault_skills.SKILL_FILES_SCAN_MAX + 1))
+    scan_cut = len(walked) > vault_skills.SKILL_FILES_SCAN_MAX
+    admitted = recall_policy.admitted_relative_paths(root, walked[: vault_skills.SKILL_FILES_SCAN_MAX])
     visible = sorted(rel for rel in admitted if rel != skill_path and sees(rel))
-    return visible[: vault_skills.SKILL_FILES_MAX], max(0, len(visible) - vault_skills.SKILL_FILES_MAX)
+    return visible[: vault_skills.SKILL_FILES_MAX], scan_cut or len(visible) > vault_skills.SKILL_FILES_MAX

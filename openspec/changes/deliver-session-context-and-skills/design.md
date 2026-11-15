@@ -53,4 +53,4 @@ This is the third level of progressive disclosure: references stay one read away
 
 - A large vault of skills could exceed the catalogue bound. Whole items fit in name order and `omitted` reports the rest; the agent can still find omitted skills through task discovery.
 - A client that ignores continuity receives the catalogue on every turn. The bound caps that cost.
-- Adding a block to every maps response adds work. The block is cached per caller view and catalogue generation; the change proves latency before and after on the recall latency instrument.
+- Adding a block to every maps response adds work: one indexed catalogue query for the skill rows and their admission checks, even when the caller already holds the block. The change proves recall latency before and after on the recall latency instrument; a per-caller cache waits for evidence that the query costs enough to need one.

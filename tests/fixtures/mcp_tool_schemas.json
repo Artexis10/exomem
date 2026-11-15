@@ -1140,7 +1140,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skill names the client loads itself; the skills block omits them."
+          "description": "Skills the client loads itself; omitted from `skills`."
         }
       },
       "type": "object"
