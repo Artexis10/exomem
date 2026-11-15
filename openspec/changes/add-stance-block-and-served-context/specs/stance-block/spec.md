@@ -29,7 +29,7 @@ A governed write SHALL reject nonboolean `stance`, with an error naming the key 
 
 Unless `EXOMEM_ACTIVATION_STANCE=off`, each maps response SHALL carry `stance` with `state`, `generation`, `items`, `omitted` and `expired`. State SHALL be `ready` for at least one served line, `empty` for none and `unavailable` for failed compilation. Items SHALL contain admitted `{ref, text}` lines and `review_due` when applicable. Compilation failure SHALL leave the existing map and slice available.
 
-Lines SHALL follow page path and unit order. Keep whole lines under `STANCE_MAX_CHARS` (initially 800) and remaining counted-prose space. Charge actual new counted prose through the packet's existing budget rule. An empty block SHALL consume no stance prose allocation. Structural fields remain outside `max_chars`.
+Lines SHALL follow page path and unit order. Keep whole lines under `STANCE_MAX_CHARS` (1600) and remaining counted-prose space. Charge actual new counted prose through the packet's existing budget rule. An empty block SHALL consume no stance prose allocation. Structural fields remain outside `max_chars`.
 
 Omitted SHALL count admitted current lines that did not fit. Expired SHALL count admitted lines withheld by typed expiry. A caller-withheld page or unit SHALL affect neither count, public generation nor date boundary. Every line SHALL pass the same unit and terminal egress checks as other served units.
 
@@ -42,6 +42,11 @@ Omitted SHALL count admitted current lines that did not fit. Expired SHALL count
 
 - **WHEN** no admitted eligible stance line exists
 - **THEN** `stance.state` is `empty` and the stance block consumes no counted prose
+
+#### Scenario: An identified page's lines survive terminal egress
+
+- **WHEN** a stance page has an `exomem_id` and the vault's release gate is active
+- **THEN** terminal egress decides each line with the page path that compilation admitted, and the block is `ready`
 
 #### Scenario: Overflow preserves whole lines
 

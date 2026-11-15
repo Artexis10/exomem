@@ -504,3 +504,25 @@ def test_served_rows_from_before_task_metadata_remain_readable(stance_vault):
     assert served_context.read(stance_vault, served_context_id=before)["record"] == old["record"]
     assert served_context.read(stance_vault, served_context_id=after)["record"]["task_context"]["state"] == "empty"
     assert served_context.read(stance_vault)["retained_rows"] == 2
+
+
+def test_identified_stance_page_is_served_on_a_store_enrolled_vault(stance_vault, monkeypatch):
+    """A release-gated vault must not turn an identified page's stance lines into `unavailable`."""
+    from exomem import commands, state_migration, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    _page(stance_vault, "global", "stance: true\nexomem_id: 0b5f3a52-4c1e-4d8e-9a8f-2f7c1d9e6a10\n",
+          body="- [rule] Keep a source for each claim.\n- [rule] Prefer prose over lists.\n")
+    state_migration.record_collection_store_compatibility(stance_vault, authority_check=lambda: True)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    working_set_runtime.reset_caches_for_tests()
+    lexstore.ensure_fresh(stance_vault)
+    _built(stance_vault)
+    _reset_caches()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    packet = invoke_command(command, stance_vault, turn="Keep a source", max_chars=2000)
+    assert packet["stance"]["state"] == "ready"
+    assert [item["text"] for item in packet["stance"]["items"]] == [
+        "Keep a source for each claim.", "Prefer prose over lists.",
+    ]
+    assert all(item["ref"].startswith("exomem://memory/") for item in packet["stance"]["items"])
