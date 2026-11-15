@@ -34,4 +34,14 @@
 - [x] 5.1 Document declared passages and the passage result level in `docs/source-capture.md`.
 - [x] 5.2 Run `openspec validate --all --strict`, deliver through an independent review, synchronize the deltas into the canonical specs and archive this change in the same delivery.
 
-Evidence for 1.1–3.9: `tests/test_passage_evidence.py` and `tests/test_passage_evidence_store.py` cover each check named above in file and store mode, and `tests/test_audit_contradiction_order.py` is unchanged. On PR #2852 head `52c142315`, these files, the matrix residency, latency and capture inventory tests passed: 129 passed in 120.37 s. Delivery: PR #2852, after an independent review that approved this content; its green CI and merge complete the delivery.
+Evidence for 1.1–3.9: `tests/test_passage_evidence.py` (file mode) and `tests/test_passage_evidence_store.py` (store mode) name a test for each check, with these limits:
+
+- 3.6, file mode: a plain query, a tag filter, and a relation scope over a tombstoned or revoked anchor each read at most `limit` Sources.
+- 3.6, store mode: only the tag filter is covered, reading at most 5 of 200 Sources.
+- 3.6, structural bound: withheld candidates and the store-mode plain and relation cases have no read-count test. They are bounded by structure: both modes run `passage_evidence._find_admitted`, which resolves each selected path once, from at most `limit` selected chunks.
+- 3.6, membership: the new-capture test proves that declaration membership is invalidated. No test counts how many times membership is derived.
+- 3.9: a store revision without a projection retires borrowed metadata. Its test counts encoding but not Source reads.
+
+`tests/test_audit_contradiction_order.py` is unchanged. On PR #2852 head `52c142315`, these files plus the matrix residency, latency and capture inventory tests passed: 129 passed in 120.37 s.
+
+Delivery: PR #2852, after an independent review of this content. Pending at archive: green CI and merge.

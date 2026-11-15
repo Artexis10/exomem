@@ -31,4 +31,4 @@
 - [x] 5.3 Run scoped and completion checks, exact-content independent review, privacy checks and strict OpenSpec validation.
 - [x] 5.4 Deliver the coherent reviewed batch through green CI and the ordinary release; keep separate activation authority unchanged.
 
-Delivery: PR #2852, after an independent review that approved this content, scoped checks, the privacy gate and strict OpenSpec validation. Its green CI, merge and the ordinary release complete 5.4; activation authority is unchanged.
+Delivery: PR #2852, after an independent review of this content, scoped checks, the privacy gate and strict OpenSpec validation. Pending at archive for 5.4: green CI, merge and the ordinary release. Activation authority is unchanged.
