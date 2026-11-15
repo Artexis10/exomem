@@ -450,7 +450,7 @@ def compile_context(
     try:
         try:
             with find_types.timing_span(timings, "working_set.task_context"):
-                discovered, missing = working_set.task_candidates(
+                discovered, missing, link_targets = working_set.task_candidates(
                     root, catalogue=catalogue, caller=caller, turn=turn,
                     focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
                     index_token=index_token, projections=sources, timings=timings,
@@ -537,6 +537,11 @@ def compile_context(
                     method["attribution"] = approved_title(sources[path])
                     # The read handle is the stable ref, never the path: a rename must not put words into the line.
                     method["read_ref"] = sources[path].ref
+        # The links come last: a lead served without them still answers the turn, a lead never read does not.
+        for reason in working_set.attach_task_links(
+            root, candidates, link_targets=link_targets, caller=caller, timings=timings,
+        ):
+            _add_missing(block, reason["reason"])
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
             # Links spend only what every lead and method leaves, so a link never displaces one.
