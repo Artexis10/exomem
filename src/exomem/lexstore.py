@@ -2512,9 +2512,7 @@ def repair_progress(vault_root: Path) -> dict[str, object] | None:
     with _REPAIRS_LOCK:
         progress = _REPAIR_PROGRESS.get(key)
         if progress is None:
-            if key in _REPAIRS_IN_FLIGHT:
-                return None
-            progress = {"phase": "idle"}
+            return None
         started_at = progress.get("started_at")
         age = (
             max(0.0, time.monotonic() - float(started_at))
