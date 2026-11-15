@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    activation_conventions,
     context_catalogue,
     lifecycle_statuses,
     semantic_contract,
@@ -22,10 +23,9 @@ from . import (
 )
 from .governance import egress, principal
 
-# Resource bounds fixed by the stance-block contract; neither is vault vocabulary.
-STANCE_MAX_CHARS = 800
+# A resource bound, not vault vocabulary. The stance character cap is the vault's `budgets.stance_max_chars`.
 CACHE_SIZE = 128
-_CACHE: OrderedDict[tuple, tuple[date | None, dict[str, Any]]] = OrderedDict()
+_CACHE: OrderedDict[tuple, tuple[date | None, dict[str, Any], list[dict[str, Any]]]] = OrderedDict()
 _LOCK = threading.Lock()
 
 
@@ -99,17 +99,22 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
     admitted = tuple(item for item, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT)
     vault.recheck_path_guards(root, (guards[path] for path in {item.path for item in admitted}))
     admitted = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
-    limit = max(0, min(STANCE_MAX_CHARS, max_chars))
-    inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance)) for item in admitted]
+    configured = activation_conventions.load_conventions(root).conventions.budget("stance_max_chars")
+    limit = max(0, max_chars if configured is None else min(configured, max_chars))
+    # The source path and anchor join the key: terminal egress re-decides the page they name, so a
+    # rename must not leave a cached entry pointing at whatever page now holds the old path.
+    inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance), item.path, item.anchor) for item in admitted]
     key = (str(root), caller.binding, _digest(inputs), limit)
     with _LOCK:
         cached = _CACHE.get(key)
         if cached is not None and (cached[0] is None or today < cached[0]):
             _CACHE.move_to_end(key)
             block = copy.deepcopy(cached[1])
-            _pin(root, caller, block)
+            _pin(root, caller, block, cached[2])
             return block
     block = _empty()
+    # Terminal egress re-decides the unit shape compile admitted, path included, not the bare served line.
+    served: list[dict[str, Any]] = []
     boundaries = []
     used = 0
     for item in admitted:
@@ -135,22 +140,23 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
             block["omitted"] += 1
             continue
         block["items"].append(line)
+        served.append(working_set._served_unit(item))  # noqa: SLF001 - the shape compile admitted
         used += cost
     block["state"] = "ready" if block["items"] else "empty"
     block["generation"] = _digest(block)
     with _LOCK:
-        _CACHE[key] = (min(boundaries) if boundaries else None, copy.deepcopy(block))
+        _CACHE[key] = (min(boundaries) if boundaries else None, copy.deepcopy(block), copy.deepcopy(served))
         _CACHE.move_to_end(key)
         while len(_CACHE) > CACHE_SIZE:
             _CACHE.popitem(last=False)
-    _pin(root, caller, block)
+    _pin(root, caller, block, served)
     return block
 
 
-def _pin(root: Path, caller: Any, block: dict[str, Any]) -> None:
+def _pin(root: Path, caller: Any, block: dict[str, Any], served: list[dict[str, Any]]) -> None:
     held = principal.invocation_served()
     if held is not None:
-        held[("stance", str(root), caller.binding, block["generation"])] = copy.deepcopy(block)
+        held[("stance", str(root), caller.binding, block["generation"])] = (copy.deepcopy(block), copy.deepcopy(served))
 
 
 def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +165,8 @@ def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any
     pinned = None if held is None else held.get(("stance", str(root), caller.binding, block.get("generation")))
     if pinned is None:
         return _empty("unavailable")
-    units = [{"ref": item["ref"], "text": item["text"]} for item in pinned["items"]]
-    if any(verdict != egress.UNIT_KEPT for verdict in egress.classify_units(root, units, purpose=caller.purpose)):
+    block, served = pinned
+    # A bare {ref, text} line lacks the page path a release-gated vault needs for an identified page's unit refs.
+    if any(verdict != egress.UNIT_KEPT for verdict in egress.classify_units(root, copy.deepcopy(served), purpose=caller.purpose)):
         return _empty("unavailable")
-    return copy.deepcopy(pinned)
+    return copy.deepcopy(block)
