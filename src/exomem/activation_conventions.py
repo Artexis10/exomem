@@ -102,7 +102,11 @@ _TOP_LEVEL_FIELDS = frozenset(
 )
 #: The response budgets a vault may set, each with the range the server accepts. Each key names a
 #: budget the server implements; a vault chooses only the number, so this closed set is not vocabulary.
-BUDGET_BOUNDS: Mapping[str, tuple[int, int]] = {"stance_max_chars": (0, 8000)}
+BUDGET_BOUNDS: Mapping[str, tuple[int, int]] = {
+    "stance_max_chars": (0, 8000),
+    "skills_max_chars": (0, 8000),
+    "skill_summary_max_chars": (40, 1000),
+}
 
 
 @dataclass(frozen=True, slots=True)

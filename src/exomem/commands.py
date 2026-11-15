@@ -150,10 +150,12 @@ from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import skills_context as skills_context_module
 from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import vault_skills as vault_skills_module
 from . import vocabulary_delta as vocabulary_delta_module
 from . import vocabulary_evidence as vocabulary_evidence_module
 from . import vocabulary_workflow as vocabulary_workflow_module
@@ -7140,6 +7142,7 @@ def op_activate_context(
     conversation: dict[str, Any] | None = None,
     trigger: Literal["user_turn", "task_refresh"] = "user_turn",
     initiator: str | None = None,
+    native_skills: list[str] | None = None,
 ) -> dict:
     """Recall authorized context; abstain if uncertain.
 
@@ -7161,6 +7164,7 @@ def op_activate_context(
         conversation: Relevant excerpts and refs; never full history.
         trigger: user_turn: initial recall. task_refresh: keep turn; task in focus.
         initiator: Caller label; no authority. Invalid labels ignored.
+        native_skills: Skills the client loads itself; omitted from `skills`.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -7283,6 +7287,7 @@ def op_activate_context(
                             trigger=trigger,
                             intent_resolution=intent_resolution,
                             reserved_chars=capture_policy.reserve if capture_policy else 0,
+                            native_skills=vault_skills_module.bounded_native_names(native_skills),
                         )
                         # Spend the reserved move before optional carriers share the public ceiling.
                         if isinstance(packet.get("budget"), dict):
@@ -7720,6 +7725,7 @@ def _op_activate_context_body(
     trigger: str = "user_turn",
     intent_resolution: dict[str, Any] | None = None,
     reserved_chars: int = 0,
+    native_skills: frozenset[str] = frozenset(),
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -8049,6 +8055,7 @@ def _op_activate_context_body(
                     },
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                     known_generation=(held_map or {}).get("map_generation"),
+                    native_skills=native_skills, known_skills=(held_map or {}).get("skills_generation"),
                     task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                     spent_after=reserved_chars,
@@ -8083,6 +8090,7 @@ def _op_activate_context_body(
                 identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
+                skills_generation=skills_context_module.held_generation(packet.get("skills")),
             )
             packet["task_context"] = context_task.pin(
                 vault_root, context_views_module.CallerView.current(vault_root, purpose=purpose),
