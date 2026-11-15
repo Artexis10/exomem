@@ -1297,6 +1297,11 @@ def run(
         # Declared before the server is built so every ownership decision in
         # `build_server` sees it.
         service_standby.enter_standby()
+    if worker_socket is None:
+        from . import artifact_lifecycle
+
+        # Only a managed worker has a separate launcher; a standalone server is its own.
+        artifact_lifecycle.claim_standalone_support()
 
     configure_logging(
         log_dir if log_dir is not None else resolve_log_dir(), process="server"

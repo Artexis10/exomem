@@ -1,4 +1,4 @@
-"""Launcher custody for original-storage and temporary-upload format changes."""
+"""Launcher custody for temporary-upload format changes."""
 
 from __future__ import annotations
 
@@ -10,10 +10,7 @@ from filelock import FileLock
 from . import state_migration
 
 # The worker command protocol fixes these IDs; they describe implemented formats.
-LIFECYCLE_IDS = (
-    state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID,
-    state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
-)
+LIFECYCLE_IDS = (state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,)
 
 _supported: frozenset[str] = frozenset()
 _activated: set[Path] = set()
@@ -27,6 +24,15 @@ def claim_launcher_support(formats: list[str] | None) -> None:
     if requested - set(LIFECYCLE_IDS):
         raise ValueError("unsupported managed artifact lifecycle declaration")
     _supported = requested
+
+
+def claim_standalone_support() -> None:
+    """A standalone server, including a Cloud cell, runs no older worker beside itself.
+
+    An older release still refuses the recorded format until offline cleanup retires it.
+    """
+    global _supported
+    _supported = frozenset(LIFECYCLE_IDS)
 
 
 def supports(format_id: str) -> bool:

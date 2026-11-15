@@ -28,17 +28,19 @@ All tasks describe future implementation. This design authorizes no code changes
 
 ## 4. Held-upload cancellation
 
-- [ ] 4.1 Make ticket consumption durable before body authority and establish the old-worker activation barrier. Prove a replay after power loss cannot recreate a completed cancellation's handle.
-- [ ] 4.2 Implement authenticated cancellation markers with strict flush and removal ordering. Cover rename-flush failure, payload-removal failure, marker-removal failure, lost acknowledgement, and cleanup after expiry.
-- [ ] 4.3 Preserve the existing claim race and failed-preservation restoration. Exercise both winners, foreign/absent handles, and replacement upload within the released session cap.
-- [ ] 4.4 Expose one bounded cancellation leaf through generated MCP, REST, and CLI surfaces. Verify ordered honest outcomes, secret-free diagnostics, and no canonical writer, fetch, indexing, or unrelated-store scan.
+Section 4 and task 5.2 ship in their own delivery, ahead of shared original storage. The two capabilities share no runtime path; each format has its own launcher declaration.
+
+- [x] 4.1 Make ticket consumption durable before body authority and establish the old-worker activation barrier. Prove a replay after power loss cannot recreate a completed cancellation's handle.
+- [x] 4.2 Implement authenticated cancellation markers with strict flush and removal ordering. Cover rename-flush failure, payload-removal failure, marker-removal failure, lost acknowledgement, and cleanup after expiry.
+- [x] 4.3 Preserve the existing claim race and failed-preservation restoration. Exercise both winners, foreign/absent handles, and replacement upload within the released session cap.
+- [x] 4.4 Expose one bounded cancellation leaf through generated MCP, REST, and CLI surfaces. Verify ordered honest outcomes, secret-free diagnostics, and no canonical writer, fetch, indexing, or unrelated-store scan.
 - [ ] 4.5 Prove launcher/operator compatibility before format activation and integrate current-runtime cleanup before target admission. Verify old-sweeper exclusion and downgrade after cleanup; exercise the documented offline launcher update.
-- [ ] 4.6 Update generic operation guidance and generated contracts through their source generators. Verify schema fidelity, privacy, and documented cancellation without adding a model dependency.
+- [x] 4.6 Update generic operation guidance and generated contracts through their source generators. Verify schema fidelity, privacy, and documented cancellation without adding a model dependency.
 
 ## 5. Integrated proof and delivery
 
 - [ ] 5.1 Measure metadata paths before and after on the same 100,000-filing fixture and representative shared objects. Verify indexed plans, bounded query counts, and p95 below one second.
-- [ ] 5.2 Measure a maximum cancellation batch beside 10,000 unrelated holds. Verify work depends on submitted handles, not payload size; exercise busy responses and the existing budget alert.
+- [x] 5.2 Measure a maximum cancellation batch beside 10,000 unrelated holds. Verify work depends on submitted handles, not payload size; exercise busy responses and the existing budget alert.
 - [ ] 5.3 Run the combined disposable custody workflow: independent protected and ordinary filings, one object, exact export/restore, and failed-upload cancellation. Verify drain counts name physical objects and zero proves every binding has local bytes.
 - [ ] 5.4 Run scoped author checks, public privacy validation, strict OpenSpec validation, and the normal completion CI. Obtain one independent adversarial review covering correctness, security, C4/C6, scale, and proof weight.
 - [ ] 5.5 Deliver the approved implementation as one cohesive batch through normal release and installed verification. Keep existing live archives unconverted and preserve explicit live-conversion authority boundaries.

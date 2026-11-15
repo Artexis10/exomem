@@ -1705,7 +1705,7 @@ class WorkerRuntime:
         if cancellation not in missing:
             return False
         if missing != {cancellation}:
-            raise ValueError("candidate lacks required original-storage or governance formats")
+            raise ValueError("candidate lacks other required state formats")
         _require_store_schema(root, verified[2])
         return True
 

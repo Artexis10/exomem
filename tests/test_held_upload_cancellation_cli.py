@@ -141,3 +141,48 @@ def test_cli_uses_the_holding_local_session_and_releases_its_upload_capacity(vau
             assert data["cancelled"] == 1, data
 
     asyncio.run(scenario())
+
+
+def test_cli_forwards_the_protected_authorization_session_only_to_the_local_listener(tmp_path, capsys):
+    """A hold bound to an authorization session is cancellable only when the CLI carries that same session."""
+    import os
+    import secrets
+
+    from exomem.governance import authorization_sessions
+
+    credential = authorization_sessions._encode_credential(secrets.token_bytes(16), secrets.token_bytes(32))
+    token_file = tmp_path / "owner.token"
+    token_file.write_text("holding-local-token")
+    reference = held_uploads.HELD_SCHEME + "y" * 43
+    seen = []
+
+    class Capture(httpx.BaseTransport):
+        def handle_request(self, request):
+            seen.append((request.url.host, request.url.path, dict(request.headers), request.read().decode()))
+            return httpx.Response(200, json={"success": True, "data": {
+                "cancelled": 1, "unavailable": 0, "failed": 0,
+                "uploads": [{"index": 0, "state": "cancelled", "released_bytes": 3}]}})
+
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, credential.encode("ascii"))
+        os.close(write_fd)
+        write_fd = -1
+        code = _core_op_main([
+            "transfer_artifact", "--operation", "cancel", "--uploads", reference,
+            "--authorization-session-fd", str(read_fd),
+            "--token-file", str(token_file), "--port", "8764", "--json",
+        ], local_transfer_transport=Capture())
+    finally:
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+    output = capsys.readouterr()
+    assert code == 0
+    [(host, path, headers, body)] = seen
+    assert (host, path) == ("127.0.0.1", "/api/transfer_artifact")
+    assert headers["x-exomem-authorization-session"] == credential
+    assert headers["authorization"] == "Bearer holding-local-token"
+    assert credential not in body
+    assert credential not in output.out + output.err
+    assert json.loads(output.out)["data"]["cancelled"] == 1

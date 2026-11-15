@@ -2688,21 +2688,21 @@ def test_failed_downgrade_cleanup_retains_active_recovery_interpreter(tmp_path, 
     asyncio.run(scenario())
 
 
-def test_cancellation_cleanup_does_not_relax_pooled_original_target_admission(tmp_path, monkeypatch, candidate_runtime):
-    """Temporary-upload cleanup cannot make an older original-storage reader compatible."""
+def test_cancellation_cleanup_does_not_relax_another_format_admission(tmp_path, monkeypatch, candidate_runtime):
+    """Temporary-upload cleanup cannot make a reader that lacks another recorded format compatible."""
     from exomem import state_migration
 
     vault = tmp_path / "vault"
     vault.mkdir()
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     state_migration.require_vault_state_ready(vault)
-    state_migration.record_shared_originals_compatibility(vault, authority_check=lambda: True)
+    state_migration.record_collections_sqlite_only(vault, authority_check=lambda: True)
     state_migration.record_held_upload_cancellation_compatibility(vault, authority_check=lambda: True, active=True)
     runtime, actual = candidate_runtime
     actual["supported_state_compatibility"] = [item for item in actual["supported_state_compatibility"]
-        if item not in {state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID,
+        if item not in {state_migration.COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
                         state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID}]
     target = asyncio.run(runtime.inspect({"python": sys.executable, "version": "1.2.3"}))
-    with pytest.raises(ValueError, match="original-storage or governance"):
+    with pytest.raises(ValueError, match="other required state formats"):
         runtime.cancellation_cleanup_required(target)
-    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+    assert state_migration.COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)

@@ -52,15 +52,13 @@ COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID = "collections-sqlite-only-v1"
 #: A vault whose pages the collection store holds (OpenSpec make-vault-store-canonical). It is also the
 #: release capability's name (``collection_store.capability.VAULT_STORE_V1``), so one string serves both.
 VAULT_STORE_COMPATIBILITY_ID = "vault-store-v1"
-# These IDs name the closed original-storage and private-upload formats.
-SHARED_ORIGINALS_COMPATIBILITY_ID = "shared-originals-v1"
+# This ID names the closed private-upload cancellation format.
 HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID = "held-upload-cancellation-v1"
 # With the store schema IDs, the closed catalog this release recognizes; an earlier release
 # reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
     "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-    VAULT_STORE_COMPATIBILITY_ID, SHARED_ORIGINALS_COMPATIBILITY_ID,
-    HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
+    VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
 })
 
 
@@ -271,8 +269,8 @@ def supported_state_compatibility_ids() -> tuple[str, ...]:
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
         CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-        VAULT_STORE_COMPATIBILITY_ID, SHARED_ORIGINALS_COMPATIBILITY_ID,
-        HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
+        VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
+        *store_schema.compatibility_ids(),
     )
 
 
@@ -441,20 +439,13 @@ def record_vault_store_compatibility(
                      drop=frozenset() if active else ids)
 
 
-def record_shared_originals_compatibility(
-    vault_root: Path, *, authority_check: Callable[[], bool],
-) -> None:
-    """Enroll before pool publication; the caller proves lifecycle custody."""
-    _record_optional(vault_root, authority_check, add=frozenset({SHARED_ORIGINALS_COMPATIBILITY_ID}))
-
-
 def record_held_upload_cancellation_compatibility(
     vault_root: Path, *, authority_check: Callable[[], bool], active: bool,
 ) -> None:
     """Enroll before cancellation, or retire after offline marker cleanup.
 
     The caller excludes old workers and settles ticket consumption before enrollment.
-    Retirement owns only the temporary-upload format, never the original pool.
+    Retirement owns only the temporary-upload format, never another recorded format.
     """
     ids = frozenset({HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID})
     _record_optional(vault_root, authority_check, add=ids if active else frozenset(),

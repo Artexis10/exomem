@@ -127,8 +127,11 @@ def _top_spans(spans: Iterable[Any] | None) -> tuple[tuple[str, float], ...]:
 @lru_cache(maxsize=1)
 def _registered_operations() -> frozenset[str]:
     from .commands import COMMANDS, PRODUCT_COMMANDS
+    from .public_tools import TOOLS
 
-    return frozenset(command.name for command in (*COMMANDS, *PRODUCT_COMMANDS))
+    # The public wire names are the MCP surface's closed tool registry; without them a
+    # per-tool bar such as `cancel-uploads-warm` could never label a live call.
+    return frozenset(command.name for command in (*COMMANDS, *PRODUCT_COMMANDS)) | frozenset(TOOLS)
 
 
 def make_sample(

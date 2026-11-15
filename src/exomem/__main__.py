@@ -4481,11 +4481,13 @@ def _simple_maintain_main(argv: list[str]) -> int:
         not args.migrate_state or args.adopt_state or args.arm_connector_boundary or args.migrate_collections
     ):
         parser.error("--cleanup-held-upload-cancellations requires --migrate-state --offline without other state steps")
-    if (args.deadline_monotonic is not None) != (args.migrate_collections or args.cleanup_held_upload_cancellations) or (
-        args.deadline_monotonic is not None
-        and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0)
+    if (
+        (args.deadline_monotonic is not None and not (args.migrate_collections or args.cleanup_held_upload_cancellations))
+        or (args.migrate_collections and args.deadline_monotonic is None)
+        or (args.deadline_monotonic is not None
+            and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0))
     ):
-        parser.error("collections migration or held-upload cleanup requires a positive --deadline-monotonic")
+        parser.error("collections migration requires a positive --deadline-monotonic; only it and held-upload cleanup take one")
     if args.migrate_state:
         if not args.offline:
             parser.error("--migrate-state requires --offline")
@@ -4498,8 +4500,10 @@ def _simple_maintain_main(argv: list[str]) -> int:
                 authority = state_migration.assert_offline_migration_authority(
                     source="exomem maintain --cleanup-held-upload-cancellations --offline",
                 )
+                # The launcher passes its own deadline; an operator's run gets a bounded default budget.
+                deadline = args.deadline_monotonic if args.deadline_monotonic is not None else time.monotonic() + 600
                 completed = artifact_lifecycle.cleanup_cancellations(
-                    _offline_vault_root(args.vault), authority=authority, deadline=args.deadline_monotonic,
+                    _offline_vault_root(args.vault), authority=authority, deadline=deadline,
                 )
             except (OSError, RuntimeError, ValueError, TimeoutError) as error:
                 if args.json:

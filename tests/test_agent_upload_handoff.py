@@ -493,6 +493,26 @@ def test_old_launcher_cannot_activate_cancellation_from_an_inherited_environment
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
 
 
+@pytest.mark.parametrize("managed_worker", [False, True])
+def test_only_a_standalone_server_is_its_own_cancellation_launcher(monkeypatch, tmp_path, managed_worker):
+    """Cloud cells and foreground servers can cancel; a managed worker still needs its launcher's claim."""
+    from exomem import artifact_lifecycle, cuda_containment, logging_config, server, state_migration
+
+    class Started(Exception):
+        pass
+
+    def stop(*args, **kwargs):
+        raise Started
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    monkeypatch.setattr(cuda_containment, "hide_in_process", lambda: None)
+    monkeypatch.setattr(logging_config, "configure_logging", stop)
+    with pytest.raises(Started):
+        server.run(transport="streamable-http", worker_socket=tmp_path / "worker.sock" if managed_worker else None)
+    cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
+    assert artifact_lifecycle.supports(cancellation) is not managed_worker
+
+
 def test_cancellation_activation_flushes_consumed_tickets_before_enrollment(upload_env, monkeypatch):
     """A failed activation barrier must leave the upload and its previous format intact."""
     from exomem import artifact_lifecycle, private_state, state_migration, upload_handoff
@@ -522,8 +542,8 @@ def test_cancellation_activation_flushes_consumed_tickets_before_enrollment(uplo
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
 
 
-def test_offline_cancellation_cleanup_can_resume_without_retiring_pooled_originals(upload_env, monkeypatch, capsys):
-    """An interrupted downgrade must keep its cleanup requirement and all canonical pool custody."""
+def test_offline_cancellation_cleanup_can_resume_without_retiring_other_formats(upload_env, monkeypatch, capsys):
+    """An interrupted downgrade must keep its cleanup requirement and every other recorded format."""
     import time
     from pathlib import Path
 
@@ -533,7 +553,7 @@ def test_offline_cancellation_cleanup_can_resume_without_retiring_pooled_origina
     held = _post(upload_env, _prepare(upload_env)).json()
     monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
     monkeypatch.setattr(artifact_lifecycle, "_activated", set())
-    state_migration.record_shared_originals_compatibility(vault, authority_check=lambda: True)
+    state_migration.record_collections_sqlite_only(vault, authority_check=lambda: True)
     original_unlink = Path.unlink
 
     def blocked_payload(path, *args, **kwargs):
@@ -550,7 +570,7 @@ def test_offline_cancellation_cleanup_can_resume_without_retiring_pooled_origina
         artifact_lifecycle.cleanup_cancellations(vault, authority=authority, deadline=time.monotonic()+10)
     required = state_migration.recorded_descriptor_ids(vault)
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID in required
-    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in required
+    assert state_migration.COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID in required
     monkeypatch.setattr(Path, "unlink", original_unlink)
     from exomem.__main__ import _simple_maintain_main
 
@@ -561,6 +581,25 @@ def test_offline_cancellation_cleanup_can_resume_without_retiring_pooled_origina
     assert json.loads(capsys.readouterr().out) == {"success": True, "data": {"completed": 1}}
     required = state_migration.recorded_descriptor_ids(vault)
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in required
-    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in required
+    assert state_migration.COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID in required
     assert not list(held_uploads._store(vault).glob("*.bin"))
     assert not list(held_uploads._store(vault).glob("*.cancelling.json"))
+
+
+def test_an_operator_can_finish_cancellations_without_a_launcher_deadline(upload_env, monkeypatch, capsys):
+    """A standalone or Cloud downgrade needs the cleanup command a person can type."""
+    from exomem import artifact_lifecycle, state_migration
+    from exomem.__main__ import _simple_maintain_main
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    monkeypatch.setattr(artifact_lifecycle, "_activated", set())
+    with principal.request_scope(who):
+        assert held_uploads.cancel(vault, held["file"]["download_url"]) == held["size"]
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+    assert _simple_maintain_main([
+        "--vault", str(vault), "--migrate-state", "--offline", "--cleanup-held-upload-cancellations", "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {"success": True, "data": {"completed": 0}}
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
