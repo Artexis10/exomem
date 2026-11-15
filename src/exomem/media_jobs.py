@@ -838,6 +838,13 @@ class MediaJobStore:
                              "evicted INTEGER, bytes INTEGER, captured_at TEXT, "
                              "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL, "
                              "attempt_failed INTEGER NOT NULL DEFAULT 0, waiting TEXT, blocked_by TEXT)")
+                if "proof_version" not in {row[1] for row in conn.execute("PRAGMA table_info(media_drain)")}:
+                    from . import media_drain_record
+
+                    # A legacy reference-only zero cannot release custody of unbacked/shared originals.
+                    media_drain_record.remove(self.vault_root)
+                    conn.execute("ALTER TABLE media_drain ADD COLUMN proof_version INTEGER NOT NULL DEFAULT 0")
+                    conn.execute("DELETE FROM media_drain")
                 # No query reads this index (design D3, query plans): a ledger from an older release loses it.
                 conn.execute("DROP INDEX IF EXISTS media_access_hydrating")
                 # A store refusal that is final for one original's exact bytes; rebuildable.

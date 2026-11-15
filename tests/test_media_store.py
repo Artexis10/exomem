@@ -3906,23 +3906,35 @@ def test_a_census_is_unknown_when_the_companion_of_an_evicted_original_is_damage
     assert not media_drain_record.record_path(vault).exists()
 
 
-@pytest.mark.parametrize("released", ["deleted", "forgotten"])
-def test_a_census_clears_the_row_of_an_original_that_its_companion_no_longer_references(vault: Path, selected_store, released):
+def test_a_census_clears_the_row_of_an_original_whose_companion_was_deleted(vault: Path, selected_store):
     """Catches a census that stays unknown for an original that is gone for good, so its cell never drains."""
     from exomem import media_store
 
     path = _stored(vault, "gone", 300)
     assert media_store.evict(vault, path)
     _retained(selected_store, vault)
-    if released == "deleted":
-        _companion(path).unlink()
-    else:
-        media_store.forget_original(vault, path)
+    _companion(path).unlink()
 
     assert media_store.drain_census(vault) == (0, 0)
 
     assert _ledger_rows(vault)[path.relative_to(vault).as_posix()][0] == 0
     assert media_store.drain_record(vault).latched
+
+
+def test_removing_only_a_recovery_reference_does_not_release_an_existing_filing(vault: Path, selected_store):
+    """An unbacked canonical identity must not disappear from the all-binding zero proof."""
+    from exomem import media_store
+
+    path = _stored(vault, "unbacked", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    media_store.forget_original(vault, path)
+
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+        media_store.drain_census(vault)
+
+    assert not media_store.drain_record(vault).latched
+    assert media_store.drain_record(vault).blocked_by == (path.relative_to(vault).as_posix(),)
 
 
 def test_a_census_is_unknown_when_the_companion_of_a_cached_row_that_lost_its_bytes_is_damaged(vault: Path, selected_store):
@@ -4192,7 +4204,8 @@ def test_the_retained_status_shows_a_census_attempt_that_failed_after_the_last_c
 
     census = commands.op_adoption_studio(vault, action="status")["retained_store"]["census"]
 
-    assert set(census) == {"unknown", "attempted_at", "last_complete"}
+    assert set(census) == {"unknown", "attempted_at", "last_complete", "blocked_by"}
+    assert census["blocked_by"] == [path.relative_to(vault).as_posix()]
     assert census["last_complete"]["evicted"] == 1
 
 
@@ -4361,7 +4374,7 @@ def test_the_retained_status_reports_the_census_the_latch_and_the_originals_too_
     assert set(before["census"]) == {"unknown"} and before["drained"] is False
     assert (after["census"]["evicted"], after["census"]["bytes"]) == (2, 700)
     assert after["drained"] is False
-    assert after["above_hydration_capacity"] == {"count": 1}
+    assert after["above_hydration_capacity"] == {"count": 1, "unit": "physical_objects"}
 
 
 def _malformed_notes(vault: Path, count: int) -> list[str]:

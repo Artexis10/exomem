@@ -70,6 +70,86 @@ def original_path(
     raise ValueError("Trash item is outside its declared placement")
 
 
+class PlacementCensus:
+    """Reuse bounded placement parsing and recheck every acquired metadata version."""
+
+    def __init__(self, vault: Path) -> None:
+        self.vault = vault
+        self.placements: dict[str, dict[str, object] | None] = {}
+        self.versions: dict[str, held_fs.FileVersion] = {}
+
+    def _placement(self, root: str) -> dict[str, object] | None:
+        from . import runtime_resources
+        from .relation_review import parse_exact_json_object
+
+        if root not in self.placements:
+            path = root + METADATA_SUFFIX
+            try:
+                with reserved_paths.open_generic_binary(self.vault, path) as source:
+                    size = source.version.size
+                    with runtime_resources.parser_preparation(size) as preparation:
+                        preparation.reserve_source(size)
+                        raw = source.stream.read(size + 1)
+                        if len(raw) != size:
+                            raise ValueError("Trash metadata changed during read")
+                        text = raw.decode("utf-8")
+                        preparation.reserve_parser(text, json_bytes=len(raw))
+                        parsed = parse_exact_json_object(text)
+                        placement = {"original_path": parsed.get("original_path")}
+                        original_path(placement, trash_root=root, current_path=root)
+                        source.require_current()
+                        self.versions[path] = source.version
+                        self.placements[root] = placement
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code != "MISSING":
+                    raise
+                self.placements[root] = None
+        return self.placements[root]
+
+    def resolve(self, path: str, fields: dict[str, object]) -> originals.BinaryBinding | None:
+        """Return the current payload path without rewriting the canonical companion."""
+        try:
+            return originals.companion_binding(fields, sidecar_path=path)
+        except ValueError:
+            if not is_trash_path(path):
+                raise
+        binary = originals.binary_binding(fields)
+        if binary is None:
+            return None
+        # A Trash page that sat away from its companion path before its deletion raises the
+        # `DisplacedReference` of that placement, for the census to confirm from the media ledger.
+        displaced: originals.DisplacedReference | None = None
+        current = PurePosixPath(path)
+        for root in (current, current.with_suffix(""), *current.parents):
+            if not is_trash_path(root.as_posix()):
+                continue
+            placement = self._placement(root.as_posix())
+            if placement is None:
+                continue
+            try:
+                historical = original_path(placement, trash_root=root.as_posix(), current_path=path)
+                admitted = originals.companion_binding(fields, sidecar_path=historical)
+                if admitted is None:
+                    continue
+                origin = PurePosixPath(placement["original_path"])
+                payload = root / PurePosixPath(admitted.path).relative_to(origin)
+                return originals.BinaryBinding(payload.as_posix(), admitted.sha256, admitted.size)
+            except originals.DisplacedReference as error:
+                displaced = error
+            except ValueError:
+                continue
+        if displaced is not None:
+            raise displaced
+        raise ValueError("original in Trash has no trustworthy placement")
+
+    def require_current(self) -> None:
+        for path, version in self.versions.items():
+            with reserved_paths.open_generic_binary(self.vault, path) as source:
+                if source.version != version:
+                    raise ValueError("Trash placement changed during the census")
+                source.require_current()
+
+
 def reference_companion(vault: Path, binary_path: str) -> tuple[str, reserved_paths.GenericFileSnapshot] | None:
     """Acquire the exact reference-only companion that recovery may retire."""
     from .vault import parse_frontmatter

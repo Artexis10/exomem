@@ -15,7 +15,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_capacity, original_pool, originals, reserved_paths
+from . import media_capacity, original_pool, originals, reserved_paths, trash_metadata
 
 # This key and the schema fields below belong to the versioned derived ledger.
 _STATE = "physical-bindings-v1"
@@ -201,8 +201,14 @@ def coalesce_cache(conn: sqlite3.Connection, keys: Iterable[str] | None = None) 
     conn.execute("DROP TABLE cache_merge")
 
 
-def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = None) -> Binding | None:
-    """Derive one companion's facts without reading any original bytes."""
+def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = None,
+              placements: trash_metadata.PlacementCensus | None = None, displaced: bool = False) -> Binding | None:
+    """Derive one companion's facts without reading any original bytes.
+
+    A page that binds a reference away from its original's companion path raises
+    `originals.DisplacedReference`. A caller that has confirmed that reference from the media ledger
+    passes ``displaced`` to get the facts of the binding that the page names.
+    """
     from .vault import canonical_vault_rel, parse_frontmatter
 
     fields, _body, marker = parse_frontmatter(data.decode("utf-8"), custody=True)
@@ -211,6 +217,19 @@ def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = No
         if originals.bound_path(fields) is not None:
             raise ValueError("an original companion has incomplete identity")
         return None
+    own_placements = placements is None
+    if own_placements:
+        placements = trash_metadata.PlacementCensus(vault)
+    try:
+        binary = placements.resolve(rel, fields)
+    except originals.DisplacedReference as error:
+        if not displaced:
+            raise
+        binary = error.binary
+    if own_placements:
+        placements.require_current()
+    if binary is None:
+        raise ValueError("an original companion has incomplete identity")
     if canonical_vault_rel(vault, binary.path) != binary.path or reserved_paths.classify_logical(binary.path).blocked:
         raise ValueError("an original companion has an unsafe path")
     reference = originals.stored_reference(fields.get("stored_object"))
@@ -487,14 +506,41 @@ def rebuild(vault: Path) -> bool:
     # canonical writer. A changed generation discards it before publication.
     with closing(ledger._connect()) as conn:
         conn.execute("CREATE TEMP TABLE binding_census AS SELECT * FROM media_bindings WHERE 0")
+        conn.execute("CREATE INDEX temp.binding_census_companion ON binding_census(companion_rel)")
+        conn.execute("CREATE TEMP TABLE displaced_census AS SELECT * FROM media_bindings WHERE 0")
+        placements = trash_metadata.PlacementCensus(vault)
         try:
+            displaced: list[tuple[originals.DisplacedReference, Binding]] = []
             for rel, data in _pages(vault):
-                binding = from_page(vault, rel, data, selected=selected)
+                try:
+                    binding = from_page(vault, rel, data, selected=selected, placements=placements)
+                except originals.DisplacedReference as error:
+                    # A page away from its original, as a confined move leaves one, counts once the ledger confirms it.
+                    found = from_page(vault, rel, data, selected=selected, placements=placements, displaced=True)
+                    if found is not None:
+                        displaced.append((error, found))
+                    continue
                 if binding is not None:
                     conn.execute("INSERT INTO binding_census VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                                  (binding.binary_rel, binding.companion_rel, binding.companion_hash,
                                   binding.object_key, binding.sha256, binding.size,
                                   int(binding.resident_only), binding.reference))
+            _confirm_displaced(vault, conn, displaced)
+            # An extant damaged companion cannot erase a previously acquired witness.
+            # Only canonical absence proves release; a replacement binding is already in the census.
+            for row in conn.execute("SELECT DISTINCT b.companion_rel FROM media_bindings b "
+                                    "WHERE NOT EXISTS(SELECT 1 FROM binding_census n "
+                                    "WHERE n.companion_rel = b.companion_rel AND n.binary_rel = b.binary_rel) "
+                                    "AND NOT EXISTS(SELECT 1 FROM displaced_census d "
+                                    "WHERE d.companion_rel = b.companion_rel AND d.binary_rel = b.binary_rel)"):
+                try:
+                    reserved_paths.read_generic_bytes(vault, row[0])
+                except reserved_paths.ReservedPathLeafError as error:
+                    if error.code != "MISSING":
+                        raise
+                else:
+                    raise ValueError("an extant companion lost its original binding")
+            placements.require_current()
             conn.commit()
             from .media_store import _guard
 
@@ -517,6 +563,30 @@ def rebuild(vault: Path) -> bool:
     return False
 
 
+def _confirm_displaced(vault: Path, conn: sqlite3.Connection,
+                       displaced: list[tuple[originals.DisplacedReference, Binding]]) -> None:
+    """Count each displaced page that the media ledger confirms, once per original; any other is unknown.
+
+    Such a page holds no original beside it, and several pages may name one original. A canonical
+    companion's binding wins, then the first displaced page in path order, as `media_store.evicted_members`
+    lists an original once; the census keeps every confirmed page, so none reads as a lost binding.
+    """
+    if not displaced:
+        return
+    from .media_store import recorded_versions
+
+    if not all(recorded_versions(vault, [(error.binary, error.reference) for error, _binding in displaced])):
+        raise ValueError("a page away from its original binds a version that the media ledger does not record")
+    conn.executemany("INSERT INTO displaced_census VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     ((binding.binary_rel, binding.companion_rel, binding.companion_hash, binding.object_key,
+                       binding.sha256, binding.size, int(binding.resident_only), binding.reference)
+                      for _error, binding in displaced))
+    conn.execute("INSERT INTO binding_census SELECT d.* FROM displaced_census d "
+                 "WHERE NOT EXISTS(SELECT 1 FROM binding_census b WHERE b.binary_rel = d.binary_rel) "
+                 "AND d.companion_rel = (SELECT MIN(x.companion_rel) FROM displaced_census x "
+                 "WHERE x.binary_rel = d.binary_rel)")
+
+
 def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
     """Aggregate one object's bindings and captured pins with indexed ledger reads."""
     state = checkpoint(conn)
@@ -535,7 +605,7 @@ def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
         "SELECT EXISTS(SELECT 1 FROM media_access WHERE object_key = ? OR object_key IS NULL) "
         "OR EXISTS(SELECT 1 FROM jobs WHERE pinned = 1 AND state IN ('pending', 'running') "
         "AND (object_key = ? OR object_key IS NULL)) "
-        "OR EXISTS(SELECT 1 FROM media_drain WHERE latched = 1)", (key, key)).fetchone()[0])
+        "OR EXISTS(SELECT 1 FROM media_drain WHERE latched = 1 AND proof_version = 1)", (key, key)).fetchone()[0])
     references = tuple(originals.stored_reference(json.loads(item[0])) for item in conn.execute(
         "SELECT DISTINCT reference FROM media_bindings WHERE object_key = ? AND reference IS NOT NULL ORDER BY reference", (key,)))
     if any(reference is None for reference in references):

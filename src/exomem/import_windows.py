@@ -460,10 +460,11 @@ def _retained_section(root: Path, config: dict) -> dict:
         census = drained = {"unknown": str(error)}
     else:
         complete = (None if record is None or record.evicted is None else
-                    {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at})
+                    {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at,
+                     "unit": record.unit})
         if record is not None and record.attempt_failed:
             # The latest attempt could not count; the last complete figures stay as history, never as the answer.
-            census = {"unknown": "the latest census could not count the evicted originals", "attempted_at": record.attempted_at}
+            census = {"unknown": "the latest census could not count physical originals", "attempted_at": record.attempted_at}
             if record.blocked_by:
                 census["blocked_by"] = list(record.blocked_by)  # The owner's own originals, for the owner to find.
             if complete is not None:
@@ -473,7 +474,7 @@ def _retained_section(root: Path, config: dict) -> dict:
         drained = record is not None and record.latched
         waiting = None if record is None else record.waiting
     try:
-        above = {"count": media_store.evicted_above_capacity(root, config)}
+        above = {"count": media_store.evicted_above_capacity(root, config), "unit": media_store.DRAIN_UNIT}
     except media_store.MediaStoreError as error:
         above = {"unknown": str(error)}
     return {"shortfall": _figure(shortfall), "census": census, "drained": drained, "drain_waiting": waiting,

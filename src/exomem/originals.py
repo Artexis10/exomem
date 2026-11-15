@@ -162,6 +162,27 @@ class DisplacedReference(ValueError):
         self.reference = reference
 
 
+def companion_binding(fields: dict[str, object], *, sidecar_path: str) -> BinaryBinding | None:
+    """Validate the binding at its permitted ordinary, protected or legacy Source companion.
+
+    A well-formed reference away from those paths raises `DisplacedReference`, which a census confirms
+    from the media ledger; any other binding away from them raises a plain `ValueError`.
+    """
+    from . import reserved_paths
+
+    binary = binary_binding(fields)
+    if binary is None:
+        return None
+    if reserved_paths.classify_logical(binary.path).blocked:
+        raise ValueError("original has an unsafe binary binding")
+    if sidecar_path not in companion_paths(binary.path):
+        reference = stored_reference(fields.get("stored_object"))
+        if reference is not None:
+            raise DisplacedReference(binary, reference)
+        raise ValueError("original is not at its bound companion path")
+    return binary
+
+
 def referenced_binding(
     fields: dict[str, object], *, sidecar_path: str, store: StoreBinding,
 ) -> tuple[BinaryBinding, StoredObject] | None:
@@ -171,8 +192,6 @@ def referenced_binding(
     Missing or foreign references count as none; malformed selected-store custody raises, and a
     well-formed one away from its companion path raises `DisplacedReference`.
     """
-    from . import reserved_paths
-
     if "stored_object" not in fields:
         return None
     reference = stored_reference(fields["stored_object"])
@@ -180,11 +199,9 @@ def referenced_binding(
         raise ValueError("stored reference is malformed")
     if reference.store != store.store:
         return None
-    binary = binary_binding(fields)
-    if binary is None or reserved_paths.classify_logical(binary.path).blocked:
+    binary = companion_binding(fields, sidecar_path=sidecar_path)
+    if binary is None:
         raise ValueError("stored reference has no valid binary binding")
-    if sidecar_path not in companion_paths(binary.path):
-        raise DisplacedReference(binary, reference)
     return binary, reference
 
 
