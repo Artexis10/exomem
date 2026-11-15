@@ -7,6 +7,10 @@ the trash path format AND the original-path encoding to recover.
 
 Refuses to overwrite an existing file at the restore destination — pick
 a different `restore_path` if the original location is now occupied.
+
+A recovery is a move out of the trash, so a restricted writer's confinement binds it as it binds
+`move_file`: both modes admit the trash entry as the source and the restore path as the
+destination before any existence check, and a refusal is `WRITE_REFUSED: target is unavailable`.
 """
 
 from __future__ import annotations
@@ -127,9 +131,11 @@ def _recover_from_trash_local(
             relation_reviews=relation_reviews,
             fold=_fold,
         )
+    # A recovery is a move out of the trash, so its source is admitted as a move's is: before any
+    # existence check, and a withheld entry answers as an absent one.
     try:
         trash_abs, trash_rel = resolve_under_vault(
-            vault_root, trash_path, must_exist=True
+            vault_root, trash_path, must_exist=True, refuse_withheld=True
         )
     except VaultPathError as e:
         raise RecoverError(code=e.code, reason=e.reason) from e
@@ -173,6 +179,7 @@ def _recover_from_trash_local(
     )
     if trash_kind == "file":
         assert trash_file_snapshot is not None
+        _admit_publication(vault_root, restore_rel, trash_file_snapshot.data)
         restored = ((restore_rel, trash_file_snapshot.data),)
     else:
         restored = tuple(
@@ -753,6 +760,37 @@ def _refuse_outside_trash(trash_rel: str) -> None:
         )
 
 
+def _admit_restore_destination(vault_root: Path, restore_rel: str) -> None:
+    """Admit the restore path as a move's destination, judged as a creation, before any existence check.
+
+    A limited caller may create only in a capture namespace, so a hidden page holding the name
+    cannot change its answer. It is `move_file`'s destination rule, with this door's error.
+    """
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, restore_rel)
+    except ValueError:
+        raise RecoverError("WRITE_REFUSED", "target is unavailable") from None
+
+
+def _admit_publication(vault_root: Path, restore_rel: str, data: bytes | None) -> None:
+    """Admit the restored bytes at their destination, as the batch target check would.
+
+    The rename publishes outside that check, so the recovery asks here, as `move_file` does for a
+    move out of the trash: every writer keeps capture namespaces free of protected content. Only
+    a page's bytes decide its membership, so a binary is judged by its path.
+    """
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_write(
+            vault_root, restore_rel, content=data if restore_rel.lower().endswith(".md") else None
+        )
+    except ValueError:
+        raise RecoverError("WRITE_REFUSED", "target is unavailable") from None
+
+
 def _refuse_reference_companion(data: bytes) -> None:
     """Refuse a trashed page that only refers to its original: the original is the entry to pick."""
     try:
@@ -853,6 +891,8 @@ def _restore_destination(
         restore_abs, restore_rel = resolve_under_vault(vault_root, restore_path)
     except VaultPathError as e:
         raise RecoverError(code=e.code, reason=e.reason) from e
+    # Before any rule that reads the destination's state, so a refused path tells nothing about it.
+    _admit_restore_destination(vault_root, restore_rel)
 
     if reserved_paths.classify_logical(restore_rel).blocked:
         raise RecoverError(
@@ -991,8 +1031,10 @@ def _recover_in_store(
     with ExitStack() as reading:
         # The read phase sees one revision; the commit's expectations recheck all that it read.
         reading.enter_context(store_read.request_snapshot(root))
+        # The source of a move out of the trash is admitted before the store is read, for a folder
+        # as for a page, as file mode admits it.
         try:
-            trash_abs, trash_rel = resolve_under_vault(root, trash_path)
+            trash_abs, trash_rel = resolve_under_vault(root, trash_path, refuse_withheld=True)
         except VaultPathError as e:
             raise RecoverError(code=e.code, reason=e.reason) from e
         _refuse_outside_trash(trash_rel)
@@ -1035,6 +1077,8 @@ def _recover_in_store(
             allow_curated=allow_curated,
             fold=fold,
         )
+        if trash_kind == "file":
+            _admit_publication(root, restore_rel, stored.get(trash_rel))
 
         def restored(source: str) -> str:
             return f"{restore_rel.rstrip('/')}/{source[len(trash_rel) + 1:]}"
