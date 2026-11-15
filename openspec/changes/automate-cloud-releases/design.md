@@ -312,7 +312,7 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 - `EXOMEM_CLOUD_UPSTREAM_TIMEOUT_SECONDS` bounds the time from the first forwarded byte to the response headers. When it runs out, the gateway answers `504 CELL_TIMEOUT` and frees its slot.
 - Stateless FastMCP answers with SSE, so headers arrive early. `EXOMEM_CLOUD_UPSTREAM_IDLE_SECONDS` therefore bounds the gap between response body chunks. When it runs out, the gateway closes the stream and frees its slot. Its value stays above the longest tool call that task 1.4 records.
 
-**Client limits (task 1.4, 2026-11-15).** A local stand-in held each `tools/call` with no response bytes for 10, 30, 45, 60 and 120 s. A second run answered the first `tools/call` with `503` and `Retry-After: 2`.
+**Client limits (task 1.4, 2026-11-15).** A local stand-in held each `tools/call` with no response bytes for 10, 30, 45, 60 and 120 s. A second run answered the first `tools/call` with `503` and `Retry-After: 2`. The measurements ran by hand; the stand-in and its output are not in the repository.
 
 | Client | Answers a held call through | Gives up at | Retries a `503` with `Retry-After` | Source |
 |---|---|---|---|---|
@@ -323,7 +323,7 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 
 - The shortest limit is 60 s, so the 40 s budget leaves about 20 s for the cell to send its first response byte after the hold.
 - No measured client retries a `503`, so a hold that runs out reaches the agent as an error. The budget therefore matters more than `Retry-After`.
-- With a 40 s budget, every held call in the cloud-rehearsal `release` mode reached its restarted cell (run 43759488588: 1,083 calls through three switches, no error, longest wait 34.5 s).
+- With a 40 s budget, every held call in the cloud-rehearsal `release` mode reached its restarted cell (run 43759488588: 1,058 calls through three switches, no error, longest wait 34.5 s).
 - That 34.5 s call is the longest tool call the rehearsal recorded, and the hold took most of it. Calls outside a hold answered with a p95 of 0.15 s. The idle bound, `cloudGateway.upstream.idleSeconds`, defaults to 600 s, above both. A tool that runs longer needs its own figure before anyone lowers the bound.
 
 **Home.** Home shows `504 CELL_TIMEOUT` with its existing cell-unavailable message. A `503 CELL_NOT_READY` after a hold reads as today's.
