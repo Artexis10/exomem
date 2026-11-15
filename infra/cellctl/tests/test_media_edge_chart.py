@@ -46,6 +46,7 @@ EDGE = (
     "--set-string", "mediaEdge.endpoint=http://10.43.0.30:8769",
     "--set-string", "mediaEdge.bucket=media-bucket",
     "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
+    "--set-string", "mediaEdge.state.storageClassName=exomem-cloud-encrypted",
     "--set-json", f'mediaEdge.cellIds=["{CANARY}"]',
 )
 NAMESPACE = "exomem-cloud"
@@ -296,6 +297,13 @@ def test_the_default_object_bound_admits_a_5_gib_file_at_the_edge_and_in_cellctl
     assert cellctl_env["CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES"] == str(5 * 2**30 + 2 * 2**20)
 
 
+def test_an_enabled_edge_needs_an_explicit_state_storage_class() -> None:
+    result = _helm_template_result(*EDGE, "--set-string", "mediaEdge.state.storageClassName=")
+
+    assert result.returncode != 0
+    assert "/mediaEdge/state/storageClassName" in result.stderr
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -450,15 +458,22 @@ def test_every_non_root_pod_can_read_the_secret_and_configmap_files_it_mounts() 
     unreadable = []
     for name, pod in _pod_specs(_helm_template(*EDGE)):
         context = pod.get("securityContext", {})
-        if context.get("runAsUser", 0) == 0:
-            continue
-        for volume in pod.get("volumes", []):
-            source = volume.get("secret") or volume.get("configMap")
-            if source is None:
+        volumes = {volume["name"]: volume for volume in pod.get("volumes", [])}
+        for container in [*(pod.get("containers") or []), *(pod.get("initContainers") or [])]:
+            effective = context | container.get("securityContext", {})
+            if not effective.get("runAsNonRoot", False) and effective.get("runAsUser", 0) == 0:
                 continue
-            modes = [item["mode"] for item in source.get("items", []) if "mode" in item]
-            for mode in modes or [source.get("defaultMode", 0o644)]:
-                readable = bool(mode & 0o004) or (bool(mode & 0o040) and "fsGroup" in context)
-                if not readable:
-                    unreadable.append((name, volume["name"], oct(mode)))
+            for mount in container.get("volumeMounts", []):
+                volume = volumes[mount["name"]]
+                projected = volume.get("projected", {})
+                for entry in projected.get("sources", [volume]):
+                    source = entry.get("secret") or entry.get("configMap")
+                    if source is None:
+                        continue
+                    default = source.get("defaultMode", projected.get("defaultMode", 0o644))
+                    modes = [item.get("mode", default) for item in source.get("items", [])] or [default]
+                    for mode in modes:
+                        readable = bool(mode & 0o004) or (bool(mode & 0o040) and "fsGroup" in context)
+                        if not readable:
+                            unreadable.append((name, container["name"], volume["name"], oct(mode)))
     assert unreadable == []

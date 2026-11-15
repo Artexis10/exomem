@@ -1,4 +1,4 @@
-"""Backblaze B2 native API (v3) for the media edge, over httpx.
+"""Backblaze B2 native API (v4) for the media edge, over httpx.
 
 Only the calls the edge needs. The edge key lacks `deleteFiles` and `listFiles`, and
 no call here deletes a version. The hide serves the collector's `condemn` and the
@@ -84,11 +84,7 @@ def _shape():
 
 def _bucket(storage: Mapping, name: str) -> tuple[str, str]:
     """Find the configured bucket among the buckets that the key is limited to."""
-    reported = [{"id": storage.get("bucketId"), "name": storage.get("bucketName")}]
-    allowed = storage.get("allowed")
-    if isinstance(allowed, Mapping):
-        reported += allowed.get("buckets") or []
-    for item in reported:
+    for item in storage["allowed"]["buckets"] or []:
         if isinstance(item, Mapping) and item.get("name") == name and item.get("id"):
             return str(item["id"]), name
     raise ProviderRejected("the application key is not limited to the configured bucket")

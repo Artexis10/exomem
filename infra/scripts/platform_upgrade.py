@@ -9,7 +9,8 @@ presence. Its machine review runs to completion before anything changes:
 3. diff the live manifest against the new render and print the changed
    objects, so the operator can stop a diff that surprises;
 4. run a server-side dry run;
-5. run the release's `cellctl` schema check against the control database;
+5. run the release's `cellctl` schema check against the control database,
+   locally with `EXOMEM_CELLCTL_DSN` or in the running cellctl pod without it;
 6. compare the secret contracts of the live release and the tag — a change
    with no barrier entry stops the command;
 7. list the open barriers: those after the live release and at or below the
@@ -36,12 +37,15 @@ directory outside the repository, because a render holds the private values.
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,14 +222,33 @@ def live_release_tag(runner: Runner) -> str | None | bool:
 
 
 def schema_check(runner: Runner, env: dict[str, str], checkout: Path) -> str:
-    """The release's own column check when the tag carries it (4.1)."""
-    if not (checkout / "infra/cellctl/src/cellctl/schema_check.py").exists():
+    """Run the tag's column check locally with a DSN, otherwise inside the running cellctl pod."""
+    package = checkout / "infra/cellctl/src/cellctl"
+    if not (package / "schema_check.py").exists():
         return "skipped: the release predates cellctl's schema check"
-    if not env.get(SCHEMA_DSN_ENV):
-        raise Stop("schema-check", f"{SCHEMA_DSN_ENV} is not set; the check needs the control database DSN")
-    run(runner, "schema-check",
-        ["uv", "run", "--frozen", "python", "-m", "cellctl.schema_check", "--dsn-env", SCHEMA_DSN_ENV],
-        cwd=checkout / "infra/cellctl")
+    if env.get(SCHEMA_DSN_ENV):
+        run(runner, "schema-check",
+            ["uv", "run", "--frozen", "python", "-m", "cellctl.schema_check", "--dsn-env", SCHEMA_DSN_ENV],
+            cwd=checkout / "infra/cellctl")
+    else:
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as source:
+            source.add(package, arcname="cellctl")
+        # The runner carries text stdin; base64 preserves the tag's archive through kubectl without a shell.
+        bootstrap = """\
+import base64, io, os, subprocess, sys, tarfile, tempfile
+with tempfile.TemporaryDirectory(prefix="cellctl-schema-", dir="/tmp") as scratch:
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(sys.stdin.buffer.read())), mode="r:gz") as source:
+        source.extractall(scratch, filter="data")
+    result = subprocess.run(
+        [sys.executable, "-m", "cellctl.schema_check", "--dsn-env", "CELLCTL_DATABASE_DSN"],
+        cwd=scratch, env={**os.environ, "PYTHONPATH": scratch}, check=False)
+sys.exit(result.returncode)
+"""
+        run(runner, "schema-check",
+            ["kubectl", "--namespace", CLOUD_NAMESPACE, "exec", "-i", "deploy/cellctl", "--",
+             "/opt/cellctl/bin/python", "-c", bootstrap],
+            stdin=base64.b64encode(archive.getvalue()).decode("ascii"))
     return "the release's schema check passed"
 
 

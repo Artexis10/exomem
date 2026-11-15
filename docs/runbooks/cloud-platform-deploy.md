@@ -208,14 +208,18 @@ Deployment record and the `cloud-deploy` dispatch as one command (automate-cloud
 Each review step stops the command before anything changes. `EXOMEM_UPGRADE_DIR` is a private
 directory outside the repository; the command keeps the tag's checkout, the render and the
 dry run there. A render holds the private values, so keep it out of tickets and chat.
+Helm and kubectl must reach the cluster API from the machine that runs the command.
+
+With `EXOMEM_CELLCTL_DSN` set, the command runs the tag's schema check locally against that DSN.
+Without it, the command streams the tag's cellctl package into the running cellctl pod's writable `/tmp`.
+It runs `/opt/cellctl/bin/python -m cellctl.schema_check --dsn-env CELLCTL_DATABASE_DSN` with `PYTHONPATH` pointing to the temporary copy, then removes it.
+A failed check stops at `schema-check` before the upgrade changes anything. This path needs a running cellctl pod.
 
 ```bash
 : "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"
 : "${EXOMEM_UPGRADE_DIR:?set a private upgrade directory outside the repository}"
-: "${EXOMEM_CELLCTL_DSN:?set the control database DSN for the schema check}"
 umask 077
-uv run --frozen python infra/scripts/platform_upgrade.py "$TAG" \
-  --crossed <barrier-id>   # repeat for each barrier the upgrade crosses, after its runbook step
+uv run --frozen python infra/scripts/platform_upgrade.py "$TAG"
 ```
 
 - The command reads the live release's tag from the Helm release description it writes on every
@@ -223,6 +227,7 @@ uv run --frozen python infra/scripts/platform_upgrade.py "$TAG" \
 - A barrier is open when it lies after the live release and at or below the tag, or when it is
   at or below the tag and the newest successful platform Deployment does not record it. An open `platform` barrier needs its runbook step done first,
   then `--crossed <id>`; a `one-way` barrier removes `--atomic` for that upgrade.
+  Append one `--crossed` argument with the barrier ID for each completed runbook step.
 - An open `cell` barrier accepts `--crossed <id>` too: only a platform Deployment's
   `barriers_crossed` records a crossing, and `cloud-deploy` stops on an unrecorded entry of either
   scope. Record it here once its runbook step is done; the command prints a note while one is open.
