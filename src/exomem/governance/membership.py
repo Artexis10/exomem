@@ -12,6 +12,8 @@ membership still evaluates the current policy at read time, so a policy edit nee
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -274,6 +276,19 @@ def evaluate_subject(
         policy, matched,
         classified=_classified_by_registry(root, subject.path, assigned, policy),
     )
+
+
+def subject_inputs(root: Path, policy: Policy) -> tuple:
+    """Every input of `evaluate_subject` that the subject does not carry, for a memo of its answers.
+
+    The page-admission scope-set memo keys on this tuple: an input that `evaluate_subject` gains goes here.
+    The policy's scopes follow its fingerprint; registry assignment follows the connector requirement,
+    the Knowledge Base folder name and the root.
+    """
+    from . import connector_boundary  # imports this module, so it loads on use
+
+    requirement = json.dumps(connector_boundary.read_requirement(root), sort_keys=True)
+    return str(root), policy.fingerprint, kb_dirname(), hashlib.sha256(requirement.encode()).hexdigest()
 
 
 def _page_membership(
