@@ -43,7 +43,8 @@ def test_mcp_turn_requests_native_activation_without_transport(monkeypatch, caps
     assert calls == []
     context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
     assert "read_instructions" in context and "recall_context" in context
-    assert "raw user turn" in context and "once" in context
+    # Recall is per subject: the text must not cap it at one call per session.
+    assert "raw user turn" in context and "subject" in context and "once" not in context
     assert "already" in context and "duplicate" in context
     assert continuation.MEMORY_CITATION_GUIDANCE in context
 
@@ -1009,5 +1010,5 @@ def test_repository_task_sentence_follows_the_level(monkeypatch, capsys, level, 
     )
     assert retrieve.main() == 0
     out = capsys.readouterr().out
-    assert "Advice on the user's own case needs that initial activation" in out
+    assert "Advice on the user's own case needs that recall" in out
     assert ("A task in the user's own repository or project" in out) is has_repo_task
