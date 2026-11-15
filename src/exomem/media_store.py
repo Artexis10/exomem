@@ -1809,7 +1809,7 @@ def _retained_gap(vault: Path, config: dict[str, object], *, margin: bool) -> in
         try:
             room = max(0, room - int(float(config["eviction_margin"]) * total))
         except (KeyError, TypeError, ValueError) as error:
-            raise MediaStoreError("MEDIA_SHORTFALL_UNKNOWN", "the media store policy sets no eviction margin") from error
+            raise MediaStoreError("MEDIA_SHORTFALL_UNKNOWN", "the media store policy sets no readable eviction_margin") from error
     return max(0, evicted - room)
 
 
@@ -2246,8 +2246,7 @@ def _drain_pass(vault: Path, claimable: Callable[[], object | None] | None) -> t
     record = drain_record(vault)
     if threshold is None or bounds is None or (record is not None and record.latched):
         return 0, None
-    evicted, room, total = _retained_figures(vault, config)
-    if evicted > room - int(margin * total):
+    if retained_shortfall(vault, config):
         return 0, None  # Inside the margin band neither this nor eviction moves a byte.
     ledger = MediaJobStore(vault)
     claimable = claimable or ledger.next_pending
