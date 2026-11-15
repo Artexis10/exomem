@@ -74,9 +74,11 @@ In native activation mode the start-of-turn hook does two things:
 1. It fetches session context: a `recall_context` call with an empty turn and the held continuity token. An empty turn runs no turn stage, so the response carries only the map, stance and skills blocks, each `unchanged` when the caller already holds its generation. Measured on the installed service, this takes about 50 ms of server time warm and 360 ms cold. The hook injects only the blocks that changed, under the existing data header, and then the activation text.
 2. It replaces "call `recall_context` once" with a per-subject pull: when the user's turn opens a subject the injected context does not cover, the agent calls `recall_context` with that subject as `conversation.focus`, or `search_memory` with its own query, before it answers. The server instructions carry the same rule for clients without hooks.
 
-The fetch has its own wall budget, separate from the turn packet's and never retried. A timeout, a transport failure or a host with no reachable REST or CLI lane injects the activation text alone, as today, and logs the outcome. Clients without a lane still receive session context from their first `recall_context` call.
+The fetch has its own wall budget, separate from the turn packet's. The budget covers credential discovery as well as the request, because reading the service's environment file can block. The fetch sends one request to the first credentialed lane and never retries. A timeout, a transport failure, an HTTP error or a host with no credentialed REST lane injects the activation text alone, as today, and logs the outcome. Clients without a lane still receive session context from their first `recall_context` call.
 
-Working-set mode is unchanged. Turn leads stay pull-based until a lane grounds raw turns well enough to pay for its hook time; the presentation fixes in the next round are measured against the same replay.
+The continuity token tells the service which map generation the session holds, and the service then answers `unchanged`. So in both modes the hook withholds the token the first time the render ceiling cuts a map generation, and the next request receives the map again at the smaller cap that the cut taught the hook. A second cut of the same generation is acknowledged, so a map that cannot fit renders twice, not on every prompt.
+
+Working-set mode keeps its turn packet. Turn leads stay pull-based until a lane grounds raw turns well enough to pay for its hook time; the presentation fixes in the next round are measured against the same replay.
 
 ### Rejected
 

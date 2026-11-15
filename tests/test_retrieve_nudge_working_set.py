@@ -1610,6 +1610,9 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
     generation.write_text("map-1", encoding="utf-8")
     overhead = path.with_suffix(checkpoint.ACTIVATION_MAP_OVERHEAD_SUFFIX)
     overhead.write_text("300", encoding="utf-8")
+    # A retry record that outlived the context would let the next cut of that map be acknowledged unseen.
+    retried = path.with_suffix(checkpoint.ACTIVATION_MAP_RETRY_SUFFIX)
+    retried.write_text("map-1", encoding="utf-8")
 
     checkpoint.dispatch_event(
         client,
@@ -1620,6 +1623,7 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
     assert not path.exists()
     assert not generation.exists()
     assert not overhead.exists()
+    assert not retried.exists()
 
 
 def test_clearing_one_session_leaves_another_alone(tmp_path: Path) -> None:
@@ -2606,6 +2610,44 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
     assert (generation_path.read_bytes(), overhead_path.read_bytes()) == before
 
 
+
+
+def test_a_cut_map_keeps_the_old_token_until_the_map_arrives(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    working_set_mode,
+) -> None:
+    """The service answers `unchanged` for a map its token names, so a token saved over a cut render keeps the
+    cut items from the agent for the rest of the session."""
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "420")
+    full = {
+        "ref": "exomem://map", "generation": "map-1", "description": "Index of what exists.",
+        "items": [
+            {"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."},
+            {"title": "Long entry", "ref": "exomem://memory/long", "description": "x" * 2000},
+        ],
+    }
+    sent: list[str] = []
+
+    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None, max_chars=None):
+        sent.append(continuity)
+        held = {**full, "items": [], "unchanged": True}
+        return {"map": held if continuity == "token-map-1" else full, "continuity": "token-map-1", "abstained": False}
+
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    monkeypatch.setattr(hook, "_fetch_packet_via_rest", _fetch)
+
+    cut = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "4000")
+    whole = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    held = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    assert "Long entry" not in cut
+    assert "Long entry" in whole
+    assert "map unchanged" in held
+    assert sent == ["", "", "token-map-1"]
 
 
 def test_the_hook_renders_a_map_the_server_sent_unchanged_as_its_one_line(

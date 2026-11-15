@@ -48,9 +48,10 @@ live contract is absent and for a recall each time the turn opens a subject that
 the held or injected context does not cover, reusing that context rather than
 duplicating it. Where a credentialed REST lane exists it also injects the session
 context that changed. One `recall_context` call with an empty turn and the persisted
-continuity token (REST only, under `SESSION_CONTEXT_BUDGET_SECONDS`, never retried)
+continuity token (one request to the first credentialed lane, never retried, with
+credential discovery and the answer both inside `SESSION_CONTEXT_BUDGET_SECONDS`)
 serves the turn-independent map, stance and skills, and only the blocks the session
-does not hold render. A timeout, a transport failure, an unusable answer or no lane
+does not hold render, under the working set's data header. A timeout, a transport failure, an unusable answer or no lane
 leaves the activation text alone. This mode
 includes short substantive follow-ups and resumes without the default length
 floor or reminder cooldowns; explicit length overrides, disable, prominence and
@@ -147,8 +148,8 @@ _STUB_OMITTED_LINE = "- … {n} more not shown"
 _WORKING_SET_MODE = "working_set"
 _MCP_MODE = "mcp"
 # What native activation logs about its session-context fetch. `none` is no usable answer inside the budget
-# (no lane, a transport failure, a non-JSON answer or a service that abstained); `timeout` is the same with
-# the whole budget spent. The ladder does not tell the first three apart.
+# (no lane, a transport failure, a non-JSON answer or a service that abstained); `timeout` is no answer at
+# all by the deadline, discovery included. The fetcher does not tell the first three apart.
 _SESSION_READY, _SESSION_UNCHANGED, _SESSION_TIMEOUT, _SESSION_NONE = "ready", "unchanged", "timeout", "none"
 _MCP_ACTIVATION_HEAD = (
     "[Exomem native MCP activation] Reuse current already-held or injected Exomem "
@@ -750,7 +751,7 @@ def _bounded(call, budget: float):
     return box[0] if box else None
 
 
-def _gather_with_lane(rest_call, cli_call, budget: float | None = None):
+def _gather_with_lane(rest_call, cli_call):
     """Transport ladder decision, plus the name of the rung that answered:
     "local", "rest", "cli", or "none" when the ladder fell through to the
     reminder-only floor. The credentialed lanes run first, in the order
@@ -763,8 +764,7 @@ def _gather_with_lane(rest_call, cli_call, budget: float | None = None):
     itself knows nothing about what they fetch, which is why stub mode and
     working-set mode share it exactly rather than drifting into two budgets.
 
-    Both rungs draw on one wall-clock budget (`INJECT_BUDGET_SECONDS`, or the
-    caller's `budget`). A caller with no `cli_call` runs REST lanes only. The
+    Both rungs draw on one wall-clock budget (`INJECT_BUDGET_SECONDS`). The
     CLI rung's `subprocess.run(timeout=)` is a wall-clock bound already; the
     REST rung's opener timeout (`Lane.post`) is only a per-socket-operation timeout, so a
     server that dribbles a byte every few seconds would never trip it (measured
@@ -772,7 +772,7 @@ def _gather_with_lane(rest_call, cli_call, budget: float | None = None):
     joined against the remaining budget: past the deadline the rung counts as
     failed and the ladder moves on, while the abandoned request dies with the
     hook process."""
-    deadline = time.monotonic() + (INJECT_BUDGET_SECONDS if budget is None else budget)
+    deadline = time.monotonic() + INJECT_BUDGET_SECONDS
     # For one release a failed local lane still falls through to the next, so a
     # service whose supervisor predates the local listener keeps answering.
     for lane in _credentialed_lanes():
@@ -782,7 +782,7 @@ def _gather_with_lane(rest_call, cli_call, budget: float | None = None):
             answer = _bounded(lambda lane=lane, timeout=timeout: rest_call(lane, timeout), remaining)
             if answer is not None:  # reachable (even if empty) -> CLI never tried
                 return answer, lane.name
-    if cli_call is not None and _env_flag("EXOMEM_RETRIEVE_INJECT_CLI"):
+    if _env_flag("EXOMEM_RETRIEVE_INJECT_CLI"):
         remaining = deadline - time.monotonic()
         if remaining >= _MIN_RUNG_SECONDS:
             answer = cli_call(min(CLI_TIMEOUT_SECONDS, remaining))
@@ -814,14 +814,10 @@ def _gather_packet_with_lane(
     attribution: dict | None = None,
     conversation: dict | None = None,
     max_chars: int | None = None,
-    budget: float | None = None,
-    rest_only: bool = False,
 ) -> tuple[dict | None, str]:
     """Working-set mode's rungs on the same ladder, under the same budget.
 
-    Without a conversation or remembered cap, the fetchers keep their original arguments.
-    Native activation's session-context fetch passes its own `budget` and `rest_only`: a CLI spawn
-    cannot fit that budget."""
+    Without a conversation or remembered cap, the fetchers keep their original arguments."""
     extra = {"conversation": conversation} if conversation else {}
     if max_chars is not None:
         extra["max_chars"] = max_chars
@@ -835,13 +831,35 @@ def _gather_packet_with_lane(
             **_local_origin(lane),
             **extra,
         ),
-        None
-        if rest_only
-        else lambda timeout: _fetch_packet_via_cli(
+        lambda timeout: _fetch_packet_via_cli(
             prompt, continuity, timeout, attribution, **extra
         ),
-        budget,
     )
+
+
+def _session_context_packet(
+    session_id: str, cwd: str, continuity: str, max_chars: int, deadline: float
+) -> tuple[dict | None, str]:
+    """Native activation's session-context request, from credential discovery to the answer.
+
+    Reading a credential from the service's environment file, deriving the attribution and listing the
+    client's own skills all touch the filesystem, and any of them can block. `_fetch_context` therefore
+    runs this whole function on one worker joined against `deadline`. The function writes nothing, so a
+    worker abandoned at the deadline leaves no state behind. It sends one POST to the first credentialed
+    lane: no lane fall-through, no compatibility ladder and no retry.
+    """
+    try:
+        lane = next(iter(_credentialed_lanes()), None)
+        if lane is None:
+            return None, "none"
+        sent = _attribution_with_native_skills(attribution(session_id, cwd))
+        packet = _fetch_packet_via_rest(
+            "", lane, continuity, deadline - time.monotonic(), sent,
+            max_chars=max_chars, retry=False, **_local_origin(lane),
+        )
+        return packet, lane.name
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return None, "none"
 
 
 #: The label the server derives a session's episode key from, per hook client.
@@ -1302,6 +1320,7 @@ def _fetch_packet_via_rest(
     base_url: str | None = None,
     conversation: dict | None = None,
     max_chars: int | None = None,
+    retry: bool = True,
 ) -> dict | None:
     """One POST to the local REST facade's `/api/recall_context`.
 
@@ -1321,6 +1340,11 @@ def _fetch_packet_via_rest(
     `conversation` rides in the body. A service that does not know it refuses
     it the same way, and the request is then made once more without it, with
     the same attribution (`_conversation_ladder`).
+
+    `retry=False` sends exactly one request, as given: no ladder step and no
+    smaller-cap retry. Native activation's session-context fetch runs before
+    every prompt, so a service that refuses a field costs that prompt its
+    session context, never a second request.
     """
     if base_url is None:
         port = _rest_port()
@@ -1331,7 +1355,8 @@ def _fetch_packet_via_rest(
     if continuity:
         body["continuity"] = continuity
     started = time.monotonic()
-    for sent, extra in _conversation_ladder(attribution, conversation):
+    steps = _conversation_ladder(attribution, conversation)
+    for sent, extra in steps if retry else steps[:1]:
         if sent:
             body["conversation"] = sent
         else:
@@ -1351,7 +1376,7 @@ def _fetch_packet_via_rest(
             return None
         packet = _parse_packet(payload)
         remaining = timeout - (time.monotonic() - started)
-        if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
+        if retry and max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_rest(
                 prompt, lane, continuity, remaining, attribution, base_url, conversation,
                 max_chars=_map_request_max_chars(_map_render_overhead(packet["map"], packet.get("turn_slice"))),
@@ -1552,6 +1577,13 @@ def _activation_map_overhead_path(session_id: str) -> Path:
     """Remember map framing independently of whether every item fit."""
     return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
         _state_core().ACTIVATION_MAP_OVERHEAD_SUFFIX
+    )
+
+
+def _activation_map_retry_path(session_id: str) -> Path:
+    """The map generation whose cut render this session already retried once."""
+    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
+        _state_core().ACTIVATION_MAP_RETRY_SUFFIX
     )
 
 
@@ -2454,21 +2486,25 @@ def _map_is_held(block: dict, last_generation: str) -> bool:
 
 
 def _format_session_context(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool]:
-    """The blocks of an empty-turn packet that the caller does not already hold, rendered as the working set renders them.
+    """The blocks of an empty-turn packet that the caller does not already hold, under the working set's data header.
 
-    An empty turn compiles no turn stage, so the packet carries only the turn-independent map, stance and skills.
+    An empty turn compiles no turn stage, so the packet carries only the turn-independent map, stance, upkeep and skills.
     A block the caller holds renders nothing at all, not even the pointer that the working set keeps for it:
-    session context that has not changed costs the prompt nothing.
+    session context that has not changed costs the prompt nothing. Whatever does render follows the data header,
+    so a stance, upkeep or skills line never reaches the agent unframed.
     """
-    room = max_chars
-    stance_text, stance_complete = ("", True) if _stance_is_held(packet.get("stance"), last_stance) else _format_stance_block(packet.get("stance"), room, last_stance)
-    room -= len(stance_text) + (1 if stance_text else 0)
+    header = len(_WORKING_SET_HEADER)
+    stance = packet.get("stance")
+    stance_text, stance_complete = ("", True) if _stance_is_held(stance, last_stance) else _format_stance_block(stance, max_chars - header - 1, last_stance)
+    stance_cost = len(stance_text) + 1 if stance_text else 0
     # The service records an upkeep item delivered when it attaches it, so a packet that carries one must show it.
-    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room))
-    room -= len(upkeep) + (1 if upkeep else 0)
-    map_text, complete = ("", True) if _map_is_held(packet["map"], last_generation) else _format_map_block(packet["map"], room, last_generation)
+    # `_bounded_lines` charges the header itself, so it gets the ceiling less the stance.
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), max_chars - stance_cost))
+    room = max_chars - header - stance_cost - (len(upkeep) + 1 if upkeep else 0)
+    map_text, complete = ("", True) if _map_is_held(packet["map"], last_generation) else _format_map_block(packet["map"], room - 1, last_generation)
     skills_text = _format_skills_block(packet.get("skills"))
-    return "\n".join(part for part in (stance_text, upkeep, skills_text, map_text) if part), complete, stance_complete
+    body = [part for part in (stance_text, upkeep, skills_text, map_text) if part]
+    return ("\n".join([_WORKING_SET_HEADER, *body]) if body else ""), complete, stance_complete
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
@@ -3480,17 +3516,48 @@ class _ContextFetch(NamedTuple):
     session: str
 
 
-def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool = False) -> _ContextFetch:
-    """One `recall_context` fetch over the shared ladder, rendered and recorded. Never raises.
+def _map_acknowledged(retry_path: Path | None, block: dict, complete: bool) -> bool:
+    """Whether this prompt may persist the token, which tells the service that the session holds `block`.
 
-    Working-set mode sends the user's turn with its conversation tail and renders the whole packet.
-    Native activation sends an empty turn (`session_only`): the service then runs no turn stage and serves
-    only the turn-independent map, stance and skills, so just the blocks the caller does not hold render.
-    That fetch has its own wall budget, REST lanes only, and exactly one request (an explicit cap stops
-    the fetcher's smaller second request). An unreachable lane, a timeout or an unusable answer render nothing.
-    Both modes persist the returned continuity token and the generations they rendered, so the next
-    prompt is served `unchanged`.
+    The service answers a map that the token names with `unchanged`, so a token persisted over a cut render
+    keeps the cut items from the agent for good. A cut map is therefore retried once: the hook withholds the
+    token and records the generation in `retry_path`, and the next request, sent with the old token, gets the
+    whole map again at the cap that the cut taught the hook. A second cut of that generation means that the map
+    cannot fit this ceiling, so the partial render, which names the map's ref and counts what it left out, is
+    acknowledged: a map that never fits renders twice, not on every prompt. Without a generation or a usable
+    record (`retry_path` is None when the map state is unavailable), a cut is acknowledged at once.
     """
+    generation = str(block.get("generation") or "")
+    if retry_path is None:
+        return True
+    try:
+        retried = _read_activation_value(retry_path)
+        if complete or not generation or retried == generation:
+            if retried:
+                _state_core().unlink_nudge_file(retry_path)
+            return True
+        _write_activation_value(retry_path, generation)
+        # Withhold only once the record holds the generation: a record that cannot be written would withhold forever.
+        return _read_activation_value(retry_path) != generation
+    except (AttributeError, OSError, ValueError):
+        return True
+
+
+def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool = False) -> _ContextFetch:
+    """One `recall_context` fetch, rendered and recorded. Never raises.
+
+    Working-set mode sends the user's turn with its conversation tail over the shared ladder and renders the
+    whole packet. Native activation sends an empty turn (`session_only`): the service then runs no turn stage
+    and serves only the turn-independent map, stance and skills, so just the blocks the caller does not hold
+    render. That fetch, from credential discovery to the answer, runs on one worker that this function joins
+    against `SESSION_CONTEXT_BUDGET_SECONDS`, measured from the start of this call (`_session_context_packet`).
+    A missing lane, a timeout or an unusable answer render nothing.
+
+    Every state write happens here, on the prompt's thread, from a packet that arrived inside the budget. Both
+    modes persist the generations they rendered and the returned continuity token, so the next prompt is served
+    `unchanged`, but only for a map that the agent received whole or that cannot fit (`_map_acknowledged`).
+    """
+    started = time.monotonic()
     policy_text = ""
     try:
         continuity = _read_activation_token(session_id)
@@ -3506,26 +3573,29 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
             generation_path = overhead_path = None
             max_chars, last_generation = None, ""
             stance_path, last_stance = None, ""
-        request_budget = {"max_chars": max_chars} if max_chars is not None else {}
-        ladder: dict = {}
+        try:
+            # Without the overhead record a retry would ask for the same cap and be cut the same way.
+            retry_path = _activation_map_retry_path(session_id) if overhead_path is not None else None
+        except AttributeError:
+            retry_path = None
+        gathered = None
         if session_only:
-            request_budget = {"max_chars": _working_set_max_chars() if max_chars is None else max_chars}
-            ladder = {"budget": SESSION_CONTEXT_BUDGET_SECONDS, "rest_only": True}
-        started = time.monotonic()
-        packet, lane = _gather_packet_with_lane(
-            turn,
-            continuity,
-            _attribution_with_native_skills(attribution(session_id, str(data.get("cwd") or ""))),
-            None
-            if session_only
-            else _conversation_from_transcript(
-                str(data.get("transcript_path") or data.get("transcriptPath") or ""),
+            max_chars = _working_set_max_chars() if max_chars is None else max_chars
+            deadline = started + SESSION_CONTEXT_BUDGET_SECONDS
+            request = (session_id, str(data.get("cwd") or ""), continuity, max_chars, deadline)
+            gathered = _bounded(lambda: _session_context_packet(*request), deadline - time.monotonic())
+            packet, lane = gathered if gathered is not None else (None, "none")
+        else:
+            packet, lane = _gather_packet_with_lane(
                 turn,
-            ),
-            **request_budget,
-            **ladder,
-        )
-        waited = time.monotonic() - started
+                continuity,
+                _attribution_with_native_skills(attribution(session_id, str(data.get("cwd") or ""))),
+                _conversation_from_transcript(
+                    str(data.get("transcript_path") or data.get("transcriptPath") or ""),
+                    turn,
+                ),
+                **({"max_chars": max_chars} if max_chars is not None else {}),
+            )
         packet_available = isinstance(packet, dict)
         packet = packet if isinstance(packet, dict) else {}
         hit_count = len(packet.get("anchors") or ())
@@ -3537,12 +3607,16 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
             _working_set_max_chars()
             - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
         )
+        acknowledged = True
         if isinstance(packet.get("map"), dict):
             render = _format_session_context if session_only else _format_map_with_slice
             block, complete, stance_complete = render(packet, render_cap, last_generation, last_stance)
             if generation_path is not None and overhead_path is not None:
                 try:
                     overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
+                    if session_only:
+                        # The session block's data header is hook framing too.
+                        overhead += len(_WORKING_SET_HEADER) + 1
                     budget = packet.get("budget")
                     requested = _working_set_max_chars() if max_chars is None else max_chars
                     if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
@@ -3562,6 +3636,7 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
                     _write_activation_value(stance_path, str(packet["stance"].get("generation") or ""))
                 except (AttributeError, OSError, ValueError):
                     pass
+            acknowledged = _map_acknowledged(retry_path, packet["map"], complete)
         elif session_only:
             # No map means the service abstained (warming, disabled, an older service): nothing to render or hold.
             block = ""
@@ -3574,7 +3649,7 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
                     pass
             block = _format_working_set_block(packet, render_cap)
         methods_reset = ((packet.get("task_context") or {}).get("methods") or {}).get("reset")
-        if not methods_reset or _METHOD_RESET_LINE in block.splitlines():
+        if acknowledged and (not methods_reset or _METHOD_RESET_LINE in block.splitlines()):
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
         if delta_text:
             block = f"{block}\n{delta_text}" if block else delta_text
@@ -3582,10 +3657,9 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
         keep_reminder = _block_keeps_the_reminder(packet)
         session = ""
         if session_only:
-            # The ladder reports only that nothing answered; spending the whole budget is what a timeout is.
             session = _SESSION_READY if block else _SESSION_UNCHANGED
-            if not packet_available:
-                session = _SESSION_TIMEOUT if waited >= SESSION_CONTEXT_BUDGET_SECONDS else _SESSION_NONE
+            if gathered is None:
+                session = _SESSION_TIMEOUT
             elif not isinstance(packet.get("map"), dict):
                 session = _SESSION_NONE
         return _ContextFetch(packet_available, lane, hit_count, block, policy_text, keep_reminder, session)
