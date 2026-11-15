@@ -1139,7 +1139,7 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     run.check("live_catalogue_holds_the_new_identity", after["live_matches"])
 
     run.record["phase"] = "catch_up"
-    notes, began, held = footprint["added"][:1], time.monotonic(), False
+    notes, began, held = [footprint["note"]] if footprint.get("note") else [], time.monotonic(), False
     while notes and not held and time.monotonic() - began < CATCH_UP_TIMEOUT:
         run.touch()  # a request lets a lazy catch-up run, as a user's would
         held = run.in_cell(CATALOGUED, notes[0], what="the live catalogue read")[notes[0]]
@@ -1191,14 +1191,18 @@ def _evidence_before_stop(run: Run, view: dict[str, Any]) -> tuple[str | None, d
     run.check("staged_copy_is_a_new_identity", bool(prefix) and not run.record["before"]["identity"].startswith(prefix),
               blocking=False)
     before_edit = _manifest(run, "before the edit")
-    phrase = f"Edited after the build {secrets.token_hex(4)}"
+    token = secrets.token_hex(4)
+    phrase = f"Edited after the build {token}"
     edit = run.in_cell(MCP_PROBE, phrase, "write", what="the edit after the build")
     run.last_touch = time.monotonic()
     run.check("edit_after_the_build_written", not edit["is_error"], blocking=False, said=json.dumps(edit["result"])[:300])
     # The edit's own footprint: what it wrote is the only change the vault may show after the restart.
     footprint = diff_manifests(before_edit, _manifest(run, "after the edit"))
-    run.check("edit_created_one_note", len(footprint["added"]) == 1 and not footprint["removed"], blocking=False,
-              said=json.dumps({key: value[:MAX_LISTED_PATHS] for key, value in footprint.items()}))
+    # A governed write also updates indexes and the log, so the edit is found by the harness's own random title token.
+    notes = [path for path in footprint["added"] if path.endswith(f"-{token}.md")]
+    footprint["note"] = notes[0] if len(notes) == 1 else None
+    run.check("edit_created_its_note", footprint["note"] is not None and not footprint["removed"], blocking=False,
+              said=json.dumps({key: value[:MAX_LISTED_PATHS] for key, value in footprint.items() if key != "note"}))
     return prefix, footprint
 
 
