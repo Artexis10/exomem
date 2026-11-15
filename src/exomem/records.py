@@ -14,7 +14,7 @@ import sqlite3
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from functools import partial
@@ -1888,7 +1888,7 @@ def update_record(
             merged.pop(name, None)
         merged.update(changes)
         try:
-            values = _validate_values(manifest, merged)
+            values = _validate_values(manifest, merged, written=changes)
         except collections.CollectionError as error:
             raise _hold_refusal(
                 root,
@@ -2780,7 +2780,7 @@ def _lifecycle_mutation(
         record_formats.validate_storage_contract(current)
         record_governance.require_proposed_manifest_visibility(root, current)
         for record in snapshot.records:
-            _validate_values(current, record.values)
+            _validate_values(current, record.values, written=())
         guards = lifecycle_guards(current, snapshot)
         _expect_hash(expected_manifest_hash, guards["expected_manifest_hash"], "manifest")
         _expect_hash(expected_container_hash, guards["expected_container_hash"], "container")
@@ -2971,14 +2971,26 @@ def _validate_revision_manifest(
         )
     record_formats.validate_storage_contract(proposed)
     record_governance.require_proposed_manifest_visibility(root, proposed)
+    newly_required = _newly_required(current, proposed)
     for record in snapshot.records:
-        _validate_values(proposed, record.values)
+        _validate_values(proposed, record.values, written=newly_required)
         if proposed.record_presentation is not None:
             record_formats._presentation_payload(proposed, record.values)
         if proposed.item_presentation is not None:
             record_formats._item_presentation_digests(proposed, record.values)
     _plan_presentation_revision(root, current, proposed, snapshot)
     return proposed
+
+
+def _newly_required(
+    current: collections.CollectionManifest, proposed: collections.CollectionManifest
+) -> frozenset[str]:
+    """The fields a revision makes required: a new claim about every stored row, so each is checked as written."""
+    return frozenset(
+        name
+        for name, spec in proposed.schema.fields.items()
+        if spec.required and not (name in current.schema.fields and current.schema.fields[name].required)
+    )
 
 
 def _plan_presentation_revision(
@@ -4413,13 +4425,20 @@ def _load_guarded_manifest(
 
 
 def _validate_values(
-    manifest: collections.CollectionManifest, item: Mapping[str, Any]
+    manifest: collections.CollectionManifest,
+    item: Mapping[str, Any],
+    *,
+    written: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Validate one candidate, reporting every failing field in one refusal.
 
     The refusal keeps the code and message the raise-first path produced, so
     existing consumers are untouched; the complete field-addressed account rides
     in ``details.issues`` beside ``details.field`` for the first issue.
+
+    ``written`` names the fields whose values this write supplies; ``None`` is a whole new row.
+    A required value it supplies must be non-null. Any other is checked as it was stored, so a
+    required field must be present and may hold the ``null`` an earlier release admitted.
     """
     if not isinstance(item, Mapping):
         raise collections.CollectionError("INVALID_ITEM", "item must be an object")
@@ -4444,7 +4463,7 @@ def _validate_values(
             )
         )
     schema_values = {name: value for name, value in item.items() if name in manifest.schema.fields}
-    value = _collect_schema_issues(manifest.schema, schema_values, issues)
+    value = _collect_schema_issues(manifest.schema, schema_values, issues, written)
     if representational:
         note = item.get(representational)
         if note is not None and type(note) is not str:
@@ -4524,27 +4543,32 @@ def _value_class(value: Any) -> str:
 
 
 def _collect_schema_issues(
-    schema: collections.ItemSchema, values: Mapping[str, Any], issues: list[_Issue]
+    schema: collections.ItemSchema,
+    values: Mapping[str, Any],
+    issues: list[_Issue],
+    written: Collection[str] | None,
 ) -> dict[str, Any]:
     """Run the shipped per-field schema rules field by field, in declared order."""
     value = dict(values)
     for name, spec in schema.fields.items():
-        if spec.required and name not in value:
+        supplied = written is None or name in written
+        if spec.required and (name not in value or (supplied and value[name] is None)):
+            gap = "missing" if name not in value else "null"
             issues.append(
                 _Issue(
                     field=name,
                     code="SCHEMA_REQUIRED_FIELD",
-                    reason=f"required field is missing: {name}",
+                    reason=f"required field is {gap}: {name}",
                     received="null",
                 )
             )
         if name in value:
-            _collect_field_issues(name, name, value[name], spec, issues)
+            _collect_field_issues(name, name, value[name], spec, issues, non_null=supplied)
     return value
 
 
 def _collect_field_issues(
-    path: str, name: str, value: Any, spec: collections.FieldSpec, issues: list[_Issue]
+    path: str, name: str, value: Any, spec: collections.FieldSpec, issues: list[_Issue], *, non_null: bool
 ) -> None:
     """Address one field's failure, refining the path into arrays and objects.
 
@@ -4552,11 +4576,11 @@ def _collect_field_issues(
     the refinement below only decides which sub-path to name.
     """
     try:
-        collections.validate_field_value(name, value, spec)
+        collections.validate_field_value(name, value, spec, non_null=non_null)
         return
     except collections.CollectionError as error:
         failure = error
-    located = _locate_field_failure(path, name, value, spec)
+    located = _locate_field_failure(path, name, value, spec, non_null)
     if not located:
         issues.append(
             _Issue(
@@ -4579,15 +4603,15 @@ def _collect_field_issues(
 
 
 def _locate_field_failure(
-    path: str, name: str, value: Any, spec: collections.FieldSpec
+    path: str, name: str, value: Any, spec: collections.FieldSpec, non_null: bool
 ) -> list[tuple[str, Any, collections.CollectionError]]:
     if spec.type == "array" and isinstance(value, list) and spec.items is not None:
         found: list[tuple[str, Any, collections.CollectionError]] = []
         for index, entry in enumerate(value):
             try:
-                collections.validate_field_value(name, entry, spec.items)
+                collections.validate_field_value(name, entry, spec.items, non_null=non_null)
             except collections.CollectionError as error:
-                deeper = _locate_field_failure(f"{path}[{index}]", name, entry, spec.items)
+                deeper = _locate_field_failure(f"{path}[{index}]", name, entry, spec.items, non_null)
                 found.extend(deeper or [(f"{path}[{index}]", entry, error)])
         return found
     if spec.type == "object" and isinstance(value, Mapping):
@@ -5500,9 +5524,8 @@ def _natural_key_twins(
     hold one observation twice under two identities and neither would be wrong.
     The scan runs over the snapshot the append has already loaded.
     """
-    try:
-        serialized = collections.manifest_natural_key(manifest, values)
-    except ValueError:
+    serialized = collections.complete_natural_key(manifest, values)
+    if serialized is None:
         return []
     twins = {
         record.identity.key
@@ -5523,16 +5546,12 @@ def _natural_key_moved(
     only that write is refused. An update that leaves the key alone is judged by
     nothing here -- otherwise a vault that already holds twins from before the
     check existed could not be edited at all, including by the very edit the
-    refusal's remediation asks for.
+    refusal's remediation asks for. A key completed by this update, where a
+    component was missing or `null`, moves onto it like a changed one.
     """
-    try:
-        return collections.manifest_natural_key(
-            manifest, before
-        ) != collections.manifest_natural_key(manifest, after)
-    except ValueError:
-        # One side carries no natural key at all. It cannot collide, and it
-        # cannot be moved onto a key it does not have.
-        return False
+    after_key = collections.complete_natural_key(manifest, after)
+    # An incomplete key names no item, so it cannot collide.
+    return after_key is not None and collections.complete_natural_key(manifest, before) != after_key
 
 
 def _same_natural_key(

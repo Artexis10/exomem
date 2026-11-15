@@ -20,7 +20,7 @@ import statistics
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,14 +47,16 @@ from exomem import (
     media_store,
     media_worker,
     mutation_lock,
+    relation_review,
     reserved_paths,
     scene_frames,
+    schema,
     server_runtime,
     writer_lease,
 )
 from exomem.collection_store import runtime
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import binaries, importer, projector, read, rederive, write
+from exomem.vault_store import importer, projector, read, rederive, write
 from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
@@ -89,14 +91,21 @@ def service(stored, monkeypatch):
         return outcome
 
     monkeypatch.setattr(runtime.StoreServer, "_registry_tick", recording)
+    with store_thread(stored):
+        yield ticks
+
+
+@contextmanager
+def store_thread(root):
+    """The service's store thread on ``root``, as a service starts it, but with no projector."""
     manager = writer_lease.start_server_lifecycle()
     server = None
     try:
         deadline = time.monotonic() + 60
-        while (server := runtime._SERVERS.get(stored.resolve())) is None or server.runtime is None:
+        while (server := runtime._SERVERS.get(root.resolve())) is None or server.runtime is None:
             assert time.monotonic() < deadline, "the store thread did not open the store"
             time.sleep(0.05)
-        yield ticks
+        yield
     finally:
         manager.close()
         if server is not None:
@@ -105,10 +114,15 @@ def service(stored, monkeypatch):
 
 
 def call(root, tool, **arguments):
-    """One MCP command as the owner, through the dispatcher that routes a write to the store."""
+    """One MCP command as the owner, through the dispatcher that routes a write to the store.
+
+    It injects what the server injects: the vault, and its source schema for a command that needs
+    it.
+    """
     command = next(c for c in commands.product_commands_for("mcp") if c.name == tool)
+    injected = (root, schema.load_source_schema(root)) if command.needs_schema else (root,)
     with request_scope(owner_principal(surface="mcp")):
-        return writer_lease.invoke_command(command, root, **arguments)
+        return writer_lease.invoke_command(command, *injected, **arguments)
 
 
 def commit(root, **change):
@@ -152,6 +166,62 @@ def manifest(root, rel):
 
 def queued(root):
     return {path for (path,) in store_rows(root, "SELECT path FROM store_projection_queue")}
+
+
+def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, service):
+    """A person's note, created, trashed and recovered through the served door, as an agent does.
+
+    The note has a stable identity and a reviewed-none decision, so its recovery binds the trash
+    proof and needs the decision in force. A recovery that refuses the proof because the page lives
+    in the store, or that looks for the decision in the projection, which has no file of it yet
+    (this fixture runs no projector), leaves the note in the trash.
+    """
+    created = call(
+        stored, "remember", title="Kept after all",
+        content="# Kept after all\n\n## Claim\n\nA note that a person trashed by mistake.\n",
+        relation_disposition="reviewed_none", relation_review_reason="a note that stands alone",
+    )
+    path = created["path"]
+    body = read.owned_bytes(stored, path)
+    trashed = call(
+        stored, "manage_memory_file", operation="delete", path=path, confirm=True,
+        response_detail="full",
+    )
+    trash_path = trashed["diagnostics"]["trash_path"]
+
+    recovered = call(stored, "manage_memory_file", operation="recover", trash_path=trash_path)
+
+    assert recovered["path"] == path
+    assert read.owned_bytes(stored, path) == body
+    assert not read.page_exists(stored, trash_path)
+
+
+def test_a_stored_creation_receipt_over_the_size_limit_is_refused_as_file_mode_refuses_it(
+    stored, service
+):
+    """A store-mode loader that parses a stored review receipt of any size, where file mode refuses
+    one over the artifact limit: governance then judges the same receipt differently by mode."""
+    reviews = "Knowledge Base/_Schema/relation-reviews/"
+    listed = "SELECT path FROM store_pages WHERE path LIKE ?"
+    before = set(store_rows(stored, listed, reviews + "%"))
+    call(
+        stored, "remember", title="A long receipt",
+        content="# A long receipt\n\n## Claim\n\nA note whose receipt grows past its limit.\n",
+        relation_disposition="reviewed_none", relation_review_reason="a note that stands alone",
+    )
+    after = set(store_rows(stored, listed, reviews + "%"))
+    ((receipt,),) = after - before
+    body = read.owned_bytes(stored, receipt)
+    # Trailing spaces keep the JSON valid, so only the size can refuse it.
+    oversized = body.ljust(relation_review._MAX_ARTIFACT_BYTES + 1)
+    commit(stored, puts=(write.PagePut(receipt, oversized),))
+
+    with request_scope(owner_principal(surface="mcp")), pytest.raises(
+        relation_review.RelationReviewError
+    ) as refused:
+        relation_review.load_creation_receipt(stored, Path(receipt).stem)
+
+    assert refused.value.code == "RELATION_REVIEW_TOO_LARGE"
 
 
 def test_a_projector_pass_records_a_governed_writes_files_in_a_served_process(stored, service):
@@ -655,6 +725,42 @@ def test_a_second_replica_that_takes_the_lease_and_stops_at_once_leaves_nothing_
     assert first.process.returncode == second.process.returncode == -signal.SIGTERM
 
 
+@pytest.mark.timeout(600)
+def test_a_follower_writes_no_projection_until_it_takes_the_lease(stored, tmp_path):
+    """A replica without the writer lease runs a projector but may not record what it projects.
+
+    The leader here is this process's store thread, which runs no projector, so the follower's
+    projector is the only one that could write the leader's new page. A follower that writes the
+    file first and is then refused its bookkeeping leaves a file that no record vouches for, and a
+    second writer of the projection.
+    """
+    page = f"{NOTES}/Leader page.md"
+    with ExitStack() as leader:
+        leader.enter_context(store_thread(stored))
+        commit(stored, puts=(write.PagePut(page, b"# Leader page\n\nThe leader holds it.\n"),))
+        with http_replica(stored, tmp_path, "follower") as follower:
+            # Long enough for several of the follower's passes, each a poll interval apart.
+            watched_until = time.monotonic() + 8 * projector.POLL_SECONDS
+            while time.monotonic() < watched_until:
+                assert not (stored / page).exists(), "the follower projected the leader's page"
+                time.sleep(0.1)
+            leader.close()
+            deadline = time.monotonic() + 60
+            while not (own := remember(follower, "Follower note")).get("success"):
+                assert time.monotonic() < deadline, own
+                time.sleep(0.25)
+            projected = (page, own["data"]["path"])
+            deadline = time.monotonic() + 60
+            # Each file comes to hold what the store holds, once the follower leads.
+            while any(
+                not (stored / rel).exists()
+                or (stored / rel).read_bytes() != read.owned_bytes(stored, rel)
+                for rel in projected
+            ):
+                assert time.monotonic() < deadline, follower.log.read_text(encoding="utf-8")[-4000:]
+                time.sleep(0.25)
+
+
 def idle(service_state):
     """Wait until no process of the replica holds a command claim on its grant, as when a service
     has finished its last request and the background work that request started."""
@@ -1016,75 +1122,42 @@ def trashed_once(root, rel, body):
     ]
 
 
-def test_a_served_projector_that_renames_a_trashed_binary_before_its_writer_does_converges(
-    stored, service, monkeypatch
-):
-    """The writer's rename after its commit racing a served projector that renames the same file
-    first: the trash refuses or warns, the file ends at both paths or neither, or a record or an
-    intent is left naming the wrong path."""
-    projector_moved = threading.Event()
-    real_rename = binaries._rename
-
-    def after_the_projector(root, entry, move, seen):
-        if entry.src == DIAGRAM:  # the writer waits until the served projector has moved the file
-            deadline = time.monotonic() + 10
-            while (stored / DIAGRAM).exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            if not (stored / DIAGRAM).exists():
-                projector_moved.set()
-        return real_rename(root, entry, move, seen)
-
-    monkeypatch.setattr(binaries, "_rename", after_the_projector)
-    loop = idle_service_projector(stored, poll_seconds=0.02)
-    try:
-        result = call(
-            stored, "manage_memory_file", operation="delete", path=DIAGRAM, confirm=True,
-            force_orphan=True,
-        )
-        deadline = time.monotonic() + 30
-        while queued(stored):
-            assert time.monotonic() < deadline, "the projector drained the queue"
-            time.sleep(0.05)
-    finally:
-        loop.stop()
-
-    assert projector_moved.is_set() and not (stored / DIAGRAM).exists(), result
-    (trashed,) = trashed_once(stored, DIAGRAM, DIAGRAM_BYTES)
-    assert result.get("ok") is not False and not result.get("warnings")
-    assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [
-        (sha(DIAGRAM_BYTES),)
-    ]
-    assert store_rows(stored, "SELECT path FROM store_binaries WHERE path = ?", DIAGRAM) == []
-    assert store_rows(stored, "SELECT path FROM store_held") == []
-
-
 def test_a_writer_that_renames_a_trashed_binary_while_the_projector_is_about_to_converges(
     stored, service, monkeypatch, caplog
 ):
     """The served projector judging a queued binary move, then finding that the writer moved the
-    file between its look and its rename: it defers the move, logs it, or renames something."""
+    file between its look and its rename: it defers the move, logs it, or renames something.
+
+    The projector's rename takes the writer's hold, so it cannot run while the writer renames; the
+    writer can only move the file after the projector has looked at both paths.
+    """
     picture = f"{NOTES}/raced.png"
     (stored / picture).write_bytes(PICTURE_BYTES)
     importer.Importer(stored).import_paths([picture])
-    at_rename, writer_moved = threading.Event(), threading.Event()
-    real_rename, real_move = projector._rename, reserved_paths.move_generic_path
+    at_look, writer_moved = threading.Event(), threading.Event()
+    real_observe, real_move = projector.observe, reserved_paths.move_generic_path
+    looked_at_the_source, moved_after_the_look = [], []
 
-    def renaming_late(filesystem, old, new, expected):
-        if old == picture:  # the projector has judged the move; the writer now moves the file
-            at_rename.set()
+    def looking_early(filesystem, rel, **options):
+        seen = real_observe(filesystem, rel, **options)
+        if rel == picture:
+            looked_at_the_source.append(rel)
+        elif looked_at_the_source and not at_look.is_set():
+            # The projector has judged both paths of the move; the writer now moves the file.
+            at_look.set()
             writer_moved.wait(10)
-        return real_rename(filesystem, old, new, expected)
+        return seen
 
     def renaming_first(root, source, destination, **options):
         if source == picture:
-            at_rename.wait(10)
+            moved_after_the_look.append(at_look.wait(10))
             try:
                 return real_move(root, source, destination, **options)
             finally:
                 writer_moved.set()
         return real_move(root, source, destination, **options)
 
-    monkeypatch.setattr(projector, "_rename", renaming_late)
+    monkeypatch.setattr(projector, "observe", looking_early)
     monkeypatch.setattr(reserved_paths, "move_generic_path", renaming_first)
     caplog.set_level("WARNING", logger="exomem.vault_store")
     loop = idle_service_projector(stored, poll_seconds=0.02)
@@ -1100,7 +1173,7 @@ def test_a_writer_that_renames_a_trashed_binary_while_the_projector_is_about_to_
     finally:
         loop.stop()
 
-    assert at_rename.is_set() and writer_moved.is_set(), result
+    assert moved_after_the_look == [True], "the writer moved the file after the projector looked"
     (trashed,) = trashed_once(stored, picture, PICTURE_BYTES)
     assert result.get("ok") is not False and not (stored / picture).exists()
     assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [
