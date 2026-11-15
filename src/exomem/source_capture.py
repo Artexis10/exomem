@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -167,6 +168,7 @@ class CanonicalCapturePages:
     snapshots: dict[str, bytes]
     parsed: dict[str, dict]
     frontmatter_free: frozenset[str]
+    store_revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,23 +317,47 @@ def raw_markdown_files(root: Path, *, subtrees: tuple[str, ...] = ()):
                 yield page.relative_to(root).as_posix(), info
 
 
-def canonical_pages(root: Path) -> CanonicalCapturePages:
+def canonical_pages(root: Path, *, join_request: bool = True) -> CanonicalCapturePages:
     """Classify raw-lane pages without trusting declarations from bound originals."""
+    from .collection_store import connection
+    from .vault_store import mode, read
+
     snapshots: dict[str, bytes] = {}
     guards: dict[str, vault.PathGuard] = {}
     parsed: dict[str, dict] = {}
     frontmatter_free: set[str] = set()
     errors: set[str] = set()
+    store_revision = None
 
     def unavailable(_error: object = None) -> None:
         raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical Source lookup is incomplete")
 
     try:
-        for relative, info in raw_markdown_files(root):
+        if mode.store_mode_for_reads(root):
+            with read.snapshot(root, join_request=join_request) as view:
+                for lane in vault.APPEND_ONLY_KB_SUBPATHS:
+                    prefix = (vault.kb_root(root) / lane).relative_to(root).as_posix() + "/"
+                    metadata = {item.path: item for item in view.pages(prefix) if Path(item.path).suffix.lower() == ".md"}
+                    bodies = view.bodies(metadata)
+                    if bodies.keys() != metadata.keys():
+                        unavailable()
+                    for relative, data in bodies.items():
+                        meta = metadata[relative]
+                        if (not isinstance(data, bytes) or len(data) != meta.size
+                                or hashlib.sha256(data).hexdigest() != meta.sha256):
+                            unavailable()
+                    snapshots.update(bodies)
+                store_revision = view.revision
+        else:
+            for relative, info in raw_markdown_files(root):
+                try:
+                    data, guard = vault.read_bounded_guarded_bytes(root, relative, limit=info.st_size)
+                    snapshots[relative] = data
+                    guards[relative] = guard
+                except (OSError, vault.PathGuardError):
+                    errors.add(relative)
+        for relative, data in snapshots.items():
             try:
-                data, guard = vault.read_bounded_guarded_bytes(root, relative, limit=info.st_size)
-                snapshots[relative] = data
-                guards[relative] = guard
                 text = data.decode("utf-8")
                 fields, _body, marker = vault.parse_frontmatter(text, strict=True)
                 if marker is None:
@@ -353,14 +379,16 @@ def canonical_pages(root: Path) -> CanonicalCapturePages:
         # A failed read supplies no classifier input; that omission cannot prove noncanonical membership.
         if incomplete or errors.difference(inputs) or canonical & errors:
             unavailable()
-        return CanonicalCapturePages(canonical, snapshots, parsed, frozenset(frontmatter_free))
-    except (OSError, UnicodeError, vault.PathGuardError, vault.FrontmatterError, ValidationError):
+        return CanonicalCapturePages(canonical, snapshots, parsed, frozenset(frontmatter_free), store_revision)
+    except (OSError, UnicodeError, sqlite3.Error, connection.CollectionStoreError,
+            vault.PathGuardError, vault.FrontmatterError, ValidationError):
         unavailable()
 
 
 def find_capture(root: Path, identity: SourceIdentity, *, warnings: list[str]) -> tuple[str, str, str] | None:
     """Scan under the caller's mutation guard; derived state cannot prove absence."""
-    classified = canonical_pages(root)
+    # Capture holds the mutation guard; its preflight snapshot can predate another capture's commit.
+    classified = canonical_pages(root, join_request=False)
     canonical, snapshots, parsed, frontmatter_free = classified.canonical, classified.snapshots, classified.parsed, classified.frontmatter_free
     match: tuple[str, str, str] | None = None
     types = note_types.Basis(root)

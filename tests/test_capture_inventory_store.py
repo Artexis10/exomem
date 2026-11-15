@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+from contextvars import copy_context
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
@@ -12,7 +13,7 @@ from test_vault_store_migration import vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 from test_vault_store_write_path import served  # noqa: F401
 
-from exomem import commands, embeddings, schema, semantic_contract, semantic_drain
+from exomem import commands, embeddings, schema, semantic_contract, semantic_drain, source_capture
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.vault_store import read
 
@@ -22,6 +23,45 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="The offline-own
 @pytest.fixture(autouse=True)
 def corpus_cache(monkeypatch):
     monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+
+
+def test_repeated_capture_reuses_unprojected_canonical_source(served, encoder):
+    inputs = dict(
+        title="Stored receipt", source_kind="session",
+        source_identity={"system": "archive", "record_id": "receipt", "revision": "one"},
+        passages=[{"key": "entry", "text": "The lantern burns oil."}],
+    )
+    first = commands.op_capture_source(served, schema.load_source_schema(served), **inputs)
+    assert not (served / first["source"]["path"]).exists()
+    second = commands.op_capture_source(served, schema.load_source_schema(served), **inputs)
+    assert first["capture_outcome"] == "created"
+    assert second["capture_outcome"] == "reused"
+    assert second["source"]["ref"] == first["source"]["ref"]
+    classified = source_capture.canonical_pages(served)
+    with read.snapshot(served) as view:
+        assert classified.store_revision == view.revision
+    assert first["source"]["path"] in classified.canonical
+
+
+def test_overlapping_capture_requests_recheck_after_both_read_snapshots_open(served, encoder):
+    """Both requests start before the first commit; the second mutation must see that commit."""
+    inputs = dict(
+        title="Shared receipt", source_kind="session",
+        source_identity={"system": "archive", "record_id": "overlapping", "revision": "one"},
+        passages=[{"key": "entry", "text": "The lantern burns oil."}],
+    )
+    first_context, second_context = copy_context(), copy_context()
+    first_scope, second_scope = read.request_snapshot(served), read.request_snapshot(served)
+    first_context.run(first_scope.__enter__)
+    second_context.run(second_scope.__enter__)
+    try:
+        first = first_context.run(commands.op_capture_source, served, schema.load_source_schema(served), **inputs)
+        second = second_context.run(commands.op_capture_source, served, schema.load_source_schema(served), **inputs)
+        assert first["capture_outcome"] == "created" and second["capture_outcome"] == "reused"
+        assert second["source"]["ref"] == first["source"]["ref"]
+    finally:
+        second_context.run(second_scope.__exit__, None, None, None)
+        first_context.run(first_scope.__exit__, None, None, None)
 
 
 def test_bound_inventory_traverses_stored_revisions_and_recovers_without_encoding(served, encoder, writer, monkeypatch, record_property):
