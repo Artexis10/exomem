@@ -147,7 +147,7 @@
   - the CI log of every recorded case holds no token, no cell ID and no tenant ID, which catches tenant identifiers in a public log;
   - a release run on `main` without a tag starts no run, which catches a run on every merge;
   - `actionlint` passes, and `gh api` shows that the environment's branch policy admits only `main`, which catches a token that a branch can reach.
-- [ ] 1.13 (Runbook merged in #2724. The Substrate data-list entry merged in substrate-systems/substrate#309 on 2026-11-12. Open until the rehearsal checks are done.) Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
+- [x] 1.13 (Runbook merged in #2724. The Substrate data-list entry merged in substrate-systems/substrate#309 on 2026-11-12.) Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
   - record the platform Deployment after each manual upgrade, with one `gh api` command, then dispatch `gh workflow run cloud-deploy.yml --ref main`;
   - record the first platform Deployment, with every barrier entry at or below the live release in `barriers_crossed`;
   - list `barriers_crossed` when an upgrade crosses a barrier;
@@ -157,6 +157,8 @@
   - add the derived quiet hour per tenant to the list of data that the platform keeps, in Substrate's Cloud privacy documentation.
 
   Verify: every alert name of D2, D3 and D8 has a runbook step, and each new command runs as written against the rehearsal cluster. It catches an alert that fires with no step for the person who receives it, and a dispatch that the branch policy refuses.
+
+  Note (2026-11-16): the runbook's alert table gives a step for each of the five alert names in D2, D3 and D8. The cloud-rehearsal `release` mode runs the runbook's commands for a paused rollout, a forward-only hold and a key rotation byte for byte against the rehearsal cluster. In run 43766731016, step 24, all seven blocks exited 0, each `PUT` printed `true`, and the view read `"paused": false` after the clear. The `gh` commands that record the platform Deployment and dispatch `cloud-deploy` act on the live GitHub settings, so production proves them (task 4.3).
 - [x] 1.14 Open follow-up: sign the origin proof and the artifact grant per attempt, before task 1.4 raises the hold budget above about 50 s. Verify: a request that the gateway retries for the full budget still carries a valid proof and grant. It catches a held request that the cell refuses, because its proof expired during the hold.
 - [x] 1.15 (Harness merged in #2746. Proven 2026-11-15 by cloud-rehearsal run 43759488588, step 14: the deploy token set the image through the workflow script's own Substrate client.) Open follow-up: make the cloud-rehearsal harness send `release` with `cellImage`. Verify: the harness sets the image through the deploy route without a refusal. It catches a rehearsal that fails on the narrowed deploy principal.
 - [x] 1.16 Open follow-up: add a test of the gateway server-slot leave and retake around a hold. Verify: a held request leaves its server slot, and retakes it when the cell accepts. It catches a slot that leaks, or a hold that counts against the server cap.
