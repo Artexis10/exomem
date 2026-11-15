@@ -57,6 +57,8 @@ Skip every tenant-locked cell, including an unlocked tenant-locked cell. Custody
 
 For each rollout candidate, schedule the build Job when its upgrade window opens, subject to D2 and D3. The build Job computes the target identity and self-gates, so scheduling does not require cellctl to read the catalogue. The feature defaults off. Cellctl records the current Job name and the outcome `requested` before creating a Job. It clears the current Job name only after observing both the Job and its pods absent. With the flag off, it queries build inventory only while a current Job name remains. Historical outcomes add no dependency to later upgrades. These annotations record controller work; staged validation decides adoption. Canary and disabled-window rules still determine when attempts are due; an immediate attempt can have no build opportunity.
 
+Builds follow the attempts' canary-first rule. A due backup, pending import or export, dirty row or changed render digest prevents or cancels a build. Cellctl persists cancelled target names for the current window before deleting their Jobs. The same target gets no further build in that window, including after controller restarts. Only applies that stop or replace the serving pod wait for build Job and pod absence. A build error affects only its cell; a failed fleet census delays only cells with a recorded current Job.
+
 A running build Job has a pod Running, including image pull after binding to a node. Pending for node capacity is not running.
 
 Before the final force minutes, count a running build Job as activity in the due rule, like an in-flight request. The force period retains its existing default of 10 minutes. A build Job waiting for node capacity does not defer the attempt. When the build Job ends, ordinary request idleness determines whether the cell is due. Force minutes override build activity, so a running build Job cannot postpone the forced attempt.
@@ -65,7 +67,7 @@ With chart defaults, `is_due` makes an idle cell due about five seconds after it
 
 When the cell becomes due, start its attempt with the existing hold clocks and deadlines. Delete any unfinished build Job and confirm its pods have ended before stopping the serving pod. Record the build outcome with the attempt. Boot may adopt any staged copy that passes D1 validation, including a complete staged copy published during cancellation.
 
-The existing sequence remains stop → backup → recreate → adopt or rebuild. A timeout, pause, target change or closed window deletes an unfinished build Job; cancellation never leaves a build Job beside the replacement. A missing or invalid staged copy means a cold rebuild. Building inside the attempt would consume its backup and stall deadlines. Build activity changes only the idle due rule before the force minutes; it changes neither deadline.
+The existing sequence remains stop → backup → recreate → adopt or rebuild. A timeout, pause, target change or closed window deletes an unfinished build Job; planned replacement waits for all build pods to end. A missing or invalid staged copy means a cold rebuild. Building inside the attempt would consume its backup and stall deadlines. Build activity changes only the idle due rule before the force minutes; it changes neither deadline.
 
 ### D5 — Locks prove liveness; file age does not
 
@@ -73,7 +75,7 @@ Use the existing interprocess lock primitive for one stable staged-build lock pe
 
 `_RebuildTempLock` protects each unique temporary file throughout the build; it does not serialize build Jobs. The build Job uses the serving pod's uid and `TMPDIR=/data/scratch/tmp`, so both resolve locks on the shared volume. Startup cleanup checks `_RebuildTempLock.held()`, every SQLite family member's age and open connections, following the existing orphan sweep. WAL writes need not update the main file's timestamp. Age alone never proves that a build died.
 
-Cellctl deletes the build Job and waits for its pods to end before stopping the serving pod. Thus no build Job pod exists when the replacement boots. At boot, a released `_RebuildTempLock` suffices to remove a `.building` family without an age guard.
+Cellctl deletes the build Job and waits for its pods to end before stopping the serving pod. This orders planned replacements; a serving-pod crash can boot while a build Job still exists. The booting cell declines adoption while the staged-build lock is held. At boot, a released `_RebuildTempLock` suffices to remove a `.building` family without an age guard.
 
 ### D6 — Cleanup belongs to the build Job and booting cell
 

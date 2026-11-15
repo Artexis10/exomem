@@ -4,7 +4,7 @@
 
 ### Requirement: A cell adopts a staged copy at boot instead of rebuilding
 
-Cellctl SHALL delete the build Job and wait for its pods to end before stopping the serving pod. No build Job pod therefore exists when the replacement boots. The booting cell SHALL check any staged copy against its computed identity. It SHALL validate a match through a read-only connection. Under the publication lock, it SHALL handle the live main, WAL and SHM as one set before installing the staged copy. It SHALL use ordinary restart reconcile for freshness drift. The cell SHALL rebuild cold when no staged copy passes validation.
+Cellctl SHALL delete the build Job and wait for its pods to end before stopping the serving pod. After a serving-pod crash, a build Job can still exist. The booting cell SHALL decline adoption while the staged-build lock is held. The booting cell SHALL check any staged copy against its computed identity. It SHALL validate a match through a read-only connection. Under the publication lock, it SHALL handle the live main, WAL and SHM as one set before installing the staged copy. It SHALL use ordinary restart reconcile for freshness drift. The cell SHALL rebuild cold when no staged copy passes validation.
 
 #### Scenario: The cell adopts a valid staged copy
 

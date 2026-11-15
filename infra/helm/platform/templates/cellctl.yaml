@@ -1,5 +1,14 @@
 {{- if .Values.cellctl.enabled }}
 {{- $workloadName := "cellctl" }}
+{{- /* JSON Schema fixes the supported CPU and memory quantity formats. It cannot compare request and limit fields. */}}
+{{- $build := .Values.cellctl.catalogueBuildResources }}
+{{- $cpuRequest := mul (int64 (trimSuffix "m" $build.requests.cpu)) (ternary 1 1000 (hasSuffix "m" $build.requests.cpu)) }}
+{{- $cpuLimit := mul (int64 (trimSuffix "m" $build.limits.cpu)) (ternary 1 1000 (hasSuffix "m" $build.limits.cpu)) }}
+{{- $memoryRequest := mul (int64 (trimSuffix "Mi" (trimSuffix "Gi" $build.requests.memory))) (ternary 1024 1 (hasSuffix "Gi" $build.requests.memory)) }}
+{{- $memoryLimit := mul (int64 (trimSuffix "Mi" (trimSuffix "Gi" $build.limits.memory))) (ternary 1024 1 (hasSuffix "Gi" $build.limits.memory)) }}
+{{- if or (gt $cpuRequest $cpuLimit) (gt $memoryRequest $memoryLimit) }}
+{{- fail "cellctl.catalogueBuildResources requests must not exceed limits" }}
+{{- end }}
 {{- $shared := .Values.cellctl.sharedWorker }}
 {{- /*
 The cell alerts' thresholds come from the observability contract the chart already
@@ -958,7 +967,7 @@ spec:
         (variables.target.metadata.name.matches('^catalogue-build-[0-9a-f]{16}$') &&
           'exomem.io/cell-job' in variables.podLabels && variables.podLabels['exomem.io/cell-job'] == 'catalogue-build' &&
           'exomem.io/cell-job' in variables.labels && variables.labels['exomem.io/cell-job'] == 'catalogue-build' &&
-          'exomem.io/cloud-cell' in variables.podLabels && variables.podLabels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9) &&
+          'exomem.io/cell' in variables.podLabels && variables.podLabels['exomem.io/cell'] == variables.namespaceName.substring(9) &&
           'app.kubernetes.io/name' in variables.podLabels && variables.podLabels['app.kubernetes.io/name'] == 'exomem-catalogue-build' &&
           has(variables.podSpec.affinity) &&
           (!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0) &&

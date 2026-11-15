@@ -527,6 +527,9 @@ The canary and disabled-window rules remain unchanged; an immediate attempt may 
 Build activity reduces attempts per window hour while attempts remain fleet-serial.
 
 Cellctl cancels unfinished builds on timeout, pause, target change, window closure or flag disable.
+Pending backups, imports, exports, row changes and digest changes take precedence over a build.
+The cancellation record in `exomem.io/catalogue-build-cancelled` prevents another build for that target in the same window, including after controller restarts.
+Enabling, disabling or retuning the build profile does not change serving pod templates or restart the fleet.
 When an attempt becomes due, cellctl starts its existing hold clock and deletes the build Job with foreground propagation.
 It waits until the Job and all its pods disappear before stopping the serving pod. The attempt records the build outcome in `exomem.io/catalogue-build-outcome`.
 Cellctl records `exomem.io/catalogue-build-job` before Job creation and clears it only after the Job and its pods disappear.
@@ -540,7 +543,8 @@ The narrow builder exits successfully in store mode; store-mode cells keep their
 The build holds one stable lock while it removes superseded staged copies and builds its target.
 At boot, the replacement validates staged copies read-only and installs a match through the existing whole-set SQLite publication path.
 Ordinary restart reconcile handles subsequent vault edits. Boot removes every unadopted staged copy, including matching duplicates.
-Because cellctl ended the build pods before the stop, released temporary-file locks suffice for boot cleanup without an age delay.
+For a planned replacement, cellctl ends build pods before the stop. After a crash, the staged-build lock makes boot decline adoption while a builder survives.
+Released temporary-file locks permit boot cleanup without an age delay.
 Every restic backup excludes staged and temporary catalogue families, with SQLite sidecars, only under the external state directory.
 Vault notes and the live catalogue stay in the backup.
 

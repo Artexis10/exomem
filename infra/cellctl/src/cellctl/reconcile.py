@@ -982,8 +982,6 @@ def _compute_render_digest(
         "backup_key_version": row.backup_key_version,
         "b2_key_version": row.b2_key_version,
     }
-    if cluster_config.catalogue_prewarm is not None:
-        material["catalogue_prewarm"] = asdict(cluster_config.catalogue_prewarm)
     if row.cell_id in cluster_config.dedicated_cell_ids:
         material["dedicated_node"] = True
     elif placement:
@@ -1230,6 +1228,10 @@ def _rollout_annotation_items(observation: ClusterObservation) -> tuple[tuple[st
         from .manifests import CATALOGUE_BUILD_OUTCOME_ANNOTATION
 
         items.append((CATALOGUE_BUILD_OUTCOME_ANNOTATION, observation.catalogue_build_outcome))
+    if observation.catalogue_build_cancelled:
+        from .manifests import CATALOGUE_BUILD_CANCELLED_ANNOTATION
+
+        items.append((CATALOGUE_BUILD_CANCELLED_ANNOTATION, observation.catalogue_build_cancelled))
     if observation.statefulset_upgrade_window:
         items.append((UPGRADE_WINDOW_ANNOTATION, observation.statefulset_upgrade_window))
     if observation.statefulset_upgrade_window_at:
@@ -1326,10 +1328,44 @@ async def _sync_rollout_annotations(
     return updated
 
 
+def _catalogue_cancellations(observation: ClusterObservation, now: datetime) -> tuple[str, set[str]]:
+    """Keep cancellation names for this window in StatefulSet metadata, across controller restarts."""
+    window = parse_window(observation.statefulset_upgrade_window)
+    start = now.replace(hour=window.hour if window else now.hour, minute=0, second=0, microsecond=0)
+    if start > now:
+        start -= timedelta(days=1)
+    key = start.isoformat()
+    prior = json.loads(observation.catalogue_build_cancelled or "{}")
+    return key, set(prior.get("jobs", ())) if prior.get("window") == key else set()
+
+
+async def _cancel_catalogue_builds(cluster: ClusterGateway, row: CellRow, observation: ClusterObservation,
+                                  now: datetime) -> ClusterObservation:
+    from .manifests import CATALOGUE_BUILD_CANCELLED_ANNOTATION, CATALOGUE_BUILD_OUTCOME_ANNOTATION
+
+    jobs = {job.name for job in observation.catalogue_builds or ()}
+    if observation.catalogue_build_job:
+        jobs.add(observation.catalogue_build_job)
+    if not jobs:
+        return observation
+    window, cancelled = _catalogue_cancellations(observation, now)
+    record = json.dumps({"window": window, "jobs": sorted(cancelled | jobs)}, sort_keys=True)
+    # Persist before deletion: a crash between these operations must not re-create a cancelled build.
+    outcome = observation.catalogue_build_outcome
+    if outcome not in ("succeeded", "failed"):  # Closed Job outcomes from the controller protocol.
+        outcome = "cancelled"
+    await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace_name(row.cell_id), {
+        CATALOGUE_BUILD_CANCELLED_ANNOTATION: record, CATALOGUE_BUILD_OUTCOME_ANNOTATION: outcome,
+    })
+    for name in sorted(jobs):
+        await asyncio.to_thread(cluster.delete_catalogue_build_job, namespace_name(row.cell_id), name)
+    return dataclass_replace(observation, catalogue_build_cancelled=record, catalogue_build_outcome=outcome)
+
+
 async def _sync_catalogue_builds(
     cluster: ClusterGateway, rows: list[CellRow], observations: dict[str, ClusterObservation],
     rollout, cell_image: str | None, now: datetime, window_config: WindowConfig | None,
-    cluster_config: ClusterConfig, *, allow_schedule: bool,
+    cluster_config: ClusterConfig, *, allow_schedule: bool, pending_starts: frozenset[str] = frozenset(),
 ) -> dict[str, ClusterObservation]:
     """Build outside attempts; reserve one slot per node, and retain deletion evidence until the stop."""
     from .manifests import (
@@ -1342,102 +1378,102 @@ async def _sync_catalogue_builds(
     )
 
     config = cluster_config.catalogue_prewarm
-    # Track the current Job separately from history, so disabling adds no dependency after cleanup.
     if config is None and not any(obs.catalogue_build_job for obs in observations.values()):
         return observations
     try:
         builds = await asyncio.to_thread(cluster.observe_catalogue_builds)
-    except Exception as error:  # noqa: BLE001 - unknown pods delay mutations, never claim absence
+    except Exception as error:  # noqa: BLE001 - only a recorded current Job needs absence proof
         logger.warning("cellctl: catalogue build observation unavailable: %s", _describe_error(error))
-        return {cell: dataclass_replace(obs, catalogue_builds=None)
-                if config is not None or obs.catalogue_build_job else obs
+        return {cell: dataclass_replace(obs, catalogue_builds=None) if obs.catalogue_build_job else obs
                 for cell, obs in observations.items()}
     occupied = {job.node for family in builds.values() for job in family if job.node and
                 (not (job.succeeded or job.failed))}
     updated = dict(observations)
     created = False
+    failed_cells = set()
+    live_rows = [row for row in rows if row.desired_state != "deleted"]
+    canary = owner_cell(live_rows) if live_rows else None
     for row in sorted(rows, key=lambda item: (item.rollout_priority, item.cell_id)):
-        obs = observations[row.cell_id]
+        obs = dataclass_replace(observations[row.cell_id], catalogue_builds=builds.get(namespace_name(row.cell_id), ()))
+        updated[row.cell_id] = obs
         namespace = namespace_name(row.cell_id)
-        family = builds.get(namespace, ())
-        if _identity_conflict(row, obs, cluster_config.storage):
-            continue
-        if obs.catalogue_build_job and not family:
-            # These are the controller's closed Job and cancellation outcomes, not a content vocabulary.
-            outcome = obs.catalogue_build_outcome if obs.catalogue_build_outcome in (
-                "succeeded", "failed", "cancelled"
-            ) else "unavailable"
-            # Both lists include orphan pods; only their joint absence retires the current Job.
-            await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace, {
-                CATALOGUE_BUILD_JOB_ANNOTATION: None,
-                CATALOGUE_BUILD_OUTCOME_ANNOTATION: outcome,
-            })
-            obs = dataclass_replace(obs, catalogue_build_job=None, catalogue_build_outcome=outcome)
-        window = parse_window(obs.statefulset_upgrade_window)
         try:
+            if _identity_conflict(row, obs, cluster_config.storage):
+                continue
+            family = obs.catalogue_builds
+            if obs.catalogue_build_job and not family:
+                # Closed Job outcomes from the controller protocol.
+                outcome = obs.catalogue_build_outcome if obs.catalogue_build_outcome in (
+                    "succeeded", "failed", "cancelled"
+                ) else "unavailable"
+                await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace, {
+                    CATALOGUE_BUILD_JOB_ANNOTATION: None, CATALOGUE_BUILD_OUTCOME_ANNOTATION: outcome,
+                })
+                obs = dataclass_replace(obs, catalogue_build_job=None, catalogue_build_outcome=outcome)
+                updated[row.cell_id] = obs
+            window = parse_window(obs.statefulset_upgrade_window)
+            # Match the attempts' canary-first rule before target code can write to tenant volumes.
+            canary_ready = canary is None or row.cell_id == canary.cell_id or (
+                current_image(canary, observations[canary.cell_id]) == target_image(canary, cell_image)
+            )
             eligible = (config is not None and window_config is not None and window is not None
-                        and window_open(window.hour, now) and not rollout.paused
+                        and window_open(window.hour, now) and not rollout.paused and canary_ready
+                        and row.cell_id not in pending_starts and not row.is_dirty()
                         and not row.tenant_locked and obs.pod_exists and obs.pod_ready and not obs.pod_terminating
                         and obs.pod_node is not None and _active_hold(row, obs) is None
                         and is_candidate(row, obs, cell_image))
-        except (ValueError, TypeError):
-            # An unreadable custody record skips this optional build; the serving cell keeps its ordinary path.
-            logger.warning("cellctl: cell %s custody mode is unreadable; repair its custody observation before building",
-                           row.cell_id)
-            eligible = False
-        target = target_image(row, cell_image)
-        outcome = obs.catalogue_build_outcome
-        for job in family:
-            expired = config is not None and job.created_at is not None and (
-                now - job.created_at).total_seconds() >= config.timeout_seconds
-            if not eligible or job.image != target or (expired and not (job.succeeded or job.failed)):
-                cluster.delete_catalogue_build_job(namespace, job.name)
-                outcome = job.outcome if job.succeeded or job.failed else "cancelled"
-            else:
-                outcome = job.outcome
-        updated[row.cell_id] = dataclass_replace(obs, catalogue_builds=family, catalogue_build_outcome=outcome)
-        if not eligible or not allow_schedule or family or obs.pod_node in occupied:
-            continue
-        resources, placement = cluster_config.workload_for_cell(row.cell_id)
-        spec = CellManifestSpec(
-            row.cell_id, target, replicas=1, read_only=row.desired_state == "read_only",
-            resources=resources, catalogue_build_resources=config.resources,
-            placement=placement, dedicated_node=row.cell_id in cluster_config.dedicated_cell_ids,
-            storage_gib=row.size_gib, local_volume=cluster_config.storage.is_local(obs.pv_storage_class),
-            job_egress_except=cluster_config.job_egress_except,
-            media_collector_url=(cluster_config.media_edge.url if cluster_config.media_edge and
-                                 _media_collects(cluster_config, row) else ""),
-        )
-        try:
+            target = target_image(row, cell_image)
+            obsolete = any(not eligible or job.image != target or (
+                job.created_at is not None and config is not None
+                and (now - job.created_at).total_seconds() >= config.timeout_seconds
+                and not (job.succeeded or job.failed)) for job in family)
+            if obsolete:
+                obs = await _cancel_catalogue_builds(cluster, row, obs, now)
+            elif family:
+                obs = dataclass_replace(obs, catalogue_build_outcome=family[-1].outcome)
+            updated[row.cell_id] = obs
+            _, cancelled = _catalogue_cancellations(obs, now)
+            if (not eligible or not allow_schedule or family or obs.pod_node in occupied
+                    or catalogue_build_name(target) in cancelled):
+                continue
+            resources, placement = cluster_config.workload_for_cell(row.cell_id)
+            spec = CellManifestSpec(
+                row.cell_id, target, replicas=1, read_only=row.desired_state == "read_only",
+                resources=resources, catalogue_build_resources=config.resources,
+                placement=placement, dedicated_node=row.cell_id in cluster_config.dedicated_cell_ids,
+                storage_gib=row.size_gib, local_volume=cluster_config.storage.is_local(obs.pv_storage_class),
+                job_egress_except=cluster_config.job_egress_except,
+                media_collector_url=(cluster_config.media_edge.url if cluster_config.media_edge and
+                                     _media_collects(cluster_config, row) else ""),
+            )
             # Record before creation so a restarted, disabled controller still cancels this Job.
             await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace, {
                 CATALOGUE_BUILD_JOB_ANNOTATION: catalogue_build_name(target),
                 CATALOGUE_BUILD_OUTCOME_ANNOTATION: "requested",
             })
-            updated[row.cell_id] = dataclass_replace(updated[row.cell_id], catalogue_build_outcome="requested",
-                                                       catalogue_build_job=catalogue_build_name(target))
-            # Capacity and the no-egress selector must exist before the second pod is admitted.
+            updated[row.cell_id] = dataclass_replace(obs, catalogue_build_outcome="requested",
+                                                   catalogue_build_job=catalogue_build_name(target))
+            # An uncertain create may have reached the API; reserve its slot until the next census.
+            occupied.add(obs.pod_node)
             cluster.apply_all([render_resource_quota(spec),
                                next(policy for policy in render_network_policies(spec)
                                     if policy["metadata"]["name"] == "job-egress")])
             cluster.run_job(render_catalogue_build_job(spec, deadline_seconds=config.timeout_seconds, node=obs.pod_node))
-        except ApiException as error:
-            logger.warning("cellctl: catalogue build %s could not start: %s", catalogue_build_name(target),
-                           _describe_error(error))
-            continue
-        occupied.add(obs.pod_node)
-        created = True
+            created = True
+        except Exception as error:  # noqa: BLE001 - one cell's build must not stop other cells' work
+            logger.warning("cellctl: catalogue build failed for cell %s: %s", row.cell_id, _describe_error(error))
+            updated[row.cell_id] = dataclass_replace(updated[row.cell_id], catalogue_builds=None)
+            failed_cells.add(row.cell_id)
     if created:
-        # Observe actual scheduling once for the fleet: an unbound pod never counts as running.
         try:
             builds = await asyncio.to_thread(cluster.observe_catalogue_builds)
             updated = {cell: dataclass_replace(obs, catalogue_builds=builds.get(namespace_name(cell), ()))
-                       for cell, obs in updated.items()}
-        except Exception as error:  # noqa: BLE001 - never stop against an unobserved new Job
+                       if cell not in failed_cells else obs for cell, obs in updated.items()}
+        except Exception as error:  # noqa: BLE001 - only recorded Jobs need absence proof
             logger.warning("cellctl: new catalogue builds could not be observed: %s", _describe_error(error))
-            updated = {cell: dataclass_replace(obs, catalogue_builds=None) for cell, obs in updated.items()}
+            updated = {cell: dataclass_replace(obs, catalogue_builds=None) if obs.catalogue_build_job else obs
+                       for cell, obs in updated.items()}
     return updated
-
 
 async def _due_cells(
     cluster: ClusterGateway,
@@ -1892,10 +1928,6 @@ async def reconcile_once(
     if not fleet_unobserved:
         observations = await _sync_rollout_annotations(
             cluster, non_deleted_rows, observations, cell_image, now, window_config, memory)
-    observations = await _sync_catalogue_builds(
-        cluster, rows, observations, rollout, cell_image, now, window_config, cluster_config,
-        allow_schedule=not fleet_unobserved,
-    )
     # H1/H9: an upgrade or a restore hold blocks new candidates; a deleted
     # row never counts, whatever its stale annotations or row state say.
     any_upgrading = any(_active_hold(row, observations[row.cell_id]) == "upgrade" for row in non_deleted_rows)
@@ -1909,6 +1941,23 @@ async def reconcile_once(
         )
         for row in rows
     }
+
+    pending_starts = set()
+    if cluster_config.catalogue_prewarm is not None:
+        pending_starts = await db.read_content_start_cells(connection, [row.cell_id for row in rows])
+        pending_starts.update(row.cell_id for row in rows if (
+            row.is_dirty()
+            or observations[row.cell_id].statefulset_render_digest != render_digests[row.cell_id]
+            or nightly_backup_due(row, observations[row.cell_id], now, config)
+            or (cluster_config.storage.is_local(observations[row.cell_id].pv_storage_class)
+                and hourly_backup_due(row, observations[row.cell_id], now, config))
+            or planned_move_volume(row, observations[row.cell_id], cluster_config.storage) is not None
+            or relocation_volume(row, observations[row.cell_id], cluster_config.storage) is not None
+        ))
+    observations = await _sync_catalogue_builds(
+        cluster, rows, observations, rollout, cell_image, now, window_config, cluster_config,
+        allow_schedule=not fleet_unobserved, pending_starts=frozenset(pending_starts),
+    )
 
     # D4 refusal parking. A row is refused while its last refusal's key is
     # still its current (generation, render digest, image to render), and
@@ -2840,6 +2889,8 @@ async def _reconcile_row(
             custody[MEDIA_STORE_RECORD] = media_store
         previous = json.loads(row.custody_observation or "{}")
         previous.pop("observed_at", None)
+        if "mode" in previous:
+            custody["mode"] = previous["mode"]
         if custody != previous:
             encoded = json.dumps({**custody, "observed_at": now.isoformat()}, sort_keys=True)
             await db.write_observed(connection, row.cell_id, {"custody_observation": encoded})
@@ -2999,22 +3050,19 @@ async def _reconcile_row(
         crossing=crossing,
         canary=canary,
     )
-    # Keep the existing attempt clock while foreground deletion ends; never change the serving pod first.
-    if decision.apply_manifests and (observation.catalogue_builds is None or observation.catalogue_builds
-                                     or observation.catalogue_build_job):
-        if observation.catalogue_build_job:
-            cluster.delete_catalogue_build_job(namespace_name(row.cell_id), observation.catalogue_build_job)
-        for job in observation.catalogue_builds or ():
-            if job.name != observation.catalogue_build_job:
-                cluster.delete_catalogue_build_job(namespace_name(row.cell_id), job.name)
+    # Only an apply that stops or replaces the serving pod needs the builder's claim released.
+    replaces_serving = decision.apply_manifests and (
+        decision.replicas == 0 or decision.image != observation.statefulset_image
+        or decision.read_only != (row.observed_state == "read_only")
+        or render_digest != observation.statefulset_render_digest
+    )
+    if replaces_serving and (observation.catalogue_builds is None or observation.catalogue_builds
+                             or observation.catalogue_build_job):
+        observation = await _cancel_catalogue_builds(cluster, row, observation, now)
         if start_upgrade and decision.hold_kind == "upgrade":
-            from .manifests import CATALOGUE_BUILD_OUTCOME_ANNOTATION
-
             await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace_name(row.cell_id), {
                 HOLD_ANNOTATION: "upgrade", HOLD_STARTED_ANNOTATION: decision.hold_started_at.isoformat(),
                 PREVIOUS_IMAGE_ANNOTATION: decision.previous_image, UPGRADE_TARGET_ANNOTATION: decision.upgrade_target,
-                CATALOGUE_BUILD_OUTCOME_ANNOTATION: (observation.catalogue_build_outcome
-                    if observation.catalogue_build_outcome in ("succeeded", "failed") else "cancelled"),
             })
             return await _write_observed(connection, row, decision.row_updates, now)
         return await _write_observed(connection, row, {}, now)

@@ -42,6 +42,7 @@ from .manifests import (
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
     CANDIDATE_SINCE_ANNOTATION,
+    CATALOGUE_BUILD_CANCELLED_ANNOTATION,
     CATALOGUE_BUILD_JOB_ANNOTATION,
     CATALOGUE_BUILD_OUTCOME_ANNOTATION,
     CLONE_CLAIM_NAME,
@@ -528,7 +529,6 @@ class ClusterClient:
                 running=running, succeeded=bool(status and status.succeeded),
                 failed=bool(status and (status.failed or any(c.type == "Failed" and c.status == "True"
                                                            for c in (status.conditions or [])))),
-                pods_exist=bool(family),
             ))
         return {namespace: tuple(family) for namespace, family in observed.items()}
 
@@ -880,6 +880,7 @@ class ClusterClient:
         return ClusterObservation(
             catalogue_build_job=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_JOB_ANNOTATION) if statefulset else None,
             catalogue_build_outcome=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_OUTCOME_ANNOTATION) if statefulset else None,
+            catalogue_build_cancelled=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_CANCELLED_ANNOTATION) if statefulset else None,
             namespace_exists=True,
             namespace_cell_label=namespace_cell_label,
             namespace_media_edge_access=namespace_labels.get(MEDIA_EDGE_ACCESS_LABEL) == "true",

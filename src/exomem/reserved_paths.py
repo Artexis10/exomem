@@ -57,6 +57,7 @@ _LEXICAL_REBUILD_RE = re.compile(
 )
 # Closed runtime filenames, not vocabulary or content classifiers.
 LEXICAL_STAGED_LOCK = ".lexical-staged-build.lock"
+# nosemgrep: ep-word-search -- Closed SQLite filenames and sidecars, not content meaning.
 _LEXICAL_STAGED_RE = re.compile(
     r"^\.lexical-staged-[0-9a-f]{16}\.sqlite(?:-(?:wal|shm|journal))?$", re.ASCII
 )

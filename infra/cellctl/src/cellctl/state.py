@@ -330,6 +330,7 @@ class ClusterObservation:
     catalogue_builds: tuple[BuildJob, ...] | None = ()
     catalogue_build_outcome: str | None = None
     catalogue_build_job: str | None = None
+    catalogue_build_cancelled: str | None = None
 
     backup_job_running: bool = False
     backup_job_started_at: datetime | None = None

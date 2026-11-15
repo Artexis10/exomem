@@ -290,3 +290,37 @@ def test_runtime_catalogue_names_remain_covered_by_controller_backup_exclusions(
     for suffix in reserved_paths._SQLITE_SUFFIXES:
         staged = "/data/host/.local/state/exomem/state/vault-key/" + stage.name + suffix
         assert any(fnmatch.fnmatchcase(staged, pattern) for pattern in CATALOGUE_BACKUP_EXCLUDES)
+
+
+def test_boot_adoption_clears_failed_and_cached_attestations(vault):
+    """A valid stage must recover a failed process and invalidate its old synchronized generation."""
+    _stage(vault)
+    store = lexstore.get_store(vault)
+    store._failed = True
+    store._synced["old"] = object()
+    store._witnessed["old"] = object()
+    store._term_frequency_cache = object()
+    store._filtered_term_frequency_cache = object()
+    assert prewarm.adopt_at_boot(vault)
+    assert not store._failed
+    assert not store._synced and not store._witnessed
+    assert store._term_frequency_cache is None
+    assert store._filtered_term_frequency_cache is None
+
+
+def test_backup_exclusions_cover_the_registry_families_without_excluding_vault_notes(vault, monkeypatch):
+    """A staged filename change must not silently upload disposable catalogues in backups."""
+    import fnmatch
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "infra/cellctl/src"))
+    from cellctl.manifests import CATALOGUE_BACKUP_EXCLUDES
+
+    paths = [f".lexical-staged-{'a' * 16}.sqlite", f".lexical.sqlite.rebuild-{'b' * 32}.tmp"]
+    registry = {descriptor.id: descriptor for descriptor in reserved_paths.internal_state_registry()}
+    for owner, base in zip(("lexical-staged", "lexical-rebuild"), paths, strict=True):
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            name = base + suffix
+            assert registry[owner].matches((name,))
+            assert any(fnmatch.fnmatchcase("/data/host/.local/state/exomem/state/vault-key/" + name, pattern)
+                       for pattern in CATALOGUE_BACKUP_EXCLUDES)
+            assert not any(fnmatch.fnmatchcase("/data/vault/" + name, pattern) for pattern in CATALOGUE_BACKUP_EXCLUDES)

@@ -3436,9 +3436,9 @@ def test_catalogue_build_admission_denies_placement_and_volume_forgery(k3s: K3sC
         if status.get("observedGeneration") != policy["metadata"]["generation"]:
             return False
         assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        return dry_run(build).returncode == 0
+        return True
 
-    _wait_for(policy_settled, timeout=60, description="admission to admit the catalogue build")
+    _wait_for(policy_settled, timeout=60, description="catalogue build admission policy to settle")
     for document in (build, render_resource_quota(spec)):
         admitted = dry_run(document)
         assert admitted.returncode == 0, admitted.stderr

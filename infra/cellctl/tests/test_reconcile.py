@@ -1111,6 +1111,7 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         else None,
         catalogue_build_job=annotations.get("exomem.io/catalogue-build-job"),
         catalogue_build_outcome=annotations.get("exomem.io/catalogue-build-outcome"),
+        catalogue_build_cancelled=annotations.get("exomem.io/catalogue-build-cancelled"),
         statefulset_upgrade_target=annotations.get(UPGRADE_TARGET_ANNOTATION),
         statefulset_upgrade_phase=annotations.get(UPGRADE_PHASE_ANNOTATION),
         statefulset_upgrade_window=annotations.get(UPGRADE_WINDOW_ANNOTATION),

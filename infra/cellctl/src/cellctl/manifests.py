@@ -129,6 +129,7 @@ CATALOGUE_BUILD_APP_LABEL = "exomem-catalogue-build"
 CATALOGUE_BUILD_PREFIX = "catalogue-build-"
 CATALOGUE_BUILD_NAME_RE = re.compile(re.escape(CATALOGUE_BUILD_PREFIX) + r"[0-9a-f]{16}")
 CATALOGUE_BUILD_NODE_ANNOTATION = "exomem.io/catalogue-build-node"
+CATALOGUE_BUILD_CANCELLED_ANNOTATION = "exomem.io/catalogue-build-cancelled"
 CATALOGUE_BUILD_OUTCOME_ANNOTATION = "exomem.io/catalogue-build-outcome"
 CATALOGUE_BUILD_JOB_ANNOTATION = "exomem.io/catalogue-build-job"
 NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE)

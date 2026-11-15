@@ -514,6 +514,19 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
     return rows
 
 
+async def read_content_start_cells(connection: asyncpg.Connection, cell_ids: list[str]) -> set[str]:
+    """One indexed fleet query finds content operations that take precedence over optional builds."""
+    # These open states come from the import/export SQL schemas, not a content vocabulary.
+    records = await connection.fetch(
+        "SELECT cell_id FROM exomem_cloud_cells c WHERE cell_id=ANY($1::text[]) AND ("
+        "EXISTS (SELECT 1 FROM exomem_cloud_imports i WHERE i.cell_id=c.cell_id AND "
+        "(i.observed_state IS NULL OR i.observed_state IN ('key_ready','importing'))) OR "
+        "EXISTS (SELECT 1 FROM exomem_cloud_exports e WHERE e.cell_id=c.cell_id AND "
+        "(e.observed_state IS NULL OR e.observed_state='packing')))", cell_ids,
+    )
+    return {str(record["cell_id"]) for record in records}
+
+
 async def read_packing_export_cells(connection: asyncpg.Connection) -> set[str]:
     """The cells with an export in packing, each of which holds its node's export slot (D8)."""
 

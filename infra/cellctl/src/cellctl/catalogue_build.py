@@ -23,7 +23,6 @@ class BuildJob:
     running: bool = False
     succeeded: bool = False
     failed: bool = False
-    pods_exist: bool = False
 
     @property
     def outcome(self) -> str:

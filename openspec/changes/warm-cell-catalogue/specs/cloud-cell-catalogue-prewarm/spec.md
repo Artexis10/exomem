@@ -10,6 +10,8 @@ Build a catalogue beside the serving cell before its upgrade attempt, so a ready
 
 The feature SHALL default off. When enabled, `cellctl` SHALL schedule a build Job for each running rollout candidate when its upgrade window opens, subject to capacity and skip rules. The build Job SHALL use the target image and share the serving pod's node through scheduler-enforced placement, mounting the live claim read-write.
 
+Builds SHALL follow the attempts' canary-first rule. Cellctl SHALL NOT schedule or keep a build while a backup is due, a content operation is pending, or a row or digest needs apply. After cancellation, cellctl SHALL NOT recreate a build for that target in the same window, including after controller restarts. Only applies that stop or replace the serving pod SHALL wait for build Job and pod absence. One cell's build error SHALL NOT stop another cell's reconciliation. A failed fleet census SHALL delay only cells with a recorded current Job.
+
 A running build Job has a pod Running, including image pull after binding to a node. Pending for node capacity is not running.
 
 Before the final force minutes, `cellctl` SHALL count a running build Job as activity in the due rule, like an in-flight request. The force period SHALL retain its existing default of 10 minutes and override build activity. A build Job waiting for node capacity SHALL NOT defer the attempt. When the build Job ends, `cellctl` SHALL use ordinary request idleness to determine whether the cell is due. Attempts SHALL retain their existing hold clocks and deadlines.
@@ -38,6 +40,13 @@ Before the final force minutes, `cellctl` SHALL count a running build Job as act
 - **WHEN** the build Job fails, exceeds its bounded timeout, or no longer applies after a pause, target change or closed window
 - **THEN** cellctl deletes any unfinished build Job
 - **AND** a due attempt rebuilds cold when no staged copy passes boot validation
+
+#### Scenario: Ordinary work cancels a build without starvation
+
+- **WHEN** a backup, import, export, row change or digest change becomes pending
+- **THEN** cellctl cancels the build and lets that work proceed after any required pod absence
+- **AND** it creates no further build for that target in the same window, including after a controller restart
+- **AND** applies that keep the serving pod proceed without waiting for build cleanup
 
 ### Requirement: The build Job self-gates on catalogue identity
 

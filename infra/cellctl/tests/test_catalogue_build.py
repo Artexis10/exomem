@@ -43,7 +43,7 @@ CELL = "aaaaaaaaaaaaaaaa"
 
 
 def _row(cell=CELL, **kwargs):
-    return CellRow(cell, uuid.UUID(int=1), 10, 0, "running", None, 1, ready=True, **kwargs)
+    return CellRow(cell, uuid.UUID(int=1), 10, 0, "running", None, 1, observed_generation=1, observed_state="running", ready=True, **kwargs)
 
 
 def _observation(**kwargs):
@@ -69,7 +69,7 @@ class BuildCluster(FakeClusterGateway):
         pod = manifest["spec"]["template"]["spec"]
         self.builds[namespace] = (BuildJob(name, pod["containers"][0]["image"],
                                          manifest["metadata"]["annotations"][CATALOGUE_BUILD_NODE_ANNOTATION],
-                                         NOW, running=True, pods_exist=True),)
+                                         NOW, running=True),)
 
 
 def test_target_build_cannot_gain_credentials_or_bypass_scheduler_capacity():
@@ -192,8 +192,11 @@ def test_forced_attempt_overrides_running_build_and_capacity_wait_never_defers()
 async def test_second_candidate_cannot_occupy_same_nodes_build_slot():
     cluster = BuildCluster()
     other = "bbbbbbbbbbbbbbbb"
-    rows = [_row(), _row(other)]
-    await reconcile._sync_catalogue_builds(cluster, rows, {r.cell_id: _observation() for r in rows},
+    canary = replace(_row("cccccccccccccccc"), rollout_priority=-1)
+    rows = [canary, _row(), _row(other)]
+    observations = {r.cell_id: _observation() for r in rows}
+    observations[canary.cell_id] = _observation(statefulset_image=IMAGE_B, ready_pod_image=IMAGE_B)
+    await reconcile._sync_catalogue_builds(cluster, rows, observations,
                                           RolloutRow(), IMAGE_B, NOW, WINDOWS, CONFIG, allow_schedule=True)
     assert len(cluster.jobs) == 1
 
@@ -218,7 +221,7 @@ async def test_ineligible_cells_receive_no_build_job(skip):
 async def test_obsolete_build_is_deleted_but_pods_stay_observed_until_they_end(reason):
     """Job deletion alone must never stand in for proof that its pods released the live claim."""
     cluster = BuildCluster()
-    job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, running=True, pods_exist=True)
+    job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, running=True)
     cluster.builds[namespace_name(CELL)] = (job,)
     now = NOW + timedelta(seconds=1801) if reason == "timeout" else NOW
     if reason == "window-close":
@@ -278,12 +281,13 @@ async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting
     fleet.cluster = cluster
     try:
         cluster.readiness[TENANT] = json.dumps({"traffic": {"inflight": 0, "last_request_age_seconds": 900}}).encode()
-        # Converge the enabled profile before changing the image, as the separate cellctl rollout does.
-        for _ in range(3):
-            await fleet.run(NOW, cluster_config=CONFIG)
-            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
         await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT)
-        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, running=True, pods_exist=True)
+        # Converge the row before the optional build can start.
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+        cluster.jobs.clear()
+        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, running=True)
         cluster.builds[namespace_name(TENANT)] = (job,)
         await fleet.run(NOW + timedelta(seconds=5), cluster_config=CONFIG)
         assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
@@ -363,7 +367,7 @@ def test_build_census_cannot_lose_a_later_page_or_treat_an_operators_job_as_its_
 async def test_disabling_clears_current_job_only_after_orphan_pods_end_then_restores_the_old_path():
     """A stale historical outcome must not keep adding a build API dependency after cancellation ends."""
     cluster = BuildCluster()
-    job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, pods_exist=True)
+    job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW)
     cluster.builds[namespace_name(CELL)] = (job,)
     observations = {CELL: _observation(catalogue_build_job=job.name, catalogue_build_outcome="requested")}
     ending = await reconcile._sync_catalogue_builds(cluster, [_row()], observations, RolloutRow(), IMAGE_B,
@@ -379,3 +383,246 @@ async def test_disabling_clears_current_job_only_after_orphan_pods_end_then_rest
     cluster.observe_catalogue_builds = lambda: pytest.fail("completed history still gated ordinary upgrades")
     assert await reconcile._sync_catalogue_builds(cluster, [_row()], ended, RolloutRow(), IMAGE_B,
                                                   NOW, WINDOWS, _cluster_config(), allow_schedule=True) == ended
+
+
+def test_build_configuration_never_restarts_the_serving_pod():
+    """Enabling or retuning a Job-only profile must not change every serving pod's template digest."""
+    from .test_reconcile import _secrets_config
+
+    row = _row()
+    before = reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
+    assert reconcile._compute_render_digest(row, CONFIG, _secrets_config()) == before
+    retuned = replace(CONFIG, catalogue_prewarm=BuildConfig(ResourceSettings("1", "2", "1Gi", "3Gi"), 600))
+    assert reconcile._compute_render_digest(row, retuned, _secrets_config()) == before
+
+
+@pytest.mark.parametrize("resources", [
+    {"requests": {"cpu": "0", "memory": "1Gi"}, "limits": {"cpu": "2", "memory": "3Gi"}},
+    {"requests": {"cpu": "1", "memory": "1Gi"}, "limits": {"cpu": "0m", "memory": "3Gi"}},
+    {"requests": {"cpu": "2001m", "memory": "1Gi"}, "limits": {"cpu": "2", "memory": "3Gi"}},
+    {"requests": {"cpu": "1", "memory": "3073Mi"}, "limits": {"cpu": "2", "memory": "3Gi"}},
+])
+def test_build_schema_refuses_zero_cpu_and_requests_above_limits(resources):
+    """Invalid build resources must fail chart validation before Kubernetes strands every build."""
+    from .test_platform_chart_headers import _helm_render
+
+    result = _helm_render("--set-json", f"cellctl.catalogueBuildResources={json.dumps(resources)}")
+    assert result.returncode != 0, "chart admitted impossible build resources"
+    assert "catalogueBuildResources" in result.stderr
+
+
+async def test_a_tenant_build_waits_for_the_canary_target_before_writing_its_volume():
+    """A read-write builder must not bypass the canary that gates ordinary upgrade attempts."""
+    other = "bbbbbbbbbbbbbbbb"
+    cluster = BuildCluster()
+    rows = [replace(_row(), rollout_priority=0), _row(other)]
+    observations = {CELL: _observation(), other: _observation(pod_node="worker-two")}
+    await reconcile._sync_catalogue_builds(cluster, rows, observations, RolloutRow(), IMAGE_B, NOW,
+                                          WINDOWS, CONFIG, allow_schedule=True)
+    assert [job["metadata"]["namespace"] for job in cluster.jobs] == [namespace_name(CELL)]
+    cluster.jobs.clear()
+    observations[CELL] = _observation(statefulset_image=IMAGE_B, ready_pod_image=IMAGE_B)
+    await reconcile._sync_catalogue_builds(cluster, rows, observations, RolloutRow(), IMAGE_B, NOW,
+                                          WINDOWS, CONFIG, allow_schedule=True)
+    assert [job["metadata"]["namespace"] for job in cluster.jobs] == [namespace_name(other)]
+
+
+@pytest.mark.parametrize("after_create", [False, True])
+async def test_build_census_failure_delays_only_cells_with_a_recorded_current_job(after_create):
+    """An optional fleet census outage must not block applies for cells that never requested a build."""
+    from kubernetes.client.rest import ApiException
+
+    cluster = BuildCluster()
+    calls = 0
+    def unavailable():
+        nonlocal calls
+        calls += 1
+        if after_create and calls == 1:
+            return {}
+        raise ApiException(status=500)
+    cluster.observe_catalogue_builds = unavailable
+    other = "bbbbbbbbbbbbbbbb"
+    rows = [replace(_row(), desired_image=IMAGE_A), _row(other)]
+    obs = {CELL: _observation(), other: _observation(
+        catalogue_build_job=None if after_create else catalogue_build_name(IMAGE_B))}
+    result = await reconcile._sync_catalogue_builds(cluster, rows, obs, RolloutRow(), IMAGE_B,
+                                                   NOW, WINDOWS, CONFIG, allow_schedule=True)
+    assert result[CELL].catalogue_builds == ()
+    assert result[other].catalogue_builds is None
+
+
+async def _build_fleet(cell_db):
+    from .test_rollout_automation import OWNER, TENANT, _observe, _windowed_fleet
+
+    fleet = await _windowed_fleet(cell_db, TENANT)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    for _ in range(3):
+        await fleet.run(NOW, cluster_config=CONFIG)
+        _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+    return fleet
+
+
+async def _settle_target(fleet):
+    from .test_rollout_automation import OWNER, TENANT, _observe
+
+    for _ in range(3):
+        await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+        _observe(fleet.cluster, OWNER, TENANT, pod_node="worker-one")
+
+
+async def test_due_backup_and_forced_upgrade_cannot_starve_behind_recreated_builds(cell_db, record_property):
+    """Minute passes must start the due backup and forced upgrade with at most one build in the window."""
+    from .test_rollout_automation import BUSY, OWNER, TENANT, _annotations, _observe
+
+    fleet = await _build_fleet(cell_db)
+    try:
+        fleet.config = replace(fleet.config, backup_window=(16, 17))
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET last_backup_at=$1", NOW)
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1, last_backup_at=$2 WHERE cell_id=$3",
+                                  IMAGE_B, NOW - timedelta(hours=21), TENANT)
+        fleet.cluster.readiness[TENANT] = BUSY
+        await _settle_target(fleet)
+        backup_started = upgrade_started = None
+        for minute in range(5, 58):
+            now = NOW.replace(minute=minute)
+            _observe(fleet.cluster, OWNER, TENANT, pod_node="worker-one")
+            if _annotations(fleet.cluster, TENANT).get("exomem.io/hold") == "backup":
+                if any(job["metadata"]["labels"].get(JOB_KIND_LABEL) == "backup" for job in fleet.cluster.jobs):
+                    _observe(fleet.cluster, TENANT, pod_node="worker-one", backup_job_succeeded=True,
+                             backup_job_snapshot_id="e" * 64)
+            await fleet.run(now, cluster_config=CONFIG)
+            hold = _annotations(fleet.cluster, TENANT).get("exomem.io/hold")
+            if hold == "backup" and backup_started is None:
+                backup_started = minute
+            if hold == "upgrade":
+                upgrade_started = minute
+                break
+            # Model foreground deletion finishing between passes, including after a controller restart.
+            for event in fleet.cluster.events:
+                if event[0] == "delete_catalogue_build_job":
+                    fleet.cluster.builds.pop(event[1], None)
+            fleet.cluster.events.clear()
+            fleet.memory = reconcile.LoopMemory()
+        builds = [job for job in fleet.cluster.jobs if job["metadata"]["labels"].get(JOB_KIND_LABEL) == JOB_KIND_CATALOGUE_BUILD]
+        record_property("backup_started_minute", str(backup_started))
+        record_property("upgrade_started_minute", str(upgrade_started))
+        record_property("builds_created", len(builds))
+        assert backup_started == 5
+        assert upgrade_started is not None and upgrade_started <= 51
+        assert len(builds) <= 1
+    finally:
+        await fleet.close()
+
+
+async def test_cancelled_target_stays_cancelled_after_restart_in_the_same_window(cell_db):
+    """A momentary dirty row must not restart the target builder on every later minute pass."""
+    from .test_rollout_automation import BUSY, OWNER, TENANT, _annotations, _observe
+
+    fleet = await _build_fleet(cell_db)
+    try:
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT)
+        fleet.cluster.readiness[TENANT] = BUSY
+        await _settle_target(fleet)
+        await fleet.run(NOW, cluster_config=CONFIG)
+        assert len(fleet.cluster.jobs) == 1
+        _observe(fleet.cluster, TENANT, pod_node="worker-one")
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET generation=generation+1 WHERE cell_id=$1", TENANT)
+        await fleet.run(NOW + timedelta(minutes=1), cluster_config=CONFIG)
+        # Updating row metadata alone keeps the serving pod, so it proceeds before build pods end.
+        assert _annotations(fleet.cluster, TENANT)["exomem.io/row-generation"] == "3"
+        fleet.cluster.builds.clear()
+        fleet.memory = reconcile.LoopMemory()
+        _observe(fleet.cluster, OWNER, TENANT, pod_node="worker-one")
+        await fleet.run(NOW + timedelta(minutes=2), cluster_config=CONFIG)
+        _observe(fleet.cluster, TENANT, pod_node="worker-one")
+        await fleet.run(NOW + timedelta(minutes=3), cluster_config=CONFIG)
+        assert len(fleet.cluster.jobs) == 1
+        # The next window is a fresh opportunity for the same image.
+        _observe(fleet.cluster, TENANT, pod_node="worker-one")
+        await fleet.run(NOW + timedelta(days=1), cluster_config=CONFIG)
+        assert len(fleet.cluster.jobs) == 2
+    finally:
+        await fleet.close()
+
+
+@pytest.mark.parametrize("operation", ["import", "export"])
+async def test_pending_content_operation_prevents_a_build_start(cell_db, operation):
+    """An import or export candidate owns the claim before an optional target builder starts."""
+    from .test_rollout_automation import BUSY, TENANT
+
+    fleet = await _build_fleet(cell_db)
+    try:
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT)
+        fleet.cluster.readiness[TENANT] = BUSY
+        await _settle_target(fleet)
+        if operation == "import":
+            await fleet.admin.execute("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
+                                      "VALUES($1,'adopt',4,1)", TENANT)
+        else:
+            await fleet.admin.execute("INSERT INTO exomem_cloud_exports(cell_id) VALUES($1)", TENANT)
+        await fleet.run(NOW, cluster_config=CONFIG)
+        assert not any(job["metadata"]["labels"].get(JOB_KIND_LABEL) == JOB_KIND_CATALOGUE_BUILD
+                       for job in fleet.cluster.jobs)
+    finally:
+        await fleet.close()
+
+
+async def test_one_build_delete_failure_does_not_drop_another_cells_read_only_change(cell_db):
+    """A tenant API 500 must stay inside that row while the owner's requested change applies."""
+    from kubernetes.client.rest import ApiException
+
+    from .test_rollout_automation import OWNER, TENANT, _annotations
+
+    fleet = await _build_fleet(cell_db)
+    try:
+        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, running=True)
+        fleet.cluster.builds[namespace_name(TENANT)] = (job,)
+        def unavailable(namespace, name):
+            raise ApiException(status=500)
+        fleet.cluster.delete_catalogue_build_job = unavailable
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_state='read_only', generation=generation+1 "
+                                  "WHERE cell_id=$1", OWNER)
+        await fleet.run(NOW, cluster_config=CONFIG)
+        assert _annotations(fleet.cluster, OWNER)["exomem.io/row-generation"] == "2"
+        assert await fleet.admin.fetchval("SELECT observed_generation FROM exomem_cloud_cells WHERE cell_id=$1", TENANT) == 1
+    finally:
+        await fleet.close()
+
+
+async def test_tenant_locked_mode_survives_two_custody_passes_without_a_build(cell_db):
+    """The custody publisher must preserve tenant-lock mode so pass two cannot bypass the skip."""
+    from .test_rollout_automation import BUSY, TENANT, _observe
+
+    fleet = await _build_fleet(cell_db)
+    try:
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1, custody_observation=$2 WHERE cell_id=$3",
+                                  IMAGE_B, json.dumps({"mode": "tenant-locked", "unlocked": True}), TENANT)
+        fleet.cluster.readiness[TENANT] = BUSY
+        await _settle_target(fleet)
+        for minute in (5, 6):
+            await fleet.run(NOW.replace(minute=minute), cluster_config=CONFIG)
+            _observe(fleet.cluster, TENANT, pod_node="worker-one")
+        assert not fleet.cluster.jobs
+        custody = json.loads(await fleet.admin.fetchval(
+            "SELECT custody_observation FROM exomem_cloud_cells WHERE cell_id=$1", TENANT))
+        assert custody["mode"] == "tenant-locked"
+    finally:
+        await fleet.close()
+
+
+async def test_cancellation_after_midnight_does_not_consume_the_next_evenings_window():
+    """A build cancelled after its 23:00 window closes must not block the next day's fresh opportunity."""
+    cluster = BuildCluster()
+    start = NOW.replace(hour=23, minute=55)
+    job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", start, running=True)
+    cluster.builds[namespace_name(CELL)] = (job,)
+    observations = {CELL: _observation(statefulset_upgrade_window="23 default", catalogue_build_job=job.name)}
+    midnight = start + timedelta(minutes=10)
+    cancelled = await reconcile._sync_catalogue_builds(cluster, [_row()], observations, RolloutRow(), IMAGE_B,
+                                                      midnight, WINDOWS, CONFIG, allow_schedule=True)
+    cluster.builds.clear()
+    await reconcile._sync_catalogue_builds(cluster, [_row()], cancelled, RolloutRow(), IMAGE_B,
+                                          midnight.replace(hour=23), WINDOWS, CONFIG, allow_schedule=True)
+    assert len(cluster.jobs) == 1

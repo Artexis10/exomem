@@ -154,6 +154,15 @@ def adopt_at_boot(vault_root: Path) -> bool:
                         # Recheck under the same barrier that installs the whole live SQLite set.
                         if _catalog_valid(store, path, "lexical-staged", identity):
                             adopted = store._replace_live_catalog(path, source_owner="lexical-staged")
+                            if adopted:
+                                with store._lock:
+                                    # The live generation replaced every attestation to the old catalogue.
+                                    store._failed = False
+                                    store._synced.clear()
+                                    store._witnessed.clear()
+                                    store._term_frequency_cache = None
+                                    store._filtered_term_frequency_cache = None
+                                    store._adopted_rows = None
                     if adopted:
                         break
             except (VaultLockError, sqlite3.Error, OSError, RuntimeError):
@@ -161,7 +170,7 @@ def adopt_at_boot(vault_root: Path) -> bool:
             finally:
                 for path in _staged_copies(store):
                     _discard_staged(store, path)
-                # Cellctl ends all build pods before the serving pod stops; released locks suffice here.
+                # The build lock also excludes a surviving builder after a serving-pod crash.
                 store._sweep_orphan_rebuild_temps(boot=True)
     except (VaultLockError, OSError, RuntimeError):
         log.info("Staged catalogue cleanup deferred; the cell keeps its ordinary boot path.")
