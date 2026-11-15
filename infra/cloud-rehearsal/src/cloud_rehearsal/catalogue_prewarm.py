@@ -19,6 +19,11 @@ are the adoption and rebuild evidence; they keep their fields through a cloud ce
 For each scenario the receipt holds the build Job's start, end and outcome, the stop and ready times,
 the build container's CPU and memory peaks and the configured build timeout. The receipt holds counts,
 timings, hashes and the synthetic fixture's invented names; it never holds note contents.
+
+After each scenario a gate reads whether the cell is fit for the next one; a gate that stays failed marks
+the scenarios left BLOCKED. The harness never resumes the rollout or clears a hold. The run's diagnostics
+artifact holds cellctl's log for the whole stage and, for each scenario, the cell's StatefulSet with its
+field owners, the namespace's events and the log of each pod that replaced the serving one.
 """
 
 from __future__ import annotations
@@ -41,8 +46,13 @@ from cellctl.cell_readiness import CELL_HEALTH_PORT, CELL_READINESS_PATH
 from cellctl.manifests import (
     CATALOGUE_BUILD_CANCELLED_ANNOTATION,
     CATALOGUE_BUILD_OUTCOME_ANNOTATION,
+    HOLD_ANNOTATION,
+    HOLD_STARTED_ANNOTATION,
     JOB_KIND_CATALOGUE_BUILD,
     JOB_KIND_LABEL,
+    PREVIOUS_IMAGE_ANNOTATION,
+    TARGET_APPLIED_ANNOTATION,
+    UPGRADE_TARGET_ANNOTATION,
     UPGRADE_WINDOW_ANNOTATION,
     UPGRADE_WINDOW_AT_ANNOTATION,
     namespace_name,
@@ -98,6 +108,15 @@ CATCH_UP_TIMEOUT = 300
 CATCH_UP_SLACK = 150  # seconds beyond the idle minute within which an undeferred attempt must start
 FILLER_FREE_FRACTION = Decimal("0.75")  # the filler leaves this share of the build's CPU request free
 MAX_LISTED_PATHS = 20
+# cellctl's own names for an upgrade hold's StatefulSet annotations (cellctl.manifests). A start beside a
+# catalogue build writes them by merge patch, and one left after the hold ends makes cellctl hold the cell
+# again. The harness lists them apart from cellctl's own cleanup, so a key that cellctl forgets to remove still shows.
+HOLD_KEYS = (HOLD_ANNOTATION, HOLD_STARTED_ANNOTATION, PREVIOUS_IMAGE_ANNOTATION, UPGRADE_TARGET_ANNOTATION)
+GATE_SETTLE_SECONDS = 75  # two of cellctl's 30-s passes and slack: a state that its next pass converges is no block
+GATE_POLL_SECONDS = 5.0
+ROLLOUT_GATE = "rollout_not_paused"  # only an operator resumes a paused rollout, so waiting cannot pass this gate
+DIAGNOSTICS_DIR = "catalogue-prewarm"  # under the run's diagnostics folder, which the workflow uploads
+LOG_FOLLOW_SECONDS = 9000  # longer than the workflow's 140-minute step; it also ends a stream the harness could not stop
 DEVIATIONS = (
     "the build's resource profile and timeout are the chart's values, read back from cellctl's Deployment; "
     "the upgrade window's idle and force minutes are the schema's 1-minute floor, so a scenario fits inside "
@@ -157,7 +176,8 @@ store = lexstore.LexicalStore(vault)
 identity = lexstore.catalog_semantic_identity(vault)
 print(json.dumps({'identity': identity,
                   'live_matches': catalogue_prewarm._catalog_valid(store, store.path, 'lexical-store', identity),
-                  'files': sorted(entry.name for entry in store.path.parent.glob('.lexical*'))}))
+                  'files': sorted(entry.name for entry in store.path.parent.glob('.lexical*')),
+                  'staged': [path.name for path in catalogue_prewarm._staged_copies(store)]}))
 """
 
 # Runs inside the cell, read-only: whether the live catalogue holds a page for each vault-relative path.
@@ -356,9 +376,12 @@ def serving_view(items: list[dict[str, Any]], old_uid: str | None) -> dict[str, 
     }
 
 
+def _statefulset(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((i for i in items if i.get("kind") == "StatefulSet"), None)
+
+
 def window_annotations(items: list[dict[str, Any]]) -> dict[str, str | None]:
-    sets = next((i for i in items if i.get("kind") == "StatefulSet"), {})
-    notes = sets.get("metadata", {}).get("annotations") or {}
+    notes = (_statefulset(items) or {}).get("metadata", {}).get("annotations") or {}
     names = {
         "window": UPGRADE_WINDOW_ANNOTATION,
         "window_at": UPGRADE_WINDOW_AT_ANNOTATION,
@@ -366,6 +389,40 @@ def window_annotations(items: list[dict[str, Any]]) -> dict[str, str | None]:
         "cancelled": CATALOGUE_BUILD_CANCELLED_ANNOTATION,
     }
     return {key: notes.get(annotation) for key, annotation in names.items()}
+
+
+def statefulset_state(statefulset: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What cellctl last wrote to the cell's StatefulSet: images, replicas and the hold annotations it carries."""
+
+    if statefulset is None:
+        return None
+    notes = statefulset.get("metadata", {}).get("annotations") or {}
+    spec = statefulset.get("spec") or {}
+    containers = spec.get("template", {}).get("spec", {}).get("containers") or []
+    return {"images": {c.get("name"): c.get("image") for c in containers}, "replicas": spec.get("replicas"),
+            "annotations": {key: notes[key] for key in (*HOLD_KEYS, TARGET_APPLIED_ANNOTATION) if key in notes}}
+
+
+def scenario_gate(row: dict[str, Any], statefulset: dict[str, Any] | None, rollout: dict[str, Any],
+                  image: str | None) -> dict[str, str]:
+    """Each gate the cell fails before the next scenario, with what was read; empty when the next may start.
+
+    `statefulset` is None when it could not be read, and `image` is None when the stage published no release.
+    """
+
+    failed: dict[str, str] = {}
+    if not _running_ready()(row):
+        failed["cell_serving_with_no_hold"] = (f"state {row.get('observed_state')}, ready {row.get('ready')}, "
+                                               f"hold {row.get('hold_kind')}")
+    if image is not None and row.get("observed_image") != image:
+        failed["cell_on_the_released_image"] = f"the cell runs {row.get('observed_image')}, the release is {image}"
+    notes = (statefulset or {}).get("metadata", {}).get("annotations") or {}
+    held = {key: notes[key] for key in HOLD_KEYS if key in notes}
+    if statefulset is None or held:
+        failed["statefulset_carries_no_hold"] = json.dumps(held) if held else "the StatefulSet could not be read"
+    if rollout.get("paused"):
+        failed[ROLLOUT_GATE] = f"paused with error {rollout.get('error_code')} on cell {rollout.get('held_cell_id')}"
+    return failed
 
 
 def build_outcome(last: dict[str, Any] | None, vanished_at: dt.datetime | None) -> dict[str, Any]:
@@ -585,6 +642,18 @@ def _iso(moment: dt.datetime | None) -> str | None:
 # --- the run ---
 
 
+def _end(process: subprocess.Popen) -> None:
+    """Stop a stream the harness started, unless it already ended by itself."""
+
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
 class PodWatch:
     """One `kubectl get pods --watch` stream over the cell's namespace, kept in a file until it is stopped."""
 
@@ -597,26 +666,90 @@ class PodWatch:
 
     def stop(self) -> dict[str, Any]:
         ended = self.process.poll()  # a watch that ended by itself may have missed later events
-        if ended is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
+        _end(self.process)
         self.output.seek(0)
         events = watch_events(self.output.read())
         self.output.close()
         return {"events": events, "ended_by_itself": ended is not None}
 
 
+class Diagnostics:
+    """Files for the run's diagnostics artifact: cellctl's log for the whole stage and each scenario's cluster state.
+
+    Every capture is best effort: a read that fails writes its error to the file and never fails the stage.
+    """
+
+    def __init__(self, ctx: Context) -> None:
+        self.ctx = ctx
+        self.root = ctx.stack.workdir / "diagnostics" / DIAGNOSTICS_DIR
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.streams: dict[str, subprocess.Popen] = {}  # each cellctl pod's log stream, which writes its own file
+        self.errors: list[str] = []
+
+    def follow_cellctl(self) -> None:
+        """Stream the log of each running cellctl pod not yet followed, one file per pod.
+
+        `kubectl set env` replaces the pod, and the old pod's stream ends with its last line.
+        """
+
+        try:
+            deployment = self.ctx.kube_json("get", "deployment", CELLCTL_DEPLOYMENT, "--namespace", CLOUD_NAMESPACE)
+            labels = deployment["spec"]["selector"]["matchLabels"]
+            selector = ",".join(f"{key}={value}" for key, value in labels.items())
+            pods = self.ctx.kube_json("get", "pods", "--namespace", CLOUD_NAMESPACE, f"--selector={selector}")["items"]
+            for pod in pods:
+                name = pod["metadata"]["name"]
+                # A pod that is not Running yet has no log to follow; a later call picks it up.
+                if name in self.streams or pod["metadata"].get("deletionTimestamp") or pod["status"].get("phase") != "Running":
+                    continue
+                # A cellctl pod's name starts with its Deployment's, so the file names its role too.
+                with (self.root / f"{name}.log").open("w", encoding="utf-8") as output:
+                    process = subprocess.Popen(
+                        ["docker", "exec", self.ctx.stack.k3s.container, "kubectl", "logs", "--namespace",
+                         CLOUD_NAMESPACE, f"pod/{name}", "--follow", "--timestamps",
+                         f"--request-timeout={LOG_FOLLOW_SECONDS}s"],
+                        stdout=output, stderr=subprocess.STDOUT)
+                self.streams[name] = process
+        except Exception as error:  # noqa: BLE001 - a diagnostics read never replaces the stage's own outcome
+            self.errors.append(f"following cellctl's log: {_where(error)}")
+
+    def stop(self) -> dict[str, Any]:
+        """End every stream; the record names the files and any read that failed."""
+
+        for process in self.streams.values():
+            _end(process)
+        return {"directory": f"{DIAGNOSTICS_DIR} in the diagnostics artifact",
+                "cellctl_logs": [f"{name}.log" for name in sorted(self.streams)], "errors": self.errors}
+
+    def capture(self, label: str, namespace: str, pods: list[str]) -> list[str]:
+        """The cell's StatefulSet with its field owners, the namespace's events and each named pod's log."""
+
+        reads = {
+            f"{label}-statefulset.yaml": ("get", "statefulset", STATEFULSET, "--namespace", namespace,
+                                          "--output=yaml", "--show-managed-fields"),
+            f"{label}-events.json": ("get", "events", "--namespace", namespace, "--output=json"),
+            **{f"{label}-pod-{pod}.log": ("logs", "--namespace", namespace, f"pod/{pod}", "--all-containers",
+                                          "--prefix", "--timestamps") for pod in pods},
+        }
+        written = []
+        for name, command in reads.items():
+            try:
+                result = self.ctx.kubectl(*command, check=False)
+                (self.root / name).write_text(result.stdout + result.stderr, encoding="utf-8")
+                written.append(name)
+            except Exception as error:  # noqa: BLE001 - a diagnostics read never replaces the scenario's own outcome
+                written.append(f"{name}: not written, {type(error).__name__}")
+        return written
+
+
 class Run:
     """One scenario's view of the cell: polls, timeline, checks and the cell's in-pod probes."""
 
     def __init__(self, ctx: Context, plan: CataloguePlan, record: dict[str, Any], name: str,
-                 profile: dict[str, Any] | None = None) -> None:
+                 profile: dict[str, Any] | None = None, diagnostics: Diagnostics | None = None) -> None:
         self.ctx, self.plan, self.name = ctx, plan, name
         self.profile = profile or {}
+        self.diagnostics = diagnostics
         self.cell_id = ctx.b.cell_id or ""
         self.namespace = namespace_name(self.cell_id)
         self.record = record
@@ -639,6 +772,8 @@ class Run:
         self.watched: dict[str, Any] | None = None
         self.unpinned_ticks = 0
         self.ticks = 0
+        self.new_pods: list[str] = []  # each pod that replaced the serving one, in the order polls first saw them
+        self.last_state: dict[str, Any] | None = None
 
     # checks
 
@@ -689,6 +824,7 @@ class Run:
             "observed_state": row.get("observed_state"),
         })
         self.ticks += 1
+        self._state(tick, _statefulset(items), await self.ctx.rollout())
         if self.pinned is not None and tick.annotations["window"] != self.pinned:
             self.unpinned_ticks += 1
         self._mark(tick)
@@ -713,6 +849,8 @@ class Run:
             started = row["hold_started_at"]
             self.hold_started = started if started.tzinfo else started.replace(tzinfo=dt.UTC)
         self.old_deleted_at = self.old_deleted_at or serving["old_deletion_timestamp"]
+        if serving["new_pod"] and serving["new_pod"] not in self.new_pods:
+            self.new_pods.append(serving["new_pod"])
         self.new_ready_at = self.new_ready_at or serving["new_ready_at"]
         # The annotations may be rewritten when the new pod is applied, so the last value seen is the record.
         self.outcome_seen = tick.annotations["outcome"] or self.outcome_seen
@@ -731,6 +869,16 @@ class Run:
         for name, happened in seen.items():
             if happened:
                 self._first(name, tick)
+
+    def _state(self, tick: Tick, statefulset: dict[str, Any] | None, rollout: dict[str, Any]) -> None:
+        """Record what cellctl wrote whenever it differs from the previous poll, with the poll that first saw it."""
+
+        state = {"statefulset": statefulset_state(statefulset),
+                 "row": {key: tick.row[key] for key in ("observed_state", "ready", "hold_kind", "observed_image")},
+                 "rollout": {key: rollout.get(key) for key in ("paused", "error_code", "held_cell_id")}}
+        if state != self.last_state:
+            self.record.setdefault("states", []).append({"at": _iso(tick.wall), "poll": self.ticks, **state})
+            self.last_state = state
 
     def _first(self, name: str, tick: Tick) -> None:
         self.events.setdefault(name, {"mono": tick.mono, "at": _iso(tick.wall)})
@@ -805,6 +953,8 @@ class Run:
                          f"CELLCTL_UPGRADE_WINDOW_FORCE_MINUTES={minutes}")
         self.ctx.kubectl("rollout", "status", f"deployment/{CELLCTL_DEPLOYMENT}", "--namespace", CLOUD_NAMESPACE,
                          "--timeout=180s")
+        if self.diagnostics is not None:
+            self.diagnostics.follow_cellctl()  # the change replaced cellctl's pod
 
     async def release(self, index: int) -> None:
         """Publish the release for this scenario and wait for the canary to run it, so the cell is next."""
@@ -921,10 +1071,6 @@ def _common_checks(run: Run, tick: Tick, *, peaks: bool = True) -> None:
         run.check("peaks_measured", not unknown, blocking=False, said=json.dumps(unknown))
 
 
-def _staged_names(files: list[str]) -> list[str]:
-    return [name for name in files if name.startswith(STAGED_PREFIX)]
-
-
 def _manifest(run: Run, when: str) -> dict[str, list]:
     return run.in_cell(MANIFEST, what=f"the vault manifest {when}")
 
@@ -935,10 +1081,12 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     baseline = _manifest(run, "before the window opens")
     await run.open_window(need_seconds=WINDOW_BUDGET_SECONDS)
 
+    # The checks before the stop record their outcome and never end the scenario, so it still watches the
+    # stop and the upgrade; any of them that failed fails the scenario at the end.
     run.record["phase"] = "build_start"
-    await run.watch(lambda t: t.build["bound"], timeout=BIND_TIMEOUT, touch=True,
-                    what="the build Job's pod to be bound to the node")
-    run.check("build_bound_before_any_attempt", "hold" not in run.events,
+    bound = await run.watch(lambda t: t.build["bound"] or t.attempting, timeout=BIND_TIMEOUT, touch=True,
+                            what="the build Job's pod to be bound to the node")
+    run.check("build_bound_before_any_attempt", bound.build["bound"] and "hold" not in run.events, blocking=False,
               said="the attempt began before the build ran")
 
     run.record["phase"] = "idle_during_build"
@@ -954,10 +1102,10 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     run.record["deferral"] = {"build_state": seen.build["state"], "idle_age_seconds": age, "idle_seconds_needed": needed,
                               "hold_kind": seen.row["hold_kind"], "old_pod": seen.serving["old"]}
     run.check("attempt_deferred_while_build_ran", not (seen.attempting and seen.build["state"] == "running"),
-              said="the attempt began while the build was still running")
+              blocking=False, said="the attempt began while the build was still running")
     run.check("cell_idle_while_build_running", seen.build["state"] == "running" and age is not None and age >= needed,
-              said=f"the build ended ({seen.build['state']}) before the cell had been idle {needed} s, so the "
-                   "deferral was not shown; raise --catalogue-prewarm-notes")
+              blocking=False, said=f"the build ended ({seen.build['state']}) before the cell had been idle {needed} s, "
+                                   "so the deferral was not shown; raise --catalogue-prewarm-notes")
     run.touch()  # idle again would let the attempt follow the build's end before the evidence is read
 
     run.record["phase"] = "build_end"
@@ -965,7 +1113,7 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
                     what="the build Job to end")
     run.touch()
     view = run.last_view or {}
-    run.check("build_completed", view.get("state") == "complete", said=f"the build ended as {view.get('state')}")
+    run.check("build_completed", view.get("state") == "complete", blocking=False, said=f"the build ended as {view.get('state')}")
     seconds = _seconds(view.get("started_at"), view.get("completed_at"))
     shared["build_seconds"] = seconds
     run.observe("build_time_in_range", seconds is not None and SHORT_BUILD_SECONDS <= seconds <= LONG_BUILD_SECONDS,
@@ -973,23 +1121,11 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
                 "unfinished and keeps a cold rebuild inside the ready deadline")
 
     run.record["phase"] = "evidence_before_stop"
-    output = run.ctx.kubectl("logs", "--namespace", run.namespace, f"job/{view.get('job')}", "--tail=2", check=False)
-    run.record["build_output"] = output.stdout.strip().splitlines()[-1:] if output.returncode == 0 else "unavailable"
-    staged = run.facts("the staged catalogue listing")
-    run.record["staged"] = staged
-    copies = _staged_names(staged["files"])
-    run.check("one_staged_copy_after_the_build", len(copies) == 1, said=f"staged files: {copies}")
-    prefix = copies[0].removeprefix(STAGED_PREFIX).split(".")[0]
-    run.check("staged_copy_is_a_new_identity", bool(prefix) and not run.record["before"]["identity"].startswith(prefix))
-    before_edit = _manifest(run, "before the edit")
-    phrase = f"Edited after the build {secrets.token_hex(4)}"
-    edit = run.in_cell(MCP_PROBE, phrase, "write", what="the edit after the build")
-    run.last_touch = time.monotonic()
-    run.check("edit_after_the_build_written", not edit["is_error"], said=json.dumps(edit["result"])[:300])
-    # The edit's own footprint: what it wrote is the only change the vault may show after the restart.
-    footprint = diff_manifests(before_edit, _manifest(run, "after the edit"))
-    run.check("edit_created_one_note", len(footprint["added"]) == 1 and not footprint["removed"],
-              said=json.dumps({key: value[:MAX_LISTED_PATHS] for key, value in footprint.items()}))
+    prefix, footprint = None, {"added": [], "changed": [], "removed": []}
+    try:
+        prefix, footprint = _evidence_before_stop(run, view)
+    except StepFailure as error:  # an in-cell read failed, as it does once the stop has begun
+        run.check("evidence_before_stop_read", False, blocking=False, said=str(error)[:300])
 
     run.record["phase"] = "attempt"
     attempt = await run.watch(lambda t: t.attempting, timeout=idle_seconds + CATCH_UP_SLACK + 60,
@@ -998,14 +1134,15 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     ready = await _wait_ready_on_target(run)
     _common_checks(run, ready)
     after = _after_restart(run)
-    run.check("staged_catalogue_is_the_new_identity", after["identity"].startswith(prefix))
+    run.check("staged_catalogue_is_the_new_identity", prefix is not None and after["identity"].startswith(prefix),
+              said="no single staged copy was read before the stop" if prefix is None else "")
     run.check("live_catalogue_holds_the_new_identity", after["live_matches"])
 
     run.record["phase"] = "catch_up"
-    note, began, held = footprint["added"][0], time.monotonic(), False
-    while not held and time.monotonic() - began < CATCH_UP_TIMEOUT:
+    notes, began, held = footprint["added"][:1], time.monotonic(), False
+    while notes and not held and time.monotonic() - began < CATCH_UP_TIMEOUT:
         run.touch()  # a request lets a lazy catch-up run, as a user's would
-        held = run.in_cell(CATALOGUED, note, what="the live catalogue read")[note]
+        held = run.in_cell(CATALOGUED, notes[0], what="the live catalogue read")[notes[0]]
         if not held:
             await asyncio.sleep(3)
     run.record["catch_up_seconds"] = round(time.monotonic() - began, 1) if held else None
@@ -1013,7 +1150,8 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     run.check("staged_catalogue_adopted", "adopted" in log["adoption"], said=f"the adoption events read {log['adoption']}")
     run.check("no_full_parse_after_adoption", not log["rebuilt"], said=json.dumps(log["rebuilt"][:3]))
     run.check("edit_caught_up_in_the_live_catalogue", held,
-              said=f"the live catalogue held no page for the edit {CATCH_UP_TIMEOUT} s after the restart")
+              said=f"the live catalogue held no page for the edit {CATCH_UP_TIMEOUT} s after the restart" if notes
+              else "no edit was written before the stop, so none could be caught up")
     parsed = [r.get("reparsed", 0) + r.get("inserted", 0) for r in log["reconciled"]]
     limit = max(10, run.plan.notes // 20)
     run.observe("catch_up_parsed_only_the_changes", all(n <= limit for n in parsed) if parsed else None,
@@ -1037,6 +1175,31 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     run.check("vault_changed_only_by_the_edit", not any(unexpected.values()),
               said=json.dumps(run.record["vault_changes"]["counts"]))
     run.finish()
+
+
+def _evidence_before_stop(run: Run, view: dict[str, Any]) -> tuple[str | None, dict[str, list[str]]]:
+    """The staged copy the build left and an edit written after it. Returns the copy's identity prefix, None
+    unless exactly one copy was staged, and the edit's footprint on the vault."""
+
+    output = run.ctx.kubectl("logs", "--namespace", run.namespace, f"job/{view.get('job')}", "--tail=2", check=False)
+    run.record["build_output"] = output.stdout.strip().splitlines()[-1:] if output.returncode == 0 else "unavailable"
+    staged = run.facts("the staged catalogue listing")
+    run.record["staged"] = staged
+    copies = staged["staged"]  # the product's own reading of its reserved names: the build lock is not a copy
+    run.check("one_staged_copy_after_the_build", len(copies) == 1, blocking=False, said=f"staged files: {copies}")
+    prefix = copies[0].removeprefix(STAGED_PREFIX).split(".")[0] if len(copies) == 1 else None
+    run.check("staged_copy_is_a_new_identity", bool(prefix) and not run.record["before"]["identity"].startswith(prefix),
+              blocking=False)
+    before_edit = _manifest(run, "before the edit")
+    phrase = f"Edited after the build {secrets.token_hex(4)}"
+    edit = run.in_cell(MCP_PROBE, phrase, "write", what="the edit after the build")
+    run.last_touch = time.monotonic()
+    run.check("edit_after_the_build_written", not edit["is_error"], blocking=False, said=json.dumps(edit["result"])[:300])
+    # The edit's own footprint: what it wrote is the only change the vault may show after the restart.
+    footprint = diff_manifests(before_edit, _manifest(run, "after the edit"))
+    run.check("edit_created_one_note", len(footprint["added"]) == 1 and not footprint["removed"], blocking=False,
+              said=json.dumps({key: value[:MAX_LISTED_PATHS] for key, value in footprint.items()}))
+    return prefix, footprint
 
 
 def _restore_force_minutes(run: Run) -> bool:
@@ -1244,8 +1407,29 @@ def _where(error: BaseException) -> str:
     return f"{type(error).__name__} at {frame.name}:{frame.lineno}: {str(error)[:200]}" if frame else type(error).__name__
 
 
+async def _gate(run: Run, image: str | None) -> dict[str, Any]:
+    """Read the cell, its StatefulSet and the rollout until the next scenario may start or the gate settles failed.
+
+    The harness never resumes the rollout or clears a hold: a gate that stays failed blocks the scenarios left.
+    """
+
+    began = time.monotonic()
+    while True:
+        row, rollout = await run.ctx.cell(run.cell_id), await run.ctx.rollout()
+        read = run.ctx.kubectl("get", "statefulset", STATEFULSET, "--namespace", run.namespace, "--output=json", check=False)
+        failed = scenario_gate(row, json.loads(read.stdout) if read.returncode == 0 else None, rollout, image)
+        waited = time.monotonic() - began
+        if not failed or ROLLOUT_GATE in failed or waited >= GATE_SETTLE_SECONDS:
+            return {"failed": failed, "image": image, "read_at": _iso(dt.datetime.now(dt.UTC)), "waited_seconds": round(waited)}
+        await asyncio.sleep(GATE_POLL_SECONDS)
+
+
 async def run_catalogue_prewarm(ctx: Context, plan: CataloguePlan) -> dict:
-    """Provision the scenario cell, run the three scenarios, and fail the stage on any unmet check."""
+    """Provision the scenario cell, run the three scenarios, and fail the stage on any unmet check.
+
+    After each scenario a gate reads whether the cell is fit for the next one; when it is not, the scenarios
+    left are BLOCKED at once instead of each waiting for a cell that will not settle.
+    """
 
     if len(plan.images) != len(RELEASES):
         raise StepFailure(f"the mode needs {len(RELEASES)} catalogue images, got {len(plan.images)}")
@@ -1258,13 +1442,22 @@ async def run_catalogue_prewarm(ctx: Context, plan: CataloguePlan) -> dict:
     def save() -> None:
         ctx.report.stages["catalogue_prewarm"]["evidence"] = record
 
+    diagnostics = Diagnostics(ctx)
     failures: list[str] = []
     save()
     try:
+        diagnostics.follow_cellctl()
         record["configuration"] = _configuration(ctx, plan)
         shared: dict[str, Any] = {"fixture_folder": await _provision(ctx, plan, record)}
         save()
+        blocked: str | None = None
+        published: str | None = None  # the last release the stage published, which the cell should run
         for name, (runner, span) in SCENARIOS.items():
+            if blocked:
+                record["scenarios"][name] = {"state": "BLOCKED", "failure": blocked, "checks": {}}
+                failures.append(f"{name}: {blocked}")
+                save()
+                continue
             scenario: dict[str, Any] = {"state": "RUNNING", "phase": "start", "checks": {}}
             record["scenarios"][name] = scenario
             record["phase"] = name
@@ -1274,7 +1467,8 @@ async def run_catalogue_prewarm(ctx: Context, plan: CataloguePlan) -> dict:
                 scenario["waits"] = [{"for": "00:05 UTC, so the scenario does not cross a date change", "seconds": round(wait)}]
                 save()
                 await asyncio.sleep(wait)
-            run = Run(ctx, plan, scenario, name, record["configuration"]["build_profile"])
+            diagnostics.follow_cellctl()
+            run = Run(ctx, plan, scenario, name, record["configuration"]["build_profile"], diagnostics)
             try:
                 await runner(run, shared)
                 scenario["state"] = "PASS" if not run.problems else "PARTIAL"
@@ -1286,14 +1480,27 @@ async def run_catalogue_prewarm(ctx: Context, plan: CataloguePlan) -> dict:
                 scenario["state"] = "FAILED"
                 scenario["failure"] = _where(error)
                 run.finish()
+            save()
+            published = run.record.get("image") or published
+            gate = scenario["gate_after"] = await _gate(run, published)
+            run.check("cell_settled_after_the_scenario", not gate["failed"], blocking=False,
+                      said="; ".join(f"{key}: {value}" for key, value in gate["failed"].items()))
+            if gate["failed"] and scenario["state"] == "PASS":
+                scenario["state"] = "PARTIAL"
+            scenario["diagnostics"] = diagnostics.capture(name, run.namespace, run.new_pods)
             if scenario["state"] != "PASS":
                 failures.append(f"{name}: {scenario.get('failure') or 'checks failed: ' + ', '.join(run.problems)}")
+            if gate["failed"]:
+                blocked = f"BLOCKED: the gate after {name} failed: {', '.join(gate['failed'])}"
             save()
     except Exception as error:  # noqa: BLE001 - any failure leaves a PARTIAL receipt; cancellation passes through
         record["state"] = "PARTIAL"
         record["failure"] = str(error)[:400] if isinstance(error, StepFailure) else _where(error)
+        if ctx.b.cell_id:
+            record["failure_diagnostics"] = diagnostics.capture("stage", namespace_name(ctx.b.cell_id), [])
         raise StepFailure(f"catalogue prewarm stopped during {record['phase']}: {record['failure'][:300]}") from None
     finally:
+        record["diagnostics"] = diagnostics.stop()
         save()
     if failures:
         record["state"] = "FAILED"

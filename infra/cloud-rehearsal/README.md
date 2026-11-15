@@ -239,6 +239,26 @@ The stage reads adoption and rebuilds from the cell's structured log events `sta
 | Insufficient capacity | A filler pod that leaves the node less free CPU than the build requests, so the build pod stays unschedulable. | The waiting build does not defer the idle attempt, which starts before the hour's forced boundary. The pod watch shows the build pod deleted before the stop. The new pod adopts nothing and logs a catalogue build with route `rebuilt`. |
 
 A scenario whose precondition does not hold fails. It never passes without the proof it was built to give.
+The completed-build scenario records each check before the stop without ending there. It still watches the stop and the upgrade, and any failed check fails it at the end.
+
+After each scenario, a gate reads whether the cell is fit for the next one. The gate passes when all of these hold:
+- the control row shows the cell running and ready, with no hold, on the release the stage published last;
+- the cell's StatefulSet carries none of the upgrade hold annotations (`exomem.io/hold`, `hold-started-at`, `previous-image`, `upgrade-target`);
+- the fleet rollout is not paused.
+
+The gate rereads for up to 75 s, two cellctl passes, so a state that the next pass converges does not count. A paused rollout fails it at once, because only an operator resumes one.
+Each scenario records the gate's result as the check `cell_settled_after_the_scenario`. A failed gate also marks every scenario left `BLOCKED` with the gates that failed, so none waits 25 minutes for a cell that will not settle.
+The harness never resumes the rollout or clears a hold. A scenario that fails before its cell reaches the release also fails the gate, so the rest are blocked; such a run is repeated anyway.
+
+The stage keeps its diagnostics in `catalogue-prewarm/` in the run's diagnostics artifact:
+- `<cellctl pod>.log`: cellctl's log for the whole stage, one file per pod, because changing the force minutes replaces the pod;
+- `<scenario>-statefulset.yaml`: the cell's StatefulSet with its field owners (`--show-managed-fields`), read after the gate;
+- `<scenario>-events.json`: the cell namespace's events;
+- `<scenario>-pod-<pod>.log`: the log of each pod that replaced the serving pod.
+
+A stage that stops early also writes `stage-statefulset.yaml` and `stage-events.json`.
+Each scenario's `states` list records the StatefulSet's images, replicas and hold annotations with `target-applied-at`, the control row and the rollout's `paused`, `error_code` and held cell. A new entry starts whenever a poll reads a change, and it names that poll.
+
 For each scenario the report records the build Job's start, end and outcome, the stop and ready times, the build container's CPU and memory peaks and the configured build timeout.
 Scenario 3's build never runs, so its peaks read "no build container ran".
 `summarize.py` shows them in the job summary.

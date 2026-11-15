@@ -238,3 +238,48 @@ def test_free_cpu_counts_the_scheduler_view_of_running_pods_and_not_finished_one
 def test_the_filler_leaves_less_than_the_build_requests_and_is_skipped_when_the_node_is_already_that_full():
     assert cp.filler_millicores(Decimal("3"), "2") == 1500
     assert cp.filler_millicores(Decimal("1.5"), "2") is None
+
+
+RELEASE = "registry.test/cell:v3"
+SETTLED_ROW = {"observed_state": "running", "ready": True, "hold_kind": None, "observed_image": RELEASE}
+
+
+def _cell_statefulset(**annotations: str) -> dict:
+    return {"kind": "StatefulSet", "metadata": {"name": "cell", "annotations": {
+        "exomem.io/upgrade-window": "4 default", **annotations}}}
+
+
+def test_a_hold_annotation_left_after_the_ready_exit_blocks_the_next_scenario_while_the_row_still_reads_ready():
+    # cellctl acts on the left annotations at its next pass and stops the upgraded cell on its previous image;
+    # a gate that read only the row would start the next scenario on that cell.
+    left = _cell_statefulset(**{"exomem.io/hold": "upgrade", "exomem.io/previous-image": "registry.test/cell:v2"})
+
+    failed = cp.scenario_gate(SETTLED_ROW, left, {"paused": False}, RELEASE)
+
+    assert list(failed) == ["statefulset_carries_no_hold"]
+    assert "exomem.io/previous-image" in failed["statefulset_carries_no_hold"]
+
+
+def test_a_cell_held_again_on_its_previous_image_fails_the_serving_and_the_image_gates():
+    held = {"observed_state": "stopped", "ready": False, "hold_kind": "upgrade", "observed_image": "registry.test/cell:v2"}
+
+    failed = cp.scenario_gate(held, _cell_statefulset(), {"paused": False}, RELEASE)
+
+    assert set(failed) == {"cell_serving_with_no_hold", "cell_on_the_released_image"}
+
+
+def test_a_paused_rollout_blocks_the_next_scenario_even_when_the_cell_serves_its_release():
+    # Only an operator resumes the rollout, and the next release would never reach the cell.
+    paused = {"paused": True, "error_code": "upgrade_failed", "held_cell_id": "0123456789abcdef"}
+
+    failed = cp.scenario_gate(SETTLED_ROW, _cell_statefulset(), paused, RELEASE)
+
+    assert list(failed) == [cp.ROLLOUT_GATE] and "upgrade_failed" in failed[cp.ROLLOUT_GATE]
+
+
+def test_a_settled_cell_passes_an_unpublished_release_is_not_judged_and_an_unread_statefulset_never_passes():
+    on_older = {**SETTLED_ROW, "observed_image": "registry.test/cell:v2"}
+
+    assert cp.scenario_gate(SETTLED_ROW, _cell_statefulset(), {}, RELEASE) == {}
+    assert cp.scenario_gate(on_older, _cell_statefulset(), {}, None) == {}
+    assert list(cp.scenario_gate(SETTLED_ROW, None, {}, RELEASE)) == ["statefulset_carries_no_hold"]
