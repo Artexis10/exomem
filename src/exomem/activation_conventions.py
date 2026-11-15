@@ -98,8 +98,15 @@ _REFERENTIAL_FIELDS_ALLOWED = frozenset({"add_cues", "drop_cues", "add_filler", 
 #: proposed it. Nothing else, so the file never grows a free-form record.
 _PROVENANCE_KEYS = frozenset({"value", "why", "at", "evidence"})
 _TOP_LEVEL_FIELDS = frozenset(
-    {"schema_version", "anchors", "state", "stopwords", "resolution", "referential"}
+    {"schema_version", "anchors", "state", "stopwords", "resolution", "referential", "budgets"}
 )
+#: The response budgets a vault may set, each with the range the server accepts. Each key names a
+#: budget the server implements; a vault chooses only the number, so this closed set is not vocabulary.
+BUDGET_BOUNDS: Mapping[str, tuple[int, int]] = {
+    "stance_max_chars": (0, 8000),
+    "skills_max_chars": (0, 8000),
+    "skill_summary_max_chars": (40, 1000),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +148,12 @@ class Conventions:
     #: One mapping per ADDED entry, in file order: `field`, `value`, and any
     #: of `why`, `at` and `evidence` the owner's agent recorded.
     referential_provenance: tuple[Mapping[str, str], ...] = ()
+    #: Effective response budgets as sorted `(name, value)` pairs (`BUDGET_BOUNDS` keys).
+    budgets: tuple[tuple[str, int], ...] = ()
+
+    def budget(self, name: str) -> int | None:
+        """The effective value of one response budget, or None when the shipped file lacks it."""
+        return dict(self.budgets).get(name)
 
     @property
     def referential(self) -> Any:
@@ -237,10 +250,11 @@ def conventions_payload(conventions: Conventions) -> dict[str, Any]:
 
 
 def turn_payload(conventions: Conventions) -> dict[str, Any]:
-    """The JSON-safe view of the referential vocabulary the turn digest reads."""
+    """The JSON-safe view the turn digest reads: what changes how a turn is answered, not the index."""
     return {
         "cues": sorted(conventions.referential_cues),
         "filler": sorted(conventions.referential_filler),
+        "budgets": dict(conventions.budgets),
     }
 
 
@@ -485,6 +499,9 @@ def _parse_shipped(data: Any) -> tuple[Conventions, tuple[dict[str, str], ...]]:
     )
     if not referential_cues:
         findings.append(_finding("invalid_referential", "referential.cues", "must list the seed cues"))
+    budgets = _merge_budgets({}, data.get("budgets"), findings)
+    for name in sorted(set(BUDGET_BOUNDS) - set(budgets)):
+        findings.append(_finding("missing_budget", f"budgets.{name}", "the shipped file must set it"))
     conventions = Conventions(
         anchors=anchors,
         skip_folders=skip_folders,
@@ -494,6 +511,7 @@ def _parse_shipped(data: Any) -> tuple[Conventions, tuple[dict[str, str], ...]]:
         rare_term_max_anchors=int(rare_term_max_anchors),
         referential_cues=referential_cues,
         referential_filler=referential_filler,
+        budgets=tuple(sorted(budgets.items())),
     )
     return conventions, tuple(findings)
 
@@ -771,6 +789,31 @@ def _merge_resolution(
     return int(value)
 
 
+def _merge_budgets(
+    shipped: Mapping[str, int], raw: Any, findings: list[dict[str, str]]
+) -> dict[str, int]:
+    """Replace a known budget with a valid integer in range; report anything else and keep the prior value."""
+    budgets = dict(shipped)
+    if raw is None:
+        return budgets
+    if not isinstance(raw, Mapping):
+        findings.append(_finding("invalid_budgets", "budgets", "must be a mapping"))
+        return budgets
+    for key, value in raw.items():
+        bounds = BUDGET_BOUNDS.get(key)
+        if bounds is None:
+            findings.append(_finding("unknown_field", f"budgets.{key}", "unknown budget"))
+            continue
+        low, high = bounds
+        if not isinstance(value, int) or isinstance(value, bool) or not (low <= value <= high):
+            findings.append(
+                _finding("invalid_budget", f"budgets.{key}", f"rejected value {value!r}; must be an integer {low}..{high}")
+            )
+            continue
+        budgets[key] = int(value)
+    return budgets
+
+
 def _referential_entries(
     value: object, *, field_name: str, findings: list[dict[str, str]]
 ) -> list[tuple[str, dict[str, str]]]:
@@ -959,6 +1002,7 @@ def _merge(shipped: Conventions, data: Any) -> ConventionsRegistry:
     cues, filler, provenance = _merge_referential(
         shipped, data.get("referential"), stopwords=stopwords, findings=findings
     )
+    budgets = _merge_budgets(dict(shipped.budgets), data.get("budgets"), findings)
 
     conventions = Conventions(
         anchors=anchors,
@@ -970,6 +1014,7 @@ def _merge(shipped: Conventions, data: Any) -> ConventionsRegistry:
         referential_cues=cues,
         referential_filler=filler,
         referential_provenance=provenance,
+        budgets=tuple(sorted(budgets.items())),
     )
     return _registry(conventions, source="vault", findings=findings)
 

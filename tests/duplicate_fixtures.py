@@ -67,3 +67,19 @@ def source_filing(
     )
     index(vault, f"{directory}/{name}.md")
     return f"{directory}/{name}.md"
+
+
+def legacy_evidence_filing(vault: Path, data: bytes) -> str:
+    """An earlier Evidence sidecar with its original, before governance companions existed."""
+    directory = "Knowledge Base/Evidence/case/raw"
+    folder = vault / directory
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "original.bin").write_bytes(data)
+    rel = f"{directory}/original.bin.md"
+    (vault / rel).write_text(
+        f"---\ntype: source\nexomem_id: {uuid.uuid4()}\ntitle: Original\n"
+        f"evidence_file: {directory}/original.bin\n"
+        f"binary_sha256: {hashlib.sha256(data).hexdigest()}\n---\n\n# Original\n",
+        encoding="utf-8",
+    )
+    return rel

@@ -338,12 +338,12 @@ That change's design and its `cloud-cell` delta hold the new rules.
 
 cellctl drives backups; there is no CronJob.
 
-- **Nightly**, only inside the configured window (chart value `cells.backupWindow`, default `02:00-05:00` UTC; a window may cross midnight, such as `22:00-03:00`, and the schema rejects an empty one), for a cell that has never been backed up or whose `now - last_backup_at > 20h`:
+- **Nightly**, only inside the configured window (chart value `cells.backupWindow`, default `02:00-05:00` UTC). A window may cross midnight, such as `22:00-03:00`; the schema rejects an empty window. A backup is due once per window occurrence, unless `last_backup_at` is at or after that occurrence's start. After midnight in a wrapping window, the occurrence starts on the previous day. For a due cell:
   1. set `exomem.io/hold=backup` and scale to 0;
   2. run the backup Job;
   3. scale back to the desired replicas and remove the hold;
   4. write `last_backup_at` and `last_backup_snapshot`.
-- **Staggered.** At most `cells.backupConcurrency` backup holds run at once (default 1). Due cells go oldest `last_backup_at` first, with never-backed-up cells first of all. 20 hours rather than 24 keeps a cell from drifting out of the window night after night.
+- **Staggered.** At most `cells.backupConcurrency` backup holds run at once (default 1). Due cells go oldest `last_backup_at` first, with never-backed-up cells first of all. A success before the current occurrence starts does not suppress that occurrence's backup.
 - **Bounded.** The backup deadline runs from `hold-started-at`, so it also bounds the wait for the volume: a pod stuck terminating cannot hold the only backup slot forever. A backup that fails or misses the backup deadline deletes its Job, restarts the cell, sets `last_error_code = BACKUP_FAILED`, removes the hold, and sets `exomem.io/backup-retry-after` (the D6 backoff). It retries inside the window. A cellctl restart resumes a `backup` hold from step 2.
 - **Failure is visible.** The Job exits non-zero when `restic backup` fails, or when it cannot extract a snapshot id. cellctl treats a Job that succeeded without a termination message matching `^[0-9a-f]{64}$` as `BACKUP_FAILED`, and never writes `last_backup_at` for it.
 - **Before every image change,** as part of D6.

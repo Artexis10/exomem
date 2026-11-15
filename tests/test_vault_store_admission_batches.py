@@ -27,7 +27,8 @@ from exomem import (
     recall_policy,
     state_paths,
 )
-from exomem.collection_store import connection
+from exomem.collection_store import connection, preview
+from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import connector_boundary, egress, policy
 from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.vault_store import read, write
@@ -70,9 +71,12 @@ def test_single_page_content_check_does_not_read_unrelated_metadata(stored, writ
     assert counts[0] > 0 and counts[1] == counts[0], counts
 
 
-@pytest.mark.parametrize("store_mode", [False, True])
-def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, monkeypatch, store_mode):  # noqa: F811
-    """A shortcut must not widen selectors, purpose, grants, RAW or inherited container restrictions."""
+def exception_corpus(vault):  # noqa: F811
+    """A page of every exception kind that a release decision has, under an external policy.
+
+    Each case rewrites ``scope_file`` to one of ``selectors`` and writes or removes ``grant_file``;
+    a purpose rule and the grant change what a caller with the audit purpose may see.
+    """
     from test_document_containers import container_bytes
 
     source = preserve.preserve_stream(
@@ -132,14 +136,44 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
         "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\nkind: standing\n"
         'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 6\n'
     )
-    if store_mode:
-        build_indexes(vault)
-        assert migrate_apply(vault) == 0
     paths = list(pages) + [mixed_fence, lone_cr_bridge, child, source.sidecar_path,
         "Knowledge Base/Records/Measurements/_collection.md",
         "Knowledge Base/Records/Measurements/items/raw.md",
         "Knowledge Base/Notes/Missing.md", "Knowledge Base/Notes/../Notes/Open.md"]
-    scope_file = governance / "scopes/secret.yaml"
+    selectors = (
+        'tags: [secret]\nexclude:\n  tags: [public]',
+        'paths: ["Notes/Hidden.md"]', 'projects: [restricted]', 'types: [insight]',
+        'classes: [confidential]',
+        'refs: ["exomem://memory/12345678-1234-4abc-8def-123456789abc"]',
+        f'paths: [{json.dumps(source.path)}]',
+    )
+    return SimpleNamespace(
+        paths=paths, child=child, source=source, mixed_fence=mixed_fence, selectors=selectors,
+        scope_file=governance / "scopes/secret.yaml", grant_file=grant_file, grant=grant,
+    )
+
+
+def apply_case(corpus, selector, granted):
+    """Select ``selector`` into the withheld scope, with the audit grant or without it."""
+    corpus.scope_file.write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n" + selector + "\n"
+    )
+    if granted:
+        corpus.grant_file.write_text(corpus.grant)
+    else:
+        corpus.grant_file.unlink(missing_ok=True)
+    document_containers.clear_unclaimed_notes()
+
+
+@pytest.mark.parametrize("store_mode", [False, True])
+def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, monkeypatch, store_mode):  # noqa: F811
+    """A shortcut must not widen selectors, purpose, grants, RAW or inherited container restrictions."""
+    corpus = exception_corpus(vault)
+    if store_mode:
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+    paths, child, source = corpus.paths, corpus.child, corpus.source
+    mixed_fence = corpus.mixed_fence
 
     def answers(keep):
         result = {}
@@ -154,23 +188,9 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
                 result[path] = str(error)
         return result
 
-    selectors = (
-        'tags: [secret]\nexclude:\n  tags: [public]',
-        'paths: ["Notes/Hidden.md"]', 'projects: [restricted]', 'types: [insight]',
-        'classes: [confidential]',
-        'refs: ["exomem://memory/12345678-1234-4abc-8def-123456789abc"]',
-        f'paths: [{json.dumps(source.path)}]',
-    )
-    for selector in selectors:
-        scope_file.write_text(
-            "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n" + selector + "\n"
-        )
+    for selector in corpus.selectors:
         for purpose, granted in ((None, False), ("audit", False), ("audit", True)):
-            if granted:
-                grant_file.write_text(grant)
-            else:
-                grant_file.unlink(missing_ok=True)
-            document_containers.clear_unclaimed_notes()
+            apply_case(corpus, selector, granted)
             who = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", purpose=purpose)
             with request_scope(who), policy.request_policy_snapshot(), state_paths.resolution_scope(), read.request_snapshot(vault):
                 compiled = policy.load(vault)
@@ -212,6 +232,66 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
                 if selector.startswith("refs:"):
                     assert not actual["Knowledge Base/Notes/Invalid-id.md"]
                 assert actual["Knowledge Base/Notes/Open.md"]
+
+
+@pytest.mark.timeout(300)
+def test_a_bound_writers_sweep_decides_a_set_of_pages_as_it_decides_each_page(vault):  # noqa: F811
+    """A store-mode write's corpus and registry sweeps decide their pages as one set, and a read
+    decides it by scope class. A set route that answered one exception kind differently from the
+    per-page route would change what the owner's or a restricted caller's request may see."""
+    corpus = exception_corpus(vault)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    paths = [path for path in corpus.paths if ".." not in path]
+    # The companion child raises on either route, which fails a whole sweep; it is its own set here.
+    others = [path for path in paths if path != corpus.child]
+
+    def outcome(decide, *arguments):
+        try:
+            return decide(*arguments)
+        except AttributeError as error:  # a stored companion snapshot has no file identity
+            return str(error)
+
+    def one_by_one(keep):
+        return {path: outcome(keep, path) for path in paths}
+
+    def as_one_set(keep):
+        admitted = egress.admitted(keep, others)
+        answers = {path: path in admitted for path in others}
+        child = corpus.child
+        answers[child] = outcome(lambda: child in egress.admitted(keep, [child]))
+        return answers
+
+    def compare(sweep, case):
+        expected = one_by_one(sweep(vault))
+        # Each caller is withheld something here, so both verdicts are compared.
+        assert False in expected.values(), case
+        assert as_one_set(sweep(vault)) == expected, ("in a write", *case)
+        with read.request_snapshot(vault):
+            assert as_one_set(sweep(vault)) == expected, ("in a read", *case)
+
+    # The selector, purpose and grant change only the external caller's verdicts. The owner and
+    # the link view (the corpus filter wrapped for links that may name no page) take one case each.
+    cases = [(selector, None, False) for selector in corpus.selectors]
+    cases += [(corpus.selectors[0], "audit", False), (corpus.selectors[0], "audit", True)]
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        token = preview._BOUND.set((vault.resolve(), CollectionWriter(vault, handle), False))
+        try:
+            for index, (selector, purpose, granted) in enumerate(cases):
+                apply_case(corpus, selector, granted)
+                restricted = RequestPrincipal(
+                    audience_id=EXTERNAL.audience_id, surface="mcp", purpose=purpose
+                )
+                case = (selector, purpose, granted)
+                with request_scope(restricted):
+                    compare(egress.restricted_release_filter, (*case, "restricted"))
+                    if index == 0:
+                        compare(egress.visible_page_filter, (*case, "restricted links"))
+                if index == 0:
+                    compare(egress.restricted_release_filter, (*case, "owner"))
+                    compare(egress.visible_page_filter, (*case, "owner links"))
+        finally:
+            preview._BOUND.reset(token)
 
 
 def test_store_absence_proof_rechecks_claims_supplied_bytes_and_next_commit(stored, writer, monkeypatch):  # noqa: F811

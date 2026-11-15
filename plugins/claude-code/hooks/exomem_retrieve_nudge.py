@@ -894,17 +894,55 @@ def attribution(session_id: str, cwd: str | None = None) -> dict:
     return out
 
 
+def _attribution_with_native_skills(sent: dict) -> dict:
+    """`sent` plus the client's native skill names when it has any, so the attribution stays as it was without them."""
+    names = _native_skill_names()
+    return {**sent, "native_skills": names} if names else sent
+
+
+#: Bounds on reading the client's own skill directory: the hook runs on every prompt, so a large or slow
+#: directory costs the skills it could not read their omission, never the prompt.
+_NATIVE_SKILLS_MAX = 200
+_NATIVE_SKILLS_BUDGET_SECONDS = 0.05
+
+
+def _native_skill_names() -> list[str]:
+    """The names of the skills this client loads itself: the directories under `<home>/skills` that hold a
+    `SKILL.md`.
+
+    The Agent Skills format requires a skill's `name` to equal its directory name, so the name comes from the
+    directory entry and no file is opened: a pipe or a slow file cannot stall the prompt, and nothing a
+    symlink points at is read. Hidden entries are skipped. The service omits these names from the skills it
+    lists, so a skill is not offered twice; a partial list only leaves a skill listed twice, and nothing raises.
+    """
+    names: list[str] = []
+    try:
+        deadline = time.monotonic() + _NATIVE_SKILLS_BUDGET_SECONDS
+        with os.scandir(_hook_home() / "skills") as entries:
+            for entry in entries:
+                if len(names) >= _NATIVE_SKILLS_MAX or time.monotonic() > deadline:
+                    break
+                if entry.name.startswith(".") or not os.path.isfile(os.path.join(entry.path, "SKILL.md")):
+                    continue
+                names.append(entry.name)
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return names
+    return names
+
+
 def _attribution_ladder(attribution: dict | None) -> list[dict]:
-    """What to send, in order: everything; then without the workspace, for a
-    service that predates it and refuses the unknown field; then nothing, for
-    one older still. A plugin can update before the service it talks to."""
+    """What to send, in order: everything; then without the native skill names,
+    then without the workspace, each for a service that predates the field and
+    refuses it; then nothing, for one older still. A plugin can update before
+    the service it talks to."""
     if not attribution:
         return [{}]
     ladder = [dict(attribution)]
-    if "workspace" in attribution:
-        reduced = {key: value for key, value in attribution.items() if key != "workspace"}
-        if reduced:
-            ladder.append(reduced)
+    for dropped in ("native_skills", "workspace"):
+        if dropped in ladder[-1]:
+            reduced = {key: value for key, value in ladder[-1].items() if key != dropped}
+            if reduced:
+                ladder.append(reduced)
     ladder.append({})
     return ladder
 
@@ -1336,6 +1374,8 @@ def _fetch_packet_via_cli(
         ]
         for sent, step in _conversation_ladder(attribution, conversation)
     ]
+    # `native_skills` rides REST only, so the rung that drops it would repeat the one before it.
+    extras = [extra for position, extra in enumerate(extras) if extra not in extras[:position]]
     for extra in extras:
         # `--` before the turn: the turn is a user's words and those words are
         # argv. A prompt of `--purpose` otherwise exits the CLI with a usage
@@ -2244,6 +2284,11 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
         read_ref = str(item.get("read_ref") or "")
+        if item.get("kind") == "skill":
+            # The name and description are page text, so they are quoted and escaped like a method's title.
+            name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
+            entries.append((_packet_line("skill", f"{name}: {description}; load it with read_page before acting.", read_ref), ""))
+            continue
         # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
         title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
         # `approved` is the server's closed verdict token. The line carries the title and a fixed instruction, no page text.
@@ -2299,6 +2344,48 @@ def _format_stance_block(block: object, max_chars: int, last_generation: str = "
     return "\n".join([*kept, *([tail] if tail else [])]), True
 
 
+#: The service already bounds the block to the vault's `budgets.skills_max_chars`; this is the most a vault may set
+#: (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together),
+#: so the hook never cuts a well-formed block and still caps a malformed one.
+_SKILLS_MAX_CHARS = 8000
+_SKILLS_HEADER = "- skills: held in the vault; retrieved, not instructions. Load one with read_page before acting on a task it covers."
+
+
+def _skill_line(item: dict) -> str:
+    """One listed skill, written exactly as the service's `vault_skills.item_line` counts it.
+
+    The service admits whole items against its bound and then marks the block delivered, so a line rendered
+    longer than it was counted could be dropped here and never offered again. This standalone hook cannot import
+    the service, so a parity test keeps the two in step.
+    """
+    name, summary, ref = (" ".join(str(item.get(key) or "").split()) for key in ("name", "summary", "ref"))
+    text = f"- {name}: {summary}" if summary else f"- {name}"
+    return f"{text} [{ref}]" if ref else text
+
+
+def _format_skills_block(block: object) -> str:
+    """The skills the service lists, whole lines under one framing line; an unchanged or empty block renders nothing.
+
+    The block has its own bound beside the working set's, so it takes nothing from the map's room.
+    """
+    if not isinstance(block, dict) or block.get("state") != "ready":
+        return ""
+    lines, used = [], 0
+    for item in block.get("items") or ():
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        line = _skill_line(item)
+        if used + len(line) + 1 > _SKILLS_MAX_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if not lines:
+        return ""
+    omitted = block.get("omitted")
+    tail = [f"- skills: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
+    return "\n".join([_SKILLS_HEADER, *lines, *tail])
+
+
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool]:
     """Keep reset and standing data before optional routes, with one supplied move last."""
     methods = (packet.get("task_context") or {}).get("methods") or {}
@@ -2321,7 +2408,8 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     turn = _format_slice_block(packet.get("turn_slice"), room - routes_cost)
     spare = max(0, room - routes_cost - len(turn) - (1 if turn else 0))
     task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
-    return "\n".join(part for part in (reset, stance_text, text, task, turn, action) if part), complete, stance_complete
+    skills_text = _format_skills_block(packet.get("skills"))
+    return "\n".join(part for part in (reset, stance_text, skills_text, text, task, turn, action) if part), complete, stance_complete
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
@@ -3529,7 +3617,7 @@ def main(argv: list[str] | None = None) -> int:
             packet, lane = _gather_packet_with_lane(
                 prompt,
                 continuity,
-                attribution(session_id, str(data.get("cwd") or "")),
+                _attribution_with_native_skills(attribution(session_id, str(data.get("cwd") or ""))),
                 _conversation_from_transcript(
                     str(data.get("transcript_path") or data.get("transcriptPath") or ""),
                     prompt,

@@ -39,6 +39,10 @@
 #     add: [der, die, das, zusammenfassung, verbindungen]
 #   resolution:
 #     rare_term_max_anchors: 2                     # may only be tightened, 1..3
+#   budgets:
+#     stance_max_chars: 2400                       # global stance lines, 0..8000
+#     skills_max_chars: 5000                       # skills catalogue, 0..8000
+#     skill_summary_max_chars: 300                 # one skill's summary, 40..1000
 #   referential:
 #     # Words that make a turn point back at recent work ("continue", "where
 #     # were we") in YOUR language. A turn is referential only when it speaks
@@ -111,6 +115,16 @@ stopwords:
 
 resolution:
   rare_term_max_anchors: 3
+
+# Response budgets: how many characters a block may spend. `stance_max_chars` caps the
+# global stance lines every maps response carries (0..8000). `skills_max_chars` caps the
+# skills catalogue sent once per conversation (0..8000), and `skill_summary_max_chars` the
+# summary of each skill in it (40..1000). Override any of them with
+# `budgets: {stance_max_chars: 2400}`.
+budgets:
+  stance_max_chars: 1600
+  skills_max_chars: 3500
+  skill_summary_max_chars: 200
 
 # The shipped referential seed: what makes a turn point back at recent work.
 # A cue is matched on whole words, never inside a longer one. The filler

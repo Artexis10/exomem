@@ -9,6 +9,7 @@ boundary. The projector, the importer and the media writers reach the store thre
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -36,8 +37,11 @@ from test_vault_store_write_path import store_rows
 
 from exomem import (
     commands,
+    deferred_index,
+    epistemic_graph,
     extract,
     extraction_parts,
+    graph_drain,
     media_jobs,
     media_store,
     media_worker,
@@ -355,6 +359,34 @@ def test_a_served_start_gives_a_media_file_dropped_on_disk_its_companion_page(
     assert [r for r in caplog.records if "media reconciliation failed" in r.getMessage()] == []
 
 
+def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_debt(
+    stored, service, monkeypatch, caplog
+):
+    """A served start whose graph drain pays file mode's graph debt with whole-vault rebuilds of
+    the sidecar. No store-mode reader opens the sidecar (D9). When such a rebuild could not
+    publish, it left its marker and retried for the life of the process."""
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    caplog.set_level(logging.INFO)
+    # File mode's debt: the repair its writes queued before the migration, and the barrier that a
+    # stopped rebuild leaves on the sidecar.
+    assert deferred_index.snapshot_graph(stored, limit=8)
+    epistemic_graph.EpistemicGraphIndex(stored).withdraw_availability()
+    activation = server_runtime.LocalRuntimeActivation(stored, fallback_seconds=600.0)
+
+    async def serve():
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            await asyncio.to_thread(activation._thread.join, 120)
+            # Long enough for a drain's first whole-vault pass: its debounce, then its quiet window.
+            await asyncio.sleep(graph_drain.DEBOUNCE_SECONDS + graph_drain.WHOLE_VAULT_SETTLE_SECONDS + 4)
+
+    asyncio.run(serve())
+
+    assert [r.getMessage() for r in caplog.records if "graph rebuild" in r.getMessage()] == []
+    assert deferred_index.graph_full_rebuild_pending(stored) is None
+    assert epistemic_graph.EpistemicGraphIndex(stored).available()
+
+
 def test_the_media_workers_own_frame_write_commits_through_the_served_door(stored, service):
     """A worker whose scene-frame unit hops from under its own boundary, or that a served process
     refuses, so a video keeps no viewable frames and its frames get no OCR jobs."""
@@ -636,15 +668,19 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
     loop.start()
     during, during_waits = [], []
     try:
+        # The waits are sampled back to back, so their count follows the drain's length in samples
+        # of a few milliseconds, not in fixed sleeps. The two writes come after the first three
+        # samples: a write that ran first, or beside the samples, could outlast a fast drain.
         while set(drained_pages) & queued(stored):
             assert time.monotonic() - began < 780, "the drain finished"
-            if len(during) < 2 and len(during_waits) in (5, 15):
+            if len(during_waits) >= 3 and len(during) < 2:
                 during.append(foreground(f"during {len(during)}"))
             during_waits.append(waits())
-            time.sleep(0.2)
         drain_seconds = time.monotonic() - began
     finally:
         loop.stop()
+    projection = holds.get("vault_store_projection", [])
+    assert len(projection) >= intents, "one hold for each record, none for the whole drain"
     assert len(during_waits) >= 3, "foreground waits were measured while the projector drained"
 
     # One importer batch: an outside edit of as many pages as one store-thread job settles.
@@ -656,7 +692,6 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
     def ms(values, how):
         return round(how(values) * 1000, 1)
 
-    projection = holds.get("vault_store_projection", [])
     b_idle, q_idle = zip(*baseline_waits, strict=True)
     b_busy, q_busy = zip(*during_waits, strict=True)
     figures = {
@@ -683,7 +718,6 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
     if report := os.environ.get("EXOMEM_SERVED_DRILL_REPORT"):
         Path(report).write_text(json.dumps(figures, indent=1), encoding="utf-8")
     assert [r.getMessage() for r in caplog.records if r.name.startswith("exomem.vault_store")] == []
-    assert len(projection) >= intents, "one hold for each record, none for the whole drain"
     assert sorted(imported.imported) == sorted(batch)
     # A hold is one record or one batch: far inside the timeout that a foreground writer waits.
     timeout = get_manager()._mutation_timeout_seconds

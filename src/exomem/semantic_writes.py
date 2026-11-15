@@ -3163,20 +3163,23 @@ def commit_existing(
         vault_root, routing, state=preflight.after, created=False
     )
     due = _due_state_block(vault_root, preflight.path, prior_markdown=preflight.before_source)
-    sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
-    candidate = _entity_candidate_block(
-        vault_root,
-        preflight.after,
-        preflight.after_corpus,
-        previous_state=preflight.before,
-    )
-    referents = _undeclared_referents_block(
-        vault_root,
-        preflight.after,
-        preflight.after_corpus,
-        previous_state=preflight.before,
-        candidate=candidate,
-    )
+    from . import capture_sweep
+
+    with capture_sweep.one_registry_index():
+        sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
+        candidate = _entity_candidate_block(
+            vault_root,
+            preflight.after,
+            preflight.after_corpus,
+            previous_state=preflight.before,
+        )
+        referents = _undeclared_referents_block(
+            vault_root,
+            preflight.after,
+            preflight.after_corpus,
+            previous_state=preflight.before,
+            candidate=candidate,
+        )
     context = _relation_advisory_context(vault_root, preflight.after)
     return replace(
         committed,
@@ -5127,16 +5130,19 @@ def _creation_post_commit(
         preflight.destination,
         related_pages=(predecessor_path,) if predecessor_path else (),
     )
-    sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
-    candidate = _entity_candidate_block(vault_root, preflight.semantic_state, preflight.corpus)
-    # A successor page links what its predecessor linked without newly naming it.
-    referents = _undeclared_referents_block(
-        vault_root,
-        preflight.semantic_state,
-        preflight.corpus,
-        previous_state=_predecessor_state(preflight.corpus, predecessor_path),
-        candidate=candidate,
-    )
+    from . import capture_sweep
+
+    with capture_sweep.one_registry_index():
+        sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
+        candidate = _entity_candidate_block(vault_root, preflight.semantic_state, preflight.corpus)
+        # A successor page links what its predecessor linked without newly naming it.
+        referents = _undeclared_referents_block(
+            vault_root,
+            preflight.semantic_state,
+            preflight.corpus,
+            previous_state=_predecessor_state(preflight.corpus, predecessor_path),
+            candidate=candidate,
+        )
     context = _relation_advisory_context(vault_root, preflight.semantic_state)
     return replace(
         committed,

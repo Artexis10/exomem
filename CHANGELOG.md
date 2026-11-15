@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.181.0](https://github.com/Artexis10/exomem/compare/v0.180.1...v0.181.0) (2026-11-15)
+
+
+### Features
+
+* **cloud:** prewarm cell catalogues before upgrade stops ([#2819](https://github.com/Artexis10/exomem/issues/2819)) ([3d6eddd](https://github.com/Artexis10/exomem/commit/3d6edddc1490922a88fff8fadc7493c2374e9afa))
+
+
+### Bug Fixes
+
+* **media:** call B2 API v4 from the media edge ([#2836](https://github.com/Artexis10/exomem/issues/2836)) ([af18fde](https://github.com/Artexis10/exomem/commit/af18fde1e59259eb0f8c3703af9b4fe2b5a23226))
+* report work in task-context method spans ([#2835](https://github.com/Artexis10/exomem/issues/2835)) ([8a337d7](https://github.com/Artexis10/exomem/commit/8a337d7c31677a34ab3db29c452b47bd04076ca6))
+
+## [0.180.1](https://github.com/Artexis10/exomem/compare/v0.180.0...v0.180.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **readiness:** report idle before the first lexical repair ([#2827](https://github.com/Artexis10/exomem/issues/2827)) ([7a4d4f8](https://github.com/Artexis10/exomem/commit/7a4d4f8edcb5b0e8575dbc9019aaa15ea4a1d663))
+* **vault-store:** read stored pages in the maintenance scans and answer validation as the commit does ([#2811](https://github.com/Artexis10/exomem/issues/2811)) ([ca48e57](https://github.com/Artexis10/exomem/commit/ca48e5798e32a66ab8958a0f24de1e748214cf4a))
+
+## [0.180.0](https://github.com/Artexis10/exomem/compare/v0.179.2...v0.180.0) (2026-11-15)
+
+
+### Features
+
+* **cloud:** shorten the cell upgrade stop and refuse a partial schema ([#2746](https://github.com/Artexis10/exomem/issues/2746)) ([f520521](https://github.com/Artexis10/exomem/commit/f520521da207ed0ec895d65e47e0cbe9ef37db17))
+
+
+### Bug Fixes
+
+* **cloud:** let cellctl read the media edge signing key ([#2828](https://github.com/Artexis10/exomem/issues/2828)) ([06a181a](https://github.com/Artexis10/exomem/commit/06a181ac53ce9e6ac5dfd8c2271c01e7fba4ca43))
+* resolve capture identity from current canonical store ([#2823](https://github.com/Artexis10/exomem/issues/2823)) ([4d81a48](https://github.com/Artexis10/exomem/commit/4d81a48d9d662fc572b98a491cc3acfc3310d813))
+
+## [0.179.2](https://github.com/Artexis10/exomem/compare/v0.179.1...v0.179.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* **duplicates:** index legacy Evidence originals after upgrade ([#2820](https://github.com/Artexis10/exomem/issues/2820)) ([8249dc1](https://github.com/Artexis10/exomem/commit/8249dc1ca784cf83578d03f8795b317f44a8f456))
+
+## [0.179.1](https://github.com/Artexis10/exomem/compare/v0.179.0...v0.179.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **readiness:** reuse bounded probes and retire late results ([#2812](https://github.com/Artexis10/exomem/issues/2812)) ([9812f1b](https://github.com/Artexis10/exomem/commit/9812f1b2d85e55dd6e0aad5c28bb41451581ffee))
+
+
+### Performance
+
+* **vault-store:** do hub-read work once per path and keep the recall resolver current across a commit ([#2806](https://github.com/Artexis10/exomem/issues/2806)) ([73264fe](https://github.com/Artexis10/exomem/commit/73264fe494fc0fc21378dd6c4362bb2a122e5bb7))
+
 ## [0.179.0](https://github.com/Artexis10/exomem/compare/v0.178.0...v0.179.0) (2026-11-14)
 
 

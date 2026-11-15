@@ -327,6 +327,24 @@ def test_unknown_resolution_key_is_ignored_with_a_finding(vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Budgets: the size bounds of what the server serves each session
+# --------------------------------------------------------------------------- #
+
+
+def test_one_bad_budget_does_not_void_the_other_or_the_file(vault: Path) -> None:
+    _override(
+        vault,
+        {"schema_version": 1, "budgets": {"skills_max_chars": 99999, "skill_summary_max_chars": 120, "bogus": 1}, "stopwords": {"add": ["der"]}},
+    )
+    registry = ac.load_conventions(vault)
+
+    assert registry.conventions.budget("skills_max_chars") == 3500
+    assert registry.conventions.budget("skill_summary_max_chars") == 120
+    assert "der" in registry.conventions.stopwords
+    assert {finding["field"] for finding in registry.findings} == {"budgets.skills_max_chars", "budgets.bogus"}
+
+
+# --------------------------------------------------------------------------- #
 # The digest is over EFFECTIVE values, never file bytes
 # --------------------------------------------------------------------------- #
 
@@ -386,3 +404,39 @@ def test_anchor_membership_matches_a_prefix_of_any_depth() -> None:
     assert ac.anchor_membership(
         conventions, kind="hub", directory_segments=("anything",), tags=("hub",), type_value=""
     )
+
+
+# --------------------------------------------------------------------------- #
+# Response budgets
+# --------------------------------------------------------------------------- #
+
+
+def test_shipped_stance_budget_is_set() -> None:
+    registry = ac.load_conventions(None)
+    assert registry.conventions.budget("stance_max_chars") == 1600
+    assert not any(finding["code"] == "missing_budget" for finding in registry.findings)
+
+
+def test_a_vault_sets_its_stance_budget_without_an_index_rebuild(vault: Path) -> None:
+    shipped = ac.load_conventions(vault)
+    _override(vault, {"schema_version": 1, "budgets": {"stance_max_chars": 2400}})
+    registry = ac.load_conventions(vault)
+    assert registry.conventions.budget("stance_max_chars") == 2400
+    assert registry.findings == ()
+    assert registry.conventions_hash == shipped.conventions_hash
+    assert registry.turn_hash != shipped.turn_hash
+
+
+@pytest.mark.parametrize("bad_value", [-1, 8001, "big", 2.5, True])
+def test_an_invalid_budget_keeps_the_shipped_value(vault: Path, bad_value: object) -> None:
+    _override(vault, {"schema_version": 1, "budgets": {"stance_max_chars": bad_value}})
+    registry = ac.load_conventions(vault)
+    assert registry.conventions.budget("stance_max_chars") == 1600
+    assert any(finding["code"] == "invalid_budget" for finding in registry.findings)
+
+
+def test_an_unknown_budget_is_reported(vault: Path) -> None:
+    _override(vault, {"schema_version": 1, "budgets": {"map_max_chars": 900}})
+    registry = ac.load_conventions(vault)
+    assert registry.conventions.budget("map_max_chars") is None
+    assert [finding["field"] for finding in registry.findings] == ["budgets.map_max_chars"]

@@ -1138,6 +1138,13 @@
         "initiator": {
           "type": "string",
           "description": "Caller label; no authority. Invalid labels ignored."
+        },
+        "native_skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills the client loads itself; omitted from `skills`."
         }
       },
       "type": "object"

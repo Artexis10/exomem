@@ -73,6 +73,8 @@ def _constructor_map():
         "lexical-store": (lexstore.lexical_path,),
         "lexical-rebuild": (lexstore.lexical_path,),
         "lexical-quarantine": (lexstore.lexical_path,),
+        "lexical-staged": (lexstore.lexical_path,),
+        "lexical-staged-lock": (lexstore.lexical_path,),
         "graph-store": (epistemic_graph.sidecar_path,),
         "graph-rebuild": (epistemic_graph.sidecar_path,),
         "graph-reset": (
@@ -147,6 +149,8 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "lexical-quarantine",
     "lexical-rebuild",
     "lexical-store",
+    "lexical-staged",
+    "lexical-staged-lock",
     "maintenance-jobs-store",
     "media-jobs-store",
     "references-store",

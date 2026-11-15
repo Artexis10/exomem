@@ -115,10 +115,6 @@ class SelectorCoverageError(RuntimeError):
     """
 
 
-#: Sentinel for a memo that legitimately caches .
-_UNSET = object()
-
-
 class ReceiptUnavailableError(RuntimeError):
     """Publicly safe failure when a governed representation lacks evidence."""
 
@@ -4055,6 +4051,10 @@ def guard_working_set(
                 from .. import stance
 
                 guarded["stance"] = stance.guard_block(vault_root, caller, guarded["stance"])
+            if "skills" in guarded:
+                from .. import skills_context
+
+                guarded["skills"] = skills_context.guard_block(vault_root, caller, guarded["skills"])
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
             )
@@ -7836,10 +7836,16 @@ def release_walk_filter(
             vault_root, policy, who, declared_purpose, grants_hash, tombstones,
         )
 
-    keep = AdmittedPredicate(Admission(identity, judge, lambda paths, publish: _stored_admission_many(
-        vault_root, paths, publish, policy=policy, who=who, purpose=declared_purpose,
-        tombstones=tombstones, identity=identity, scalar=judge, record_outcomes=True,
-    )))
+    def judge_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
+        if not paths:
+            return {}
+        with release_decision_context(vault_root):
+            return _stored_admission_many(
+                vault_root, paths, publish, policy=policy, who=who, purpose=declared_purpose,
+                tombstones=tombstones, identity=identity, scalar=judge, record_outcomes=True,
+            )
+
+    keep = AdmittedPredicate(Admission(identity, judge, judge_many))
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
@@ -7894,6 +7900,49 @@ def restricted_release_filter(
     if who is None:
         return None
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+@contextmanager
+def release_decision_context(vault_root: Path) -> Iterator[None]:
+    """Hold one store snapshot, authorization and path placement while a set of pages is decided.
+
+    Under a bound writer, each page's decision otherwise opens its own snapshot and builds its own
+    authorization, which loads the policy again: the inputs that every page of the set shares, read
+    once per page. A decision nested in the held snapshot joins it
+    (`CollectionWriter.read_snapshot`). Each decision also opened a pooled snapshot of the vault
+    store to read the page's container; the set holds one (`request_snapshot`), as a move's
+    post-commit filter does, and a request that already holds one keeps it. The store
+    thread serves a write without a resolution scope, so each decision also resolved the vault and
+    its state folder again; the set shares one resolution, as a move's preflight does. The scope
+    ends with the set, so the write still finds the placement live, and reads the store's new
+    revision, after it waits for the mutation boundary or commits. Without a bound writer a
+    decision opens no writer snapshot, so this holds nothing.
+    """
+    writer = bound_writer(vault_root)
+    if writer is None:
+        yield
+        return
+    from ..vault_store import read as store_read
+
+    with (
+        state_paths.resolution_scope(),
+        writer.read_snapshot(),
+        store_read.request_snapshot(vault_root),
+    ):
+        yield
+
+
+def admitted(keep: Callable[[str], bool], paths: Iterable[str]) -> frozenset[str]:
+    """The paths that the release filter `keep` admits, decided as one set.
+
+    A filter that offers its `Admission` decides the set through `decide_many`; any other filter is
+    asked once per path. Each path gets the verdict that `keep(path)` gives it.
+    """
+    wanted = list(dict.fromkeys(paths))
+    offered = admission_of(keep)
+    if offered is None:
+        return frozenset(path for path in wanted if keep(path))
+    return frozenset(path for path, verdict in offered.decide_many(wanted).items() if verdict[0])
 
 
 def file_mode_restricted_caller(
@@ -8182,7 +8231,10 @@ def page_filter_over(
     # catalogue publishes only the pages `decide` hands on to the release verdict.
     def decide_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
         if store_read.request_memo(root) is None:
-            return {path: decide(path, publish) for path in paths}
+            if not paths:
+                return {}
+            with release_decision_context(root):
+                return {path: decide(path, publish) for path in paths}
         held_page = store_read.held_lookup(root, paths)
         ordinary = [path for path in paths if path not in held and held_page(path)]
         answers = offered.decide_many(ordinary, publish)
@@ -8896,11 +8948,11 @@ def filter_withheld_entries(
         verdicts[rel_path] = allowed
         return allowed
 
-    resolved_items: dict[str, str | None] = {}
-    # One listing per directory per call: each entry by exact name, in scandir order. The
-    # casefold map of a directory is built only when an exact name misses in it.
+    resolved_items: dict[str, tuple[str, ...]] = {}
+    # One listing per directory per call: each entry by exact name. A directory's names grouped
+    # by case-folded key are built only when an exact spelling names no file.
     listings: dict[Path, dict[str, os.DirEntry[str]] | None] = {}
-    folded_listings: dict[Path, dict[str, str]] = {}
+    folded_listings: dict[Path, dict[str, list[str]]] = {}
     def _markup_targets(text: str) -> list[str]:
         targets = []
         for raw in _WIKILINK_ANYWHERE.findall(text):
@@ -8936,8 +8988,8 @@ def filter_withheld_entries(
                 found.extend(resolved_markup.get(target, ()))
         return list(dict.fromkeys(found))
 
-    def _resolve_vault_item(rel_path: str) -> str | None:
-        """The real vault-relative path this reference names, or `None`.
+    def _resolve_vault_item(rel_path: str) -> tuple[str, ...]:
+        """The real vault-relative paths this reference names, or none.
 
         N6 established that a reference resolving to nothing under this vault
         is not the release plane's business. NEW-4 is the other half: the
@@ -8951,18 +9003,20 @@ def filter_withheld_entries(
 
         Resolution walks components case-insensitively via `scandir` rather
         than indexing the whole vault, so the cost is O(depth) directory reads
-        on a miss instead of a full walk per result.
+        on a miss instead of a full walk per result. A spelling that several
+        items share once case is folded names them all, and the caller
+        releases the entry only when it may release each one.
         """
         request_budget.checkpoint()
-        cached = resolved_items.get(rel_path, _UNSET)
-        if cached is not _UNSET:
-            return cached  # type: ignore[return-value]
+        cached = resolved_items.get(rel_path)
+        if cached is not None:
+            return cached
         result = _resolve_uncached(rel_path)
         resolved_items[rel_path] = result
         return result
 
-    def _walk_to_real_spelling(parts: list[str]) -> str | None:
-        """Name each component the way the filesystem names it, or `None`.
+    def _walk_to_real_spelling(parts: list[str]) -> tuple[str, ...]:
+        """Each vault item that ``parts`` names, spelled the way the vault spells it.
 
         Prefers an exact match so a page literally called `a%20b.md` still
         resolves to itself, then falls back to a case-insensitive one. The
@@ -8976,70 +9030,143 @@ def filter_withheld_entries(
         names nothing and the walk below finds the real one. Same payload,
         different answer per platform -- which is the whole thing this
         resolver exists to remove.
+
+        Without an exact match, every item whose path matches once case is
+        folded is named: `secret/Ledger.md` and `Secret/Ledger.md` are two
+        pages under two policies, and the order of a listing must not pick one.
+
+        In store mode a stored page may have no file, so the store's pages
+        answer first, by the same rule. The disk answers for every path that
+        the store does not serve, and a file at a path that it serves without a
+        page is still named, so it can only withhold.
         """
+        from ..vault_store import mode as store_mode
         from ..vault_store import read as store_read
 
-        current = vault_root
-        real: list[str] = []
-        entry: os.DirEntry[str] | None = None
-        for part in parts:
-            # A store-owned page is a leaf even when its projection is absent or is a directory.
-            if real:
-                parent = "/".join(real)
-                if store_read.serves(vault_root, parent) and (
-                    store_read.page_exists(vault_root, parent)
-                    or not store_read.holds_folder(vault_root, parent)
-                ):
-                    return None
-            if current not in listings:
-                try:
-                    with os.scandir(current) as scanned:
-                        listings[current] = {item.name: item for item in scanned}
-                except OSError:
-                    listings[current] = None
-            listing = listings[current]
-            if listing is None:
-                return None
-            entry = listing.get(part)
-            if entry is None:
-                folded = folded_listings.get(current)
-                if folded is None:
-                    folded = folded_listings[current] = {}
-                    for name in listing:
-                        folded.setdefault(name.casefold(), name)
-                match = folded.get(part.casefold())
-                if match is None:
-                    return None
-                entry = listing[match]
-            real.append(entry.name)
-            current = current / entry.name
-        try:
-            # The entry's own file type proves a regular file without a stat; a symlink
-            # leaf is followed exactly as `Path.is_file` followed it.
-            return "/".join(real) if entry is not None and entry.is_file() else None
-        except OSError:
-            return None
+        store = store_mode.store_mode_for_reads(vault_root)
+        if store:
+            exact = _stored_spellings(parts, folded=False)
+            if exact is None:
+                store = False  # the records stopped saying store mode: the disk answers
+            elif exact:
+                return exact
+        exact = _disk_spellings(parts, folded=False)
+        if exact and not (store and store_read.serves(vault_root, exact[0])):
+            return exact
+        matches = set(_disk_spellings(parts, folded=True))
+        if store:
+            matches.update(_stored_spellings(parts, folded=True) or ())
+        return tuple(sorted(matches))
 
-    def _resolve_uncached(rel_path: str) -> str | None:
-        if _tombstoned(rel_path):
-            return _normalize_pathish(rel_path)
-        if rel_path.startswith(("http://", "https://", "exomem://")):
+    def _disk_spellings(parts: list[str], *, folded: bool) -> tuple[str, ...]:
+        """The regular files at ``parts``: its exact spelling, or each spelling that matches it
+        once case is folded."""
+        from ..vault_store import read as store_read
+
+        branches: list[tuple[Path, list[str], os.DirEntry[str] | None]] = [(vault_root, [], None)]
+        for part in parts:
+            following: list[tuple[Path, list[str], os.DirEntry[str] | None]] = []
+            for current, real, _entry in branches:
+                # A store-owned page is a leaf even when its projection is absent or is a directory.
+                if real:
+                    parent = "/".join(real)
+                    if store_read.serves(vault_root, parent) and (
+                        store_read.page_exists(vault_root, parent)
+                        or not store_read.holds_folder(vault_root, parent)
+                    ):
+                        continue
+                if current not in listings:
+                    try:
+                        with os.scandir(current) as scanned:
+                            listings[current] = {item.name: item for item in scanned}
+                    except OSError:
+                        listings[current] = None
+                listing = listings[current]
+                if listing is None:
+                    continue
+                if folded:
+                    groups = folded_listings.get(current)
+                    if groups is None:
+                        groups = folded_listings[current] = {}
+                        for name in listing:
+                            groups.setdefault(name.casefold(), []).append(name)
+                    names: Sequence[str] = groups.get(part.casefold(), ())
+                else:
+                    names = (part,) if part in listing else ()
+                following.extend((current / name, [*real, name], listing[name]) for name in names)
+            branches = following
+        found = []
+        for _current, real, entry in branches:
+            try:
+                # The entry's own file type proves a regular file without a stat; a symlink
+                # leaf is followed exactly as `Path.is_file` followed it.
+                if entry is not None and entry.is_file():
+                    found.append("/".join(real))
+            except OSError:
+                continue
+        return tuple(found)
+
+    # A folder's stored children grouped by case-folded name, read once per call in one statement.
+    stored_folded: dict[str, dict[str, list[tuple[str, bool]]]] = {}
+
+    def _stored_spellings(parts: list[str], *, folded: bool) -> tuple[str, ...] | None:
+        """The stored pages at ``parts``, by the disk walk's rule, or None when the store no
+        longer answers."""
+        from ..collection_store import connection as store_connection
+        from ..vault_store import directory as store_directory
+        from ..vault_store import read as store_read
+
+        try:
+            if not folded:
+                rel = "/".join(parts)
+                with store_read.snapshot(vault_root) as view:
+                    held = view.page_meta(rel) is not None
+                return (rel,) if held and store_read.serves(vault_root, rel) else ()
+            branches: list[list[str]] = [[]]
+            for index, part in enumerate(parts):
+                leaf = index == len(parts) - 1
+                following: list[list[str]] = []
+                for real in branches:
+                    folder = "/".join(real)
+                    groups = stored_folded.get(folder)
+                    if groups is None:
+                        # No index serves a case-folded name, so this reads the folder's names.
+                        groups = stored_folded[folder] = {}
+                        for name, child in store_directory.stored_children(vault_root, folder).items():
+                            groups.setdefault(name.casefold(), []).append((name, child.meta is not None))
+                    following.extend(
+                        [*real, name] for name, page in groups.get(part.casefold(), ()) if page == leaf
+                    )
+                branches = following
+        except store_connection.CollectionStoreError as error:
+            if error.code != store_read.NOT_ACTIVE:
+                raise
             return None
+        return tuple(
+            rel for rel in ("/".join(real) for real in branches) if store_read.serves(vault_root, rel)
+        )
+
+    def _resolve_uncached(rel_path: str) -> tuple[str, ...]:
+        if _tombstoned(rel_path):
+            normalized = _normalize_pathish(rel_path)
+            return () if normalized is None else (normalized,)
+        if rel_path.startswith(("http://", "https://", "exomem://")):
+            return ()
         # RAW spelling first. `_decode_pathish` is otherwise unconditional,
         # which meant a file literally named `a%20b.md` could never resolve to
         # itself — the decode turned it into `a b.md`, so a reference to the
         # withheld percent-literal file landed on its permitted decoded twin
         # and was kept. Exotic, but the file's own name is the most specific
         # evidence available, and `_walk_to_real_spelling` prefers an exact
-        # component match, so the literal wins wherever it exists.
+        # match, so the literal wins wherever it exists.
         raw = rel_path.strip().replace("\\", "/").strip("/")
         if raw and ".." not in raw.split("/"):
             resolved = _walk_to_real_spelling(raw.split("/"))
-            if resolved is not None:
+            if resolved:
                 return resolved
         candidate = _decode_pathish(rel_path)
         if candidate is None:
-            return None
+            return ()
         candidate = candidate.strip("/")
         # FOLD `..` rather than rejecting it. Rejecting outright returned
         # `None`, and under the skip-not-deny contract `None` means KEEP — so
@@ -9054,20 +9181,17 @@ def filter_withheld_entries(
                 continue
             if part == "..":
                 if not parts:
-                    return None  # escapes the vault root
+                    return ()  # escapes the vault root
                 parts.pop()
                 continue
             parts.append(part)
         if not parts:
-            return None
+            return ()
         # One walk, not a fast `is_file()` probe followed by a slow fallback.
         # The probe was unsound wherever the filesystem folds case: it answered
         # yes for a spelling the page does not have, and the release decision
         # was then made against a path the policy never names.
-        resolved = _walk_to_real_spelling(parts)
-        if resolved is not None:
-            return resolved
-        return None
+        return _walk_to_real_spelling(parts)
 
     def _candidate_paths(entry, directory, location):
         # Only exact producer-bound metadata slots avoid physical-byte proof.
@@ -9100,16 +9224,17 @@ def filter_withheld_entries(
             # it happened to use — otherwise a `.MD` or percent-encoded variant
             # is decided against a path that does not exist.
             resolved = _resolve_vault_item(rel_path)
-            if resolved is None:
+            if not resolved:
                 continue  # not a vault item -> not the release plane's business
             if review_audience is not None and who.audience_id == OWNER_AUDIENCE:
                 # A bridge-review finding is owner work derived from an exact
                 # release approval. It remains actionable when that approval
                 # is stale; hiding it then would strand the required reapproval.
-                if not content_permits(vault_root, resolved, who):
+                if not all(content_permits(vault_root, path, who) for path in resolved):
                     return None
                 continue
-            if not _permitted(resolved):
+            # A spelling that several items share is released only when each of them is.
+            if not all(_permitted(path) for path in resolved):
                 return None
         return candidates
 
@@ -9149,9 +9274,8 @@ def filter_withheld_entries(
             # on a restricted dependency also appearing in the result pool.
             if candidates is None:
                 candidates = _candidate_paths(node, directory, location)
-            for candidate in candidates:
-                resolved = _resolve_vault_item(candidate)
-                if resolved is None or not _permitted(resolved):
+            for resolved in (path for candidate in candidates for path in _resolve_vault_item(candidate)):
+                if not _permitted(resolved):
                     continue
                 decision = decisions_by_path.get(resolved)
                 if decision is not None and decision.release_strip:
@@ -9240,7 +9364,7 @@ def filter_withheld_entries(
         root_candidates = _candidate_paths(payload, None, ()) if isinstance(payload, Mapping) else ()
         announce(
             resolved for candidate in (*root_candidates, *_pages_named(payload))
-            if (resolved := _resolve_vault_item(candidate)) is not None
+            for resolved in _resolve_vault_item(candidate)
         )
     filtered = _walk(payload)
     if (
