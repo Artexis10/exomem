@@ -1109,6 +1109,43 @@ def test_an_update_onto_another_items_natural_key_refuses(tmp_path: Path) -> Non
     ), "the refusal must write nothing"
 
 
+def test_an_update_that_completes_a_null_key_part_onto_another_items_key_refuses(tmp_path: Path) -> None:
+    # A null key part read as "no key to move" lets the update give one observation two identities.
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    existing = next(record for record in parsed.records if record.values["occurred_on"] == "2026-06-01")
+    appended = records.append_record(
+        tmp_path,
+        manifest.path,
+        item={"occurred_on": "2026-06-01", "asset": "[[Assets/Vehicle]]", "provider": None, "odometer": 42_760},
+        expected_container_hash=parsed.snapshot,
+        why="log a service whose provider is not known yet",
+    )
+    partial = next(
+        record
+        for record in record_formats.load_adapter(tmp_path, manifest).read().records
+        if record.identity.key == appended["item_key"]
+    )
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.update_record(
+            tmp_path,
+            manifest.path,
+            item_key=partial.identity.key,
+            changes={"provider": existing.values["provider"]},
+            expected_container_hash=appended["after_container_hash"],
+            expected_item_version=partial.source.hash,
+            why="name the provider",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    assert existing.identity.key in str(caught.value.details)
+
+
 def test_a_planning_update_onto_another_items_natural_key_refuses(tmp_path: Path) -> None:
     """Planning updates run through the same writer, so they inherit the rule."""
     import sys

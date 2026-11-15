@@ -947,7 +947,7 @@ class ItemSchema:
             raise CollectionError("SCHEMA_UNKNOWN_FIELD", f"field is not declared: {unknown[0]}")
         for name, spec in self.fields.items():
             # A stored row is checked as it was written, so a read or a legacy migration asks for presence only.
-            # The non-null rule for new values lives in `records._collect_schema_issues`.
+            # The non-null rule for written values lives in `records._collect_schema_issues`.
             if spec.required and name not in value:
                 raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {name}")
             if name in value:
@@ -1648,14 +1648,6 @@ def _parse_item_ref(prefix: str, value: str) -> tuple[str, str] | None:
     return normalized, key
 
 
-def _require_key_component(values: Mapping[str, Any], name: str) -> None:
-    """A natural key is complete only when every component holds a value; `null` is no value."""
-    if name not in values:
-        raise ValueError(f"natural key field is missing: {name}")
-    if values[name] is None:
-        raise ValueError(f"natural key field is null: {name}")
-
-
 def natural_key_serialization(
     schema_version: int,
     fields_in_order: Iterable[str],
@@ -1690,8 +1682,6 @@ def manifest_natural_key(manifest: CollectionManifest, values: Mapping[str, Any]
     schema-version / field-order / field-type triple is assembled here once
     instead of at each call site.
     """
-    for name in manifest.schema.natural_key:
-        _require_key_component(values, name)
     return natural_key_serialization(
         manifest.schema.version,
         manifest.schema.natural_key,
@@ -1700,13 +1690,34 @@ def manifest_natural_key(manifest: CollectionManifest, values: Mapping[str, Any]
     )
 
 
+def _natural_key_incomplete(manifest: CollectionManifest, values: Mapping[str, Any]) -> bool:
+    """A missing or `null` component leaves the natural key incomplete: it names no item."""
+    return any(values.get(name) is None for name in manifest.schema.natural_key)
+
+
+def complete_natural_key(manifest: CollectionManifest, values: Mapping[str, Any]) -> str | None:
+    """The serialised natural key a write may store and match twins by, or `None` when it is incomplete.
+
+    A stored row's read identity keeps `manifest_natural_key`, which serialises a `null` component
+    as rows written before this rule were keyed.
+    """
+    if _natural_key_incomplete(manifest, values):
+        return None
+    try:
+        return manifest_natural_key(manifest, values)
+    except ValueError:
+        return None
+
+
 def derived_item_key(manifest: CollectionManifest, values: Mapping[str, Any]) -> str | None:
     """The identity a complete natural key implies, or `None` when one is absent.
 
-    A partial natural key cannot be serialised, so it cannot carry identity; the
+    A partial natural key, with a component missing or `null`, cannot carry identity; the
     caller falls back to a deterministic or random key rather than deriving one from a hole.
     The manifest's `item_key_scheme` decides the key: a hash of the serialization, or an order-preserving encoding.
     """
+    if _natural_key_incomplete(manifest, values):
+        return None
     try:
         if manifest.item_key_scheme == item_keys.ORDERED_V1:
             return item_keys.spell(item_keys.ordered_key(
@@ -1721,7 +1732,8 @@ def _ordered_components(manifest: CollectionManifest, values: Mapping[str, Any])
     """The natural key's `(field type, normalised value)` in declared order, as the hashed scheme normalises them."""
     components = []
     for name in manifest.schema.natural_key:
-        _require_key_component(values, name)
+        if name not in values:
+            raise ValueError(f"natural key field is missing: {name}")
         field_type = manifest.schema.fields[name].type
         components.append((field_type, _natural_key_value(values[name], field_type)))
     return components
@@ -3462,7 +3474,7 @@ def _parse_plan_join(value: object, schema: ItemSchema, index: int) -> Mapping[s
     return MappingProxyType(join)
 
 
-def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
+def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool = False) -> None:
     if value is None:
         return
     if spec.type not in _SUPPORTED_FIELD_TYPES:
@@ -3486,7 +3498,7 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
             raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
         assert spec.items is not None
         for item in value:
-            _validate_field_value(name, item, spec.items)
+            _validate_field_value(name, item, spec.items, non_null)
     if spec.type == "object":
         if not isinstance(value, Mapping) or not _is_json_value(value):
             raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
@@ -3494,8 +3506,10 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
             path = f"{name}.{child}"
             if child_spec.required and child not in value:
                 raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {path}")
+            if child_spec.required and non_null and value[child] is None:
+                raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is null: {path}")
             if child in value:
-                _validate_field_value(path, value[child], child_spec)
+                _validate_field_value(path, value[child], child_spec, non_null)
     if spec.type == "link" and type(value) is not str:
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
     if spec.enum and not any(
@@ -3504,14 +3518,15 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
         raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
 
 
-def validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
+def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:
     """Validate one declared field, raising the same refusal `validate` raises.
 
     Exposed so an aggregating validator can run the shipped per-field rules
     field by field, and address each failure by path, without a second copy of
-    those rules drifting away from this one.
+    those rules drifting away from this one. With `non_null`, for a value being
+    written, a required nested field must also hold a value.
     """
-    _validate_field_value(name, value, spec)
+    _validate_field_value(name, value, spec, non_null)
 
 
 def normalize_item_values(schema: ItemSchema, values: Mapping[str, Any]) -> dict[str, Any]:
