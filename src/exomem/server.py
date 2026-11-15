@@ -157,15 +157,12 @@ class PublicCommandNameMiddleware(Middleware):
                 # A call that no operation owns has no authorization route or egress projector.
                 await refuse_unverified_credential(self.vault_root, context)
                 log.info("public operation refused: tool=%s code=%s", name, error.code)
-                from fastmcp.tools import ToolResult
-
-                return ToolResult(
-                    content=[],
-                    structured_content=agent_refusal_result(
-                        public_refusal(error), error, name, arguments, (),
-                        write=getattr(error, "writes", False),
-                    ),
-                )
+                # As the rendered refusal does: a host that shows only text content must see the refusal too.
+                tool = await context.fastmcp_context.fastmcp.get_tool(name)
+                return tool.convert_result(agent_refusal_result(
+                    public_refusal(error), error, name, arguments, (),
+                    write=getattr(error, "writes", False),
+                ))
             refusal = error
             flat = error.arguments
             writes = rendered_call_writes(
