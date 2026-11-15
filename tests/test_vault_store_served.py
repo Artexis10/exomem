@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import statistics
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -593,6 +594,14 @@ def http_replica(root, tmp_path, name, *, activation_after=None):
                     process.wait(10)
 
 
+@pytest.fixture
+def sigterm_delivered():
+    """Skips a test that stops a process by SIGTERM where none is delivered: on Windows
+    ``Popen.terminate()`` is TerminateProcess, which ends the process with no handler and no teardown."""
+    if sys.platform == "win32":
+        pytest.skip("Windows has no SIGTERM delivery")
+
+
 def remember(replica, title):
     return replica.post(
         "remember",
@@ -603,7 +612,7 @@ def remember(replica, title):
 
 @pytest.mark.timeout(600)
 def test_a_service_stopped_before_it_activated_still_projects_the_write_it_accepted(
-    stored, tmp_path
+    sigterm_delivered, stored, tmp_path
 ):
     """A service that accepts a write before its activation starts the vault projector, then
     stops: a stop that drains only a started projector leaves the write's projections queued, so
@@ -622,7 +631,7 @@ def test_a_service_stopped_before_it_activated_still_projects_the_write_it_accep
 
 @pytest.mark.timeout(600)
 def test_a_second_replica_that_takes_the_lease_and_stops_at_once_leaves_nothing_queued(
-    stored, tmp_path
+    sigterm_delivered, stored, tmp_path
 ):
     """Two services on one vault: the first writes and stops, the second takes the lease over with
     its own write and stops right after it. A stop that leaves that write's projections queued
@@ -731,7 +740,7 @@ ExomemFastMCP("startup", lifespan=lifespan).run(
 """
 
 
-def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(tmp_path):
+def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(sigterm_delivered, tmp_path):
     """A SIGTERM that lands while the lifespan's startup awaits: met at once, it ends the process
     without the teardown of what the startup began, or, raised as an exception that lands in the
     event loop, with 1, which a supervisor reads as a crash."""
@@ -851,7 +860,7 @@ mark("returned")
     ],
 )
 def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
-    tmp_path, action, startup, marks, status
+    sigterm_delivered, tmp_path, action, startup, marks, status
 ):
     """A service that stops on SIGTERM without its teardown, or whose stop drops the action that
     its caller installed: the handler never runs or runs before the teardown, or an ignored signal

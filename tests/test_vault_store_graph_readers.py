@@ -173,6 +173,8 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
     Keep the graph test and the registry surface test on the same instrument. Repair seams
     record intent without starting a background repair against deliberately damaged files.
     """
+    if sys.platform == "win32":
+        pytest.skip("the read spy wraps the POSIX held filesystem, which Windows does not have")
     # The POSIX backend imports `posix`, so a module-level import would stop collection on Windows.
     from exomem import _held_fs_posix
 
@@ -1234,7 +1236,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
             elapsed = (time.perf_counter() - started) * 1000
             cpu = (time.process_time() - cpu_started) * 1000
     return {"ms": elapsed, "cpu_ms": cpu, "result_count": size, **counters,
-            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg(), "cpu_pressure_avg10": cpu_pressure()}
+            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg() if hasattr(os, "getloadavg") else None,
+            "cpu_pressure_avg10": cpu_pressure()}
 
 
 def fitted_slope(samples):
