@@ -87,6 +87,12 @@ class PlatformConfig:
     # Selects the local domain (design D1): new cells run on TopoLVM, their volume capped at this size.
     local_storage_cell_gib: int | None = None
     operator_restore_abort: bool = False
+    # The release mode's rollout settings (automate-cloud-releases D4, D5): cellctl's idle and force
+    # minutes, and the gateway's hold budget. None leaves the chart's values, which are five and ten
+    # minutes and a budget of 0, the value that turns the hold off.
+    upgrade_idle_minutes: int | None = None
+    upgrade_force_minutes: int | None = None
+    gateway_hold_budget_seconds: int | None = None
 
     @property
     def renders_local_storage(self) -> bool:
@@ -151,6 +157,10 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
     # window lands, so the render carries the complement.
     upgrade_start, upgrade_end = upgrade_default_range(config.backup_window)
     cellctl["upgradeWindow"] = {"defaultHourStart": upgrade_start, "defaultHourEnd": upgrade_end}
+    if config.upgrade_idle_minutes is not None:
+        cellctl["upgradeWindow"]["idleMinutes"] = config.upgrade_idle_minutes
+    if config.upgrade_force_minutes is not None:
+        cellctl["upgradeWindow"]["forceMinutes"] = config.upgrade_force_minutes
     values = {
         "cellctl": cellctl,
         "cellData": cell_data_values(stack),
@@ -181,6 +191,8 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
             else {"domain": "hetzner", "local": {"enabled": config.local_storage_coexistence}}
         ),
     }
+    if config.gateway_hold_budget_seconds is not None:
+        values["cloudGateway"]["hold"] = {"budgetSeconds": config.gateway_hold_budget_seconds}
     show_only = (
         "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
         "templates/namespaces.yaml",

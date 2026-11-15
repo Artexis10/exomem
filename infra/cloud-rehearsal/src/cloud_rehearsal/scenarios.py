@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 import boto3
+import httpx
 from botocore.config import Config
 from cellctl.manifests import (
     OBJECT_STORE_KEY_SECRET,
@@ -160,11 +161,19 @@ class Context:
     original_fixity: FixityPlan | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
+    # The release mode's third cell (release_rollout.py); no other mode provisions it.
+    c: Tenant = field(default_factory=lambda: Tenant("C", f"neighbour-{secrets.token_hex(3)}@rehearsal.test", paid=False))
+    # The release mode: run the rollout proofs after provisioning (release_rollout.py).
+    release_rollout: bool = False
     browser: HeadlessBrowser = field(init=False)
     log_snapshots: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.browser = HeadlessBrowser(self.resolver)
+
+    @property
+    def tenants(self) -> tuple[Tenant, ...]:
+        return (self.a, self.b, self.c)
 
     # --- control database, read as the operator ---
 
@@ -204,13 +213,18 @@ class Context:
 
     # --- Substrate surfaces ---
 
-    async def admin_release(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def release_request(self, token: str, payload: dict[str, Any]) -> httpx.Response:
+        """A single PUT of the release route as the holder of `token`, answered whatever the status."""
+
         async with self.resolver.async_client() as client:
-            response = await client.put(
+            return await client.put(
                 f"{PUBLIC_BASE_URL}/api/exomem/admin/cloud-release",
                 json=payload,
-                headers={"authorization": f"Bearer {self.substrate.secrets.admin_token}"},
+                headers={"authorization": f"Bearer {token}"},
             )
+
+    async def admin_release(self, payload: dict[str, Any]) -> dict[str, Any]:
+        response = await self.release_request(self.substrate.secrets.admin_token, payload)
         if response.status_code != 200:
             raise CrossLaneDefect(
                 f"PUT /api/exomem/admin/cloud-release answered {response.status_code}",
@@ -218,6 +232,46 @@ class Context:
                 evidence={"status": response.status_code, "body": _safe_body(response)},
             )
         return response.json()
+
+    async def deploy_call(self, action: Callable[[Any], Any]) -> Any:
+        """Run `action` on the cloud-deploy workflow's own Substrate client, as the deploy principal.
+
+        The principal may read the rollout view and set the release image, and send nothing else;
+        a request Substrate refuses outright is a cross-lane finding."""
+
+        from .release_rollout import deploy_settings, deploy_transport, load_cloud_deploy
+
+        deploy = load_cloud_deploy()
+        settings = deploy_settings(deploy, self.substrate.secrets.deploy_token)
+
+        def send() -> Any:
+            with self.resolver.client() as client:
+                return action(deploy.Substrate(settings, deploy_transport(client)))
+
+        try:
+            return await asyncio.to_thread(send)
+        except deploy.Stop as stop:
+            raise CrossLaneDefect(
+                f"the deploy principal's request to the release route was refused: {stop.code}",
+                component="Substrate admin cloud-release route (deploy principal)", owner=SUBSTRATE_REPO,
+                evidence={"code": stop.code},
+            ) from stop
+
+    async def deploy_release(self, image: str, release: str) -> None:
+        """Set the release image the way the workflow does, with its tag and nothing else."""
+
+        refused = await self.deploy_call(lambda substrate: substrate.set_image(image, release))
+        if refused is not None:
+            raise CrossLaneDefect(
+                f"the deploy principal's PUT of the release image was refused: {refused}",
+                component="Substrate admin cloud-release route (deploy principal)", owner=SUBSTRATE_REPO,
+                evidence={"code": refused, "release": release},
+            )
+
+    async def deploy_rollout(self) -> dict[str, Any]:
+        """The bounded rollout view the workflow reads."""
+
+        return await self.deploy_call(lambda substrate: substrate.rollout())
 
     async def paddle(self, event: dict[str, Any]) -> dict[str, Any]:
         raw = json.dumps(event, separators=(",", ":")).encode()
@@ -1307,6 +1361,15 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the original-fixity mode needs the provisioned cell, and step 2 did not pass")
                 await run_original_fixity(ctx, ctx.original_fixity)
+        if number == 3 and ctx.release_rollout:
+            from .release_rollout import run_release_rollout
+
+            # Not wrapped in `stage`: the proofs are step records and the stage's own status says which failed,
+            # so the report and the post-checks are still written when a proof fails.
+            if record.status != PASSED:
+                with stage(ctx.report, "release_rollout"):
+                    raise StepFailure("the release proofs need the canary's connector, and step 3 did not pass")
+            await run_release_rollout(ctx)
     if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
         with stage(ctx.report, "operator_restore_abort"):
             raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
@@ -1322,10 +1385,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.original_fixity is not None and "original_fixity" not in ctx.report.stages:
         with stage(ctx.report, "original_fixity"):
             raise StepFailure("the requested original-fixity stage requires provisioning at step 2")
+    if ctx.release_rollout and "release_rollout" not in ctx.report.stages:
+        with stage(ctx.report, "release_rollout"):
+            raise StepFailure("the requested release proofs require the canary's connector at step 3")
 
 
 async def close_clients(ctx: Context) -> None:
-    for tenant in (ctx.a, ctx.b):
+    for tenant in ctx.tenants:
         if tenant.client is not None:
             await tenant.client.aclose()
 
@@ -1353,7 +1419,7 @@ def snapshot_logs(ctx: Context) -> None:
     for namespace, selector in [
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=exomem-cloud-gateway"),
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=cellctl"),
-        *[(namespace_name(t.cell_id), "app.kubernetes.io/name=exomem-cell") for t in (ctx.a, ctx.b) if t.cell_id],
+        *[(namespace_name(t.cell_id), "app.kubernetes.io/name=exomem-cell") for t in ctx.tenants if t.cell_id],
     ]:
         for previous in ((), ("--previous",)):
             result = run(
@@ -1369,7 +1435,7 @@ def post_checks(ctx: Context) -> dict[str, Any]:
     """Content-free logs: no distinctive phrase in any cell, gateway or cellctl log."""
 
     snapshot_logs(ctx)
-    phrases = [ctx.a.phrase, ctx.b.phrase]
+    phrases = [tenant.phrase for tenant in ctx.tenants]
     haystack = "\n".join(ctx.log_snapshots)
     leaked = [phrase for phrase in phrases if phrase in haystack]
     return {"log_bytes_scanned": len(haystack), "phrases_checked": len(phrases), "phrases_leaked": len(leaked)}
@@ -1379,7 +1445,7 @@ async def ready_matches_pods(ctx: Context) -> list[dict[str, Any]]:
     """D4: a row's `ready` must be what its pod's Ready condition says."""
 
     mismatches = []
-    for tenant in (ctx.a, ctx.b):
+    for tenant in ctx.tenants:
         if not tenant.cell_id:
             continue
         row = await ctx.fetchrow("SELECT ready, observed_state, observed_at FROM exomem_cloud_cells WHERE cell_id = $1", tenant.cell_id)

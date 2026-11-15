@@ -223,6 +223,16 @@ The stage's `runbook_deviations` list each place where the rehearsal differs fro
 Seeding costs about 3 seconds per original on a GitHub runner, so the default 1,000 originals take about an hour of the job's 150 minutes.
 Set the workflow inputs `original_fixity_originals` and `original_fixity_mean_kib` to change the fixture.
 
+## Release rollout
+
+`--release` proves `automate-cloud-releases` tasks 1.15, 2.1 and 3.1. It runs only on demand, as the `release` mode of the `Cloud rehearsal` workflow, after steps 1 to 3. Dispatch it with `gh workflow run cloud-rehearsal.yml -f mode=release`.
+The canary and two more cells run on the local storage domain. The baseline release and every later release go through the deploy token and the workflow script's own Substrate client.
+Each proof is a step record from 13 up. The steps cover the canary rolling at once, an idle cell rolling after its idle minute, a busy cell waiting, a second release leaving the running attempt pinned, a failed canary pausing the rollout and being restored, and only the admin token clearing the pause.
+The run polls each rolled cell through its switch. An errored call fails step 23.
+Hand-set window annotations hold the cells back, because cellctl keeps a cell's window for the UTC day. A window opens only with 20 minutes of the hour left, so a run can wait for the next hour before step 16.
+The chart's gateway hold budget is 0, which turns the hold off. The mode sets 40 seconds and records it.
+The exit code is 0 only when every proof passed. The mode never gates a node.
+
 ## Report
 
 `schema: exomem-cloud-rehearsal-report-v1`. It records:

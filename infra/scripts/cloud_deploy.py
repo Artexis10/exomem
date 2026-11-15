@@ -319,8 +319,7 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if view.get("cell_image") == image or view.get("release") == tag:
         raise Stop("CELL_IMAGE_CURRENT", ok=True)
     # D1 step 4: never resume a paused fleet; only a person clears the pause.
-    if view.get("paused") is True:
-        raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+    refuse_paused(view)
 
     # D2: the platform gate.
     deployment = github.newest_platform_deployment()
@@ -354,13 +353,26 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     deadline = tools.monotonic() + settings.poll_timeout
     while True:
         view = substrate.rollout()
-        if view.get("paused") is True:
-            raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+        refuse_paused(view)
         if view.get("canary_on_target") is True:
             raise Stop("CANARY_ON_TARGET", ok=True)
         if tools.monotonic() >= deadline:
             raise Stop("CANARY_WAIT_TIMEOUT", ok=False)
         tools.sleep(settings.poll_interval)
+
+
+def refuse_paused(view: dict) -> None:
+    """Stop with the pause's code, and nothing else, when the rollout view says it is paused."""
+
+    if view.get("paused") is True:
+        raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+
+
+def finish(stop: Stop) -> int:
+    """Print the single line a stopped run shows, a code and the detail it chose to show, and return its exit code."""
+
+    print(f"cloud-deploy: {stop.code}" + (f" {stop.detail}" if stop.detail else ""))
+    return 0 if stop.ok else 1
 
 
 def _code(value: object) -> str:
@@ -375,8 +387,7 @@ def main(env: dict[str, str] | None = None, tools: Tools | None = None) -> int:
         deploy(settings, tools or Tools(), gate=load_gate(),
                barriers=json.loads(BARRIER_FILE.read_text(encoding="utf-8")))
     except Stop as stop:
-        print(f"cloud-deploy: {stop.code}" + (f" {stop.detail}" if stop.detail else ""))
-        return 0 if stop.ok else 1
+        return finish(stop)
     return 0
 
 
