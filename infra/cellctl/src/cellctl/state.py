@@ -269,6 +269,9 @@ class ClusterObservation:
     statefulset_hold_started_at: datetime | None = None
     statefulset_previous_image: str | None = None
     statefulset_pre_upgrade_snapshot: str | None = None
+    # automate-cloud-releases D6: a local cell's pre-upgrade VolumeSnapshot
+    # name. Set beside pre_upgrade_snapshot, which keeps the restic id.
+    statefulset_pre_upgrade_volume_snapshot: str | None = None
     statefulset_target_applied_at: datetime | None = None
     statefulset_restored_snapshot: str | None = None
     statefulset_backup_retry_after: datetime | None = None
@@ -368,6 +371,9 @@ class Decision:
     hold_started_at: datetime | None = None
     previous_image: str | None = None
     pre_upgrade_snapshot: str | None = None
+    # automate-cloud-releases D6: a local cell's restore point is the
+    # VolumeSnapshot with this name, taken after the stop.
+    pre_upgrade_volume_snapshot: str | None = None
     target_applied_at: datetime | None = None
     restored_snapshot: str | None = None
     # automate-cloud-releases D4/D3: the attempt's pinned target, and its phase.
@@ -393,6 +399,9 @@ class Decision:
     storage_cleanup_pending: bool = False
     run_backup_job: bool = False
     run_restore_job_snapshot: str | None = None
+    # automate-cloud-releases D6: restore from the attempt's clone instead of
+    # restic. The Job mounts the clone read-only beside the cell's volume.
+    run_clone_restore_job: bool = False
 
     # D3, the hourly hold's steps. `backup_prune` makes its Job apply the
     # retention policy and prune; `backup_outcome` records the result on the

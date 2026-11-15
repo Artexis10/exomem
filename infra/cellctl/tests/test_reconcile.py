@@ -114,6 +114,13 @@ class FakeClusterGateway:
     def delete_job(self, namespace: str, name: str) -> None:
         self.events.append(("delete_job", namespace, name))
 
+    def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
+        self.events.append(("delete_snapshot_backup", namespace, snapshot, claim))
+        names = {snapshot, claim}
+        self.jobs[:] = [m for m in self.jobs if m["metadata"]["name"] not in names]
+        for kind, name in (("VolumeSnapshot", snapshot), ("PersistentVolumeClaim", claim)):
+            self.applied.pop((namespace, kind, name), None)
+
     def observe_export_job(self, namespace: str, export_id: str, *, step: str) -> ExportJob:
         return ExportJob()
 
@@ -660,7 +667,7 @@ async def test_a_converged_ready_cell_is_still_considered_for_a_fresh_upgrade(
 ) -> None:
     # Regression: the same is_dirty()-gated skip that hid the nightly-backup
     # bug above also hid a D6 upgrade start. A converged, ready row is
-    # exactly what select_upgrade_candidate() picks -- but the per-row skip
+    # exactly what select_upgrade_candidates() picks -- but the per-row skip
     # ran before decide() ever saw start_upgrade=True, so a new cell_image
     # setting could sit there forever with the upgrade candidate chosen but
     # never actually started. Found live against a real K3s cluster in 3.10.
@@ -1045,6 +1052,10 @@ async def test_an_init_deadline_failure_is_observed_every_pass_but_never_re_appl
         await connection.close()
 
 
+def _job_manifest(cluster: FakeClusterGateway, name: str) -> dict | None:
+    return next((m for m in cluster.jobs if m["metadata"]["name"] == name), None)
+
+
 def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **overrides: object) -> ClusterObservation:
     """What ClusterClient.observe() reports right after the last apply: the
     StatefulSet's own image, replicas and annotations read back, plus a pod
@@ -1059,6 +1070,7 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         HOLD_STARTED_ANNOTATION,
         MEDIA_EDGE_ACCESS_LABEL,
         PRE_UPGRADE_SNAPSHOT_ANNOTATION,
+        PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION,
         PREVIOUS_IMAGE_ANNOTATION,
         RENDER_DIGEST_ANNOTATION,
         RENDER_DIGEST_APPLIED_AT_ANNOTATION,
@@ -1091,6 +1103,42 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         statefulset_hold_started_at=_parse_timestamp(annotations.get(HOLD_STARTED_ANNOTATION)),
         statefulset_previous_image=annotations.get(PREVIOUS_IMAGE_ANNOTATION),
         statefulset_pre_upgrade_snapshot=annotations.get(PRE_UPGRADE_SNAPSHOT_ANNOTATION),
+        statefulset_pre_upgrade_volume_snapshot=annotations.get(
+            PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION
+        ),
+        # ClusterClient's _snapshot_steps, keyed by the annotation's names:
+        # the objects exist once their manifests applied, and the fake
+        # reports them ready/bound at once.
+        # The snapshot and clone manifests go through run_job, so the fake
+        # holds them in `jobs`; it reports them ready and bound at once.
+        snapshot_exists=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(cluster, annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION])
+            is not None
+        ),
+        snapshot_ready=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(cluster, annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION])
+            is not None
+        ),
+        clone_exists=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(
+                cluster,
+                "cell-clone"
+                + annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION][len("cell-snapshot") :],
+            )
+            is not None
+        ),
+        clone_bound=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(
+                cluster,
+                "cell-clone"
+                + annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION][len("cell-snapshot") :],
+            )
+            is not None
+        ),
         statefulset_target_applied_at=_parse_timestamp(annotations.get(TARGET_APPLIED_ANNOTATION)),
         statefulset_restored_snapshot=annotations.get(RESTORED_SNAPSHOT_ANNOTATION),
         # As ClusterClient.observe() reads them: the D6/D8 backup backoff.
@@ -1568,7 +1616,7 @@ async def test_a_refused_digest_candidate_does_not_stall_the_rest_of_the_rotatio
 
 
 def test_a_refused_row_starts_no_upgrade_but_is_backed_up_unless_its_statefulset_was_refused() -> None:
-    from cellctl.rollout import select_upgrade_candidate
+    from cellctl.rollout import select_upgrade_candidates
 
     owner, parked, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
     rows = [
@@ -1582,10 +1630,10 @@ def test_a_refused_row_starts_no_upgrade_but_is_backed_up_unless_its_statefulset
         tenant: _served(tenant),
     }
     now = datetime(2026, 1, 1, 3, tzinfo=UTC)
-    pick = select_upgrade_candidate(
-        rows, observations, RolloutRow(), IMAGE_B, now=now, any_cell_already_upgrading=False, refused=frozenset({parked})
+    pick = select_upgrade_candidates(
+        rows, observations, RolloutRow(), IMAGE_B, now=now, restore_active=False, concurrency_per_node=1, refused=frozenset({parked})
     )
-    assert pick == tenant
+    assert pick == {tenant}
     config = dataclasses.replace(reconcile.DEFAULT_RECONCILE_CONFIG, backup_concurrency=3)
     assert parked in reconcile._select_backup_candidates(rows, observations, now, config)
     assert parked not in reconcile._select_backup_candidates(rows, observations, now, config, frozenset({parked}))
@@ -2643,7 +2691,7 @@ async def test_a_refused_backup_job_is_recorded_parked_and_retried_on_the_backof
 def test_a_failed_restore_stops_blocking_the_fleet_only_once_the_owner_resumes_the_rollout() -> None:
     # Keyed on the hold's age, not its error code: a refusal inside the hold
     # overwrites RESTORE_FAILED with MANIFEST_IMMUTABLE.
-    from cellctl.rollout import select_upgrade_candidate
+    from cellctl.rollout import select_upgrade_candidates
 
     owner, broken, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
     now = datetime(2026, 1, 1, 12, tzinfo=UTC)
@@ -2663,14 +2711,14 @@ def test_a_failed_restore_stops_blocking_the_fleet_only_once_the_owner_resumes_t
         tenant: _served(tenant),
     }
 
-    def pick(rollout: RolloutRow) -> str | None:
+    def pick(rollout: RolloutRow) -> set[str]:
         restoring = any(
             reconcile._restore_blocks_upgrades(row, observations[row.cell_id], rollout, now, config) for row in rows
         )
-        return select_upgrade_candidate(rows, observations, rollout, IMAGE_B, now=now, any_cell_already_upgrading=restoring)
+        return select_upgrade_candidates(rows, observations, rollout, IMAGE_B, now=now, restore_active=restoring, concurrency_per_node=1)
 
-    assert pick(RolloutRow(paused=True)) is None
-    assert pick(RolloutRow(paused=False)) == tenant
+    assert pick(RolloutRow(paused=True)) == set()
+    assert pick(RolloutRow(paused=False)) == {tenant}
     # A restore hold still inside its bound blocks either way.
     young = now - timedelta(minutes=5)
     observations[broken] = dataclasses.replace(observations[broken], statefulset_hold_started_at=young)

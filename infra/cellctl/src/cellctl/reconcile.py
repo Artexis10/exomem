@@ -100,6 +100,7 @@ from .manifests import (
     check_grant_public_key,
     check_media_slot_url,
     check_upload_public_key,
+    clone_claim_name,
     dedicated_placement,
     hold_job_name,
     namespace_name,
@@ -108,10 +109,12 @@ from .manifests import (
     render_cell_manifests,
     render_cell_namespace,
     render_clone_claim,
+    render_clone_restore_job,
     render_export_job,
     render_export_staging_claim,
     render_export_verification_secret,
     render_import_job,
+    render_prepare_job,
     render_restore_job,
     render_volume_snapshot,
     snapshot_backup_name,
@@ -137,9 +140,10 @@ from .rollout import (
     is_candidate,
     owner_cell,
     parked_canary,
-    select_upgrade_candidate,
+    select_upgrade_candidates,
     target_image,
 )
+from .schema_check import SchemaGap, check_schema
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
     BACKUP_FAILED,
@@ -1094,6 +1098,56 @@ def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation,
     return storage.claim_class(observation.pvc_storage_class)
 
 
+def _run_prepare_jobs(
+    cluster: ClusterGateway,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    due: frozenset[str] | None,
+    cell_image: str | None,
+    now: datetime,
+    config: ReconcileConfig,
+) -> None:
+    """automate-cloud-releases D9: one pull-only prepare Job per node per
+    target image, applied before the node's first upgrade window for it, so
+    the window's first attempt finds the image pulled. A Job names its node
+    and target, so a second pass applies the same object (a no-op), one Job
+    serves every cell of the node, and its TTL outlasts any window. A cell
+    already on its target asks for nothing, and a node that already runs the
+    target gets nothing: the image is pulled there by definition."""
+
+    if not config.upgrade_prepare_enabled:
+        return
+    node_images: dict[str, set[str]] = {}
+    for row in rows:
+        node = observations[row.cell_id].pv_node
+        if node is not None:
+            node_images.setdefault(node, set()).add(current_image(row, observations[row.cell_id]) or "")
+    seen_nodes: set[str] = set()
+    for row in rows:
+        observation = observations[row.cell_id]
+        target = target_image(row, cell_image)
+        if target is None or current_image(row, observation) == target:
+            continue
+        node = observation.pv_node
+        if node is None or node in seen_nodes or target in node_images.get(node, frozenset()):
+            continue
+        window = parse_window(observation.statefulset_upgrade_window)
+        window_soon = window is not None and (window.hour - now.hour) % 24 <= 1
+        if row.cell_id not in (due or frozenset()) and not window_soon:
+            continue
+        seen_nodes.add(node)
+        spec = CellManifestSpec(
+            cell_id=row.cell_id, image=target, replicas=0, read_only=False,
+            storage_gib=row.storage_gib,
+        )
+        try:
+            cluster.run_job(render_prepare_job(spec, node=node, image=target))
+        except ApiException as error:
+            if not _is_refusal(error):
+                raise
+            logger.error("cellctl: the prepare Job for node %s was refused: %s", node, error.reason)
+
+
 def _select_backup_candidates(
     rows: list[CellRow],
     observations: dict[str, ClusterObservation],
@@ -1793,7 +1847,7 @@ async def reconcile_once(
     parked = frozenset(cell_id for cell_id, record in refusal_records.items() if now < record.retry_at)
     statefulset_blocked = frozenset(cell_id for cell_id in parked if refusal_records[cell_id].statefulset_blocked)
 
-    upgrade_candidate: str | None = None
+    upgrade_candidates: set[str] = set()
     # Like an upgrade, no relocation starts while a row is unobserved: it may
     # be the owner's, which must relocate first. Started ones continue.
     relocation_candidates = (
@@ -1814,16 +1868,26 @@ async def reconcile_once(
     else:
         due = await _due_cells(cluster, non_deleted_rows, observations, cell_image, render_digests, now,
                                window_config)
-        upgrade_candidate = select_upgrade_candidate(
+        # D4: an upgrade hold counts against the concurrency of the node its
+        # cell's PV is pinned to; a restore hold still blocks every start.
+        upgrading_per_node: dict[str | None, int] = {}
+        for held in non_deleted_rows:
+            if _active_hold(held, observations[held.cell_id]) == "upgrade":
+                node = observations[held.cell_id].pv_node
+                upgrading_per_node[node] = upgrading_per_node.get(node, 0) + 1
+        upgrade_candidates = select_upgrade_candidates(
             non_deleted_rows,
             observations,
             rollout,
             cell_image,
             now=now,
-            any_cell_already_upgrading=any_upgrading or any_restoring,
+            restore_active=any_restoring,
+            upgrading_per_node=upgrading_per_node,
+            concurrency_per_node=config.upgrade_concurrency_per_node,
             refused=refused,
             due=due,
         )
+        _run_prepare_jobs(cluster, non_deleted_rows, observations, due, cell_image, now, config)
         await _publish_parked_canary(connection, rollout, non_deleted_rows, observations, cell_image, refused)
         render_digest_candidate = _select_render_digest_candidate(
             non_deleted_rows, observations, render_digests, now, config, parked, statefulset_blocked, due=due
@@ -1831,7 +1895,7 @@ async def reconcile_once(
     # automate-cloud-releases D3: map the images of every attempt to releases, only
     # when a one-way `cell` barrier makes the releases matter.
     releases: dict[str, str] | None = {}
-    if needs_history(config.upgrade_barriers) and (any_upgrading or upgrade_candidate is not None):
+    if needs_history(config.upgrade_barriers) and (any_upgrading or upgrade_candidates):
         try:
             releases = await db.read_image_releases(connection)
         except asyncpg.PostgresError as error:
@@ -1839,20 +1903,23 @@ async def reconcile_once(
             logger.error("cellctl: the image history could not be read; no upgrade starts this pass: %s",
                          _describe_error(error))
             releases = None
-            upgrade_candidate = None
-    if upgrade_candidate is not None and releases is not None:
-        candidate_row = next(row for row in non_deleted_rows if row.cell_id == upgrade_candidate)
-        candidate_observation = observations[upgrade_candidate]
-        if crosses_backward(_release(current_image(candidate_row, candidate_observation), releases),
-                            _release(target_image(candidate_row, cell_image), releases), config.upgrade_barriers):
-            logger.error("cellctl: the target of cell %s lies before a one-way barrier that its image is past; "
-                         "the rollout pauses with %s", upgrade_candidate, UPGRADE_BACKWARD_CROSSING)
-            await db.write_rollout(
-                connection,
-                {"paused": True, "error_code": UPGRADE_BACKWARD_CROSSING, "held_cell_id": upgrade_candidate},
-                only_if={"paused": False},
-            )
-            upgrade_candidate = None
+            upgrade_candidates = set()
+    if upgrade_candidates and releases is not None:
+        for candidate in set(upgrade_candidates):
+            candidate_row = next(row for row in non_deleted_rows if row.cell_id == candidate)
+            candidate_observation = observations[candidate]
+            if crosses_backward(_release(current_image(candidate_row, candidate_observation), releases),
+                                _release(target_image(candidate_row, cell_image), releases),
+                                config.upgrade_barriers):
+                logger.error("cellctl: the target of cell %s lies before a one-way barrier that its image is past; "
+                             "the rollout pauses with %s", candidate, UPGRADE_BACKWARD_CROSSING)
+                await db.write_rollout(
+                    connection,
+                    {"paused": True, "error_code": UPGRADE_BACKWARD_CROSSING, "held_cell_id": candidate},
+                    only_if={"paused": False},
+                )
+                upgrade_candidates.clear()
+                break
     crossing = {
         row.cell_id: releases is None or crosses_forward(
             _release(observations[row.cell_id].statefulset_previous_image or row.observed_image, releases),
@@ -1873,7 +1940,7 @@ async def reconcile_once(
     fast = (
         fleet_unobserved
         or media_unsettled
-        or upgrade_candidate is not None
+        or bool(upgrade_candidates)
         or bool(relocation_candidates)
         or bool(backup_candidates)
         or render_digest_candidate is not None
@@ -1900,7 +1967,7 @@ async def reconcile_once(
                 rollout,
                 cell_image,
                 render_digests[row.cell_id],
-                start_upgrade=row.cell_id == upgrade_candidate,
+                start_upgrade=row.cell_id in upgrade_candidates,
                 start_backup=row.cell_id in backup_candidates,
                 start_relocation=row.cell_id in relocation_candidates,
                 crossing=crossing.get(row.cell_id, False),
@@ -2981,15 +3048,23 @@ async def _reconcile_row(
         )
 
     if decision.delete_snapshot_backup and (observation.statefulset_hold_started_at is not None
-                                            or observation.statefulset_backup_family_request is not None):
+                                            or observation.statefulset_backup_family_request is not None
+                                            or observation.statefulset_pre_upgrade_volume_snapshot is not None):
         # D3: whatever happens to the cell or its apply, the hold's clone and
-        # snapshot go. Named from the hold-started string they were made with.
-        started = observation.statefulset_hold_started_at.isoformat() if observation.statefulset_hold_started_at else None
-        request = FamilyRequest.parse(observation.statefulset_backup_family_request) if observation.statefulset_backup_family_request else None
-        cluster.delete_snapshot_backup(
-            namespace_name(row.cell_id), snapshot_backup_name(SNAPSHOT_NAME, row.cell_id, started, request),
-            snapshot_backup_name(CLONE_CLAIM_NAME, row.cell_id, started, request)
-        )
+        # snapshot go. An upgrade hold's pair is named from the VolumeSnapshot
+        # its annotation recorded (the current hold's start belongs to a
+        # different hold); anything else derives names from its hold-started
+        # string, as they were made with.
+        if observation.statefulset_pre_upgrade_volume_snapshot is not None:
+            vol_name = observation.statefulset_pre_upgrade_volume_snapshot
+            snapshot_name = vol_name
+            clone_name = clone_claim_name(vol_name)
+        else:
+            started = observation.statefulset_hold_started_at.isoformat() if observation.statefulset_hold_started_at else None
+            request = FamilyRequest.parse(observation.statefulset_backup_family_request) if observation.statefulset_backup_family_request else None
+            snapshot_name = snapshot_backup_name(SNAPSHOT_NAME, row.cell_id, started, request)
+            clone_name = snapshot_backup_name(CLONE_CLAIM_NAME, row.cell_id, started, request)
+        cluster.delete_snapshot_backup(namespace_name(row.cell_id), snapshot_name, clone_name)
 
     # D4 relocation: the old PV is set to Retain one pass, and its claim is
     # deleted only on a later pass that observes Retain (admission checks it
@@ -3127,6 +3202,7 @@ async def _reconcile_row(
             hold_started_at=decision.hold_started_at.isoformat() if decision.hold_started_at else None,
             previous_image=decision.previous_image,
             pre_upgrade_snapshot=decision.pre_upgrade_snapshot,
+            pre_upgrade_volume_snapshot=decision.pre_upgrade_volume_snapshot,
             target_applied_at=decision.target_applied_at.isoformat() if decision.target_applied_at else None,
             restored_snapshot=decision.restored_snapshot,
             backup_outcome=decision.backup_outcome,
@@ -3240,7 +3316,8 @@ async def _reconcile_row(
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
         steps = (decision.import_action or decision.run_export_job or transfer_run or decision.run_backup_job
-                 or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone)
+                 or decision.run_restore_job_snapshot or decision.run_clone_restore_job
+                 or decision.create_snapshot or decision.create_clone)
         local = cluster_config.storage.local
         if jobs_parked and steps:
             # A Job refused for this key waits out the backoff.
@@ -3277,11 +3354,18 @@ async def _reconcile_row(
             if family is not None:
                 cluster.apply_all([render_backup_family_secret(spec, namespace=local.reservation_namespace, token=family["token"],
                     physical_uuid=family["physicalSourceUUID"])])
+            if (decision.create_snapshot or decision.create_clone) and local is not None:
+                snapshot_name = spec.pre_upgrade_volume_snapshot or snapshot_backup_name(
+                    SNAPSHOT_NAME, spec.cell_id, spec.hold_started_at,
+                    FamilyRequest.parse(spec.backup_family_request) if spec.backup_family_request else None)
+                clone_name = clone_claim_name(snapshot_name)
             if decision.create_snapshot and local is not None:
-                _run_cell_job(cluster, row.cell_id, render_volume_snapshot(spec, snapshot_class=local.snapshot_class),
+                _run_cell_job(cluster, row.cell_id, render_volume_snapshot(
+                    spec, snapshot_name=snapshot_name, snapshot_class=local.snapshot_class),
                               job_refused)
             if decision.create_clone and local is not None:
-                _run_cell_job(cluster, row.cell_id, render_clone_claim(spec, clone_class=local.clone_class), job_refused)
+                _run_cell_job(cluster, row.cell_id, render_clone_claim(
+                    spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class), job_refused)
             if decision.run_backup_job:
                 _run_cell_job(
                     cluster,
@@ -3302,6 +3386,17 @@ async def _reconcile_row(
                         **_backup_store(cluster_config, spec),
                         snapshot_id=decision.run_restore_job_snapshot,
                     ),
+                    job_refused,
+                )
+            if decision.run_clone_restore_job:
+                # automate-cloud-releases D6: the Job mounts the clone the
+                # attempt's annotation names, beside the cell's own volume.
+                vol_name = spec.pre_upgrade_volume_snapshot or ""
+                clone_name = clone_claim_name(vol_name)
+                _run_cell_job(
+                    cluster,
+                    row.cell_id,
+                    render_clone_restore_job(spec, snapshot_claim=clone_name),
                     job_refused,
                 )
         refused = refused + job_refused
@@ -3548,9 +3643,11 @@ def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservati
 
 def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
     """D3: the hourly hold reads its clone and prunes only on its first run
-    after 02:00 UTC; the stopped pre-upgrade backup of a local cell never
-    prunes, nor does a planned move's. Every other backup of a Hetzner cell
-    keeps its claim and the nightly prune, as before local storage."""
+    after 02:00 UTC. No pre-upgrade backup prunes: on a cell without
+    snapshot support the prune would hold restic's exclusive lock inside
+    the stop (automate-cloud-releases D6). A planned move's stopped backup
+    never prunes either. Every other backup keeps its claim and the nightly
+    prune, as before local storage."""
 
     if decision.hold_kind == SNAPSHOT_BACKUP:
         return {
@@ -3558,8 +3655,13 @@ def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
                 FamilyRequest.parse(spec.backup_family_request) if spec.backup_family_request else None),
             "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
         }
-    if decision.hold_kind == MOVE or (spec.local_volume and decision.hold_kind == "upgrade"):
-        # A move's cell is down while its backup runs, so it never prunes either.
+    if decision.hold_kind == "upgrade":
+        # Only a snapshot-backed attempt reads a clone. Old and reservation-backed
+        # local attempts still run a stopped restic backup on the live claim.
+        if spec.pre_upgrade_volume_snapshot is not None:
+            return {"claim_name": clone_claim_name(spec.pre_upgrade_volume_snapshot), "retention": None}
+        return {"retention": None}
+    if decision.hold_kind == MOVE:
         return {"retention": None}
     return {"retention": RETENTION_ARGS}
 
@@ -3636,11 +3738,17 @@ async def run_loop(
                     connection.add_termination_listener(lambda *_args, w=woken: w.set())
                     if not await db.try_advisory_lock(connection):
                         raise RuntimeError("cellctl advisory lock is held by another writer")
+                    # D7: every table and column cellctl reads or writes, on
+                    # every (re)connect. A gap is a deploy-order fault, not an
+                    # outage: stop naming it rather than act on half a schema.
+                    gaps = await check_schema(connection, access_record=cluster_config.access_record_enabled)
+                    if gaps:
+                        raise SchemaGap("cellctl refuses to start; the schema is missing: " + "; ".join(gaps))
                     cluster_config = await _observe_media_key_columns(connection, cluster_config)
                     cluster_config = dataclass_replace(
                         cluster_config, deletion_grant_column=await db.has_deletion_grant_column(connection))
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
-                except MediaKeyColumnsMissing:
+                except (MediaKeyColumnsMissing, SchemaGap):
                     # A deploy-order fault, not an outage: stop, so the rollout fails where it started.
                     raise
                 except Exception as error:  # noqa: BLE001
