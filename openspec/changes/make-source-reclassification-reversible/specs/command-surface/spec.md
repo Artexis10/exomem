@@ -100,3 +100,77 @@ The operation SHALL offer a revert that restores the source's latest recorded pr
 - **WHEN** revert is requested for a source whose only history entry came from a legacy scalar
 - **THEN** the revert is refused with the reason
 - **AND** nothing changes
+
+### Requirement: A move follows the prose paths that name the moved file
+
+The move operation SHALL rename the exact vault path of each moved file where a page body cites it in prose, unless wikilink updating is disabled. It SHALL find those pages through the maintained search catalogue and SHALL NOT walk the vault. It SHALL change only a page body, never text inside a recorded origin carrier, and SHALL match whole paths only.
+
+The operation SHALL leave a Source or Evidence page that cites the path as captured, and SHALL NOT refuse a move because of such a citation. It SHALL report how many pages kept one. When the catalogue cannot answer, the operation SHALL say that path mentions were not checked rather than report none.
+
+#### Scenario: A note citing the path follows the move
+
+- **WHEN** a mutable note cites a raw artifact by its vault path in prose and the artifact is moved
+- **THEN** the note names the new path and the result counts the rewritten mentions
+
+#### Scenario: A Source card citing the path is left as captured
+
+- **WHEN** a captured Source card cites the artifact by its vault path in prose and the artifact is moved
+- **THEN** the move succeeds and the card is unchanged
+- **AND** the result warns that an append-only page kept a mention
+
+#### Scenario: A longer path is not renamed
+
+- **WHEN** a page names `<path>.bak` or a file whose name ends with the moved file's name
+- **THEN** that text is unchanged after the move
+
+#### Scenario: An unanswered lookup is reported
+
+- **WHEN** the search catalogue cannot answer during a move
+- **THEN** the move still applies and its warnings state that path mentions were not checked
+
+### Requirement: The audit reports a Source pointer that does not name its bytes
+
+The audit SHALL offer the category `source_pointer_drift`. For a Source or Evidence card it SHALL check each structured pointer to its raw artifact (`evidence_file`, `data_file`, and the `artifact_path` of `raw_protection` and `governance_companion`) and report a pointer that names no file, leaves the vault, or names a file whose size or SHA-256 differs from the recorded one. A card with no structured pointer SHALL be checked through the custody paths its body cites in a code span. A healthy structured pointer SHALL end any finding about the card's prose.
+
+Each finding SHALL name the card, the field, the recorded path and the problem, and SHALL name a candidate path only when exactly one same-named file exists under the custody trees. The audit SHALL hash a file only when its recorded modification time no longer matches, within a byte budget per run, and SHALL report its coverage as unknown when the budget leaves a file unread.
+
+#### Scenario: A pointer left behind by a move names its candidate
+
+- **WHEN** a card's `data_file` names a path that no longer exists and one same-named file exists under Sources
+- **THEN** the audit reports the card with that candidate path
+
+#### Scenario: Two same-named files propose nothing
+
+- **WHEN** two files under Sources share the missing file's name
+- **THEN** the finding names no candidate
+
+#### Scenario: A card with only a prose path is checked
+
+- **WHEN** a Source card has no structured pointer and its body cites a custody path that no longer exists
+- **THEN** the audit reports the card, and reports nothing once a repaired pointer names an existing file
+
+### Requirement: A Source's pointer to its bytes can be repaired and reverted
+
+The reclassification operation SHALL accept `artifact_path`, a vault path to the raw file the card describes. It SHALL set every scalar pointer the card records, or `evidence_file` when it records none, and SHALL record the previous values in the new `reclassified_from` entry so that a revert restores them. A repair that names no kind or domain SHALL NOT move the card or change its classification.
+
+It SHALL refuse a target that is not a vault-relative file under a custody tree, a target that does not exist, a target whose size or SHA-256 differs from the identity the card records, and a card whose pointer sits in a `raw_protection` or `governance_companion` descriptor.
+
+#### Scenario: A repair is recorded and reverted
+
+- **WHEN** a card's `evidence_file` names a missing path and a repair names the file that exists
+- **THEN** the card names that file, and its history entry records the previous value
+- **AND** reverting the entry restores the previous value
+
+#### Scenario: A repair to a missing or different file is refused
+
+- **WHEN** the named file does not exist, or its bytes differ from the recorded SHA-256
+- **THEN** the repair is refused and the card is unchanged
+
+### Requirement: A binary sidecar records that no kind was chosen
+
+A sidecar card that the system writes for a binary artifact SHALL record the unclassified kind unless the artifact is a dataset export. It SHALL NOT record the retired `other` kind.
+
+#### Scenario: A preserved binary is left for a person to classify
+
+- **WHEN** a binary file is preserved with no kind chosen
+- **THEN** its sidecar records the unclassified kind

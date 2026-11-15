@@ -191,6 +191,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "transient_state_review",
     "collection_view_corrections",
     "original_fixity",
+    "source_pointer_drift",
 )
 # The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
 DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
@@ -838,6 +839,12 @@ def audit(
             findings.extend(fixity_findings)
             if fixity_coverage is not None:
                 metadata.setdefault("coverage", {})["original_fixity"] = fixity_coverage
+    with stage('source_pointer_drift') as run:
+        if run:
+            pointer_findings, pointer_coverage = _check_source_pointers(vault_root, pages)
+            findings.extend(pointer_findings)
+            if pointer_coverage is not None:
+                metadata.setdefault("coverage", {})["source_pointer_drift"] = pointer_coverage
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     with stage(semantic_categories) as run:
         if run:
@@ -906,6 +913,66 @@ def _check_original_fixity(vault_root: Path) -> tuple[list[AuditFinding], str | 
     from . import original_fixity
 
     return original_fixity.attention_findings(vault_root)
+
+
+@call_spans.timed("audit.source_pointer_drift")
+def _check_source_pointers(
+    vault_root: Path, pages: list[find_module.ParsedPage]
+) -> tuple[list[AuditFinding], str | None]:
+    """A Source or Evidence card whose recorded pointer no longer names its bytes.
+
+    Coverage is "unknown" when the run's hashing budget left a changed file unread.
+    """
+    from . import source_pointers
+
+    inspector = source_pointers.Inspector(vault_root)
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if page.page_type != "source" or in_append_only_tree(page.rel_path) is None:
+            continue
+        request_budget.checkpoint()
+        for drift in inspector.inspect_card(page.frontmatter, page.body):
+            candidate = (
+                inspector.candidate(drift.recorded_path)
+                if drift.problem == source_pointers.MISSING
+                else None
+            )
+            repointable = drift.field in (
+                *source_pointers.SCALAR_POINTERS,
+                source_pointers.BODY_FIELD,
+            )
+            if candidate and repointable:
+                fix = (
+                    f"Point the card at its bytes: reclassify_source with "
+                    f"artifact_path={candidate!r}."
+                )
+            elif candidate:
+                fix = f"Move the file {candidate!r} back to {drift.recorded_path!r} with move_file."
+            else:
+                fix = (
+                    f"Restore the file at {drift.recorded_path!r}, or point the card at its "
+                    "bytes with reclassify_source and artifact_path."
+                )
+            findings.append(
+                AuditFinding(
+                    category="source_pointer_drift",
+                    severity="error" if drift.problem == source_pointers.CONTENT else "warn",
+                    path=str(page.rel_path),
+                    detail=(
+                        f"{drift.field} names {drift.recorded_path}: "
+                        f"{source_pointers.PROBLEM_TEXT[drift.problem]}"
+                    ),
+                    proposed_fix=fix,
+                    paths=[drift.recorded_path, *([candidate] if candidate else [])],
+                    meta={
+                        "field": drift.field,
+                        "recorded_path": drift.recorded_path,
+                        "problem": drift.problem,
+                        "candidate_path": candidate,
+                    },
+                )
+            )
+    return findings, "unknown" if inspector.unchecked else None
 
 
 @call_spans.timed("audit.bridge_review")

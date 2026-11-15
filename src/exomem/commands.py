@@ -6347,18 +6347,22 @@ def op_move_file(
     When `update_wikilinks=true` (default), scans the full vault for
     `[[<old>]]`, `[[<old.md>]]`, and `[[<old_basename>]]` (only when the
     basename is unique vault-wide) and rewrites them to point at the
-    new location. Preserves full-form vs stripped-form per link.
+    new location. Preserves full-form vs stripped-form per link. It also
+    renames the exact old vault path where a page body cites it in prose,
+    and leaves a Source or Evidence page that cites it as captured (a
+    warning counts those).
 
     Args:
         old_path: Vault-relative source.
         new_path: Vault-relative destination (must not exist).
-        update_wikilinks: Default true.
+        update_wikilinks: Default true; also covers prose path mentions.
         allow_curated: Required if either end is in a curated tree.
         promotion_reason: Required only for a Sources/ -> Evidence/ promotion;
             recorded in the activity log as the audit trail for the
             reclassification.
 
-    Returns: {old_path, new_path, wikilinks_updated, files_touched, warnings}.
+    Returns: {old_path, new_path, wikilinks_updated, path_mentions_updated,
+    files_touched, warnings}.
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
             CURATED_PROTECTED; PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH
             (either end is a store collection's view path).
@@ -13909,6 +13913,7 @@ def op_reclassify_source(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    artifact_path: str | None = None,
     reason: str | None = None,
 ) -> dict:
     """Correct a captured source's classification and relocate it to match.
@@ -13930,6 +13935,11 @@ def op_reclassify_source(
 
     Both vocabularies are open, exactly as at capture: name the kind and domain
     you actually mean rather than the closest familiar label.
+
+    `artifact_path` repairs the source's pointer to its raw file, for a source whose
+    file moved. It names an existing file under Sources/ or Evidence/ that fits the
+    size and SHA-256 the source records. Alone it leaves the source where it is; revert
+    restores the earlier pointer.
     """
     from . import reclassify_source as reclassify_module
 
@@ -13939,6 +13949,7 @@ def op_reclassify_source(
             path=path,
             source_kind=source_kind,
             domain=domain,
+            artifact_path=artifact_path,
             reason=reason,
         )
     except reclassify_module.ReclassifyError as error:
@@ -14017,6 +14028,7 @@ def op_manage_memory_file(
     new_path: str | None = None,
     source_kind: str | None = None,
     domain: str | None = None,
+    artifact_path: str | None = None,
     reason: str | None = None,
     update_wikilinks: bool = True,
     confirm: bool = False,
@@ -14048,6 +14060,7 @@ def op_manage_memory_file(
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
+        artifact_path: reclassify only: the existing file the source's pointer must name.
         reason: Required for reclassify and revert-reclassification.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
@@ -14163,6 +14176,7 @@ def op_manage_memory_file(
             path=target,
             source_kind=source_kind,
             domain=domain,
+            artifact_path=artifact_path,
             reason=reason,
         )
     if operation == "trash-list":

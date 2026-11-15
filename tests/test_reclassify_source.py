@@ -1072,3 +1072,37 @@ def test_an_edit_after_preflight_survives_the_failed_relocation(
     assert injected
     assert page.read_text() == edited
     assert "classification_history" not in _front(vault, source)
+
+
+def test_a_reclassified_source_is_followed_by_prose_paths_in_notes_but_not_in_evidence(
+    vault: Path,
+) -> None:
+    """A page that cites the source by vault path in prose must follow it, or say it stayed.
+
+    The Note is rewritable and has to name the new location; the Evidence page is immutable, so
+    it keeps its bytes, the move still goes ahead, and the preview names it as left unchanged.
+    """
+    source = _legacy_source(vault)
+    evidence = _write(
+        vault,
+        f"{KB}/Evidence/Harbor/tide-proof.md",
+        f"---\ntype: evidence\n---\n\nThe table is kept at `{source}`.\n",
+    )
+    evidence_bytes = evidence.read_bytes()
+    note = _write(
+        vault,
+        f"{KB}/Notes/Insights/tide-note.md",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nThe table: `{source}`.\n",
+    )
+
+    preview = rc.propose(vault, source, source_kind="dataset", domain="travel")
+    result = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel", reason="a table of readings"
+    )
+
+    assert preview.append_only_unchanged == {
+        rc.MENTION_FORM: (f"{KB}/Evidence/Harbor/tide-proof.md",)
+    }
+    assert preview.rewritten == (f"{KB}/Notes/Insights/tide-note.md",)
+    assert f"`{result.new_path}`" in note.read_text(encoding="utf-8")
+    assert evidence.read_bytes() == evidence_bytes
