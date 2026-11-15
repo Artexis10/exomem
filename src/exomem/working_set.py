@@ -1681,8 +1681,8 @@ def task_candidates(
 def attach_task_links(
     vault_root: Path, candidates: Sequence[dict[str, Any]], *, link_targets: Mapping[str, Any], caller: Any,
     timings: Any = None,
-) -> list[dict[str, str]]:
-    """List each served lead's outbound links on it, and return the missing reasons of a skipped lookup.
+) -> list[str]:
+    """List each served lead's outbound links on it, and return the task-context missing reasons of a skipped lookup.
 
     Links are read only for the leads that projection kept, and only with the time that projection left: a lead
     without its links still serves the turn, but a link lookup that ran first could spend the deadline that
@@ -1693,7 +1693,7 @@ def attach_task_links(
     if not candidates or not link_targets:
         return []
     if budget_exhausted("working_set.task_context_links"):
-        return [{"role": "task_context", "reason": "budget"}]
+        return ["budget"]
     try:
         with find_types.timing_span(timings, "working_set.task_context_links"):
             links = _task_links(vault_root, candidates, by_path=link_targets, visible=caller.visible)
@@ -1701,7 +1701,7 @@ def attach_task_links(
         log.debug("task-context links unavailable", exc_info=True)
         links = None
     if links is None:
-        return [{"role": "task_context", "reason": "lane_failed"}]
+        return ["lane_failed"]
     for candidate in candidates:
         listed, omitted = links.get(candidate["source_ref"], ((), 0))
         if listed:

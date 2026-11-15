@@ -541,7 +541,7 @@ def compile_context(
         for reason in working_set.attach_task_links(
             root, candidates, link_targets=link_targets, caller=caller, timings=timings,
         ):
-            _add_missing(block, reason["reason"])
+            _add_missing(block, reason)
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
             # Links spend only what every lead and method leaves, so a link never displaces one.

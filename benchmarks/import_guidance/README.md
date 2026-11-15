@@ -179,3 +179,12 @@ This family measures recall on short follow-up turns: a carried subject ("and th
 - Generate with `run --suite session-close --case-dir benchmarks/import_guidance/scenarios/follow-up`. No case has a `recall_turn`; the last reply is what matters.
 - The scorer's capture judge never reads replies, so `session-score` yields only the deterministic page checks (the session must change no page). Reply quality is judged by the replay batch: run `PYTHONPATH=benchmarks python -m import_guidance.followup_judge_scenarios --case-dir <cases> --out <judge dir>`, then `judge-prepare --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>` and, once the judge returns lines, `judge-import --judgments <file> --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>`.
 - `answer-keys/<id>.json` is the session-close key; `answer-keys/<id>.marks.json` carries the same reference for the judge batch. The criteria F1 to F3 apply to the final reply only.
+
+## Skills suite
+
+These cases test whether an agent loads a vault skill when a task matches it, and loads none otherwise. A vault skill is a `SKILL.md` page that the first `recall_context` lists in its `skills` block. The cases live in `scenarios/skills/` and use the session-close format and the follow-up rubric.
+
+- `s01` asks for the task the seeded skill describes. The agent passes when it reads the skill page with `read_page` before its reply, and the reply follows the skill's steps.
+- `s02` is unrelated to the vault, and `s03` asks a fact about the skill's subject that the skill does not cover. Each passes when the agent reads no skill page.
+
+Generate with `run --suite session-close --case-dir <absolute path to scenarios/skills>`. The skill read is deterministic: count `read_page` calls on the skill's path or ref in each run's `calls`, before the final reply. Judge the reply as the follow-up suite does.

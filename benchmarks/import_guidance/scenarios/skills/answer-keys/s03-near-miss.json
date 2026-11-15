@@ -1,0 +1,10 @@
+{
+  "reference": "The turn asks for the agreed label rate with Larkspur Print. A correct reply says 0.12 EUR per label under purchase order PO-4471. It is a fact lookup, not a dispute reply, so it drafts no letter. SEED FACTS. Skill supplier-dispute-reply (Skills/supplier-dispute-reply/SKILL.md): use when drafting a reply to a supplier who disputes an invoice or payment; steps: 1 open with the invoice number and date as the supplier wrote them; 2 state the purchase-order rate and the purchase order number; 3 offer exactly one weekday-morning call slot; 4 admit no liability and promise no payment date; 5 sign off as 'Accounts team'. Larkspur Print (organization entity, tag supplier): print supplier for warehouse labels; purchase order PO-4471 agrees 0.12 EUR per label; invoices paid within 30 days.",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/Organizations/Larkspur Print.md",
+    "Skills/supplier-dispute-reply/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none"
+}
