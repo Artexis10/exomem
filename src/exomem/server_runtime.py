@@ -592,6 +592,27 @@ class LocalRuntimeActivation:
     def _start_vault_projector(self, vault_root: Path) -> None:
         self.vault_projector = _start_vault_projector(vault_root)
 
+    def _start_projector_for_the_stop_drain(self) -> None:
+        """Start the vault projector at the stop when activation has not, if it has work.
+
+        HTTP accepts a write before activation starts the projector, so a stop then had no
+        projector to drain and left that write's projections queued. The next stop of the workers
+        drains this one, bounded, before the lease hand-back. Activation has ended by now, so no
+        second projector can start beside it. A standby owns no writes; a file-mode vault and a
+        store-mode vault with an empty queue start nothing.
+        """
+        if self.vault_projector is not None or self._deferred:
+            return
+        from .vault_store import mode
+
+        try:
+            queued = mode.projections_queued(self.vault_root)
+        except Exception:  # noqa: BLE001 - an unreadable store leaves its queue to the next start
+            log.warning("the stop could not read the vault projection queue", exc_info=True)
+            return
+        if queued:
+            self._start_component("vault projector", self._start_vault_projector)
+
     def _start_dreamer(self, vault_root: Path) -> None:
         self.dreamer = _start_dreamer(vault_root)
 
@@ -617,6 +638,7 @@ class LocalRuntimeActivation:
             shutdown_error = error
         if thread is not None and thread is not threading.current_thread():
             await anyio.to_thread.run_sync(thread.join)
+        await anyio.to_thread.run_sync(self._start_projector_for_the_stop_drain)
         # A starter may have assigned its worker after the first stop.
         try:
             await anyio.to_thread.run_sync(self._stop_background_workers)

@@ -402,7 +402,7 @@ def test_product_and_canonical_mcp_schemas_are_strict_bounded_integers(
     # The public tool carries the knob in `options`; the same bound refuses a boolean there.
     refused = asyncio.run(
         mcp.call_tool("search_memory", {"query": "", "options": {"rerank_max_candidates": True}})
-    ).structured_content
+    ).structured_content["result"]  # search_memory's tool wraps every reply, refusals included, under "result"
     assert refused["error"]["code"] == "INVALID_ARGUMENT"
     assert "rerank_max_candidates" in refused["error"]["message"]
 

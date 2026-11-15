@@ -247,6 +247,42 @@ def _recorded_identity(vault: Path, path: Path, snapshot: OriginalSnapshot) -> s
         conn.close()
 
 
+# SQLite's smallest default limit on bound parameters is 999; a chunk stays below it.
+_LEDGER_PATHS_PER_QUERY = 500
+
+
+def recorded_versions(
+    vault: Path, wanted: list[tuple[originals.BinaryBinding, StoredObject]],
+) -> list[bool]:
+    """For each binding in `wanted`, whether the ledger records that exact version at its path.
+
+    The media store writes that row itself when it offloads, reads or evicts the original there, and
+    no note writes one, so a row is the store's own evidence that the version belongs at the path.
+    Reads without creating state or a store client, a few paths per query; raises `sqlite3.Error`
+    when the ledger cannot be read.
+    """
+    store = MediaJobStore(Path(vault).resolve(), create=False)
+    if not wanted or not store.path.exists():
+        return [False] * len(wanted)
+    keys = [store._relative(store.vault_root / binary.path) for binary, _reference in wanted]
+    paths = sorted(set(keys))
+    rows: dict[str, tuple[str, str]] = {}
+    with closing(store._connect(readonly=True)) as conn:
+        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_cache' AND type = 'table'").fetchone() is None:
+            return [False] * len(wanted)
+        for start in range(0, len(paths), _LEDGER_PATHS_PER_QUERY):
+            chunk = paths[start:start + _LEDGER_PATHS_PER_QUERY]
+            rows.update(
+                (row["binary_rel"], (row["reference"], row["sha256"]))
+                for row in conn.execute(
+                    f"SELECT binary_rel, reference, sha256 FROM media_cache WHERE binary_rel IN ({', '.join('?' * len(chunk))})",
+                    chunk,
+                )
+            )
+    return [rows.get(key) == (_reference_key(reference), binary.sha256)
+            for key, (binary, reference) in zip(keys, wanted, strict=True)]
+
+
 def cache_matches(vault: Path, path: Path, *, snapshot: OriginalSnapshot | None = None) -> bool:
     """Read a proven cache identity without creating state or a store client."""
     selected = snapshot if snapshot is not None else original_state(vault, path)
@@ -1393,12 +1429,13 @@ def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO) 
     return _decrypt_into(store_for(vault), reference, str(_settings(vault)["identity_path"]), sink)
 
 
-def _payload_path(companion: str, binary: originals.BinaryBinding) -> str:
+def _payload_path(companion: str, binary: originals.BinaryBinding, displaced: bool) -> str:
     """Where an original's bytes belong: a live original's bound path, or a Trash payload's path beside its companion.
 
-    A Trash companion of a deleted folder binds the path that the original had before the deletion.
+    A Trash companion of a deleted folder binds the path that the original had before the deletion. A
+    displaced page (`media_allowance.bound_references`) sits away from its original, which stays at its bound path.
     """
-    if trash_metadata.is_trash_path(companion):
+    if not displaced and trash_metadata.is_trash_path(companion):
         return (PurePosixPath(companion).parent / PurePosixPath(binary.path).name).as_posix()
     return binary.path
 
@@ -1406,19 +1443,21 @@ def _payload_path(companion: str, binary: originals.BinaryBinding) -> str:
 def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
     """Each original whose bytes are not on the volume and whose version the store holds, Trash included.
 
-    Yields the path that the archive gives it: a live original's bound path, or a Trash payload's path
-    beside its companion. A companion that cannot be read binds nothing, so the ledger, which keeps a row
+    Yields the path that the archive gives it, once however many pages bind it: a live original's bound path,
+    or a Trash payload's path beside its companion. A companion that cannot be read binds nothing, so the ledger, which keeps a row
     for each evicted path, gives the version of an original behind one. Raises `MEDIA_LEDGER_UNRESOLVED`
     when such a row does not hold a version of this store with its size. The caller holds the consistency guard.
     """
     ledger = MediaJobStore(vault)
     counted: set[str] = set()
     unreadable: set[str] = set()
-    for companion, binary, reference in media_allowance.bound_references(
+    yielded: set[str] = set()
+    for companion, binary, reference, displaced in media_allowance.bound_references(
             vault, binding, unreadable=lambda path, _error: unreadable.add(path)):
         counted.add(ledger._relative(ledger.vault_root / binary.path))
-        path = _payload_path(companion, binary)
-        if not _on_volume(vault, path):
+        path = _payload_path(companion, binary, displaced)
+        if path not in yielded and not _on_volume(vault, path):
+            yielded.add(path)
             yield path, binary, reference
     if not unreadable:
         return
@@ -1502,6 +1541,31 @@ def pin_original(vault: Path, path: str | Path, *, read: bool = False):
         snapshot = original_state(root, target)
         if snapshot.state == "evicted":
             _hydrate(root, snapshot, ledger, token)
+        yield
+
+
+@contextmanager
+def moved_originals(vault: Path, rel: str):
+    """Fetch the original that moving the file `rel` carries, and pin it until the move returns.
+
+    An original carries itself. A page carries the binding of the original beside it, which the
+    move would strand: a resident one is pinned, and an evicted one is fetched only when the caller
+    may see it (`originals.evicted_visible_original`), so a withheld one stays in the store and the
+    page moves as if no original were there. Only that exact file is selected, so a page's name
+    never selects a folder of originals beside it.
+    """
+    carried: str | None = rel
+    if originals.is_note_path(rel):
+        carried = rel[:-3]
+        if not carried or originals.is_note_path(carried):
+            carried = None
+        elif not (Path(vault) / carried).is_file():
+            stored = originals.evicted_visible_original(vault, carried)
+            carried = None if stored is None else stored[1]
+    if carried is None:
+        yield
+        return
+    with local_originals(vault, (carried,)):
         yield
 
 
@@ -2091,10 +2155,10 @@ def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str
     Raises when a companion or a path cannot be read: an incomplete census is unknown, never a lower count.
     """
     found: dict[str, tuple[originals.BinaryBinding, StoredObject]] = {}
-    for companion, binary, reference in media_allowance.bound_references(vault, binding):
-        path = _payload_path(companion, binary)
+    for companion, binary, reference, displaced in media_allowance.bound_references(vault, binding):
+        path = _payload_path(companion, binary, displaced)
         if not _on_volume(vault, path):
-            found[path] = (binary, reference)
+            found.setdefault(path, (binary, reference))  # As in `evicted_members`, the first page to bind a path wins.
     return found
 
 

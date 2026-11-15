@@ -11,7 +11,7 @@ Native clients load skills by progressive disclosure: every skill's name and des
 Clients without native skills, such as chat apps connected over MCP, get none of this from the vault.
 
 Ordinary turns also miss context for a separate reason: the start-of-turn hook delegates activation to the agent with an instruction to call recall once, and agents seldom call it again.
-That delivery problem is recorded here and settled by later tasks in this change once measured.
+A measured replay settled the delivery: the hook pushes the cheap turn-independent context on every turn, and the agent pulls for each new subject.
 
 ## What Changes
 
@@ -29,7 +29,8 @@ That delivery problem is recorded here and settled by later tasks in this change
 
 ### Modified Capabilities
 
-- None in canonical specs yet. Later tasks add the measured delivery change to `retrieve-inject-hook`.
+- `retrieve-inject-hook`: native activation mode injects changed session context from an empty-turn recall.
+- `agent-prominence-control`: the nudge and server instructions ask for recall per new subject, not once per conversation.
 
 ## Impact
 
