@@ -262,6 +262,9 @@ async def claim_upload(vault_root: Path, token: str) -> dict:
             if json.loads(path.read_text(encoding="utf-8")) != record or float(record["expires"]) <= _now():
                 raise _unavailable()
             path.unlink()
+            # Refuse before accepting bytes if consumption cannot survive a crash;
+            # otherwise replay can recreate a cancelled import's upload identity.
+            private_state.sync_directory(store)
         except (OSError, ValueError, KeyError, TypeError):
             raise _unavailable() from None
     return {**record, "principal": who, "nonce": secret}

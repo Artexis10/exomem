@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import replace
+from io import BytesIO
 
 import httpx
 import pytest
@@ -152,6 +153,174 @@ def test_hash_mismatch_publishes_no_held_bytes(upload_env):
     store = held_uploads._store(upload_env[0])
     assert not list(store.glob("*.bin"))
     assert not list(store.glob("*.json"))
+
+
+def test_ticket_consumption_must_be_durable_before_the_body_is_accepted(upload_env, monkeypatch):
+    """A crash can replay an unflushed ticket and recreate a cancelled upload's identity."""
+    from exomem import private_state
+
+    descriptor = _prepare(upload_env)
+    body_read = False
+
+    def unavailable_directory(_store):
+        raise OSError("directory durability unavailable")
+
+    monkeypatch.setattr(private_state, "sync_directory", unavailable_directory)
+
+    async def send():
+        async def chunks():
+            nonlocal body_read
+            body_read = True
+            yield b"an upload body that must never be accepted"
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=upload_env[-1]), base_url="https://capture.example",
+        ) as client:
+            return await client.post(
+                "/upload", headers={"Authorization": "Bearer " + descriptor["token"],
+                    "Content-Type": "multipart/form-data; boundary=unread"}, content=chunks(),
+            )
+
+    assert asyncio.run(send()).status_code == 401
+    assert body_read is False
+    assert asyncio.run(send()).status_code == 401
+    assert body_read is False
+
+
+def test_cancelling_a_restored_hold_releases_only_its_session_quota(upload_env):
+    """A failed preservation's hold can fill the cap until its verified session cancels it."""
+    vault, who, *_ = upload_env
+    data = b"original"
+    response = _post(upload_env, _prepare(upload_env, data, max_bytes=len(data)), data)
+    assert response.status_code == 201
+    reference = response.json()["file"]["download_url"]
+    foreign = replace(who, origin_session=replace(who.origin_session, session_id="other"))
+    with principal.request_scope(foreign):
+        with pytest.raises(held_uploads.HeldUploadError) as denied:
+            held_uploads._cancel(vault, reference)
+        with pytest.raises(held_uploads.HeldUploadError) as missing:
+            held_uploads._cancel(vault, held_uploads.HELD_SCHEME + "x" * 43)
+        assert (denied.value.code, denied.value.reason) == (missing.value.code, missing.value.reason)
+    with principal.request_scope(who):
+        claimed = held_uploads.redeem(vault, reference, lane="source")
+        with pytest.raises(held_uploads.HeldUploadError, match="no redeemable"):
+            held_uploads._cancel(vault, reference)
+        assert held_uploads.restore(vault, claimed)
+        with pytest.raises(held_uploads.HeldUploadError, match="too many uploads"):
+            held_uploads.hold(vault, BytesIO(data), lane="source", filename="next.txt",
+                              content_type="text/plain", max_bytes=len(data))
+        assert held_uploads._cancel(vault, reference) == len(data)
+        with pytest.raises(held_uploads.HeldUploadError, match="no redeemable"):
+            held_uploads.redeem(vault, reference, lane="source")
+        with pytest.raises(held_uploads.HeldUploadError, match="no redeemable"):
+            held_uploads._cancel(vault, reference)
+    assert _post(upload_env, _prepare(upload_env, data, max_bytes=len(data)), data).status_code == 201
+
+
+def test_failed_cancellation_keeps_payload_ownership_and_quota_beyond_expiry(upload_env, monkeypatch):
+    """Expiry must not discard the only cleanup record after payload removal fails."""
+    from pathlib import Path
+
+    vault, who, *_ = upload_env
+    data = b"original"
+    held = _post(upload_env, _prepare(upload_env, data, max_bytes=len(data)), data).json()
+    reference = held["file"]["download_url"]
+    store = held_uploads._store(vault)
+    payload, = store.glob("*.bin")
+    original_unlink = Path.unlink
+
+    def blocked_payload(path, *args, **kwargs):
+        if path == payload:
+            raise OSError("payload removal unavailable")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", blocked_payload)
+    with principal.request_scope(who):
+        with pytest.raises(held_uploads.HeldUploadError) as failed:
+            held_uploads._cancel(vault, reference)
+        assert failed.value.code == "HELD_UPLOAD_CANCELLATION_INCOMPLETE"
+        marker, = store.glob("*.cancelling.json")
+        expires = json.loads(marker.read_text())["expires"]
+        monkeypatch.setattr(held_uploads, "_now", lambda: expires + 1)
+        held_uploads._sweep(store, expires + 1)
+        assert marker.exists() and payload.read_bytes() == data
+        with pytest.raises(held_uploads.HeldUploadError, match="no redeemable"):
+            held_uploads.hold(vault, BytesIO(b"replacement"), lane="source", filename="next.txt",
+                              content_type="text/plain", max_bytes=32,
+                              secret=reference[len(held_uploads.HELD_SCHEME):])
+        assert marker.exists() and payload.read_bytes() == data
+        with pytest.raises(held_uploads.HeldUploadError, match="too many uploads"):
+            held_uploads.hold(vault, BytesIO(data), lane="source", filename="next.txt",
+                              content_type="text/plain", max_bytes=len(data))
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+        assert held_uploads._cancel(vault, reference) == len(data)
+        assert not marker.exists() and not payload.exists()
+
+
+def test_unconfirmed_cancellation_rename_leaves_payload_for_retry(upload_env, monkeypatch):
+    """A failed directory flush must not delete bytes whose cleanup ownership could disappear."""
+    from exomem import private_state
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    reference = held["file"]["download_url"]
+    store = held_uploads._store(vault)
+    payload, = store.glob("*.bin")
+    original_sync = private_state.sync_directory
+
+    def blocked_directory(_store):
+        raise OSError("directory durability unavailable")
+
+    monkeypatch.setattr(private_state, "sync_directory", blocked_directory)
+    with principal.request_scope(who):
+        with pytest.raises(held_uploads.HeldUploadError) as failed:
+            held_uploads._cancel(vault, reference)
+        assert failed.value.code == "HELD_UPLOAD_CANCELLATION_INCOMPLETE"
+        assert payload.read_bytes() == b"exact original\n"
+        assert len(list(store.glob("*.cancelling.json"))) == 1
+        monkeypatch.setattr(private_state, "sync_directory", original_sync)
+        assert held_uploads._cancel(vault, reference) == held["size"]
+
+
+def test_cancellation_retries_after_payload_is_gone_but_marker_removal_fails(upload_env, monkeypatch):
+    """A partial cleanup must retain its quota owner and finish without reading the missing payload."""
+    from pathlib import Path
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    reference = held["file"]["download_url"]
+    store = held_uploads._store(vault)
+    original_unlink = Path.unlink
+
+    def blocked_marker(path, *args, **kwargs):
+        if path.name.endswith(".cancelling.json"):
+            raise OSError("cleanup record removal unavailable")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", blocked_marker)
+    with principal.request_scope(who):
+        with pytest.raises(held_uploads.HeldUploadError) as failed:
+            held_uploads._cancel(vault, reference)
+        assert failed.value.code == "HELD_UPLOAD_CANCELLATION_INCOMPLETE"
+        assert not list(store.glob("*.bin"))
+        assert len(list(store.glob("*.cancelling.json"))) == 1
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+        assert held_uploads._cancel(vault, reference) == held["size"]
+
+
+def test_cancellation_returns_busy_without_consuming_a_hold(upload_env):
+    """A competing claim must not leave cancellation waiting behind upload work."""
+    from filelock import FileLock
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    reference = held["file"]["download_url"]
+    with principal.request_scope(who):
+        with FileLock(held_uploads._store(vault) / ".lock"):
+            with pytest.raises(held_uploads.HeldUploadError) as busy:
+                held_uploads._cancel(vault, reference)
+            assert busy.value.code == "HELD_UPLOAD_BUSY"
+        assert held_uploads._cancel(vault, reference) == held["size"]
 
 
 def test_chunked_body_is_bounded_before_multipart_spooling(upload_env):

@@ -26,6 +26,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -38,6 +39,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from . import local_ingress, private_state
 from .governance import principal
@@ -60,6 +62,8 @@ _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _CHUNK = 1024 * 1024
 UNAVAILABLE_REASON = "no redeemable held upload for this handle"
 _now = time.time
+# This suffix is the closed private-store protocol for committed cancellation.
+_CANCELLING_SUFFIX = ".cancelling.json"
 
 
 class HeldUploadError(Exception):
@@ -133,9 +137,29 @@ def _unavailable() -> HeldUploadError:
 _remove = private_state.remove
 
 
+def _finish_cancellation(store: Path, key: str, marker: Path) -> None:
+    """Keep the cleanup owner and quota charge until payload removal is durable."""
+    if (store / f"{key}.json").exists():
+        raise OSError("conflicting upload ownership")
+    private_state.sync_directory(store)
+    (store / f"{key}.bin").unlink(missing_ok=True)
+    private_state.sync_directory(store)
+    marker.unlink()
+    private_state.sync_directory(store)
+
+
 def _sweep(store: Path, now: float) -> None:
     """Drop expired holds and anything a crashed hold or claim left behind."""
     for meta_path in store.glob("*.json"):
+        if meta_path.name.endswith(_CANCELLING_SUFFIX):
+            key = meta_path.name.removesuffix(_CANCELLING_SUFFIX)
+            # Cleanup keys have the SHA-256 filename format; malformed state owns no other path.
+            if len(key) == 64 and all(character in "0123456789abcdef" for character in key):
+                try:
+                    _finish_cancellation(store, key, meta_path)
+                except OSError:
+                    pass  # Its surviving marker retains the quota charge, including after expiry.
+            continue
         try:
             expires = float(json.loads(meta_path.read_text(encoding="utf-8"))["expires"])
         except (OSError, ValueError, KeyError, TypeError):
@@ -223,6 +247,8 @@ def hold(
         if _SECRET.fullmatch(secret) is None:
             raise HeldUploadError("INVALID_UPLOAD", "a hold secret is 43 URL-safe characters")
         key = _key(secret)
+        if (store / f"{key}{_CANCELLING_SUFFIX}").exists():
+            raise _unavailable()  # A committed cancellation still owns this payload identity.
         fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
         part = Path(raw)
         digest = hashlib.sha256()
@@ -273,6 +299,54 @@ def hold(
             "file_name": name or f"held-{key[:16]}",
         },
     }
+
+
+def _cancel(vault_root: Path, reference: str) -> int:
+    """Cancel one owned unclaimed hold; the lifecycle-admitted leaf owns exposure.
+
+    Return only its confirmed quota charge. Never inspect unrelated uploads or
+    wait for the claim lock. Unavailable and failed operations claim no release.
+    """
+    secret = reference[len(HELD_SCHEME):] if is_held_reference(reference) else ""
+    bindings = _bindings()
+    if not bindings or _SECRET.fullmatch(secret) is None:
+        raise _unavailable()
+    try:
+        store = _store(vault_root)
+        with FileLock(store / ".lock", timeout=0):
+            key = _key(secret)
+            active = store / f"{key}.json"
+            marker = store / f"{key}{_CANCELLING_SUFFIX}"
+            committed = marker.exists()
+            metadata = marker if committed else active
+            try:
+                record = json.loads(metadata.read_text(encoding="utf-8"))
+                bound = str(record["binding"]).encode("utf-8")
+                size = record["size"]
+                expires = float(record["expires"])
+            except (OSError, ValueError, KeyError, TypeError):
+                raise _unavailable() from None
+            if not any(hmac.compare_digest(bound, binding.encode("utf-8")) for binding in bindings):
+                raise _unavailable()
+            if type(size) is not int or size < 0 or not math.isfinite(expires) or expires <= 0:
+                raise _unavailable()
+            if not committed:
+                payload = store / f"{key}.bin"
+                if expires <= _now() or not payload.is_file():
+                    raise _unavailable()
+                # Windows requires a writable handle to flush the record; its contents stay unchanged.
+                with active.open("r+b") as source:
+                    os.fsync(source.fileno())
+                os.rename(active, marker)
+            _finish_cancellation(store, key, marker)
+            return size
+    except FileLockTimeout:
+        raise HeldUploadError("HELD_UPLOAD_BUSY", "the upload claim is busy; retry shortly") from None
+    except OSError:
+        raise HeldUploadError(
+            "HELD_UPLOAD_CANCELLATION_INCOMPLETE",
+            "upload cancellation could not confirm cleanup; retry this handle",
+        ) from None
 
 
 def redeem(
