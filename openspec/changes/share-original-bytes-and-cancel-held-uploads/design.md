@@ -1,6 +1,6 @@
 # Design
 
-This design is incomplete. The local storage compatibility choice blocks the shared-storage specification and its implementation tasks. Do not apply this change.
+This design selects a managed original pool. It authorizes no implementation, live conversion, or cleanup by itself.
 
 ## Context
 
@@ -26,13 +26,53 @@ Held uploads use private metadata and payload files. Redemption renames a payloa
 
 ## Decisions
 
-### Local storage compatibility remains a blocking choice
+### A canonical local pool separates bytes from filenames
 
-A managed pool can preserve one local original while filings keep independent logical addresses. Ordinary applications would need compatible exports or materialized paths. Existing bindings, citations, grants, previews, and downloads must remain valid.
+Place immutable objects under `<managed-root>/_Originals/sha256/<prefix>/<digest>.blob`. The SHA-256 prefix shards directory entries. Verify the recorded size as well as the digest. This is canonical vault content, never disposable machine-local state.
 
-Keeping ordinary binary files preserves today's filesystem layout. Hard links cannot guarantee sharing across supported filesystems and volumes. The proposal does not select this trade-off silently.
+Register the root through `reserved_paths`. Keep the existing `BinaryBinding` logical path, digest, and size. Extend `OriginalSnapshot` to resolve that binding to local pooled bytes or the existing Cloud reference. The canonical companion remains the binding authority; a blob alone creates no filing.
+
+New filings keep their existing metadata shape. Conversion does not rewrite companions, provenance, references, or grant-bound hashes. Filings with the same bytes can therefore retain different lanes, protection, and permissions. Existing logical `already_stored` reuse remains unchanged.
+
+All original consumers use the resolver: preview, range download, extraction, frames, datasets, processing, backup, and export. A consumer needing a filename receives a bounded temporary materialization with the original name. Callers address filings, never pool keys. No placeholder binary file is left at a logical path.
+
+Hard links were rejected because sharing must work across supported filesystems without shared filesystem ACLs or link-count limits. A separate blob service was rejected because existing local storage and Cloud references already provide custody.
 
 Cloud reference sharing remains the existing mechanism. Backups, staging, recovery replicas, and historical encryption versions must remain visible in storage accounting. Sharing does not mean a single physical copy across every recovery tier.
+
+### Publication and pins belong to the physical object
+
+Reuse the durable publication techniques in `archive_members.py`, not its family ownership model. Stage and verify supplied bytes before publishing a new filing. Publish or verify the immutable object before committing its logical binding. A crash may leave an unreferenced object; it must never leave a committed filing without confirmed bytes.
+
+Keep byte transfer and hashing outside the canonical mutation lease. Retain the verified input and object pins through the final binding check and commit. The lease covers canonical existence, ownership, and publication decisions, not a vault-sized scan.
+
+Extend the existing media ledger and reader pins to the resolved object identity. Pins, active jobs, hydration reservations, and eviction checks must include every filing using that object. Index the derived object identity; do not inspect each filing during a request. Canonical bindings remain authoritative, so no independent reference-count database is added.
+
+A read through one filing must prevent eviction initiated through another. Concurrent hydration publishes one verified local object. Shared corruption returns an explicit unavailable or corrupt state and preserves verified recovery copies. It never silently substitutes another version.
+
+Every binding also contributes its residency requirement. Retain the local object if any binding is resident-only or lacks its own usable recovery reference. A Source's remote copy cannot make a separately governed dataset evictable. Maintain this derived eligibility through existing indexed metadata and its invalidation; do not scan filings during eviction.
+
+### Physical reuse grants no admission credit
+
+Preserve existing declared-byte allowance admission and full session-held charges. A new filing stages and verifies its supplied bytes on destination storage before a physical pool hit can save allocation. A miss promotes that stage; a hit releases it after the filing commits. Existing logical reuse is not a new filing and keeps its current path.
+
+This retains the current transient-space cost, even when an identical hidden object exists. It prevents a new immediate hit-dependent admission shortcut. Do not add permanent reservations, padding, or another quota system. Return no hidden filing identity, pool-hit flag, or saved-byte figure to a restricted caller.
+
+This is not global resource noninterference. Real storage savings can affect later free-space observations. Existing Cloud background offload also exposes allowance outcomes after hidden-reference reuse (`media_store.py`, D10 of `add-cloud-media-store`). That is existing scope debt, not a new guarantee or a reason to change Cloud policy here.
+
+### Format conversion preserves grants and supports export
+
+Use a versioned canonical pool marker and a `shared-originals-v1` compatibility identifier through the existing state-compatibility mechanism. Record compatibility before publishing the marker or relocating bytes. An interrupted enablement resumes with the compatible runtime; it drops the identifier only after proving no pooled layout was published.
+
+New archives start in this format. Existing archives require one explicit owner maintenance operation, using the existing resumable job framework. It requires whole-namespace authority because conversion includes hidden filings. Ordinary deployment leaves existing archives unchanged.
+
+The conversion job inventories canonical bindings, reports unbound or unreadable originals, and processes bounded batches. It verifies the pooled copy and unchanged binding before retiring an ordinary binary path. It waits for existing reader and writer pins. Mixed legacy and pooled storage stays readable after interruption. A retry derives progress from actual bindings and verified bytes, not an authoritative second catalogue.
+
+Keep current Cloud references during conversion; do not initiate offload or rewrite protected companions merely to pool local bytes. New filing references are part of initial publication. Hydration changes local object availability, not companion bytes or grant hashes.
+
+The existing compatibility manifest stops unsupported managed downgrades when its requirement remains enrolled. A canonical marker lets capable restore tools re-enrol it before serving. A pre-feature runtime cannot recognize that marker after a bare-copy restore loses external state, whether started manually or through an older manager. Those starts are unsupported; use capable restore or compatibility export. Do not claim retroactive protection from binaries that lack the format.
+
+Compatibility export writes a separate ordinary-file archive through the existing export path. It materializes every logical original, verifies hashes and sidecar bytes, and preserves canonical metadata through its existing store export. Prove that a declared pre-feature runtime can read that export. Export failure leaves the pooled source intact. No automatic in-place downgrade or orphan collection is added.
 
 ### Shared ownership preserves collection and cell isolation
 
@@ -78,13 +118,37 @@ An active cancellation marker owns its key until cleanup completes. Under the up
 
 After older serving workers stop, establish a directory durability barrier for existing ticket consumption before enabling cancellation. This settles deletions performed by older code; the new claim path makes later consumption durable. Do not treat normal-execution one-use behavior as proof of the power-loss guarantee.
 
+Record `held-upload-cancellation-v1` through the existing compatibility manifest at that activation boundary. This prevents an older expiry sweep from discarding a cancellation marker while retaining its payload. Cleanup uses a resumable maintenance pass, not a scan on each cancellation. This guard costs a cleanup step on downgrade; it protects temporary-byte ownership rather than canonical content.
+
+### Lifecycle compatibility precedes feature activation
+
+A current worker can run under an older stable launcher. For managed installations, prove launcher and operator support before enrolling either new compatibility identifier. Otherwise keep the existing layout and retry/expiry behavior, and name the maintained launcher-update action. Deploying a new worker alone is insufficient.
+
+Use the existing offline launcher-update procedure in `docs/managed-service-upgrades.md`. Stage the compatible package first, stop the owned service, prove its processes and listeners stopped, update the launcher, then restart and verify read/write acceptance. This interrupts stable connections once. No new per-operation human approval gate is added; execution remains within the approved release scope.
+
+Add current-runtime cancellation cleanup to the managed upgrade preparation seam, before target compatibility admission. When an explicitly selected target lacks the cancellation format, quiesce new cancellations under lifecycle custody, finish markers, and retire only that identifier. Use the migration lock and trusted authority check. Pending cleanup returns progress or busy; it does not enter an incompatible target or claim completion. Failure retains the identifier and keeps compatible recovery available.
+
+Do not defer that cleanup to the target migrator: current admission rejects unknown identifiers before it runs. A pooled archive still cannot downgrade in place. It needs a compatibility export or a verified pre-conversion restore; cancellation cleanup never retires pooled-format custody.
+
 ## Risks / Trade-offs
 
 - Partial cleanup retains the marker and its quota charge. The caller receives a visible failure and can retry; the server claims no released capacity.
 - Filesystem metadata exhaustion can refuse the marker rename. Keep the upload intact and report the failure; do not fall back to untracked deletion.
 - Older workers do not interpret cancellation markers. Complete the serving-worker handoff before exposing cancellation; specify pending-marker recovery before any supported downgrade.
 - Shared originals increase the impact of corruption. The storage design must preserve fixity, verified recovery, and every affected filing's access rules.
-- Moving storage metadata can invalidate grants that bind companion hashes. The completed storage design must prove compatibility before any relocation.
+- A compatibility export needs space for ordinary copies. A failed export retains the pooled archive and reports incomplete output.
+- Pool conversion never rewrites grant-bound companion bytes. Storage operations that already rewrite Cloud references retain their existing contract and need separate proof.
+
+## Migration Plan
+
+1. Deploy capable readers while existing archives retain their layout; ordinary releases require no conversion.
+2. Update any incompatible stable launcher through documented offline maintenance; verify the service before activating new formats.
+3. On explicit conversion, fence old writers and record compatibility before publishing the pool marker.
+4. Convert bounded batches after verified publication; interrupted batches retain readable originals and resume safely.
+5. Verify bindings, grants, exports, and backup restore; report incomplete coverage without claiming complete sharing.
+6. For older readers, create and verify a separate compatibility export; keep the pooled source recoverable.
+
+For enrolled managed state, the format guard prevents an older runtime from treating relocated originals as missing. Its cost is refusing a converted archive until compatible recovery or export completes. It applies only after format activation, not to ordinary releases.
 
 ## Proof Boundaries
 
@@ -94,4 +158,12 @@ The shared-storage workflow must prove separate protected and ordinary filings, 
 
 Cancellation uses the existing held-upload count limit as its batch bound. Its metadata work must remain proportional to submitted handles, not archive size or unrelated holds. Measure a maximum batch with 10,000 unrelated held records on a disposable store; payload size must add no read work. Target a response p95 below one second, with immediate busy responses rather than lock polling. Extend existing command latency and error telemetry for this operation; verify the corresponding budget alert.
 
-The shared-storage load targets, migration steps, and task breakdown still require the storage choice and integration review. That dependency does not block cancellation design. No implementation is authorized by this partial design.
+Use the owner scale in `add-cloud-media-store/design.md`: tens to hundreds of gigabytes of originals. Prove metadata paths at 100,000 filings and 100 GiB of logical originals in a disposable fixture. Shared representative objects can supply those logical bytes; the fixture need not allocate 100 GiB. These are proof sizes, not customer limits.
+
+Pool lookup, authorization, pin selection, and admission perform bounded indexed metadata work. Target p95 below one second for those operations. Transfer, fixity, conversion, and export stream bytes or use the existing background jobs. Their completion time is reported separately from metadata latency.
+
+Compare before and after through the same instrument and fixture. Show no per-filing query growth and verify index plans. Reuse current cryptography and provider evidence; test our binding, permission, configuration, and data-flow integration.
+
+One author owns the coupled implementation. One independent adversarial review covers both capabilities and their security boundaries. Run the protected-dataset owner/ungranted-reader workflow, independent revocation, exact export and restore, publication interruption, concurrent reuse, and cancellation races. Use the existing latency contract and alert route. No model evaluation is needed unless agent-facing wording changes model behavior.
+
+All implementation tasks remain unchecked. Live conversion and cleanup remain outside the authorized design work.

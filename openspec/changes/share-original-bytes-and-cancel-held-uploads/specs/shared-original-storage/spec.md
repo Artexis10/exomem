@@ -1,10 +1,14 @@
 # Spec Delta
 
+## Purpose
+
+Share canonical original bytes within a vault while each filing retains its own identity, authorization, custody, and compatible export.
+
 ## ADDED Requirements
 
 ### Requirement: Physical reuse preserves independent filings
 
-Physical original reuse SHALL preserve each filing's identity, logical address, provenance, governance, and grants. Existing logical duplicate outcomes SHALL remain unchanged. Reuse SHALL NOT merge filings or broaden the caller's visible results. This requirement defines no local filesystem conversion; the local compatibility decision remains open in `design.md`.
+Physical original reuse SHALL preserve each filing's identity, logical address, provenance, governance, and grants. Existing logical duplicate outcomes SHALL remain unchanged. Reuse SHALL NOT merge filings or broaden the caller's visible results.
 
 #### Scenario: Governed filings contain identical bytes
 
@@ -20,7 +24,7 @@ Physical original reuse SHALL preserve each filing's identity, logical address, 
 
 ### Requirement: Original resolution authorizes the logical filing
 
-Each read, preview, download, export, and processing request SHALL authorize its logical filing before resolving shared original bytes. A physical object identifier or digest SHALL NOT grant access. Reuse SHALL NOT disclose another filing's existence, path, protection class, or storage use. Canonical-store existence SHALL remain authoritative for store-owned pages.
+Each read, preview, download, export, and processing request SHALL authorize its logical filing before resolving shared bytes. A digest SHALL NOT grant access. Results SHALL contain no hidden filing identity, pool-hit indication, or saved-byte figure. Canonical-store existence SHALL remain authoritative for store-owned pages.
 
 #### Scenario: An ungranted reader requests a protected dataset
 
@@ -33,6 +37,98 @@ Each read, preview, download, export, and processing request SHALL authorize its
 - **WHEN** a store-owned filing has a missing or stale disk projection
 - **THEN** original resolution follows the canonical filing state and its authorization
 - **AND** a physical payload does not make a deleted or unauthorized filing readable
+
+### Requirement: Pooled layouts retain one canonical local object
+
+A pooled archive SHALL store identical original bytes once in its managed canonical pool, identified by SHA-256 and size. Separate filings SHALL resolve their logical addresses through that pool. Temporary staging, recovery replicas, and backup copies SHALL remain separately identified. Missing or corrupt bytes SHALL remain explicit failures.
+
+#### Scenario: Independent filings preserve the same bytes
+
+- **WHEN** two distinct filings in a pooled archive preserve identical bytes
+- **THEN** one canonical local object supplies both logical addresses
+- **AND** each filing keeps its own page, name, permissions, and grant-bound metadata
+
+#### Scenario: A shared object is corrupt
+
+- **WHEN** the stored object fails its bound digest or size check
+- **THEN** original reads report corruption or unavailable bytes
+- **AND** they do not silently select another version or retire recovery copies
+
+### Requirement: Physical reuse preserves resource admission
+
+Physical reuse SHALL NOT waive existing declared-byte intake admission or session-held charges for a new filing. The supplied bytes SHALL pass destination staging before a physical match releases allocation. Logical duplicate reuse SHALL retain its current contract. This requirement does not hide later shared-capacity changes or revise existing Cloud offload policy.
+
+#### Scenario: A restricted writer submits bytes held by a hidden filing
+
+- **WHEN** equal-capacity archives contain hidden bytes of equal size and only one matches a restricted writer's new filing
+- **THEN** intake, staging, and the filing outcome obey the same admission rules in both archives
+- **AND** no result names the hidden filing or reports physical reuse
+- **AND** only owner inspection may establish the different physical allocation after commit
+
+### Requirement: Publication and eviction preserve every reader
+
+The system SHALL confirm durable original bytes before committing a filing that depends on them. A shared object SHALL remain available while any authorized reader, writer, processing job, or export pins it. Failure SHALL preserve confirmed copies and report an incomplete operation rather than claiming successful publication or removal.
+
+#### Scenario: Publication is interrupted
+
+- **WHEN** publication stops before its new filing commits
+- **THEN** existing filings and their originals remain readable
+- **AND** recovery retains uncertain or unreferenced bytes until their custody is proved
+
+#### Scenario: Eviction races a reader of another filing
+
+- **WHEN** one filing's original is being read while another filing requests eviction of the same object
+- **THEN** the object remains available until the reader releases its pin
+- **AND** other filings do not lose their remote custody or permissions
+
+#### Scenario: A resident dataset shares a Source's bytes
+
+- **WHEN** a resident-only dataset shares an object with an idle Source that has a confirmed remote reference
+- **THEN** eviction retains the local object for the dataset
+- **AND** the Source's recovery reference does not broaden the dataset's offload policy
+
+### Requirement: Existing archives convert explicitly and remain recoverable
+
+New archives SHALL use the pooled format. Existing archives SHALL retain their layout until an owner with whole-namespace authority requests conversion. Conversion SHALL declare compatibility before relocation, preserve companion bytes and grants, and resume safely across mixed layouts. Retained or re-enrolled compatibility state SHALL prevent unsupported managed downgrade.
+
+#### Scenario: Ordinary deployment reaches an existing archive
+
+- **WHEN** a capable release starts without a conversion request
+- **THEN** existing original paths remain unchanged and usable
+
+#### Scenario: Conversion stops between batches
+
+- **WHEN** a conversion stops after some originals reach the pool
+- **THEN** supported readers resolve both verified legacy and pooled originals
+- **AND** a later conversion continues without rewriting grant-bound companions or losing bytes
+
+#### Scenario: An unsupported managed downgrade is attempted
+
+- **WHEN** a runtime lacks the converted archive's format support and its compatibility requirement remains enrolled
+- **THEN** managed admission refuses that archive and identifies compatible recovery or export
+- **AND** it does not treat pooled originals as deleted files
+
+#### Scenario: A bare pooled copy reaches a pre-feature runtime
+
+- **WHEN** a bare pooled copy has no external compatibility state and the reader predates its canonical format marker
+- **THEN** that reader is outside the supported restore path, including under a pre-feature manager
+- **AND** compatible restore or a verified ordinary-file export is required before older-reader access
+
+### Requirement: Export and restore preserve ordinary original access
+
+A compatibility export SHALL materialize verified originals at their logical filenames in a separate archive, preserving page bytes and identity. Backup and restore SHALL retain pooled bytes with their canonical bindings and format declaration. An incomplete export or restore SHALL remain visible and SHALL leave the source archive recoverable.
+
+#### Scenario: An older supported reader consumes an export
+
+- **WHEN** an owner creates a compatibility export for a declared pre-feature runtime
+- **THEN** that runtime reads ordinary filenames with the same bytes and pages
+- **AND** the pooled source remains intact
+
+#### Scenario: A pooled archive is restored without derived indexes
+
+- **WHEN** a backup restores canonical bindings, the pool, and its format declaration
+- **THEN** a capable runtime rebuilds derived indexes and enrols compatibility before serving
+- **AND** authorized originals and their grant checks match the source archive
 
 ### Requirement: Shared Cloud originals remain within one cell
 
