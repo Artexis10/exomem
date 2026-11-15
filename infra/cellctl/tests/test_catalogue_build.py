@@ -29,7 +29,7 @@ from cellctl.manifests import (
     render_network_policies,
     render_resource_quota,
 )
-from cellctl.state import CellRow, ClusterObservation, RolloutRow
+from cellctl.state import SNAPSHOT_BACKUP, CellRow, ClusterObservation, RolloutRow
 from cellctl.upgrade_window import Idle, WindowConfig, is_due
 
 from .test_platform_chart_headers import _find, _helm_template
@@ -475,6 +475,13 @@ async def test_build_census_failure_delays_stops_only_on_nodes_with_a_recorded_c
     assert result[CELL].catalogue_waiting_builds is None
     assert result[other].catalogue_waiting_builds is None
     assert result[separate].catalogue_waiting_builds == {}
+    unlocated = {other: replace(result[other], pod_node=None, pv_node=None), separate: obs[separate]}
+    result = await reconcile._sync_catalogue_builds(
+        cluster, rows[1:], unlocated, RolloutRow(), IMAGE_B, NOW, WINDOWS, CONFIG, allow_schedule=False)
+    assert result[other].catalogue_builds is None
+    assert result[other].catalogue_waiting_builds == {}
+    assert result[separate].catalogue_builds == ()
+    assert result[separate].catalogue_waiting_builds == {}
 
 
 async def test_build_request_annotation_failure_preserves_known_absence_of_jobs():
@@ -495,19 +502,20 @@ async def test_build_request_annotation_failure_preserves_known_absence_of_jobs(
     assert not cluster.jobs
 
 
-@pytest.mark.parametrize("held", [False, True])
-async def test_held_or_pending_cell_reserves_its_volume_node_against_new_peer_builds(held):
-    """A serving stop keeps replacement capacity reserved even while its pod is absent."""
+@pytest.mark.parametrize("hold,pending_stop,reserved", [(None, True, True), ("upgrade", False, True), (SNAPSHOT_BACKUP, False, False)])
+async def test_only_stopping_holds_or_pending_stops_reserve_the_node_against_new_peer_builds(hold, pending_stop, reserved):
+    """Replacement capacity stays reserved after a stop; a snapshot hold keeps serving beside a peer build."""
     other = "bbbbbbbbbbbbbbbb"
     cluster = BuildCluster()
-    observations = {CELL: _observation(pod_node=None, pv_node="worker-one",
+    observations = {CELL: _observation(pod_node="worker-one" if hold == SNAPSHOT_BACKUP else None, pv_node="worker-one",
                                       statefulset_image=IMAGE_B, ready_pod_image=None,
-                                      statefulset_hold_kind="upgrade" if held else None),
+                                      statefulset_hold_kind=hold),
                     other: _observation()}
     await reconcile._sync_catalogue_builds(
         cluster, [_row(), _row(other)], observations, RolloutRow(), IMAGE_B, NOW, WINDOWS, CONFIG,
-        allow_schedule=True, pending_starts=frozenset() if held else frozenset({CELL}))
-    assert not cluster.jobs
+        allow_schedule=True, pending_starts=frozenset({CELL}) if pending_stop else frozenset(),
+        pending_stops=frozenset({CELL}) if pending_stop else frozenset())
+    assert [job["metadata"]["namespace"] for job in cluster.jobs] == ([] if reserved else [namespace_name(other)])
 
 
 @pytest.mark.parametrize("unobserved", [False, True])
@@ -764,15 +772,17 @@ async def test_stopped_cell_cancels_waiting_peer_on_its_volume_node_before_targe
         await fleet.close()
 
 
-async def test_census_failure_for_a_recorded_build_without_a_node_does_not_freeze_other_cells(cell_db):
-    """An unlocated recorded build cannot turn a fleet census failure into a global stop barrier."""
+@pytest.mark.parametrize("desired_state", ["stopped", "running"])
+async def test_local_hourly_backup_does_not_reserve_a_node_against_peer_builds(cell_db, desired_state):
+    """An overdue local backup cannot starve a peer, whether the cell is stopped or still serves."""
+    from cellctl.storage_config import LocalStorage, StorageConfig
+
     from .test_rollout_automation import (
+        BUSY,
         OWNER,
         TENANT,
         TENANT_2,
-        _annotations,
         _observe,
-        _statefulset,
         _windowed_fleet,
     )
 
@@ -780,20 +790,30 @@ async def test_census_failure_for_a_recorded_build_without_a_node_does_not_freez
     cluster = BuildCluster()
     cluster.__dict__.update(fleet.cluster.__dict__)
     fleet.cluster = cluster
+    config = replace(CONFIG, storage=StorageConfig(local=LocalStorage()))
     try:
+        await fleet.admin.execute(
+            "UPDATE exomem_cloud_cells SET desired_state=$1, generation=generation+1, last_backup_at=$2 WHERE cell_id=$3",
+            desired_state, NOW, TENANT)
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT_2)
         for _ in range(3):
-            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
-            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
-            _observe(cluster, TENANT_2, pod_node=None)
-        _annotations(cluster, TENANT_2)["exomem.io/catalogue-build-job"] = catalogue_build_name(IMAGE_B)
-        _observe(cluster, TENANT_2, pod_node=None)
-        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_state='stopped', generation=generation+1 WHERE cell_id=$1",
-                                  TENANT)
-        def unavailable():
-            raise RuntimeError("census unavailable")
-        cluster.observe_catalogue_builds = unavailable
-        await fleet.run(NOW, cluster_config=CONFIG)
-        assert _statefulset(cluster, TENANT)["spec"]["replicas"] == 0
+            await fleet.run(NOW.replace(hour=15), cluster_config=config)
+            _observe(cluster, OWNER, TENANT_2, pod_node="worker-one")
+            _observe(cluster, TENANT, pod_node=None if desired_state == "stopped" else "worker-one",
+                     pv_node="worker-one", pv_storage_class=config.storage.local.class_name)
+        settled = await fleet.admin.fetchrow(
+            "SELECT observed_state, observed_generation=generation AS settled FROM exomem_cloud_cells WHERE cell_id=$1", TENANT)
+        assert settled["observed_state"] == desired_state and settled["settled"]
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET last_backup_at=$1 WHERE cell_id=$2",
+                                  NOW - timedelta(hours=3), TENANT)
+        cluster.readiness[TENANT_2] = BUSY
+        for minute in range(3):
+            await fleet.run(NOW + timedelta(minutes=minute), cluster_config=config)
+            builds = [job for job in cluster.jobs if job["metadata"]["labels"].get(JOB_KIND_LABEL) == JOB_KIND_CATALOGUE_BUILD]
+            assert [job["metadata"]["namespace"] for job in builds] == [namespace_name(TENANT_2)]
+            _observe(cluster, OWNER, TENANT_2, pod_node="worker-one")
+            _observe(cluster, TENANT, pod_node=None if desired_state == "stopped" else "worker-one",
+                     pv_node="worker-one", pv_storage_class=config.storage.local.class_name)
     finally:
         await fleet.close()
 

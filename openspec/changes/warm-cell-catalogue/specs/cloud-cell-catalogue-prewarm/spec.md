@@ -44,7 +44,8 @@ Before the final force minutes, `cellctl` SHALL count a running build Job as act
 - **AND** bound builds and builds targeting other nodes remain untouched
 - **AND** a cell without its own builds or waiting builds on its node stops in the same pass
 - **AND** a stopped cell uses its volume's node when its serving pod is absent
-- **AND** cellctl reserves nodes with an active hold or pending start against new builds
+- **AND** cells with desired state `running` or `read_only` reserve nodes only during holds or pending starts that stop or replace serving pods
+- **AND** hourly snapshot backups and snapshot-backup holds do not reserve nodes against new builds
 - **AND** a new build makes its node's waiting inventory unknown for the rest of that pass, allowing it to bind before cancellation
 
 #### Scenario: The build Job fails, expires or no longer applies

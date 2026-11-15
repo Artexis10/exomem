@@ -1472,7 +1472,7 @@ async def _sync_catalogue_builds(
     cluster: ClusterGateway, rows: list[CellRow], observations: dict[str, ClusterObservation],
     rollout, cell_image: str | None, now: datetime, window_config: WindowConfig | None,
     cluster_config: ClusterConfig, *, allow_schedule: bool, pending_starts: frozenset[str] = frozenset(),
-    memory: LoopMemory | None = None,
+    pending_stops: frozenset[str] = frozenset(), memory: LoopMemory | None = None,
 ) -> dict[str, ClusterObservation]:
     """Build outside attempts; reserve one slot per node, and retain deletion evidence until the stop."""
     from .manifests import (
@@ -1500,7 +1500,10 @@ async def _sync_catalogue_builds(
                 (not (job.succeeded or job.failed))}
     for row in rows:
         obs = observations[row.cell_id]
-        if _active_hold(row, obs) is not None or row.cell_id in pending_starts:
+        # Snapshot-backup holds keep serving; the other protocol holds stop or replace the pod.
+        if row.desired_state in ("running", "read_only") and (
+            _active_hold(row, obs) not in (None, SNAPSHOT_BACKUP) or row.cell_id in pending_stops
+        ):
             if (node := obs.pv_node or obs.pod_node) is not None:
                 occupied.add(node)
     updated = dict(observations)
@@ -2067,20 +2070,27 @@ async def reconcile_once(
     }
 
     pending_starts = set()
+    pending_stops = set()
     if cluster_config.catalogue_prewarm is not None:
-        pending_starts = await db.read_content_start_cells(connection, [row.cell_id for row in rows])
-        pending_starts.update(row.cell_id for row in rows if (
+        pending_stops = await db.read_content_start_cells(connection, [row.cell_id for row in rows])
+        pending_stops.update(row.cell_id for row in rows if (
             row.is_dirty()
             or observations[row.cell_id].statefulset_render_digest != render_digests[row.cell_id]
-            or nightly_backup_due(row, observations[row.cell_id], now, config)
-            or (cluster_config.storage.is_local(observations[row.cell_id].pv_storage_class)
-                and hourly_backup_due(row, observations[row.cell_id], now, config))
+            or (not cluster_config.storage.is_local(observations[row.cell_id].pv_storage_class)
+                and nightly_backup_due(row, observations[row.cell_id], now, config))
             or planned_move_volume(row, observations[row.cell_id], cluster_config.storage) is not None
             or relocation_volume(row, observations[row.cell_id], cluster_config.storage) is not None
         ))
+        # Local backups read a snapshot clone, so they block only their own build eligibility.
+        pending_starts = pending_stops | {row.cell_id for row in rows if (
+            cluster_config.storage.is_local(observations[row.cell_id].pv_storage_class)
+            and (hourly_backup_due(row, observations[row.cell_id], now, config)
+                 or nightly_backup_due(row, observations[row.cell_id], now, config))
+        )}
     observations = await _sync_catalogue_builds(
         cluster, rows, observations, rollout, cell_image, now, window_config, cluster_config,
-        allow_schedule=not fleet_unobserved, pending_starts=frozenset(pending_starts), memory=memory,
+        allow_schedule=not fleet_unobserved, pending_starts=frozenset(pending_starts),
+        pending_stops=frozenset(pending_stops), memory=memory,
     )
 
     # D4 refusal parking. A row is refused while its last refusal's key is

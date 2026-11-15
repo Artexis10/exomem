@@ -536,7 +536,8 @@ Build activity reduces attempts per window hour; `config.upgrade_concurrency_per
 Before a serving stop or replacement, cellctl also cancels other cells' unfinished, unbound builds targeting that node.
 Each cancellation uses its own cell's window record. The stop waits until a later census shows no waiting builds on that node.
 Bound builds on other cells continue, including bound, terminating pods. A stopped cell uses its volume node when its serving pod is absent.
-Active holds and pending starts reserve their nodes against new builds. A fresh build gets one pass to bind before cancellation.
+Cells with desired state `running` or `read_only` reserve nodes only during holds or pending starts that stop or replace serving pods.
+Hourly snapshot backups and snapshot-backup holds do not reserve nodes against new builds. A fresh build gets one pass to bind before cancellation.
 
 Cellctl cancels unfinished builds on timeout, pause, target change, window closure or flag disable.
 Pending backups, imports, exports, row changes and digest changes take precedence over a build.

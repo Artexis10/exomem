@@ -67,7 +67,11 @@ With chart defaults, `is_due` makes an idle cell due about five seconds after it
 
 Before a serving stop or replacement, cancel every unfinished, unbound build targeting that node, including other cells' builds. Persist each cancellation in its own cell's window record before deletion. Wait until a later census shows no waiting builds on that node. Unknown inventory on that node also defers the stop. Bound builds on other cells keep their capacity and continue, including bound, terminating pods. A node without waiting builds adds no delay. When the serving pod is absent, use the cell's volume node.
 
-Reserve a cell's volume node, or its pod node when the volume node is unknown, against new builds during active holds and pending starts. A new build makes its node's waiting inventory unknown for the rest of the pass. The stop defers once and records its upgrade hold. On the next pass, that hold prevents further builds on the node. A fresh build that bound keeps its capacity; one still waiting yields. A census failure affects only known nodes with recorded current Jobs. A waiting build with no owner observation makes only its known node unknown. If its owner's StatefulSet is gone, delete the Job without writing a cancellation record.
+Only cells with desired state `running` or `read_only` reserve their volume node against new builds. The pod node supplies the fallback when the volume node is unknown. A hold or pending start reserves that node only if it stops or replaces the serving pod. Hourly snapshot backups and snapshot-backup holds keep serving and do not reserve the node.
+
+A new build makes its node's waiting inventory unknown for the rest of the pass. The stop defers once and records its upgrade hold. On the next pass, that hold prevents further builds on the node. A fresh build that bound keeps its capacity; one still waiting yields.
+
+A census failure affects only known nodes with recorded current Jobs. A waiting build with no owner observation makes only its known node unknown. If its owner's StatefulSet is gone, delete the Job without writing a cancellation record.
 
 When the cell becomes due, start its attempt with the existing hold clocks and deadlines. Delete any unfinished build Job and confirm its pods have ended before stopping the serving pod. Record the build outcome with the attempt. Boot may adopt any staged copy that passes D1 validation, including a complete staged copy published during cancellation.
 
