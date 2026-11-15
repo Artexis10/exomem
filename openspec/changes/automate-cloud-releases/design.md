@@ -312,6 +312,18 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 - `EXOMEM_CLOUD_UPSTREAM_TIMEOUT_SECONDS` bounds the time from the first forwarded byte to the response headers. When it runs out, the gateway answers `504 CELL_TIMEOUT` and frees its slot.
 - Stateless FastMCP answers with SSE, so headers arrive early. `EXOMEM_CLOUD_UPSTREAM_IDLE_SECONDS` therefore bounds the gap between response body chunks. When it runs out, the gateway closes the stream and frees its slot. Its value stays above the longest tool call that task 1.4 records.
 
+**Client limits (task 1.4, 2026-11-15).** A local stand-in held each `tools/call` with no response bytes for 10, 30, 45, 60 and 120 s. A second run answered the first `tools/call` with `503` and `Retry-After: 2`.
+
+| Client | Answers a held call through | Gives up at | Retries a `503` with `Retry-After` | Source |
+|---|---|---|---|---|
+| Claude Code 2.1.325 | 10, 30 and 45 s | 60 s ("The operation timed out.") | No. It sends one request, and the agent sees the error. | Measured. The documented first-byte limit for HTTP servers is 60 s. |
+| Codex CLI 0.169.0 | 10, 30, 45, 60 and 120 s | Not reached at 120 s | No. It sends one request, and the agent sees the error. | Measured. The docs say 60 s (`tool_timeout_sec`), the source 300 s. |
+| claude.ai connectors | Not measured | 240 s per tool call | Not documented | Documented, not measured |
+| ChatGPT connectors | Not measured | Not documented | Not documented | Documented, not measured |
+
+- The shortest limit is 60 s, so the 40 s budget leaves about 20 s for the cell to send its first response byte after the hold.
+- No measured client retries a `503`, so a hold that runs out reaches the agent as an error. The budget therefore matters more than `Retry-After`.
+
 **Home.** Home shows `504 CELL_TIMEOUT` with its existing cell-unavailable message. A `503 CELL_NOT_READY` after a hold reads as today's.
 
 **Configuration.** The platform chart renders each value into the gateway's environment, from `cloudGateway.hold.*` and `cloudGateway.upstream.*`. C3's pinned environment set grows to match.
