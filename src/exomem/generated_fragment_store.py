@@ -356,12 +356,16 @@ class GeneratedFragmentStore:
         if item.kind == "copy":
             if item.image_id is None:
                 raise ValueError("generated_copy_key_invalid")
-            return self.path / "copies" / item.object_id[:2] / f"{item.object_id}.json"
+            return self._copy_path(item.object_id)
         if item.kind == "slot":
             if item.image_id is not None:
                 raise ValueError("generated_slot_key_invalid")
             return self.path / "slots" / item.object_id[:2] / f"{item.object_id}.json"
         return self.path / "uncertain" / f"{item.object_id}.json"
+
+    def _copy_path(self, copy_id: str) -> Path:
+        _opaque(copy_id)
+        return self.path / "copies" / copy_id[:2] / f"{copy_id}.json"
 
     def _read(self, path: Path, model):
         with reserved_paths._subsystem_authority_scope(OWNER):
@@ -971,7 +975,7 @@ class GeneratedFragmentStore:
         identities = (slot.current_copy_id, slot.pending.candidate_copy_id if slot.pending else None)
         copies, images, guards = [], {}, []
         for identity in dict.fromkeys(identity for identity in identities if identity is not None):
-            copy, guard = self._read(self.path / "copies" / identity[:2] / f"{identity}.json", Copy)
+            copy, guard = self._read(self._copy_path(identity), Copy)
             if copy is None or copy.copy_id != identity:
                 raise ValueError("generated slot copy binding is unavailable")
             guards.append(guard)
@@ -1182,7 +1186,7 @@ class GeneratedFragmentStore:
         _boundary(self.root)
         self._recover()
         _opaque(copy_id)
-        path = self.path / "copies" / copy_id[:2] / f"{copy_id}.json"
+        path = self._copy_path(copy_id)
         current, _ = self._read(path, Copy)
         if current is None or current.copy_id != copy_id or current.owner != owner:
             raise ValueError("generated copy owner witness differs")
@@ -1215,6 +1219,22 @@ class GeneratedFragmentStore:
         self._run("uncertainty", ((ObjectChange(kind="uncertainty", object_id=value.unit_id,
                    image_id=image_id, after_revision=value.revision), value),))
         return value
+
+    def copy_record(self, copy_id: str) -> Observation:
+        """Read one expected copy directly, independently of the derived membership index."""
+        _boundary(self.root)
+        try:
+            _opaque(copy_id)
+            head = self.head()
+            value, guard = self._read(self._copy_path(copy_id), Copy)
+            if value is not None and value.copy_id != copy_id:
+                raise ValueError("generated copy key differs")
+            guard.recheck(self.root)
+            if head.pending is not None or self.head() != head:
+                return Observation("pending", value)
+            return Observation("observed" if value is not None else "missing", value)
+        except (ValueError, OSError, vault.PathGuardError):
+            return Observation("unknown")
 
     def image_header(self, image_id: str) -> Observation:
         """Read bounded image binding evidence without loading its map or native bytes."""
@@ -1487,7 +1507,7 @@ class GeneratedFragmentStore:
                         if family == "images":
                             item = ObjectChange(kind="image", object_id=identity, image_id=identity)
                         elif family == "copies":
-                            value, _ = self._read(self.path / "copies" / identity[:2] / f"{identity}.json", Copy)
+                            value, _ = self._read(self._copy_path(identity), Copy)
                             if value is None:
                                 raise ValueError("generated copy disappeared during census")
                             item = ObjectChange(kind="copy", object_id=identity, image_id=value.image_id)

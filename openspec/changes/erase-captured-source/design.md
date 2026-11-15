@@ -109,7 +109,8 @@ This follows [How we contain Claude](https://www.anthropic.com/research/how-we-c
 Keep one canonical slot for each generated-file locator and physical owner scope.
 Its deterministic opaque key selects the current copy directly, with at most one pending candidate copy and publication identifier.
 Read its copy records and image headers directly when rendering; a cold local index cannot block capture or erase healthy ownership evidence.
-Reserve the candidate copy before preparing the slot, and prepare the slot before native publication.
+Reserve the candidate copy and prepare the slot before selecting its private temporary name.
+Before allocating that name, recheck the open canonical reservation and immutable image content; uncertainty may only increase.
 Normal success settles the slot from the native owner's exact installation witness after the rollback-capable batch finishes.
 Equal content hashes cannot select between different ownership maps without that witness.
 A takeover changes the slot revision and cancels delayed forward or inverse publication rights.
