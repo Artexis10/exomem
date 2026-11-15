@@ -885,3 +885,90 @@ def test_a_killed_projector_drains_on_restart_to_identical_files_and_no_held_row
     if destination:
         with open(destination, "w") as record:
             json.dump(timings, record, indent=2, sort_keys=True)
+
+
+def sha(body):
+    return hashlib.sha256(body).hexdigest()
+
+
+def test_the_facts_of_a_batch_name_each_paths_current_life_as_a_single_read_does(
+    stored, writer, projecting
+):
+    """A batched facts read that counts the bytes of an earlier life as Exomem's, or misses those of
+    the current one, when one batch mixes a recorded path, a reset, a queued removal and a move:
+    the projector then replaces a file that a person restored, or holds Exomem's own file."""
+    recorded, reset, removed = f"{NOTES}/Recorded.md", f"{NOTES}/Reset.md", f"{NOTES}/Removed.md"
+    moved_from, moved_to = f"{NOTES}/Moved.md", f"{NOTES}/Archive/Moved.md"
+    first, second, third = b"# One\n", b"# Two\n", b"# Three\n"
+    commit(writer, **put(recorded, first))
+    assert projecting.run_pass().projected == 1  # its manifest records the first bytes
+    commit(writer, **put(recorded, second))
+    commit(writer, **put(recorded, third))
+    commit(writer, **put(reset, first))
+    with writer.handle.transaction() as tx:  # the row that a migration writes, with no path
+        tx.execute(
+            "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at) "
+            "SELECT MAX(revision), NULL, 'migrate', ?, NULL, 'test', ? FROM store_audit",
+            (write.Origin.MIGRATION.value, write.timestamp()),
+        )
+    commit(writer, **put(reset, second))
+    commit(writer, **put(removed, first))
+    commit(writer, deletes=(write.PageDelete(removed),))
+    commit(writer, **put(removed, second))
+    commit(writer, **put(removed, third))
+    commit(writer, deletes=(write.PageDelete(removed),))  # queued: its file is still this life's
+    commit(writer, **put(moved_from, first))
+    commit(writer, moves=(write.PageMove(moved_from, moved_to),))
+    commit(writer, **put(moved_to, second))
+    expected = {
+        recorded: {sha(second), sha(third)},
+        reset: {sha(second)},
+        removed: {sha(second), sha(third)},
+        moved_from: {sha(first)},
+        moved_to: {sha(first), sha(second)},
+    }
+
+    with read.snapshot(stored) as view:
+        batched = projector._facts_for(view, list(expected))
+    single = {rel: projector.read_facts(stored, rel) for rel in expected}
+
+    assert {rel: set(facts.audited) for rel, facts in batched.items()} == expected
+    assert {rel: set(facts.audited) for rel, facts in single.items()} == expected
+
+
+def facts_read_work(root, rel):
+    """The SQLite virtual-machine steps, in hundreds, of one facts read of ``rel``."""
+    steps = []
+
+    def count():
+        steps.append(1)
+        return 0  # go on
+
+    with read.request_snapshot(root), read.snapshot(root) as view:  # the read joins this view
+        view.connection.set_progress_handler(count, 100)
+        try:
+            projector.read_facts(root, rel)
+        finally:
+            view.connection.set_progress_handler(None, 100)
+    return len(steps)
+
+
+def test_one_paths_facts_read_does_work_in_proportion_to_its_audit_history(stored, writer):
+    """A facts read whose work grows faster than the path's audit history. The importer reads facts
+    on the store thread inside the vault boundary, so a path that is written and deleted often held
+    that boundary for seconds: 16 s at 800 audit rows."""
+
+    def rewritten(times):
+        # A write and a delete per turn. No projector runs, so the path has no manifest row.
+        for turn in range(times):
+            commit(writer, **put(NEW, f"# Gamma\n\nVersion {turn}.\n".encode()))
+            commit(writer, deletes=(write.PageDelete(NEW),))
+
+    rewritten(50)
+    short = facts_read_work(stored, NEW)
+    rewritten(150)
+    long = facts_read_work(stored, NEW)
+
+    assert rows(stored, "SELECT COUNT(*) FROM store_audit WHERE path = ?", NEW) == [(400,)]
+    # Four times the rows is four times the work for a linear read; a quadratic one does sixteen.
+    assert long < 8 * short, (short, long)

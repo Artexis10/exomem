@@ -12227,7 +12227,7 @@ class LexicalStore:
         and the receipt for what a caller reads comes from the hits it is given.
         """
         decided: dict[str, bool] = {}
-        stored: dict[str, bool] = {}
+        publishable: dict[str, tuple[bool, tuple]] = {}
         # A collection store decides its pages on one thread, so the pages it owns share one store request.
         with deciding(plan.missing):
             # The predicate's set rule decides each ordinary scope class once; the rest stay scalar.
@@ -12235,8 +12235,15 @@ class LexicalStore:
                 decided[path] = allowed
                 if page_local and path not in plan.live and plan.signatures is not None:
                     signature = plan.signatures.get(path)
-                    if signature is not None and self._page_unchanged_since(path, signature):
-                        stored[sys.intern(path)] = allowed
+                    if signature is not None:
+                        publishable[path] = (allowed, signature)
+        from .vault_store import read as store_read
+
+        served = store_read.serves_many(self.vault_root, publishable)
+        stored = {
+            sys.intern(path): allowed for path, (allowed, signature) in publishable.items()
+            if self._page_unchanged_since(path, signature, served[path])
+        }
         if stored or not plan.current:
             known = plan.signatures or {}
             allowed_map = {
@@ -12268,15 +12275,13 @@ class LexicalStore:
             _key, dropped = held.popitem(last=False)
             total -= len(dropped.allowed)
 
-    def _page_unchanged_since(self, path: str, signature: tuple) -> bool:
+    def _page_unchanged_since(self, path: str, signature: tuple, served: bool) -> bool:
         """Whether the file still carries the `mtime_ns` its catalogue row was built from.
 
-        A page that the store serves has no file to ask: its commit derived its row, so the row is
-        the page's at the snapshot that the plan read.
+        A page that the store serves (`served`, decided once for the batch) has no file to ask: its
+        commit derived its row, so the row is the page's at the snapshot that the plan read.
         """
-        from .vault_store import read as store_read
-
-        if store_read.serves(self.vault_root, path):
+        if served:
             return True
         try:
             return os.stat(self.vault_root / path).st_mtime_ns == signature[1]

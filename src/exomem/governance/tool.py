@@ -52,6 +52,7 @@ from . import (
     decisions,
     graph_producer,
     membership,
+    page_admission,
     projection_store,
     projections,
     receipts,
@@ -1451,6 +1452,7 @@ def _durable_bytes(path: Path, value: bytes) -> None:
 def _clear_policy_caches(vault_root: Path) -> None:
     policy_module._CACHE.pop(str(policy_module.governance_root(vault_root)), None)
     membership.clear_memo()
+    page_admission.forget_scopes(vault_root)
     try:
         from . import egress
 

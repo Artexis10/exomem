@@ -396,10 +396,7 @@ def capture_legacy_collection(
 def _natural_key(manifest, values):
     if not manifest.schema.natural_key:
         return None
-    try:
-        return collections.manifest_natural_key(manifest, values)
-    except ValueError:
-        return None
+    return collections.complete_natural_key(manifest, values)
 
 
 def _body(manifest, values, body):

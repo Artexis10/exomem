@@ -1819,8 +1819,11 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     monkeypatch.setattr(CollectionWriter, "append_record", delayed)
     arguments = dict(action="append", collection=CID, item={"title": "Late committed"},
                      item_key=LATER, why="late acknowledgement", idempotency_key="late-commit")
+    # The leaf waits for `release`, so the budget ends while the mutation is accepted, unfinished.
+    # It also covers the queue's acceptance, which a loaded host can delay past 0.3 s: a request
+    # that the queue has not accepted is refused as busy instead.
     token = request_budget.set_current(request_budget.RequestBudget(
-        seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.3))
+        seconds=request_budget.DELIVERY_RESERVE_SECONDS + 2.0))
     busy_before = busy_total()
     try:
         with pytest.raises(OpError) as pending:

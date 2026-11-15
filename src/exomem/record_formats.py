@@ -2760,46 +2760,53 @@ def query_collection(
         raise collections.CollectionError(
             "RECORD_RESPONSE_TOO_LARGE", "first result row exceeds the response cap"
         )
-    next_offset = offset + result.returned
-    next_token = None
-    if result.truncated:
-        next_token = _encode_continuation(
-            {
-                "collection_id": manifest.collection_id,
-                "snapshot": parsed.snapshot,
-                "query": cursor_query,
-                "offset": next_offset,
-            }
+    kept = result.rows
+    while True:
+        # The rows bound already holds the rows alone; the envelope and source list render around them,
+        # so the rendered page is the one the cap counts, and a page that overflows shrinks to fit.
+        truncated = result.truncated or len(kept) < len(result.rows)
+        next_token = None
+        if truncated:
+            next_token = _encode_continuation(
+                {
+                    "collection_id": manifest.collection_id,
+                    "snapshot": parsed.snapshot,
+                    "query": cursor_query,
+                    "offset": offset + len(kept),
+                }
+            )
+        response = RecordQueryResult(
+            collection_id=manifest.collection_id,
+            snapshot=parsed.snapshot,
+            rows=kept,
+            returned=len(kept),
+            total_matched=result.total_matched,
+            truncated=truncated,
+            continuation=next_token,
+            derived=True,
+            rendered="",
+            aggregate=result.aggregate,
+            query=query,
+            # Only the returned rows' sources: a list of every source grows with the
+            # collection and passes the response cap; the snapshot names the whole read.
+            source_versions=_source_versions_for_returned_rows(
+                parsed,
+                manifest,
+                kept,
+                item_id_property=profile.item_id_property,
+            ),
+            columns=tuple(result.columns),
+            view=view_provenance,
         )
-    response = RecordQueryResult(
-        collection_id=manifest.collection_id,
-        snapshot=parsed.snapshot,
-        rows=result.rows,
-        returned=result.returned,
-        total_matched=result.total_matched,
-        truncated=result.truncated,
-        continuation=next_token,
-        derived=True,
-        rendered="",
-        aggregate=result.aggregate,
-        query=query,
-        # Only the returned rows' sources: a list of every source grows with the
-        # collection and passes the response cap; the snapshot names the whole read.
-        source_versions=_source_versions_for_returned_rows(
-            parsed,
-            manifest,
-            result.rows,
-            item_id_property=profile.item_id_property,
-        ),
-        columns=tuple(result.columns),
-        view=view_provenance,
-    )
-    rendered = render_query_result(response, output_format=output_format)
-    if len(rendered.encode("utf-8")) > query_data.MAX_RESPONSE_BYTES:
-        raise collections.CollectionError(
-            "RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap"
-        )
-    return replace(response, rendered=rendered)
+        rendered = render_query_result(response, output_format=output_format)
+        size = len(rendered.encode("utf-8"))
+        if size <= query_data.MAX_RESPONSE_BYTES:
+            return replace(response, rendered=rendered)
+        if aggregate is not None or len(kept) <= 1:
+            raise collections.CollectionError(
+                "RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap"
+            )
+        kept = kept[: max(1, min(len(kept) - 1, len(kept) * query_data.MAX_RESPONSE_BYTES // size))]
 
 
 @dataclass(frozen=True, slots=True)

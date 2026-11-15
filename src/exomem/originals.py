@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -133,13 +133,28 @@ def is_reference_only_companion(fields: dict[str, object], body: str) -> bool:
     return binary is not None and reference is not None and not body.strip() and fields == reference_companion_fields(binary, reference)
 
 
+class DisplacedReference(ValueError):
+    """A well-formed reference in a page that is not at its original's companion path.
+
+    A page that a confined move carries alone, away from an evicted original that its caller may
+    not see, keeps the original's binding. The page alone cannot show that the binding is its own,
+    so it raises this; the census confirms it from the media ledger (`media_store.recorded_versions`).
+    """
+
+    def __init__(self, binary: BinaryBinding, reference: StoredObject) -> None:
+        super().__init__("stored reference is not at its bound companion path")
+        self.binary = binary
+        self.reference = reference
+
+
 def referenced_binding(
     fields: dict[str, object], *, sidecar_path: str, store: StoreBinding,
 ) -> tuple[BinaryBinding, StoredObject] | None:
     """Read a canonical reference without requiring the original's physical presence.
 
     A caller supplies the companion's authoritative path before any Trash relocation.
-    Missing or foreign references count as none; malformed selected-store custody raises.
+    Missing or foreign references count as none; malformed selected-store custody raises, and a
+    well-formed one away from its companion path raises `DisplacedReference`.
     """
     from . import reserved_paths
 
@@ -154,7 +169,7 @@ def referenced_binding(
     if binary is None or reserved_paths.classify_logical(binary.path).blocked:
         raise ValueError("stored reference has no valid binary binding")
     if sidecar_path not in companion_paths(binary.path):
-        raise ValueError("stored reference is not at its bound companion path")
+        raise DisplacedReference(binary, reference)
     return binary, reference
 
 
@@ -228,14 +243,22 @@ def companion_paths(relative: str) -> tuple[str, ...]:
     )
 
 
-def companion_candidates(vault: Path, relative: str) -> Iterator[tuple[str, bytes]]:
+def companion_candidates(
+    vault: Path, relative: str, *, companions: Mapping[str, bytes] | None = None,
+) -> Iterator[tuple[str, bytes]]:
     """Each companion candidate of this original that exists, as its path and bytes.
 
-    A missing candidate is skipped; any other failed read raises.
+    A missing candidate is skipped; any other failed read raises. A caller that has already read every page
+    that can be a companion, with one batch read, passes them as ``companions`` by vault-relative path; a
+    candidate absent from it is missing.
     """
     from . import reserved_paths
 
     for companion in companion_paths(relative):
+        if companions is not None:
+            if (held := companions.get(companion)) is not None:
+                yield companion, held
+            continue
         try:
             data = reserved_paths.read_generic_bytes(vault, companion).data
         except reserved_paths.ReservedPathLeafError as error:
@@ -245,25 +268,31 @@ def companion_candidates(vault: Path, relative: str) -> Iterator[tuple[str, byte
         yield companion, data
 
 
-def bound_companion(vault: Path, relative: str) -> tuple[str, dict[str, object], bytes] | None:
+def bound_companion(
+    vault: Path, relative: str, *, companions: Mapping[str, bytes] | None = None,
+) -> tuple[str, dict[str, object], bytes] | None:
     """Return the first companion candidate whose pointer fields all name this original.
 
     A malformed candidate raises UnicodeError or FrontmatterError; each caller decides what it means.
     """
     from .vault import parse_frontmatter
 
-    for companion, data in companion_candidates(vault, relative):
+    for companion, data in companion_candidates(vault, relative, companions=companions):
         fields, _body, marker = parse_frontmatter(data.decode("utf-8"), custody=True)
         if marker is not None and bound_path(fields) == relative:
             return companion, fields, data
     return None
 
 
-def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | None = None) -> OriginalSnapshot:
+def original_state(
+    vault: Path, path: str | Path, *, binding: StoreBinding | None = None,
+    companions: Mapping[str, bytes] | None = None,
+) -> OriginalSnapshot:
     """Resolve local, cached, evicted or missing from one exact sibling binding.
 
     This reader never constructs a store client or opens the job database.
     Foreign references deliberately confer no presence in the selected vault.
+    ``companions`` is ``companion_candidates``'s: pages that the caller has already read.
     """
     from . import reserved_paths
     from .vault import FrontmatterError
@@ -292,7 +321,7 @@ def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | Non
                 raise
             physical = False
     try:
-        found = bound_companion(vault, relative)
+        found = bound_companion(vault, relative, companions=companions)
     except (UnicodeError, FrontmatterError):
         found = None
     if found is None:
@@ -317,3 +346,28 @@ def original_state(vault: Path, path: str | Path, *, binding: StoreBinding | Non
         # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
         offloadable=not is_note_path(relative) and "data_file" not in fields,
     )
+
+
+def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, OriginalSnapshot] | None:
+    """An evicted original that the caller may see, found without fetching it; any other absent path is none.
+
+    A door that moves an original reads this to accept the path before it materializes anything, so a
+    withheld original and an absent path answer alike whether the store is reachable or not.
+    """
+    if binding_for(vault) is None:
+        return None
+    from . import reserved_paths
+    from .governance import egress
+    from .vault import VaultPathError, resolve_under_vault
+
+    try:
+        abs_path, rel_path = resolve_under_vault(vault, path, must_be_file=True)
+        stored = original_state(vault, abs_path)
+    except (VaultPathError, reserved_paths.ReservedPathLeafError):
+        return None
+    # A bound store filters the owner's walk too (it leaves out the trash); a door withholds nothing
+    # from the owner, as `egress.write_target_withheld` decides.
+    visible = egress.restricted_release_filter(vault) if egress.caller_restricted(vault) else None
+    if stored.state != "evicted" or (visible is not None and not visible(rel_path)):
+        return None
+    return abs_path, rel_path, stored

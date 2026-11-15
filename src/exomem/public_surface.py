@@ -417,7 +417,12 @@ def _door_call(
     extra = sorted(set(body) - {"operation", "arguments", *({"detail"} if writes else set())})
     operation = body.get("operation")
     if extra or not isinstance(operation, str):
-        refusal = OpError("INVALID_ARGUMENT", f"{door} takes operation, arguments{' and detail' if writes else ''}.")
+        problems = [] if isinstance(operation, str) else ["operation must name one of its operations"]
+        if extra:
+            problems.append(f"{', '.join(extra)} {'is not a field' if len(extra) == 1 else 'are not fields'} "
+                            "of this tool, and an operation's own fields go inside arguments")
+        fields = "operation, arguments and detail" if writes else "operation and arguments"
+        refusal = OpError("INVALID_ARGUMENT", f"{door} takes {fields}; {'; '.join(problems)}.")
         refusal.writes = writes
         raise refusal
     if operation not in operations:
