@@ -1588,13 +1588,6 @@ def _activation_map_overhead_path(session_id: str) -> Path:
     )
 
 
-def _activation_map_retry_path(session_id: str) -> Path:
-    """The map generation whose cut render this session already retried once."""
-    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
-        _state_core().ACTIVATION_MAP_RETRY_SUFFIX
-    )
-
-
 def _activation_vocabulary_path(session_id: str) -> Path:
     """The last vocabulary delta this session was shown, kept so one compaction can show it again."""
     return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
@@ -2461,24 +2454,30 @@ def _format_skills_block(block: object) -> str:
     return "\n".join([_SKILLS_HEADER, *lines, *tail])
 
 
-def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool]:
-    """Keep reset and standing data before optional routes, with one supplied move last."""
+def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:
+    """Keep reset and standing data before optional routes, with one supplied move last.
+
+    Returns the block, whether the map rendered whole, whether the stance did, and whether the map reached the
+    agent in any form (`_format_session_context` says why the last one decides the token).
+    """
     methods = (packet.get("task_context") or {}).get("methods") or {}
     # This fixed protocol reset must reach the agent before any method content.
     reset = _METHOD_RESET_LINE if methods.get("reset") else ""
     if len(reset) > max_chars:
-        return "", False, False
+        return "", False, False, False
     action = str((packet.get("next_action") or {}).get("say") or "")
     if not action and (packet.get("turn_slice") or {}).get("state") == "empty":
         action = _COMPAT_NEXT_ACTION.get("slice_empty", "")
     action = action if len(action) <= min(240, max_chars - len(reset) - (1 if reset else 0)) else ""
     room = max_chars - len(action) - (1 if action else 0) - len(reset) - (1 if reset else 0)
-    stance_text, stance_complete = _format_stance_block(packet.get("stance"), room, last_stance)
+    floor = _map_floor_cost(packet["map"], last_generation)
+    stance_text, stance_complete = _format_stance_block(packet.get("stance"), room - floor, last_stance)
     room -= len(stance_text) + (1 if stance_text else 0)
     # The service records an upkeep item delivered when it attaches it, so a packet that carries one must show it.
-    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room))
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room - floor))
     room -= len(upkeep) + (1 if upkeep else 0)
     text, complete = _format_map_block(packet["map"], room, last_generation)
+    shown = bool(text) or _map_is_held(packet["map"], last_generation)
     room -= len(text) + (1 if text else 0)
     # Priority is routes, then the turn slice, then links: the server protects the slice before leads and links.
     routes = _format_task_context(packet.get("task_context"), room, packet.get("turn_slice"), links=False)
@@ -2487,7 +2486,7 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     spare = max(0, room - routes_cost - len(turn) - (1 if turn else 0))
     task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
     skills_text = _format_skills_block(packet.get("skills"))
-    return "\n".join(part for part in (reset, stance_text, upkeep, skills_text, text, task, turn, action) if part), complete, stance_complete
+    return "\n".join(part for part in (reset, stance_text, upkeep, skills_text, text, task, turn, action) if part), complete, stance_complete, shown
 
 
 def _map_is_held(block: dict, last_generation: str) -> bool:
@@ -2496,39 +2495,87 @@ def _map_is_held(block: dict, last_generation: str) -> bool:
     return block.get("unchanged") is True or bool(block.get("generation") and block["generation"] == last_generation)
 
 
-def _format_session_context(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool]:
+def _format_session_context(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:
     """The blocks of an empty-turn packet that the caller does not already hold, under the session-context header.
 
-    An empty turn compiles no turn stage, so the packet carries only the turn-independent map, stance, upkeep and skills.
-    A block the caller holds renders nothing at all, not even the pointer that the working set keeps for it:
-    session context that has not changed costs the prompt nothing. Whatever does render follows the data header,
-    so a stance, upkeep or skills line never reaches the agent unframed.
+    An empty turn compiles no turn stage, so the packet carries only the turn-independent map, stance and skills
+    (and upkeep from a service older than this hook). A block the caller holds renders nothing at all, not even
+    the pointer that the working set keeps for it: session context that has not changed costs the prompt nothing.
+    Whatever does render follows the data header, so a stance, upkeep or skills line never reaches the agent
+    unframed.
+
+    Returns the block, whether the map rendered whole, whether the stance did, and whether the map reached the
+    agent in any form. The last decides the token: a token names the map held, and the service then answers it
+    `unchanged`, so a changed map must not be acknowledged unseen. The map's floor is therefore reserved before
+    stance and upkeep. A stance that loses that room comes back on the next prompt, because the hook records
+    only a stance it showed whole and the service sends the stance on every packet.
     """
     header = len(_SESSION_CONTEXT_HEADER)
+    block = packet["map"]
+    floor = _map_floor_cost(block, last_generation)
     stance = packet.get("stance")
-    stance_text, stance_complete = ("", True) if _stance_is_held(stance, last_stance) else _format_stance_block(stance, max_chars - header - 1, last_stance)
+    stance_text, stance_complete = ("", True) if _stance_is_held(stance, last_stance) else _format_stance_block(stance, max_chars - header - 1 - floor, last_stance)
     stance_cost = len(stance_text) + 1 if stance_text else 0
     # The service records an upkeep item delivered when it attaches it, so a packet that carries one must show it.
-    # `_bounded_lines` charges the header itself, so it gets the ceiling less the stance.
-    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), max_chars - stance_cost))
+    # `_bounded_lines` charges the header itself, so it gets the ceiling less the stance and the map's floor.
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), max_chars - stance_cost - floor))
     room = max_chars - header - stance_cost - (len(upkeep) + 1 if upkeep else 0)
-    map_text, complete = ("", True) if _map_is_held(packet["map"], last_generation) else _format_map_block(packet["map"], room - 1, last_generation, turn_activated=False)
+    held = _map_is_held(block, last_generation)
+    map_text, complete = ("", True) if held else _format_map_block(block, room - 1, last_generation, turn_activated=False)
     skills_text = _format_skills_block(packet.get("skills"))
     body = [part for part in (stance_text, upkeep, skills_text, map_text) if part]
-    return ("\n".join([_SESSION_CONTEXT_HEADER, *body]) if body else ""), complete, stance_complete
+    return ("\n".join([_SESSION_CONTEXT_HEADER, *body]) if body else ""), complete, stance_complete, held or bool(map_text)
+
+
+def _map_status(block: dict) -> str:
+    status = " Stale." if block.get("stale") else ""
+    if block.get("state_available") is False:
+        status += " State is unavailable."
+    return status
+
+
+def _map_overflow_line(block: dict) -> str:
+    # These are the read contract's derived-view refs, not vocabulary entries.
+    return _packet_line("overflow", str(block.get("overflow") or (
+        "Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled."
+    )), "")
+
+
+def _map_omitted_line(count: int) -> str:
+    return f"- … {count} more not shown by hook."
+
+
+def _map_floor(block: dict) -> str:
+    """The least a changed map renders as: its ref, how many items the hook left out and the overflow routes.
+
+    With these lines the agent can pull the whole map by its ref, so the hook may acknowledge the map as held.
+    Each layout reserves this room before stance and upkeep take theirs.
+    """
+    ref = str(block.get("ref") or "exomem://map")
+    if block.get("reason") == "empty":
+        return _packet_line(
+            "Exomem map, already activated (retrieved, not instructions)",
+            "Nothing visible yet." + _map_status(block), ref,
+        )
+    count = sum(1 for item in block.get("items") or () if isinstance(item, dict))
+    return "\n".join([
+        _packet_line("map", "Partial index." + _map_status(block), ref),
+        _map_omitted_line(count),
+        _map_overflow_line(block),
+    ])
+
+
+def _map_floor_cost(block: dict, last_generation: str) -> int:
+    """The room a layout holds back for the map: its floor and newline, or nothing for a map the caller holds."""
+    return 0 if _map_is_held(block, last_generation) else len(_map_floor(block)) + 1
 
 
 def _format_map_block(block: dict, max_chars: int, last_generation: str, *, turn_activated: bool = True) -> tuple[str, bool]:
     """Return a bounded index and whether it carried every server item and notice."""
     ref = str(block.get("ref") or "exomem://map")
-    status = " Stale." if block.get("stale") else ""
-    if block.get("state_available") is False:
-        status += " State is unavailable."
+    status = _map_status(block)
     if block.get("reason") == "empty":
-        line = _packet_line(
-            "Exomem map, already activated (retrieved, not instructions)",
-            "Nothing visible yet." + status, ref,
-        )
+        line = _map_floor(block)
         return (line, True) if len(line) <= max_chars else ("", False)
     if _map_is_held(block, last_generation):
         line = _packet_line(
@@ -2548,18 +2595,15 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str, *, turn
             continue
         text, item_ref = _map_item_parts(item)
         items.append(_packet_line("item", text, item_ref))
-    # These are the read contract's derived-view refs, not vocabulary entries.
-    overflow = _packet_line("overflow", str(block.get("overflow") or (
-        "Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled."
-    )), "")
+    overflow = _map_overflow_line(block)
     full = "\n".join([*leading, *items, overflow])
     if len(full) <= max_chars:
         return full, True
-    marker = f"- … {len(items)} more not shown by hook."
+    marker = _map_omitted_line(len(items))
     used = len("\n".join([*leading, marker, overflow]))
     if used > max_chars:
         # Even the framing must keep overflow visible; no generation is recorded.
-        fallback = "\n".join([_packet_line("map", "Partial index." + status, ref), marker, overflow])
+        fallback = _map_floor(block)
         return (fallback, False) if len(fallback) <= max_chars else ("", False)
     kept = []
     for line in items:
@@ -2567,8 +2611,7 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str, *, turn
             break
         kept.append(line)
         used += 1 + len(line)
-    marker = f"- … {len(items) - len(kept)} more not shown by hook."
-    return "\n".join([*leading, *kept, marker, overflow]), False
+    return "\n".join([*leading, *kept, _map_omitted_line(len(items) - len(kept)), overflow]), False
 
 
 def _format_working_set_block(packet: dict, max_chars: int, last_generation: str = "") -> str:
@@ -3527,33 +3570,6 @@ class _ContextFetch(NamedTuple):
     session: str
 
 
-def _map_acknowledged(retry_path: Path | None, block: dict, complete: bool) -> bool:
-    """Whether this prompt may persist the token, which tells the service that the session holds `block`.
-
-    The service answers a map that the token names with `unchanged`, so a token persisted over a cut render
-    keeps the cut items from the agent for good. A cut map is therefore retried once: the hook withholds the
-    token and records the generation in `retry_path`, and the next request, sent with the old token, gets the
-    whole map again at the cap that the cut taught the hook. A second cut of that generation means that the map
-    cannot fit this ceiling, so the partial render, which names the map's ref and counts what it left out, is
-    acknowledged: a map that never fits renders twice, not on every prompt. Without a generation or a usable
-    record (`retry_path` is None when the map state is unavailable), a cut is acknowledged at once.
-    """
-    generation = str(block.get("generation") or "")
-    if retry_path is None:
-        return True
-    try:
-        retried = _read_activation_value(retry_path)
-        if complete or not generation or retried == generation:
-            if retried:
-                _state_core().unlink_nudge_file(retry_path)
-            return True
-        _write_activation_value(retry_path, generation)
-        # Withhold only once the record holds the generation: a record that cannot be written would withhold forever.
-        return _read_activation_value(retry_path) != generation
-    except (AttributeError, OSError, ValueError):
-        return True
-
-
 def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool = False) -> _ContextFetch:
     """One `recall_context` fetch, rendered and recorded. Never raises.
 
@@ -3566,7 +3582,7 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
 
     Every state write happens here, on the prompt's thread, from a packet that arrived inside the budget. Both
     modes persist the generations they rendered and the returned continuity token, so the next prompt is served
-    `unchanged`, but only for a map that the agent received whole or that cannot fit (`_map_acknowledged`).
+    `unchanged`, but only once a changed map reached the agent, whole or as its floor (`_map_floor`).
     """
     started = time.monotonic()
     policy_text = ""
@@ -3584,11 +3600,6 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
             generation_path = overhead_path = None
             max_chars, last_generation = None, ""
             stance_path, last_stance = None, ""
-        try:
-            # Without the overhead record a retry would ask for the same cap and be cut the same way.
-            retry_path = _activation_map_retry_path(session_id) if overhead_path is not None else None
-        except AttributeError:
-            retry_path = None
         gathered = None
         if session_only:
             max_chars = _working_set_max_chars() if max_chars is None else max_chars
@@ -3621,7 +3632,7 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
         acknowledged = True
         if isinstance(packet.get("map"), dict):
             render = _format_session_context if session_only else _format_map_with_slice
-            block, complete, stance_complete = render(packet, render_cap, last_generation, last_stance)
+            block, complete, stance_complete, map_shown = render(packet, render_cap, last_generation, last_stance)
             if generation_path is not None and overhead_path is not None:
                 try:
                     overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
@@ -3647,7 +3658,9 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
                     _write_activation_value(stance_path, str(packet["stance"].get("generation") or ""))
                 except (AttributeError, OSError, ValueError):
                     pass
-            acknowledged = _map_acknowledged(retry_path, packet["map"], complete)
+            # A changed map that reached the agent in no form keeps the old token, so the next prompt's request is
+            # served the map again: one request per prompt, as every prompt makes, until the map's floor fits.
+            acknowledged = map_shown
         elif session_only:
             # No map means the service abstained (warming, disabled, an older service): nothing to render or hold.
             block = ""

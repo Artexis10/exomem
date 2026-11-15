@@ -39,6 +39,8 @@ STANCE = {
     "generation": "stance-1",
     "items": [{"ref": "stance.md#rule", "text": "Keep the source for each claim."}],
 }
+# The reviewed failure: one 80-character stance rule left a 500-character ceiling no room for the map.
+RULE = "Keep the source of every measurement with the reading it supports and date both."
 SKILLS = {
     "state": "ready",
     "items": [{"name": "exomem-review", "summary": "Review a vault.", "ref": "exomem://skill/review"}],
@@ -272,27 +274,82 @@ def test_a_credential_file_that_blocks_costs_the_prompt_no_more_than_the_session
     assert "session=timeout" in _log_text(tmp_path)
 
 
-def _answer_as_the_service(monkeypatch: pytest.MonkeyPatch, first: dict, later: dict) -> list[dict]:
-    """Serve `first` once and `later` after it, both as `token-1`; a request that holds `token-1` gets the map and
-    skills `unchanged`, as the service does for the generations a token names."""
+@pytest.fixture
+def served_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """A built vault with one 80-character stance rule; the real `recall_context` answers every request, whose
+    body is kept."""
+    from conftest import initialize_vault_state_offline
+    from test_context_catalogue import _built, _page, _seed, _write
+
+    from exomem import commands, stance, working_set_runtime
+    from exomem.governance import principal
+    from exomem.writer_lease import invoke_command
+
+    vault = tmp_path / "vault"
+    _seed(vault)
+    schema = Path(stance.__file__).parent / "_scaffold/_Schema/references"
+    _write(vault, "Knowledge Base/_Schema/SKILL.md", "# Memory schema\n")
+    for name in ("frontmatter.md", "page-types.md"):
+        _write(vault, f"Knowledge Base/_Schema/references/{name}", (schema / name).read_text(encoding="utf-8"))
+    _page(vault, "global", "stance: true\n", body=f"- [rule] {RULE} ^source\n")
+    initialize_vault_state_offline(vault, source="native session context")
+    _built(vault).close()
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    working_set_runtime.reset_caches_for_tests()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
     bodies: list[dict] = []
 
     def answer(request, timeout=None):
-        body = json.loads(request.data.decode("utf-8"))
-        bodies.append(body)
-        packet = dict(first if len(bodies) == 1 else later)
-        if body.get("continuity") == "token-1":
-            packet.update(map={**packet["map"], "items": [], "unchanged": True}, skills={"state": "unchanged"})
+        bodies.append(json.loads(request.data.decode("utf-8")))
+        with principal.library_scope():
+            packet = invoke_command(command, vault, **bodies[-1])
         return _Response(json.dumps({"success": True, "data": packet}).encode("utf-8"))
 
     answer_requests(monkeypatch, answer)
     return bodies
 
 
-def test_a_map_the_ceiling_cut_is_served_again_until_it_arrives(
+def test_a_tight_ceiling_still_delivers_the_map_ref_before_the_token_names_it_held(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], served_vault: list[dict]
+) -> None:
+    """The service answers a held map `unchanged`, so a token saved while stance took the map's room hid the map
+    from the agent for the rest of the session."""
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "500")
+    # The real service compiles the packet on this worker; the deadline is not what this test measures.
+    monkeypatch.setattr(hook, "SESSION_CONTEXT_BUDGET_SECONDS", 30.0)
+
+    first = _prompt(monkeypatch, capsys)
+    second = _prompt(monkeypatch, capsys, "And what about the winter schedule for the depot")
+
+    assert "[exomem://map]" in first and "exomem://map/unfiled" in first
+    assert served_vault[1].get("continuity"), "the map reached the agent, so its token is kept"
+    assert RULE in first + second, "a stance the map's room displaced arrives on the next prompt"
+
+
+def test_a_changed_map_that_renders_in_no_form_keeps_the_old_token(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A token saved over a cut map makes the service answer `unchanged`, so the cut item never reaches the agent."""
+    """Acknowledging a map the agent never saw makes the service answer it `unchanged` from then on."""
+    packet = _packet()
+    bodies = _serve(monkeypatch, packet)
+    _prompt(monkeypatch, capsys)
+    packet.update(map={**MAP, "generation": "map-2"}, skills={"state": "unchanged"}, continuity="token-2")
+    # The session header alone takes most of this ceiling, so not even the map's ref fits.
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "300")
+
+    second = _prompt(monkeypatch, capsys, "And what about the winter schedule for the depot")
+    third = _prompt(monkeypatch, capsys, "And the spring schedule")
+    _prompt(monkeypatch, capsys, "And the summer schedule")
+
+    assert "exomem://map" not in second + third
+    assert [body.get("continuity") for body in bodies[1:]] == ["token-1", "token-1", "token-1"]
+
+
+def test_an_upkeep_item_and_the_map_ref_share_a_tight_ceiling(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An older service attaches a once-only upkeep item to the session fetch and records it delivered, so the
+    hook must show it; the map's ref must still reach the agent, or the token marks an unseen map held."""
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "900")
     upkeep = {
         "items": [
@@ -300,45 +357,18 @@ def test_a_map_the_ceiling_cut_is_served_again_until_it_arrives(
                 "ref": "exomem://review/upkeep/item-one",
                 "label": "stale link",
                 "why": "a link points nowhere",
-                "subject": {"title": "Depot winter rota " + "x" * 280},
+                "subject": {"title": "Depot winter rota " + "x" * 120},
             }
         ]
     }
-    # The service records the upkeep item delivered when it attaches it, so only the first answer carries it.
-    bodies = _answer_as_the_service(monkeypatch, _packet(upkeep=upkeep), _packet())
+    bodies = _serve(monkeypatch, _packet(upkeep=upkeep, map={**MAP, "description": "Index of what exists. " + "y" * 200}))
 
     first = _prompt(monkeypatch, capsys)
-    second = _prompt(monkeypatch, capsys, "And what about the winter schedule for the depot")
-    third = _prompt(monkeypatch, capsys, "And the spring schedule")
+    _prompt(monkeypatch, capsys, "And what about the winter schedule for the depot")
 
-    assert "exomem://review/upkeep/item-one" in first and "Depot Ledger" not in first
-    assert "continuity" not in bodies[1], "the cut map stays unacknowledged"
-    assert "Depot Ledger" in second
-    assert bodies[2]["continuity"] == "token-1"
-    assert third == hook._mcp_activation_context()
-
-
-def test_a_map_that_cannot_fit_the_ceiling_renders_twice_then_is_acknowledged(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A token withheld for every cut would resend a map that never fits on every prompt of the session."""
-    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "1200")
-    items = [
-        {"title": f"Depot ledger {n}", "ref": f"exomem://memory/depot-{n}", "description": "Stock decisions " + "y" * 60}
-        for n in range(8)
-    ]
-    wide = _packet(map={**MAP, "items": items})
-    bodies = _answer_as_the_service(monkeypatch, wide, wide)
-
-    first = _prompt(monkeypatch, capsys)
-    second = _prompt(monkeypatch, capsys, "And what about the winter schedule for the depot")
-    third = _prompt(monkeypatch, capsys, "And the spring schedule")
-
-    assert "Depot ledger 0" in first and "Depot ledger 7" not in first
-    assert "continuity" not in bodies[1]
-    assert "Depot ledger 0" in second and "Depot ledger 7" not in second
-    assert bodies[2]["continuity"] == "token-1"
-    assert third == hook._mcp_activation_context()
+    assert "exomem://review/upkeep/item-one" in first
+    assert "[exomem://map]" in first and "more not shown by hook" in first
+    assert bodies[1]["continuity"] == "token-1"
 
 
 def test_session_context_never_claims_the_turn_was_activated(

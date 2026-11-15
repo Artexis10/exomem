@@ -411,6 +411,32 @@ def test_a_stale_decision_on_an_evicted_twin_holds_only_until_it_is_proposed_aga
     assert offered_path in offered, offered
 
 
+def test_an_empty_turn_fetch_leaves_the_session_item_to_the_first_recall_with_a_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The start-of-turn hook fetches session context with an empty turn and may abandon that answer at its
+    deadline. An item attached to it would be recorded delivered and never reach the agent."""
+    monkeypatch.setattr(upkeep, "_monotonic", lambda: 1_000_000.0)
+    monkeypatch.setattr(upkeep, "_wall", lambda: time.time() + 3 * HOUR)
+    upkeep.reset_delivery_state()
+    vault = fx.build(tmp_path)
+    monkeypatch.setenv(dreamer.ENV, "paused")
+    assert dreamer.start(vault) is not None and dreamer.delivering()
+    start = time.time()
+    _quiet(vault, start)
+    _quiet(vault, start + 2 * HOUR)
+    try:
+        fetched = _tool(vault, "activate_context", turn="", session="conversation-a")
+        assert "upkeep" not in fetched
+        assert upkeep.pending_deliveries() == []
+
+        recalled = _tool(vault, "activate_context", turn="how is the orbit pump doing", session="conversation-a")
+        assert len((recalled.get("upkeep") or {}).get("items") or []) == 1
+        assert len(upkeep.pending_deliveries()) == 1
+    finally:
+        dreamer.stop()
+
+
 def test_the_next_ordinary_session_receives_and_disposes_of_an_item_unasked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

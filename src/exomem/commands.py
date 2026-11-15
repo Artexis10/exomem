@@ -7301,7 +7301,10 @@ def op_activate_context(
                         from . import sensed_model
                         from . import upkeep as upkeep_module
 
-                        upkeep_module.for_packet(vault_root, packet, session=session)
+                        # An empty turn is the hook's session-context fetch, which it may abandon at its deadline, so it
+                        # must not consume this once-only delivery: the agent's first recall with a turn receives it.
+                        if str(turn or "").strip():
+                            upkeep_module.for_packet(vault_root, packet, session=session)
                         # Also outside the cache: each resolved anchor page's sensed status.
                         sensed_model.for_packet(vault_root, packet)
                         from . import due_state as due_state_module

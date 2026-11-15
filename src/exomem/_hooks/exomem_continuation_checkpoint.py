@@ -46,8 +46,6 @@ def optional_sibling_module(filename: str):
 ACTIVATION_MAP_GENERATION_SUFFIX = ".map-generation"
 ACTIVATION_STANCE_GENERATION_SUFFIX = ".stance-generation"
 ACTIVATION_MAP_OVERHEAD_SUFFIX = ".map-overhead"
-# The map generation whose cut render the retrieve hook already retried once by withholding the token.
-ACTIVATION_MAP_RETRY_SUFFIX = ".map-retry"
 # The retrieve hook keeps the last vocabulary delta it showed and a marker that the live context holds it.
 # A lifecycle event drops only the marker, so the next prompt shows that delta once more.
 ACTIVATION_VOCABULARY_DELTA_SUFFIX = ".vocabulary-delta"
@@ -483,7 +481,6 @@ def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
         token.with_suffix(ACTIVATION_MAP_GENERATION_SUFFIX),
         token.with_suffix(ACTIVATION_STANCE_GENERATION_SUFFIX),
         token.with_suffix(ACTIVATION_MAP_OVERHEAD_SUFFIX),
-        token.with_suffix(ACTIVATION_MAP_RETRY_SUFFIX),
         token.with_suffix(ACTIVATION_VOCABULARY_SHOWN_SUFFIX),
     ):
         try:
