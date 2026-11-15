@@ -2,8 +2,8 @@
 
 ## 1. Measure the baseline
 
-- [ ] 1.1 Replay real operator turns against the installed build. Record, per case, whether the needed page reached the response, in which block and rank, and the latency. Keep cases and keys outside the repository.
-- [ ] 1.2 Freeze a held-out third of the cases before any iteration and record its digest.
+- [x] 1.1 Replay real operator turns against the installed build. Record, per case, whether the needed page reached the response, in which block and rank, and the latency. Keep cases and keys outside the repository.
+- [x] 1.2 Freeze a held-out third of the cases before any iteration and record its digest.
 
 ## 2. Recognize and catalogue skills
 
@@ -17,8 +17,9 @@
 
 ## 3. Deliver context on every turn
 
-- [ ] 3.1 From the 1.1 results, choose the start-of-turn delivery for the hook and the server instructions; add the `retrieve-inject-hook` delta before code.
+- [x] 3.1 From the 1.1 results, choose the start-of-turn delivery for the hook and the server instructions; add the `retrieve-inject-hook` delta before code.
 - [ ] 3.2 Implement and prove it on follow-up turns with real models, including a provider outage and a Codex case.
+  - Implementation landed: the native-mode hook fetches the changed session context with one empty-turn call, and the nudge and server instructions ask for recall per new subject. Hook tests cover its transport. The real-model proof (follow-up turns, a provider outage, a Codex case) is still open.
 
 - [ ] 3.3 Evaluate pick-by-problem routing tables (a note whose rows map a problem to the method or source to use) as a method carrier beside skills; specify before code.
 

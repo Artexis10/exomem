@@ -202,6 +202,25 @@ def test_the_hook_door_is_one_conversation_by_the_session_it_sends(
     assert "vocabulary_delta" not in anonymous, "a call that names no conversation cannot be told once"
 
 
+def test_an_empty_turn_fetch_leaves_the_delta_to_the_first_recall_with_a_turn(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The start-of-turn hook fetches session context with an empty turn and may abandon that answer at its
+    deadline. A delta attached to it would be recorded delivered and never reach the agent."""
+    from test_recent_promotions import _save_relation
+
+    _as(monkeypatch, "session-a")
+    _save_relation(vault, "vault.hosts", parent="relates_to")
+
+    _as(monkeypatch, None)
+    with library_scope():
+        fetched = commands.op_activate_context(vault, "", session="hook-conversation")
+        recalled = commands.op_activate_context(vault, "which relations exist in this vault?", session="hook-conversation")
+
+    assert "vocabulary_delta" not in fetched
+    assert _keys(recalled.get("vocabulary_delta")) == ["vault.hosts"]
+
+
 def test_bootstrap_new_and_the_delta_list_the_same_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

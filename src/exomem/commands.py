@@ -7301,7 +7301,10 @@ def op_activate_context(
                         from . import sensed_model
                         from . import upkeep as upkeep_module
 
-                        upkeep_module.for_packet(vault_root, packet, session=session)
+                        # An empty turn is the hook's session-context fetch, which it may abandon at its deadline, so it
+                        # must not consume this once-only delivery: the agent's first recall with a turn receives it.
+                        if str(turn or "").strip():
+                            upkeep_module.for_packet(vault_root, packet, session=session)
                         # Also outside the cache: each resolved anchor page's sensed status.
                         sensed_model.for_packet(vault_root, packet)
                         from . import due_state as due_state_module
@@ -7309,8 +7312,10 @@ def op_activate_context(
                         # Guarded material supplies relevance; the agent decides whether to raise it.
                         due_state_module.for_activation(vault_root, packet, purpose=purpose)
                         # Vocabulary added since this conversation was last told, once per admitted
-                        # digest change and counted inside the packet's own `limit_chars`.
-                        vocabulary_delta_module.for_packet(vault_root, packet, session=session)
+                        # digest change and counted inside the packet's own `limit_chars`. Recorded
+                        # delivered on attach, so like upkeep it waits for the agent's first recall with a turn.
+                        if str(turn or "").strip():
+                            vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                         # A store-mode vault serves its rows while a registry pass re-derives them:
                         # the diagnostics name the pass, and the lanes serve.
                         registry_lag = store_read_module.request_registry_notice(vault_root)

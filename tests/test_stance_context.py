@@ -453,16 +453,19 @@ def test_hook_keeps_reset_stance_and_move_when_optional_routes_cannot_fit():
         "next_action": {"state": "method_reset", "say": "Read the current method source."},
     }
     stance_text, _ = hook._format_stance_block(packet["stance"], 4000)
-    cap = len(hook._METHOD_RESET_LINE) + len(stance_text) + len(packet["next_action"]["say"]) + 2
-    first, complete, stance_complete = hook._format_map_with_slice(packet, cap, "")
+    # The map's floor is reserved too: a token must not name a map that reached the agent in no form.
+    floor = len(hook._map_floor(packet["map"])) + 1
+    cap = len(hook._METHOD_RESET_LINE) + len(stance_text) + len(packet["next_action"]["say"]) + 2 + floor
+    first, complete, stance_complete, map_shown = hook._format_map_with_slice(packet, cap, "")
     assert first.splitlines()[0] == hook._METHOD_RESET_LINE
     assert "Keep the source." in first and first.endswith(packet["next_action"]["say"])
     assert "method.md" not in first and not complete and stance_complete
+    assert map_shown and "[exomem://map]" in first
     assert len(first) <= cap
     full, *_ = hook._format_map_with_slice(packet, 4000, "")
     assert full.index(hook._METHOD_RESET_LINE) < full.index("method.md")
     packet["task_context"]["methods"]["reset"] = False
-    second, _, held_complete = hook._format_map_with_slice(packet, cap, "", "stance")
+    second, _, held_complete, _ = hook._format_map_with_slice(packet, cap, "", "stance")
     assert "already held" in second and second.endswith(packet["next_action"]["say"])
     assert hook._METHOD_RESET_LINE not in second and held_complete and len(second) <= cap
 
