@@ -1192,6 +1192,12 @@ class FileWatcher:
     # ---- change recording (called by the watchdog handler AND by tests) ----
 
     def _record_external_locked(self, path: Path, *, deleted: bool) -> None:
+        from . import media_bindings
+
+        try:
+            media_bindings.external_change(self._vault_root)
+        except Exception:  # noqa: BLE001 - pending external custody still fences eviction below
+            log.warning("physical binding inventory was not invalidated before debounce", exc_info=True)
         if deleted:
             self._pending_upsert.discard(path)
             self._pending_delete.add(path)

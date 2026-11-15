@@ -40,6 +40,8 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
     config = tmp_path / "media.json"
     config.write_text(json.dumps({"vaults": {str(vault): values}}))
     monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # Ordinary workflows run below the eviction target; pressure cases set their own volume.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1 << 40, 1 << 38))
     return values, config
 
 

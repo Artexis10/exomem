@@ -57,6 +57,18 @@ class MediaStoreError(RuntimeError):
         super().__init__(f"{code}: {reason}")
 
 
+def register_path_custody() -> None:
+    """Use existing path receipts; eviction alone verifies this optional derived inventory."""
+    from . import freshness, media_bindings
+
+    freshness.register_custody_seam(freshness.CustodySeam(
+        name="media_store",
+        apply=lambda root, changed, deleted, digests: media_bindings.repair_paths(root, (*changed, *deleted)),
+        # Missing binding facts retain bytes and must never gate an unrelated read.
+        invalidate_scope=lambda root, scope: media_bindings.external_change(root),
+    ))
+
+
 # The refusal that the classification rule records for an original that stays on the volume (D12).
 RESIDENT_CODE = "MEDIA_ORIGINAL_RESIDENT"
 # An original whose plaintext exceeds the whole hydration capacity; waiting never clears it (D3, M4).
@@ -222,7 +234,18 @@ def _source_identity(source: reserved_paths.GenericBinarySource) -> str:
 
 
 def _identity(vault: Path, path: Path) -> str:
-    with reserved_paths.open_generic_binary(vault, path.relative_to(vault).as_posix()) as source:
+    try:
+        with reserved_paths.open_generic_binary(vault, path.relative_to(vault).as_posix()) as source:
+            return _source_identity(source)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            raise
+        snapshot = original_state(vault, path)
+        if snapshot.local_path is None:
+            raise
+    from . import original_pool
+
+    with original_pool.open_object(vault, snapshot.binary_sha256, snapshot.binary_size) as source:
         return _source_identity(source)
 
 
@@ -392,12 +415,18 @@ def clear_dead_reservations(vault: Path) -> int:
 def _pin(vault: Path, path: Path, *, read: bool = False):
     """Keep an original on the volume; `read` marks an owner's playback, download or viewing (D3, M4)."""
     store = MediaJobStore(vault)
+    from . import media_bindings
+
+    relative = store._relative(path)
     token = uuid.uuid4().hex
     conn = store._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start) VALUES (?, ?, ?, ?)",
-                     (token, store._relative(path), os.getpid(), process_start(os.getpid())))
+        # Admit before canonical resolution. An unmapped legacy pin conservatively
+        # retains pooled objects until background inventory recovery proves its key.
+        captured = media_bindings.capture_pin(conn, relative)
+        conn.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start, object_key) VALUES (?, ?, ?, ?, ?)",
+                     (token, relative, os.getpid(), process_start(os.getpid()), captured))
         conn.commit()
     finally:
         conn.close()
@@ -1727,6 +1756,8 @@ def _evict_one(vault: Path, path: Path) -> str:
     snapshot = _cached_original(vault, ledger, path)
     if isinstance(snapshot, str):
         return snapshot
+    if snapshot.local_path is not None:
+        return _evict_shared(vault, snapshot, ledger, config)
     bounds = media_capacity.bounds_for(config, vault)
     assert snapshot.binary_size is not None and snapshot.reference is not None
     if bounds is None or not bounds.hydration_fits(snapshot.binary_size):
@@ -1790,6 +1821,44 @@ def _evict_one(vault: Path, path: Path) -> str:
             return EVICTED
         finally:
             conn.close()
+
+
+def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, config: dict[str, object]) -> str:
+    """Confirm distinct own recovery versions outside the guard; unlink once under physical pin exclusion."""
+    from . import media_bindings, original_pool
+
+    assert snapshot.local_path is not None and snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    key = snapshot.local_path.relative_to(vault).as_posix()
+    with closing(ledger._connect(readonly=True)) as conn:
+        facts = media_bindings.object_facts(conn, key)
+    bounds = media_capacity.bounds_for(config, vault)
+    if (facts is None or facts.resident_only or not facts.recoverable or facts.pinned
+            or bounds is None or not bounds.hydration_fits(facts.size)):
+        return KEPT
+    with original_pool.open_object(vault, facts.sha256, facts.size) as source:
+        version = source.version
+    try:
+        backend = store_for(vault)
+        if not all(_confirmed(backend, reference) for reference in facts.references):
+            return KEPT
+    except MediaStoreError as error:
+        return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
+    with _guard(vault, "media_store_evict_shared"), closing(ledger._connect()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _clear_dead_access(conn, ledger, conn.execute(
+            "SELECT * FROM media_access WHERE object_key = ?", (key,)).fetchall())
+        latest = media_bindings.object_facts(conn, key)
+        if (latest is None or latest.checkpoint != facts.checkpoint or not media_bindings.current(vault, conn)
+                or latest.sha256 != facts.sha256 or latest.size != facts.size or latest.references != facts.references
+                or latest.resident_only or not latest.recoverable or latest.pinned
+                or latest.owner_read is not None and time.time() - latest.owner_read < float(config["minimum_idle_seconds"])):
+            conn.rollback()
+            return KEPT
+        original_pool.evict_object(vault, facts.sha256, expected_version=version)
+        conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel IN "
+                     "(SELECT binary_rel FROM media_bindings WHERE object_key = ?)", (key,))
+        conn.commit()
+        return EVICTED
 
 
 # A demand lapses 15 minutes after its series last renewed it (D3).

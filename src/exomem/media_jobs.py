@@ -895,6 +895,9 @@ class MediaJobStore:
                     """
                 )
                 self._migrate_job_key(conn)
+                from . import media_bindings
+
+                media_bindings.initialize(conn)
         finally:
             conn.close()
 
@@ -1356,6 +1359,9 @@ class MediaJobStore:
                 conn.commit()
                 return None
             now = time.time()
+            from . import media_bindings
+
+            captured = media_bindings.capture_pin(conn, row["binary_rel"])
             # A job that stays pinned across a slice keeps the flag from its first claim.
             changed = conn.execute(
                 """
@@ -1363,10 +1369,11 @@ class MediaJobStore:
                 SET state = 'running', attempts = attempts + 1,
                     claim_revision = claim_revision + 1,
                     hydrated = CASE WHEN pinned = 1 THEN hydrated ELSE ? END, pinned = 1,
+                    object_key = CASE WHEN pinned = 1 THEN object_key ELSE ? END,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
-                (int(row["needs_hydration"]), now, row["id"]),
+                (int(row["needs_hydration"]), captured, now, row["id"]),
             ).rowcount
             conn.commit()
             if changed != 1:

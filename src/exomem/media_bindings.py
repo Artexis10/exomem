@@ -1,0 +1,503 @@
+"""Rebuildable physical binding facts in the existing media ledger.
+
+Canonical companions remain authoritative. An incomplete projection can never
+authorize eviction; it does not participate in upload or read admission.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import sqlite3
+from collections.abc import Iterable, Mapping
+from contextlib import closing
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import media_capacity, original_pool, originals, reserved_paths
+
+# This key and the schema fields below belong to the versioned derived ledger.
+_STATE = "physical-bindings-v1"
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class Binding:
+    binary_rel: str
+    companion_rel: str
+    companion_hash: str
+    object_key: str
+    sha256: str
+    size: int
+    resident_only: bool
+    reference: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Checkpoint:
+    generation: int = 0
+    complete: bool = False
+    revision: int | None = None
+    seq: int | None = None
+    policy: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Basis:
+    pooled: bool
+    bounds: media_capacity.Bounds | None
+    store: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectFacts:
+    object_key: str
+    sha256: str
+    size: int
+    bindings: int
+    resident_only: bool
+    recoverable: bool
+    owner_read: float | None
+    pinned: bool
+    references: tuple[originals.StoredObject, ...]
+    checkpoint: Checkpoint
+
+
+def basis(vault: Path) -> Basis:
+    config = originals.configuration(vault)
+    return Basis(original_pool.enabled(vault),
+                 media_capacity.bounds_for(config, vault) if config is not None else None,
+                 None if config is None else str(config["store"]))
+
+
+def initialize(conn: sqlite3.Connection) -> None:
+    """Add derived facts and captured pin identities without rewriting canonical state."""
+    conn.execute("CREATE TABLE IF NOT EXISTS media_bindings ("
+                 "binary_rel TEXT PRIMARY KEY, companion_rel TEXT NOT NULL, companion_hash TEXT NOT NULL, "
+                 "object_key TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, "
+                 "resident_only INTEGER NOT NULL, reference TEXT)")
+    conn.execute("CREATE INDEX IF NOT EXISTS media_bindings_object ON media_bindings(object_key, binary_rel)")
+    conn.execute("CREATE INDEX IF NOT EXISTS media_bindings_companion ON media_bindings(companion_rel)")
+    # A pin captures the acquired object's identity. Joining its current filing later
+    # would silently move that pin when a companion changes.
+    for table in ("media_access", "jobs"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if columns and "object_key" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN object_key TEXT")
+        if columns:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {table}_object_key ON {table}(object_key)")
+
+
+def checkpoint(conn: sqlite3.Connection) -> Checkpoint:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (_STATE,)).fetchone()
+    if row is None:
+        return Checkpoint()
+    try:
+        state = Checkpoint(**json.loads(row[0]))
+        if (type(state.generation) is not int or state.generation < 0 or type(state.complete) is not bool
+                or any(value is not None and (type(value) is not int or value < 0)
+                       for value in (state.revision, state.seq))
+                or state.policy is not None and not originals.is_sha256(state.policy)):
+            return Checkpoint()
+        return state
+    except (TypeError, ValueError):
+        return Checkpoint()  # A lost or older projection is unknown, never an empty archive.
+
+
+def _record(conn: sqlite3.Connection, state: Checkpoint) -> None:
+    from dataclasses import asdict
+
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (_STATE, json.dumps(asdict(state), separators=(",", ":"))))
+
+
+def _ledger(vault: Path, *, create: bool = True):
+    from .media_jobs import MediaJobStore
+
+    return MediaJobStore(vault, create=create)
+
+
+def withdraw(vault: Path) -> Checkpoint | None:
+    """Durably withdraw completeness before a canonical install or external debounce."""
+    ledger = _ledger(vault, create=False)
+    if not ledger.path.exists():
+        return None  # With no ledger, no eviction has a complete projection to consume.
+    with closing(ledger._connect()) as conn:
+        conn.execute("PRAGMA synchronous=FULL")
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            before = checkpoint(conn)
+            _record(conn, Checkpoint(before.generation + 1, False, before.revision, before.seq, before.policy))
+        return before
+
+
+def policy_key(vault: Path) -> str:
+    config = originals.configuration(vault)
+    return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def object_key(vault: Path, binary_rel: str, digest: str | None = None, *, pooled: bool | None = None) -> str:
+    """An ordinary file's location stays distinct, even when another file has equal bytes."""
+    if digest is None:
+        snapshot = originals.original_state(vault, binary_rel)
+        digest = snapshot.binary_sha256
+        if snapshot.local_path is not None:
+            return snapshot.local_path.relative_to(vault).as_posix()
+    if digest is None:
+        return binary_rel
+    if pooled is None:
+        pooled = original_pool.enabled(vault)
+    if pooled:
+        try:
+            reserved_paths.inspect_generic_file(vault, binary_rel)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+            return original_pool.object_path(vault, digest).relative_to(vault).as_posix()
+    return binary_rel
+
+
+def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = None) -> Binding | None:
+    """Derive one companion's facts without reading any original bytes."""
+    from .vault import canonical_vault_rel, parse_frontmatter
+
+    fields, _body, marker = parse_frontmatter(data.decode("utf-8"), custody=True)
+    binary = originals.binary_binding(fields)
+    if marker is None or binary is None:
+        if originals.bound_path(fields) is not None:
+            raise ValueError("an original companion has incomplete identity")
+        return None
+    if canonical_vault_rel(vault, binary.path) != binary.path or reserved_paths.classify_logical(binary.path).blocked:
+        raise ValueError("an original companion has an unsafe path")
+    reference = originals.stored_reference(fields.get("stored_object"))
+    if "stored_object" in fields and reference is None:
+        raise ValueError("an original companion has an incomplete recovery reference")
+    selected = selected if selected is not None else basis(vault)
+    if reference is not None and reference.store != selected.store:
+        reference = None
+    bounds = selected.bounds
+    resident = (originals.is_note_path(binary.path) or "data_file" in fields
+                or bounds is None or bounds.classify(binary.size) == media_capacity.RESIDENT)
+    return Binding(binary.path, rel, hashlib.sha256(data).hexdigest(),
+                   object_key(vault, binary.path, binary.sha256, pooled=selected.pooled), binary.sha256,
+                   binary.size, resident, None if reference is None else json.dumps(reference.fields(), sort_keys=True))
+
+
+def _put(conn: sqlite3.Connection, bindings: Iterable[Binding]) -> None:
+    bindings = tuple(bindings)
+    changed = conn.executemany("INSERT INTO media_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                 "ON CONFLICT(binary_rel) DO UPDATE SET companion_rel=excluded.companion_rel, "
+                 "companion_hash=excluded.companion_hash, object_key=excluded.object_key, sha256=excluded.sha256, "
+                 "size=excluded.size, resident_only=excluded.resident_only, reference=excluded.reference "
+                 "WHERE media_bindings.companion_rel = excluded.companion_rel",
+                 ((binding.binary_rel, binding.companion_rel, binding.companion_hash, binding.object_key,
+                   binding.sha256, binding.size, int(binding.resident_only), binding.reference) for binding in bindings)).rowcount
+    if changed != len(bindings):
+        # A new companion must not erase another companion's retention requirement.
+        raise ValueError("canonical companions disagree about one filing")
+
+
+def apply_delta(vault: Path, paths: Iterable[str], bindings: Iterable[Binding], *,
+                expected: Checkpoint, revision: int | None = None, seq: int | None = None) -> bool:
+    """Replace exact path facts and their source checkpoint in one ledger transaction."""
+    ledger = _ledger(vault)
+    with closing(ledger._connect()) as conn:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = checkpoint(conn)
+            if current.generation != expected.generation + 1 or current.complete:
+                return False
+            conn.executemany("DELETE FROM media_bindings WHERE companion_rel = ? OR binary_rel = ?",
+                             ((rel, rel) for rel in paths))
+            _put(conn, bindings)
+            _record(conn, Checkpoint(current.generation, expected.complete, revision, seq, expected.policy))
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedDelta:
+    paths: tuple[str, ...]
+    bindings: tuple[Binding, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FileChange:
+    before: Checkpoint
+    forward: PreparedDelta
+    inverse: PreparedDelta
+
+
+def begin_file_change(vault: Path, images: Mapping[str, bytes], installed: Iterable[str]) -> FileChange | None:
+    """Prepare exact facts, then withdraw completeness before the first ordinary-file install."""
+    ledger = _ledger(vault, create=False)
+    if not ledger.path.exists() or not original_pool.enabled(vault):
+        return None
+    from .vault_store import mode
+
+    if mode.store_mode_for_reads(vault):
+        return None  # The canonical store's revision supplies its publication boundary.
+    paths = tuple(installed)
+    try:
+        selected = basis(vault)
+        inverse = prepare_delta(vault, paths, selected=selected)
+        forward = prepare_delta(vault, paths, images=images, selected=selected)
+        if not inverse.bindings and not forward.bindings:
+            return None
+        from dataclasses import replace
+
+        # A staged ordinary binary wins over a same-digest pooled object in a mixed archive.
+        forward = PreparedDelta(forward.paths, tuple(
+            replace(binding, object_key=binding.binary_rel) if binding.binary_rel in paths else binding
+            for binding in forward.bindings))
+    except (OSError, ValueError, UnicodeError, reserved_paths.ReservedPathLeafError):
+        withdraw(vault)
+        return None  # Unknown inventory retains bytes; it does not refuse a filing.
+    # If this durable withdrawal fails, publishing changed bindings would make
+    # previously complete eviction facts unsafe. Only that publication must retry.
+    before = withdraw(vault)
+    return None if before is None else FileChange(before, forward, inverse)
+
+
+def finish_file_change(vault: Path, change: FileChange | None, *, committed: bool) -> None:
+    """A failed derived update keeps eviction disabled and leaves canonical acknowledgement alone."""
+    if change is None:
+        return
+    delta = change.forward if committed else change.inverse
+    try:
+        apply_delta(vault, delta.paths, delta.bindings, expected=change.before)
+    except Exception:  # noqa: BLE001 - derived failure cannot undo an acknowledged canonical outcome
+        log.warning("physical binding update remains incomplete; background recovery will retry", exc_info=True)
+
+
+def prepare_delta(vault: Path, paths: Iterable[str], *, images: Mapping[str, bytes | None] | None = None,
+                  selected: Basis | None = None) -> PreparedDelta:
+    """Read exact affected companions, including those whose ordinary binary changed."""
+    paths = tuple(dict.fromkeys(paths))
+    companions = {rel for rel in paths if rel.lower().endswith(".md")}
+    ledger = _ledger(vault, create=False)
+    if ledger.path.exists():
+        with closing(ledger._connect(readonly=True)) as conn:
+            # Parameter batches bound SQL size; none enumerates the archive.
+            for start in range(0, len(paths), 256):
+                batch = paths[start:start + 256]
+                placeholders = ",".join("?" for _ in batch)
+                companions.update(row[0] for row in conn.execute(
+                    f"SELECT companion_rel FROM media_bindings WHERE binary_rel IN ({placeholders})", batch))
+    selected = selected if selected is not None else basis(vault)
+    bindings = []
+    for rel in sorted(companions):
+        if images is not None and rel in images:
+            data = images[rel]
+        else:
+            try:
+                data = reserved_paths.read_generic_bytes(vault, rel).data
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code != "MISSING":
+                    raise
+                data = None
+        if data is not None and (binding := from_page(vault, rel, data, selected=selected)) is not None:
+            bindings.append(binding)
+    return PreparedDelta(tuple(sorted(set(paths) | companions)), tuple(bindings))
+
+
+def follow_store(vault: Path, *, batch: int = 256) -> bool:
+    """Replay one bounded canonical audit suffix; a broken trail requires background recovery."""
+    from .vault_store import mode, read
+
+    ledger = _ledger(vault, create=False)
+    if not ledger.path.exists() or not mode.store_mode_for_reads(vault):
+        return False
+    with closing(ledger._connect(readonly=True)) as conn:
+        before = checkpoint(conn)
+    if not before.complete or before.seq is None or before.policy != policy_key(vault):
+        return False
+    with read.snapshot(vault, join_request=False) as view:
+        head = view.connection.execute("SELECT COALESCE(MAX(seq), 0) FROM store_audit").fetchone()[0]
+        if before.seq > head or before.revision is None or before.revision > view.revision:
+            withdraw(vault)
+            return False
+        if before.seq == head:
+            return before.revision == view.revision
+        rows = view.connection.execute(
+            "SELECT seq, path, from_path FROM store_audit WHERE seq > ? ORDER BY seq LIMIT ?",
+            (before.seq, batch)).fetchall()
+        if any(row[1] is None for row in rows):
+            withdraw(vault)
+            return False
+        paths = tuple({path for row in rows for path in row[1:] if path is not None})
+        # The pinned snapshot supplies current bodies for both sides of a move.
+        bodies = view.bodies(rel for rel in paths if rel.lower().endswith(".md"))
+        images = {rel: bodies.get(rel) for rel in paths if rel.lower().endswith(".md")}
+        delta = prepare_delta(vault, paths, images=images)
+        reached = rows[-1][0]
+        from .media_store import _guard
+
+        with _guard(vault, "media_binding_audit_publish"):
+            if source_checkpoint(vault) != (view.revision, head):
+                return False
+            with closing(ledger._connect(readonly=True)) as conn:
+                if checkpoint(conn) != before:
+                    return False
+            withdrawn = withdraw(vault)
+            if withdrawn != before:
+                return False
+            applied = apply_delta(vault, delta.paths, delta.bindings, expected=before,
+                                  revision=view.revision, seq=reached)
+            # `current` refuses the partial cursor; the next background slice follows it.
+            return applied and reached == head
+
+
+def _pages(vault: Path):
+    from contextlib import nullcontext
+
+    from .kbdir import kb_dirname
+    from .vault_store import mode, read
+
+    with (read.snapshot(vault, join_request=False) if mode.store_mode_for_reads(vault) else nullcontext(None)) as view:
+        if view is not None:
+            # Authoritative store pages include companions not projected to disk yet.
+            # One streaming query avoids a body lookup per companion in a large archive.
+            prefix = kb_dirname() + "/"
+            yield from view.connection.execute(
+                "SELECT path, body FROM store_pages WHERE path >= ? AND path < ? ORDER BY path",
+                (prefix, prefix + "\U0010ffff"))
+            return  # Every ordinary companion is a store-owned page; disk is only its projection.
+        with reserved_paths.open_generic_tree(
+            vault, kb_dirname(), require_complete=True,
+            select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and rel.lower().endswith(".md")),
+        ) as entries:
+            for entry in entries:
+                rel = kb_dirname() + "/" + entry.relative_path
+                if not read.serves(vault, rel):
+                    yield rel, reserved_paths.read_generic_bytes(vault, rel).data
+
+
+def source_checkpoint(vault: Path) -> tuple[int | None, int | None]:
+    from .vault_store import mode, read
+
+    if not mode.store_mode_for_reads(vault):
+        return None, None
+    with read.snapshot(vault, join_request=False) as view:
+        return view.revision, view.connection.execute("SELECT COALESCE(MAX(seq), 0) FROM store_audit").fetchone()[0]
+
+
+def current(vault: Path, conn: sqlite3.Connection) -> bool:
+    """Check the source frontier under the caller's canonical guard before using object facts."""
+    from . import freshness
+
+    state = checkpoint(conn)
+    return (state.complete and not freshness.external_pending(vault) and state.policy == policy_key(vault)
+            and (state.revision, state.seq) == source_checkpoint(vault))
+
+
+def external_change(vault: Path) -> None:
+    """Fence an observed outside edit before its existing watcher debounce."""
+    ledger = _ledger(vault, create=False)
+    if ledger.path.exists() and original_pool.enabled(vault):
+        withdraw(vault)
+
+
+def repair_paths(vault: Path, paths: Iterable[str]) -> None:
+    """Repair exact receipt paths; an incomplete inventory still needs its background census."""
+    ledger = _ledger(vault, create=False)
+    if not ledger.path.exists() or not original_pool.enabled(vault):
+        return
+    from .vault_store import mode
+
+    if mode.store_mode_for_reads(vault):
+        follow_store(vault)
+        return
+    with closing(ledger._connect(readonly=True)) as conn:
+        before = checkpoint(conn)
+    delta = prepare_delta(vault, paths)
+    with closing(ledger._connect(readonly=True)) as conn:
+        selected = []
+        for start in range(0, len(delta.paths), 256):
+            batch = delta.paths[start:start + 256]
+            placeholders = ",".join("?" for _ in batch)
+            selected.extend(Binding(**dict(row)) for row in conn.execute(
+                f"SELECT * FROM media_bindings WHERE companion_rel IN ({placeholders})", batch))
+        if sorted(selected, key=lambda item: item.binary_rel) == sorted(delta.bindings, key=lambda item: item.binary_rel):
+            return
+    withdrawn = withdraw(vault)
+    if withdrawn == before:
+        apply_delta(vault, delta.paths, delta.bindings, expected=before)
+
+
+def rebuild(vault: Path) -> bool:
+    """A startup/background census; no request or pin admission calls this walk."""
+    vault = Path(vault).resolve()
+    ledger = _ledger(vault)
+    from .writer_lease import get_manager
+
+    # Starting mid-publication could scan half a compound move and later bless it.
+    with get_manager().consistency_guard(vault, operation="media_binding_census_start", holder_kind="background"):
+        with closing(ledger._connect(readonly=True)) as conn:
+            before = checkpoint(conn)
+        source = source_checkpoint(vault)
+        policy = policy_key(vault)
+        selected = basis(vault)
+    # A separate SQLite transaction permits streaming the census without holding the
+    # canonical writer. A changed generation discards it before publication.
+    with closing(ledger._connect()) as conn:
+        conn.execute("CREATE TEMP TABLE binding_census AS SELECT * FROM media_bindings WHERE 0")
+        try:
+            for rel, data in _pages(vault):
+                binding = from_page(vault, rel, data, selected=selected)
+                if binding is not None:
+                    conn.execute("INSERT INTO binding_census VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                 (binding.binary_rel, binding.companion_rel, binding.companion_hash,
+                                  binding.object_key, binding.sha256, binding.size,
+                                  int(binding.resident_only), binding.reference))
+            conn.commit()
+            from .media_store import _guard
+
+            with _guard(vault, "media_binding_census_publish"):
+                conn.execute("BEGIN IMMEDIATE")
+                if checkpoint(conn) != before or source_checkpoint(vault) != source or policy_key(vault) != policy:
+                    conn.rollback()
+                    return False
+                if conn.execute("SELECT 1 FROM binding_census GROUP BY binary_rel HAVING COUNT(*) > 1 LIMIT 1").fetchone():
+                    raise ValueError("canonical companions disagree about one filing")
+                conn.execute("DELETE FROM media_bindings")
+                conn.execute("INSERT INTO media_bindings SELECT * FROM binding_census")
+                _record(conn, Checkpoint(before.generation + 1, True, *source, policy))
+                conn.commit()
+                return True
+        except (ValueError, UnicodeError, OSError, reserved_paths.ReservedPathLeafError, sqlite3.Error):
+            conn.rollback()
+    withdraw(vault)
+    return False
+
+
+def capture_pin(conn: sqlite3.Connection, binary_rel: str) -> str | None:
+    """Resolve one pin through the index; NULL means a legacy pin still needs recovery."""
+    row = conn.execute("SELECT object_key FROM media_bindings WHERE binary_rel = ?", (binary_rel,)).fetchone()
+    return None if row is None else row[0]
+
+
+def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
+    """Aggregate one object's bindings and captured pins with indexed ledger reads."""
+    state = checkpoint(conn)
+    if not state.complete:
+        return None
+    row = conn.execute(
+        "SELECT COUNT(*), MIN(b.sha256), MAX(b.sha256), MIN(b.size), MAX(b.size), "
+        "MAX(b.resident_only), MIN(b.reference IS NOT NULL), MAX(c.owner_read) "
+        "FROM media_bindings b LEFT JOIN media_cache c ON c.binary_rel = b.binary_rel WHERE b.object_key = ?",
+        (key,)).fetchone()
+    if row[0] == 0 or row[1] != row[2] or row[3] != row[4]:
+        return None
+    # Legacy NULL pins retain bytes until startup recovery resolves them. A claimed
+    # pending job pins; an unclaimed pending job deliberately does not.
+    pinned = bool(conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM media_access WHERE object_key = ? OR object_key IS NULL) "
+        "OR EXISTS(SELECT 1 FROM jobs WHERE pinned = 1 AND state IN ('pending', 'running') "
+        "AND (object_key = ? OR object_key IS NULL)) "
+        "OR EXISTS(SELECT 1 FROM media_drain WHERE latched = 1)", (key, key)).fetchone()[0])
+    references = tuple(originals.stored_reference(json.loads(item[0])) for item in conn.execute(
+        "SELECT DISTINCT reference FROM media_bindings WHERE object_key = ? AND reference IS NOT NULL ORDER BY reference", (key,)))
+    if any(reference is None for reference in references):
+        return None
+    return ObjectFacts(key, row[1], row[3], row[0], bool(row[5]), bool(row[6]), row[7], pinned, references, state)

@@ -149,6 +149,24 @@ def test_pool_hit_still_stages_all_supplied_bytes_before_filing(vault, monkeypat
     assert copied == [len(content), len(content)]
 
 
+def test_pool_eviction_refuses_a_replaced_physical_version(vault, monkeypatch) -> None:
+    """An eviction confirmed for old bytes must not unlink a replacement at the same digest path."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    content = b"the confirmed physical original"
+    digest = hashlib.sha256(content).hexdigest()
+    with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(lambda: [content])) as prepared:
+        prepared.publish()
+    with original_pool.open_object(vault, digest, len(content)) as source:
+        version = source.version
+    target = original_pool.object_path(vault, digest)
+    target.rename(target.with_suffix(".aside"))
+    target.write_bytes(b"a replacement must survive")
+    with pytest.raises(OSError, match="target changed"):
+        original_pool.evict_object(vault, digest, expected_version=version)
+    assert target.read_bytes() == b"a replacement must survive"
+
+
 def test_interrupted_marker_publication_retains_compatibility_and_resumes(vault, monkeypatch) -> None:
     """A durable format requirement must survive an unacknowledged marker publication."""
     monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))

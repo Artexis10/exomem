@@ -193,3 +193,10 @@ def locally_present(vault: Path, digest: str, size: int) -> bool:
         if error.code == "MISSING":
             return False
         raise
+
+
+def evict_object(vault: Path, digest: str, *, expected_version: held_fs.FileVersion) -> None:
+    """Remove one verified physical version after the ledger proves every binding recoverable."""
+    with reserved_paths._subsystem_authority_scope(OWNER):
+        reserved_paths._remove_owner_file(vault, object_path(vault, digest), DESCRIPTOR_ID,
+                                         expected_version=expected_version)

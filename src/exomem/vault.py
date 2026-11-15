@@ -5848,6 +5848,7 @@ def _batch_atomic_write_locked(
     """
     caller_writes = list(writes)
     writes = list(caller_writes)
+    media_change = None
     graph_checkpoint_path: Path | None = None
     graph_floor_path: Path | None = None
     graph_debt_checkpoint: PlannedWrite | None = None
@@ -6365,6 +6366,17 @@ def _batch_atomic_write_locked(
             if index == 0 and _prepare is not None:
                 _prepare(caller_writes)
                 raise ValueError("native preparation must stop before publication")
+            if index == 0 and vault_root is not None:
+                from . import media_bindings
+
+                media_change = media_bindings.begin_file_change(
+                    Path(vault_root),
+                    {write.path.relative_to(vault_root).as_posix(): write.content.encode("utf-8")
+                     for write in caller_writes if isinstance(write.content, str) and write.path.suffix.lower() == ".md"
+                     and write.path.is_relative_to(vault_root)},
+                    (write.path.relative_to(vault_root).as_posix() for write in caller_writes
+                     if write.path.is_relative_to(vault_root)),
+                )
             if index == 0 and _before_first_install is not None:
                 # The owner's own durable write, never in `replaced`: a rollback does not revert it.
                 _before_first_install()
@@ -6533,6 +6545,8 @@ def _batch_atomic_write_locked(
                 False,
                 diagnostics=rollback_errors,
             ) from commit_error
+        if media_change is not None:
+            media_bindings.finish_file_change(Path(vault_root), media_change, committed=False)
         if fast_receipt is not None:
             _abort_rolled_back_receipt(Path(os.path.abspath(vault_root)), fast_receipt)
         if cleanup_retained:
@@ -6568,6 +6582,9 @@ def _batch_atomic_write_locked(
     finally:
         if additive_guard is not None:
             additive_guard.abort()
+
+    if media_change is not None:
+        media_bindings.finish_file_change(Path(vault_root), media_change, committed=True)
 
     if vault_root is not None:
         # Before the write acknowledges, so the free-text census names every

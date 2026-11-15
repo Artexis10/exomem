@@ -4821,6 +4821,7 @@ def _remove_owner_file(
     descriptor_id: str,
     *,
     missing_ok: bool = False,
+    expected_version: held_fs.FileVersion | None = None,
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
@@ -4876,6 +4877,10 @@ def _remove_owner_file(
                 with file_result.require() as file:
                     if file.identity.link_count != 1:
                         raise OSError("private remove target is ambiguous")
+                    if expected_version is not None:
+                        _require_owner_parent(filesystem, route, parent)
+                        if file.version() != expected_version:
+                            raise OSError("private remove target changed")
                     if not _owner_directory_is_current(filesystem, parent):
                         raise OSError("private remove parent changed")
                     removed = filesystem.unlink(file)
@@ -4895,9 +4900,11 @@ def _remove_owner_file(
                     raise OSError("private remove parent changed")
 
         if not route.external:
-            _replace_published_owner_path(
-                root, descriptor_id, route.logical_relative, None
-            )
+            if expected_version is not None:
+                _publish_owner_identity_delta(root, descriptor_id, put={},
+                    remove={route.logical_relative.as_posix(): expected_version.identity})
+            else:
+                _replace_published_owner_path(root, descriptor_id, route.logical_relative, None)
         return True
 
 
