@@ -2198,6 +2198,28 @@ class OperationAuthorization:
         }
 
 
+    def row_release(self, cid: str) -> tuple[Callable[[int, str], bool], str]:
+        """This caller's read decision on one row, and the snapshot ``authorized_rows`` would return.
+
+        It decodes no row and refuses as ``authorized_rows`` does, so a caller that cannot read
+        the collection learns nothing from it and a withheld row decides as an absent one.
+        """
+        try:
+            release = self.summary_release(cid)
+        except collections.CollectionError as error:
+            _pass_release_limit(error)
+            self.refuse()
+        except (ValueError, TypeError, StopIteration, sqlite3.Error,
+                authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            self.refuse()
+        if release is not None:
+            uniform = release.released == release.rows
+            return (lambda _row_id, key: release.released > 0 and (
+                uniform or self._summary_row_released(release, {"item_key": key}))), release.snapshot
+        allowed = self.released_subjects(cid)
+        row_ids = {subject.row_id for subject in allowed if isinstance(subject.row_id, int)}
+        return (lambda row_id, _key: row_id in row_ids), self.visible_snapshot(cid, allowed)
+
     def _summary_rows(self, cid: str, release: SummaryRelease) -> tuple[list[dict[str, Any]], str, set[str]]:
         """A whole summary snapshot only within the interactive visit and deadline bounds.
 

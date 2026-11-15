@@ -168,7 +168,9 @@ def record_memory(
     if item_id is not None:
         if action != "update" or any(v is not None for v in (item_key, expected_container_hash, expected_item_version)):
             _invalid_arguments("item_id applies to update and replaces item_key and both guards")
-        bound = collection_refs.bind_item(
+        from .collection_store import preview
+
+        bound = preview.bind_row(vault_root, str(collection), item_id) or collection_refs.bind_item(
             lambda **kw: record_memory(vault_root, "query", **kw),
             collection=str(collection), item_id=item_id, profile="records",
         )
