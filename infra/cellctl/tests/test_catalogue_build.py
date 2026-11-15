@@ -18,6 +18,7 @@ from cellctl.k8s_client import ClusterClient
 from cellctl.manifests import (
     CATALOGUE_BACKUP_EXCLUDES,
     CATALOGUE_BUILD_NODE_ANNOTATION,
+    HOLD_ANNOTATION,
     JOB_KIND_CATALOGUE_BUILD,
     JOB_KIND_LABEL,
     CellManifestSpec,
@@ -338,9 +339,9 @@ async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting
 
 
 async def test_an_attempt_started_beside_a_finished_build_leaves_no_hold_once_it_is_ready(cell_db):
-    """The start that cancels a build records its hold by merge patch, and server-side apply keeps keys
-    another manager owns. Without their removal, the pass after the Ready exit resumes a half-cleared
-    attempt and stops the upgraded cell on its previous image."""
+    """The start that cancels a build records its hold by patch, and server-side apply keeps keys that
+    a patch owns. Without their removal, the pass after the Ready exit resumes a half-cleared attempt
+    and stops the upgraded cell on its previous image."""
     from .test_reconcile import _ATTEMPT_SNAPSHOT
     from .test_rollout_automation import (
         IDLE,
@@ -384,6 +385,73 @@ async def test_an_attempt_started_beside_a_finished_build_leaves_no_hold_once_it
         assert not set(patched[0]) & set(_annotations(cluster, TENANT))
         assert ("apply_statefulset", namespace_name(TENANT), 0) not in cluster.events
         assert _image(cluster, TENANT) == IMAGE_B and _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+    finally:
+        await fleet.close()
+
+
+@pytest.mark.parametrize("method, fails", [
+    ("patch_statefulset_annotations", lambda namespace, annotations: HOLD_ANNOTATION in annotations
+     and annotations[HOLD_ANNOTATION] is None),
+    ("apply_all", lambda manifests: manifests[0]["kind"] == "StatefulSet"),
+], ids=["the-hold-removal", "the-apply-after-it"])
+async def test_one_failed_write_after_a_patched_start_still_converges(cell_db, method, fails):
+    """After a patched start, the next StatefulSet apply first removes the patched hold keys. One API
+    503 on that removal, or on the apply after it, once stopped the upgraded cell again or left it stopped
+    until the stall bound paused the rollout. Either failure must leave a serving cell that the next
+    passes upgrade once."""
+    from kubernetes.client.rest import ApiException
+
+    from cellctl.manifests import UPGRADE_START_ANNOTATION_KEYS
+
+    from .test_reconcile import _ATTEMPT_SNAPSHOT
+    from .test_rollout_automation import (
+        IDLE,
+        OWNER,
+        TENANT,
+        _annotations,
+        _image,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    try:
+        cluster.readiness[TENANT] = IDLE
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT)
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, succeeded=True)
+        cluster.builds[namespace_name(TENANT)] = (job,)
+        await fleet.run(NOW, cluster_config=CONFIG)
+        cluster.builds.clear()
+        call, failures = getattr(cluster, method), [ApiException(status=503)]
+
+        def fail_once(*args):
+            if failures and fails(*args):
+                raise failures.pop()
+            return call(*args)
+
+        setattr(cluster, method, fail_once)
+        for seconds, overrides in ((5, {}), (10, {}), (15, {}), (20, {"backup_job_succeeded": True,
+                                                                     "backup_job_snapshot_id": _ATTEMPT_SNAPSHOT}),
+                                   (25, {}), (30, {})):
+            _observe(cluster, TENANT, pod_node="worker-one", **overrides)
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        assert not failures and _image(cluster, TENANT) == IMAGE_B
+        assert "exomem.io/target-applied-at" not in _annotations(cluster, TENANT)
+        cluster.events.clear()
+        for seconds in (35, 40, 45):
+            _observe(cluster, TENANT, pod_node="worker-one")
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        assert not UPGRADE_START_ANNOTATION_KEYS & set(_annotations(cluster, TENANT))
+        assert ("apply_statefulset", namespace_name(TENANT), 0) not in cluster.events
+        assert _image(cluster, TENANT) == IMAGE_B and _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        assert not (await fleet.rollout()).paused
     finally:
         await fleet.close()
 

@@ -74,7 +74,7 @@ class FakeClusterGateway:
         self.histories: dict[str, bytes] = {}
         self.history_reads: list[str] = []
         # Server-side apply's field ownership of each StatefulSet's annotations, by namespace:
-        # the keys a merge patch (an Update entry) owns, which an apply that omits them keeps.
+        # the keys a patch (an Update entry) owns, which an apply that omits them keeps.
         self.patch_owned: dict[str, set[str]] = {}
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
@@ -182,7 +182,7 @@ class FakeClusterGateway:
         return {cell: body for cell, body in self.histories.items() if cell in addresses}
 
     def patch_statefulset_annotations(self, namespace: str, annotations: dict[str, str | None]) -> None:
-        # The live object: a merge patch sets or removes these keys, whichever manager wrote them.
+        # The live object: a patch sets or removes these keys, whichever manager wrote them.
         self.events.append(("patch_annotations", namespace, dict(annotations)))
         statefulset = self.applied.get((namespace, "StatefulSet", "cell"))
         if statefulset is None:
@@ -1100,6 +1100,7 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         ROW_GENERATION_ANNOTATION,
         TARGET_APPLIED_ANNOTATION,
         UPGRADE_PHASE_ANNOTATION,
+        UPGRADE_START_ANNOTATION_KEYS,
         UPGRADE_TARGET_ANNOTATION,
         UPGRADE_WINDOW_ANNOTATION,
         UPGRADE_WINDOW_AT_ANNOTATION,
@@ -1181,6 +1182,9 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         statefulset_upgrade_window=annotations.get(UPGRADE_WINDOW_ANNOTATION),
         statefulset_upgrade_window_at=annotations.get(UPGRADE_WINDOW_AT_ANNOTATION),
         statefulset_candidate_since=_parse_timestamp(annotations.get(CANDIDATE_SINCE_ANNOTATION)),
+        # As ClusterClient.observe() reads managedFields: the hold keys the fake's patch owns.
+        statefulset_patched_hold=frozenset(cluster.patch_owned.get(namespace_name(cell_id), ()))
+        & UPGRADE_START_ANNOTATION_KEYS,
         pod_exists=running,
         pod_uses_volume=running,
         pod_ready=running,
