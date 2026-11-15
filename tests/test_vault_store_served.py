@@ -43,6 +43,7 @@ from exomem import (
     media_store,
     media_worker,
     mutation_lock,
+    relation_review,
     reserved_paths,
     scene_frames,
     schema,
@@ -51,7 +52,7 @@ from exomem import (
 )
 from exomem.collection_store import runtime
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import binaries, importer, projector, read, rederive, write
+from exomem.vault_store import importer, projector, read, rederive, write
 from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
@@ -192,6 +193,34 @@ def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, se
     assert recovered["path"] == path
     assert read.owned_bytes(stored, path) == body
     assert not read.page_exists(stored, trash_path)
+
+
+def test_a_stored_creation_receipt_over_the_size_limit_is_refused_as_file_mode_refuses_it(
+    stored, service
+):
+    """A store-mode loader that parses a stored review receipt of any size, where file mode refuses
+    one over the artifact limit: governance then judges the same receipt differently by mode."""
+    reviews = "Knowledge Base/_Schema/relation-reviews/"
+    listed = "SELECT path FROM store_pages WHERE path LIKE ?"
+    before = set(store_rows(stored, listed, reviews + "%"))
+    call(
+        stored, "remember", title="A long receipt",
+        content="# A long receipt\n\n## Claim\n\nA note whose receipt grows past its limit.\n",
+        relation_disposition="reviewed_none", relation_review_reason="a note that stands alone",
+    )
+    after = set(store_rows(stored, listed, reviews + "%"))
+    ((receipt,),) = after - before
+    body = read.owned_bytes(stored, receipt)
+    # Trailing spaces keep the JSON valid, so only the size can refuse it.
+    oversized = body.ljust(relation_review._MAX_ARTIFACT_BYTES + 1)
+    commit(stored, puts=(write.PagePut(receipt, oversized),))
+
+    with request_scope(owner_principal(surface="mcp")), pytest.raises(
+        relation_review.RelationReviewError
+    ) as refused:
+        relation_review.load_creation_receipt(stored, Path(receipt).stem)
+
+    assert refused.value.code == "RELATION_REVIEW_TOO_LARGE"
 
 
 def test_a_projector_pass_records_a_governed_writes_files_in_a_served_process(stored, service):
@@ -914,75 +943,42 @@ def trashed_once(root, rel, body):
     ]
 
 
-def test_a_served_projector_that_renames_a_trashed_binary_before_its_writer_does_converges(
-    stored, service, monkeypatch
-):
-    """The writer's rename after its commit racing a served projector that renames the same file
-    first: the trash refuses or warns, the file ends at both paths or neither, or a record or an
-    intent is left naming the wrong path."""
-    projector_moved = threading.Event()
-    real_rename = binaries._rename
-
-    def after_the_projector(root, entry, move, seen):
-        if entry.src == DIAGRAM:  # the writer waits until the served projector has moved the file
-            deadline = time.monotonic() + 10
-            while (stored / DIAGRAM).exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            if not (stored / DIAGRAM).exists():
-                projector_moved.set()
-        return real_rename(root, entry, move, seen)
-
-    monkeypatch.setattr(binaries, "_rename", after_the_projector)
-    loop = idle_service_projector(stored, poll_seconds=0.02)
-    try:
-        result = call(
-            stored, "manage_memory_file", operation="delete", path=DIAGRAM, confirm=True,
-            force_orphan=True,
-        )
-        deadline = time.monotonic() + 30
-        while queued(stored):
-            assert time.monotonic() < deadline, "the projector drained the queue"
-            time.sleep(0.05)
-    finally:
-        loop.stop()
-
-    assert projector_moved.is_set() and not (stored / DIAGRAM).exists(), result
-    (trashed,) = trashed_once(stored, DIAGRAM, DIAGRAM_BYTES)
-    assert result.get("ok") is not False and not result.get("warnings")
-    assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [
-        (sha(DIAGRAM_BYTES),)
-    ]
-    assert store_rows(stored, "SELECT path FROM store_binaries WHERE path = ?", DIAGRAM) == []
-    assert store_rows(stored, "SELECT path FROM store_held") == []
-
-
 def test_a_writer_that_renames_a_trashed_binary_while_the_projector_is_about_to_converges(
     stored, service, monkeypatch, caplog
 ):
     """The served projector judging a queued binary move, then finding that the writer moved the
-    file between its look and its rename: it defers the move, logs it, or renames something."""
+    file between its look and its rename: it defers the move, logs it, or renames something.
+
+    The projector's rename takes the writer's hold, so it cannot run while the writer renames; the
+    writer can only move the file after the projector has looked at both paths.
+    """
     picture = f"{NOTES}/raced.png"
     (stored / picture).write_bytes(PICTURE_BYTES)
     importer.Importer(stored).import_paths([picture])
-    at_rename, writer_moved = threading.Event(), threading.Event()
-    real_rename, real_move = projector._rename, reserved_paths.move_generic_path
+    at_look, writer_moved = threading.Event(), threading.Event()
+    real_observe, real_move = projector.observe, reserved_paths.move_generic_path
+    looked_at_the_source, moved_after_the_look = [], []
 
-    def renaming_late(filesystem, old, new, expected):
-        if old == picture:  # the projector has judged the move; the writer now moves the file
-            at_rename.set()
+    def looking_early(filesystem, rel, **options):
+        seen = real_observe(filesystem, rel, **options)
+        if rel == picture:
+            looked_at_the_source.append(rel)
+        elif looked_at_the_source and not at_look.is_set():
+            # The projector has judged both paths of the move; the writer now moves the file.
+            at_look.set()
             writer_moved.wait(10)
-        return real_rename(filesystem, old, new, expected)
+        return seen
 
     def renaming_first(root, source, destination, **options):
         if source == picture:
-            at_rename.wait(10)
+            moved_after_the_look.append(at_look.wait(10))
             try:
                 return real_move(root, source, destination, **options)
             finally:
                 writer_moved.set()
         return real_move(root, source, destination, **options)
 
-    monkeypatch.setattr(projector, "_rename", renaming_late)
+    monkeypatch.setattr(projector, "observe", looking_early)
     monkeypatch.setattr(reserved_paths, "move_generic_path", renaming_first)
     caplog.set_level("WARNING", logger="exomem.vault_store")
     loop = idle_service_projector(stored, poll_seconds=0.02)
@@ -998,7 +994,7 @@ def test_a_writer_that_renames_a_trashed_binary_while_the_projector_is_about_to_
     finally:
         loop.stop()
 
-    assert at_rename.is_set() and writer_moved.is_set(), result
+    assert moved_after_the_look == [True], "the writer moved the file after the projector looked"
     (trashed,) = trashed_once(stored, picture, PICTURE_BYTES)
     assert result.get("ok") is not False and not (stored / picture).exists()
     assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [

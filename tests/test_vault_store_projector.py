@@ -133,6 +133,31 @@ def test_committed_pages_a_delete_and_a_move_reach_the_disk_byte_exact(stored, w
     assert temporaries(stored) == []
 
 
+def test_a_projector_that_loses_its_writer_authority_changes_no_file_after_the_loss(stored):
+    """A projector that checks writer authority once and then changes the disk: a lease lost after
+    that check still lets the next record's file reach the vault, though its record is refused, so
+    a process without the lease changes the person's vault."""
+    pages = [f"{NOTES}/Fenced {n}.md" for n in range(2)]
+    authority = {"held": True}
+    path = connection.store_path(stored)
+    with connection.open_writer(path, lease_check=lambda: authority["held"]) as handle:
+        writer = CollectionWriter(stored, handle)
+        commit(writer, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in pages))
+        on_disk_at_the_loss = []
+
+        def run(work):
+            work(writer)
+            if authority["held"]:  # the lease is lost once the first hop has returned
+                authority["held"] = False
+                on_disk_at_the_loss.extend(rel for rel in pages if (stored / rel).exists())
+
+        with pytest.raises(connection.CollectionStoreError) as refused:
+            projector.Projector(stored, run=run).run_pass()
+
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert [rel for rel in pages if (stored / rel).exists()] == on_disk_at_the_loss
+
+
 def test_a_vacated_folder_goes_once_its_files_moved_and_stays_while_it_holds_a_persons_file(
     stored, writer, projecting
 ):

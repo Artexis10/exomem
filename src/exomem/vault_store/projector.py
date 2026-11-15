@@ -66,6 +66,7 @@ HELD_DELETE = "delete"
 Runner = Callable[[Callable[["CollectionWriter"], None]], None]
 
 _Found = TypeVar("_Found")
+_Done = TypeVar("_Done")
 
 
 class StoreNotServed(RuntimeError):
@@ -396,8 +397,6 @@ class Projector:
                     if not batch:
                         break
                     try:
-                        if cursor == ("", ""):
-                            self._require_recording()  # before the pass writes any file
                         for intent in batch:
                             if self._stopping():
                                 break
@@ -409,29 +408,32 @@ class Projector:
                     except OpError as refusal:
                         if refusal.code not in TRANSIENT_WRITER_CODES:
                             raise
-                        # This process may not record now, a follower above all: the pass ends as
-                        # at a busy boundary, quietly, and a pass after it takes the lease projects.
+                        # This process may not change the disk or record now, a follower above
+                        # all: the pass ends as at a busy boundary, quietly, and a pass after it
+                        # takes the lease projects.
                         report.busy = True
                         return report
                     cursor = (batch[-1].queued_at, batch[-1].path)
         return report
 
-    def _require_recording(self) -> None:
-        """Ask what each record of this pass asks, before the pass writes any file.
+    def _with_authority(self, effect: Callable[[], _Done]) -> _Done:
+        """Run one change to the disk right after the writer's authority check, under one hold.
 
-        A replica without the writer lease would publish files and then be refused their records,
-        so the projection would have a second writer and files that no record vouches for. The
-        question is the record's own: the hop to the store thread under the vault's writer
-        authority (``_holding_boundary``) and the writer's check (``require_write_authority``),
-        so no second notion of role decides it. A lease lost later in the pass refuses that
-        pass's next record the same way.
+        This follows the contract of ``require_write_authority``: recheck before SQL or a
+        publication filesystem effect, as the collection publisher does before each effect. The
+        effect runs on the store thread inside the hold that the check needs, and a release of the
+        lease must take that hold. So no lease loss can fall between the check and the effect. A
+        busy boundary or a refusal leaves the record queued and ends the pass, as a record's own
+        refusal does.
         """
-        try:
-            self._run(lambda writer: writer.handle.require_write_authority())
-        except BoundaryBusy:
-            # Contention is not inability: the pass goes on, and each record meets the boundary as
-            # before, so a projection may still race a writer that holds it.
-            return
+        done: list[_Done] = []
+
+        def work(writer: CollectionWriter) -> None:
+            writer.handle.require_write_authority()
+            done.append(effect())
+
+        self._run(work)
+        return done[0]
 
     def _list(self, after: tuple[str, str]) -> list[Intent]:
         """The next intents after ``after`` in queue order, without bodies or held paths."""
@@ -546,7 +548,7 @@ class Projector:
             body = self._stored_body(page)
             if body is None:
                 return  # a commit changed the page meanwhile; its intent comes up next pass
-            installed = _publish(filesystem, facts.path, body, disk)
+            installed = self._with_authority(lambda: _publish(filesystem, facts.path, body, disk))
             self._record_projected(page, installed.size, installed.mtime_ns)
             report.projected += 1
 
@@ -584,7 +586,7 @@ class Projector:
             return True
         if verdict is Removal.UNLINK:
             assert disk is not None
-            _unlink(filesystem, facts.path, disk)
+            self._with_authority(lambda: _unlink(filesystem, facts.path, disk))
             report.removed += 1
             return True
         if verdict is Removal.LEAVE:
@@ -616,10 +618,12 @@ class Projector:
             and old.manifest.sha256 == page.sha256 == old_disk.sha256
             and new_disk is None
         ):
-            renamed = _rename(filesystem, old.path, intent.path, old_disk)
+            renamed = self._with_authority(
+                lambda: _rename(filesystem, old.path, intent.path, old_disk)
+            )
             self._record_moved(intent, page, old.path, renamed)
             report.projected += 1
-            _move_parts(filesystem, old.path, intent.path)
+            self._with_authority(lambda: _move_parts(filesystem, old.path, intent.path))
             return
         verdict = _judge_write(facts, None if new_disk is None else new_disk.sha256)
         if verdict in (Judgement.HOLD_DELETE, Judgement.HOLD_EDIT):
@@ -629,7 +633,7 @@ class Projector:
         if not self._remove(filesystem, old, old_disk, report, store_revision=None):
             return
         self._record_move_split(intent, old.path)
-        _move_parts(filesystem, old.path, intent.path)
+        self._with_authority(lambda: _move_parts(filesystem, old.path, intent.path))
         self._project(filesystem, intent.path, report)
 
     def _project_folder(
@@ -658,11 +662,15 @@ class Projector:
             ).fetchone()
         if queued is None or waiting is not None:
             return
-        opened = _parent(filesystem, folder, access="mutate")
-        removed = False
-        if opened.ok:
+
+        def remove_folder() -> bool:
+            opened = _parent(filesystem, folder, access="mutate")
+            if not opened.ok:
+                return False
             with opened.require() as directory:
-                removed = filesystem.unlink_directory(directory).ok
+                return filesystem.unlink_directory(directory).ok
+
+        removed = self._with_authority(remove_folder)
         if removed:
             _flush_folder(filesystem, _split(folder)[0])
         self._run(lambda writer: _drop_intent(writer, rel, queued[0]))
@@ -691,8 +699,9 @@ class Projector:
             and old_disk.sha256 == binary.sha256
             and new_disk is None
         ):
+            source, seen = intent.from_path, old_disk  # names that the rename's closure keeps
             try:
-                _rename(filesystem, intent.from_path, intent.path, old_disk)
+                self._with_authority(lambda: _rename(filesystem, source, intent.path, seen))
             except (Deferred, held_fs.HeldFsError, OSError):
                 # The writer renames the same file right after its commit and may have won.
                 old_disk = observe(filesystem, intent.from_path)
