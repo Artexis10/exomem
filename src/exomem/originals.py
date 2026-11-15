@@ -283,6 +283,24 @@ def available(vault: Path, path: str | Path) -> bool:
     return original_state(vault, target).state in {"local", "cached", "evicted"}
 
 
+def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
+    """The filing of an original whose bytes are a shared pool object, which has no file at its logical path.
+
+    `local_path` is that immutable object: read its identity or stat from it. A decoder that needs the
+    filename takes `media_store.logical_view`. Any other path, a missing or unsafe one included, is not pooled.
+    """
+    from . import reserved_paths
+
+    target = Path(path) if Path(path).is_absolute() else Path(vault) / path
+    if target.is_file():
+        return None
+    try:
+        snapshot = original_state(vault, target)
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        return None
+    return snapshot if snapshot.local_path is not None else None
+
+
 def evicted(vault: Path, path: str | Path) -> bool:
     """Whether a path names an evicted original; an unbound vault and a note never do."""
     if binding_for(vault) is None:

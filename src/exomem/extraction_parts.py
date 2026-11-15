@@ -719,15 +719,21 @@ def _rebuild(vault_root: Path, page: Path, content: str, present: Mapping[int, P
     image or a scanned PDF page is never transcribed again. Its text must split into the parts
     the Source page holds now, so a rebuilt part never mixes with other text.
     """
-    from . import extract
+    from . import extract, media_store, originals
 
     binary = page.with_name(page.name.removesuffix(".md"))
     kind = media_types.media_type_for(binary)
-    if kind is None or media_engines.engine_for(kind) in media_engines.MODEL_ENGINES or not binary.is_file():
+    if kind is None or media_engines.engine_for(kind) in media_engines.MODEL_ENGINES:
+        return False
+    # A shared original has no file at its path; an evicted one stays unread, as it always was.
+    if not binary.is_file() and originals.pooled(vault_root, binary) is None:
         return False
     try:
-        with media_engines.only(set(media_engines.ENGINES) - media_engines.MODEL_ENGINES):
-            pieces = split(extract.extract_text(binary, media_type=kind, vault_root=vault_root).text.strip())
+        with (
+            media_engines.only(set(media_engines.ENGINES) - media_engines.MODEL_ENGINES),
+            media_store.logical_view(vault_root, binary) as view,
+        ):
+            pieces = split(extract.extract_text(view, media_type=kind, vault_root=vault_root).text.strip())
         agreed = len(pieces) == count_of(parse_frontmatter(content)[0]) and pieces[0] == preserve.extracted_text(content)
         agreed = agreed and all(_part_text(vault_root, page, number) == pieces[number - 1] for number in present)
     except Exception:  # noqa: BLE001 — a failed re-read is reported as not rebuilt
