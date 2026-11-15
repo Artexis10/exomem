@@ -290,7 +290,7 @@ class NativeCustody:
             if relative is None:
                 raise NativeCustodyUnavailable("native allocation has no intended destination")
             parent_path, leaf = _parts(relative)
-            with filesystem.parent(parent_path, access="mutate").require() as parent:
+            with filesystem.parent(parent_path).require() as parent:
                 filesystem.validate_directory(parent, require_name=parent_path != ".").require()
                 expected = binding.destination_parent_identity if destination else binding.parent_identity
                 if expected is None or not _same(parent.identity, expected):

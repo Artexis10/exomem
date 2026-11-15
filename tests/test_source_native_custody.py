@@ -29,6 +29,30 @@ def reserve(custody, data=b"complete payload", **kwargs):
                            expected_size=len(data), **kwargs)
 
 
+def test_root_allocation_works_with_the_windows_parent_access_policy(vault, monkeypatch):
+    with held_fs.acquire(vault).require() as filesystem:
+        implementation = type(filesystem)
+    parent = implementation.parent
+
+    def supported_parent(self, relative, **options):
+        if relative == "." and options.get("access", "read") != "read":
+            return held_fs.HeldResult(error=held_fs.HeldFsError("INVALID_INPUT", "root parent access must stay read-only"))
+        return parent(self, relative, **options)
+
+    monkeypatch.setattr(implementation, "parent", supported_parent)
+    with owner(vault) as custody:
+        data = b"root allocation"
+        allocated = reserve(custody, data)
+        with held_fs.acquire(vault).require() as filesystem, filesystem.parent(".").require() as directory:
+            with filesystem.file(directory, "private.tmp", access="write", create=True, exclusive=True).require() as file:
+                custody.bind(allocated, file)
+                filesystem.write(file, data).require()
+                custody.verified(allocated, file, sha256=hashlib.sha256(data).hexdigest())
+        assert custody.observe(allocated.binding_id).matching is True
+        assert custody.cleanup(allocated.binding_id).outcome == "removed"
+        assert not (vault / "private.tmp").exists()
+
+
 @pytest.mark.parametrize("late_alias", [False, True])
 def test_retirement_closes_only_the_matching_canonical_copy(vault, monkeypatch, late_alias):
     from exomem import generated_fragment_store, native_copy_custody
