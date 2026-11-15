@@ -91,6 +91,7 @@ def commit_batch(
     validate_prepared_bindings: Callable[[], None] | None = None,
     prepare: Callable[[list[vault.PlannedWrite]], None] | None = None,
     lifecycle: Lifecycle | None = None,
+    publish_originals: Callable[[], None] | None = None,
 ) -> list[Path]:
     """Commit one batch to the store of ``vault_root`` in place of the file-mode flip.
 
@@ -151,7 +152,7 @@ def commit_batch(
             vocabulary_auxiliaries,
             validate_prepared_bindings,
             commit_point,
-            curation_witness.publication_hook(witness),
+            vault._owner_writes(publish_originals, curation_witness.publication_hook(witness)),
             lifecycle,
         )
     except BaseException:

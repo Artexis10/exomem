@@ -260,3 +260,58 @@ def test_frame_sampling_reads_the_pooled_stream_and_keeps_the_logical_video_path
     assert result.path == saved.path
     assert len(result.frames) == 2
     assert all(frame.jpeg == b"\xff\xd8fake" for frame in result.frames)
+
+
+def test_identical_captures_in_a_pooled_archive_share_one_original_and_keep_their_own_filings(
+        vault, tmp_path, monkeypatch) -> None:
+    """Two Sources of the same bytes keep separate pages and paths; one verified object holds the bytes."""
+    import datetime as dt
+
+    from exomem import add as add_module
+    from exomem import media_store, originals, schema
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    data = b"Speaker A: one recording, filed twice."
+    filed = []
+    for title in ("Morning briefing", "Evening briefing"):
+        stage = tmp_path / title.replace(" ", "-")
+        stage.mkdir()
+        (stage / "briefing.txt").write_bytes(data)
+        filed.append(add_module.add(
+            vault, schema.load_source_schema(vault), content="", title=title, source_type="session",
+            artifact=add_module.SourceArtifact(staged_path=stage / "briefing.txt", filename="briefing.txt"),
+            today=dt.date(2026, 11, 15),
+        ))
+    digest = hashlib.sha256(data).hexdigest()
+    assert list((original_pool.pool_root(vault) / "sha256").rglob("*.blob")) == [original_pool.object_path(vault, digest)]
+    assert filed[0].artifact_path != filed[1].artifact_path
+    for added in filed:
+        assert not (vault / added.artifact_path).exists()
+        assert originals.original_state(vault, added.artifact_path).local_path == original_pool.object_path(vault, digest)
+        assert media_store.read_original_bytes(vault, added.artifact_path).data == data
+        assert f"evidence_file: {added.artifact_path}" in (vault / added.path).read_text(encoding="utf-8")
+
+
+def test_a_refused_capture_publishes_no_original(vault, tmp_path, monkeypatch) -> None:
+    """Bytes publish only at the commit point; a write refused before it leaves the pool untouched."""
+    import datetime as dt
+
+    from exomem import add as add_module
+    from exomem import schema, vault as vault_module
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "notes.txt").write_bytes(b"never stored")
+
+    def refuse(*args, **kwargs):
+        raise vault_module.PathGuardError("PATH_GUARD_CHANGED", "a planned write moved")
+
+    monkeypatch.setattr(vault_module, "recheck_path_guards", refuse)
+    with pytest.raises((vault_module.PathGuardError, add_module.AddError, ValueError)):
+        add_module.add(vault, schema.load_source_schema(vault), content="", title="Refused", source_type="session",
+                       artifact=add_module.SourceArtifact(staged_path=stage / "notes.txt", filename="notes.txt"),
+                       today=dt.date(2026, 11, 15))
+    assert not list((original_pool.pool_root(vault) / "sha256").rglob("*.blob"))

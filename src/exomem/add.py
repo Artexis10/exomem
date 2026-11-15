@@ -52,6 +52,7 @@ from .vault import (
     CreateOnlyConflict,
     DefiniteNoEffect,
     InvalidSlugError,
+    PathGuard,
     PathGuardError,
     PlannedWrite,
     PreparedBinaryContent,
@@ -305,6 +306,46 @@ def artifact_binary_write(
         ),
         stream,
     )
+
+
+def pools_original(vault_root: Path, artifact_path: Path) -> bool:
+    """Whether a new filing's bytes go to the shared original pool rather than its logical path.
+
+    Notes stay ordinary pages. Every other original of an activated archive is pooled; its
+    companion alone binds the logical path.
+    """
+    from . import original_pool
+    from .originals import is_note_path
+
+    relative = artifact_path.relative_to(vault_root).as_posix()
+    return not is_note_path(relative) and original_pool.enabled(vault_root)
+
+
+def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, stream: IO[bytes],
+                            digest: str, size: int) -> Callable[[], None]:
+    """Stage and verify every byte now; return the publication the batch runs before its first install.
+
+    The stack keeps the stage and its physical pin until the filing commits. A concurrent
+    identical upload that publishes first makes this filing retry instead of hashing the
+    winner under the canonical boundary.
+    """
+    from . import held_fs, original_pool
+
+    def chunks():
+        stream.seek(0)
+        while chunk := stream.read(1024 * 1024):
+            yield chunk
+
+    prepared = stack.enter_context(original_pool.prepare(vault_root, digest, size, held_fs.Chunks(chunks)))
+
+    def publish() -> None:
+        try:
+            prepared.publish()
+        except original_pool.PublicationRace:
+            raise AddError(code="MUTATION_BUSY", missing=[],
+                           reason="an identical upload was stored at the same moment; retry") from None
+
+    return publish
 
 
 @dataclass(frozen=True)
@@ -848,13 +889,16 @@ def add(
     # can publish in the same rollback set.
     artifact_stream = None
     originals: list[PlannedWrite] = []
+    pooled_artifact = False
     if artifact is not None and artifact_path is not None:
         assert artifact_digest is not None and artifact_size is not None
         binary_write, artifact_stream = artifact_binary_write(
             artifact.staged_path, artifact_path, artifact_digest, artifact_size
         )
-        writes.append(binary_write)
-        originals.append(binary_write)
+        pooled_artifact = pools_original(vault_root, artifact_path)
+        if not pooled_artifact:
+            writes.append(binary_write)
+            originals.append(binary_write)
 
     # The registry the domain resolved against must still be the one on disk.
     # A registration rewrites it in this batch under its own content guard.
@@ -865,12 +909,22 @@ def add(
     )
     if correction_plan is not None:
         required_guards = (*required_guards, correction_plan.guards[0])
+    if pooled_artifact:
+        assert artifact_path is not None
+        # A pooled filing leaves no ordinary file at its logical path; one appearing there would shadow it.
+        required_guards = (*required_guards, PathGuard.capture(
+            vault_root, artifact_path.relative_to(vault_root).as_posix(), leaf_policy="absent"))
     from . import document_containers
 
     container_stack = contextlib.ExitStack()
     container_metadata = None
     core_paths = {source_path, artifact_path} - {None}
+    publish_original = None
     try:
+        if pooled_artifact:
+            assert artifact_stream is not None and artifact_digest is not None and artifact_size is not None
+            publish_original = staged_pool_publication(
+                container_stack, vault_root, artifact_stream, artifact_digest, artifact_size)
         if artifact_stream is not None and document_containers.is_container(artifact_path):
             container_plan = container_stack.enter_context(document_containers.plan(
                 vault_root, parent=artifact_path.relative_to(vault_root).as_posix(),
@@ -919,12 +973,14 @@ def add(
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
                 _prepare=prepare_final if _prepare is not None else None,
+                _publish_originals=publish_original,
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
                                _vocabulary_auxiliaries=bound_outputs,
                                _validate_prepared_bindings=validate_bindings,
-                               _prepare=prepare_final if _prepare is not None else None)
+                               _prepare=prepare_final if _prepare is not None else None,
+                               _publish_originals=publish_original)
     except _NativePrepared:
         raise
     except source_capture.SourceCaptureError:

@@ -5641,6 +5641,22 @@ def _governed_advisory_target(
     return target
 
 
+def _owner_writes(*writes: Callable[[], None] | None) -> Callable[[], None] | None:
+    """The owner's durable writes that run before a batch's first install, in order.
+
+    Pooled original bytes come first: a filing's binding must never commit before its bytes.
+    """
+    selected = tuple(write for write in writes if write is not None)
+    if not selected:
+        return None
+
+    def run() -> None:
+        for write in selected:
+            write()
+
+    return run
+
+
 class _NativePrepared(Exception):
     """Owner-local final preparation snapshot; no canonical effect has started."""
 
@@ -5684,6 +5700,7 @@ def batch_atomic_write(
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
+    _publish_originals: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -5715,6 +5732,7 @@ def batch_atomic_write(
                 defer_graph_completion=defer_graph_completion,
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
+                publish_originals=_publish_originals,
             )
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
@@ -5767,7 +5785,9 @@ def batch_atomic_write(
                 _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 publication_intents_out=publication_intents_out,
                 _validate_prepared_bindings=_validate_prepared_bindings,
-                _before_first_install=curation_witness.publication_hook(curation_witness_state),
+                _before_first_install=_owner_writes(
+                    _publish_originals, curation_witness.publication_hook(curation_witness_state)
+                ),
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
