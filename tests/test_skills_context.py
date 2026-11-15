@@ -18,11 +18,9 @@ from exomem import (
     activation_conventions,
     commands,
     context_catalogue,
-    find_corpus,
     lexstore,
     skills_context,
     state_migration,
-    vault_skills,
     working_set_runtime,
 )
 from exomem.governance import principal
@@ -200,52 +198,6 @@ def test_a_store_enrolled_vault_serves_a_skill_page_that_has_an_identity(skills_
     assert block["state"] == "ready"
     zeta = next(item for item in block["items"] if item["name"] == "zeta")
     assert zeta["ref"].startswith("exomem://memory/")
-
-
-def test_opening_a_skill_lists_the_other_files_of_its_directory_the_caller_may_see(skills_vault):
-    for rel in ("references/style.md", "references/deep/more.md", "private.md"):
-        _write(skills_vault, f"{KB}/Skills/zeta/{rel}", f"---\ntype: insight\nstatus: active\n---\n\n# {rel}\n")
-    _write(skills_vault, f"{KB}/Skills/zeta/scripts/run.py", "print(1)\n")
-    _withhold(skills_vault, f"{KB}/Skills/zeta/private.md", ceiling=0)
-    _refresh(skills_vault)
-    read = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
-
-    owner = invoke_command(read, skills_vault, path=ZETA)
-    with principal.request_scope(_external()):
-        restricted = invoke_command(read, skills_vault, path=ZETA)
-    ordinary = invoke_command(read, skills_vault, path=f"{KB}/Skills/zeta/references/style.md")
-
-    assert owner["skill_files"] == [
-        f"{KB}/Skills/zeta/private.md", f"{KB}/Skills/zeta/references/deep/more.md", f"{KB}/Skills/zeta/references/style.md",
-    ]
-    assert restricted["skill_files"] == [f"{KB}/Skills/zeta/references/deep/more.md", f"{KB}/Skills/zeta/references/style.md"]
-    assert "skill_files_partial" not in restricted
-    assert "skill_files" not in ordinary
-
-
-def test_a_skill_above_a_large_tree_costs_a_bounded_read_and_says_its_list_is_partial(skills_vault, monkeypatch):
-    """A skill placed above a big folder must not make every read of it walk that whole folder."""
-    for index in range(12):
-        _write(skills_vault, f"{KB}/Skills/zeta/references/page-{index:02}.md", f"---\ntype: insight\nstatus: active\n---\n\n# {index}\n")
-    _refresh(skills_vault)
-    monkeypatch.setattr(vault_skills, "SKILL_FILES_SCAN_MAX", 5)
-    monkeypatch.setattr(vault_skills, "SKILL_FILES_MAX", 3)
-    walked = []
-    real_walk = find_corpus.walk_md
-
-    def counting_walk(root, **kwargs):
-        for path in real_walk(root, **kwargs):
-            walked.append(path)
-            yield path
-
-    monkeypatch.setattr(find_corpus, "walk_md", counting_walk)
-    read = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
-
-    opened = invoke_command(read, skills_vault, path=ZETA)
-
-    assert len(opened["skill_files"]) == 3
-    assert opened["skill_files_partial"] is True
-    assert len(walked) <= 6
 
 
 def test_a_catalogue_from_before_skills_rebuilds_and_lists_them(skills_vault):

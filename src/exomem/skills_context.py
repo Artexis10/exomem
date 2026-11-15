@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import itertools
 import json
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
-from . import activation_conventions, context_catalogue, find_corpus, kbdir, recall_policy, vault_skills, working_set
+from . import activation_conventions, context_catalogue, vault_skills, working_set
 from .governance import egress, principal
 
 
@@ -121,21 +120,3 @@ def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any
     if any(verdict != egress.UNIT_KEPT for verdict in egress.classify_units(root, copy.deepcopy(served), purpose=caller.purpose)):
         return _empty("unavailable")
     return copy.deepcopy(block)
-
-
-def skill_files(root: Path, skill_path: str, sees: Callable[[str], bool]) -> tuple[list[str], bool]:
-    """The caller-visible pages in a skill's directory tree, other than the skill page, in path order, and whether a bound cut the list.
-
-    A page the caller cannot see is neither listed nor counted. The walk examines at most `SKILL_FILES_SCAN_MAX`
-    pages, so a skill placed above a large tree costs a bounded read; when that bound or `SKILL_FILES_MAX` cuts
-    the list, the answer says it is partial instead of counting what was not examined. A skill directly under the
-    vault or the knowledge base has no tree of its own, so it lists nothing instead of the whole corpus.
-    """
-    folder = skill_path.rpartition("/")[0]
-    if folder in ("", kbdir.kb_dirname()):
-        return [], False
-    walked = list(itertools.islice(find_corpus.walk_md(root / folder), vault_skills.SKILL_FILES_SCAN_MAX + 1))
-    scan_cut = len(walked) > vault_skills.SKILL_FILES_SCAN_MAX
-    admitted = recall_policy.admitted_relative_paths(root, walked[: vault_skills.SKILL_FILES_SCAN_MAX])
-    visible = sorted(rel for rel in admitted if rel != skill_path and sees(rel))
-    return visible[: vault_skills.SKILL_FILES_MAX], scan_cut or len(visible) > vault_skills.SKILL_FILES_MAX

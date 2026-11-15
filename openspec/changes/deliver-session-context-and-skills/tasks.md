@@ -11,7 +11,7 @@
 - [x] 2.2 Serve the `skills` block in maps responses with its own bound, continuity generation and `unchanged` state; verify first delivery, the unchanged turn, an edited skill and the off switch.
 - [x] 2.3 Accept `native_skills` and omit matching names from the catalogue only; verify a projected method still appears for an omitted skill.
 - [x] 2.4 Project admitted skill pages as `kind: "skill"` method items with the full description; verify against a real turn that names no skill.
-- [x] 2.5 List a skill's visible directory files when `read_page` opens a skill page; verify a hidden file is neither listed nor counted.
+- [x] 2.5 Keep a skill's other files one `read_page` away by the paths its body names, with no directory listing: a listing that is both bounded and blind to hidden pages needs an indexed folder read the catalogue does not have.
 - [x] 2.6 Render the catalogue and skill methods in the start-of-turn hook and pass the client's native skill names; verify the hook output for a Claude Code and a Codex home.
 - [ ] 2.7 Prove recall latency before and after on the recall latency instrument.
 

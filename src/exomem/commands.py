@@ -8567,12 +8567,6 @@ def read_memory_stored(
         result["id"] = named_id
     if units:
         result["units"] = observe_memory_module.page_units(vault_root, result)
-    if isinstance(result.get("path"), str) and vault_skills_module.recognise(result["path"], result.get("frontmatter")):
-        caller = context_views_module.CallerView.current(vault_root)
-        files, partial = skills_context_module.skill_files(vault_root, result["path"], caller.sees)
-        result["skill_files"] = files
-        if partial:
-            result["skill_files_partial"] = True
     return result
 
 

@@ -44,10 +44,11 @@ A client that already loads some skills natively names them in `native_skills`.
 The local hook can list its client's native skill directories without a model; an MCP-only client sends nothing and receives the whole catalogue.
 Omission applies only to the catalogue, so a native copy can still surface as a relevant method.
 
-### List a skill's other files on open
+### Reach a skill's other files by the paths it names
 
-Opening a skill page lists the visible files in its directory tree.
-This is the third level of progressive disclosure: references stay one read away and never enter context unasked.
+A skill's body names its references and scripts by paths relative to its folder, and `read_page` returns the skill's own path, so each named file is one read away.
+Opening a skill lists no directory: a listing must cost a bounded read and must not let pages the caller cannot see change what it shows, and visibility is a per-page decision the catalogue cannot index.
+A listing returns only with an indexed folder read that applies visibility before its bounds.
 
 ## Risks
 

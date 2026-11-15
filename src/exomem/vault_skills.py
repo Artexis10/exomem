@@ -22,9 +22,6 @@ DESCRIPTION_MAX_CHARS = 1024
 # A client lists tens of native skills; these bounds keep a hostile or broken request cheap.
 NATIVE_SKILLS_MAX = 200
 NATIVE_SKILL_NAME_MAX_CHARS = 128
-# A skill's page listing stays one cheap read: it examines a bounded number of pages and lists fewer.
-SKILL_FILES_MAX = 200
-SKILL_FILES_SCAN_MAX = 800
 
 # A sentence ends at terminal punctuation before whitespace: a format rule, not a reading of the words.
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s")

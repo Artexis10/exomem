@@ -20,7 +20,6 @@ That delivery problem is recorded here and settled by later tasks in this change
 - Serve a turn-independent `skills` block in maps responses: each visible skill's name, the first sentence of its description and its load reference. Serve it once per conversation and again only when it changes, using the existing continuity token.
 - Project a skill page that task discovery finds relevant as a method item that carries its full description and load reference.
 - Let a caller name the skills it already loads natively, so the catalogue omits them.
-- When `read_page` opens a skill page, list the other files in the skill's directory, so the agent can load them on demand.
 
 ## Capabilities
 
