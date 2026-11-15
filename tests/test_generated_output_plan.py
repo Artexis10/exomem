@@ -21,7 +21,7 @@ from exomem.governance.principal import owner_principal, request_scope
 
 
 @pytest.fixture
-def installed(vault):
+def installed(vault, request):
     with request_scope(owner_principal(surface="mcp")), writer_lease.active_manager().mutation_guard(vault):
         store = generated.GeneratedFragmentStore(vault)
         store.initialize()
@@ -30,10 +30,14 @@ def installed(vault):
         text = "A retained café entry.\r\n"
         reference = generated_fragments.SourceRef(f"exomem://memory/{uuid.UUID(int=41)}")
         rendered = generated_fragments._Image(text).own(reference).plan(hashlib.sha256(b"").hexdigest())
-        build = store.begin_image(text.encode(), rendered, unknown_through_epoch=0)
-        for page in build.pages:
-            store.append_image(page)
-        image = store.seal_image(build.header.image_id)
+        if getattr(request, "param", None) == "opaque":
+            image = store.begin_opaque_image(source_refs=(reference.value,),
+                image_sha256=rendered.after.image_sha256, image_size=len(text.encode()), unknown_through_epoch=0)
+        else:
+            build = store.begin_image(text.encode(), rendered, unknown_through_epoch=0)
+            for page in build.pages:
+                store.append_image(page)
+            image = store.seal_image(build.header.image_id)
         path = vault / "generated.md"
         copy = copies.reserve(image, logical_path=path, relative_path="prepared.tmp", destination="generated.md", removable=False)
         publication = store.prepare_slot(owner=copy.canonical.owner.owner, locator=copy.canonical.owner.locator,
@@ -349,3 +353,14 @@ def test_failed_stage_closes_a_publication_whose_native_reservation_never_starte
     binding = store.read_slot(owner=source_native_custody.OWNER,
         locator=generated.file_locator(before.catalogue_id, path.name), physical_scope=native.physical_scope)
     assert not path.exists() and binding.current is None and binding.slot.pending is None
+
+
+@pytest.mark.parametrize("installed", ["opaque"], indirect=True)
+def test_native_opaque_membership_never_becomes_text_fragment_ownership(installed):
+    store, native, copy, path, reference = installed
+    text, guard = vault_module.read_guarded_text(store.root, path)
+    before = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
+    assert before.binding.current.copy_id == copy.canonical.copy_id
+    assert before.current is None and before.mapping.after.fragments == ()
+    assert before.mapping.unknown and before.mapping.unknown_through_epoch >= store.head().epoch
+    assert store.lookup(reference.value, None).image_ids == (copy.canonical.image_id,)

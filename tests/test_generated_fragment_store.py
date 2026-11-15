@@ -979,6 +979,65 @@ def test_equal_whole_bytes_for_different_sources_have_distinct_immutable_images(
     assert store.image_header(left.image_id).value.whole_source_ref == first
 
 
+def test_opaque_multi_source_copy_survives_a_cold_index(store, monkeypatch, tmp_path):
+    birth = store.allocate_birth()
+    first, second = reference(), reference()
+    payload = b"\x80\x00opaque retained result"
+    header = store.begin_opaque_image(source_refs=(first, second),
+        image_sha256=hashlib.sha256(payload).hexdigest(), image_size=len(payload), unknown_through_epoch=0)
+    assert header.state == "ready" and header.page_count == 0
+    assert header.whole_source_ref is None
+    assert set(header.opaque_source_refs) == {first, second}
+    owner = OwnerLocator(owner="capture-result", locator=uuid.uuid4().hex, version=uuid.uuid4().hex)
+    copy = store.reserve_copy(header.image_id, owner=owner,
+        origin_ledger=writer_lease.active_manager().idempotency.capture_attempts.ledger_id,
+        expected_header=header, expected_root=store.root)
+    store.close()
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "opaque-result-replica"))
+    replica = generated.GeneratedFragmentStore(store.root)
+    try:
+        assert replica.lookup(first, birth).state == "pending"
+        for _ in range(20):
+            if replica.census(limit=1).state == "ready":
+                break
+        for ref in (first, second):
+            found = replica.lookup(ref, birth)
+            assert found.image_ids == (header.image_id,) and found.copies == (copy,)
+            assert found.state == "pending" and found.copies[0].outcome == "reserved"
+    finally:
+        replica.close()
+
+
+def test_equal_opaque_bytes_keep_distinct_source_membership(store):
+    first, second, third = reference(), reference(), reference()
+    payload = b"\x80same retained response"
+    digest = hashlib.sha256(payload).hexdigest()
+    left = store.begin_opaque_image(source_refs=(first, second), image_sha256=digest,
+        image_size=len(payload), unknown_through_epoch=0)
+    right = store.begin_opaque_image(source_refs=(first, third), image_sha256=digest,
+        image_size=len(payload), unknown_through_epoch=0)
+    assert left.image_id != right.image_id
+    cursor, found = None, set()
+    for _ in range(3):
+        page = store.lookup(first, None, cursor=cursor)
+        found.update(page.image_ids)
+        cursor = page.cursor
+        if cursor is None:
+            break
+    assert found == {left.image_id, right.image_id} and cursor is None
+    assert store.lookup(second, None).image_ids == (left.image_id,)
+    assert store.lookup(third, None).image_ids == (right.image_id,)
+
+
+def test_oversized_opaque_membership_leaves_catalogue_unchanged(store):
+    before = store.head()
+    with pytest.raises(ValueError, match="generated_metadata_bound_exceeded"):
+        store.begin_opaque_image(source_refs=tuple(reference() for _ in range(1300)),
+            image_sha256=hashlib.sha256(b"opaque reply").hexdigest(), image_size=12,
+            unknown_through_epoch=0)
+    assert store.head() == before
+
+
 @pytest.mark.parametrize("birth_state", ("missing", "mismatched", "future"))
 def test_unknown_birth_preserves_explicit_whole_and_fragment_copy_obligations(store, birth_state):
     birth = store.allocate_birth()

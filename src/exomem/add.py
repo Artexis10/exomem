@@ -38,6 +38,7 @@ from . import (
     schema,
     source_capture,
     source_corrections,
+    source_result_attribution,
     source_taxonomy,
     tag_variants,
     temporal,
@@ -170,7 +171,11 @@ class AddResult:
             out["same_url"] = self.same_url
         if self.duplicate_check_unavailable:
             out["duplicate_check_unavailable"] = True
-        return out
+        # These are this producer's result fields; historical outcome facts stay independently readable.
+        paths = tuple((key,) for key in out if key not in (
+            "capture_outcome", "duplicate_check_unavailable", "same_url",
+        ))
+        return source_result_attribution.bind(out, (self.ref,), paths=paths)
 
 
 @dataclass
@@ -1107,16 +1112,21 @@ def _same_url_advisory(found: duplicates.SameUrl | None) -> dict[str, object] | 
     """The `same_url` advisory for earlier Sources that share a capture's URL: up to five of them and the total."""
     if found is None:
         return None
-    return {
+    if found.count > len(found.sources):
+        source_result_attribution.mark_unknown()
+    out = {
         "count": found.count,
         "sources": [
-            {
+            source_result_attribution.bind({
                 "ref": source.ref, "path": source.path, "title": source.payload.frontmatter.get("title"),
                 "captured": str(source.payload.frontmatter.get("captured")),
-            }
+            }, (source.ref,))
             for source in found.sources
         ],
     }
+    return source_result_attribution.bind(
+        out, tuple(source.ref for source in found.sources), paths=(("count",),), action="count",
+    )
 
 
 _SUGGESTION_KIND = "source_classification_debt"

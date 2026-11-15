@@ -9253,6 +9253,8 @@ def op_capture_source(
         source_capture.require_authority(vault_root)
     # Resolved before any byte is fetched or written, for files and text alike.
     kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    from . import source_result_attribution
+
     out: dict
     if files or adoption is not None:
         from . import client_artifacts
@@ -9281,6 +9283,10 @@ def op_capture_source(
             row["page"] for row in captured.get("files", [])
             if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
         ]
+        source_refs = {
+            row["page"]: source_result_attribution.recipe(row).sources for row in captured.get("files", [])
+            if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
+        }
     else:
         source = _add_source(
             vault_root,
@@ -9312,13 +9318,16 @@ def op_capture_source(
         for key in ("vocabulary_resolution", "vocabulary_receipt"):
             if key in source:
                 out[key] = source[key]
+                source_result_attribution.carry(source, out, moves={(key,): (key,)})
         # What the duplicate check found moves up, so a reused reply (which the terminal passes through whole)
         # states it once.
         for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable"):
             if key in source:
+                source_result_attribution.carry_fields(source, out, {key: key})
                 out[key] = source.pop(key)
         source_paths = [source["path"]]
-    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
+        source_refs = {source["path"]: (source["ref"],)}
+    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths, source_refs=source_refs)
     if compile_guidance:
         if files or adoption is not None:
             # Originals remain usable while extraction is pending; preparation is optional.

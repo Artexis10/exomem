@@ -1882,7 +1882,9 @@ def _committed_failure_payload(error: Exception) -> dict[str, Any] | None:
     if not callable(public_dict):
         return None
     try:
-        return _validate_committed_failure_payload(public_dict())
+        from .source_result_custody import attribute_failure
+
+        return attribute_failure(_validate_committed_failure_payload(public_dict()))
     except Exception:  # noqa: BLE001 - arbitrary exception payloads are not cacheable
         return None
 
@@ -3154,6 +3156,13 @@ class IdempotencyStore:
 
         return CaptureAttemptLedger(self)
 
+    @cached_property
+    def source_results(self):
+        """Source-only publication witnesses share the protected runtime database."""
+        from .source_result_custody import Journal
+
+        return Journal(self)
+
     def __init__(
         self,
         path: Path,
@@ -3579,6 +3588,8 @@ class IdempotencyStore:
         legacy_graph_pending_proof=None,  # noqa: ANN001
         reconcile_abandoned: bool = False,
     ) -> Any:
+        from . import source_result_custody
+
         if not key:
             with operation_guard() if operation_guard is not None else nullcontext():
                 result = operation()
@@ -3619,10 +3630,15 @@ class IdempotencyStore:
                     # The waiter already acquired the new attempt under the SQLite transaction.
                     break
                 disposition, stored = waited
+            source_result = source_result_custody.current(self)
+            if source_result is not None and disposition in {"completed", "canonical_resume"}:
+                stored = source_result.decode(stored)
+            elif source_result is not None and disposition == "committed_failure":
+                stored = _CachedCommittedFailure(source_result.decode(stored.as_public_dict()))
             if disposition == "canonical_resume":
                 if resume_canonically_committed is None:
                     raise _mutation_outcome_unknown_error()
-                terminal_result = resume_canonically_committed(stored)
+                terminal_result = source_result_custody.carry_result(stored, resume_canonically_committed(stored))
                 if terminal_result == _OUTCOME_UNKNOWN_TERMINAL:
                     # A v2 receipt can prove the canonical write happened,
                     # yet deliberately retains no cleanup target paths.  Do
@@ -3710,18 +3726,21 @@ class IdempotencyStore:
                             attempt,
                             "committed_failure" if committed_handoff else "success",
                         )
-                        result = prepared
+                        result = source_result_custody.carry_result(result, prepared)
                     canonical_result = result
                     if committed_handoff:
                         assert committed_failure is not None
                         canonical_result = _CanonicalCommittedFailure(result, committed_failure)
                     try:
-                        self._persist_canonically_committed(
+                        published_result = self._persist_canonically_committed(
                             key,
                             digest,
                             canonical_result,
                             attempt,
                         )
+                        if published_result is not None:
+                            canonical_result = published_result
+                            result = canonical_result.result if committed_handoff else canonical_result
                     except Exception as storage_error:
                         if self._exact_evidence(commit_evidence, digest, attempt):
                             raise _PostCommitOutcomeUncertain() from storage_error
@@ -3740,7 +3759,9 @@ class IdempotencyStore:
             if after_operation_guard is None:
                 terminal_result = result
             else:
-                terminal_result = after_operation_guard(result)
+                from .source_result_custody import carry_result
+
+                terminal_result = carry_result(result, after_operation_guard(result))
             if committed_handoff:
                 # A committed *failure* has no success terminal to protect, so
                 # its derived work still runs before the failure terminal
@@ -3769,7 +3790,9 @@ class IdempotencyStore:
             # chance to register a batch. A commit that registers none owes
             # nothing and must not be stamped pending forever.
             if acknowledgement_expected is not None and acknowledgement_expected():
-                terminal_result = _awaiting_derived_acknowledgement(terminal_result)
+                from .source_result_custody import carry_result
+
+                terminal_result = carry_result(terminal_result, _awaiting_derived_acknowledgement(terminal_result))
             try:
                 terminal_result = self._persist_completed_from_canonical(
                     key, digest, terminal_result
@@ -3787,7 +3810,9 @@ class IdempotencyStore:
             # to the fail-closed outcome-unknown. Committed-uncertain is now
             # reached only when persisting the terminal itself fails.
             try:
-                acknowledged = after_terminal_acknowledgement(terminal_result)
+                from .source_result_custody import carry_result
+
+                acknowledged = carry_result(terminal_result, after_terminal_acknowledgement(terminal_result))
             except _PostCommitOutcomeUncertain as acknowledgement_error:
                 acknowledged = _derived_acknowledgement_pending(
                     terminal_result, acknowledgement_error
@@ -3837,6 +3862,9 @@ class IdempotencyStore:
                 (key,),
             ).fetchone()
             if row and self._expired_row(row, now, expires_after):
+                from .source_result_custody import close_rows
+
+                close_rows(conn, kind="mutation", keys=(key,))
                 conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
                 row = None
             if row is not None:
@@ -3849,6 +3877,11 @@ class IdempotencyStore:
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
                 )
                 if row is not None:
+                    from . import source_result_custody
+
+                    source_result = source_result_custody.current(self)
+                    if source_result is not None and row[5] and row[6]:
+                        source_result.pin(conn, source_result_custody.mutation_pointer(key, row), row[1])
                     disposition = self._decode_disposition(row, digest, commit_evidence=commit_evidence)
                     if disposition[0] != "outcome_unknown" or not reconcile_abandoned:
                         return disposition
@@ -4073,7 +4106,10 @@ class IdempotencyStore:
         expires_after: float | None,
         key: str,
     ) -> None:
+        from .source_result_custody import close_rows
+
         key_pattern = f"{key.partition(':')[0]}:%"
+        closed_source_keys: list[str] = []
         if expires_after is not None:
             cutoff = now - expires_after
             expired_completed = conn.execute(
@@ -4094,6 +4130,11 @@ class IdempotencyStore:
                 else:
                     if completed == _OUTCOME_UNKNOWN_TERMINAL:
                         continue
+                closed_source_keys.append(expired_key)
+                # Bound the added witness work; generic expiry's existing admission policy stays unchanged.
+                if len(closed_source_keys) >= 128:
+                    close_rows(conn, kind="mutation", keys=tuple(closed_source_keys))
+                    closed_source_keys.clear()
                 conn.execute(
                     "DELETE FROM mutations WHERE key = ? AND state = 'completed'", (expired_key,)
                 )
@@ -4109,10 +4150,15 @@ class IdempotencyStore:
                     _deserialize_committed_failure_payload(expired_payload)
                 except Exception:  # noqa: BLE001 - corrupt markers remain fail-closed
                     continue
+                closed_source_keys.append(expired_key)
+                if len(closed_source_keys) >= 128:
+                    close_rows(conn, kind="mutation", keys=tuple(closed_source_keys))
+                    closed_source_keys.clear()
                 conn.execute(
                     "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
                     (expired_key,),
                 )
+            close_rows(conn, kind="mutation", keys=tuple(closed_source_keys))
         # `outcome_unknown` deliberately remains retained: expiry would turn
         # an unprovable canonical cut into permission to replay the leaf.
 
@@ -4275,6 +4321,14 @@ class IdempotencyStore:
         raise self._reconciliation_error("cached mutation state")
 
     def _persist_completed(self, key: str, digest: str, result: Any) -> None:
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None and source_result.persist_mutation(
+            key, digest, result, state="completed", allowed=("pending", "executing", "canonically_committed"),
+            attempt=self._attempts.get(key),
+        ) is not None:
+            return
         payload = pickle.dumps(result)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -4288,7 +4342,7 @@ class IdempotencyStore:
 
     def _persist_canonically_committed(
         self, key: str, digest: str, result: Any, attempt: _ExecutionAttempt
-    ) -> None:
+    ) -> Any:
         # Closes the span opened when canonical bytes landed. Everything between
         # the two is derived fan-out and terminal bookkeeping, and the 0.83.1
         # deploy could not attribute ~32 s of it per write.
@@ -4303,6 +4357,14 @@ class IdempotencyStore:
         # 0.4 s per write on 0.84.1, against 46 s inside the umbrella that had
         # no span at all, so the split is what says which half to look in.
         call_spans.record_span_since("derived.terminal_persist", "derived_fanout_complete")
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None:
+            published = source_result.persist_mutation(key, digest, result, state="canonically_committed",
+                                                       allowed=("executing",), attempt=attempt)
+            if published is not None:
+                return published
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE mutations SET state = 'canonically_committed', result = ?, owner = NULL, "
@@ -4320,8 +4382,17 @@ class IdempotencyStore:
             if cursor.rowcount != 1:
                 raise self._reconciliation_error("canonical mutation state")
         _log_mutation_event("canonically_committed", receipt=_receipt_tag(key))
+        return result
 
     def _persist_completed_from_canonical(self, key: str, digest: str, result: Any) -> Any:
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None:
+            published = source_result.persist_mutation(key, digest, result, state="completed",
+                                                       allowed=("canonically_committed",))
+            if published is not None:
+                return published
         payload = pickle.dumps(result)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -4359,6 +4430,13 @@ class IdempotencyStore:
 
     def _replace_completed(self, key: str, digest: str, result: Any) -> None:
         """Advance a durably committed canonical terminal with derived progress."""
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None and source_result.persist_mutation(
+            key, digest, result, state="completed", allowed=("completed",)
+        ) is not None:
+            return
         payload = pickle.dumps(result)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -4373,6 +4451,15 @@ class IdempotencyStore:
     def _persist_committed_failure(
         self, key: str, digest: str, committed_failure: dict[str, Any]
     ) -> None:
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None and source_result.persist_mutation(
+            key, digest, committed_failure, state="completed", allowed=("executing", "canonically_committed"),
+            encode=_serialize_committed_failure_payload, attempt=self._attempts.get(key),
+            encoding="failure-json",
+        ) is not None:
+            return
         payload = _serialize_committed_failure_payload(committed_failure)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -6124,7 +6211,12 @@ class LeaseManager:
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             manager_token = _ACTIVE_LEASE_MANAGER.set(self)
             from .governance.principal import effective_principal
-            from .vocabulary_gate import attach_evidence, operation_context
+            from .source_result_custody import carry_result
+            from .vocabulary_gate import attach_evidence as attach_vocabulary_evidence
+            from .vocabulary_gate import operation_context
+
+            def attach_evidence(terminal, context):
+                return carry_result(terminal, attach_vocabulary_evidence(terminal, context))
 
             gate_context = None
             post_terminal_token = _ACTIVE_POST_TERMINAL_FANOUT.set(post_terminal_fanout)
@@ -6992,8 +7084,22 @@ class LeaseManager:
                     raise
 
             def run_idempotent() -> Any:
+                from .source_result_custody import Invocation
+
                 try:
-                    return self.idempotency.run(
+                    with Invocation(self, mutation_subject) if command.name in {
+                        "capture_source", "settle_source_capture"
+                    } else nullcontext():
+                        return run_source_idempotent()
+                except OpError as error:
+                    if command.name != "settle_source_capture" or error.code != "MUTATION_BUSY" or commit_state["leaf_started"]:
+                        raise
+                    from . import capture_attempts
+
+                    return capture_attempts.pending(self, mutation_subject, kwargs["reservation"])
+
+            def run_source_idempotent() -> Any:
+                return self.idempotency.run(
                         key,
                         digest,
                         invoke_protocol_leaf,
@@ -7019,13 +7125,7 @@ class LeaseManager:
                         commit_evidence=exact_commit_evidence,
                         legacy_graph_pending_proof=legacy_graph_pending_proof,
                         reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
-                    )
-                except OpError as error:
-                    if command.name != "settle_source_capture" or error.code != "MUTATION_BUSY" or commit_state["leaf_started"]:
-                        raise
-                    from . import capture_attempts
-
-                    return capture_attempts.pending(self, mutation_subject, kwargs["reservation"])
+                )
 
             from .command_surface import OPEN_WORLD_OPS
 

@@ -207,6 +207,9 @@ class CaptureAttemptLedger:
             expired = conn.execute("SELECT ticket FROM capture_attempts WHERE boundary_id=? AND state='reserved' AND custody_pending=0 AND expires_at<=? ORDER BY expires_at,ticket LIMIT ?", (identity, now, GC_BATCH_SIZE)).fetchall()
             terminal = conn.execute("SELECT ticket FROM capture_attempts WHERE boundary_id=? AND custody_pending=0 AND gc_after<=? ORDER BY gc_after,ticket LIMIT ?", (identity, now, GC_BATCH_SIZE - len(expired))).fetchall()
             tickets = [row for row in (*expired, *terminal) if row[0] not in active]
+            from .source_result_custody import close_rows
+
+            close_rows(conn, kind="capture", keys=tuple(row[0] for row in tickets))
             conn.executemany("DELETE FROM capture_attempts WHERE ticket=?", tickets)
             conn.executemany("DELETE FROM capture_attempt_custody WHERE ticket=?", tickets)
             conn.executemany("DELETE FROM capture_attempt_residue WHERE ticket=?", tickets)
@@ -298,9 +301,17 @@ class CaptureAttemptLedger:
 
     def _lookup(self, reservation: CaptureReservation):
         with self.store._connect() as conn:
+            conn.execute("BEGIN")
             row = conn.execute("SELECT reservation, principal, state, past_outcome, receipt, retention_seconds FROM capture_attempts WHERE ticket=?", (reservation.ticket,)).fetchone()
-        if row is not None and (row[0] != _json(reservation.model_dump(mode="json")) or row[1] != _principal_binding()):
-            raise ValueError("CAPTURE_ATTEMPT_INVALID: reservation or principal binding differs")
+            if row is not None and (row[0] != _json(reservation.model_dump(mode="json")) or row[1] != _principal_binding()):
+                raise ValueError("CAPTURE_ATTEMPT_INVALID: reservation or principal binding differs")
+            from .source_result_custody import current
+
+            invocation = current(self.store)
+            if row is not None and invocation is not None:
+                from .source_result_custody import capture_pointer
+
+                invocation.pin(conn, capture_pointer(reservation), row[2])
         return row
 
     def complete(self, ticket: str, terminal: dict, *, retention_seconds: float) -> None:
@@ -309,6 +320,15 @@ class CaptureAttemptLedger:
         # These outcomes are the canonical Source capture protocol's closed enum.
         if capture_result not in ("created", "reused"):
             raise RuntimeError("capture attempt lacks a canonical capture outcome")
+        from .source_result_custody import current
+
+        invocation = current(self.store)
+        if invocation is not None:
+            with self.store._connect() as conn:
+                stored = conn.execute("SELECT reservation FROM capture_attempts WHERE ticket=?", (ticket,)).fetchone()
+            if stored is not None and invocation.persist_capture(terminal,
+                    reservation=CaptureReservation.model_validate_json(stored[0]), retention_seconds=retention_seconds) is not None:
+                return
         with self.store._connect() as conn:
             conn.execute("UPDATE capture_attempts SET state='completed',past_outcome=?,receipt=?,gc_after=? WHERE ticket=? AND state='accepted'",
                          (
@@ -330,7 +350,13 @@ class CaptureAttemptLedger:
         row = self._lookup(reservation)
         if row is not None and row[2] == "completed":
             source_capture.require_authority(root)
-            return replay(_capture_receipt(json.loads(row[4])))
+            from .source_result_custody import current
+
+            terminal = json.loads(row[4])
+            invocation = current(self.store)
+            if invocation is not None:
+                terminal = invocation.decode(terminal)
+            return replay(_capture_receipt(terminal))
         if row is None or row[2] != "reserved" or reservation.admission_expires_at <= self.store.clock():
             raise ValueError("CAPTURE_ATTEMPT_CLOSED: admission is closed; use a fresh reservation")
         with self.store._connect() as conn:
@@ -359,7 +385,13 @@ class CaptureAttemptLedger:
         result.update(state="closed", admission_closed_here=True)
         if row is not None:
             if row[2] == "completed":
-                result.update(past_outcome=row[3], capture_receipt=_capture_receipt(json.loads(row[4])))
+                from .source_result_custody import current
+
+                terminal = json.loads(row[4])
+                invocation = current(self.store)
+                if invocation is not None:
+                    terminal = invocation.decode(terminal)
+                result.update(past_outcome=row[3], capture_receipt=_capture_receipt(terminal))
             else:
                 past = "not_started" if row[2] == "reserved" else row[3] or "unknown"
                 with self.store._connect() as conn:

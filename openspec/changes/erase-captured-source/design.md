@@ -50,7 +50,11 @@ Keep the manifest bounded by producer families; each opaque locator addresses pr
 Do not embed an ever-growing fragment or version list in the manifest or public progress response.
 
 Keep attempt-local pre-reference residue and bounded erase cursors beside the existing private attempt ledger.
-Reuse its protected connections without changing generic mutation replay or its tables.
+Reuse its protected connections without changing generic mutation replay or its existing tables.
+Source-owned result hooks may fence persistence and refresh, and redact the target's identifying projection.
+They preserve row identity, historical outcome and serialization; erasure cannot clear an issued claim and permit its execution again.
+Shared results retain unrelated Source authority and mark affected aggregates partial or unavailable instead of inventing a remaining total.
+Ordinary retry expiry can admit a fresh capture under its existing policy; issued capture tickets keep their frozen admission and retention.
 Local cursors accelerate progress; they never supply canonical independence or completion authority.
 Another replica can reconcile owner acknowledgements from canonical custody without trusting the previous replica's cursor.
 
@@ -85,6 +89,21 @@ Keep only one generated-owner locator in each Source manifest, rather than rewri
 A whole Source page or sealed original uses an immutable `whole_source_ref` on its image header, without textual fragment pages.
 The allocation and sealed original declaration establish that ownership; matching bytes, Markdown markers and nearby paths do not.
 Binary originals therefore reuse image and copy custody without passing through UTF-8 fragment validation.
+Opaque result images use explicit producer-declared Source membership in their bounded headers, without textual fragment pages.
+Their hashes bind exact serialized payload bytes; membership never comes from parsing or matching those bytes.
+The existing metadata byte bound and positive-membership index also cover this variant.
+One Source-private publication table selects the exact canonical image and Copy; it stores no payload or rollback bytes.
+Existing row identities and hashes cannot select different ownership maps for identical serialized bytes after a crash.
+The witness adds one bounded recipe format and transactional hooks at the existing result owners.
+Prepare its content-free publication identifier, physical ledger, opaque row pointer and attempt incarnation before reserving the canonical Copy.
+Publish the exact existing pickle or JSON bytes and selected witness in one SQLite transaction.
+Read those bytes and their witness from the same SQLite snapshot, then close the connection before checking canonical retirement.
+Every refresh compares the attempt incarnation and prior publication identifier, including completion fallback and delayed acknowledgment.
+Replacement and expiry close the old witness atomically and clear its attribution; retain content-free closure until canonical Copy acknowledgment.
+Prepared witnesses can prove that publication never occurred. A missing witness remains unknown and cannot be reconstructed from equal bytes.
+Trusted typed producers supply bounded schema selectors and ordinals before compact projection discards attribution.
+Compilation guidance binds its actual resolved Source pages, including correction resolution.
+These selectors redact the target projection while preserving unrelated Source authority and historical admission facts.
 Canonical copies define the expected obligations, including when a private native binding disappears.
 An empty local lookup never proves completion. Missing birth coverage preserves known positive copies while leaving completeness unknown.
 

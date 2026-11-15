@@ -79,7 +79,7 @@ class BoundText:
 
 def _mapping(store: generated.GeneratedFragmentStore, header: generated.ImageHeader,
              data: bytes) -> generated_fragments.FragmentMap:
-    if header.whole_source_ref is not None or header.image_size != len(data):
+    if header.whole_source_ref is not None or header.opaque_source_refs is not None or header.image_size != len(data):
         raise ValueError("generated before-image is not a matching fragment image")
     fragments, previous = [], None
     for number in range(header.page_count):

@@ -42,6 +42,7 @@ def _opaque(value: str) -> str:
 _Id = Annotated[str, AfterValidator(_opaque)]
 _Hash = Annotated[str, AfterValidator(validate_sha256)]
 _Epoch = Annotated[int, Field(ge=0)]
+_SourceReference = Annotated[str, AfterValidator(lambda value: SourceRef(value).value)]
 
 
 def _id() -> str:
@@ -96,7 +97,9 @@ class ImageHeader(_Record):
     image_size: Annotated[int, Field(ge=0)]
     catalogue_id: _Id
     unknown_through_epoch: _Epoch
-    whole_source_ref: Annotated[str, AfterValidator(lambda value: SourceRef(value).value)] | None = None
+    whole_source_ref: _SourceReference | None = None
+    # Explicit opaque membership shares the canonical record byte bound; no payload parser establishes it.
+    opaque_source_refs: tuple[_SourceReference, ...] | None = None
     # These states distinguish incomplete construction from immutable usable pages and collection.
     state: Literal["building", "ready", "collecting"] = "building"
     page_count: Annotated[int, Field(ge=0)]
@@ -107,6 +110,10 @@ class ImageHeader(_Record):
 
     @model_validator(mode="after")
     def consistent_pages(self):
+        if self.opaque_source_refs is not None and (self.whole_source_ref is not None
+                or self.page_count != 0 or self.written_pages != 0
+                or self.last_page_hash is not None or self.expected_last_page_hash is not None):
+            raise ValueError("opaque_source_image_cannot_have_other_membership")
         if self.whole_source_ref is not None and (self.page_count != 0 or self.written_pages != 0
                 or self.last_page_hash is not None or self.expected_last_page_hash is not None):
             raise ValueError("whole_source_image_cannot_have_fragment_pages")
@@ -869,7 +876,8 @@ class GeneratedFragmentStore:
     def begin_verified_image(self, *, image_sha256: str, image_size: int, page_count: int,
                              expected_last_page_hash: str | None,
                              unknown_through_epoch: int, image_id: str | None = None,
-                             whole_source_ref: str | None = None) -> ImageHeader:
+                             whole_source_ref: str | None = None,
+                             opaque_source_refs: tuple[str, ...] | None = None) -> ImageHeader:
         """Begin an image after its native owner verified the byte hash and planned page chain.
 
         Large producers can prepare that evidence across invocations without loading the body here.
@@ -885,7 +893,7 @@ class GeneratedFragmentStore:
                              image_size=image_size, catalogue_id=head.catalogue_id,
                              unknown_through_epoch=unknown_through_epoch, page_count=page_count,
                              expected_last_page_hash=expected_last_page_hash,
-                             whole_source_ref=whole_source_ref, revision=_id())
+                             whole_source_ref=whole_source_ref, opaque_source_refs=opaque_source_refs, revision=_id())
         item = ObjectChange(kind="image", object_id=image_id, image_id=image_id, after_revision=header.revision)
         self._run("image_begin", ((item, header),))
         return header
@@ -900,6 +908,15 @@ class GeneratedFragmentStore:
                                            image_sha256=image_sha256, image_size=image_size,
                                            page_count=0, expected_last_page_hash=None,
                                            unknown_through_epoch=0)
+        return self.seal_image(header.image_id)
+
+    def begin_opaque_image(self, *, source_refs: Sequence[str], image_sha256: str,
+                           image_size: int, unknown_through_epoch: int) -> ImageHeader:
+        """Bind producer-declared members of exact opaque bytes without textual spans."""
+        members = tuple(sorted({SourceRef(reference).value for reference in source_refs}))
+        header = self.begin_verified_image(opaque_source_refs=members,
+            image_sha256=image_sha256, image_size=image_size, page_count=0,
+            expected_last_page_hash=None, unknown_through_epoch=unknown_through_epoch)
         return self.seal_image(header.image_id)
 
     def _image(self, image_id: str, *, guards: list[vault.PathGuard] | None = None) -> ImageHeader:
@@ -1333,8 +1350,9 @@ class GeneratedFragmentStore:
             if old is not None:
                 previous = ImageHeader.model_validate_json(old[0])
                 if (previous.image_sha256, previous.image_size, previous.expected_last_page_hash,
-                    previous.whole_source_ref) != (value.image_sha256, value.image_size,
-                                                  value.expected_last_page_hash, value.whole_source_ref):
+                    previous.whole_source_ref, previous.opaque_source_refs) != (
+                        value.image_sha256, value.image_size, value.expected_last_page_hash,
+                        value.whole_source_ref, value.opaque_source_refs):
                     self._cache_uncertainty(conn, Uncertainty(unit_id=_id(), catalogue_id=value.catalogue_id,
                                             unknown_through_epoch=epoch, image_id=value.image_id, revision=_id()), canonical=False)
             conn.execute("INSERT INTO images(image_id,header,horizon,seen) VALUES (?,?,?,?) ON CONFLICT(image_id) "
@@ -1345,6 +1363,9 @@ class GeneratedFragmentStore:
             if value.whole_source_ref is not None:
                 # Explicit whole ownership uses the same positive-membership index as fragment ownership.
                 conn.execute("INSERT OR IGNORE INTO members VALUES (?,?)", (value.whole_source_ref, value.image_id))
+            if value.opaque_source_refs is not None:
+                conn.executemany("INSERT OR IGNORE INTO members VALUES (?,?)",
+                    ((reference, value.image_id) for reference in value.opaque_source_refs))
         elif item.kind == "page":
             row = conn.execute("SELECT next_page,chain_hash FROM images WHERE image_id=?", (value.image_id,)).fetchone()
             if row is None or row[0] != value.page_number or row[1] != value.previous_page_hash:

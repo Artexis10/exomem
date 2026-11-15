@@ -63,6 +63,9 @@ class _CaptureCopies:
                     size = write.content.size
                 else:
                     continue
+                from .source_result_custody import record_target
+
+                record_target(reference, relative)
                 if not write.create_only or write.expected_hash != vault.MISSING_CONTENT_HASH:
                     raise ValueError("fresh Source payload custody requires a missing destination")
                 image = self.store.begin_whole_image(
