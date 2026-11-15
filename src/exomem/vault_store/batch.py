@@ -129,6 +129,9 @@ def commit_batch(
             )
     if not caller_writes and lifecycle is None:
         return []
+    from .. import trash_metadata
+
+    caller_writes = trash_metadata.prepare_binding_changes(root, caller_writes)
     # A lifecycle commit with no page to write carries no curation witness: nothing to witness.
     augmented, witness = (
         curation_witness.augment_batch(

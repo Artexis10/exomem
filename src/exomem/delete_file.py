@@ -592,6 +592,10 @@ def _delete_file_local(
         item.source_path == rel_path and item.content_hash == stored_original.binary_sha256
         and item.size == stored_original.binary_size for item in lifecycle_operation.manifest
     )
+    retirement = None
+    if binary_placement_required:
+        metadata_bytes, retirement = trash_metadata.prepare_retirement(
+            vault_root, stored_original, trash_rel, metadata_bytes)
     # A stored companion needs durable placement to resolve its historical binary path in Trash.
     placement_required = binary_placement_required or "stored_object" in fm
     placement_files: list[tuple[str, bytes]] = [(meta_rel, metadata_bytes)] if placement_required else []
@@ -648,7 +652,7 @@ def _delete_file_local(
     from .media_store import forget_original
 
     # Explicit deletion retires the binding; cache eviction never calls here.
-    forget_original(vault_root, rel_path)
+    forget_original(vault_root, rel_path, prepared=retirement)
 
     # The part pages of a long extraction go to Trash beside their page, so a recovery brings
     # them back; only emptying Trash removes them. A failed move leaves them in place.
@@ -863,6 +867,9 @@ def _trash_in_store(
 
     root = Path(vault_root)
     page = store_ownership.classify(rel_path) is store_ownership.Ownership.PAGE
+    retirement = None
+    if not page and stored_original is not None and stored_original.reference is not None:
+        metadata_bytes, retirement = trash_metadata.prepare_retirement(root, stored_original, trash_rel, metadata_bytes)
     # The sidecar is a file that the commit records, so it waits in a temporary until the commit.
     sidecar = binaries.Placement(meta_rel, metadata_bytes)
     moves: list[PageMove] = []
@@ -937,7 +944,7 @@ def _trash_in_store(
         from .media_store import forget_original
 
         # Explicit deletion retires the binding; cache eviction never calls here.
-        forget_original(root, rel_path)
+        forget_original(root, rel_path, prepared=retirement)
         store_media.after_removal(root, [rel_path])
     if prior_markdown is not None:
         from . import due_state

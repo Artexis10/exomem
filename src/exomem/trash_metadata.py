@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -12,10 +14,203 @@ from .kbdir import managed_split, managed_split_parts
 
 if TYPE_CHECKING:
     from .graph_sync import GraphLifecycleTransition
+    from .media_store import ReferencePublication
+    from .vault import PlannedWrite
 
 # These names belong to the fixed vault placement format, not a content vocabulary.
 TRASH_SUBPATH = "_trash"
 METADATA_SUFFIX = ".meta.json"
+_completing: ContextVar[tuple[str, str, str] | None] = ContextVar("trash_retirement_completion", default=None)
+
+
+@dataclass(frozen=True, slots=True)
+class Retirement:
+    source: originals.BinaryBinding
+    companion: str
+    before: str
+    after: str
+    trash: originals.BinaryBinding
+    reference: originals.StoredObject
+
+
+def prepare_retirement(
+    vault: Path, snapshot: originals.OriginalSnapshot, trash_path: str, metadata: bytes,
+) -> tuple[bytes, ReferencePublication]:
+    """Prepublish the exact result of the existing reference-removal renderer."""
+    import json
+
+    from .media_store import prepare_reference
+    from .relation_review import parse_exact_json_object
+    from .vault import content_hash
+
+    assert snapshot.reference is not None and snapshot.sidecar_hash is not None
+    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    publication = prepare_reference(vault, snapshot, None, retirement_meta=trash_path + METADATA_SUFFIX)
+    fields = parse_exact_json_object(metadata.decode("utf-8"))
+    fields["original_retirement"] = {
+        "schema": 1,
+        "source": snapshot.path.relative_to(vault).as_posix(),
+        "sha256": snapshot.binary_sha256,
+        "size": snapshot.binary_size,
+        "companion": snapshot.sidecar_path.relative_to(vault).as_posix(),
+        "before": snapshot.sidecar_hash,
+        "after": content_hash(publication.write.content),
+        "trash": trash_path,
+        "reference": snapshot.reference.fields(),
+    }
+    return json.dumps(fields, indent=2).encode("utf-8"), publication
+
+
+@contextmanager
+def completing_retirement(publication: ReferencePublication):
+    """Only the prepared deletion may complete a witness whose before image still has its reference."""
+    from .vault import content_hash
+
+    proof = None if publication.retirement_meta is None else (
+        publication.retirement_meta, publication.write.expected_hash, content_hash(publication.write.content))
+    token = _completing.set(proof)
+    try:
+        yield
+    finally:
+        _completing.reset(token)
+
+
+def _retirement(value: object, *, root: str, origin: object) -> Retirement:
+    # These are closed version-1 placement witness fields, not a content vocabulary.
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "source", "sha256", "size", "companion", "before", "after", "trash", "reference",
+    } or type(value["schema"]) is not int or value["schema"] != 1:
+        raise ValueError("Trash retirement has an unknown format")
+    source, companion, trash = value["source"], value["companion"], value["trash"]
+    if (not isinstance(source, str) or not isinstance(companion, str) or not isinstance(trash, str)
+            or source != origin or trash != root or is_trash_path(source)
+            or reserved_paths.classify_logical(source).blocked
+            or companion not in originals.companion_paths(source)
+            or not all(originals.is_sha256(value[key]) for key in ("sha256", "before", "after"))
+            or type(value["size"]) is not int or value["size"] < 0):
+        raise ValueError("Trash retirement has an invalid binding")
+    reference = originals.stored_reference(value["reference"])
+    if reference is None:
+        raise ValueError("Trash retirement has an invalid recovery reference")
+    return Retirement(originals.BinaryBinding(source, value["sha256"], value["size"]), companion,
+                      value["before"], value["after"],
+                      originals.BinaryBinding(trash, value["sha256"], value["size"]), reference)
+
+
+def _document(vault: Path, path: str) -> tuple[dict[str, object], str, held_fs.FileVersion]:
+    from . import runtime_resources
+    from .relation_review import parse_exact_json_object
+
+    with reserved_paths.open_generic_binary(vault, path) as source:
+        size = source.version.size
+        with runtime_resources.parser_preparation(size) as preparation:
+            preparation.reserve_source(size)
+            raw = source.stream.read(size + 1)
+            if len(raw) != size:
+                raise ValueError("Trash metadata changed during read")
+            text = raw.decode("utf-8")
+            preparation.reserve_parser(text, json_bytes=len(raw))
+            parsed = parse_exact_json_object(text)
+            source.require_current()
+            return parsed, text, source.version
+
+
+def _backlink(fields: dict[str, object]) -> str | None:
+    path = fields.get("original_retirement_meta")
+    if (not isinstance(path, str) or not path.endswith(METADATA_SUFFIX) or not is_trash_path(path)
+            or PurePosixPath(path).as_posix() != path or any(part in {".", ".."} for part in PurePosixPath(path).parts)
+            or reserved_paths.classify_logical(path).blocked):
+        return None
+    return path
+
+
+def _companion_fields(text: str | None) -> dict[str, object]:
+    from .vault import FrontmatterError, parse_frontmatter
+
+    if text is None:
+        return {}
+    try:
+        return parse_frontmatter(text, custody=True)[0]
+    except FrontmatterError:
+        return {}  # Malformed frontmatter cannot satisfy the retirement census either.
+
+
+def _matches_retirement(text: str | None, fields: dict[str, object], metadata: str, proof: Retirement) -> bool:
+    from .vault import content_hash
+
+    return text is not None and _matches_retirement_fields(fields, metadata, content_hash(text), proof)
+
+
+def _matches_retirement_fields(fields: dict[str, object], metadata: str, digest: str, proof: Retirement) -> bool:
+    return (_backlink(fields) == metadata and originals.binary_binding(fields) == proof.source
+            and "stored_object" not in fields and digest == proof.after)
+
+
+def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list[PlannedWrite]:
+    """Carry exact retirement edits, or invalidate before a new original can reuse its source path.
+
+    The reciprocal companion backlink makes lookup bounded and independent of derived state.
+    """
+    import json
+
+    from .vault import PlannedWrite, content_hash, parse_frontmatter
+
+    writes = list(writes)
+    incoming = {write.path.relative_to(vault).as_posix(): write for write in writes if write.path.is_relative_to(vault)}
+    relevant = {path for path in incoming if path.startswith(kb_dirname() + "/")
+                and not reserved_paths.classify_logical(path).blocked}
+    companions = {path for path in relevant if path.lower().endswith(".md")}
+    for path in relevant:
+        if not path.lower().endswith(".md") and not is_trash_path(path):
+            companions.update(originals.companion_paths(path))
+    updates: dict[str, PlannedWrite] = {}
+    for path in sorted(companions):
+        try:
+            before = reserved_paths.read_generic_bytes(vault, path).data.decode("utf-8")
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+            before = None
+        except UnicodeError:
+            before = None  # A malformed prior companion cannot prove retirement.
+        after_write = incoming.get(path)
+        after = before if after_write is None else after_write.content
+        if not isinstance(after, str):
+            after = None
+        before_fields, after_fields = _companion_fields(before), _companion_fields(after)
+        for metadata in dict.fromkeys(link for image in (before_fields, after_fields) if (link := _backlink(image)) is not None):
+            fields, text, _version = _document(vault, metadata)
+            value = fields.get("original_retirement")
+            if value is None:
+                continue  # A retired proof remains invalid even if its backlink survives.
+            proof = _retirement(value, root=metadata[:-len(METADATA_SUFFIX)], origin=fields.get("original_path"))
+            if path != proof.companion:
+                continue  # A forged locator never supplies mutation authority over another filing.
+
+            old_match = _matches_retirement(before, before_fields, metadata, proof)
+            new_match = _matches_retirement(after, after_fields, metadata, proof)
+            if not old_match and not new_match:
+                continue
+            trash = reference_companion(vault, proof.trash.path)
+            if trash is None:
+                raise ValueError("Trash retirement lost its recovery companion")
+            trash_fields = parse_frontmatter(trash[1].data.decode("utf-8"), custody=True)[0]
+            if (originals.binary_binding(trash_fields) != proof.trash
+                    or originals.stored_reference(trash_fields.get("stored_object")) != proof.reference):
+                raise ValueError("Trash retirement lost its exact recovery binding")
+            if _completing.get() == (metadata, proof.before, proof.after) and new_match and proof.source.path not in incoming:
+                continue  # The deletion owns this one prepared reference-removal transition.
+            if (proof.source.path not in incoming and old_match and _backlink(after_fields) == metadata
+                    and originals.binary_binding(after_fields) == proof.source and "stored_object" not in after_fields):
+                if content_hash(after) == proof.after:
+                    continue
+                value["after"] = content_hash(after)
+            else:
+                fields.pop("original_retirement")
+            if metadata in incoming or metadata in updates:
+                raise ValueError("one batch contains conflicting Trash placement changes")
+            updates[metadata] = PlannedWrite(vault / metadata, json.dumps(fields, indent=2), expected_hash=content_hash(text))
+    return [*updates.values(), *writes]  # New-original invalidation lands before any new binary bytes.
 
 
 def is_trash_path(path: str) -> bool:
@@ -79,32 +274,54 @@ class PlacementCensus:
         self.versions: dict[str, held_fs.FileVersion] = {}
 
     def _placement(self, root: str) -> dict[str, object] | None:
-        from . import runtime_resources
-        from .relation_review import parse_exact_json_object
-
         if root not in self.placements:
             path = root + METADATA_SUFFIX
             try:
-                with reserved_paths.open_generic_binary(self.vault, path) as source:
-                    size = source.version.size
-                    with runtime_resources.parser_preparation(size) as preparation:
-                        preparation.reserve_source(size)
-                        raw = source.stream.read(size + 1)
-                        if len(raw) != size:
-                            raise ValueError("Trash metadata changed during read")
-                        text = raw.decode("utf-8")
-                        preparation.reserve_parser(text, json_bytes=len(raw))
-                        parsed = parse_exact_json_object(text)
-                        placement = {"original_path": parsed.get("original_path")}
-                        original_path(placement, trash_root=root, current_path=root)
-                        source.require_current()
-                        self.versions[path] = source.version
-                        self.placements[root] = placement
+                parsed, _text, version = _document(self.vault, path)
+                placement = {"original_path": parsed.get("original_path")}
+                original_path(placement, trash_root=root, current_path=root)
+                if "original_retirement" in parsed:
+                    placement["original_retirement"] = _retirement(
+                        parsed["original_retirement"], root=root, origin=placement["original_path"])
+                self.versions[path] = version
+                self.placements[root] = placement
             except reserved_paths.ReservedPathLeafError as error:
                 if error.code != "MISSING":
                     raise
                 self.placements[root] = None
         return self.placements[root]
+
+    def retirement(self, binary: str) -> Retirement | None:
+        """Read only the named Trash placement; the caller supplies its current binding."""
+        if not is_trash_path(binary):
+            return None
+        placement = self._placement(binary)
+        return None if placement is None else placement.get("original_retirement")
+
+    def retired_source(self, companion: str, fields: dict[str, object], digest: str) -> bool:
+        """Resolve one reciprocal retirement without a media index or archive scan."""
+        metadata = _backlink(fields)
+        if metadata is None:
+            return False
+        proof = self.retirement(metadata[:-len(METADATA_SUFFIX)])
+        if (proof is None or companion != proof.companion
+                or not _matches_retirement_fields(fields, metadata, digest, proof)):
+            return False
+        try:
+            reserved_paths.inspect_generic_path(self.vault, proof.source.path)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+        else:
+            return False
+        trash = reference_companion(self.vault, proof.trash.path)
+        if trash is None:
+            return False
+        from .vault import parse_frontmatter
+
+        current = parse_frontmatter(trash[1].data.decode("utf-8"), custody=True)[0]
+        return (originals.binary_binding(current) == proof.trash
+                and originals.stored_reference(current.get("stored_object")) == proof.reference)
 
     def resolve(self, path: str, fields: dict[str, object]) -> originals.BinaryBinding | None:
         """Return the current payload path without rewriting the canonical companion."""

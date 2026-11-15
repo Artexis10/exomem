@@ -202,7 +202,8 @@ def coalesce_cache(conn: sqlite3.Connection, keys: Iterable[str] | None = None) 
 
 
 def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = None,
-              placements: trash_metadata.PlacementCensus | None = None, displaced: bool = False) -> Binding | None:
+              placements: trash_metadata.PlacementCensus | None = None, include_retired: bool = False,
+              displaced: bool = False) -> Binding | None:
     """Derive one companion's facts without reading any original bytes.
 
     A page that binds a reference away from its original's companion path raises
@@ -226,8 +227,12 @@ def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = No
         if not displaced:
             raise
         binary = error.binary
+    digest = hashlib.sha256(data).hexdigest()
+    retired = not include_retired and placements.retired_source(rel, fields, digest)
     if own_placements:
         placements.require_current()
+    if retired:
+        return None
     if binary is None:
         raise ValueError("an original companion has incomplete identity")
     if canonical_vault_rel(vault, binary.path) != binary.path or reserved_paths.classify_logical(binary.path).blocked:
@@ -241,7 +246,7 @@ def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = No
     bounds = selected.bounds
     resident = (originals.is_note_path(binary.path) or "data_file" in fields
                 or bounds is None or bounds.classify(binary.size) == media_capacity.RESIDENT)
-    return Binding(binary.path, rel, hashlib.sha256(data).hexdigest(),
+    return Binding(binary.path, rel, digest,
                    object_key(vault, binary.path, binary.sha256, pooled=selected.pooled), binary.sha256,
                    binary.size, resident, None if reference is None else json.dumps(reference.fields(), sort_keys=True))
 
@@ -327,8 +332,10 @@ def finish_file_change(vault: Path, change: FileChange | None, *, committed: boo
     """A failed derived update keeps eviction disabled and leaves canonical acknowledgement alone."""
     if change is None:
         return
-    delta = change.forward if committed else change.inverse
     try:
+        # A companion edit can carry its retirement metadata in this same batch.
+        # Resolve the committed pair, rather than the pre-install metadata image.
+        delta = prepare_delta(vault, change.forward.paths) if committed else change.inverse
         apply_delta(vault, delta.paths, delta.bindings, expected=change.before)
     except Exception:  # noqa: BLE001 - derived failure cannot undo an acknowledged canonical outcome
         log.warning("physical binding update remains incomplete; background recovery will retry", exc_info=True)
@@ -513,10 +520,11 @@ def rebuild(vault: Path) -> bool:
             displaced: list[tuple[originals.DisplacedReference, Binding]] = []
             for rel, data in _pages(vault):
                 try:
-                    binding = from_page(vault, rel, data, selected=selected, placements=placements)
+                    binding = from_page(vault, rel, data, selected=selected, placements=placements, include_retired=True)
                 except originals.DisplacedReference as error:
                     # A page away from its original, as a confined move leaves one, counts once the ledger confirms it.
-                    found = from_page(vault, rel, data, selected=selected, placements=placements, displaced=True)
+                    found = from_page(vault, rel, data, selected=selected, placements=placements,
+                                      include_retired=True, displaced=True)
                     if found is not None:
                         displaced.append((error, found))
                     continue
@@ -526,13 +534,17 @@ def rebuild(vault: Path) -> bool:
                                   binding.object_key, binding.sha256, binding.size,
                                   int(binding.resident_only), binding.reference))
             _confirm_displaced(vault, conn, displaced)
+            _retire_census(vault, conn, placements)
+            _fill_displaced(conn)  # A retired filing that a confirmed page still names stays counted.
             # An extant damaged companion cannot erase a previously acquired witness.
             # Only canonical absence proves release; a replacement binding is already in the census.
             for row in conn.execute("SELECT DISTINCT b.companion_rel FROM media_bindings b "
                                     "WHERE NOT EXISTS(SELECT 1 FROM binding_census n "
                                     "WHERE n.companion_rel = b.companion_rel AND n.binary_rel = b.binary_rel) "
                                     "AND NOT EXISTS(SELECT 1 FROM displaced_census d "
-                                    "WHERE d.companion_rel = b.companion_rel AND d.binary_rel = b.binary_rel)"):
+                                    "WHERE d.companion_rel = b.companion_rel AND d.binary_rel = b.binary_rel) "
+                                    "AND NOT EXISTS(SELECT 1 FROM retired_census r "
+                                    "WHERE r.companion_rel = b.companion_rel AND r.binary_rel = b.binary_rel)"):
                 try:
                     reserved_paths.read_generic_bytes(vault, row[0])
                 except reserved_paths.ReservedPathLeafError as error:
@@ -581,10 +593,55 @@ def _confirm_displaced(vault: Path, conn: sqlite3.Connection,
                      ((binding.binary_rel, binding.companion_rel, binding.companion_hash, binding.object_key,
                        binding.sha256, binding.size, int(binding.resident_only), binding.reference)
                       for _error, binding in displaced))
+    _fill_displaced(conn)
+
+
+def _fill_displaced(conn: sqlite3.Connection) -> None:
+    """Give each original that only confirmed displaced pages name one binding, the first in path order."""
     conn.execute("INSERT INTO binding_census SELECT d.* FROM displaced_census d "
                  "WHERE NOT EXISTS(SELECT 1 FROM binding_census b WHERE b.binary_rel = d.binary_rel) "
                  "AND d.companion_rel = (SELECT MIN(x.companion_rel) FROM displaced_census x "
                  "WHERE x.binary_rel = d.binary_rel)")
+
+
+def _retire_census(vault: Path, conn: sqlite3.Connection, placements: trash_metadata.PlacementCensus) -> None:
+    """Exclude only a completed, version-witnessed transfer to a current Trash binding."""
+    from .kbdir import kb_dirname
+
+    conn.execute("CREATE TEMP TABLE retired_census (binary_rel TEXT PRIMARY KEY, companion_rel TEXT NOT NULL)")
+    prefix = kb_dirname() + "/" + trash_metadata.TRASH_SUBPATH + "/"
+    for row in conn.execute("SELECT * FROM binding_census WHERE binary_rel >= ? AND binary_rel < ? "
+                            "AND reference IS NOT NULL ORDER BY binary_rel", (prefix, prefix + "\U0010ffff")):
+        retirement = placements.retirement(row["binary_rel"])
+        if retirement is None:
+            continue
+        trash = retirement.trash
+        if ((row["binary_rel"], row["sha256"], row["size"]) != (trash.path, trash.sha256, trash.size)
+                or originals.stored_reference(json.loads(row["reference"])) != retirement.reference):
+            raise ValueError("Trash retirement no longer has its exact recovery binding")
+        source = conn.execute("SELECT * FROM binding_census WHERE binary_rel = ? AND companion_rel = ?",
+                              (retirement.source.path, retirement.companion)).fetchone()
+        try:
+            reserved_paths.inspect_generic_path(vault, retirement.source.path)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+        else:
+            continue  # An ordinary original at the old path is a new lifetime.
+        if source is None:
+            continue  # Canonical absence leaves no historical binding to exclude.
+        if (source["sha256"], source["size"], source["companion_hash"], source["reference"]) != (
+                retirement.source.sha256, retirement.source.size, retirement.after, None):
+            raise ValueError("the source retirement has not reached its witnessed companion state")
+        from .vault import parse_frontmatter
+
+        data = reserved_paths.read_generic_bytes(vault, retirement.companion).data
+        fields = parse_frontmatter(data.decode("utf-8"), custody=True)[0]
+        if (hashlib.sha256(data).hexdigest() != retirement.after
+                or fields.get("original_retirement_meta") != trash.path + trash_metadata.METADATA_SUFFIX):
+            raise ValueError("the source companion has no reciprocal retirement witness")
+        conn.execute("INSERT INTO retired_census VALUES (?, ?)", (source["binary_rel"], source["companion_rel"]))
+    conn.execute("DELETE FROM binding_census WHERE binary_rel IN (SELECT binary_rel FROM retired_census)")
 
 
 def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:

@@ -26,7 +26,7 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from . import (
     held_fs,
@@ -47,6 +47,9 @@ from .media_jobs import (
     process_start,
 )
 from .originals import OriginalSnapshot, StoredObject, original_state
+
+if TYPE_CHECKING:
+    from .vault import PlannedWrite
 
 log = logging.getLogger(__name__)
 
@@ -955,8 +958,18 @@ def _upload_decision(
     return media_allowance.decide(census.used_bytes, projected, allowance_bytes, census.observed_at)
 
 
-def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:
-    from . import preserve
+@dataclass(frozen=True, slots=True)
+class ReferencePublication:
+    """The exact guarded companion image prepared before a placement transition."""
+
+    snapshot: OriginalSnapshot
+    write: PlannedWrite
+    retirement_meta: str | None = None
+
+
+def prepare_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None,
+                      *, retirement_meta: str | None = None) -> ReferencePublication:
+    """Prepare the existing reference edit once, retaining its source guard and hash."""
     from .vault import (
         PlannedWrite,
         content_hash,
@@ -965,8 +978,6 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
         render_frontmatter_document,
         serialize_frontmatter,
     )
-    from .vault_store import read
-
     text, guard = read_guarded_text(vault, snapshot.sidecar_path)
     if content_hash(text) != snapshot.sidecar_hash:
         raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the sidecar binding changed")
@@ -975,21 +986,33 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
         fields.pop("stored_object", None)
     else:
         fields["stored_object"] = reference.fields()
+    if retirement_meta is not None:
+        fields["original_retirement_meta"] = retirement_meta
     rendered = render_frontmatter_document(serialize_frontmatter(fields), body)
-    preserve.commit_media_sidecar_writes(vault, (PlannedWrite(
+    return ReferencePublication(snapshot, PlannedWrite(
         snapshot.sidecar_path, rendered, guard=guard, expected_hash=content_hash(text),
-    ),))
+    ), retirement_meta)
+
+
+def _commit_reference(vault: Path, publication: ReferencePublication) -> None:
+    from . import preserve
+    from .vault_store import read
+
+    snapshot, write = publication.snapshot, publication.write
+    rendered = write.content.encode("utf-8")
+    with trash_metadata.completing_retirement(publication):
+        preserve.commit_media_sidecar_writes(vault, (write,))
     # Keep protection through an uncertain writer or catalog result. Explicitly
     # confirm durable bytes even when a prior attempt already wrote this value.
     relative = snapshot.sidecar_path.relative_to(vault).as_posix()
     # A store-mode vault's page is the store's, committed durably above, and its Markdown file may
     # not be projected yet: the read-back is the store's page, with no file to sync.
     if (stored := read.owned_bytes(vault, relative)) is not None:
-        if stored != rendered.encode("utf-8"):
+        if stored != rendered:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
         return
     with reserved_paths.open_generic_binary(vault, relative) as source:
-        if source.stream.read() != rendered.encode("utf-8"):
+        if source.stream.read() != rendered:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
         try:
             os.fsync(source.stream.fileno())
@@ -1011,6 +1034,10 @@ def _flush_through_writer(vault: Path, relative: str, expected: held_fs.StableId
                 os.fsync(writable.descriptor)
 
 
+def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:
+    _commit_reference(vault, prepare_reference(vault, snapshot, reference))
+
+
 def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:
     """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
     with _transport("head"):
@@ -1029,7 +1056,7 @@ def _confirmed(store: Store, reference: StoredObject) -> bool:
     return head is not None and not head.condemned
 
 
-def forget_original(vault: Path, path: str | Path) -> None:
+def forget_original(vault: Path, path: str | Path, *, prepared: ReferencePublication | None = None) -> None:
     """Remove a deleted original's binding before its explicit deletion fan-out."""
     if originals.binding_for(vault) is None:
         return
@@ -1042,7 +1069,14 @@ def forget_original(vault: Path, path: str | Path) -> None:
         if original_state(vault, path) != snapshot:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the deletion binding changed")
         _release_name(MediaJobStore(vault), reference.object)
-        _publish_reference(vault, snapshot, None)
+        if prepared is None:
+            _publish_reference(vault, snapshot, None)
+        else:
+            acquired = prepared.snapshot
+            if (acquired.path, acquired.sidecar_path, acquired.sidecar_hash, acquired.reference) != (
+                    snapshot.path, snapshot.sidecar_path, snapshot.sidecar_hash, snapshot.reference):
+                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the prepared deletion binding changed")
+            _commit_reference(vault, prepared)
 
     _publishing(vault, "media_store_forget_original", forget)
 

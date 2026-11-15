@@ -5735,7 +5735,10 @@ def batch_atomic_write(
                     _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                     _validate_prepared_bindings=_validate_prepared_bindings, _prepare=_prepare,
                 )
-        from . import curation_witness
+        from . import curation_witness, trash_metadata
+
+        if vault_root is not None:
+            caller_writes = trash_metadata.prepare_binding_changes(Path(vault_root), caller_writes)
 
         augmented_writes, curation_witness_state = curation_witness.augment_batch(
             caller_writes,

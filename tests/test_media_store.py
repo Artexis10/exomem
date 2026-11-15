@@ -4271,6 +4271,108 @@ def test_an_evicted_original_in_trash_is_counted_and_drained_back_into_trash(vau
     assert media_store.drain_record(vault).latched
 
 
+@pytest.mark.parametrize("transition", ["interrupted reference removal", "edited companion", "legacy metadata", "changed trash reference"])
+def test_a_trash_transfer_without_its_exact_retirement_proof_keeps_the_drain_unknown(
+        vault: Path, selected_store, monkeypatch, transition):
+    """A historical transfer must never erase a current or unresolved source binding from zero proof."""
+    from exomem import (
+        delete_file,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        trash_metadata,
+    )
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    path = vault / "Knowledge Base/Notes/Media/retained.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"a retained original")
+    media_processing.reconcile_media(vault, path)
+    companion = originals.sidecar_path(path)
+    preserve.update_sidecar_extraction(vault, companion, text="searchable text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    before = companion.read_bytes()
+    trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+    trash = vault / trashed.trash_path
+    if transition == "interrupted reference removal":
+        companion.write_bytes(before)
+    elif transition == "edited companion":
+        companion.write_bytes(companion.read_bytes() + b"\nAn unwitnessed edit.\n")
+    elif transition == "legacy metadata":
+        metadata = vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)
+        fields = json.loads(metadata.read_bytes())
+        fields.pop("original_retirement")
+        metadata.write_text(json.dumps(fields), encoding="utf-8")
+    else:
+        target = originals.sidecar_path(trash)
+        fields, body, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        fields["stored_object"]["version"] = "a-different-version"
+        target.write_text(render_frontmatter_document(serialize_frontmatter(fields), body), encoding="utf-8")
+    _retained(selected_store, vault)
+
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+        media_store.drain_census(vault)
+    assert not media_store.drain_record(vault).latched
+    assert trash.read_bytes() == b"a retained original"
+
+
+@pytest.mark.parametrize("change", ["companion edit", "identical new original"])
+def test_retirement_follows_canonical_edits_and_never_hides_an_identical_new_original_without_its_derived_index(
+        vault: Path, selected_store, change):
+    """Lost derived facts must not disable bounded retirement carry or same-path publication invalidation."""
+    import io
+
+    from exomem import (
+        delete_file,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        trash_metadata,
+    )
+    from exomem.vault import (
+        MISSING_CONTENT_HASH,
+        PlannedWrite,
+        PreparedBinaryContent,
+        batch_atomic_write,
+    )
+
+    path = vault / "Knowledge Base/Notes/Media/reused.txt"
+    path.parent.mkdir(parents=True)
+    data = b"the same original bytes"
+    path.write_bytes(data)
+    media_processing.reconcile_media(vault, path)
+    companion = originals.sidecar_path(path)
+    preserve.update_sidecar_extraction(vault, companion, text="searchable text", engine="text")
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.retire_ocr(path, "text")
+    _offload(vault, path)
+    trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+    retired = companion.read_text(encoding="utf-8")
+    metadata = vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DELETE FROM media_bindings")
+        connection.execute("DELETE FROM meta WHERE key = 'physical-bindings-v1'")
+    if change == "companion edit":
+        batch_atomic_write([PlannedWrite(companion, retired + "\nAn updated observation.\n")], vault_root=vault)
+        assert json.loads(metadata.read_bytes())["original_retirement"]["after"] == hashlib.sha256(companion.read_bytes()).hexdigest()
+        assert media_store.drain_census(vault) == (0, 0)
+    else:
+        binary = PreparedBinaryContent(io.BytesIO(data), len(data), hashlib.sha256(data).hexdigest())
+        batch_atomic_write([
+            PlannedWrite(path, binary, create_only=True, expected_hash=MISSING_CONTENT_HASH),
+            PlannedWrite(companion, retired),
+        ], vault_root=vault)
+        assert "original_retirement" not in json.loads(metadata.read_bytes())
+        assert companion.read_text(encoding="utf-8") == retired and path.read_bytes() == data
+        path.unlink()  # An unexpected later loss must remain visible despite byte-identical historical metadata.
+        with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+            media_store.drain_census(vault)
+    assert (vault / trashed.trash_path).read_bytes() == data
+
+
 def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vault: Path, selected_store, monkeypatch):
     """Pins the band rule: no hydration, and no eviction, while the evicted bytes leave less than the margin of room.
     The status names the bytes that keep the store from draining, never 0 while it cannot drain."""
