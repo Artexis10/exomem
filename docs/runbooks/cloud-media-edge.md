@@ -95,7 +95,8 @@ Expected result: the canary's pod restarts once, every other cell keeps its pod,
 the canary reads and writes media through the edge.
 
 Offload runs with the chart's default store policy. Eviction stays off until the operator sets all six keys
-below in `mediaEdge.storePolicy`. The chart sets none of them. Design D3 sets the canary's values after measurement.
+below in `mediaEdge.storePolicy`. The chart sets none of them. The canary's target, margin and minimum idle age are set after two to four
+weeks of its hydration records (task 6.2 and the design's open question on eviction settings).
 
 | Key | Meaning |
 | --- | --- |

@@ -243,9 +243,12 @@ def test_the_schema_check_uses_the_local_dsn_when_set(tmp_path: Path) -> None:
         assert stdin is None
         return pu.Completed(0)
 
-    assert pu.schema_check(local, env_for(tmp_path), runner.checkout) == "the release's schema check passed"
+    assert pu.schema_check(local, env_for(tmp_path), runner.checkout) == (
+        "the release's schema check passed against EXOMEM_CELLCTL_DSN")
 
 
+# The bootstrap runs on the host here, and asserts the pod's Linux /tmp path.
+@pytest.mark.skipif(sys.platform != "linux", reason="the pod bootstrap's /tmp path is Linux-specific")
 @pytest.mark.parametrize("schema_exit", [0, 1], ids=["passes", "stops-before-any-change"])
 def test_without_a_local_dsn_the_tag_checks_the_schema_in_the_pod_and_removes_its_copy(
     tmp_path: Path, schema_exit: int, capsys

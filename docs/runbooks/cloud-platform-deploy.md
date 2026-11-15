@@ -214,6 +214,9 @@ With `EXOMEM_CELLCTL_DSN` set, the command runs the tag's schema check locally a
 Without it, the command streams the tag's cellctl package into the running cellctl pod's writable `/tmp`.
 It runs `/opt/cellctl/bin/python -m cellctl.schema_check --dsn-env CELLCTL_DATABASE_DSN` with `PYTHONPATH` pointing to the temporary copy, then removes it.
 A failed check stops at `schema-check` before the upgrade changes anything. This path needs a running cellctl pod.
+The command's review line says which path ran. In the pod, the tag's code runs on the live image's libraries.
+An import error there means the tag needs a library that the running image lacks.
+In that case, run the check from a one-off pod on the tag's cellctl image, with the cellctl DSN Secret.
 
 ```bash
 : "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"

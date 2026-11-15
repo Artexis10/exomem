@@ -230,6 +230,7 @@ def schema_check(runner: Runner, env: dict[str, str], checkout: Path) -> str:
         run(runner, "schema-check",
             ["uv", "run", "--frozen", "python", "-m", "cellctl.schema_check", "--dsn-env", SCHEMA_DSN_ENV],
             cwd=checkout / "infra/cellctl")
+        return f"the release's schema check passed against {SCHEMA_DSN_ENV}"
     else:
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as source:
@@ -249,7 +250,7 @@ sys.exit(result.returncode)
             ["kubectl", "--namespace", CLOUD_NAMESPACE, "exec", "-i", "deploy/cellctl", "--",
              "/opt/cellctl/bin/python", "-c", bootstrap],
             stdin=base64.b64encode(archive.getvalue()).decode("ascii"))
-    return "the release's schema check passed"
+    return "the release's schema check passed in the cellctl pod"
 
 
 def secret_contract_changed(runner: Runner, live_tag: str, tag: str) -> list[str]:
