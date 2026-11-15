@@ -28,5 +28,7 @@
 
 - [x] 5.1 Add the inventory reference to the existing latency contract and qualify the public instrument on generated production-sized data; record the new route's baseline as unavailable.
 - [x] 5.2 Prove constant query count for 2 and 200 returned items, with file and store coverage named separately.
-- [ ] 5.3 Run scoped and completion checks, exact-content independent review, privacy checks and strict OpenSpec validation.
-- [ ] 5.4 Deliver the coherent reviewed batch through green CI and the ordinary release; keep separate activation authority unchanged.
+- [x] 5.3 Run scoped and completion checks, exact-content independent review, privacy checks and strict OpenSpec validation.
+- [x] 5.4 Deliver the coherent reviewed batch through green CI and the ordinary release; keep separate activation authority unchanged.
+
+Delivery: PR #2852, after an independent review that approved this content, scoped checks, the privacy gate and strict OpenSpec validation. Its green CI, merge and the ordinary release complete 5.4; activation authority is unchanged.
