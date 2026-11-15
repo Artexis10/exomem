@@ -472,3 +472,95 @@ def test_only_one_concurrent_request_can_claim_a_ticket(upload_env):
             responses = await asyncio.gather(post(), post())
             assert sorted(response.status_code for response in responses) == [201, 401]
     asyncio.run(send())
+
+
+def test_old_launcher_cannot_activate_cancellation_from_an_inherited_environment(upload_env, monkeypatch):
+    """A new worker under an old launcher must keep held bytes redeemable."""
+    from exomem import artifact_lifecycle, state_migration
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    monkeypatch.setenv("EXOMEM_LIFECYCLE_STATE_COMPATIBILITY", state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID)
+    with principal.request_scope(who):
+        with pytest.raises(held_uploads.HeldUploadError) as refused:
+            held_uploads.cancel(vault, held["file"]["download_url"])
+        assert refused.value.code == "HELD_UPLOAD_LIFECYCLE_REQUIRED"
+        claimed = held_uploads.redeem(vault, held["file"]["download_url"], lane="source")
+        assert claimed.path.read_bytes() == b"exact original\n"
+        assert held_uploads.restore(vault, claimed)
+    assert not list(held_uploads._store(vault).glob("*.cancelling.json"))
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_cancellation_activation_flushes_consumed_tickets_before_enrollment(upload_env, monkeypatch):
+    """A failed activation barrier must leave the upload and its previous format intact."""
+    from exomem import artifact_lifecycle, private_state, state_migration, upload_handoff
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    monkeypatch.setattr(artifact_lifecycle, "_activated", set())
+    original_sync = private_state.sync_directory
+    tickets = private_state.store(vault, upload_handoff.STORE_DIRNAME)
+
+    def unavailable_barrier(directory):
+        if directory == tickets:
+            raise OSError("ticket consumption is not durable")
+        return original_sync(directory)
+
+    monkeypatch.setattr(private_state, "sync_directory", unavailable_barrier)
+    with principal.request_scope(who):
+        with pytest.raises(held_uploads.HeldUploadError) as failed:
+            held_uploads.cancel(vault, held["file"]["download_url"])
+        assert failed.value.code == "HELD_UPLOAD_CANCELLATION_INCOMPLETE"
+        assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+        claimed = held_uploads.redeem(vault, held["file"]["download_url"], lane="source")
+        assert held_uploads.restore(vault, claimed)
+        monkeypatch.setattr(private_state, "sync_directory", original_sync)
+        assert held_uploads.cancel(vault, held["file"]["download_url"]) == held["size"]
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_offline_cancellation_cleanup_can_resume_without_retiring_pooled_originals(upload_env, monkeypatch, capsys):
+    """An interrupted downgrade must keep its cleanup requirement and all canonical pool custody."""
+    import time
+    from pathlib import Path
+
+    from exomem import artifact_lifecycle, state_migration
+
+    vault, who, *_ = upload_env
+    held = _post(upload_env, _prepare(upload_env)).json()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    monkeypatch.setattr(artifact_lifecycle, "_activated", set())
+    state_migration.record_shared_originals_compatibility(vault, authority_check=lambda: True)
+    original_unlink = Path.unlink
+
+    def blocked_payload(path, *args, **kwargs):
+        if path.parent.name == held_uploads.STORE_DIRNAME and path.suffix == ".bin":
+            raise OSError("payload removal unavailable")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", blocked_payload)
+    with principal.request_scope(who):
+        with pytest.raises(held_uploads.HeldUploadError):
+            held_uploads.cancel(vault, held["file"]["download_url"])
+    authority = state_migration.assert_offline_migration_authority(source="owned stopped test service")
+    with pytest.raises(OSError, match="payload removal"):
+        artifact_lifecycle.cleanup_cancellations(vault, authority=authority, deadline=time.monotonic()+10)
+    required = state_migration.recorded_descriptor_ids(vault)
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID in required
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in required
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    from exomem.__main__ import _simple_maintain_main
+
+    assert _simple_maintain_main([
+        "--vault", str(vault), "--migrate-state", "--offline",
+        "--cleanup-held-upload-cancellations", "--deadline-monotonic", str(time.monotonic()+10), "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {"success": True, "data": {"completed": 1}}
+    required = state_migration.recorded_descriptor_ids(vault)
+    assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in required
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in required
+    assert not list(held_uploads._store(vault).glob("*.bin"))
+    assert not list(held_uploads._store(vault).glob("*.cancelling.json"))

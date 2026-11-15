@@ -4446,6 +4446,10 @@ def _simple_maintain_main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--cleanup-held-upload-cancellations", action="store_true",
+        help="with --migrate-state --offline: finish temporary cancellation markers before downgrading",
+    )
+    parser.add_argument(
         "--deadline-monotonic",
         type=float,
         help=(
@@ -4470,18 +4474,44 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("--arm-connector-boundary requires --migrate-state --offline without --adopt-state")
     if args.migrate_collections and (
         not args.migrate_state or args.adopt_state or args.arm_connector_boundary
+        or args.cleanup_held_upload_cancellations
     ):
         parser.error("--migrate-collections requires --migrate-state --offline without other state steps")
-    if (args.deadline_monotonic is not None) != args.migrate_collections or (
+    if args.cleanup_held_upload_cancellations and (
+        not args.migrate_state or args.adopt_state or args.arm_connector_boundary or args.migrate_collections
+    ):
+        parser.error("--cleanup-held-upload-cancellations requires --migrate-state --offline without other state steps")
+    if (args.deadline_monotonic is not None) != (args.migrate_collections or args.cleanup_held_upload_cancellations) or (
         args.deadline_monotonic is not None
         and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0)
     ):
-        parser.error("--migrate-collections requires a positive --deadline-monotonic, and only it takes one")
+        parser.error("collections migration or held-upload cleanup requires a positive --deadline-monotonic")
     if args.migrate_state:
         if not args.offline:
             parser.error("--migrate-state requires --offline")
         if args.fix or args.reconcile:
             parser.error("--migrate-state cannot be combined with --fix or --reconcile")
+        if args.cleanup_held_upload_cancellations:
+            from . import artifact_lifecycle, state_migration
+
+            try:
+                authority = state_migration.assert_offline_migration_authority(
+                    source="exomem maintain --cleanup-held-upload-cancellations --offline",
+                )
+                completed = artifact_lifecycle.cleanup_cancellations(
+                    _offline_vault_root(args.vault), authority=authority, deadline=args.deadline_monotonic,
+                )
+            except (OSError, RuntimeError, ValueError, TimeoutError) as error:
+                if args.json:
+                    print(json.dumps({"success": False, "error": {"message": str(error)}}))
+                else:
+                    print(f"Error: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(json.dumps({"success": True, "data": {"completed": completed}}))
+            else:
+                print(f"Completed {completed} held-upload cancellations")
+            return 0
         try:
             resolution = _run_offline_state_migration(
                 vault=args.vault,
@@ -4918,7 +4948,7 @@ def _print_triage_human(result: dict) -> None:
         print(f"  {result['ref']}")
 
 
-def _core_op_main(argv: list[str]) -> int:
+def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
     from . import cli_ops, product_invoke
     from . import commands as commands_module
 
@@ -4988,9 +5018,16 @@ def _core_op_main(argv: list[str]) -> int:
         if resolved is not None:
             argv = [resolved.public_name, *argv[1:]]
 
+    local_cancellation = False
+    if argv and argv[0] in cmds and cmds[argv[0]].name == "transfer_artifact":
+        # The closed transfer selector chooses transport before any fresh CLI owner is constructed.
+        selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        selector.add_argument("--operation", default="upload")
+        selected, _ = selector.parse_known_args(argv[1:])
+        local_cancellation = selected.operation == "cancel"
     preverified_root = None
     preverified_admission = None
-    if not authorization_carrier.is_absent and argv and argv[0] in cmds:
+    if not authorization_carrier.is_absent and argv and argv[0] in cmds and not local_cancellation:
         try:
             preverified_root, preverified_admission = (
                 product_invoke.verify_local_authorization_transport(
@@ -5035,6 +5072,9 @@ def _core_op_main(argv: list[str]) -> int:
             ),
         )
         _add_command_args(sp, cmd)
+        if cmd.name == "transfer_artifact":
+            sp.add_argument("--token-file", default="", help="holding local client's token file (default EXOMEM_LOCAL_TOKEN_FILE)")
+            sp.add_argument("--port", default="", help="local listener port (default EXOMEM_LOCAL_PORT)")
 
     args = parser.parse_args(argv)
     cmd = cmds[args.op]
@@ -5042,6 +5082,19 @@ def _core_op_main(argv: list[str]) -> int:
 
     try:
         raw = _collect_raw_args(cmd, args, parser)
+        if local_cancellation:
+            from .local_transfer_client import cancel_uploads
+
+            kwargs = cli_ops.coerce(cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True)
+            result = cancel_uploads(
+                kwargs, authorization_carrier=authorization_carrier,
+                token_file=args.token_file, port=args.port, transport=local_transfer_transport,
+            )
+            if as_json:
+                print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
+            else:
+                _print_human(result, op=cmd.name)
+            return 1 if result.get("failed") else 0
         if preverified_admission is None:
             root, principal = product_invoke.prepare_local_authorization(
                 cmd,

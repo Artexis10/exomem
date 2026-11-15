@@ -56,6 +56,19 @@ PROFILES = {
 }
 
 
+def lifecycle_state_compatibility_ids() -> tuple[str, ...]:
+    """Formats whose upgrade preparation this operator implements."""
+    from .artifact_lifecycle import LIFECYCLE_IDS
+
+    return LIFECYCLE_IDS
+
+
+def _require_lifecycle_support(status: dict[str, Any]) -> None:
+    required = set(status.get("required_lifecycle_state_compatibility", ()))
+    if required - set(lifecycle_state_compatibility_ids()):
+        raise RuntimeError("use a compatible managed upgrade operator for the active artifact formats")
+
+
 def _releases_directory(runtime_dir: Path) -> Path:
     return runtime_dir.parent / "releases"
 
@@ -738,7 +751,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.status:
             result = control(args.runtime_dir, {"command": "status"})
         elif args.resume:
-            result = control(args.runtime_dir, {"command": "resume"})
+            result = control(args.runtime_dir, {
+                "command": "resume",
+                "lifecycle_state_compatibility": list(lifecycle_state_compatibility_ids()),
+            })
         else:
             if args.wheel is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", args.source_revision):
                 parser.error("--wheel requires a full hexadecimal source revision")
@@ -760,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
                 # A supervisor older than this field reports none, and its upgrade refuses after staging instead.
                 if current.get("upgrade_blocker"):
                     raise RuntimeError(str(current["upgrade_blocker"]))
+                _require_lifecycle_support(current)
                 target = stage(
                     args.runtime_dir,
                     str(current.get("launcher_python", "")),
@@ -768,7 +785,10 @@ def main(argv: list[str] | None = None) -> int:
                     args.wheel,
                     args.source_revision,
                 )
-                result = control(args.runtime_dir, {"command": "upgrade", "target": target})
+                result = control(args.runtime_dir, {
+                    "command": "upgrade", "target": target,
+                    "lifecycle_state_compatibility": list(lifecycle_state_compatibility_ids()),
+                })
                 result = _wait_for_target(args.runtime_dir, target, result)
                 result = {
                     **result,

@@ -9718,11 +9718,13 @@ def op_transfer_artifact(
     vault_root: Path, operation: str = "upload", lane: str = "evidence",
     artifact: str | None = None, expected_sha256: str | None = None,
     hold: bool = False, artifacts: list[str] | None = None,
+    uploads: list[str] | None = None,
 ) -> dict:
-    """Prepare an upload or download; a handoff does not prove custody.
+    """Prepare a file transfer or cancel owned waiting uploads.
 
     Upload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.
     Capture its handle. Download: supply artifact or artifacts; use MCP or HTTPS delivery.
+    Cancel: supply uploads, with each held reference from the same authenticated session.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
@@ -9732,10 +9734,40 @@ def op_transfer_artifact(
         hold: One-use upload bound to this session; requires expected_sha256.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
+        uploads: Cancellation only: held-upload references owned by this authenticated session.
     """
     from . import cloud_cell
     from .cli_ops import OpError
 
+    if operation == "cancel":
+        from . import held_uploads
+
+        if (artifact is not None or artifacts is not None or expected_sha256 is not None or hold
+                or not isinstance(uploads, list) or not 1 <= len(uploads) <= held_uploads.HOLD_MAX_COUNT
+                or any(not isinstance(reference, str) for reference in uploads)):
+            raise ValueError(
+                f"INVALID_MODE: cancellation takes 1 to {held_uploads.HOLD_MAX_COUNT} held-upload references only"
+            )
+        outcomes = []
+        for index, reference in enumerate(uploads):
+            try:
+                released = held_uploads.cancel(vault_root, reference)
+                outcomes.append({"index": index, "state": "cancelled", "released_bytes": released})
+            except held_uploads.HeldUploadError as error:
+                if error.code == "HELD_UPLOAD_UNAVAILABLE":
+                    outcomes.append({"index": index, "state": "unavailable"})
+                else:
+                    outcomes.append({"index": index, "state": "failed",
+                                     "error": {"code": error.code, "message": error.reason}})
+        cancelled = sum(outcome["state"] == "cancelled" for outcome in outcomes)
+        unavailable = sum(outcome["state"] == "unavailable" for outcome in outcomes)
+        failed = sum(outcome["state"] == "failed" for outcome in outcomes)
+        return {
+            "user_summary": f"Cancelled {cancelled} waiting uploads; {unavailable} unavailable and {failed} failed.",
+            "cancelled": cancelled, "unavailable": unavailable, "failed": failed, "uploads": outcomes,
+        }
+    if uploads is not None:
+        raise ValueError("INVALID_MODE: uploads requires cancellation")
     if artifacts is not None:
         if operation != "download" or artifact is not None or hold or expected_sha256 is not None:
             raise ValueError("INVALID_MODE: artifacts needs download, with no artifact, hold or expected_sha256")
@@ -14565,6 +14597,9 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """
     if command.read_only:
         return True
+    if command.name == "transfer_artifact" and kwargs.get("operation") == "cancel":
+        # Cancellation changes only session-private temporary bytes, outside canonical writer custody.
+        return True
     if command.name == "maintain_memory" and kwargs.get("mode") == "curation":
         from . import curation as curation_module
 
@@ -15152,7 +15187,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("transfer_token",),
-        {"public_title": "Prepare a file transfer", "surface": "primary", "actions": ("prove",), "first_run_safe": True},
+        {"public_title": "Transfer files or cancel waiting uploads", "surface": "primary", "actions": ("prove",), "first_run_safe": True},
     ),
     (
         "process_media",

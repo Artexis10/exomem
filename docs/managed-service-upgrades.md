@@ -748,6 +748,23 @@ before the upgrade, as "A release that changes the collection store's schema" in
 
 ### A supervisor older than the vault's state
 
+Shared originals and held-upload cancellation also require lifecycle support
+from the launcher and the upgrade operator. A new worker alone cannot activate
+these formats. The worker accepts support only through its launch arguments;
+an inherited environment setting cannot supply it. Update an older launcher
+through the offline maintenance procedure before activating either format.
+
+An upgrade that removes cancellation support first stops the serving worker
+and its descendants. The current interpreter then finishes cancellation
+markers within the maintenance budget. The supervisor inspects the target
+again before admission. Interrupted cleanup retains the format requirement
+and the compatible interpreter for recovery.
+
+Cancellation cleanup retires only its temporary-upload requirement. It cannot
+remove the shared-originals requirement or downgrade a pooled archive.
+Ordinary deployment leaves existing archives unconverted. Use a separate
+compatibility export when an older reader needs an archive with ordinary files.
+
 A worker records each optional state format that it uses in the vault's state
 manifest, for example the schema of a migrated collection store. The supervisor
 runs from the launcher venv, which a seamless upgrade does not replace. A

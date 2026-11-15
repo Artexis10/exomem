@@ -301,6 +301,28 @@ def hold(
     }
 
 
+def cancel(vault_root: Path, reference: str) -> int:
+    """Cancel owned waiting bytes only after the launcher has settled older workers."""
+    from . import artifact_lifecycle, state_migration
+
+    if not _bindings():
+        raise _unavailable()
+    try:
+        artifact_lifecycle.activate_cancellation(vault_root)
+    except FileLockTimeout:
+        raise HeldUploadError("HELD_UPLOAD_BUSY", "upload ownership is busy; retry this handle") from None
+    except state_migration.StateMigrationOfflineRequired:
+        raise HeldUploadError(
+            "HELD_UPLOAD_LIFECYCLE_REQUIRED",
+            "update the managed launcher offline before cancelling held uploads",
+        ) from None
+    except OSError:
+        raise HeldUploadError(
+            "HELD_UPLOAD_CANCELLATION_INCOMPLETE", "upload cleanup could not be made durable; retry this handle",
+        ) from None
+    return _cancel(vault_root, reference)
+
+
 def _cancel(vault_root: Path, reference: str) -> int:
     """Cancel one owned unclaimed hold; the lifecycle-admitted leaf owns exposure.
 

@@ -58,6 +58,13 @@ def parse_ticket(value: object) -> str | None:
     return None
 
 
+def settle_consumption(vault_root: Path) -> None:
+    """Flush deletions by excluded older workers before cancellation format activation."""
+    store = private_state.store(vault_root, STORE_DIRNAME)
+    with FileLock(store / ".lock", timeout=0):
+        private_state.sync_directory(store)
+
+
 def parse_handoff_token(value: object) -> str | None:
     """Return a handoff's upload token in either published form, or None.
 
