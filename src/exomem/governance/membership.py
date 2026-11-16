@@ -137,6 +137,16 @@ def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
     return rel_path in normalized or kb_rel in normalized
 
 
+def path_selector_matches(patterns: tuple[str, ...], rel_path: str) -> bool:
+    """Whether a `paths` or `exclude_paths` value in `patterns` selects `rel_path`, by the rule that scope membership applies."""
+    return _matches_paths(patterns, rel_path)
+
+
+def ref_selector_matches(values: tuple[str, ...], rel_path: str) -> bool:
+    """Whether a path form in a `refs` or `exclude_refs` value list names `rel_path`, by the rule that scope membership applies."""
+    return _matches_refs(values, rel_path)
+
+
 def _scope_matches(scope: Scope, subject: MetadataSubject) -> bool:
     def semantic(values, candidates):
         return any(value.lower() in candidates for value in values)

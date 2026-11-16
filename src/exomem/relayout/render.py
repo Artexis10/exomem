@@ -11,6 +11,7 @@ from collections import Counter
 from collections.abc import Mapping
 
 from .. import kbdir, vault
+from . import disclosure as disclosure_diff
 from .plan import CHOICES, Move, RelayoutPlan
 from .sampled import Sampled
 
@@ -27,6 +28,7 @@ def _resolve(value: object, *, full: bool) -> object:
 def _attention(plan: RelayoutPlan) -> list[str]:
     counts = plan.counts()
     managed = kbdir.managed_root_rel()
+    figures = plan.disclosure.figures() if plan.disclosure is not None else {}
     found: list[tuple[int, str]] = [
         (counts["unmappable_files"], "files that cannot get a new path"),
         (counts["top_level_collisions"], "new top-level names that collide with existing entries"),
@@ -35,8 +37,37 @@ def _attention(plan: RelayoutPlan) -> list[str]:
         (counts["outside_links_that_break"], f"links from outside {managed} that would break"),
         (counts["pointers_left"], "pointer fields that name files the plan cannot repoint"),
         (len(plan.registry_findings), "registries that could not be read in full"),
+        (figures.get("broken_inheritance_edges") or 0, "inheritance edges that break"),
+        (
+            figures.get("untranslatable_selectors") or 0,
+            "policy selectors that cannot be translated",
+        ),
     ]
     return [f"{sentence}: {count}" for count, sentence in found if count]
+
+
+def _disclosure_sentence(plan: RelayoutPlan) -> str:
+    """The disclosure differences as a count, "unknown" naming the source that did not load, and zero as zero."""
+    found = plan.disclosure
+    if found is None:
+        return "The disclosure diff was not computed."
+    figures = found.figures()
+    if figures["differences"] is None:
+        unknown = [
+            detail
+            for state, detail in (
+                (found.policy_state, found.policy_detail),
+                (found.tiers.state, found.tiers.detail),
+            )
+            if state == disclosure_diff.STATE_UNKNOWN
+        ]
+        return f"Disclosure differences: unknown ({'; '.join(unknown)})."
+    return (
+        f"Disclosure differences: {figures['differences']}"
+        f" ({figures['scopes_changed']} scopes and {figures['tiers_changed']} access tiers change members,"
+        f" {figures['broken_inheritance_edges']} inheritance edges break,"
+        f" {figures['untranslatable_selectors']} selectors cannot be translated)."
+    )
 
 
 def outcome(plan: RelayoutPlan) -> str:
@@ -48,6 +79,7 @@ def outcome(plan: RelayoutPlan) -> str:
         f"{counts['moved_files']} of {counts['files']} files move and {counts['renamed_files']} get a new file name.",
         f"{counts['link_edits']} links change in {counts['link_edit_pages']} pages"
         f" and {counts['pointer_edits']} pointer fields change.",
+        _disclosure_sentence(plan),
     ]
     attention = _attention(plan)
     if attention:
@@ -87,6 +119,7 @@ def render(plan: RelayoutPlan, *, full: bool = False) -> dict[str, object]:
         "choices": dict(CHOICES),
         "counts": plan.counts(),
         "alternatives": plan.alternatives,
+        "disclosure": disclosure_diff.report(plan.disclosure) if plan.disclosure else None,
         "moves": {"renamed": Sampled(renamed), "folder_only": Sampled(folder_only)},
         "link_edits": Sampled([dataclasses.asdict(edit) for edit in links.edits]),
         "link_edits_per_page": Sampled(_edits_per_page(plan)),
@@ -95,6 +128,17 @@ def render(plan: RelayoutPlan, *, full: bool = False) -> dict[str, object]:
             "ambiguous": Sampled([dataclasses.asdict(note) for note in links.ambiguous]),
             "to_folders": Sampled([dataclasses.asdict(note) for note in links.folder]),
         },
+        "links_in_collection_and_part_pages": {
+            "note": "Pages that the collection store and the part writer own; the plan lists their edits and writes none.",
+            "pages_scanned": plan.collection_links.counts.pages_scanned,
+            "edits": Sampled([dataclasses.asdict(edit) for edit in plan.collection_links.edits]),
+        },
+        "to_retired_collection_paths": Sampled(
+            [
+                dataclasses.asdict(note)
+                for note in (*links.retired_collection, *plan.collection_links.retired_collection)
+            ]
+        ),
         "pointer_edits": Sampled([dataclasses.asdict(edit) for edit in plan.pointers.edits]),
         "pointers_left_as_written": Sampled(
             [dataclasses.asdict(note) for note in plan.pointers.left]

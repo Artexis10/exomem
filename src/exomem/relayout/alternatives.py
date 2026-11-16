@@ -12,6 +12,7 @@ import dataclasses
 import posixpath
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 
 from .. import layout, obsidian_links, vault
 from ..held_fs import vault_name_key
@@ -45,8 +46,12 @@ def flatten(
     primary: layout.Allocations,
     facts: Mapping[str, PageFact],
     registry: layout.Registry,
-) -> dict[str, object]:
-    """Pages that flattening the partition folders would move beyond the primary plan, and the collisions it adds."""
+) -> tuple[dict[str, object], dict[str, str]]:
+    """What flattening the partition folders would change beyond the primary plan.
+
+    Returns the report's counts and the new path of every file under the flattened plan, for
+    the disclosure diff to read the policy's selectors against.
+    """
     flattened: list[layout.Placement] = []
     extra: list[str] = []
     for placement in placements:
@@ -66,12 +71,13 @@ def flatten(
         else:
             flattened.append(placement)
     result = layout.allocate(flattened)
-    return {
+    report = {
         "covers": "derived pages of the note types that declare a partition",
         "extra_pages_moved": Sampled(extra),
         "extra_suffixed_names": _suffixed(result) - _suffixed(primary),
         "extra_unmappable_pages": len(result.unmappable) - len(primary.unmappable),
     }
+    return report, layout.final_paths(flattened, result)
 
 
 def slug_names(
@@ -193,18 +199,28 @@ def corrections(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class Alternatives:
+    """The alternatives' report keyed as the report names them, and the files that O1 places differently."""
+
+    report: dict[str, object]
+    flattened: Mapping[str, str]
+
+
 def build(
     *,
     placements: Sequence[layout.Placement],
     primary: layout.Allocations,
+    primary_paths: Mapping[str, str],
     facts: Mapping[str, PageFact],
     registry: layout.Registry,
     unresolved: Sequence[LinkNote],
     today_paths: Iterable[str],
-) -> dict[str, object]:
-    """Every alternative's counts, keyed as the report names them."""
-    return {
-        "o1_flatten": flatten(placements, primary, facts, registry),
+) -> Alternatives:
+    """Every alternative's counts. `flattened` holds the new path of each file that O1 places elsewhere than `primary_paths`."""
+    o1_report, o1_paths = flatten(placements, primary, facts, registry)
+    report = {
+        "o1_flatten": o1_report,
         "o2_slug": slug_names(placements, primary),
         "o3_per_folder": per_folder(placements, primary),
         "o5_drift": drift(placements, facts),
@@ -213,3 +229,5 @@ def build(
             "name_corrections": corrections(placements, primary),
         },
     }
+    differing = {path: new for path, new in o1_paths.items() if primary_paths.get(path) != new}
+    return Alternatives(report, differing)

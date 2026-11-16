@@ -12,12 +12,12 @@ nothing, takes no lease and holds no page body after it has used it. It reads in
    (`links.LinkRewriter`). Pages outside the managed folder are scanned for links into it.
    Pointer fields come from the first pass's facts (`pointers.plan_pointers`).
 
-Two files hold the plan's later extensions. The disclosure diff (a later module,
-`relayout/disclosure.py`) takes a built `RelayoutPlan` and needs nothing else: `moved` maps
-every moved file to its new path, `facts` holds the page facts of the first pass, `registry`
-is the loaded vocabulary, and `inventory`-level counts sit in `diagnostics`. It adds a field
-here and a key in `render.render`. The apply, verify and revert steps use `moves`, `moved`,
-`links` and `pointers` as the list of what to write.
+The disclosure diff (`relayout/disclosure.py`) reads a built `RelayoutPlan`: `moved` maps every
+moved file to its new path, `facts` holds the page facts of the first pass, `registry` is the
+loaded vocabulary and `flattened` holds the paths that the flat-partition alternative changes.
+The apply, verify and revert steps use `moves`, `moved`, `links` and `pointers` as the list of
+what to write, and `collection_links` as the list of edits that the owners of the collection
+and part pages receive: the plan reads those pages and writes none of them.
 
 A file-mode and a store-mode vault with the same pages give the same plan: both modes list
 files and parse bytes through `inventory`, and only the source of the bytes differs.
@@ -36,6 +36,8 @@ from .. import extraction_parts, layout, obsidian_links, vault
 from ..held_fs import vault_name_key
 from ..vault_store import read
 from . import alternatives
+from .disclosure import Disclosure, flatten_report
+from .disclosure import build as build_disclosure
 from .facts import PageFact, read_fact
 from .inventory import Inventory, open_inventory
 from .links import LinkRewriter, LinkScan
@@ -113,6 +115,9 @@ class RelayoutPlan:
     collisions: tuple[TopLevelCollision, ...]
     alternatives: dict[str, object]
     hidden_entries: tuple[str, ...]
+    collection_links: LinkScan = field(default_factory=LinkScan)
+    flattened: Mapping[str, str] = field(default_factory=dict)
+    disclosure: Disclosure | None = None
     diagnostics: dict[str, object] = field(default_factory=dict)
 
     def counts(self) -> dict[str, int]:
@@ -146,6 +151,10 @@ class RelayoutPlan:
             "links_ambiguous": links.ambiguous,
             "links_to_folders": links.folder,
             "links_in_origin_carriers": links.carrier_links,
+            "links_to_retired_collection_paths": links.to_retired_collection_paths
+            + self.collection_links.counts.to_retired_collection_paths,
+            "pages_in_collection_and_part_pages_scanned": self.collection_links.counts.pages_scanned,
+            "link_edits_in_collection_and_part_pages": self.collection_links.counts.edits,
             "pointer_edits": len(self.pointers.edits),
             "pointers_left": len(self.pointers.left),
             "outside_links_into_managed_folder": len(self.links.outside),
@@ -218,26 +227,6 @@ def _place_all(
         if placement is not None:
             placements.append(placement)
     return placements
-
-
-def _final_paths(
-    placements: Sequence[layout.Placement], allocations: layout.Allocations
-) -> dict[str, str]:
-    """The new path of every placed file. A part page follows its source page's new folder, never its own."""
-    moved = {allocation.current_path: allocation.new_path for allocation in allocations.placed}
-    for placement in placements:
-        if placement.fixed_because is not layout.FixedBecause.EXTRACTION_PART:
-            continue
-        if placement.current_path not in moved:
-            continue
-        source = extraction_parts.source_page_for(PurePosixPath(placement.current_path))
-        new_source = moved.get(source.as_posix()) if source is not None else None
-        if new_source is not None:
-            folder = extraction_parts.folder_for(PurePosixPath(new_source))
-            moved[placement.current_path] = (
-                folder / posixpath.basename(placement.current_path)
-            ).as_posix()
-    return moved
 
 
 def _moves(
@@ -325,7 +314,7 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
         entries, unreadable_outside = _resolver_entries(inventory, facts)
         placements = _place_all(inventory, facts, registry)
         allocations = layout.allocate(placements)
-        moved = _final_paths(placements, allocations)
+        moved = layout.final_paths(placements, allocations)
         marks["facts"] = time.monotonic()
 
         outside_markdown = [path for entry in inventory.outside.values() for path in entry.markdown]
@@ -342,18 +331,17 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
             {path.removesuffix(".md"): path for path, _title in entries},
         )
         scan = LinkScan()
-        not_scanned = 0
+        foreign = LinkScan()
         for item in inventory.managed:
             if not item.markdown:
                 continue
-            if not item.owned:
-                not_scanned += 1
-                continue
+            # A collection page and a part page have another owner; its links are counted apart.
+            into = scan if item.owned else foreign
             data = inventory.read(item.path)
             if data is None:
-                scan.counts.unreadable_pages += 1
+                into.counts.unreadable_pages += 1
                 continue
-            rewriter.scan_managed(scan, item.path, data, frozenset(facts[item.path].ingested))
+            rewriter.scan_managed(into, item.path, data, frozenset(facts[item.path].ingested))
         for path in outside_markdown:
             data = inventory.read(path)
             if data is not None:
@@ -364,6 +352,7 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
         built = alternatives.build(
             placements=placements,
             primary=allocations,
+            primary_paths=moved,
             facts=facts,
             registry=registry,
             unresolved=scan.unresolved,
@@ -399,9 +388,16 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
             pointers=pointers,
             outside=_outside_summaries(inventory, scan),
             collisions=_collisions(inventory, moved),
-            alternatives=built,
+            alternatives=built.report,
+            collection_links=foreign,
+            flattened=built.flattened,
             hidden_entries=tuple(inventory.hidden),
         )
+        result.disclosure = build_disclosure(result, root)
+        flat = built.report["o1_flatten"]
+        if isinstance(flat, dict):
+            flat["scopes_whose_members_change"] = flatten_report(result.disclosure)
+        marks["disclosure"] = time.monotonic()
         stages = list(marks.items())
         timings = {
             name: round(finished - (stages[index - 1][1] if index else started), 3)
@@ -419,12 +415,10 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
             "files_listed": len(inventory.managed),
             "files_skipped": dict(sorted(inventory.skipped.items())),
             "unreadable_files": sorted([*unreadable, *unreadable_outside]),
-            "markdown_not_scanned_for_links": not_scanned,
             "part_folders": len(part_folders),
             "registry_findings": list(registry.findings),
             "limits": [
-                "A link to a path that a converted collection retired counts as unresolved.",
-                "Collection pages and extraction part pages are not scanned for links.",
+                "A link that resolves to no page and names a path inside a collection layer counts as a link to a retired collection path; the collection store is not read, so a path that never existed counts there too.",
             ],
             READ_KEY: {
                 "mode": "store" if inventory.revision is not None else "file",

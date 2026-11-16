@@ -442,6 +442,14 @@ def _area_below_notes(folders: list[str], registry: Registry) -> tuple[bool, str
     return (True, None) if registry.has_area(folders[1]) else (False, folders[1])
 
 
+def in_collection_layer(managed_relative: str) -> bool:
+    """Whether a path below the managed root lies in a collection layer, the folders that the collection store owns."""
+    head, separator, _rest = managed_relative.partition("/")
+    return bool(separator) and vault_name_key(head) in {
+        vault_name_key(profile.placement_layer) for profile in collection_profiles.PROFILES.values()
+    }
+
+
 def place(
     current_path: str,
     *,
@@ -494,10 +502,7 @@ def place(
     # The write gate's own list of generated navigation names; a bare Markdown name matches no folder.
     if semantic_contract.compiled_route_exempt(filename):
         return keep(FixedBecause.NAVIGATION)
-    layers = {
-        vault_name_key(profile.placement_layer) for profile in collection_profiles.PROFILES.values()
-    }
-    if folders and vault_name_key(folders[0]) in layers:
+    if in_collection_layer(below):
         return keep(FixedBecause.COLLECTION)
     note_type = registry.note_type(type_value)
     if note_type is None:
@@ -659,3 +664,21 @@ def allocate(placements: Iterable[Placement]) -> Allocations:
         tuple(chosen[path] for path in sorted(chosen) if path not in clashing),
         tuple(sorted(unmappable, key=lambda item: item.current_path)),
     )
+
+
+def final_paths(placements: Iterable[Placement], allocations: Allocations) -> dict[str, str]:
+    """The new path of every placed file. A part page follows its source page's new folder, never its own."""
+    moved = {allocation.current_path: allocation.new_path for allocation in allocations.placed}
+    for placement in placements:
+        if placement.fixed_because is not FixedBecause.EXTRACTION_PART:
+            continue
+        if placement.current_path not in moved:
+            continue
+        source = extraction_parts.source_page_for(PurePosixPath(placement.current_path))
+        new_source = moved.get(source.as_posix()) if source is not None else None
+        if new_source is not None:
+            folder = extraction_parts.folder_for(PurePosixPath(new_source))
+            moved[placement.current_path] = (
+                folder / PurePosixPath(placement.current_path).name
+            ).as_posix()
+    return moved

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from .. import obsidian_links, provenance, vault
+from .. import kbdir, layout, obsidian_links, provenance, vault
 
 # The wikilink grammar fixes the brackets that wrap a link's text.
 _OPEN, _CLOSE = "[[", "]]"
@@ -87,6 +87,7 @@ class LinkCounts:
     unresolved: int = 0
     ambiguous: int = 0
     folder: int = 0
+    to_retired_collection_paths: int = 0
     full_path_forms: int = 0
     edit_pages: int = 0
     append_only_edit_pages: int = 0
@@ -103,9 +104,17 @@ class LinkScan:
     unresolved: list[LinkNote] = field(default_factory=list)
     ambiguous: list[LinkNote] = field(default_factory=list)
     folder: list[LinkNote] = field(default_factory=list)
+    retired_collection: list[LinkNote] = field(default_factory=list)
     outside: list[OutsideLink] = field(default_factory=list)
     outside_pages_scanned: int = 0
     failures: list[LinkNote] = field(default_factory=list)
+
+
+def _names_collection_path(inner: str) -> bool:
+    """Whether the link text names a path inside a collection layer, with or without the managed folder."""
+    page = vault.split_wikilink_target(inner)[0]
+    below = kbdir.managed_split(page)
+    return layout.in_collection_layer(page if below is None else below)
 
 
 def _inner(text: str, start: int, end: int) -> str:
@@ -117,8 +126,9 @@ class LinkRewriter:
 
     `moved` maps the current path of each Markdown page the plan moves to its new path;
     `post_index` is Obsidian's basename index of the vault as it will be. The resolver answers
-    for today's vault. `retired` is not consulted: a path that a converted collection retired
-    counts as unresolved, which the plan reports as a limit.
+    for today's vault. `retired` is not consulted, because it asks the collection store, which
+    a plan never opens: a link that resolves to no page and names a path inside a collection
+    layer is counted as a link to a retired collection path instead of an unresolved link.
     """
 
     def __init__(
@@ -238,7 +248,10 @@ class LinkRewriter:
         counts = scan.counts
         target = self.target(inner)
         note = LinkNote(page, inner)
-        if target.outcome is Outcome.UNRESOLVED:
+        if target.outcome is Outcome.UNRESOLVED and _names_collection_path(inner):
+            counts.to_retired_collection_paths += 1
+            scan.retired_collection.append(note)
+        elif target.outcome is Outcome.UNRESOLVED:
             counts.unresolved += 1
             scan.unresolved.append(note)
         elif target.outcome is Outcome.AMBIGUOUS:
