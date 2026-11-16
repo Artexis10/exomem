@@ -167,7 +167,25 @@ The cases are row-shaped turns, near misses and unrelated turns. Keys give the c
 
 The evaluation result and the chosen carrier are specified here before any code.
 
-R3 result: pending.
+R3 result. The round ran on the R1 fixture, with the vault's real skills added so the routing skill competed with them. An agent on a GPT model answered 11 cases twice in each arm. A blind judge on another model family scored whether each reply pointed to the key row's sources, scoring correct 1, partial 0.5 and wrong 0.
+
+| Arm | Table reached the agent (row cases) | Row score (row cases) | Forced a row (other cases) |
+|---|---|---|---|
+| Base: ordinary note | 2 of 12 | 0.08 | 0 of 10 |
+| Skill | 10 of 12 | 0.50 | 0 of 10 |
+| Skill whose body tells the agent to name the row | 11 of 12 | 0.96 | 0 of 4 |
+
+- The skill carrier reached the agent far more often than the note. Per case, skill − base was +0.667 (95% CI +0.333 to +1.000).
+- With the table loaded, the plain skill's agent often gave sound advice and cited no source. One line in the skill body fixed that. Per case, the instructed skill scored +0.458 over the plain skill (95% CI +0.125 to +0.792) and +0.875 over the note (95% CI +0.625 to +1.000).
+- No arm forced a row onto a near-miss or unrelated turn.
+
+The carrier is therefore a convention, with no product code and no `route` items. A routing table is an ordinary vault skill:
+
+- Its description names the problems the table covers.
+- Its body holds the pick-by-problem table.
+- Its body tells the agent to name the matched row and point to that row's sources first, and to answer without the table when no row fits.
+
+The generic scaffold teaches the convention. The catalogue and the skill method items carry it as they carry any skill.
 
 ## Risks
 
