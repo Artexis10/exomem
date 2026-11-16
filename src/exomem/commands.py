@@ -14844,10 +14844,6 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "preserve_artifacts",
             "process_media",
             "episode_memory",
-            "reserve_source_capture",
-            "settle_source_capture",
-            "inspect_captured_sources",
-            "inspect_capture_erasure_policy",
         ],
     },
     "review": {
@@ -15095,13 +15091,13 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
     (
         "inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None,
         _MCRC, ("inspect_captured_sources",),
-        {"public_title": "Inspect captured Source inventory", "surface": "advanced", "actions": (), "first_run_safe": True,
+        {"public_title": "Inspect captured Source inventory", "surface": "service", "actions": (), "first_run_safe": True,
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_inventory",)}},
     ),
     (
         "inspect_capture_erasure_policy", op_inspect_capture_erasure_policy, 1, False, False, None,
         _MCRC, (),
-        {"public_title": "Inspect Source erasure policy", "surface": "advanced", "actions": (), "first_run_safe": True,
+        {"public_title": "Inspect Source erasure policy", "surface": "service", "actions": (), "first_run_safe": True,
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure_policy",)}},
     ),
     (
@@ -15236,14 +15232,14 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "reserve_source_capture",
         op_reserve_source_capture,
         1, True, False, None, _MCRC, (),
-        {"public_title": "Reserve Source capture admission", "surface": "primary", "actions": ("save",), "first_run_safe": False,
+        {"public_title": "Reserve Source capture admission", "surface": "service", "actions": ("save",), "first_run_safe": False,
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_reservation",)}},
     ),
     (
         "settle_source_capture",
         op_settle_source_capture,
         1, True, False, None, _MCRC, (),
-        {"public_title": "Close Source capture admission", "surface": "primary", "actions": ("save",), "first_run_safe": False,
+        {"public_title": "Close Source capture admission", "surface": "service", "actions": ("save",), "first_run_safe": False,
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_settlement",)}},
     ),
     (
@@ -16017,6 +16013,7 @@ def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescripto
         tier2_enabled=True,
         product_commands=tuple(
             command.public_name for command in product_commands_for("mcp", expose_tier2=True)
+            if command.agent_listed
         ),
         compatibility_commands=tuple(command.name for command in PRODUCT_COMMANDS if command.preferred_name),
     )

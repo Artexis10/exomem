@@ -187,12 +187,17 @@ class PublicSurface:
     def _served(tool: WireTool, available: set[str]) -> bool:
         return all(route.command in available for route in tool.routes)
 
-    def door_operations(self, door: str, commands: Iterable[object]) -> tuple[DoorOp, ...]:
+    def door_operations(self, door: str, commands: Iterable[object], *, listed: bool = False) -> tuple[DoorOp, ...]:
+        """The operations a door serves for these commands; `listed` keeps the ones an agent's listing names.
+
+        A service command's operations stay callable and are left out of every listing.
+        """
         # A served command can carry fewer variants than the registry holds (Cloud and remote
         # admission withhold some), so an operation stays only while its variant is served.
         served = {
             command.name: {(rendering.name, kind) for rendering in command.renderings for kind in rendering.kinds}
             for command in commands
+            if not listed or command.agent_listed
         }
         return tuple(
             op for op in self.doors[door].values() if (op.rendering, op.kind) in served.get(op.command, ())
@@ -237,7 +242,8 @@ class PublicSurface:
         operations = {op.name: op for op in self.door_operations(name, commands)}
         elsewhere = {op.name: other for other in DOORS.values() if other != name
                      for op in self.door_operations(other, commands)}
-        operation, fields, tool_fields = _door_call(name, body, operations, elsewhere)
+        shown = [op.name for op in self.door_operations(name, commands, listed=True)]
+        operation, fields, tool_fields = _door_call(name, body, operations, elsewhere, shown)
         op = operations[operation]
         nested = {"operation": {"kind": op.kind, **fields}, **tool_fields}
         wire = {**nested, **carried}
@@ -408,11 +414,13 @@ def _wire_refusal(name: str, error: Exception, *, tool: WireTool | None = None):
 
 def _door_call(
     door: str, body: Mapping[str, Any], operations: Mapping[str, DoorOp], elsewhere: Mapping[str, str] | None = None,
+    shown: Sequence[str] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     """The operation name, its fields and the tool-level fields of one door call.
 
     `elsewhere` maps an operation of the other door to that door, so a read sent to the write door
-    (or the reverse) is refused with the tool that serves it.
+    (or the reverse) is refused with the tool that serves it. `shown` names the operations that a
+    refusal may suggest, so a misspelt call never teaches a service operation.
     """
     from .cli_ops import OpError
 
@@ -429,13 +437,14 @@ def _door_call(
         refusal.writes = writes
         raise refusal
     if operation not in operations:
+        suggested = operations if shown is None else shown
         served_by = (elsewhere or {}).get(operation)
         refusal = OpError("INVALID_OPERATION",
                           f"{operation} is an operation of {served_by}." if served_by
                           else f"{door} has no operation {operation!r}.",
                           details=None if served_by else {
-                              "candidates": get_close_matches(operation, sorted(operations), n=5)
-                              or sorted(operations)[:5]})
+                              "candidates": get_close_matches(operation, sorted(suggested), n=5)
+                              or sorted(suggested)[:5]})
         refusal.writes = writes
         raise refusal
     fields = body.get("arguments")
@@ -485,7 +494,7 @@ def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
     listed = surface.listed_names(commands)
     if topic is None:
         return {"topics": list(listed), "doors": {
-            door: sorted({op.name.split(".")[0] for op in surface.door_operations(door, commands)})
+            door: sorted({op.name.split(".")[0] for op in surface.door_operations(door, commands, listed=True)})
             for door in (d for d in DOORS.values() if d in listed)
         }}
     if topic in surface.tools and topic in listed:
@@ -494,20 +503,22 @@ def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
                 **({"example": dict(tool.example)} if tool.example else {}),
                 **({"guide": _GUIDES[topic]} if topic in _GUIDES else {})}
     if topic in DOORS.values() and topic in listed:
-        ops = surface.door_operations(topic, commands)
+        ops = surface.door_operations(topic, commands, listed=True)
         areas: dict[str, list[str]] = {}
         for op in ops:
             area, action = op.name.split(".", 1)
             areas.setdefault(area, []).append(action)
         return {"tool": topic, "operations": areas,
                 "next": "read_instructions(topic='<area>.<action>') lists one operation's arguments."}
-    served = [op for door in DOORS.values() for op in surface.door_operations(door, commands) if op.name == topic]
+    served = [op for door in DOORS.values() for op in surface.door_operations(door, commands, listed=True)
+              if op.name == topic]
     if len(served) == 1:
         return _door_help(surface, served[0], commands)
     if served:
         # An operation that both doors carry reads on one and writes on the other: show each its own arguments.
         return {"operation": topic, "tools": [_door_help(surface, op, commands) for op in served]}
-    names = sorted({*listed, *(op.name for door in DOORS.values() for op in surface.door_operations(door, commands))})
+    names = sorted({*listed, *(op.name for door in DOORS.values()
+                               for op in surface.door_operations(door, commands, listed=True))})
     raise OpError("INVALID_OPERATION", f"{topic!r} is not a tool or an operation of this server.",
                   details={"candidates": get_close_matches(topic, names, n=5) or list(listed)[:5]})
 
@@ -647,7 +658,7 @@ def build_tools(commands: Sequence[Any]) -> dict[str, Any]:
     for effect, door in DOORS.items():
         if door not in listed:
             continue
-        operations = surface.door_operations(door, commands)
+        operations = surface.door_operations(door, commands, listed=True)
         title, description = _DOOR_TEXT[effect]
         destructive = any(
             v.destructive for op in operations for r in surface._renderings[op.command] if r.name == op.rendering

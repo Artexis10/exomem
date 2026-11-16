@@ -335,6 +335,12 @@ The consumer uses this read for registration and background readiness, without a
 Every erase still checks current policy before admission.
 After a stale hash, the consumer can issue a new checked operation for its existing target reference; its durable retirement intent never retargets.
 
+The capture protocol's reservation, settlement, inventory and erasure-policy commands are service commands.
+The command registry marks each with the closed listing tier `service`.
+The consumer still calls them through the MCP doors, REST and the CLI, and the discovery route still reports their features.
+No agent listing names them: tool enums, `read_instructions`, the action catalog and `available_product_tools` omit them.
+An agent has no use for a protocol step, and naming four of them cost every session about 113 bytes of its 15,000-byte core.
+
 ### D5. Preserve snapshot reads and fence reusable publication
 
 An overlapping read can finish from its existing snapshot or detached invocation bytes.

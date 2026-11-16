@@ -32,9 +32,7 @@ from exomem import (
 
 #: Core ceiling at maximal on the worst-case surface. Ruled 15,000; measured
 #: 14,407 (claude-code, maximal) when set, i.e. about 590 bytes of margin.
-#: Raised to 15,150: main measured 14,991, and the four Source custody commands that
-#: `active_capabilities.available_product_tools` must list add 113 bytes (15,104).
-CORE_BYTE_CEILING = 15_150
+CORE_BYTE_CEILING = 15_000
 CORE_HEADROOM_WARNING_BYTES = 512
 
 #: Per-section ceilings: the measured size on the largest surface plus about 10%, on a
@@ -98,6 +96,7 @@ def _bootstrap(monkeypatch, level: str, surface: str | None, *, populated: bool 
             tier2_enabled=True,
             product_commands=tuple(
                 command.public_name for command in commands.product_commands_for("mcp", cloud=True)
+                if command.agent_listed
             ),
         )
         with capabilities.active_surface(descriptor):
@@ -463,8 +462,7 @@ def test_the_session_profile_is_live_state_only(monkeypatch):
         assert static_rules not in session
     for live in ("engagement", "governance", "active_capabilities", "sections", "authoring_contract"):
         assert live in session
-    # 21,945 on main; the four Source custody commands in the capability list add 113 bytes.
-    assert len(_text(session)) < 22_100
+    assert len(_text(session)) < 22_000
 
 
 def test_the_bootstrap_names_the_store_it_reaches(monkeypatch):

@@ -15,7 +15,10 @@ from exomem.__main__ import main
 
 
 def test_public_write_door_reserves_captures_and_settles_exact_input(vault, passage_tools):
+    """A service calls the write door's capture protocol, which no agent listing names."""
     call, _ = passage_tools
+    listed = call("read_instructions", {"topic": "manage_memory"})["operations"].get("sources", [])
+    assert "reserve_capture" not in listed and "settle_capture" not in listed
     args = authored()
     wire = capture_attempts.CaptureWireV1.model_validate(args)
     reserved = call("manage_memory", {"operation": "sources.reserve_capture", "arguments": {"source_identity": args["source_identity"], "request_sha256": wire.sha256()}})

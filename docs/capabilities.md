@@ -11,7 +11,7 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 - Product commands: 41
 - Tier 1 commands: 36
 - Tier 2 commands: 5
-- Public MCP tools: 38
+- Public MCP tools: 34
 - REST commands: 38
 - CLI commands: 38
 - Hand-registered MCP tools: none
@@ -53,8 +53,6 @@ REST and CLI calls keep the grouped commands in the following registry.
 | episode_memory | Direct inputs | episode_memory |
 | govern_memory | Direct inputs | govern_memory |
 | import_memory | file, start, select, plan, apply, cancel, finish, propose, apply-proposal, acknowledge | adoption_studio |
-| inspect_capture_erasure_policy | Direct inputs | inspect_capture_erasure_policy |
-| inspect_captured_sources | Direct inputs | inspect_captured_sources |
 | maintain_memory | Direct inputs | maintain_memory |
 | manage_memory_file | Direct inputs | manage_memory_file |
 | observe_memory | Direct inputs | observe_memory |
@@ -68,12 +66,10 @@ REST and CLI calls keep the grouped commands in the following registry.
 | read_memory | page | read_memory |
 | recall_context | Direct inputs | activate_context |
 | record_memory | Direct inputs | record_memory |
-| reserve_source_capture | Direct inputs | reserve_source_capture |
 | review_item_context | Direct inputs | review_item_context |
 | review_memory | Direct inputs | review_memory |
 | schema_memory | Direct inputs | schema_memory |
 | search_memory | Direct inputs | ask_memory |
-| settle_source_capture | Direct inputs | settle_source_capture |
 | supersede_note | Direct inputs | replace_memory |
 | transfer_artifact | Direct inputs | transfer_artifact |
 | triage_memory | decision, set-family, set-envelope, decide-vocabulary | triage_memory |
