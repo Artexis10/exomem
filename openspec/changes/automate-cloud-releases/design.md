@@ -325,8 +325,9 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 
 - The shortest limit is 60 s, so the 40 s budget leaves about 20 s for the cell to send its first response byte after the hold.
 - No measured client retries a `503`, so a hold that runs out reaches the agent as an error. The budget therefore matters more than `Retry-After`.
-- With a 40 s budget, every held call in the cloud-rehearsal `release` mode reached its restarted cell (run 43759488588: 1,058 calls through three switches, no error, longest wait 34.5 s).
-- That 34.5 s call is the longest tool call the rehearsal recorded, and the hold took most of it. Calls outside a hold answered with a p95 of 0.15 s. The idle bound, `cloudGateway.upstream.idleSeconds`, defaults to 600 s, above both. A tool that runs longer needs its own figure before anyone lowers the bound.
+- With a 40 s budget, every held call in the cloud-rehearsal `release` mode reached its restarted cell. Run 43759488588 made 1,058 calls through three switches, with no error and a longest wait of 34.5 s. Run 43794420561 made 1,052, with no error and longest waits of 32.9, 38.5 and 40.3 s.
+- The 40.3 s call reached its cell at the end of the hold. A cell that restarts more slowly than the rehearsal's gives its held calls the `503`. Task 2.2's production stop figures decide whether the budget needs to grow toward the 60 s client limit.
+- That 40.3 s call is the longest tool call the rehearsal recorded, and the hold took most of it. Calls outside a hold answered with a p95 of 0.15 s. The idle bound, `cloudGateway.upstream.idleSeconds`, defaults to 600 s, above both. A tool that runs longer needs its own figure before anyone lowers the bound.
 
 **Home.** Home shows `504 CELL_TIMEOUT` with its existing cell-unavailable message. A `503 CELL_NOT_READY` after a hold reads as today's.
 
