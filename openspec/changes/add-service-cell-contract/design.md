@@ -78,6 +78,14 @@ Ship Exomem as a library that the service opens in its own process over a per-te
 - **First consumer changes:** it removes the network hop, discovery and credentials. It takes over storage, backup, model serving and erasure of the files on its hosts.
 - **Verdict: rejected.** Governance would run in the caller's process, so a caller defect could open another tenant's file. Erasure proofs and operator-access limits would depend on the caller's hosts. It serves one language only.
 
+## Sources
+
+Three rows of the "Pick by problem" table in the engineering primary-source roster shape this design:
+
+- "Untrusted content can influence an outbound action" (Lethal trifecta; CaMeL; How we contain Claude). The first service never lets cell text reach a prompt, and D8 keeps per-person content out of cells until the cell enforces its readers.
+- "Answer claims need references to source material" (Citations docs; separate pointer validity from claim support). The first service verifies each hit against its own rows before it cites one.
+- "The model keeps misusing a tool/MCP surface" (Writing effective tools). The agent door stays shaped for agents, and the service contract is a separate rendering (D1).
+
 ## Decisions
 
 ### D1. Services use a versioned rendering of the command registry
@@ -137,12 +145,11 @@ An uncertain outcome, such as a pending settlement, is a typed result state, not
 A message can accompany a code for people. A client acts on the code alone.
 The codes and the status table are protocol tokens that this specification fixes, so they are a closed set and not vocabulary.
 
-### D5. Service captures stay off shared summaries
+### D5. Stage 0 belongs to the passage-evidence delivery
 
-Attempt reservation is a service-tier command that the agent tool listing does not offer, so an attempt-bound capture comes from a service.
-It does not write the Sources catalog, the top-level index or the activity log. Captured-Source inventory is its listing.
-A service capture appears in no shared summary that a person reads, and its erasure has no summary fragment to clean.
-This stage has no flag of its own. The attempt protocol has not shipped in a release, so no released caller depends on these summary writes.
+The passage-evidence delivery (#2852) owns the rule that an attempt-bound capture stays off the Sources catalog, the top-level index and the activity log.
+Its requirement lives in that delivery's captured-source inventory or passage-evidence capability, with the code. This change does not restate it.
+The service contract relies on the rule: inventory is a service capture's only listing, and erasing a service capture leaves no summary fragment to clean.
 
 ### D6. Service authority has three layers (Stage 2)
 
@@ -203,7 +210,7 @@ Today transcription and segmentation live in the consumer, and embedding lives i
 
 | Stage | Outcome | Host setting, default off | Proof | Depends on |
 |---|---|---|---|---|
-| S0 | Service captures stay off shared summaries | none (D5) | An attempt-bound capture leaves the three summary pages byte-identical and appears in inventory; an ordinary capture still updates them | passage-evidence merged |
+| S0 | Service captures stay off shared summaries | none | Owned and proven by the passage-evidence delivery (D5) | ships in #2852 |
 | S1 | Typed service API v1 | `EXOMEM_SERVICE_API` | Each operation returns the same data through both doors on one disposable cell; every response validates against the document; passage bars hold at the service boundary | passage-evidence merged |
 | S2 | Service principals | `EXOMEM_SERVICE_PRINCIPALS` names the registry file | Two principals on one cell cannot reach each other's Sources through any operation or argument; an ungoverned cell gives a principal custody only; existing audiences' decisions are unchanged | S1 |
 | S3 | Subject-bound requests | a subject key in a principal's registry entry | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references | S2; the partition fact of the single store |
@@ -214,7 +221,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 
 ## Dependencies on in-flight work
 
-- **Passage evidence and inventory (in review).** S0 and S1 render their operations and land after the merge. This change edits none of their specs.
+- **Passage evidence and inventory (in review, #2852).** S1 renders their operations and lands after the merge. That delivery also ships S0 (D5). This change edits none of their specs.
 - **`erase-captured-source`.** `sources.erase` joins version 1 when it ships. Discovery omits it until then. S5 reuses its owner acknowledgements.
 - **The consumer's retrieval switch.** It runs on the MCP door and is not blocked. The consumer moves its transport after S1, behind its own setting, and moves its credential after S2.
 - **`make-vault-store-canonical`.** S3's partition fact follows its page admission facts. No stage changes its contract.
@@ -235,7 +242,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 
 ## Migration and rollback
 
-1. Ship S0 and S1 with `EXOMEM_SERVICE_API` unset on every cell. Behaviour is unchanged.
+1. Ship S1 with `EXOMEM_SERVICE_API` unset on every cell. Behaviour is unchanged.
 2. Enable version 1 on a disposable cell and run the conformance check and the consumer's acceptance through its generated client.
 3. Enable version 1 on a tenant's cell, then switch the consumer's transport for that tenant through its own setting.
 4. To roll back, switch the consumer back to the MCP door and unset the host setting. No data changes, because both doors call the same leaves.

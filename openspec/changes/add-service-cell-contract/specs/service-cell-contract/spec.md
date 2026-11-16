@@ -1,22 +1,5 @@
 ## ADDED Requirements
 
-### Requirement: Attempt-Bound Captures Stay Off Shared Summaries
-
-A Source capture bound to a server-issued capture attempt SHALL NOT write the Sources catalog, the top-level index or the activity log.
-Captured-Source inventory SHALL list that Source with the same fields as any other captured Source.
-A capture without a capture attempt SHALL keep its current summary writes.
-
-#### Scenario: A service captures a Source
-
-- **WHEN** a service captures a Source under a reserved capture attempt and settles it
-- **THEN** the Sources catalog, the top-level index and the activity log are byte-identical to their state before the capture
-- **AND** captured-Source inventory lists the new Source
-
-#### Scenario: An agent captures a Source
-
-- **WHEN** an agent captures a Source without a capture attempt
-- **THEN** the Sources catalog, the top-level index and the activity log record it as they do today
-
 ### Requirement: The Service API Is Served Only For Enabled Versions
 
 A Cloud cell SHALL serve `POST /service/<version>/<operation>` only for a version that the host setting `EXOMEM_SERVICE_API` lists.
