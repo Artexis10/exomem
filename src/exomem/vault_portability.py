@@ -865,7 +865,7 @@ def _enumerate_compatible(vault_root: Path, limits: PortabilityLimits) -> list[_
     retirement witness is invalidated, because the older reader that this copy serves keeps no witness current.
     """
     from . import original_pool, trash_metadata
-    from .media_store import bound_originals
+    from .media_store import _retired, bound_originals
 
     vault = vault_root.resolve()
     bindings = {snapshot.path.relative_to(vault).as_posix(): snapshot for snapshot in bound_originals(vault)}
@@ -902,8 +902,13 @@ def _enumerate_compatible(vault_root: Path, limits: PortabilityLimits) -> list[_
         if bound.state == "evicted":
             raise PortabilityError("ORIGINAL_UNAVAILABLE", "an original stored off this archive was not fetched, "
                                    "so the export is incomplete", member=path)
+        if bound.state == "missing" and not _retired(vault, bound):
+            raise PortabilityError(
+                "ORIGINAL_UNAVAILABLE", "this filing's original has no bytes in this archive and no stored copy, "
+                "so the export is incomplete. Restore the original or repair it with the fixity check, or retire "
+                "the filing and empty its Trash entry. Then export again", member=path)
         if bound.local_path is None:
-            continue  # An ordinary file carried it above, or the archive holds no bytes for it.
+            continue  # An ordinary file carried it above, or Trash retired the filing and no original remains.
         assert bound.binary_sha256 is not None and bound.binary_size is not None
         admit(_SourceSnapshot(path, bound.local_path, bound.binary_size, bound.binary_sha256,
                               classify_artifact(path).artifact_class.value, None,

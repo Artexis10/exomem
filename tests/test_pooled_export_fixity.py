@@ -506,6 +506,24 @@ def test_a_compatibility_export_refuses_a_shared_object_that_vanishes_and_publis
     assert _tree(vault) == source
 
 
+def test_a_compatibility_export_refuses_a_filing_whose_original_is_gone_and_publishes_nothing(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches a compatibility export that leaves out an original it cannot find and still publishes, so the way back to
+    an older release delivers a page that names bytes the archive does not hold."""
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "side-a.txt", TRANSCRIPT)
+    original_pool.object_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest()).unlink()
+    source = _tree(vault)
+    exports = tmp_path / "exports"
+
+    with pytest.raises(vault_portability.PortabilityError) as refused:
+        vault_portability.export_compatible_vault(vault, exports, context=_context())
+
+    assert refused.value.code == "ORIGINAL_UNAVAILABLE"
+    assert refused.value.member == added.artifact_path
+    assert not exports.exists() or list(exports.iterdir()) == []
+    assert _tree(vault) == source
+
+
 def test_a_whole_vault_export_carries_a_page_that_a_trash_retirement_left_without_bytes(
         vault: Path, selected_store, tmp_path: Path) -> None:  # noqa: F811
     """Catches an export that opens the original of a page that a Trash retirement left at its path, and so fails
