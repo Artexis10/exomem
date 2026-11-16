@@ -48,6 +48,7 @@ from . import (
 from . import (
     corpus_aware,
     indexes,
+    layout,
     memory_refs,
     note_types,
     relation_registry,
@@ -1031,6 +1032,22 @@ class _Err:
     reason: str
 
 
+def _definition(vault_root: Path, note_type: str) -> note_types.NoteType:
+    """A compiled type's definition from the effective registry: the shipped pack and the vault's overlay.
+
+    Raises INVALID_NOTE for a value that names no compiled type. A shipped type needs no overlay read.
+    """
+    basis = note_types.Basis(vault_root)
+    definition = basis.resolve(note_type).require()
+    if definition is None or not note_types.compiled(definition):
+        raise NoteError(
+            "INVALID_NOTE",
+            ["note_type"],
+            f"note_type {note_type!r} is not supported. Valid: {list(basis.keys(note_types.compiled))}.",
+        )
+    return definition
+
+
 _ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _BRIDGE_SCOPE_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
@@ -1058,12 +1075,10 @@ def _validate(
     missing: list[str] = []
     reasons: list[str] = []
 
-    if note_type not in NOTE_TYPES:
-        return _Err(
-            code="INVALID_NOTE",
-            missing=["note_type"],
-            reason=(f"note_type {note_type!r} is not supported. Valid: {list(NOTE_TYPES)}."),
-        )
+    try:
+        _definition(vault_root, note_type)
+    except NoteError as error:
+        return _Err(code=error.code, missing=error.missing, reason=error.reason)
     if not content or not content.strip():
         missing.append("content")
         reasons.append("content is empty")
@@ -1242,8 +1257,8 @@ def _type_default(
     project_registry: project_keys_module.ProjectRegistry | None,
 ) -> _Placement:
     """The folder and stem of the type's own layout: its folder, partition and stem kind."""
-    definition = note_types.shipped_registry().types[note_type]
-    folder = kb_root(vault_root) / str(definition.folder)
+    definition = _definition(vault_root, note_type)
+    folder = kb_root(vault_root) / str(layout.area_folder(definition, layout.Layout.NESTED))
     if definition.partition == "project":
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
@@ -1329,7 +1344,7 @@ def _placement_block(
         "basis": f"home:{home.key}" if home is not None else "type_default",
     }
     # A research note is filed by project, so a topic home would not move it.
-    if home is None and topics and note_types.shipped_registry().types[note_type].partition != "project":
+    if home is None and topics and _definition(root, note_type).partition != "project":
         offer = homes_module.offer(home_set, topics[0])
         if offer is not None:
             block["make_home"] = offer
@@ -1376,11 +1391,13 @@ def _place(
         parent = (vault_root / predecessor).parent
         if _home_containing(vault_root, parent, home_set) is not None:
             return _Placement(parent, default.stem)
-    if note_types.shipped_registry().types[note_type].partition == "project":
+    if _definition(vault_root, note_type).partition == "project":
         home = home_set.by_project.get(project) if project else None
     else:
         home = next((home_set.by_topic[topic] for topic in topics if topic in home_set.by_topic), None)
-    return _Placement(kb / home.folder, default.stem) if home is not None else default
+    if home is None:
+        return default
+    return _Placement(kb / layout.home_folder(home, layout.Layout.NESTED), default.stem)
 
 
 def _resolve_path(

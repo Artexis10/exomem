@@ -177,7 +177,8 @@ def test_a_compiled_area_loses_its_notes_parent_only_in_root():
         == layout.area_folder(entity, Layout.ROOT)
         == "Assets"
     )
-    assert layout.area_folder(note_types.shipped_registry().types["source"], Layout.ROOT) is None
+    source = note_types.shipped_registry().types["source"]
+    assert layout.area_folder(source, Layout.NESTED) == layout.area_folder(source, Layout.ROOT) == "Sources"
 
 
 def test_registry_reads_overlay_types_and_homes_as_areas(registry):

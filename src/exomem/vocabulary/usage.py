@@ -196,6 +196,9 @@ def homes(vault_root: Path, snapshot: Snapshot) -> Usage:
 
     source = "graph file pages in home folders"
 
+    # A local import: the note-type registry module imports this package at load time.
+    from ..note_types import nested_folder
+
     def read() -> Usage:
         rows = _graph_rows(vault_root, "SELECT path FROM graph_nodes WHERE kind = 'file'")
         if isinstance(rows, str):
@@ -203,7 +206,7 @@ def homes(vault_root: Path, snapshot: Snapshot) -> Usage:
         pages = sorted(str(path) for (path,) in rows)
         holders: dict[str, tuple[str, ...]] = {}
         for key, entry in snapshot.entries.items():
-            folder = f"{managed_join('')}{entry.attributes['folder']}/".casefold()
+            folder = f"{managed_join('')}{nested_folder(entry.attributes['folder'])}/".casefold()
             holders[key] = tuple(path for path in pages if path.casefold().startswith(folder))
         return Usage(
             True,

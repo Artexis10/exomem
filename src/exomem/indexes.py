@@ -18,7 +18,7 @@ import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cache
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
@@ -332,9 +332,9 @@ def _notes_owners(home_set: homes.HomeSet | None) -> tuple[_NotesOwner, ...]:
     """The shipped compiled types' folders, then the vault's homes."""
     owners = [
         _NotesOwner(
-            PurePosixPath(str(note_type.folder)).parts[1:],
+            note_types.folder_below_notes(str(note_type.folder)),
             note_type.index_row or note_type.key,
-            (PurePosixPath(str(note_type.folder)).name,),
+            (note_types.folder_below_notes(str(note_type.folder))[-1],),
         )
         for note_type in note_types.shipped(note_types.compiled)
     ]

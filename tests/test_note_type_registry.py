@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import activation, commands, lexstore
+from exomem import activation, commands, layout, lexstore
 from exomem import find as find_module
 
 MEETING_PAGE = "Knowledge Base/Notes/Meetings/2026-10-quillwort-sync.md"
@@ -260,7 +260,8 @@ def test_the_shipped_pack_reproduces_each_former_type_set() -> None:
     for predicate, members in former_sets.items():
         assert {note_type.key for note_type in note_types.shipped(predicate)} == members, predicate
     assert {
-        note_type.key: note_type.folder for note_type in note_types.shipped(note_types.compiled)
+        note_type.key: layout.area_folder(note_type, "nested")
+        for note_type in note_types.shipped(note_types.compiled)
     } == {
         "research-note": "Notes/Research",
         "insight": "Notes/Insights",

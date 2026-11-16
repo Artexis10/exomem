@@ -18,6 +18,7 @@ code fixed before the registry existed:
 - H, raw and append-only pages: `raw`.
 - I, captured Sources whose compilation the attention queue tracks: `captured_source`.
 - J, pages whose file name follows their frontmatter title: `titled_name`.
+- K, entity pages: `entity`.
 
 The lookup is exact. Each call site keeps its own normalisation of the
 authored value before the lookup, and the lookup adds none.
@@ -47,8 +48,24 @@ SOURCES_VALUES = frozenset({"required", "optional"})
 PARTITIONS = frozenset({"project", "domain", "medium", "none"})
 # nosemgrep: ep-word-set -- The typed writer implements these stem kinds; a pack entry picks one.
 STEMS = frozenset({"slug", "dated", "started"})
-#: The one parent folder a compiled type's folder sits in.
+#: The parent folder that a compiled area sits in under the `nested` layout.
 NOTES_FOLDER = "Notes"
+
+
+def folder_below_notes(folder: str) -> tuple[str, ...]:
+    """The segments of a type or home `folder` below the `Notes/` parent.
+
+    A folder value names its area with or without the parent: `Notes/Insights` and `Insights`
+    read the same. The parent belongs to the `nested` layout, so a reader that needs a layout's
+    path takes the area from here and adds the parent itself (`layout.area_folder`).
+    """
+    parts = PurePosixPath(folder).parts
+    return parts[1:] if parts[:1] == (NOTES_FOLDER,) else parts
+
+
+def nested_folder(folder: str) -> str:
+    """`folder` as the `nested` layout spells it, below the `Notes/` parent."""
+    return "/".join((NOTES_FOLDER, *folder_below_notes(folder)))
 
 
 def registry_path(root: Path) -> Path:
@@ -159,6 +176,11 @@ def captured_source(note_type: NoteType) -> bool:
     return note_type.role == "source"
 
 
+def entity(note_type: NoteType) -> bool:
+    """Set K: entity pages, whose type groups live below the entity area."""
+    return note_type.role == "entity"
+
+
 def titled_name(note_type: NoteType) -> bool:
     """Set J: pages whose file name is built from their frontmatter title.
 
@@ -186,13 +208,14 @@ class NoteTypeRegistry:
 
 
 def _folder_name(folder: object, key: str) -> str:
-    """The one `Notes/<Name>` segment a compiled folder declares."""
-    parts = PurePosixPath(folder).parts if isinstance(folder, str) else ()
-    if len(parts) != 2 or parts[0] != NOTES_FOLDER or parts[1] in {".", ".."}:
+    """The casefolded area name that a type's `folder` declares, with or without its `Notes/` parent."""
+    below = folder_below_notes(folder) if isinstance(folder, str) else ()
+    if len(below) != 1 or below[0] in {".", ".."}:
         raise registry.RegistryError(
-            f"INVALID_NOTE_TYPE_FOLDER: {key} needs one {NOTES_FOLDER}/<Name> folder"
+            f"INVALID_NOTE_TYPE_FOLDER: {key} needs a single area name as its folder "
+            f"({NOTES_FOLDER}/<Name> or <Name>)"
         )
-    return parts[1].casefold()
+    return below[0].casefold()
 
 
 def _check_attributes(entry: registry.Entry) -> None:
@@ -211,10 +234,14 @@ def _check_attributes(entry: registry.Entry) -> None:
         raise registry.RegistryError(
             f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} sources must be required or optional"
         )
-    if (role == "compiled") != ("folder" in attributes):
+    # Only a compiled type must name its area. A source, evidence or entity type may name one, and a
+    # type with no role has no area that anything reads.
+    if (role == "compiled" and "folder" not in attributes) or (
+        role is None and "folder" in attributes
+    ):
         raise registry.RegistryError(
-            f"INVALID_NOTE_TYPE_FOLDER: {entry.key} declares a folder exactly when its "
-            "note-type role is compiled"
+            f"INVALID_NOTE_TYPE_FOLDER: {entry.key} must declare a folder when its note-type role "
+            "is compiled, and may declare one only with a note-type role"
         )
 
 
@@ -224,7 +251,8 @@ def _check_routable(entry: registry.Entry) -> None:
     from .semantic_contract import compiled_route_exempt
 
     folder = entry.attributes.get("folder")
-    if isinstance(folder, str) and compiled_route_exempt(folder):
+    # The router selects compiled pages only, so a source, evidence or entity area is never routed.
+    if entry.attributes.get("role") == "compiled" and isinstance(folder, str) and compiled_route_exempt(folder):
         raise registry.RegistryError(
             f"NOTE_TYPE_FOLDER_RESERVED: the write gate never routes {folder}, so no "
             f"{entry.key} page could be written there"
@@ -237,8 +265,10 @@ def _index(entries: Mapping[str, registry.Entry]) -> tuple[dict[str, NoteType], 
     for key, entry in entries.items():
         note_type = _note_type(entry)
         types[key] = note_type
+        if note_type.folder is None:
+            continue
+        name = _folder_name(note_type.folder, key)
         if note_type.role == "compiled":
-            name = _folder_name(note_type.folder, key)
             if name in folders:
                 raise registry.RegistryError(
                     f"NOTE_TYPE_FOLDER_TAKEN: {note_type.folder} already belongs to {folders[name]}"

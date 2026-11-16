@@ -204,21 +204,22 @@ def resolve(vault_root: Path) -> Layout:
 
 def _compiled_folder(folder: str, layout: Layout) -> str:
     """A compiled folder under `layout`; `folder` is read with or without its `Notes/` parent."""
-    parts = PurePosixPath(folder).parts
-    below = parts[1:] if parts and parts[0] == note_types.NOTES_FOLDER else parts
-    return "/".join(below if layout is Layout.ROOT else (note_types.NOTES_FOLDER, *below))
+    if layout is Layout.ROOT:
+        return "/".join(note_types.folder_below_notes(folder))
+    return note_types.nested_folder(folder)
 
 
 def area_folder(note_type: note_types.NoteType, layout: Layout | str) -> str | None:
     """The folder a note type's pages sit in under `layout`, relative to the managed root.
 
     None when the type declares no folder. A compiled type's folder is an area below the
-    `Notes/` parent in `nested` and a top-level folder in `root`. Another role keeps its folder.
+    `Notes/` parent in `nested` and a top-level folder in `root`. A source, evidence or entity
+    type sits at the managed root in both layouts, whichever way its value spells the area.
     """
     if note_type.folder is None:
         return None
     if not note_types.compiled(note_type):
-        return note_type.folder
+        return "/".join(note_types.folder_below_notes(note_type.folder))
     return _compiled_folder(note_type.folder, Layout(layout))
 
 

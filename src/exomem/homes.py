@@ -1,7 +1,7 @@
 """Homes: shared folders where compiled notes of any type live, chosen by topic or project.
 
-A type folder holds the pages of one note type's default layout. A home is the
-owner's own grouping: one folder under the Notes root and the topic and project
+A type folder holds the pages of a single note type's default layout. A home is the
+owner's own grouping: a folder under the Notes root and the topic and project
 keys it serves, so an insight and a failure about the same subject sit together.
 The registry is overlay-only, `_Schema/homes.yaml`, with an empty shipped pack. Typed
 creation reads it to choose a destination; the index counts read it to give each
@@ -44,8 +44,8 @@ class Home:
 
     @property
     def parts(self) -> tuple[str, ...]:
-        """The folder's segments below the Notes root."""
-        return PurePosixPath(self.folder).parts[1:]
+        """The folder's segments below the Notes root, whether or not the value spells the root."""
+        return note_types.folder_below_notes(self.folder)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,11 +90,17 @@ def _keys(entry: registry.Entry, name: str) -> tuple[str, ...]:
 
 
 def _folder_parts(entry: registry.Entry) -> tuple[str, ...]:
+    """The folder's segments with the Notes root in front, from `Notes/<Name>...` or an area name alone.
+
+    A bare value names the area alone, so `Equipment` reads as `Notes/Equipment`. A deeper home
+    keeps its `Notes/` parent, and a deeper bare path stays refused as a path outside Notes.
+    """
     folder = entry.attributes.get("folder")
     parts = PurePosixPath(folder).parts if isinstance(folder, str) else ()
+    below = note_types.folder_below_notes(folder) if isinstance(folder, str) else ()
     if (
-        len(parts) < 2
-        or parts[0] != note_types.NOTES_FOLDER
+        not below
+        or (parts[0] != note_types.NOTES_FOLDER and len(parts) != 1)
         or "/".join(parts) != folder
         or any(part in {".", ".."} or "\\" in part or len(part.encode()) > MAX_SEGMENT_BYTES
                for part in parts)
@@ -103,9 +109,9 @@ def _folder_parts(entry: registry.Entry) -> tuple[str, ...]:
     ):
         raise registry.RegistryError(
             f"INVALID_HOME_FOLDER: {entry.key} needs a canonical {note_types.NOTES_FOLDER}/<Name> "
-            "folder path without '.', '..' or a leading underscore"
+            "folder path, or <Name> alone, without '.', '..' or a leading underscore"
         )
-    return parts
+    return (note_types.NOTES_FOLDER, *below)
 
 
 def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None:
@@ -133,7 +139,7 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
         if other_key == entry.key:
             continue
         other_folder = other.attributes.get("folder")
-        if isinstance(other_folder, str) and other_folder.casefold() == folded:
+        if isinstance(other_folder, str) and note_types.nested_folder(other_folder).casefold() == folded:
             raise registry.RegistryError(
                 f"HOME_FOLDER_TAKEN: {folder} already belongs to home {other_key}"
             )
