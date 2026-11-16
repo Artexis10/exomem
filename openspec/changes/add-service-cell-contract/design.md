@@ -153,10 +153,11 @@ The service contract relies on the rule: inventory is a service capture's only l
 
 ### D6. Service authority has three layers (Stage 2)
 
-A **service principal** is registered by the host operator, not by the service. A host-owned registry file outside the vault holds each entry: an opaque principal id, its credential verifiers with rotation, and the identity systems it holds in custody.
+A **service principal** is declared by the host operator, not by the service. A host-owned registry file outside the vault holds each entry: an opaque principal id, its credential verifiers with rotation, and its subject-assertion keys (D7).
+The registry declares who a principal is. The cell owner's policy decides what it may do (D11).
 
-1. **Principal.** The credential resolves to a non-owner audience in the kernel's identity space, under a reserved prefix that no OAuth subject can produce. The owner credential stays with the operator.
-2. **Custody.** A principal has full authority over the Sources of the identity systems it holds: capture, settlement, inventory, passage search and erasure. This replaces whole-namespace authority for that principal. Two principals cannot hold one system. The host erasure policy still enables erasure per system.
+1. **Principal.** The credential resolves to a non-owner audience in the kernel's identity space, under a reserved prefix that no OAuth subject can produce. The owner credential stays with the cell's owner (D11).
+2. **Custody.** The owner's grant names the identity systems that a principal holds. A principal has full authority over the Sources of those systems: capture, settlement, inventory, passage search and erasure. This replaces whole-namespace authority for that principal. Two principals cannot hold one system. The host erasure policy still enables erasure per system.
 3. **Kernel.** Every other item reaches the principal only through the kernel's decision for its audience. A service audience that no standing rule names receives no disclosure, also for an item outside every scope. This default is an evaluator rule, not a policy document, so a policy edit cannot remove it.
 
 When consumers have moved to their own principals, the agent door refuses service operations. The connector boundary stays as it is for OAuth clients.
@@ -190,10 +191,32 @@ Stage 1 already writes a call-ledger row for every service call, so the export s
 
 A cell without Markdown projection is `make-vault-store-canonical` task 6.2. This change adds no projection rule and depends on that task only through D7's storage.
 
+### D11. The tenant owns the cell, and the product is a service principal (Stage 2)
+
+A cell that a product provisions for a tenant belongs to the tenant. Ownership is not hosting: the product may provision, host and pay for the cell, and the tenant still owns it.
+
+- The product reaches the cell only as a service principal (D6). The tenant's policy grants its authority. The grant takes effect when the owner commits it through the kernel's propose and commit flow.
+- The tenant holds the owner credential and the owner sign-in. From S2 the product holds only its service credential. Until S2 the product holds an owner-equivalent credential, as today, and S2 ends that state.
+- The tenant may connect their own agents to the same cell through MCP, under their own principal. The kernel keeps the two apart. The product reaches only its custody and what the tenant grants it. The tenant's agents reach what the owner's policy and connector ceilings allow, except member partitions (D12).
+- The product must tolerate three tenant decisions: a narrowed grant, a revoked grant and the tenant leaving with their cell.
+  A narrowed or revoked grant reaches the product as a 403 authority refusal on its next request, not as an outage.
+  When the tenant leaves, the product's credential stops working. The product keeps its own records and loses access to the cell.
+- A host with machine access can bypass any in-process rule. Against such a host, ownership holds only as far as the cell's operator-access limits.
+
+### D12. A member's partition is private from the owner (Stage 3)
+
+- The owner cannot read a member's partition by default. This narrows the kernel's owner exemption: for a partitioned item, the owner is an audience like any other. The S3 change writes that delta to `governance-kernel`.
+- The owner may read one member's partition only under an explicit kernel grant that names the partition, the purpose and an expiry. Every read under that grant writes a disclosure receipt.
+- Without such a grant, the owner sees aggregates across partitions only, never one member's items. The S3 change sets the aggregate forms and the smallest group that an aggregate may describe.
+- The owner's agents and connectors inherit this limit, because they act under the owner's audience or a narrower one.
+- An owner export that produces readable files leaves member partitions out. A cell transfer to another host keeps them under the same protection.
+- Two rules follow from this decision. A member reads their own partition through a request bound to their subject (D7). A member's erasure request erases their partition (S5), and the owner can erase a partition without reading it.
+
 ## Ownership split
 
 | Concern | Consumer product | Cell |
 |---|---|---|
+| Ownership | may provision, host and pay for the cell; acts as a service principal | belongs to the tenant, whose policy grants and bounds the product (D11) |
 | End-user identity | authenticates its users; mints subject assertions at its edge | verifies assertions; binds subjects |
 | Media | acquires media and checks provider access | stores the passages it receives |
 | Media processing | runs each component that a measured comparison on its data places in the consumer | runs a component only when that comparison places it in the cell |
@@ -212,10 +235,10 @@ Today transcription and segmentation live in the consumer, and embedding lives i
 |---|---|---|---|---|
 | S0 | Service captures stay off shared summaries | none | Owned and proven by the passage-evidence delivery (D5) | ships in #2852 |
 | S1 | Typed service API v1 | `EXOMEM_SERVICE_API` | Each operation returns the same data through both doors on one disposable cell; every response validates against the document; passage bars hold at the service boundary | passage-evidence merged |
-| S2 | Service principals | `EXOMEM_SERVICE_PRINCIPALS` names the registry file | Two principals on one cell cannot reach each other's Sources through any operation or argument; an ungoverned cell gives a principal custody only; existing audiences' decisions are unchanged | S1 |
-| S3 | Subject-bound requests | a subject key in a principal's registry entry | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references | S2; the partition fact of the single store |
+| S2 | Service principals under the tenant's grant (D6, D11) | `EXOMEM_SERVICE_PRINCIPALS` names the registry file | Two principals on one cell cannot reach each other's Sources through any operation or argument; a principal without a committed grant reaches nothing; a narrowed or revoked grant refuses the next request; the tenant's own agents and the product reach only their own scopes; existing audiences' decisions are unchanged | S1 |
+| S3 | Subject-bound requests and private member partitions (D7, D12) | a subject key in a principal's registry entry | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references; the owner reads a partition only under a grant, and each such read writes a receipt; without a grant the owner receives aggregates only | S2; the partition fact of the single store |
 | S4 | Audit export | `EXOMEM_SERVICE_AUDIT_EXPORT` | An exported window verifies end to end against the chain; an injected gap reports incomplete | S1; S2 for principal ids |
-| S5 | Subject erasure | the host erasure policy, per principal | After complete erasure no door returns an item of the partition; progress reports complete, pending, failed or unknown | S3; `erase-captured-source` |
+| S5 | Subject erasure (D12) | the host erasure policy, per principal | After a member's erasure request completes, no door returns an item of the partition; progress reports complete, pending, failed or unknown | S3; `erase-captured-source` |
 
 Each stage after S1 writes its requirements into a successor change before its code starts, and cites these decisions.
 
@@ -238,6 +261,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 - **Typed result models add code to each rendered leaf.** → Seven operations in version 1; the models also replace the consumer's hand-written parsers.
 - **The OpenAPI diff tool can miss a semantic change.** → A meaning change still needs review; the committed document makes every schema change visible.
 - **Service credentials stay owner-equivalent until S2.** → D8 keeps per-person content out until S3; tenant isolation holds through one cell per tenant.
+- **The tenant can narrow or revoke the product's grant, or leave with the cell.** → D11 makes these refusals, not outages; the product keeps its own records and stops using the cell.
 - **A service can assert the wrong subject.** → D7 confines minting to the service's authentication edge; Exomem enforces everything after it.
 
 ## Migration and rollback
@@ -251,11 +275,11 @@ Each stage after S1 writes its requirements into a successor change before its c
 
 These choices belong to the operator. Each has a recommendation.
 
-1. **Who owns a product-provisioned cell?** Recommend that the tenant is the owner and the product is a service principal under the tenant's policy.
-2. **May the owner read member partitions?** Recommend no by default: the owner can erase and export, and can read only through an explicit, audited grant. This narrows the kernel's owner exemption for partitioned items.
-3. **Does Exomem publish generated client packages?** Recommend publishing only the document until a second consumer exists.
-4. **Do hosted and self-hosted enterprise cells get the service API in S1?** Recommend Cloud cells first. Other cell modes get the same setting when their credential and discovery match.
-5. **How long does a superseded version stay?** Recommend at least 90 days after its successor ships, advertised in discovery.
-6. **Who verifies subjects?** Recommend service-signed assertions, because the consumer is its users' identity provider; accept external identity-provider tokens later for enterprises that have one.
-7. **When does the consumer move off the MCP door?** Recommend right after S1, before its rollout passes the first tenant.
-8. **What load target does a service cell record?** Recommend the passage reference per cell, plus a cells-per-node target from the Cloud platform, recorded once in the repository.
+1. **Does Exomem publish generated client packages?** Recommend publishing only the document until a second consumer exists.
+2. **Do hosted and self-hosted enterprise cells get the service API in S1?** Recommend Cloud cells first. Other cell modes get the same setting when their credential and discovery match.
+3. **How long does a superseded version stay?** Recommend at least 90 days after its successor ships, advertised in discovery.
+4. **Who verifies subjects?** Recommend service-signed assertions, because the consumer is its users' identity provider; accept external identity-provider tokens later for enterprises that have one.
+5. **When does the consumer move off the MCP door?** Recommend right after S1, before its rollout passes the first tenant.
+6. **What load target does a service cell record?** Recommend the passage reference per cell, plus a cells-per-node target from the Cloud platform, recorded once in the repository.
+7. **Who may issue the owner's read grant for one member's partition (D12)?** Recommend the owner, for a stated purpose and a bounded expiry, with each read audited.
+8. **What happens to member partitions when the product's grant ends (D11, D12)?** Recommend that they stay closed to the owner and are erased after a retention window that the tenant's policy sets.
