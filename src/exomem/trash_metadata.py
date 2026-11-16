@@ -158,7 +158,7 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
     import unicodedata
 
     from .kbdir import managed_join
-    from .vault import PlannedWrite, content_hash, read_guarded_bytes
+    from .vault import MALFORMED_FRONTMATTER_ERRORS, PlannedWrite, content_hash, read_guarded_bytes
     from .vault_store import read as store_read
 
     writes = list(writes)
@@ -209,13 +209,19 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
                 new_match = _matches_retirement(after, after_fields, metadata, proof)
                 if not old_match and not new_match:
                     continue
-                # The Trash entry is not checked here: every reader confirms it (`PlacementCensus.retired_source`), so a
-                # damaged or partly emptied entry refuses reads rather than every later edit of the page.
                 if _completing.get() == (metadata, proof.before, proof.after) and new_match and proof.source.path not in incoming:
                     continue  # The deletion owns this one prepared reference-removal transition.
                 if (proof.source.path not in incoming and old_match and _backlink(after_fields) == metadata
                         and originals.binary_binding(after_fields) == proof.source and "stored_object" not in after_fields):
                     if content_hash(after) == proof.after:
+                        continue
+                    try:
+                        confirmed = _confirmed_by_trash(vault, proof)
+                    except MALFORMED_FRONTMATTER_ERRORS:
+                        confirmed = False
+                    if not confirmed:
+                        # Recovery or the owner ended this witness, and readers refuse it while its metadata remains. An
+                        # edit neither refuses nor revives it, so it leaves alone the metadata that a recovery is settling.
                         continue
                     value["after"] = content_hash(after)
                 else:
@@ -345,14 +351,7 @@ class PlacementCensus:
                 raise
         else:
             return False
-        trash = reference_companion(self.vault, proof.trash.path)
-        if trash is None:
-            return False
-        from .vault import parse_frontmatter
-
-        current = parse_frontmatter(trash[1].data.decode("utf-8"), custody=True)[0]
-        return (originals.binary_binding(current) == proof.trash
-                and originals.stored_reference(current.get("stored_object")) == proof.reference)
+        return _confirmed_by_trash(self.vault, proof)
 
     def resolve(self, path: str, fields: dict[str, object]) -> originals.BinaryBinding | None:
         """Return the current payload path without rewriting the canonical companion."""
@@ -420,6 +419,18 @@ def retired_companion(vault: Path, companion: str, fields: dict[str, object], di
     if not confirmed:
         raise originals.RetirementUnconfirmed(companion)
     return True
+
+
+def _confirmed_by_trash(vault: Path, proof: Retirement) -> bool:
+    """Whether the Trash entry still holds the exact reference-only companion that the witness names."""
+    from .vault import parse_frontmatter
+
+    trash = reference_companion(vault, proof.trash.path)
+    if trash is None:
+        return False
+    current = parse_frontmatter(trash[1].data.decode("utf-8"), custody=True)[0]
+    return (originals.binary_binding(current) == proof.trash
+            and originals.stored_reference(current.get("stored_object")) == proof.reference)
 
 
 def reference_companion(vault: Path, binary_path: str) -> tuple[str, reserved_paths.GenericFileSnapshot] | None:
