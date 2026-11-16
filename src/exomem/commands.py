@@ -1919,7 +1919,7 @@ def op_bootstrap(
             "preflight": {
                 tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
                 "near_duplicate_warnings": (
-                    "if they fire, consider edit or replace instead of a parallel page; a write advisory "
+                    "if they fire, prefer edit or replace over a parallel page; a write advisory "
                     "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
                     "signal stays quiet until "
                     + (
