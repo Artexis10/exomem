@@ -8305,8 +8305,17 @@ def borrow_query_resolver(
     Set `schedule_rebuild=False` for an advisory read that must not start a rebuild.
     Writers and explicit operations keep `_get_query_resolver`.
     """
+    from . import lexstore
+
     root = Path(vault_root)
-    triple = freshness.consumer_checkpoint(root, "vault").triple
+    # A store-mode resolver is keyed on the snapshot's revision (`FreshnessSnapshot._scope_key`), which no
+    # file registry holds; the revision moves with every commit, so a resolver that a commit passed is a miss.
+    if lexstore.store_rows_serve(root):
+        from .vault_store import read as store_read
+
+        triple = store_read.scope_triple(root, "vault")
+    else:
+        triple = freshness.consumer_checkpoint(root, "vault").triple
     cached = _RESOLVER_CACHE.get(root)
     if triple is not None and cached is not None and cached[0] == triple:
         return cached[1]
