@@ -559,8 +559,13 @@ def repair_paths(vault: Path, paths: Iterable[str]) -> None:
         apply_delta(vault, delta.paths, delta.bindings, expected=before)
 
 
-def rebuild(vault: Path) -> bool:
-    """A startup/background census; no request or pin admission calls this walk."""
+def rebuild(vault: Path) -> bool | None:
+    """A startup/background census; no request or pin admission calls this walk.
+
+    True when it publishes a complete projection. None when a write, an outside change or a configuration change
+    raced it: it publishes nothing and leaves the checkpoint as the race left it. False when it failed: it then
+    withdraws completeness, which moves the generation.
+    """
     vault = Path(vault).resolve()
     ledger = _ledger(vault)
     from .writer_lease import get_manager
@@ -623,7 +628,7 @@ def rebuild(vault: Path) -> bool:
                 conn.execute("BEGIN IMMEDIATE")
                 if checkpoint(conn) != before or source_checkpoint(vault) != source or policy_key(vault) != policy:
                     conn.rollback()
-                    return False
+                    return None
                 if conn.execute("SELECT 1 FROM binding_census GROUP BY binary_rel HAVING COUNT(*) > 1 LIMIT 1").fetchone():
                     raise ValueError("canonical companions disagree about one filing")
                 conn.execute("DELETE FROM media_bindings")
@@ -716,8 +721,8 @@ def recover(vault: Path) -> bool:
     """Make a shared archive's projection current with a background census; True when it is current.
 
     Background passes call this outside any guard, since the census takes its own; a request or an eviction never
-    does. A failed census is not repeated until the projection's generation moves, so a persistent failure costs
-    one census, not one per pass. A census that lost a race to a write waits for the next generation change.
+    does. A census that lost a race runs again on the next pass. A failed census is not repeated until the
+    projection's generation moves again, so a persistent failure costs one census, not one per pass.
     """
     vault = Path(vault).resolve()
     ledger = _ledger(vault, create=False)
@@ -730,9 +735,12 @@ def recover(vault: Path) -> bool:
             generation = checkpoint(conn).generation
         if _failed_census.get(vault) == generation:
             return False
-        if rebuild(vault):
+        published = rebuild(vault)
+        if published is not False:  # A raced census (None) is not a failure: the next pass runs it again.
             _failed_census.pop(vault, None)
-            return True
+            return bool(published)
+        # The failure withdrew completeness, which moved the generation past the one read above. Keying on the
+        # generation after that withdrawal is what stops a persistent failure from running once per pass.
         with closing(ledger._connect(readonly=True)) as conn:
             _failed_census[vault] = checkpoint(conn).generation
         return False

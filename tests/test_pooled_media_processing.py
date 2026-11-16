@@ -172,6 +172,36 @@ def test_the_first_offload_scan_of_a_pooled_archive_builds_the_binding_projectio
     assert offloaded.artifact_path + ".md" not in reads
 
 
+def test_the_offload_scan_after_a_census_that_an_outside_edit_raced_builds_the_binding_projection(
+        vault, tmp_path, monkeypatch, selected_store):
+    """An outside edit during the background census made it publish nothing, and every later offload scan read every
+    companion until another edit came. The next scan runs the census again; a later scan reads no companion of an
+    offloaded filing."""
+    from exomem import media_bindings, media_store, reserved_paths
+
+    offloaded = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"the minutes of the quarterly meeting")
+    assert media_store.offload(vault, vault / offloaded.artifact_path) is not None
+    pages = media_bindings._pages
+
+    def raced(root):
+        monkeypatch.setattr(media_bindings, "_pages", pages)
+        media_bindings.external_change(root)  # the file watcher observes an outside edit while the census reads
+        yield from pages(root)
+
+    monkeypatch.setattr(media_bindings, "_pages", raced)
+    media_store.enqueue_offloads(vault)
+    assert media_bindings._pages is pages
+    media_store.enqueue_offloads(vault)
+    reads: list[str] = []
+    read = reserved_paths.read_generic_bytes
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes",
+                        lambda root, rel, *args, **kwargs: (reads.append(rel), read(root, rel, *args, **kwargs))[1])
+
+    assert media_store.enqueue_offloads(vault) == 0
+
+    assert offloaded.artifact_path + ".md" not in reads
+
+
 def test_a_failed_job_of_a_pooled_original_can_be_retried(vault, tmp_path, monkeypatch):
     """An explicit retry must find the pooled bytes the failed job named, not report the file as missing."""
     added = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"the minutes of the quarterly meeting")
