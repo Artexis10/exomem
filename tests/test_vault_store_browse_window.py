@@ -276,32 +276,30 @@ def test_a_page_that_fails_to_hydrate_is_replaced_by_the_next_one(world, monkeyp
     window has pages left to read: the window refills from the next pages as the exhaustive route."""
     everyone = [hit["path"] for hit in browse(world.root, world.caller, 100, {})]
     lost = everyone[1]
-    admitted = SimpleNamespace(incomplete=False, capture_page_hashes=lambda paths: None)
-    hydrating = []
-    real_hits, real_resolve = find_module._browse_hits, find_module._resolve_page
-
-    def hits(*args, **kwargs):
-        hydrating.append(1)  # the request's admitted view exists only while the hits hydrate
-        try:
-            return real_hits(*args, **kwargs)
-        finally:
-            hydrating.pop()
+    admitted = SimpleNamespace(incomplete=False)
+    views = []
+    real_resolve = find_module._resolve_page
 
     def resolve(root, rel, *args, **kwargs):
-        return None if rel == lost else real_resolve(root, rel, *args, **kwargs)
+        if rel != lost:
+            return real_resolve(root, rel, *args, **kwargs)
+        # The admitted view that a managed request holds, handed to the browse that asks for it
+        # just after this page failed.
+        views.append(admitted)
+        return None
 
-    monkeypatch.setattr(find_module, "_browse_hits", hits)
     monkeypatch.setattr(find_module, "_resolve_page", resolve)
     monkeypatch.setattr(
-        lexstore, "_admitted_catalog_view", lambda root: admitted if hydrating else None
+        lexstore, "_admitted_catalog_view", lambda root: views.pop() if views else None
     )
 
     windowed = [hit["path"] for hit in browse(world.root, world.caller, 3, {})]
+    assert admitted.incomplete, "the failed page must mark the answer incomplete"
+    admitted.incomplete = False
     declined_window(monkeypatch)
     exhaustive = [hit["path"] for hit in browse(world.root, world.caller, 3, {})]
 
     assert windowed == exhaustive == [path for path in everyone if path != lost][:3]
-    assert admitted.incomplete, "the failed page must mark the answer incomplete"
 
 
 def test_a_withheld_frame_never_reaches_a_visible_parents_hit(world):
