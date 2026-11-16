@@ -161,11 +161,49 @@ def _usage(vault_root: Path, snapshot: registry.Snapshot) -> Any:
     return usage.homes(vault_root, snapshot)
 
 
+class _Adapter(registry.FixedPackAdapter):
+    """The fixed-pack grammar plus the check that reads the vault's layout, for the homes a save touches."""
+
+    def admission(
+        self, vault_root: Path, candidate: Any, touched: Mapping[str, registry.Entry]
+    ) -> list[dict[str, str]]:
+        """Refuse a home whose folder another role holds in a `root` vault, where homes, areas and group folders share a single namespace."""
+        from . import layout  # imported here: `layout` imports this module
+
+        if layout.of(vault_root) is not layout.Layout.ROOT:
+            return []
+        try:
+            types = registry.load(note_types.SPEC, vault_root).typed.types
+        except registry.RegistryError:
+            types = note_types.shipped_registry().types
+        findings: list[dict[str, str]] = []
+        for key in touched:
+            entry = self.entries(candidate).get(key)
+            if entry is None or entry.status != "active":
+                continue
+            below = _folder_parts(entry)[1:]
+            holder = layout.area_holder(
+                vault_root, below[0], types=types, own_key=key, role=None, deep=len(below) > 1
+            )
+            if holder is not None:
+                findings.append({
+                    "code": "HOME_AREA_COLLIDES",
+                    "path": f"entries.{key}",
+                    "severity": "error",
+                    "detail": (
+                        f"home {key} files its pages in {below[0]}/, which is {holder}, and a root "
+                        f"vault has a single folder namespace. Change `attributes.folder` of {key} to a "
+                        "folder that no other role uses."
+                    ),
+                })
+        return findings
+
+
 SPEC: registry.RegistrySpec = registry.RegistrySpec(
     name="homes",
     stem="homes",
     overlay=registry_path,
-    adapter=registry.FixedPackAdapter(PACK, lambda: SPEC, _check),
+    adapter=_Adapter(PACK, lambda: SPEC, _check),
     fields=frozenset({"label", "description", "status", "attributes"}),
     # The homes registry schema fixes these attribute names.
     attributes=frozenset({"folder", "topics", "projects"}),

@@ -369,6 +369,38 @@ class _Adapter:
     def findings(self, typed: NoteTypeRegistry) -> tuple[Mapping[str, Any], ...]:
         return typed.findings
 
+    def admission(
+        self, vault_root: Path, candidate: NoteTypeRegistry, touched: Mapping[str, registry.Entry]
+    ) -> list[dict[str, str]]:
+        """Refuse an area that another role holds in a `root` vault, for the types a save touches.
+
+        The refusal needs the vault's layout, which the pack grammar cannot see, and it holds only
+        for a touched type: a type that already sits there stays usable until someone edits it.
+        """
+        from . import layout  # imported here: `layout` imports this module
+
+        findings: list[dict[str, str]] = []
+        for key in touched:
+            note_type = candidate.types.get(key)
+            if note_type is None or note_type.folder is None or candidate.entries[key].status != "active":
+                continue
+            area = PurePosixPath(str(layout.area_folder(note_type, layout.Layout.ROOT))).parts[0]
+            holder = layout.area_holder(
+                vault_root, area, types=candidate.types, own_key=key, role=note_type.role
+            )
+            if holder is not None:
+                findings.append({
+                    "code": "NOTE_TYPE_AREA_COLLIDES",
+                    "path": f"entries.{key}",
+                    "severity": "error",
+                    "detail": (
+                        f"{key} files its pages in {area}/, which is {holder}, and a root vault "
+                        "has a single folder namespace. Change `attributes.folder` of "
+                        f"{key} to a name that no other role uses."
+                    ),
+                })
+        return findings
+
     def put(
         self, document: dict[str, Any], key: str, entry: registry.Entry, *, existing: bool
     ) -> None:

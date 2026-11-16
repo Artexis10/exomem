@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import date
@@ -324,6 +324,42 @@ def home_folder(home: homes.Home, layout: Layout | str) -> str:
     return _compiled_folder(home.folder, Layout(layout))
 
 
+def area_holder(
+    vault_root: Path,
+    area: str,
+    *,
+    types: Mapping[str, note_types.NoteType],
+    own_key: str,
+    role: str | None,
+    deep: bool = False,
+) -> str | None:
+    """What holds the top-level folder `area` against the entry `own_key`, as a phrase, or None when it is free.
+
+    A `root` vault has no `Notes/` level between its compiled areas, its homes and its group folders
+    (`Sources/`, `Entities/`, `Evidence/` and the collection layers), so they share a single namespace and
+    a folder cannot serve two of them. `nested` keeps them apart, so it always answers None.
+    `types` are the note types whose areas count. `role` is the touched type's role, and None for a
+    home. A type collides with the area of a type of another role, since two types of a single role may
+    share a group folder and two compiled types are refused by the registry itself. A home collides
+    with any type area, except that a home `deep` below a compiled area is a subfolder of it.
+    """
+    if managed_of(vault_root).layout is not Layout.ROOT:
+        return None
+    if in_collection_layer(area, folder=True):
+        return "a collection layer"
+    wanted = vault_name_key(area)
+    for key, note_type in types.items():
+        folder = None if key == own_key or note_type.folder is None else area_folder(note_type, Layout.ROOT)
+        held = PurePosixPath(folder).parts[:1] if folder else ()
+        if not held or vault_name_key(held[0]) != wanted:
+            continue
+        if role is None and deep and note_types.compiled(note_type):
+            continue
+        if role is None or note_type.role != role:
+            return f"the area of note type {key}, whose role is {note_type.role}"
+    return None
+
+
 def _area_name(folder: str) -> str:
     """The first folder below the `Notes/` parent of a compiled folder, or "" when there is none."""
     parts = PurePosixPath(_compiled_folder(folder, Layout.ROOT)).parts
@@ -479,10 +515,13 @@ def _area_below_notes(folders: list[str], registry: Registry) -> tuple[bool, str
     return (True, None) if registry.has_area(folders[1]) else (False, folders[1])
 
 
-def in_collection_layer(managed_relative: str) -> bool:
-    """Whether a path below the managed root lies in a collection layer, the folders that the collection store owns."""
+def in_collection_layer(managed_relative: str, *, folder: bool = False) -> bool:
+    """Whether a path below the managed root lies in a collection layer, the folders that the collection store owns.
+
+    The layer folder itself is no path below it, unless `folder` counts it.
+    """
     head, separator, _rest = managed_relative.partition("/")
-    return bool(separator) and vault_name_key(head) in {
+    return (bool(separator) or folder) and vault_name_key(head) in {
         vault_name_key(profile.placement_layer) for profile in collection_profiles.PROFILES.values()
     }
 
