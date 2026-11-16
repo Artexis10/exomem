@@ -1593,7 +1593,13 @@ class Rehearsal:
             with self.step("adopt the collection store replica", fatal=True) as entry:
                 why = ("--why", "adopt the vault copy's collection store replica for a rehearsal")
                 preview = rig.cli_json(
-                    "collections adopt-local --dry-run", "collections", "adopt-local", "--dry-run", *why, *vault
+                    "collections adopt-local --dry-run",
+                    "collections",
+                    "adopt-local",
+                    "--dry-run",
+                    *why,
+                    *vault,
+                    operator=True,
                 )
                 done = rig.cli_json(
                     "collections adopt-local",
@@ -1603,6 +1609,7 @@ class Rehearsal:
                     preview["preview_id"],
                     *why,
                     *vault,
+                    operator=True,
                     wait_for_lease=True,
                 )
                 entry["detail"] = {"preview": preview.get("step"), "status": done.get("status")}
