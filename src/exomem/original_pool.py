@@ -65,38 +65,52 @@ def enabled(vault: Path) -> bool:
     return True
 
 
-#: What an archive that keeps ordinary original storage tells its owner when no launcher support is proven.
-LIFECYCLE_ACTION = ("Convert the archive's originals with maintain_memory mode=convert-originals through the service. "
-                    "A managed service whose launcher predates shared originals needs the offline launcher update "
-                    "in docs/managed-service-upgrades.md first.")
+#: What a new archive's creator reports when its process proves no launcher support for shared originals.
+NEW_ARCHIVE_ACTION = ("The first service start that proves it moves new originals into shared storage, with no "
+                      "conversion; a standalone server always proves it. A managed service whose launcher predates "
+                      "shared originals needs the offline launcher update in docs/managed-service-upgrades.md first.")
 
 
-def activate_new(vault: Path) -> dict[str, str]:
-    """Start a genuinely new archive in the shared layout when this process proves launcher support.
+def activate_new(vault: Path, *, authority: object) -> dict[str, str]:
+    """Start a genuinely new archive in the shared layout.
 
-    Without that proof the archive keeps ordinary original storage, and the result names the action. Every
-    new-archive creator calls this once its state is initialized for the final path.
+    Every new-archive creator calls this once its state is initialized for the final path, under its offline
+    authority. The intent is recorded first, so a crash, or a process that proves no launcher support, leaves the
+    first capable service start to activate the layout. Until then the archive keeps ordinary storage.
     """
-    ordinary = {"layout": "ordinary", "reason": "no launcher support for shared originals is proven in this process",
-                "action": LIFECYCLE_ACTION}
+    state_migration.record_shared_originals_intent(vault, authority=authority)
+    if _activate_intent(vault):
+        return {"layout": "shared"}
+    return {"layout": "ordinary", "reason": "no launcher support for shared originals is proven in this process",
+            "action": NEW_ARCHIVE_ACTION}
+
+
+def _activate_intent(vault: Path, *, lock_timeout: float | None = None) -> bool:
+    """Activate a recorded intent where this process proves launcher support; otherwise the intent stays."""
+    required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID
     # Checked first because the refusal below logs an offline-migration error, which is no fault of a new archive.
-    if not artifact_lifecycle.supports(state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID):
-        return ordinary
+    if not artifact_lifecycle.supports(required):
+        return False
     try:
-        enable(vault)
+        enable(vault, lock_timeout=lock_timeout)
     except state_migration.StateMigrationOfflineRequired:
-        return ordinary  # Standby withdrew support after the check.
-    return {"layout": "shared"}
+        return False  # Standby withdrew support after the check.
+    state_migration.clear_shared_originals_intent(
+        vault, authority_check=lambda: artifact_lifecycle.supports(required), lock_timeout=lock_timeout)
+    return True
 
 
-def enable(vault: Path) -> None:
-    """Enrol compatibility before publishing the marker; callers own explicit layout activation."""
+def enable(vault: Path, *, lock_timeout: float | None = None) -> None:
+    """Enrol compatibility before publishing the marker; callers own explicit layout activation.
+
+    A serving caller passes `lock_timeout` and gets `TimeoutError` while another migrator holds the state lock.
+    """
     required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID
     if not artifact_lifecycle.supports(required):
         raise state_migration.StateMigrationOfflineRequired(
             "update the managed launcher offline before enabling shared originals")
     state_migration.record_shared_originals_compatibility(
-        vault, authority_check=lambda: artifact_lifecycle.supports(required))
+        vault, authority_check=lambda: artifact_lifecycle.supports(required), lock_timeout=lock_timeout)
     with reserved_paths._subsystem_authority_scope(OWNER):
         with reserved_paths._stage_owner_chunks(vault, pool_root(vault) / _MARKER_NAME, DESCRIPTOR_ID,
                 held_fs.Chunks(lambda: [_MARKER_BYTES]), expected_sha256=hashlib.sha256(_MARKER_BYTES).hexdigest(),

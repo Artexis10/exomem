@@ -1,4 +1,4 @@
-"""A new archive starts in shared original storage only where launcher support is proven."""
+"""A new archive records that it starts in shared original storage; launcher support decides when."""
 
 from __future__ import annotations
 
@@ -37,10 +37,13 @@ def test_a_new_archive_starts_in_shared_storage_and_files_an_upload_as_one_objec
     assert originals.pooled(vault, filed.path).local_path.read_bytes() == PHOTO
     assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
     assert report["original_storage"] == {"layout": "shared"}
+    assert not state_migration.shared_originals_intent(vault)
 
 
-def test_a_new_archive_without_launcher_support_keeps_ordinary_storage_and_says_why(tmp_path, monkeypatch) -> None:
-    """Catches an init that fails, or enrols a format an older launcher cannot serve, where no support is proven."""
+def test_a_new_archive_without_launcher_support_records_its_intent_and_says_when_it_starts(
+        tmp_path, monkeypatch) -> None:
+    """Catches an init that fails, enrols a format an older launcher cannot serve, or forgets that the archive is new,
+    where no support is proven."""
     monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
     vault = tmp_path / "vault"
 
@@ -48,24 +51,24 @@ def test_a_new_archive_without_launcher_support_keeps_ordinary_storage_and_says_
     filed = _upload(vault)
 
     assert report["original_storage"]["layout"] == "ordinary"
-    assert "convert-originals" in report["original_storage"]["action"]
+    assert "first service start" in report["original_storage"]["action"]
     assert "managed-service-upgrades" in report["original_storage"]["action"]
     assert not original_pool.pool_root(vault).exists()
     assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+    assert state_migration.shared_originals_intent(vault)
     assert (vault / filed.path).read_bytes() == PHOTO
 
 
-def test_an_overlay_of_an_existing_archive_never_changes_its_original_storage(tmp_path, monkeypatch) -> None:
-    """Catches a scaffold overlay that switches an existing archive's layout without the owner's conversion."""
-    vault = tmp_path / "vault"
-    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
-    init.init_vault(vault)
+def test_an_overlay_of_an_existing_archive_never_changes_its_original_storage(vault, monkeypatch) -> None:
+    """Catches a scaffold overlay that switches an existing archive's layout, or marks it new, without the owner's
+    conversion."""
     monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
 
     report = init.init_vault(vault, force=True)
 
     assert "original_storage" not in report
     assert not original_pool.enabled(vault)
+    assert not state_migration.shared_originals_intent(vault)
 
 
 @pytest.mark.parametrize("supported", [True, False])
@@ -80,5 +83,6 @@ def test_a_new_cell_archive_follows_the_new_archive_rule_at_its_final_path(tmp_p
     assert original_pool.enabled(vault) is supported
     recorded = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
     assert recorded is supported
+    assert state_migration.shared_originals_intent(vault) is not supported
     assert result.original_storage["layout"] == ("shared" if supported else "ordinary")
     assert cell_init.run_cell_init(vault).original_storage is None  # An existing cell archive is never re-laid out.

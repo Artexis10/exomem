@@ -327,13 +327,14 @@ def init_vault(
     typed folder tree. Raises ``FileExistsError`` if `Knowledge Base/` already
     exists, unless ``force=True`` (which overlays the scaffold without deleting
     any existing files). A genuinely new vault also receives its empty external
-    state manifest, then starts in shared original storage when this process
-    proves launcher support (``original_storage`` in the result says which).
-    Callers building a renameable staging vault must pass
-    ``initialize_state=False``, initialize state only after publication and
-    then call ``original_pool.activate_new``, because the per-vault state key
-    binds the final vault path. An overlay of an existing vault never changes
-    its original storage.
+    state manifest, which records that the vault starts in shared original
+    storage. The layout is active at once when this process proves launcher
+    support, and otherwise at the first service start that does
+    (``original_storage`` in the result says which). Callers building a
+    renameable staging vault must pass ``initialize_state=False``, initialize
+    state only after publication and then call ``original_pool.activate_new``,
+    because the per-vault state key binds the final vault path. An overlay of
+    an existing vault never changes its original storage.
     """
     vault_root = Path(vault_root)
     if force and _store_mode(vault_root):
@@ -402,7 +403,7 @@ def init_vault(
         )
         from . import original_pool
 
-        storage = original_pool.activate_new(vault_root)
+        storage = original_pool.activate_new(vault_root, authority=authority)
         return {"vault": str(vault_root), "kb": str(kb), "created": created, "original_storage": storage}
 
     return {"vault": str(vault_root), "kb": str(kb), "created": created}
