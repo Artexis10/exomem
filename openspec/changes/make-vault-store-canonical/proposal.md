@@ -34,7 +34,6 @@ The spike also built the alternative: one SQLite store, canonical for page bytes
 
 - `epistemic-graph`: graph rows live in the canonical store in store mode and commit with their page; file mode is unchanged.
 - `live-index-freshness`: in store mode, lexical rows commit with their page, and graph audit re-derives from store bytes instead of repairing from Markdown.
-- `command-surface`: in store mode, a move repoints links in append-only `Sources/` and `Evidence/` pages and changes no other byte.
 
 ## Impact
 

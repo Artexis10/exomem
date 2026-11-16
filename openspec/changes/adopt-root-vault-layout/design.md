@@ -140,7 +140,7 @@ The resolver's order becomes:
 
 Only links that resolve nowhere today change, because the trailing-path step is the last path step. A retired collection path keeps precedence over it.
 
-In store mode, append-only pages in `Sources/` and `Evidence/` accept link repoints and nothing else, each with its own audit reason. File mode keeps today's `APPEND_ONLY` refusal.
+In store mode, append-only pages in `Sources/` and `Evidence/` accept link repoints and nothing else, each with its own audit reason (the `command-surface` delta of this change). File mode keeps today's `APPEND_ONLY` refusal.
 
 Whether the trailing-path step and the naming corrections reach existing `nested` vaults is owner choice O7. The read-only plan computes both and wires nothing.
 
@@ -316,7 +316,7 @@ Each choice changes what a person sees. Examples use an invented insight "Why ch
 - **Later homonyms.** A later fixed name or outside-edit import can add a second file with a name that an existing bare `[[Name]]` already uses, and the link becomes ambiguous. This is accepted debt, and this change adds no repoint rule for it.
 - **Obsidian homonyms.** A bare `[[Name]]` may resolve in Obsidian to a homonym in `_trash` or `_archive`. Writers count every Obsidian-visible file when they choose the short form.
 - **Old builds.** An older build pointed at a `root` vault could create a fresh wrapper folder. The vault-side marker of the store change's rollback design refuses a build that carries the check. A build from before it ignores the marker, so each host must upgrade before the relayout. The replica copy at the old path covers builds that predate the layout record.
-- **Command-surface task moved.** The link-only repoint in append-only pages is a requirement of the `command-surface` delta, which stays in `make-vault-store-canonical`. Its build task moved here (tasks group 5). The store change cannot archive while that task is open unless the delta moves with it.
+- **Append-only repoint.** The store-mode repoint of links in append-only pages is specified (`command-surface` delta) and built (task 5.6) in this change.
 - **Scale.** Each added per-write cost is a bounded lookup. The relayout and the retitle option are the only operations that rewrite many pages. The first is offline and the second is gated by owner choice O5 and a bound.
 
 **Not verified.**

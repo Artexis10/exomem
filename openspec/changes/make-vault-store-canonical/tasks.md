@@ -224,4 +224,4 @@
 
 ## 9. Root layout and readable names (D12)
 
-Moved to the change `adopt-root-vault-layout`, which never gates 7.4. Its task 5.6 builds the link-only repoint in append-only pages that the `command-surface` delta of this change states.
+Moved to the change `adopt-root-vault-layout`, which never gates 7.4.

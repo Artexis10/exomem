@@ -219,7 +219,7 @@ When the true original of content already filed as an original arrives, a govern
 
 ### D12. Root layout and readable names
 
-This decision moved to the change `adopt-root-vault-layout`, which holds its design, tasks and specs. It never gates the store-mode switch (task 7.4), and the relayout of an existing vault runs in store mode after the switch. This change keeps the store-mode repoint of links in append-only pages (the `command-surface` delta) and the rollback export of the path alias table when the store has such a table.
+This decision moved to the change `adopt-root-vault-layout`, which holds its design, tasks and specs. It never gates the store-mode switch (task 7.4), and the relayout of an existing vault runs in store mode after the switch. The store-mode repoint of links in append-only pages moved there too. This change keeps the rollback export of the path alias table when the store has such a table.
 
 ### D13. Store page facts; decide admission by scope set
 
