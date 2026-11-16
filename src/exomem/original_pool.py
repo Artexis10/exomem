@@ -74,9 +74,9 @@ def enabled(vault: Path) -> bool:
 
 
 #: What a new archive's creator reports when its process proves no launcher support for shared originals.
-NEW_ARCHIVE_ACTION = ("The first service start that proves it moves new originals into shared storage, with no "
-                      "conversion; a standalone server always proves it. A managed service whose launcher predates "
-                      "shared originals needs the offline launcher update in docs/managed-service-upgrades.md first.")
+NEW_ARCHIVE_ACTION = ("Shared original storage starts at the archive's first service start, with no conversion. "
+                      "A standalone server starts it itself. A managed service whose launcher predates shared "
+                      "originals needs the offline launcher update in docs/managed-service-upgrades.md first.")
 
 
 def activate_new(vault: Path, *, authority: object) -> dict[str, str]:

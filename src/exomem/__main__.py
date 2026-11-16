@@ -3442,7 +3442,7 @@ def _init_main(argv: list[str]) -> int:
         if storage["layout"] == "shared":
             print("  Originals are stored once, however many filings share their bytes.")
         else:
-            print(f"  Originals keep ordinary storage: {storage['reason']}. {storage['action']}")
+            print(f"  {storage['action']}")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
