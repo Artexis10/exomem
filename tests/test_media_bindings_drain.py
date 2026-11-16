@@ -9,7 +9,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 
 import pytest
-from test_media_store import _retained, selected_store  # noqa: F401
+from test_media_store import _offload, _retained, selected_store  # noqa: F401
 
 from exomem import (
     artifact_lifecycle,
@@ -120,6 +120,37 @@ def test_a_frontier_change_during_physical_probes_cannot_publish_zero(vault, sel
     with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
         media_store.drain_census(vault)
     assert not media_drain_record.record_path(vault).exists()
+
+
+def test_a_page_moved_alone_from_its_withheld_original_still_counts_toward_the_drain(
+    vault, selected_store, monkeypatch,  # noqa: F811
+):
+    """Catches a drain census that drops the page a confined move carried alone, away from its withheld evicted
+    original: the store holds that original's only copy, and a count without it would let a drain release the store."""
+    from exomem import media_processing, move_file, originals
+    from exomem.governance import egress, principal
+
+    content = b"bytes that only the store holds"
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "withheld.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    original = path.relative_to(vault).as_posix()
+    with monkeypatch.context() as confined:
+        confined.setattr(egress, "restricted_release_filter",
+                         lambda *_args, **_kwargs: lambda candidate: candidate != original)
+        with principal.request_scope(principal.most_restrictive_principal(surface="mcp")):
+            move_file.move_file(vault, old_path=original + ".md", new_path="Knowledge Base/Notes/Media/renamed.md")
+    assert originals.original_state(vault, path).state == "missing"
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    _retained(selected_store, vault)
+
+    assert media_store.drain_census(vault) == (1, len(content))
 
 
 def test_a_legacy_reference_only_zero_does_not_survive_ledger_upgrade(vault):
