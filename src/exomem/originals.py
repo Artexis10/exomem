@@ -418,15 +418,39 @@ def bound_companion(
     return None
 
 
+class ArchiveReads:
+    """Archive-level state that one walk over many bindings reads once, as each binding first needs it."""
+
+    def __init__(self, vault: Path) -> None:
+        self.vault = vault
+        self._binding: tuple[StoreBinding | None] | None = None
+        self._pooled = False
+
+    def binding(self) -> StoreBinding | None:
+        if self._binding is None:
+            self._binding = (binding_for(self.vault),)
+        return self._binding[0]
+
+    def pooled(self) -> bool:
+        from . import original_pool
+
+        # A published pool marker is never removed, so a True read is kept. A missing marker is read again, so a
+        # walk sees a conversion that starts while it runs.
+        if not self._pooled:
+            self._pooled = original_pool.enabled(self.vault)
+        return self._pooled
+
+
 def original_state(
     vault: Path, path: str | Path, *, binding: StoreBinding | None = None,
-    companions: Mapping[str, bytes] | None = None,
+    companions: Mapping[str, bytes] | None = None, archive: ArchiveReads | None = None,
 ) -> OriginalSnapshot:
     """Resolve local, cached, evicted or missing from one exact sibling binding.
 
     This reader never constructs a store client or opens the job database.
     Foreign references deliberately confer no presence in the selected vault.
-    ``companions`` is ``companion_candidates``'s: pages that the caller has already read.
+    ``companions`` is ``companion_candidates``'s: pages that the caller has already read. A walk passes one
+    ``archive`` for all its bindings, so it reads the store binding and the pool marker once.
     """
     from . import reserved_paths
     from .vault import FrontmatterError
@@ -474,7 +498,8 @@ def original_state(
         from . import original_pool
 
         try:
-            present = original_pool.enabled(vault) and original_pool.locally_present(
+            pooled = archive.pooled() if archive is not None else original_pool.enabled(vault)
+            present = pooled and original_pool.locally_present(
                 vault, binary_binding_value.sha256, binary_binding_value.size)
         except original_pool.ObjectMismatch:
             present = True  # A damaged object still holds the filing's place; each read of it refuses.
@@ -488,7 +513,7 @@ def original_state(
             physical = True
             local_path = original_pool.object_path(vault, binary_binding_value.sha256)
     reference = stored_reference(fields.get("stored_object"))
-    selected = binding if binding is not None else binding_for(vault)
+    selected = binding if binding is not None else archive.binding() if archive is not None else binding_for(vault)
     if selected is None or (reference is not None and reference.store != selected.store):
         reference = None
     state = ("cached" if physical else "evicted") if reference is not None else ("local" if physical else "missing")

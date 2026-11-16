@@ -597,6 +597,7 @@ def bound_originals(
         return
     from .vault_store import read as store_read
 
+    archive = originals.ArchiveReads(vault)
     for sidecar in iter_kb_files(root):
         if sidecar.suffix.lower() != ".md":
             continue
@@ -607,7 +608,7 @@ def bound_originals(
             relative = originals.bound_path(fields)
             if not isinstance(relative, str) or (selects is not None and not selects(relative)):
                 continue
-            snapshot = original_state(vault, relative)
+            snapshot = original_state(vault, relative, archive=archive)
             if snapshot.sidecar_path == sidecar and snapshot.binary_sha256 is not None:
                 yield snapshot
         except originals.RetirementUnconfirmed as error:
