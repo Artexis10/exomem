@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.183.0](https://github.com/Artexis10/exomem/compare/v0.182.0...v0.183.0) (2026-11-15)
+
+
+### Features
+
+* **hook:** deliver changed session context on every native turn ([#2845](https://github.com/Artexis10/exomem/issues/2845)) ([0c58ddb](https://github.com/Artexis10/exomem/commit/0c58ddbf64dad3722df4eb8fae14c3f5b786e097))
+
+
+### Bug Fixes
+
+* **cellctl:** yield waiting catalogue builds before same-node stops ([#2843](https://github.com/Artexis10/exomem/issues/2843)) ([e25f1d0](https://github.com/Artexis10/exomem/commit/e25f1d010e56047b8aaaf47b25a420b3a9245028))
+* **context:** project found leads before their links are read ([#2856](https://github.com/Artexis10/exomem/issues/2856)) ([ea7d237](https://github.com/Artexis10/exomem/commit/ea7d2378c51ef7834340d446789cf892a5c3fd01))
+* **mcp:** show a misplaced-argument refusal in the text a host reads ([#2847](https://github.com/Artexis10/exomem/issues/2847)) ([3810d8f](https://github.com/Artexis10/exomem/commit/3810d8fe7af0c5e9ab7ef7b849ca4431c7290927))
+* **media:** count the eviction margin in a retained store's shortfall ([#2850](https://github.com/Artexis10/exomem/issues/2850)) ([11db346](https://github.com/Artexis10/exomem/commit/11db3462f51ff553027eb5b2b389cc7ef1187f1d))
+* **records:** reject null required values, preview the whole import source, and bind a row id in one read ([#2853](https://github.com/Artexis10/exomem/issues/2853)) ([306d89b](https://github.com/Artexis10/exomem/commit/306d89b063966094264942f9cc7b0ac3389ec849))
+* **recovery:** admit a trash recovery as a move for a restricted writer ([#2826](https://github.com/Artexis10/exomem/issues/2826)) ([6958d2a](https://github.com/Artexis10/exomem/commit/6958d2a48b0e52d481f633647246d0d4d3c77f9b))
+* **server:** run the shutdown on SIGTERM and let a store-mode rollback project its queue ([#2805](https://github.com/Artexis10/exomem/issues/2805)) ([58dc949](https://github.com/Artexis10/exomem/commit/58dc94907eefe1c71e97621be0a12dd82ea38678))
+* **vault-store:** bring a trashed note back in store mode, project only where a process can record, and keep derived rows equal to file mode ([#2818](https://github.com/Artexis10/exomem/issues/2818)) ([7aaa8cd](https://github.com/Artexis10/exomem/commit/7aaa8cd34c8b38a97c6293d862aecd78bf1f162d))
+
+
+### Performance
+
+* **governance:** keep scope sets across restricted store-mode reads ([#2846](https://github.com/Artexis10/exomem/issues/2846)) ([802e246](https://github.com/Artexis10/exomem/commit/802e2462e7e7f28ef52103925229e5e7caf56c8d))
+* **vault-store:** make a store commit a delta of the semantic corpus context ([#2824](https://github.com/Artexis10/exomem/issues/2824)) ([46553c9](https://github.com/Artexis10/exomem/commit/46553c97e01e3b392b91cc7c6f100af7665f8da0))
+
 ## [0.182.0](https://github.com/Artexis10/exomem/compare/v0.181.0...v0.182.0) (2026-11-15)
 
 
