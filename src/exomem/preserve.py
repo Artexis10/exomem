@@ -23,6 +23,7 @@ themselves never get an LLM — extraction happens in the caller (the sandbox).
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import io
@@ -680,6 +681,14 @@ def preserve(
         elif text_clean:
             # An explicit uploader extraction keeps its existing behavior.
             inspection = None
+        from .add import pools_original
+
+        # A dataset stays an ordinary resident file beside its notes (design D1); other binaries pool.
+        pooled_artifact = (isinstance(staged_content, PreparedBinaryContent)
+                           and not (inspection is not None and inspection.dataset_format)
+                           and pools_original(vault_root, artifact_path))
+        if pooled_artifact:
+            writes = [write for write in writes if write.path != artifact_path]
         # A media binary (audio/video/image/pdf) with no provided text gets a STUB
         # sidecar — pointer + media_type + `extracted_by: pending` — so it's a
         # first-class find() result immediately and the extraction worker fills the
@@ -906,9 +915,20 @@ def preserve(
         from . import curation_witness
 
         curation_witness.bind_native_core(vault_root, [write for write in writes if write.path in core_paths])
-        batch_atomic_write(writes, vault_root=vault_root,
-                           _prepare=prepare_final if _prepare is not None else None,
-                           _validate_prepared_bindings=_validate_inputs)
+        with contextlib.ExitStack() as pooled_stack:
+            publish_original = None
+            pooled_guards: tuple[PathGuard, ...] = ()
+            if pooled_artifact:
+                from .add import staged_pool_publication
+
+                publish_original = staged_pool_publication(
+                    pooled_stack, vault_root, artifact_stage, artifact_hash, artifact_size)
+                # A pooled filing leaves no ordinary file at its logical path; one appearing there would shadow it.
+                pooled_guards = (PathGuard.capture(vault_root, rel_artifact, leaf_policy="absent"),)
+            batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
+                               _prepare=prepare_final if _prepare is not None else None,
+                               _validate_prepared_bindings=_validate_inputs,
+                               _publish_originals=publish_original)
         written_artifact = True
         from . import lexstore
 

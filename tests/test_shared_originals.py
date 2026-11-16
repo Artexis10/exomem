@@ -298,7 +298,8 @@ def test_a_refused_capture_publishes_no_original(vault, tmp_path, monkeypatch) -
     import datetime as dt
 
     from exomem import add as add_module
-    from exomem import schema, vault as vault_module
+    from exomem import schema
+    from exomem import vault as vault_module
 
     monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
     original_pool.enable(vault)
@@ -357,3 +358,27 @@ def test_a_decoder_view_keeps_the_logical_filename_and_disappears_after_use(vaul
         assert not view.is_relative_to(vault / "Knowledge Base" / "Sources")
     assert not view.exists()
     assert not (vault / added.artifact_path).exists()
+
+
+def test_preserved_evidence_pools_its_binary_but_keeps_a_dataset_resident(vault, monkeypatch) -> None:
+    """Evidence uploads share bytes like Sources; a dataset stays a file its queries open in place."""
+    import datetime as dt
+
+    from exomem import originals, preserve
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    photo = b"\x89PNG\r\n\x1a\n" + b"receipt photo bytes" * 64
+    first = preserve.preserve_bytes(vault, scope="work", category="receipts", filename="receipt.png",
+                                    data=photo, today=dt.date(2026, 11, 16))
+    second = preserve.preserve_bytes(vault, scope="work", category="receipts", filename="receipt-copy.png",
+                                     data=photo, today=dt.date(2026, 11, 16))
+    for result in (first, second):
+        assert not (vault / result.path).exists()
+        assert (vault / result.sidecar_path).is_file()
+        assert originals.pooled(vault, result.path) is not None
+    assert originals.pooled(vault, first.path).local_path == originals.pooled(vault, second.path).local_path
+    table = preserve.preserve_bytes(vault, scope="work", category="exports", filename="ledger.csv",
+                                    data=b"date,amount\n2026-11-16,12.50\n", today=dt.date(2026, 11, 16))
+    assert (vault / table.path).is_file()
+    assert originals.pooled(vault, table.path) is None

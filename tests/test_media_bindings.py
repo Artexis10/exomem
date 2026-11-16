@@ -159,7 +159,9 @@ def test_external_edit_withdraws_before_debounce_without_blocking_reads_or_new_f
         with library_scope():
             created = preserve.preserve_stream(vault, scope="Archive", category="documents", filename="another.txt",
                                               stream=io.BytesIO(b"new independent bytes"))
-        assert (vault / created.path).read_bytes() == b"new independent bytes"
+        # A pooled archive files new bytes once in its pool; the filing reads them through its logical path.
+        with media_store.open_original(vault, created.path) as source:
+            assert source.stream.read() == b"new independent bytes"
     finally:
         freshness.clear_external_pending(vault, through=watcher._pending_external_epoch)
 
