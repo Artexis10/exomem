@@ -642,7 +642,7 @@ def _prepend_recent_capture(
     """
     entry = f"- {date_iso} — [[{rel_source_path}]]"
     entry_line = entry + "\n"
-    owned = generated_fragments._Image(entry_line)
+    inserted = generated_fragments._Image(entry_line)
     header_idx = text.find(SOURCES_RECENT_HEADER)
     if header_idx == -1:
         # No Recent captures section — append one at the end.
@@ -654,7 +654,7 @@ def _prepend_recent_capture(
                 generated_fragments._Image.join(
                     (
                         generated_fragments._Image(prefix),
-                        owned,
+                        inserted,
                     )
                 ),
             )
@@ -675,7 +675,7 @@ def _prepend_recent_capture(
                     generated_fragments._Image.join(
                         (
                             generated_fragments._Image(prefix),
-                            owned,
+                            inserted,
                         )
                     ),
                 )
@@ -695,7 +695,7 @@ def _prepend_recent_capture(
         # The generated recent-list protocol fixes "- " as its row token.
         old_bullets = [line for line in old_lines if line.text.startswith("- ")]
         old_rest = [line for line in old_lines if not line.text.startswith("- ")]
-        pieces = [owned]
+        pieces = [inserted]
         for line in [*old_bullets[: RECENT_ACTIVITY_CAP - 1], *old_rest]:
             pieces.extend((line, generated_fragments._Image("\n")))
         _tracking.splice(body_start, section_end, generated_fragments._Image.join(pieces))
@@ -742,7 +742,7 @@ def _prepend_recent_activity(
     section = text[header_idx:section_end]
     lines = section.splitlines()
     new_bullet = f"- {date_iso} — {summary}"
-    owned = generated_fragments._Image(new_bullet + "\n")
+    inserted = generated_fragments._Image(new_bullet + "\n")
     # Locate where bullets start (first line beginning with "- ").
     bullet_start = None
     for i, line in enumerate(lines):
@@ -752,12 +752,12 @@ def _prepend_recent_activity(
     if bullet_start is None:
         # No bullets yet — append after the section.
         prefix = "\n\n"
-        new_section = section.rstrip("\n") + prefix + owned.text
+        new_section = section.rstrip("\n") + prefix + inserted.text
         if _tracking is not None:
             _tracking.splice(
                 header_idx + len(section.rstrip("\n")),
                 section_end,
-                generated_fragments._Image.join((generated_fragments._Image(prefix), owned)),
+                generated_fragments._Image.join((generated_fragments._Image(prefix), inserted)),
             )
         return text[:header_idx] + new_section + text[section_end:], None
 
@@ -791,7 +791,7 @@ def _prepend_recent_activity(
         pieces = []
         for line in old_lines[:bullet_start]:
             pieces.extend((line, generated_fragments._Image("\n")))
-        pieces.append(owned)
+        pieces.append(inserted)
         for line in old_bullets[: RECENT_ACTIVITY_CAP - 1]:
             pieces.extend((line, generated_fragments._Image("\n")))
         _tracking.splice(header_idx, section_end, generated_fragments._Image.join(pieces))
