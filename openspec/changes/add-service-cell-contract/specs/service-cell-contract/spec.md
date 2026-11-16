@@ -74,20 +74,22 @@ Each operation SHALL state in the document whether a repeat of the same request 
 
 Every refusal SHALL carry one error code. A refusal from a leaf SHALL carry the code that the leaf raises through the MCP door.
 The HTTP status SHALL come from the code-to-status map that every HTTP door of the cell shares.
-The service API SHALL read that map through a service overlay. The overlay SHALL add the 401, 403 and 500 classes and SHALL send every busy refusal to 503.
-The busy refusals SHALL include `MUTATION_BUSY` and `MUTATION_WARMING`, which the personal REST facade answers with 409.
+The service API SHALL read that map through a service overlay. The overlay SHALL add the 401, 403 and 500 classes and SHALL send every busy or unavailable refusal to 503.
+The cell SHALL declare its busy and unavailable codes in one list, which the overlay reads. Every code that the cell raises for busy or unavailable capacity SHALL be on that list.
+Examples are `MUTATION_BUSY` and `MUTATION_WARMING`, which the personal REST facade answers with 409, and `CLOUD_CELL_READ_ONLY`, which it answers with 400.
 The overlay SHALL NOT change a status that the personal REST facade, edge ingress or a transfer route returns.
 The service classes SHALL be: 400 invalid request, 401 credential or proof refused, 403 authority refused, 404 resource not found or operation unavailable, 409 conflict or stale precondition, 500 unexpected failure with unknown outcome, and 503 busy or unavailable.
 A refusal that the service renderer makes before the leaf SHALL carry one of these codes: `CLOUD_PROOF_REQUIRED`, `UNAUTHORIZED`, `OPERATION_UNAVAILABLE`, `INVALID_REQUEST`, or the leaf's existing busy code.
 A refusal from the shared request boundary SHALL carry the code that the boundary raises on every door. Examples are a read-only cell, a quiescing cell and a held writer lease.
 A leaf code that the operation does not declare SHALL reach the client with its class status, and the cell SHALL count it by operation.
-A 503 refusal SHALL carry a retry hint in its body and in the `Retry-After` header. The cell SHALL NOT queue a request that it refuses as busy.
+When the cell knows a retry time, a 503 refusal SHALL carry it as a retry hint in its body and in the `Retry-After` header. The cell SHALL NOT queue a request that it refuses as busy.
 A pending or uncertain outcome that the leaf reports as a result state SHALL remain a successful result with that state.
 
 #### Scenario: The cell is busy
 
 - **WHEN** the cell refuses a service request because its model or mutation capacity is busy
-- **THEN** the service API answers with status 503, the leaf's busy code and a `Retry-After` header
+- **THEN** the service API answers with status 503 and the leaf's busy code
+- **AND** the response has a `Retry-After` header when the refusal carries a retry time
 - **AND** the request is not queued
 
 #### Scenario: An authority refusal keeps its personal status
@@ -101,6 +103,12 @@ A pending or uncertain outcome that the leaf reports as a result state SHALL rem
 - **WHEN** a mutation is refused as busy through the personal REST facade and through the service API
 - **THEN** the service API answers with status 503, a retry hint in its body and a `Retry-After` header
 - **AND** the personal REST facade answers with status 409 and the same code
+
+#### Scenario: A read-only cell refuses a write as unavailable
+
+- **WHEN** a Cloud cell that serves read-only refuses a write through the personal REST facade and through the service API
+- **THEN** the service API answers with status 503 and `CLOUD_CELL_READ_ONLY`
+- **AND** the personal REST facade answers with the status that it returned before the service API shipped
 
 #### Scenario: A settlement is still pending
 

@@ -134,7 +134,7 @@ Each release holds one OpenAPI 3.1 document for each version that it serves. The
 
 - **One document per release.** Every cell of one release serves the same bytes for one version. A cell that does not serve an operation of the document refuses it with `OPERATION_UNAVAILABLE`. Discovery lists the operations that the cell serves. A per-cell document was the other option. It would give each cell its own digest and its own generated client.
 - **Digest.** The advertised digest is the SHA-256 of the exact bytes that the cell serves, which are the committed bytes. Within a version the digest changes only when a release adds to the document.
-- **Path.** The cell serves the document at `GET /.well-known/exomem-cell/service-api/<version>.json`, outside the POST operation namespace. Like discovery, it needs no credential and holds no tenant content.
+- **Path.** The cell serves the document at `GET /.well-known/exomem-cell/service-api/<version>.json`, outside the POST operation namespace. Like discovery, it needs no credential and holds no tenant content. On Cloud the gateway routes only authenticated requests. A Cloud integrator therefore fetches the document through the gateway with its own credential. The gateway passes the bytes through unchanged, so the digest still matches.
 - **Clients.** Consumers generate clients with maintained tools, such as `openapi-python-client` or `openapi-typescript`. Exomem writes and maintains no client by hand. Whether Exomem also publishes generated client packages is an open choice.
 - **Repeats.** Each operation states in the document whether a repeat of the same request is safe, and which identifier makes it safe. The capture protocol already supplies these identifiers: the attempt handle and the erasure operation identifier. The service API adds no generic replay layer, because the capture protocol bypasses generic replay by design.
 
@@ -159,9 +159,12 @@ CI runs `oasdiff breaking` between the base branch's committed document and the 
 Every refusal carries one string code. Its HTTP status comes from `cli_ops.http_status_for`, the map that the REST facade, edge ingress and transfer routes already use.
 That map sends most codes to 400, including authority refusals such as `GOVERNANCE_AUTHORITY_REQUIRED`. The personal profile keeps the map unchanged.
 The service profile reads the same map through a service overlay. The overlay adds three classes: 401 for credential and proof refusals, 403 for authority refusals and 500 for unexpected failures.
-The overlay also sends every busy refusal to 503 with `Retry-After`. The shared map sends `MUTATION_BUSY` and `MUTATION_WARMING` to 409, and the personal profile keeps that status.
-A service client needs one status class for "busy, retry later", with a retry hint. A 409 means a conflict that the caller must resolve.
+The overlay also sends every busy or unavailable refusal to 503, with `Retry-After` when the refusal carries a retry time.
+The shared map sends `MUTATION_BUSY` and `MUTATION_WARMING` to 409 and `CLOUD_CELL_READ_ONLY` to 400. The personal profile keeps those statuses. The `/upload` route already answers 503 for `CLOUD_CELL_READ_ONLY`.
+A service client needs one status class for "busy or unavailable, retry later". A 409 means a conflict that the caller must resolve, and a 400 means a request that the caller must change.
 The overlay lists its codes in `cli_ops`, next to the shared map, so one module holds every code-to-status rule. For any other code, the overlay returns the shared map's status.
+The busy and unavailable codes form one declared list in `cli_ops`. It includes the shared map's 503 set, and it is the closed set of codes that the overlay sends to 503.
+A test fails on any `_BUSY` or `_WARMING` code in `src/exomem` that the list does not hold (task 1.5).
 The other option was to change the shared map and declare the `/api` change. The personal facade has local clients and no version, so nothing would warn them of a new status. The spec promises them unchanged replies.
 
 The service profile uses these classes:
@@ -174,7 +177,7 @@ The service profile uses these classes:
 | 404 | resource not found, or operation unavailable | for a resource, check the identifier; for an operation, read discovery |
 | 409 | conflict or stale precondition that the caller resolves | read current state, then decide |
 | 500 | unexpected failure | treat the outcome as unknown; read state, or repeat with the same identifier when the operation states it is safe |
-| 503 | busy or unavailable, including a busy mutation | retry after the hint |
+| 503 | busy or unavailable, including a busy mutation and a read-only cell | retry after the hint, or later when no hint is given |
 
 The service renderer refuses some requests before any leaf runs. Their codes are the same for every operation:
 
@@ -351,7 +354,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 ## Risks / Trade-offs
 
 - **Two doors to one leaf can drift.** → One registration and one leaf per operation; the conformance check runs every operation through both doors.
-- **Extracting one renderer can change the personal facade.** → The personal profile's existing tests and document stay unchanged as the acceptance check. A new test pins the status of an authority code and of a busy code on both profiles (task 1.5). No existing test pins the service side of either code.
+- **Extracting one renderer can change the personal facade.** → The personal profile's existing tests and document stay unchanged as the acceptance check. A new test pins the status of an authority code, a busy code and the read-only code on both profiles (task 1.5). No existing test pins the service side of these codes.
 - **Typed result models add code to each rendered leaf.** → Seven operations in the first version; the models also replace the consumer's hand-written parsers.
 - **The OpenAPI diff tool can miss a semantic change.** → A meaning change still needs review; the committed document makes every schema change visible.
 - **String codes give up enum checks in clients.** → The known values stay in the document; the conformance run fails on an undeclared code.

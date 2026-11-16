@@ -12,11 +12,6 @@ The gateway SHALL NOT add, remove or rename a service operation, and SHALL NOT r
 - **THEN** the gateway forwards the call to the principal's mapped cell with a valid origin proof
 - **AND** the cell runs the operation's leaf only after it verifies the proof
 
-#### Scenario: A service call carries a proof for another cell
-
-- **WHEN** a service call reaches a cell with a proof whose cell identity differs from the cell's own
-- **THEN** the cell refuses the call with status 401 before any leaf runs
-
 #### Scenario: The document passes through unchanged
 
 - **WHEN** an authenticated principal requests the service document path on the gateway
