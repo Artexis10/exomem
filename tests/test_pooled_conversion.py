@@ -108,13 +108,15 @@ def test_only_the_owner_may_convert(vault, supported):
     assert (vault / original).read_bytes() == RECEIPT
 
 
-def test_a_conversion_without_launcher_support_refuses_before_moving_anything(vault, monkeypatch):
-    """Catches a conversion that relocates bytes an older managed launcher would then read as deleted files."""
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_a_conversion_without_launcher_support_refuses_before_moving_anything(vault, monkeypatch, dry_run):
+    """Catches a conversion that relocates bytes an older managed launcher would then read as deleted files, and a
+    preview that offers a plan whose start the same launcher refuses."""
     monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
     original, _page = _file(vault, "receipts", "receipt.png", RECEIPT)
 
     with pytest.raises(OpError) as refused:
-        _convert(vault, dry_run=False)
+        _convert(vault, dry_run=dry_run)
 
     assert refused.value.code == "ORIGINAL_POOL_LIFECYCLE_REQUIRED"
     assert not original_pool.pool_root(vault).exists()

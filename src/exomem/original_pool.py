@@ -53,6 +53,11 @@ def is_canonical_member(path: str) -> bool:
     return originals.is_sha256(digest) and relative == _object_relative(digest)
 
 
+def launcher_supported() -> bool:
+    """Whether this process's launcher has proven that it keeps the shared original format."""
+    return artifact_lifecycle.supports(state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID)
+
+
 def enabled(vault: Path) -> bool:
     """Read canonical format state; a missing derived index cannot disable this layout."""
     with reserved_paths._subsystem_authority_scope(OWNER):
@@ -90,16 +95,15 @@ def activate_new(vault: Path, *, authority: object) -> dict[str, str]:
 
 def _activate_intent(vault: Path, *, lock_timeout: float | None = None) -> bool:
     """Activate a recorded intent where this process proves launcher support; otherwise the intent stays."""
-    required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID
     # Checked first because the refusal below logs an offline-migration error, which is no fault of a new archive.
-    if not artifact_lifecycle.supports(required):
+    if not launcher_supported():
         return False
     try:
         enable(vault, lock_timeout=lock_timeout)
     except state_migration.StateMigrationOfflineRequired:
         return False  # Standby withdrew support after the check.
     state_migration.clear_shared_originals_intent(
-        vault, authority_check=lambda: artifact_lifecycle.supports(required), lock_timeout=lock_timeout)
+        vault, authority_check=launcher_supported, lock_timeout=lock_timeout)
     return True
 
 
@@ -169,11 +173,11 @@ def _record_arrived_format(vault: Path) -> None:
     # which a promotion must survive while it is busy.
     if not (pool_root(vault) / _MARKER_NAME).exists() or not enabled(vault):
         return
-    if not artifact_lifecycle.supports(required):
+    if not launcher_supported():
         log.error("refusing to serve a shared-storage archive whose state does not record that format")
         raise LauncherUpdateRequired()
     state_migration.record_shared_originals_compatibility(
-        vault, authority_check=lambda: artifact_lifecycle.supports(required), lock_timeout=_START_LOCK_SECONDS)
+        vault, authority_check=launcher_supported, lock_timeout=_START_LOCK_SECONDS)
     log.warning("recorded the shared original storage format of an archive that arrived without it")
 
 
@@ -187,12 +191,11 @@ def enable(vault: Path, *, lock_timeout: float | None = None) -> None:
 
     A serving caller passes `lock_timeout` and gets `TimeoutError` while another migrator holds the state lock.
     """
-    required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID
-    if not artifact_lifecycle.supports(required):
+    if not launcher_supported():
         raise state_migration.StateMigrationOfflineRequired(
             "update the managed launcher offline before enabling shared originals")
     state_migration.record_shared_originals_compatibility(
-        vault, authority_check=lambda: artifact_lifecycle.supports(required), lock_timeout=lock_timeout)
+        vault, authority_check=launcher_supported, lock_timeout=lock_timeout)
     with reserved_paths._subsystem_authority_scope(OWNER):
         with reserved_paths._stage_owner_chunks(vault, pool_root(vault) / _MARKER_NAME, DESCRIPTOR_ID,
                 held_fs.Chunks(lambda: [_MARKER_BYTES]), expected_sha256=hashlib.sha256(_MARKER_BYTES).hexdigest(),

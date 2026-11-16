@@ -77,6 +77,8 @@ def convert(vault_root: Path, *, dry_run: bool = True, plan_id: str | None = Non
     """
     vault = Path(vault_root).resolve()
     maintenance_jobs.require_owner(vault)
+    if not original_pool.enabled(vault) and not original_pool.launcher_supported():
+        raise _launcher_update_required()  # A preview offers no plan that its start would refuse.
     maintenance_jobs.checkpoint("planning")
     inventory = _inventory(vault)
     fresh = maintenance_jobs.plan_identity(MODE, {}, (filing.entry() for filing in inventory.convert))
@@ -114,12 +116,16 @@ def _enable(vault: Path) -> None:
     try:
         original_pool.enable(vault)
     except state_migration.StateMigrationOfflineRequired:
-        raise OpError(
-            "ORIGINAL_POOL_LIFECYCLE_REQUIRED",
-            "this service's launcher has not proven support for shared originals",
-            "Update the managed launcher offline (docs/managed-service-upgrades.md), then run the conversion again.",
-            details={"status": "terminal", "committed": False},
-        ) from None
+        raise _launcher_update_required() from None
+
+
+def _launcher_update_required() -> OpError:
+    return OpError(
+        "ORIGINAL_POOL_LIFECYCLE_REQUIRED",
+        "this service's launcher has not proven support for shared originals",
+        "Update the managed launcher offline (docs/managed-service-upgrades.md), then run the conversion again.",
+        details={"status": "terminal", "committed": False},
+    )
 
 
 def _inventory(vault: Path) -> _Inventory:
