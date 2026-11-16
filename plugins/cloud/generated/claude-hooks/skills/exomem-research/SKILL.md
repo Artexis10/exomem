@@ -2,7 +2,7 @@
 name: exomem-research
 description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 metadata:
-  skill_contract: 7a1f53dc262a115f19e5e35a422923eef2bd3bb678862c216470143be4383f3d
+  skill_contract: 92b556a074aa7fb86732619e9a2583e47b6228ac89fc9202cc7bd702fc6a1f3f
   version: "0.1.0"
 ---
 
@@ -94,7 +94,7 @@ Save findings that answer the question, change a decision, or create reusable co
 ## Mistakes to avoid
 Do not research from scratch before checking Exomem. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
 
-<!-- exomem-semantic-authoring:v11 sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8 -->
+<!-- exomem-semantic-authoring:v12 sha256:1410a1cacfddf9f0a4977c4d4ab3776e0011976c840d8bbd21f3967053b54923 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

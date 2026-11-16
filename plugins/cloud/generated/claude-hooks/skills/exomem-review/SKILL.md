@@ -2,7 +2,7 @@
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
-  skill_contract: 7a1f53dc262a115f19e5e35a422923eef2bd3bb678862c216470143be4383f3d
+  skill_contract: 92b556a074aa7fb86732619e9a2583e47b6228ac89fc9202cc7bd702fc6a1f3f
   version: "0.2.0"
 ---
 
@@ -152,7 +152,7 @@ Do not auto-delete. Do not treat queue presence as proof something is wrong. Do
 not auto-accept suggested relations or batch risky mutations without user
 confirmation.
 
-<!-- exomem-semantic-authoring:v11 sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8 -->
+<!-- exomem-semantic-authoring:v12 sha256:1410a1cacfddf9f0a4977c4d4ab3776e0011976c840d8bbd21f3967053b54923 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

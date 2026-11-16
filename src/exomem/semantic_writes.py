@@ -2739,22 +2739,38 @@ def _prepare_markdown_catalog_publication(
 
 
 @call_spans.timed("post_commit.structure_suggestion")
-def _structure_suggestion(vault_root: Path, state: Any) -> dict[str, Any] | None:
-    """The note-cohesion question for a committed page, while its item is open. Advisory; never raises.
+def _structure_suggestion(
+    vault_root: Path, state: Any, *, created: bool = False, previous: Any = None
+) -> dict[str, Any] | None:
+    """The structure question for a committed page, while its item is open. Advisory; never raises.
 
     Runs only after the guarded write has returned, over the page state the
     preflight already built, and holds no lock. It reads the review-state file to
     learn whether the page's item is already answered. A fault here, including an
     unreadable review state, costs the caller the question, never the write:
     asking on every write when decisions cannot be read would turn it into noise.
-    """
-    try:
-        from . import note_cohesion
 
-        return note_cohesion.suggestion_for_state(vault_root, state)
-    except Exception:  # noqa: BLE001 -- a structural question never breaks a commit
-        log.debug("note cohesion question failed (non-fatal)", exc_info=True)
-        return None
+    A response carries one question. The ownership question leads the cohesion question:
+    a page's home decides what its size means. `created` and `previous` (the page before
+    an edit) tell the ownership review whether this write opens its item.
+    """
+    from . import note_cohesion, ownership_review
+
+    questions: tuple[Callable[[], dict[str, Any] | None], ...] = (
+        lambda: ownership_review.suggestion_after_write(
+            vault_root, state, created=created, previous=previous
+        ),
+        lambda: note_cohesion.suggestion_for_state(vault_root, state),
+    )
+    for ask in questions:
+        try:
+            suggestion = ask()
+        except Exception:  # noqa: BLE001 -- a structural question never breaks a commit
+            log.debug("structure question failed (non-fatal)", exc_info=True)
+            continue
+        if suggestion is not None:
+            return suggestion
+    return None
 
 
 def _records_routing_from_terms(
@@ -3141,7 +3157,9 @@ def commit_existing(
             corpus=preflight.after_corpus,
             transition_id=_existing_transition_id(preflight.transition_token),
         )
-    suggestion = _structure_suggestion(vault_root, preflight.after)
+    suggestion = _structure_suggestion(
+        vault_root, preflight.after, previous=preflight.before
+    )
     routing = _records_routing(vault_root, preflight.after)
     _observation_delta(vault_root, preflight.after, routing)
     delivered_routing = _records_routing_for_delivery(
@@ -5103,7 +5121,10 @@ def _creation_post_commit(
             vault_root, preflight.destination, before_source=None, after_source=preflight.source,
             origin=promotion_origin, corpus=preflight.corpus, source_state=preflight.semantic_state,
         )
-    suggestion = _structure_suggestion(vault_root, preflight.semantic_state)
+    # A successor page is a new version of an entity, so it opens no new question.
+    suggestion = _structure_suggestion(
+        vault_root, preflight.semantic_state, created=predecessor_path is None
+    )
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)
     delivered_routing = _records_routing_for_delivery(

@@ -249,6 +249,14 @@ changes `status`, `mutated`, `warnings_count`, mutation identity, or replay, and
 failure to compute it omits the field rather than affecting the write. The runtime
 never creates, moves, renames, or deletes anything as a result.
 
+The same field has kind `ownership` while the written page is asked whether it belongs
+in its project and that question is unanswered. It carries the review item's `ref`,
+`fingerprint` and `id`, and one `question`. The question holds the ownership test and the
+call that keeps the page where it is; it never reports a path, title, or count belonging
+to another page. It has the same advisory limits, and a response carries at most one
+`structure_suggestion`, with the ownership one first. The `structural_suggestions`
+delegation class and the `ownership_review` family disposition both withhold it.
+
 `detail="full"` adds the existing leaf result under
 `diagnostics`. The detail choice
 is removed before mutation identity is calculated, so it cannot create a second

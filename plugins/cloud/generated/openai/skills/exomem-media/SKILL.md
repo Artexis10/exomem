@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: 7a1f53dc262a115f19e5e35a422923eef2bd3bb678862c216470143be4383f3d
+  skill_contract: 92b556a074aa7fb86732619e9a2583e47b6228ac89fc9202cc7bd702fc6a1f3f
   version: "0.1.0"
 ---
 
@@ -102,7 +102,7 @@ Raw media belongs in `Sources/` or `Evidence/`; textual notes should summarize c
 ## Mistakes to avoid
 Do not claim visual/audio evidence from filenames alone. Do not discard raw media after extracting text. Do not paste whole transcripts into notes when a cited artifact path with timestamps or pages is the durable evidence; read the extracted text in full before concluding anything from it.
 
-<!-- exomem-semantic-authoring:v11 sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8 -->
+<!-- exomem-semantic-authoring:v12 sha256:1410a1cacfddf9f0a4977c4d4ab3776e0011976c840d8bbd21f3967053b54923 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

@@ -304,6 +304,20 @@ whole, dismiss the item through `decide_review_item` with a reason that starts
 plan through the curation lane and ask the user to confirm the exact plan. A hub
 by design carries a breadth tag. The same items sit in due-state as a backlog.
 
+The same field has kind `ownership` while the written page is asked whether it belongs
+in its current project and that question is unanswered. A page is asked when it is
+created in a project, when its project key or title changes, and when the daily
+rotation reaches it. The field carries the review item's `ref`, `fingerprint` and `id`,
+and one `question` that holds the ownership test and the call that keeps the page where
+it is. The runtime decides when to ask and never judges the page or moves it. To keep
+the page where it is, dismiss the item through `decide_review_item` with a reason that
+starts `intentional:` and names the project goal the page serves; it stays quiet until
+the page's project key, home folder or title changes. If you cannot tell, dismiss with a
+reason that starts `deferred:`, or make no call. To move or split the page, tell the
+user and propose the change through the curation lane, after the user confirms the
+exact plan. A response carries at most one `structure_suggestion`, and the ownership
+one comes first.
+
 Use `response_detail="full"` when an agent
 needs the previous leaf diagnostics nested under `diagnostics`.
 `response_detail="legacy"` returns the old raw result for temporary
