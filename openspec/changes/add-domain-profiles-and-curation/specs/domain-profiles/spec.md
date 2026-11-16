@@ -60,7 +60,7 @@ Selection:
 - The product SHALL decide which domains a turn touches by retrieval restricted to the caller's admitted profile pages. A page that is not a profile never touches a domain.
 - A semantic reading SHALL score each profile page's stored chunks against the turn's vector and take the page's best chunk score. The vector is the one the activation pass already encoded: the turn slice's, or the task-context dense lane's when the slice encodes nothing, as on a small catalogue. The response SHALL NOT encode the turn again.
 - The semantic reading SHALL cost in proportion to the number of profile pages, not the size of the vault.
-- A lexical reading SHALL run one bounded keyword query over the same pages.
+- A lexical reading SHALL run one bounded keyword query over the same pages. It SHALL read the catalogue at the lexical checkpoint the activation request already holds, and SHALL NOT take a new freshness snapshot or walk the vault. A catalogue that is not ready at that checkpoint leaves the reading unrun.
 - A page SHALL be selected when its semantic score reaches `budgets.profile_semantic_floor` or its keyword score reaches `budgets.profile_lexical_floor`.
 - Selected pages SHALL rank by the sum of their scores, and the response SHALL keep at most `budgets.profile_domains_max` touched domains. Ancestors follow after that cap, so they do not count against it.
 - The three limits are vault-owned activation conventions with shipped defaults of 0.50, 8.5 and 2. The floors accept a number in 0..1 and 0..100, and the cap accepts a whole number in 1..8.

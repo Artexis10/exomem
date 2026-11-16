@@ -12,6 +12,7 @@ import base64
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -23,15 +24,16 @@ from test_working_set_withheld_twins import _withhold
 
 from exomem import (
     activation_conventions,
-    bm25,
     commands,
     context_catalogue,
     domain_profiles,
     embeddings,
     lexstore,
     note_types,
+    profile_selection,
     ranking_config,
     readiness,
+    recall_policy,
     recall_space,
     source_taxonomy,
     stance,
@@ -552,11 +554,37 @@ def test_a_vault_floor_decides_whether_a_meaning_match_selects(semantic_vault) -
     assert packet["domain_profiles"]["profiles"] == [] and packet["domain_profiles"]["selection"] == "semantic"
 
 
-def test_a_keyword_outage_with_no_turn_vector_leaves_the_profiles_unknown_not_absent(profiles_vault, monkeypatch) -> None:
-    def down(*args, **kwargs):
-        raise OSError("lexical index unreadable")
+def test_selecting_profiles_walks_the_vault_no_more_often_than_without_them(profiles_vault, monkeypatch) -> None:
+    """The keyword reading takes the checkpoint the request holds; working one out walks every page of the vault."""
+    walks: list[None] = []
+    original = recall_policy.iter_recall_markdown
+    monkeypatch.setattr(recall_policy, "iter_recall_markdown", lambda *args, **kwargs: walks.append(None) or original(*args, **kwargs))
+    _activate(profiles_vault, GAMES_TURN)  # the first request fills the caches; count the second of each kind
+    walks.clear()
+    packet = _activate(profiles_vault, GAMES_TURN)
+    with_profiles = len(walks)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PROFILES", "off")
+    walks.clear()
+    _activate(profiles_vault, GAMES_TURN)
 
-    monkeypatch.setattr(bm25, "search", down)
+    assert packet["domain_profiles"]["selection"] == "lexical" and "games" in _served(packet)
+    assert with_profiles == len(walks)
+
+
+def _keyword_reading_down(*args, **kwargs):
+    raise OSError("lexical index unreadable")
+
+
+def _keyword_catalogue_behind(*args, **kwargs):
+    return lexstore.CatalogQueryResult(None, lexstore.CatalogReadiness("stale", False, "auto"))
+
+
+@pytest.mark.parametrize("keyword_reading", [_keyword_reading_down, _keyword_catalogue_behind])
+def test_a_keyword_reading_that_does_not_run_with_no_turn_vector_leaves_the_profiles_unknown_not_absent(
+    profiles_vault, monkeypatch, keyword_reading,
+) -> None:
+    # Only the profile selection's own reading fails; the turn slice and task context keep theirs.
+    monkeypatch.setattr(profile_selection, "lexstore", SimpleNamespace(search_bm25_result=keyword_reading))
 
     packet = _activate(profiles_vault, GAMES_TURN)
 

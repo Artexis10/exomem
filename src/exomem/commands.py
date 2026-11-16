@@ -8066,7 +8066,7 @@ def _op_activate_context_body(
                     native_skills=native_skills, known_skills=(held_map or {}).get("skills_generation"),
                     known_stance=(held_map or {}).get("stance_generation"),
                     known_profiles=(held_map or {}).get("profile_generations"),
-                    turn=turn,
+                    turn=turn, snapshot=snapshot,
                     task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                     spent_after=reserved_chars,

@@ -102,11 +102,13 @@ def _with_ancestors(taxonomy: source_taxonomy.SourceTaxonomy, touched: Sequence[
 def compile_block(
     root: Path, caller: Any, *, turn: str = "", turn_vector: Any = None,
     catalogue: Any = None, known_generations: Mapping[str, str] | None = None, today: date | None = None,
+    lexical: profile_selection.LexicalBasis | None = None,
 ) -> dict[str, Any]:
     """The profiles for the domains the turn touches, from admitted units only.
 
     A domain is touched when its profile page clears a floor in `profile_selection`, which reads the turn vector
     the activation pass already holds and one keyword query, both restricted to the caller's profile pages.
+    The keyword query reads the catalogue at the `lexical` checkpoint the request holds; with none it does not run.
     `selection` on the block names the evidence read, so a turn without a vector shows as `lexical`.
 
     A hidden page or unit changes no count, generation or expiry. Each profile fits whole lines within the vault's
@@ -136,7 +138,7 @@ def compile_block(
     semantic_floor = conventions.budget("profile_semantic_floor")
     lexical_floor = conventions.budget("profile_lexical_floor")
     selection = profile_selection.select(
-        root, [page.path for page in pages], turn, turn_vector, restricted=caller.restricted,
+        root, [page.path for page in pages], turn, turn_vector, restricted=caller.restricted, lexical=lexical,
         semantic_floor=float("inf") if semantic_floor is None else semantic_floor,
         lexical_floor=float("inf") if lexical_floor is None else lexical_floor,
     )
