@@ -1617,8 +1617,13 @@ def _parse_page_state(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
     complete_authored_effects: bool = False,
+    owner_type_basis: note_types.Basis | None = None,
 ) -> SemanticPageState:
-    """Build detached semantic state from one already-read Markdown string."""
+    """Build detached semantic state from one already-read Markdown string.
+
+    ``owner_type_basis`` is the owner-local note-type basis that the caller shares across the pages
+    it parses, so that each page does not load the registry again.
+    """
     request_budget.checkpoint()
     root = Path(vault_root)
     rel_path = _normalize_path(root, path)
@@ -1712,7 +1717,9 @@ def _parse_page_state(
     writable_placed = (
         connectable_placed and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
     )
-    compiled = writable_placed and note_types.Basis(root, owner_local=True).selects(
+    if owner_type_basis is None:
+        owner_type_basis = note_types.Basis(root, owner_local=True)
+    compiled = writable_placed and owner_type_basis.selects(
         activation.normalized_page_type(parsed.page_type), note_types.compiled
     )
     return SemanticPageState(

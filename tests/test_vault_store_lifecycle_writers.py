@@ -746,3 +746,30 @@ def test_a_folder_trashs_store_reads_do_not_grow_with_its_pages(served, monkeypa
     many = reads_for_one_trash("Knowledge Base/Projects/Many", 30)
 
     assert few == many
+
+
+def test_a_folder_recoverys_store_reads_do_not_grow_with_its_pages(served, monkeypatch):
+    """A folder recovery that resolves each derived page's note type through its own store reader:
+    its cost grows with the folder, and each page's type may read another revision of the registry."""
+    opened = []
+    real = connection.store_reader
+
+    def counting(*arguments, **keywords):
+        opened.append(1)
+        return real(*arguments, **keywords)
+
+    def reads_for_one_recovery(folder, pages):
+        store_folder(served, pages, folder=folder)
+        trashed = delete_directory.delete_directory(
+            served, path=folder, confirm=True, recursive=True
+        )
+        opened.clear()
+        with monkeypatch.context() as patched:
+            patched.setattr(connection, "store_reader", counting)
+            recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+        return len(opened)
+
+    few = reads_for_one_recovery("Knowledge Base/Projects/Few", 2)
+    many = reads_for_one_recovery("Knowledge Base/Projects/Many", 30)
+
+    assert few == many
