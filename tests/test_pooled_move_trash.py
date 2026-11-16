@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+import test_media_store
 
 from exomem import (
     artifact_lifecycle,
@@ -29,6 +30,8 @@ from exomem.governance.principal import library_scope
 
 DATA = b"quarterly ledger, exported once and filed by its owner"
 FOLDER = "Knowledge Base/Notes/Attachments"
+# A configured media store, for the cases that evict an original.
+selected_store = test_media_store.selected_store
 
 
 def _filing(vault: Path, name: str = "ledger.bin", data: bytes = DATA, folder: str = FOLDER) -> tuple[str, str]:
@@ -181,6 +184,42 @@ def test_a_trashed_folder_keeps_its_pooled_filing_bound_through_recovery(vault, 
     assert _bound(vault, page) == binary and media_store.read_original_bytes(vault, binary).data == DATA
     complete, rows = _rows(vault)
     assert complete and rows == {(page, binary)}
+
+
+LOOSE = "Knowledge Base/Notes/Media/loose.txt"
+
+
+def _evicted_in_trash(vault: Path, monkeypatch: pytest.MonkeyPatch) -> delete_file.DeleteFileResult:
+    """An offloaded original that went to Trash and was evicted there before the archive enabled the pool."""
+    from test_vault_store_media import offloaded
+
+    offloaded(vault, LOOSE)
+    trashed = delete_file.delete_file(vault, path=LOOSE, confirm=True)
+    with media_store.open_original(vault, vault / trashed.trash_path):
+        pass  # a read records the cache binding that an eviction at the Trash path needs
+    assert media_store.evict(vault, vault / trashed.trash_path)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    return trashed
+
+
+def test_an_original_evicted_in_trash_before_pooling_recovers_by_its_trash_path_as_an_ordinary_file(
+        vault, selected_store, monkeypatch):
+    """Catches a recovery that takes the entry's own reference companion for a trashed filing's page and refuses
+    the entry the caller picked, or that fetches the entry into the pool and leaves no file at its Trash path to
+    move back."""
+    from test_vault_store_media import ORIGINAL_BYTES
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+
+    planned = recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path, validate_only=True)
+    recovered = recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path)
+
+    assert planned.restored_path == recovered.restored_path == LOOSE
+    assert (vault / LOOSE).read_bytes() == ORIGINAL_BYTES
+    assert originals.original_state(vault, LOOSE).local_path is None
+    assert list_trash.list_trash(vault).as_dict() == {"entries": [], "count": 0, "orphan_sidecars": [], "orphan_files": []}
+    assert not original_pool.object_path(vault, hashlib.sha256(ORIGINAL_BYTES).hexdigest()).exists()
 
 
 def test_an_archive_without_shared_storage_still_moves_its_ordinary_bytes(vault):

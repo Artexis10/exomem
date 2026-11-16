@@ -1447,6 +1447,7 @@ def _hydrate(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, tok
     if current.state != "evicted":
         return  # Another completed hydration needs no second provider read.
     relative = ledger._relative(snapshot.path)
+    # Only a filing hydrates into the pool; a Trash entry comes back as an ordinary file at its own Trash path.
     key = media_bindings.object_key(vault, relative, snapshot.binary_sha256)
     if key != relative:
         _hydrate_shared(vault, snapshot, ledger, token, key)

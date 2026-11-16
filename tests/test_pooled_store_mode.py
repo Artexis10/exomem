@@ -7,6 +7,7 @@ moved into the shared pool keeps its record but has no file at its logical path.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from test_vault_store_media import (  # noqa: F401 - fixtures
 from test_vault_store_projector import NOTES
 
 from exomem import (
+    artifact_lifecycle,
     delete_file,
     list_trash,
     media_bindings,
@@ -142,3 +144,36 @@ def test_a_trashed_pooled_filing_in_store_mode_lists_as_one_original_and_recover
     assert media_bindings.follow_store(vault)
     complete, rows = _rows(vault)
     assert complete and rows == {(page, rel)}
+
+
+def test_an_original_evicted_in_trash_before_pooling_recovers_by_its_trash_path_in_store_mode(
+    vault, selected_store, monkeypatch  # noqa: F811 - the store-mode suite's fixtures
+):
+    """A recovery that takes the entry's own reference companion for a trashed filing's page refuses the entry the
+    caller picked; one that fetches the entry into the pool finds no file at its Trash path and fails."""
+    rel = f"{NOTES}/Media/loose.txt"
+    offloaded(vault, rel)
+    trashed = delete_file.delete_file(vault, path=rel, confirm=True)
+    with media_store.open_original(vault, vault / trashed.trash_path):
+        pass  # a read records the cache binding that an eviction at the Trash path needs
+    assert media_store.evict(vault, vault / trashed.trash_path)
+    enter_store_mode(vault)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    try:
+        planned = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path, validate_only=True))
+        recovered = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path))
+        projector.Projector(vault, run=thread.run).run_pass()
+        listed = list_trash.list_trash(vault).as_dict()
+    finally:
+        thread.close()
+
+    assert planned.restored_path == recovered.restored_path == rel
+    assert (vault / rel).read_bytes() == ORIGINAL_BYTES
+    assert originals.original_state(vault, rel).local_path is None
+    assert listed == {"entries": [], "count": 0, "orphan_sidecars": [], "orphan_files": []}
+    assert not original_pool.object_path(vault, hashlib.sha256(ORIGINAL_BYTES).hexdigest()).exists()

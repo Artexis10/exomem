@@ -143,14 +143,19 @@ def policy_key(vault: Path) -> str:
     return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def object_key(vault: Path, binary_rel: str, digest: str | None = None, *, pooled: bool | None = None) -> str:
-    """An ordinary file's location stays distinct, even when another file has equal bytes."""
+def object_key(vault: Path, binary_rel: str, digest: str | None = None, *, pooled: bool | None = None,
+               bound: str | None = None) -> str:
+    """An ordinary file's location stays distinct, even when another file has equal bytes.
+
+    ``bound`` is the path that the binding's companion names, when a Trash placement maps it to ``binary_rel``.
+    A Trash entry's bytes stay at its own path (`originals.may_pool`).
+    """
     if digest is None:
         snapshot = originals.original_state(vault, binary_rel)
         digest = snapshot.binary_sha256
         if snapshot.local_path is not None:
             return snapshot.local_path.relative_to(vault).as_posix()
-    if digest is None:
+    if digest is None or not originals.may_pool(binary_rel if bound is None else bound):
         return binary_rel
     if pooled is None:
         pooled = original_pool.enabled(vault)
@@ -247,8 +252,8 @@ def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = No
     bounds = selected.bounds
     resident = (originals.is_note_path(binary.path) or "data_file" in fields
                 or bounds is None or bounds.classify(binary.size) == media_capacity.RESIDENT)
-    return Binding(binary.path, rel, digest,
-                   object_key(vault, binary.path, binary.sha256, pooled=selected.pooled), binary.sha256,
+    key = object_key(vault, binary.path, binary.sha256, pooled=selected.pooled, bound=originals.bound_path(fields))
+    return Binding(binary.path, rel, digest, key, binary.sha256,
                    binary.size, resident, None if reference is None else json.dumps(reference.fields(), sort_keys=True))
 
 

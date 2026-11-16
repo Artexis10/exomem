@@ -283,6 +283,18 @@ def available(vault: Path, path: str | Path) -> bool:
     return original_state(vault, target).state in {"local", "cached", "evicted"}
 
 
+def may_pool(bound: str) -> bool:
+    """Whether a binding whose companion names ``bound`` may keep its bytes as a shared pool object.
+
+    Only a filing's bytes are shared. A Trash entry is no filing: its companion names its own Trash path,
+    while a trashed filing's page keeps naming its original path. So a binding that names a Trash path is
+    an entry, which keeps an ordinary file there even in a pooled archive.
+    """
+    from .trash_metadata import is_trash_path
+
+    return not is_trash_path(bound)
+
+
 def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
     """The filing of an original whose bytes are a shared pool object, which has no file at its logical path.
 
@@ -439,7 +451,7 @@ def original_state(
     if binary_binding_value is None:
         return OriginalSnapshot("local" if physical else "missing", binary, sidecar)
     local_path = None
-    if not physical and not store_read.serves(vault, relative):
+    if not physical and not store_read.serves(vault, relative) and may_pool(relative):
         from . import original_pool
 
         try:
