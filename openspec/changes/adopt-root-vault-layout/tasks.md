@@ -1,0 +1,88 @@
+This change never gates the store-mode switch (task 7.4 of `make-vault-store-canonical`). The groups follow the delivery order in design L11, and a group waits only on what its heading names. A task ends with "(was 9.N)" when it moved here from task group 9 of `make-vault-store-canonical`.
+
+## 1. Managed-root helpers (delivered)
+
+- [x] 1.1 Add the managed-root helpers to `src/exomem/kbdir.py` (`managed_join`, `managed_split` and the others), so that code builds and compares managed-relative paths through them and not through `kb_dirname()` or `kb_prefix()`. (was 9.1)
+  - Evidence: the helpers sit in `src/exomem/kbdir.py` (#2868).
+- [x] 1.2 Route every site that built or compared the wrapper folder as a string through the helpers. (was 9.1)
+  - Evidence: a search of `src/exomem` finds no call of `kb_dirname()` or `kb_prefix()` outside `kbdir.py` (#2868).
+- [x] 1.3 Refuse a new `kb_dirname()` or `kb_prefix()` call outside `kbdir.py` in the repository's semgrep gate, so the routing stays in place while the layout work proceeds.
+  - Evidence: the rule `managed-root-bare-name` in `.github/semgrep/managed-root.yml`, listed under `semgrep.rules` in `.github/quality.yml` (#2868).
+
+## 2. Read-only relayout plan and layout model
+
+Nothing in this group changes a link, a name or a write. The plan computes the trailing-path resolution and the naming corrections, and group 4 wires them into the resolver and the writers after owner choice O7.
+
+- [ ] 2.1 Resolve the managed root from the layout record. Define `_Schema/vault-layout.yaml` (`layout`, `unmanaged`) and `layout.resolve(vault_root)` with its four cases: a `root` record gives `root`; no record and only the wrapper `_Schema/` gives `nested`; no record and `_Schema/` at the root only refuses and names the missing record; no record and `_Schema/` in both places refuses and names both folders. While a record exists, report a leftover second `_Schema/` in status and doctor and never refuse. Give `managed_join` and `managed_split` an optional layout, and return today's strings in `nested`. (was 9.1)
+- [ ] 2.2 Add `layout.translate_path(pattern, layout)` as a pure function. It reads note-type and home `folder` values, governance `paths`, `exclude_paths` and `refs`, `_access.yaml` tiers, instance bindings and folder topic carriers. In `root` it drops a leading wrapper segment and reads `Notes/<Area>/...` as `<Area>/...` for a registered compiled area or home. It rewrites no file. Group 4 wires it into the readers.
+- [ ] 2.3 Add the Obsidian basename-or-path rule and `link_form(target, name_group, layout)` as pure functions beside the resolver. Compare under the NFC-casefold key (`held_fs.vault_name_key`). Reuse `_LINK_TITLE_REFUSED` plus `^` and add no second set. Give the rule a single-line reason in the code. Take the homonym group from an indexed lookup in store mode and from the resolver's stem buckets in file mode, never from a scan of all paths.
+- [ ] 2.4 Compute the naming corrections in the plan: remove `#`, `^`, `[` and `]`, strip leading dots, cap a name at 200 UTF-8 bytes at a code-point boundary. Compute derived names for the types that declare a title rule. Keep the date prefix of the current filename for any dated stem when it parses. Resolve collisions in ascending order of current paths, with the two name sets of design L6.
+- [ ] 2.5 Add `exomem store-mode relayout --plan [--json]`, which runs on any vault in file or store mode and writes nothing. Build the planner as `plan(vault_root, target) -> RelayoutPlan` with the target layout as a parameter, deterministic and sorted by current path. Report moves, renames, ` (2)` suffixes, truncations, link edits per page (append-only pages separately), pointer-field edits (including `parent_media`) and where `.obsidian` sits.
+- [ ] 2.6 List in the plan each unregistered `Notes/<X>` folder, each foreign top-level entry with its links into the managed tree, every top-level name collision, and every page it cannot map. Include the entries that `unmanaged` would hold.
+- [ ] 2.7 Add the disclosure diff to the plan. For every scope, access tier and instance binding, compute the member set by identity before and after, reusing the membership kernels. Report each difference with counts and sample ids. List each path ref and filename glob that names a renamed page, which the operator converts to an id ref.
+- [ ] 2.8 Report in the plan the counts that each owner choice depends on, such as "pages flattening would move: N; scopes flattening would change: K".
+- [ ] 2.9 Confirm Obsidian's handling of partial paths, case-insensitive matching and extensionless links a single time on a fixture vault, and record the result in the design.
+- [ ] 2.10 Prove the plan. Highest-level check: `--plan` on a generated nested vault that covers every listing: partitions, homonyms, a title with `#`, Evidence collisions, a scope by path and a scope by project, a frame with `parent_media`, foreign root files and `.obsidian` inside the wrapper. File mode and store mode give the same plan. A byte snapshot and the store revision stay unchanged. Add guard tests:
+  - two runs give the same names;
+  - the disclosure diff catches a path ref to a renamed page and a partition glob under flattening;
+  - a mapped `parent_media` gives no difference;
+  - trailing-path resolution: a unique suffix resolves, an ambiguous suffix stays unresolved, earlier steps are unchanged and a retired collection path keeps precedence;
+  - a plan over the 20,000-page drill generator (`tests/test_vault_store_graph_readers.py`) finishes within twice a cold lexical build on the same host, with bounded memory.
+
+## 3. Owner choices
+
+- [ ] 3.1 Copy a real vault to a disposable location with its own state root, and run `relayout --plan` against the copy. Record the counts in the design, with no path or title.
+- [ ] 3.2 Replace the counts in the design's measured facts with the rechecked ones, or label each count still unverified.
+- [ ] 3.3 Decide O1 to O7 from the plan's counts and record each answer in the design. Rewrite the requirements that depend on an answer (design, "Owner choices"). Drop the `adoption-studio` delta if O1 keeps partitions, and move or delete the pin and retitle requirements as O5 decides.
+
+## 4. Root layout for new vaults
+
+Waits on group 2's layout model and link rule, on the answers of group 3 and on `add-note-type-registry` task 2.4 for overlay-defined areas.
+
+- [ ] 4.1 Name the areas in registries. Give compiled, source, evidence and entity types an area `folder`, and make the pack's `folder` values bare area names. Let the validator accept both forms (`note_types.py`, `homes.py`). Read a `folder` value that starts with `Notes/` as the `nested` parent plus the area name, and rewrite no overlay value. Declare a `stem` for source (date of capture) and entity. Derive `init`'s folders from the registries, which adds the missing `Notes/Procedures` folder, and remove `init._FOLDERS` and the area-root literals. Derive `access._APPEND_ONLY` from roles `source` and `evidence`, and take `Records` and `Planning` from the collection profiles. (was 9.2)
+- [ ] 4.2 Place pages inside areas by the answer to O1. Make the typed writer (`note._type_default`, `_home_containing`, `_place`) and the compiled-type write gate (`semantic_contract._route_name`) read the area through `layout.area_folder`. In `root`, keep today's meaning of a leftover `Notes/<X>` at the gate. Make ownership (`vault_store/ownership.classify`, `owns_folder`) treat the vault root as the managed root, minus dot names, `_Imports` and the unmanaged list, so `_Imports/<id>` stages stay outside the store. (was 9.1, 9.3)
+- [ ] 4.3 Give `root` vaults title names by default. Take the date prefix of dated and started stems from the page's recorded date. Apply the uniqueness scope of O3 with a case-insensitive check read from the store, and deterministic ` (2)`, ` (3)` suffixes. Never rename a fixed name after creation. A fixed name that collides inside a folder keeps today's disambiguation. (was 9.4)
+- [ ] 4.4 Make every writer emit `link_form`, including the index and log generators and the f-string emitters of `[[...]]`. Add the trailing-path step to `WikilinkResolver` in the order of design L7, and keep graph rows on resolved paths. Wire trailing-path resolution and the naming corrections into `nested` vaults only as owner choice O7 decides. (was 9.5)
+- [ ] 4.5 Read every path selector through `layout.translate_path`: note-type and home folders, governance scopes, `_access.yaml` tiers, instance bindings and folder topic carriers. Rewrite no governance YAML and no `_access.yaml`.
+- [ ] 4.6 Start `exomem init` in `root` and write the layout record. Make the scaffold skill, its references and the tool descriptions layout-neutral, and keep the scaffold generic. (was 9.11)
+- [ ] 4.7 Reopen `add-readable-note-filenames` and correct its `vault-file-naming` requirements. Add the wikilink characters, leading dots and the 200-byte cap to Filesystem-Safe Title Names. Make `title` the default style in `root`. Apply the uniqueness scope of O3 with the ` (2)` suffix for `title` names in a `root` vault, and keep the `-2` contract for slug names and for `nested` vaults. Keep No Existing File Is Renamed true for `nested` vaults and for any style change in either layout. (was 9.14)
+- [ ] 4.8 Reopen `add-note-type-registry` and correct its `Notes/<Name>` folder rule in its spec, its `semantic-write-contract` delta and its design. The folder becomes an area name, with the parent supplied by the layout. Let source, evidence and entity types declare `folder` too. Read a `folder` value that starts with `Notes/` as the `nested` parent plus the area name, and rewrite no existing value. (was 9.15)
+- [ ] 4.9 Prove the root layout. Highest-level check: the installed-wheel journey on a fresh `root` vault in file mode. Create typed notes, link them, add a homonym, move a note and search. A restricted caller with `paths: Insights/**` does not see a page there. Every written link resolves to exactly a single file under the Obsidian rule, and no path holds the wrapper. Then run a small real-model run in a `root` vault, in which agents create, link and cite without inventing wrapper or `Notes/` paths. State its cost first under the measurement rule. Add guard tests:
+  - the nested suite's failure-name diff against main is empty;
+  - a naming table: each new character, a leading dot, and a multibyte title at the 200-byte cap;
+  - ` (2)` in `root` and `-2` in `nested`;
+  - an overlay type `Playbooks` lands at `Playbooks/` in `root` and at `Notes/Playbooks/` in `nested`;
+  - the folders that `init` creates equal the registry's areas;
+  - selector translation.
+
+## 5. Relayout apply, verify and revert
+
+Waits on groups 2 to 4. The offline projector entry of the store-mode rollback and the per-effect writer authority, which #2805 and #2818 delivered, are in main.
+
+- [ ] 5.1 Add the path alias table, store schema 18 `store_path_aliases(old_path PRIMARY KEY, page identity, current_path, relayout_id, created_revision)`, and update it on every store move in the same transaction. Add the alias step to the shared managed-relative form `kbdir.kb_relative_form`, after exact paths, so that the resolver and the hosted protected-tree guard share it. Answer an alias to a page that the caller may not see exactly as a missing page. Export the table in the store change's rollback when the store has such a table. Record as accepted debt that a later fixed name or outside-edit import can make an existing bare `[[Name]]` ambiguous, and add no repoint rule for it. (was 9.6)
+- [ ] 5.2 Add `relayout --apply` as a single store change built on the multi-move machinery of `vault_store.directory`: page moves, repointed pages, aliases and the layout record. Derived rows take a path-map `UPDATE`, and only pages whose bytes change are re-derived. Place pages by the rules of design L9, and repoint pointer fields with the move writer's transforms plus `parent_media`. Refuse on each failed precondition and name it: store mode inactive, service running, items held, projection queue not empty, no store backup, free disk below the store size, an unmappable page, a disclosure difference, a path ref to a renamed page, or a top-level name collision. Never run a relayout from the managed upgrade migrator. (was 9.10)
+- [ ] 5.3 Make the apply crash-safe. Write the `relayout_pending` marker first, commit the store change, run the offline projector drain, move the disk-canonical files (`_Governance/`, `_access.yaml` and the collection replica), and clear the marker. While the marker stands, refuse the service start and every CLI read with a code that names `--apply` (resume) and `--revert`. Refuse governance root resolution when the root-layout `_Governance/` is missing and the wrapper copy exists. Keep a copy of the replica at the old path so a pre-layout build refuses with `VAULT_STORE_ELSEWHERE`, and let doctor report and remove it on request. (was 9.10)
+- [ ] 5.4 Add `relayout --verify`. Map graph edges to ids before the comparison, then prove each check below. (was 9.10)
+  - every owned page maps to exactly a single new path, and its `exomem_id` is unchanged;
+  - the member set of every scope, tier and binding is equal by identity;
+  - every link occurrence resolves to the same page and passes the Obsidian rule;
+  - page bytes equal the old bytes with only the planned link and pointer-field edits, and binaries keep their hashes;
+  - a fresh derivation equals the stored rows.
+- [ ] 5.5 Add `relayout --revert`. Record each page's old path as an alias row and each link span's old text in the relayout's audit. Plan back to `nested` through the same planner: return every page that existed at the relayout to its recorded path, restore the old text of every recorded link span that is still byte-identical, and give a page created later nested placement by rule and today's link form. Run it offline under the marker sequence of 5.3.
+- [ ] 5.6 Accept link-only repoints in append-only pages in store mode, each with its own audit reason. This is the requirement of the `command-surface` delta in `make-vault-store-canonical`. Reconcile it with two active changes so that each reads as file mode only or names this repoint as the single allowed byte change. `make-source-reclassification-reversible` refuses a reclassification on append-only path links, and its domain-only clause applies only if O1 flattens partitions. `add-governed-vault-consolidation` says its import never overwrites or rewrites the body of an append-only original. (was 9.9)
+- [ ] 5.7 Rehearse on a disposable copy of a real vault: plan, apply and verify; the recall canary case by case with 95% intervals; the revert drill, in which the vault returns byte-identical apart from the audit and alias tables; and the rollback drill, in which store mode to file mode keeps `root` and file mode serves it. Repeat on native Windows. (was 9.13)
+- [ ] 5.8 Add the CI guards. Apply then verify on a generated vault. A kill at each phase refuses the start, and a resume completes it. A restricted caller's id sets from `find`, `get` and graph reads are equal before and after. Each precondition refuses and names itself. An old path resolves for a caller who sees the page and answers as missing for a caller who does not.
+
+## 6. Cloud
+
+Waits on group 5 and on Cloud task 6.2 of `make-vault-store-canonical`.
+
+- [ ] 6.1 Start Cloud cells in `root`. (was 9.11)
+- [ ] 6.2 In Cloud import, map `nested` trees to `root` through the relayout planner. Hold its link repoints to the rule of `add-governed-vault-consolidation` that append-only originals are not overwritten or body-rewritten, as 5.6 reconciles it. Make Cloud export emit the cell's own layout. (was 9.12)
+
+## 7. Filenames follow retitles
+
+Build this group only if owner choice O5 says build. Waits on group 5.
+
+- [ ] 7.1 Record the pin. In store mode, in either layout, record a pin with the page when a caller explicitly chooses a name for a page of a title-named type at create, move or rename time, as a store column or an audit entry. Count an editor rename that an outside-edit import (task 4.2 of `make-vault-store-canonical`) reads as a governed move as a chosen name. Let a move that keeps the basename, and an outside-edit import, neither pin nor meet the refusal. In a `root` vault, refuse a chosen name that another page holds, and name that page. A `nested` vault keeps its suffixing of an explicit name. (was 9.7)
+- [ ] 7.2 Add the rename rule, with a bound on the inbound repoints of a hub. Take the class from the note type: a name is derived when the type names its files from the frontmatter `title`, and every other name is fixed. Read no H1 or filename stem as a title. In a `root` vault in store mode whose style is `title`, rename a derived name that does not match its page's frontmatter title, in the same write as any governed write, with its inbound link repoints. A name matches when it equals the naming rule's output under the `title` or the `slug` style. Take the date prefix from the page's recorded date, never the write date. Never rename a pinned or fixed name, and never rename on an outside-edit import, so the next governed write renames. In a `nested` vault, in either mode, and on any style change, no governed write renames an existing file. (was 9.8)
