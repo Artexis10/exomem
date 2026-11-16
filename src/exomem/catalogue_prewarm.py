@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from . import freshness, lexstore, reserved_paths, state_paths
+from .log_events import log_event
 from .state_migration import vault_store_recorded
 from .vault import VaultLockError, _InterprocessFileLock
 
@@ -138,22 +139,36 @@ def build(vault_root: Path) -> str:
 
 
 def adopt_at_boot(vault_root: Path) -> bool:
-    """Adopt before runtime workers open the live catalogue, then remove leftovers."""
+    """Adopt before runtime workers open the live catalogue, then remove leftovers.
+
+    Logs one `staged_catalogue_adoption` event, the only adoption evidence a
+    hosted cell keeps. Its `outcome` is a closed token: `adopted`; `declined`
+    when a valid copy could not be installed; `none` when no staged copy was
+    valid; `deferred` when another holder kept the build lock; `store_mode`
+    when the store serves the catalogue. `staged` counts the copies found and
+    `cleanup` is `deferred` when leftovers stay for a later boot.
+    """
     if vault_store_recorded(vault_root):
+        _log_adoption("store_mode", 0, "done")
         return False
     store = lexstore.get_store(vault_root)
     adopted = False
+    outcome, staged, cleanup = "deferred", 0, "done"
     try:
         with _build_lock(store):
+            outcome = "none"
             try:
                 identity = lexstore.catalog_semantic_identity(vault_root)
-                for path in _staged_copies(store):
+                copies = _staged_copies(store)
+                staged = len(copies)
+                for path in copies:
                     if not _catalog_valid(store, path, "lexical-staged", identity):
                         continue
                     with store._publication_lock():
                         # Recheck under the same barrier that installs the whole live SQLite set.
                         if _catalog_valid(store, path, "lexical-staged", identity):
                             adopted = store._replace_live_catalog(path, source_owner="lexical-staged")
+                            outcome = "adopted" if adopted else "declined"
                             if adopted:
                                 with store._lock:
                                     # The live generation replaced every attestation to the old catalogue.
@@ -166,15 +181,27 @@ def adopt_at_boot(vault_root: Path) -> bool:
                     if adopted:
                         break
             except (VaultLockError, sqlite3.Error, OSError, RuntimeError):
-                log.info("Staged catalogue adoption declined; the cell will reconcile or rebuild.")
+                # The cell will reconcile or rebuild.
+                outcome = "adopted" if adopted else "declined"
             finally:
                 for path in _staged_copies(store):
                     _discard_staged(store, path)
                 # The build lock also excludes a surviving builder after a serving-pod crash.
                 store._sweep_orphan_rebuild_temps(boot=True)
     except (VaultLockError, OSError, RuntimeError):
-        log.info("Staged catalogue cleanup deferred; the cell keeps its ordinary boot path.")
+        # The cell keeps its ordinary boot path.
+        cleanup = "deferred"
+    _log_adoption(outcome, staged, cleanup)
     return adopted
+
+
+def _log_adoption(outcome: str, staged: int, cleanup: str) -> None:
+    log_event(
+        log,
+        logging.INFO,
+        "staged_catalogue_adoption",
+        fields={"outcome": outcome, "staged": staged, "cleanup": cleanup},
+    )
 
 
 def main() -> int:

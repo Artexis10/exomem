@@ -189,6 +189,19 @@ CANDIDATE_SINCE_ANNOTATION = "exomem.io/candidate-since"
 ROLLOUT_ANNOTATIONS = (UPGRADE_WINDOW_ANNOTATION, UPGRADE_WINDOW_AT_ANNOTATION, CANDIDATE_SINCE_ANNOTATION)
 
 
+def upgrade_start_annotations(started_at: str, previous_image: str, target: str) -> dict[str, str]:
+    """warm-cell-catalogue: the hold that an upgrade start writes by patch, not by
+    server-side apply, in the pass that cancels the cell's catalogue builds."""
+
+    return {HOLD_ANNOTATION: "upgrade", HOLD_STARTED_ANNOTATION: started_at,
+            PREVIOUS_IMAGE_ANNOTATION: previous_image, UPGRADE_TARGET_ANNOTATION: target}
+
+
+# The keys that patch writes, read from the function itself so the ownership
+# check in ClusterClient.observe_cells cannot drift from what the patch writes.
+UPGRADE_START_ANNOTATION_KEYS = frozenset(upgrade_start_annotations("", "", ""))
+
+
 def namespace_name(cell_id: str) -> str:
     return f"{NAMESPACE_PREFIX}{cell_id}"
 

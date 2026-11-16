@@ -309,6 +309,9 @@ class ClusterObservation:
     statefulset_upgrade_window: str | None = None
     statefulset_upgrade_window_at: str | None = None
     statefulset_candidate_since: datetime | None = None
+    # warm-cell-catalogue: the upgrade-start hold keys that cellctl's patch owns
+    # in managedFields. Server-side apply keeps such a key when the apply omits it.
+    statefulset_patched_hold: frozenset[str] = frozenset()
 
     pod_exists: bool = False
     pod_ready: bool = False

@@ -87,16 +87,12 @@ from .manifests import (
     CANDIDATE_SINCE_ANNOTATION,
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
-    HOLD_ANNOTATION,
-    HOLD_STARTED_ANNOTATION,
     HOURLY_RETENTION_ARGS,
     JOB_EGRESS_POLICY,
-    PREVIOUS_IMAGE_ANNOTATION,
     RENDER_VERSION,
     RETENTION_ARGS,
     SNAPSHOT_NAME,
     STORAGE_CLASS,
-    UPGRADE_TARGET_ANNOTATION,
     UPGRADE_WINDOW_ANNOTATION,
     UPGRADE_WINDOW_AT_ANNOTATION,
     CellManifestSpec,
@@ -123,6 +119,7 @@ from .manifests import (
     render_restore_job,
     render_volume_snapshot,
     snapshot_backup_name,
+    upgrade_start_annotations,
 )
 from .media_edge import (
     COLLECTOR_AUDIENCE,
@@ -245,6 +242,7 @@ def _apply_cell_manifests(
     *,
     hold_active: bool,
     statefulset_exists: bool,
+    patched_hold: frozenset[str],
 ) -> tuple[list[tuple[str, str]], bool]:
     """D4: each object is applied on its own, in render order, and a refusal
     of one does not stop the others, so the StatefulSet (which carries
@@ -258,7 +256,15 @@ def _apply_cell_manifests(
     refused Secret carries, and its pod would fail to start. A StatefulSet
     that does not exist yet is created only when every earlier object
     applied, so a new cell never starts without its NetworkPolicies. Inside
-    a hold, including its exit, the StatefulSet is always applied."""
+    a hold, including its exit, the StatefulSet is always applied.
+
+    Server-side apply removes an omitted annotation only when no other field
+    manager owns it, and the patch that records an upgrade start beside
+    cancelled catalogue builds owns its hold keys (`patched_hold`, read from
+    managedFields). So just before the StatefulSet apply, a patch removes
+    those keys. The apply then writes them back under its own ownership if
+    the hold continues, and a later apply that ends the hold removes them.
+    Once no patch owns a hold key, no apply sends this extra request."""
 
     refused: list[tuple[str, str]] = []
     statefulset_applied = False
@@ -270,6 +276,8 @@ def _apply_cell_manifests(
                 logger.error("cellctl held back StatefulSet %s for cell %s: an earlier object was refused", name, cell_id)
                 continue
         try:
+            if kind == "StatefulSet" and patched_hold:
+                cluster.patch_statefulset_annotations(namespace_name(cell_id), dict.fromkeys(sorted(patched_hold)))
             cluster.apply_all([manifest])
         except ApiException as error:
             if not _is_refusal(error):
@@ -3217,10 +3225,10 @@ async def _reconcile_row(
         observation = await _cancel_catalogue_builds(cluster, row.cell_id, observation, now)
         fleet_observations[row.cell_id] = observation
         if start_upgrade and decision.hold_kind == "upgrade":
-            await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace_name(row.cell_id), {
-                HOLD_ANNOTATION: "upgrade", HOLD_STARTED_ANNOTATION: decision.hold_started_at.isoformat(),
-                PREVIOUS_IMAGE_ANNOTATION: decision.previous_image, UPGRADE_TARGET_ANNOTATION: decision.upgrade_target,
-            })
+            # This patch owns the hold keys; the next StatefulSet apply removes them first (_apply_cell_manifests).
+            await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace_name(row.cell_id),
+                                    upgrade_start_annotations(decision.hold_started_at.isoformat(),
+                                                              decision.previous_image, decision.upgrade_target))
             return await _write_observed(connection, row, decision.row_updates, now)
         return await _write_observed(connection, row, {}, now)
     local = cluster_config.storage.local
@@ -3553,6 +3561,7 @@ async def _reconcile_row(
             manifests,
             hold_active=hold_active,
             statefulset_exists=observation.statefulset_exists,
+            patched_hold=observation.statefulset_patched_hold,
         )
         if is_first_target_apply and ("StatefulSet", spec.statefulset_name) in refused:
             desired_replicas = 0 if row.desired_state == "stopped" else 1
@@ -3569,7 +3578,8 @@ async def _reconcile_row(
                 target_applied_at=None,
             )
             reject_refused, reject_applied = _apply_cell_manifests(
-                cluster, row.cell_id, render_cell_manifests(reject_spec), hold_active=True, statefulset_exists=True
+                cluster, row.cell_id, render_cell_manifests(reject_spec), hold_active=True, statefulset_exists=True,
+                patched_hold=observation.statefulset_patched_hold,
             )
             if reject_refused or not reject_applied:
                 reject_key = (row.generation, render_digest, reject_spec.image)
