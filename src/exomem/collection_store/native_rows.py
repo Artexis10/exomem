@@ -171,7 +171,9 @@ def _add_value(values: dict, name: str, value, remaining: int) -> int:
     return remaining
 
 
-def decode_row(connection, layout: NativeLayout, columns, *, max_bytes: int | None = None, database: str = "main") -> dict:
+def decode_row(connection, layout: NativeLayout, columns, *, max_bytes: int | None = None, database: str = "main",
+               fields=None) -> dict:
+    """Decode one row; a caller decoding many rows of one snapshot passes its ``snapshot_fields`` as ``fields``."""
     columns = tuple(columns)
     masks = _masks(layout, columns)
     extent = columns[0]
@@ -188,7 +190,8 @@ def decode_row(connection, layout: NativeLayout, columns, *, max_bytes: int | No
             if cell is not None:
                 raise TypedStorageError("missing native field has a payload")
             continue
-        metadata = FieldMetadata(connection, layout.collection_id, layout.generation, ordinal, database)
+        metadata = (FieldMetadata(connection, layout.collection_id, layout.generation, ordinal, database)
+                    if fields is None else fields[ordinal])
         remaining = _add_value(values, name, decode_cell(codec, cell, metadata, max_bytes=remaining), remaining)
     residual = columns[-1]
     if residual is not None:

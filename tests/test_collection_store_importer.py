@@ -159,6 +159,11 @@ def import_txns(conn):
     return count(conn, "SELECT COUNT(*) FROM txns WHERE request_id LIKE 'import:%'", ())
 
 
+def _inserts(statement, per_row, table):
+    """The single-row statement, or a bulk batch's multi-row INSERT into ``table``."""
+    return statement is per_row or (isinstance(statement, str) and statement.startswith(f"INSERT INTO {table} "))
+
+
 def small(monkeypatch, rows=40):
     monkeypatch.setattr(importer(), "MAX_BATCH_ROWS", rows)
 
@@ -524,7 +529,7 @@ def test_source_release_revoked_during_commit_rolls_back_the_batch(store, monkey
 
     def revoke_mid_batch(self, statement, *args, **kwargs):
         result = execute(self, statement, *args, **kwargs)
-        if statement is tables.INSERT_SOURCE:
+        if _inserts(statement, tables.INSERT_SOURCE, "item_sources"):
             write_scope(store.root, paths="Evidence/**")
             write_rule(store.root, ceiling=0)
         return result
@@ -1229,7 +1234,7 @@ def test_crash_inside_a_batch_leaves_it_absent_and_resumes_once(store, monkeypat
 
     def crash(self, statement, *args, **kwargs):
         result = execute(self, statement, *args, **kwargs)
-        if statement is tables.INSERT_EFFECT:
+        if _inserts(statement, tables.INSERT_EFFECT, "audit_effects"):
             raise _Crash
         return result
 

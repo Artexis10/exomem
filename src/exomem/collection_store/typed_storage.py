@@ -64,7 +64,7 @@ from sqlalchemy.types import UserDefinedType
 
 from .. import records
 from ..query_engine.scalars import scalar_key
-from . import tables
+from . import multirow, tables
 
 JSON_V1 = "json-v1"
 TYPED_V1 = "typed-v1"
@@ -209,13 +209,27 @@ def encode_row(layout: Layout, values: Mapping[str, Any], *, connection=None, sc
     return (*columns, canonical_json(residual) if residual else None)
 
 
-def decode_row(layout: Layout, columns, *, connection=None) -> dict[str, Any]:
+def shared_fields(conn, layout: Layout):
+    """Field metadata for ``decode_row(fields=...)``: decoding many rows of one layout then reads each epoch and format once.
+
+    Use it for one synchronous read of one snapshot; the memo is not kept past that read.
+    """
+    if layout.encoding != TYPED_V2:
+        return None
+    from .native_metadata import snapshot_fields
+
+    return snapshot_fields(conn, layout.collection_id, layout.generation, range(len(layout.fields)),
+                           database=layout.database)
+
+
+def decode_row(layout: Layout, columns, *, connection=None, fields=None) -> dict[str, Any]:
+    """Decode one stored row; ``fields`` is a native ``snapshot_fields`` mapping shared by one caller's rows."""
     if layout.encoding == TYPED_V2:
         from . import native_rows
 
         if connection is None:
             raise TypedStorageError("native row decoding requires its metadata connection")
-        return native_rows.decode_row(connection, layout, columns, database=layout.database)
+        return native_rows.decode_row(connection, layout, columns, database=layout.database, fields=fields)
     columns = tuple(columns)
     if len(columns) != 3 * len(layout.fields) + 1:
         raise TypedStorageError("typed row width differs from its layout")
@@ -624,18 +638,22 @@ def write_new_versions(conn, layout: Layout, rows, *, txn_id: int, schema_versio
         version, identity = _version_parameters(layout, row_id, 1, encoded, body, payload_hash, txn_id, schema_version)
         history.append(version)
         identities.append(identity)
-    _, _, upsert, insert_version = _declarations(layout)
+    current_table, history_table, _, _ = _declarations(layout)
+    raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection
+
+    def write(table, rows, **options):
+        multirow.insert_rows(conn.execute, raw, table.name, rows, **options)
+
     if layout.encoding == TYPED_V2:
         from .native_operands import FileRole, operand_snapshot
 
-        raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection
         with operand_snapshot(raw, layout, role=FileRole.STORE):
-            conn.executemany(upsert, current)
+            write(current_table, current, upsert_key="row_id")
     else:
-        conn.executemany(upsert, current)
+        write(current_table, current, upsert_key="row_id")
     # History must precede its identity: triggers refuse payloads attached to existing identities.
-    conn.executemany(insert_version, history)
-    conn.executemany(tables.INSERT_IDENTITY, identities)
+    write(history_table, history)
+    write(tables.version_identity, identities)
 
 
 # --- forward migration --------------------------------------------------------
