@@ -704,13 +704,13 @@ def _forge_earlier_listing(vault, manager, reference: str, source_path: str) -> 
             for path, content, guard in zip(pages,
                     (update.sources_index_content, update.top_index_content, update.log_content),
                     (update.sources_index_guard, update.top_index_guard, update.log_guard), strict=True):
-                image = generated_fragments._Image.before(content, update.fragment_plans[path.relative_to(vault).as_posix()],
-                                                          hashlib.sha256(content.encode()).hexdigest())
+                plan = update.fragment_plans[path.relative_to(vault).as_posix()]
+                image = generated_fragments._Image.before(content, plan, hashlib.sha256(content.encode()).hexdigest())
                 start = content.rindex("\n", 0, content.index(Path(listed).name)) + 1
                 end = content.index("\n", start) + 1
                 image.splice(start, end, image.slice(start, end).own(generated_fragments.SourceRef(reference)))
                 write = vault_module.PlannedWrite(path=path, content=content, guard=guard)
-                writes.append(producer.attach(write, image.plan(update.fragment_plans[path.relative_to(vault).as_posix()].before_sha256)))
+                writes.append(producer.attach(write, image.plan(plan.before_sha256)))
             vault_module.batch_atomic_write(writes, vault_root=vault, post_commit_fanout=False)
         finally:
             store.close()
