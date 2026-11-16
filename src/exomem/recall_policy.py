@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import access, freshness, vault
+from .collection_profiles import PROFILES
 from .kbdir import managed_split_parts
 
 RECALL_POLICY_VERSION = "structured-collection-manifest-only-v2"
@@ -313,7 +314,7 @@ def _manifest_admits(root: Path, rel: str, data: bytes) -> bool:
 
     try:
         manifest = structured_collections.parse_manifest_bytes(root, rel, data)
-        admitted = manifest.semantic_profile in {"records", "planning"}
+        admitted = manifest.semantic_profile in PROFILES
     except (UnicodeError, ValueError):
         admitted = False
     with _MANIFEST_ADMISSION_LOCK:
@@ -465,9 +466,14 @@ def _vault_relative(root: Path, path: Path | str) -> str | None:
     return rel
 
 
+# The collection profiles own their layer names; recall policy reads them, never spells them.
+_STRUCTURED_LAYERS = frozenset(profile.placement_layer for profile in PROFILES.values())
+_STRUCTURED_LAYERS_CASEFOLDED = frozenset(layer.casefold() for layer in _STRUCTURED_LAYERS)
+
+
 def _is_structured_descendant(parts: list[str]) -> bool:
     below = managed_split_parts(parts)
-    return below is not None and len(below) >= 2 and below[0] in {"Records", "Planning"}
+    return below is not None and len(below) >= 2 and below[0] in _STRUCTURED_LAYERS
 
 
 def _is_collection_manifest(parts: list[str]) -> bool:
@@ -477,7 +483,12 @@ def _is_collection_manifest(parts: list[str]) -> bool:
 
 def _is_structured_alias(parts: list[str]) -> bool:
     below = managed_split_parts(parts, key=str.casefold)
-    return below is not None and len(below) >= 2 and below[0].casefold() in {"records", "planning"}
+    return (
+        below is not None
+        and len(below) >= 2
+        # nosemgrep: ep-word-membership -- layer names come from the collection profiles, a closed product registry
+        and below[0].casefold() in _STRUCTURED_LAYERS_CASEFOLDED
+    )
 
 
 def _safe_regular_file(

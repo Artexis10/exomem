@@ -22,8 +22,18 @@ _DEFAULT = "Knowledge Base"
 
 
 def kb_dirname() -> str:
-    """The KB folder name, no slashes (``EXOMEM_KB_DIRNAME`` override, else default)."""
-    name = os.environ.get("EXOMEM_KB_DIRNAME", "").strip().strip("/")
+    """The KB folder name, a single folder (``EXOMEM_KB_DIRNAME`` override, else default).
+
+    A leading or trailing slash is dropped, a backslash like a slash (native Windows). A separator
+    inside the name is refused: the helpers below compare the root as the first component of a
+    path, which a nested name never equals.
+    """
+    name = os.environ.get("EXOMEM_KB_DIRNAME", "").strip().strip("/\\")
+    if "/" in name or "\\" in name:
+        raise ValueError(
+            f"EXOMEM_KB_DIRNAME={name!r} names a nested path. Set it to a single folder name "
+            "inside the vault, such as 'Knowledge Base', or unset it."
+        )
     return name or _DEFAULT
 
 

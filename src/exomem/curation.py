@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
-from . import capabilities, held_fs, vault
+from . import capabilities, held_fs, trash_metadata, vault
 from .collection_profiles import PLANNING_PROFILE
 from .kbdir import managed_root, managed_split
 from .vault import (
@@ -382,8 +382,7 @@ def store_request_id(run_identity: str, operation_identity: str) -> str:
 
 def _is_governed_trash(path: str) -> bool:
     """Whether `path` lies in the managed root's trash folder, compared without regard to case."""
-    below = managed_split(path, key=str.casefold)
-    return below is not None and below.casefold().startswith("_trash/")
+    return trash_metadata.is_inside_trash(path, key=str.casefold)
 
 
 def _records_store_unsupported(kind: str) -> CurationError:
@@ -560,7 +559,7 @@ def normalize_target_path(
         "workflow-contract/"
     ):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} belongs to another typed owner")
-    if first == "_trash" and not (allow_trash or allow_fold):
+    if first == trash_metadata.TRASH_SUBPATH and not (allow_trash or allow_fold):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} targets trash internals")
     return raw
 
