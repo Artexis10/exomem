@@ -50,14 +50,21 @@ def test_an_edit_that_only_the_store_holds_replaces_the_entry_that_the_old_file_
     stored, writer, monkeypatch  # noqa: F811
 ):
     """The old file keeps its stat, so a stored page keyed on the file's stat would reuse the entry
-    that the old bytes gave."""
-    # The fixture's files are seconds old, inside the window that stops a file's entry being reused.
+    that the old bytes gave, in the index and in the catalogue."""
+    # The fixture's files are seconds old, inside the window that stops a file's entry being reused
+    # (the window reads the change time too, which back-dating a file cannot move).
     monkeypatch.setattr(working_set_index, "_RACY_WINDOW_NS", 0)
-    assert current_index(stored)[0].resolve_names(["Alpha Prime"]) == {}
+    index, stamp = current_index(stored)
+    assert index.resolve_names(["Alpha Prime"]) == {}
+    context_catalogue.ensure_unlisted(stored, freshness_stamp=stamp)
     write.commit(writer, put(ALPHA, ALPHA_WITH_ALIAS))
     assert b"Alpha Prime" not in (stored / ALPHA).read_bytes()
 
-    assert current_index(stored)[0].resolve_names(["Alpha Prime"]) == {"alpha prime": (ALPHA,)}
+    index, stamp = current_index(stored)
+    assert index.resolve_names(["Alpha Prime"]) == {"alpha prime": (ALPHA,)}
+    _state, catalogue, _unlisted = context_catalogue.ensure_unlisted(stored, freshness_stamp=stamp)
+    [entry] = [entry for entry in catalogue.entries() if entry.path == ALPHA]
+    assert "An edit that only the store holds." in entry.description
 
 
 def test_the_index_lists_a_stored_page_by_the_walks_folder_rule(stored, writer):  # noqa: F811

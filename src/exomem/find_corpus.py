@@ -536,15 +536,18 @@ def corpus_paths(
     whose walk admits pages by another rule: it takes a stored page's vault-relative path. Give it
     the path form of that walk's own rule, so a stored page is listed as its file would be.
     """
-    from .vault_store import read
+    from .vault_store import ownership, read
 
     if not store_serves(vault_root):
         return disk_walk()
     with read.snapshot(vault_root) as view:
+        # Only a path the store owns: the walk lists a stored page's file whenever the store does
+        # not own its path, so listing both would count the page twice.
         members = tuple(
             meta
             for meta in view.pages()
             if (member(meta.path) if member is not None else read.corpus_member(meta.path, scope))
+            and ownership.classify(meta.path) is ownership.Ownership.PAGE
         )
     return StoreCorpus(
         vault_root=Path(vault_root), revision=view.revision, pages=members, disk=disk_walk
@@ -938,17 +941,6 @@ def stored_page_signature(path: Path, vault_root: Path) -> freshness.FileSignatu
 
     meta = read.owned_meta(vault_root, rel)
     return None if meta is None else _stored_signature(meta)
-
-
-def page_signature(path: Path, vault_root: Path) -> freshness.FileSignature:
-    """The change signature of the page at ``path``: the store's row when the store serves that
-    page, else the file's stat.
-
-    ``page_stat``'s counterpart for a caller that compares signatures (a corpus walk's own is
-    ``signature_lookup``). It raises as ``stored_page_signature`` and a stat do.
-    """
-    stored = stored_page_signature(path, vault_root)
-    return freshness.stat_signature(path) if stored is None else stored
 
 
 def page_relative_path(path: Path, vault_root: Path) -> str:

@@ -90,8 +90,9 @@ GUARDED_PREFIXES = ("EXOMEM_", "KB_MCP_", "XDG_")
 GUARDED_NAMES = ("HOME", "TMPDIR", "PYTHONPATH")
 LEASE_VAULT_ID = "store-rehearsal"
 LEASE_REPLICA_ID = "rehearsal-service"
-#: The lease term of the run, the length of a real service's default lease. The journey's short
-#: test lease is too short here: one operation on a real vault under load outlasts it.
+#: The run's lease term: a service's default (`writer_lease.LeaseConfig`), not the journey's short
+#: test lease, which one operation on a real vault under load outlasts. A copy, because this
+#: process builds the run's environment before it may import product code (see "Isolation").
 LEASE_TTL = 30.0
 
 

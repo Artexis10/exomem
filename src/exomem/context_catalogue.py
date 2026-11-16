@@ -1045,11 +1045,6 @@ class _Fold:
             self.signatures[rel] = find_corpus.stored_page_signature(self.root / rel, self.root)
         return self.signatures[rel]
 
-    def _signature_now(self, rel: str) -> freshness.FileSignature:
-        """The page's change signature as it is now, read fresh: the store's row, or the file's stat."""
-        absolute = self.root / rel
-        return find_corpus.page_signature(absolute, self.root) if self.store else freshness.stat_signature(absolute)
-
     def _signature(self, rel: str) -> str:
         """The page's signature, joined with its manifest's when it is a collection manifest."""
         try:
@@ -1080,10 +1075,15 @@ class _Fold:
             return
         signature = self._signature(rel)
         page = _read_page(absolute, self.root)
-        try:
-            unchanged = self._signature_now(rel) == before
-        except OSError:
-            unchanged = False
+        if stored is not None:
+            # The read takes its own store snapshot. A read that lands on a newer revision leaves
+            # this fold's signature behind the next listing's, so the next fold folds the page again.
+            unchanged = True
+        else:
+            try:
+                unchanged = freshness.stat_signature(absolute) == before
+            except OSError:
+                unchanged = False
         if not unchanged:
             # Publishing the parse would present bytes the file no longer has as current.
             self.pending[rel] = PENDING_CHANGED
