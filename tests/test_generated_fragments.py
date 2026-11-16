@@ -198,46 +198,36 @@ def _capture(
         activity_summary=summary or f"Captured synthetic entry {number}",
         log_entry_body=f"Kept body {number}: [[Knowledge Base/Sources/Articles/capture-{number}]]",
         source_counts={"Articles": number},
-        source_ref=reference,
         before_fragment_maps=maps,
     )
-    for relative, content in zip(
+    for relative, content, newest in zip(
         ("Knowledge Base/Sources/index.md", "Knowledge Base/index.md", "Knowledge Base/log.md"),
         (update.sources_index_content, update.top_index_content, update.log_content),
+        ("- 2026-11-14 — ", "- 2026-11-14 — ", "## [2026-11-14] add | "),
         strict=True,
     ):
         (root / relative).write_bytes(content.encode("utf-8"))
-    maps.update(
-        {
-            key: fragments.FragmentPlan.model_validate_json(plan.model_dump_json())
-            for key, plan in update.fragment_plans.items()
-        }
-    )
+        plan = update.fragment_plans[relative]
+        if reference is not None:
+            # Builds before enrolled Sources left the shared pages owned the line each capture added.
+            image = fragments._Image.before(content, plan, _hash(content))
+            start = content.index(newest)
+            end = content.index("\n", start) + 1
+            image.splice(start, end, image.slice(start, end).own(reference))
+            plan = image.plan(plan.before_sha256)
+        maps[relative] = fragments.FragmentPlan.model_validate_json(plan.model_dump_json())
     return update
 
 
 def test_real_capture_trim_keeps_old_source_ownership_inside_new_log_entry(tmp_path: Path) -> None:
     """Erasing a trimmed Source must preserve the capture that copied its excerpt."""
     maps = _seed(tmp_path)
-    old, current = _reference(1), _reference(100)
+    old = _reference(1)
     first = _capture(
         tmp_path, maps, old, 1, summary="Café 🧭 [[Knowledge Base/Sources/Articles/capture-1]]"
     )
     assert "[[Sources/Articles/capture-1]]" in first.top_index_content
-    old_id = next(
-        f.opaque_fragment_id
-        for f in first.fragment_plans["Knowledge Base/index.md"].after.fragments
-    )
-    for relative, content in (
-        ("Knowledge Base/Sources/index.md", first.sources_index_content),
-        ("Knowledge Base/index.md", first.top_index_content),
-        ("Knowledge Base/log.md", first.log_content),
-    ):
-        removed, removal = fragments.remove_source_fragments(
-            content, first.fragment_plans[relative], old
-        )
-        assert "capture-1" not in removed
-        assert removal.coverage_complete
+    old_id = next(f.opaque_fragment_id for f in maps["Knowledge Base/index.md"].after.fragments)
 
     # A valid owner map must bind raw CRLF bytes before the renderer normalizes them.
     for relative, plan in list(maps.items()):
@@ -275,9 +265,8 @@ def test_real_capture_trim_keeps_old_source_ownership_inside_new_log_entry(tmp_p
         (tmp_path / relative).write_bytes(crlf.encode("utf-8"))
 
     for number in range(2, indexes.RECENT_ACTIVITY_CAP + 1):
-        _capture(tmp_path, maps, _reference(number), number)
-    before = (tmp_path / "Knowledge Base/log.md").read_bytes().decode("utf-8")
-    update = _capture(tmp_path, maps, current, 51)
+        _capture(tmp_path, maps, None, number)
+    update = _capture(tmp_path, maps, None, 51)
     plan = update.fragment_plans["Knowledge Base/log.md"]
     plan.after.validate_image(update.log_content.encode("utf-8"))
     assert plan.coverage_complete, plan.unknown
@@ -290,8 +279,7 @@ def test_real_capture_trim_keeps_old_source_ownership_inside_new_log_entry(tmp_p
         "(bottom entry drops off at cap-50; trimmed 1 this write — bottom was: "
         "- 2026-11-14 — Café 🧭 `Sources/Articles/capture-1`…)"
     )
-    outer = next(f for f in plan.after.fragments if f.source_ref == current.value)
-    assert outer.start_byte < copied.start_byte < copied.end_byte < outer.end_byte
+    assert {f.source_ref for f in plan.after.fragments} == {old.value}
 
     without_old, after_old = fragments.remove_source_fragments(update.log_content, plan, old)
     assert "bottom entry drops off" not in without_old
@@ -300,18 +288,6 @@ def test_real_capture_trim_keeps_old_source_ownership_inside_new_log_entry(tmp_p
     assert "Kept body 51: `Knowledge Base/Sources/Articles/capture-51`" in without_old
     assert after_old.coverage_complete
     after_old.after.validate_image(without_old.encode("utf-8"))
-
-    without_current, after_current = fragments.remove_source_fragments(
-        update.log_content, plan, current
-    )
-    assert (
-        without_current
-        == before[: before.index("\n---\n") + len("\n---\n")]
-        + "\n\n"
-        + before[before.index("\n---\n") + len("\n---\n") :]
-    )
-    assert not any(f.opaque_fragment_id == old_id for f in after_current.after.fragments)
-    assert any(f.source_ref == old.value for f in after_current.after.fragments)
 
 
 def test_unenrolled_capture_preserves_previously_owned_generated_prose(tmp_path: Path) -> None:
@@ -367,16 +343,16 @@ def test_invalid_before_map_cannot_authorize_removal(corruption: str) -> None:
 
 
 def test_missing_map_and_marker_looking_input_never_mint_source_ownership(tmp_path: Path) -> None:
-    """Only the resolved primary reference can own caller text in a new capture."""
+    """Caller text that looks like an ownership marker owns nothing, and an unmapped page stays uncertain."""
     _seed(tmp_path)
-    claimed, actual = _reference(1), _reference(2)
+    claimed = _reference(1)
     marker = f'<!-- fragment source_ref="{claimed.value}" -->'
-    update = _capture(tmp_path, {}, actual, 2, summary=marker)
+    update = _capture(tmp_path, {}, None, 2, summary=marker)
     plan = update.fragment_plans["Knowledge Base/index.md"]
     result, after = fragments.remove_source_fragments(update.top_index_content, plan, claimed)
     assert result == update.top_index_content
     assert marker in result
-    assert {f.source_ref for f in plan.after.fragments} == {actual.value}
+    assert plan.after.fragments == ()
     assert not after.coverage_complete
     assert "fragment_map_missing" in after.unknown
 

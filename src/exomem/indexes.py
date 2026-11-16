@@ -162,7 +162,6 @@ def compute_updates(
     log_entry_body: str,
     stamp_iso: str | None = None,
     source_counts: Mapping[str, int] | None = None,
-    source_ref: generated_fragments.SourceRef | None = None,
     before_fragment_maps: Mapping[
         str, generated_fragments.FragmentMap | generated_fragments.FragmentPlan
     ]
@@ -183,9 +182,10 @@ def compute_updates(
     `source_counts`, when supplied, includes the caller's planned Source.
     The snapshot stays local to this update.
 
-    `source_ref` comes from the trusted primary allocation. Before-maps come
-    from producer-owned metadata, never from Markdown. Carry FragmentPlan
-    coverage forward when the earlier image has incomplete ownership.
+    Before-maps come from producer-owned metadata, never from Markdown. They
+    carry ownership that earlier builds recorded for enrolled Sources; this
+    renderer adds none. Carry FragmentPlan coverage forward when the earlier
+    image has incomplete ownership.
     """
     kb = kb_root(vault_root)
     sources_dir = kb / "Sources"
@@ -207,7 +207,7 @@ def compute_updates(
     tracked: dict[str, generated_fragments._Image] = {}
 
     def track(path: Path, text: str, guard: PathGuard) -> generated_fragments._Image | None:
-        if source_ref is None and before_fragment_maps is None:
+        if before_fragment_maps is None:
             return None
         relative = path.relative_to(vault_root).as_posix()
         image = generated_fragments._Image.before(
@@ -235,7 +235,6 @@ def compute_updates(
         rel_source_path=rel_source_path,
         vault_root=vault_root,
         _tracking=sources_tracking,
-        _source_ref=source_ref,
     )
 
     trim_fragments: list[generated_fragments._Image] = []
@@ -245,7 +244,6 @@ def compute_updates(
         date_iso=date_iso,
         activity_summary=activity_summary,
         _tracking=top_tracking,
-        _source_ref=source_ref,
         _trim_fragments=trim_fragments,
     )
 
@@ -282,7 +280,6 @@ def compute_updates(
         rel_source_path=rel_source_path,
         log_entry_body=log_body,
         _tracking=log_tracking,
-        _source_ref=source_ref,
         _tracked_body=tracked_log_body,
     )
 
@@ -545,7 +542,6 @@ def _update_sources_index(
     rel_source_path: str,
     vault_root: Path | None = None,
     _tracking: generated_fragments._Image | None = None,
-    _source_ref: generated_fragments.SourceRef | None = None,
 ) -> str:
     """Bump the By-type count row and prepend a Recent-captures bullet.
 
@@ -565,7 +561,6 @@ def _update_sources_index(
         date_iso=date_iso,
         rel_source_path=rel_source_path,
         _tracking=_tracking,
-        _source_ref=_source_ref,
     )
     return text
 
@@ -640,7 +635,6 @@ def _prepend_recent_capture(
     date_iso: str,
     rel_source_path: str,
     _tracking: generated_fragments._Image | None = None,
-    _source_ref: generated_fragments.SourceRef | None = None,
 ) -> str:
     """Insert a new bullet at the top of the Recent captures list, keeping the newest `RECENT_ACTIVITY_CAP`.
 
@@ -649,8 +643,6 @@ def _prepend_recent_capture(
     entry = f"- {date_iso} — [[{rel_source_path}]]"
     entry_line = entry + "\n"
     owned = generated_fragments._Image(entry_line)
-    if _source_ref is not None:
-        owned.own(_source_ref)
     header_idx = text.find(SOURCES_RECENT_HEADER)
     if header_idx == -1:
         # No Recent captures section — append one at the end.
@@ -717,7 +709,6 @@ def _update_top_index(
     date_iso: str,
     activity_summary: str,
     _tracking: generated_fragments._Image | None = None,
-    _source_ref: generated_fragments.SourceRef | None = None,
     _trim_fragments: list[generated_fragments._Image] | None = None,
 ) -> tuple[str, str | None]:
     """Prepend Recent activity bullet (cap-50 trim) + rewrite the Sources Counts line."""
@@ -726,7 +717,6 @@ def _update_top_index(
         date_iso=date_iso,
         summary=activity_summary,
         _tracking=_tracking,
-        _source_ref=_source_ref,
         _trim_fragments=_trim_fragments,
     )
     text = _rewrite_sources_count(text, counts=counts, _tracking=_tracking)
@@ -739,7 +729,6 @@ def _prepend_recent_activity(
     date_iso: str,
     summary: str,
     _tracking: generated_fragments._Image | None = None,
-    _source_ref: generated_fragments.SourceRef | None = None,
     _trim_fragments: list[generated_fragments._Image] | None = None,
 ) -> tuple[str, str | None]:
     """Insert `- <date> — <summary>` at the top of Recent activity. Trim to cap-50."""
@@ -754,8 +743,6 @@ def _prepend_recent_activity(
     lines = section.splitlines()
     new_bullet = f"- {date_iso} — {summary}"
     owned = generated_fragments._Image(new_bullet + "\n")
-    if _source_ref is not None:
-        owned.own(_source_ref)
     # Locate where bullets start (first line beginning with "- ").
     bullet_start = None
     for i, line in enumerate(lines):
@@ -1513,7 +1500,6 @@ def _update_log(
     rel_source_path: str,
     log_entry_body: str,
     _tracking: generated_fragments._Image | None = None,
-    _source_ref: generated_fragments.SourceRef | None = None,
     _tracked_body: generated_fragments._Image | None = None,
 ) -> str:
     """Prepend `## [<date>] add | <path>` entry right after the `---` separator."""
@@ -1532,8 +1518,6 @@ def _update_log(
         )
         if entry.text != new_entry:
             raise ValueError("fragment_renderer_log_body_changed")
-        if _source_ref is not None:
-            entry.own(_source_ref)
 
     sep_idx = text.find(LOG_SEPARATOR)
     if sep_idx == -1:

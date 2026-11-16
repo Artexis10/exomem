@@ -849,7 +849,6 @@ def add(
             originals.extend(write for write in container_plan.writes if isinstance(write.content, PreparedBinaryContent))
             core_paths.update(write.path for write in container_plan.writes)
         from . import (
-            generated_fragments,
             generated_output_plan,
             source_custody,
             source_payload_custody,
@@ -860,8 +859,9 @@ def add(
             vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
             source_hash=content_hash(writes[0].content), identity=source_identity,
         )
-        if not raw_protection:
-            producer = container_stack.enter_context(generated_output_plan.producer(vault_root, initialize=custody_started))
+        # An enrolled Source stays off the shared index and log pages; the captured-Source inventory lists it.
+        if not raw_protection and not custody_started:
+            producer = container_stack.enter_context(generated_output_plan.producer(vault_root))
             before_maps = producer.before_maps((indexes.sources_index_path(vault_root), kb_root(vault_root) / "index.md",
                                                 kb_root(vault_root) / "log.md")) if producer is not None else None
             activity_summary = _activity_summary(
@@ -893,7 +893,6 @@ def add(
                     activity_summary=activity_summary,
                     log_entry_body=log_entry_body,
                     source_counts=post_counts,
-                    source_ref=generated_fragments.SourceRef(source_reference) if custody_started else None,
                     before_fragment_maps=before_maps,
                 )
 

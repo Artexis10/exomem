@@ -247,8 +247,12 @@ class GeneratedProducer:
 
 
 @contextmanager
-def producer(root: Path, *, initialize: bool = False, preview: bool = False) -> Iterator[GeneratedProducer | None]:
-    """Reuse existing file custody independently of current Source enrollment."""
+def producer(root: Path, *, preview: bool = False) -> Iterator[GeneratedProducer | None]:
+    """Keep shared generated files under custody only in a vault that already placed one there.
+
+    Enrolled Sources never write shared pages, so no new Slot appears. A vault whose earlier build
+    recorded enrolled fragments keeps carrying them, so a later erasure can still find every copy.
+    """
     from .vault_store import mode
 
     # Store mode opts out on every thread: a preview off the store thread plans and never writes,
@@ -258,7 +262,7 @@ def producer(root: Path, *, initialize: bool = False, preview: bool = False) -> 
         return
     store = generated.GeneratedFragmentStore(root)
     try:
-        if not initialize and not store.path.exists():
+        if not store.path.exists():
             yield None
             return
         from .writer_lease import active_manager
@@ -267,14 +271,14 @@ def producer(root: Path, *, initialize: bool = False, preview: bool = False) -> 
         boundary = manager._mutation_coordinator_for(root)
         # Planning may precede the commit hold. Read under the actual boundary without advancing its write generation.
         hold = nullcontext() if boundary.current_thread_holds_boundary() else (
-            manager.mutation_guard(root, operation="generated_inputs") if initialize
-            else manager.consistency_guard(root, operation="generated_inputs", holder_kind="producer", may_borrow=False)
+            manager.consistency_guard(root, operation="generated_inputs", holder_kind="producer", may_borrow=False)
         )
         with hold:
-            if initialize:
-                store.initialize()
-            else:
-                store.head()
+            # Only a producer places a Slot, so a vault without one keeps this answer until its commit.
+            if not store.holds_slots():
+                yield None
+                return
+            store.head()
             yield GeneratedProducer(store, source_native_custody.NativeCustody(root))
     finally:
         store.close()

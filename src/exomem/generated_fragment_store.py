@@ -1570,6 +1570,36 @@ class GeneratedFragmentStore:
             processed += 1
         return Progress("ready" if self.checkpoint()["applied_epoch"] == head.epoch else "pending", head.epoch, processed)
 
+    def holds_slots(self) -> bool:
+        """Whether any shared generated file was ever placed under custody; stops at the first Slot record."""
+        acquired = held_fs.acquire(self.root)
+        if not acquired.ok:
+            raise RuntimeError("generated slot probe cannot acquire vault")
+        with acquired.require() as filesystem:
+            path = (self.path / "slots").relative_to(self.root).as_posix()
+            result = filesystem.parent(path)
+            if not result.ok:
+                if result.error is not None and result.error.code == "MISSING":
+                    return False
+                raise RuntimeError("generated slot directory is unsafe")
+            with result.require() as slots:
+                names = filesystem.iter_names(slots)
+                try:
+                    for name in names:
+                        prefix = filesystem.parent(f"{path}/{name}")
+                        if not prefix.ok:
+                            return True  # An unreadable entry may hide a Slot; keeping custody refuses no write.
+                        with prefix.require() as directory:
+                            children = filesystem.iter_names(directory)
+                            try:
+                                if any(child.endswith(".json") for child in children):
+                                    return True
+                            finally:
+                                children.close()
+                finally:
+                    names.close()
+        return False
+
     def _census_keys(self) -> Iterator[tuple[str, str, int | None]]:
         """Hold streaming directory handles only during explicit cold census, never lookup."""
         acquired = held_fs.acquire(self.root)

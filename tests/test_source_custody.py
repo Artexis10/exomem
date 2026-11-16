@@ -651,45 +651,73 @@ def test_earlier_candidate_without_custody_eligibility_is_not_guessed(attempts):
     assert "custody eligibility" in caught.value.message
 
 
-def test_real_default_off_capture_keeps_prior_index_and_log_ownership(vault, attempts, registered_custody):
+def test_enrolled_capture_stays_off_shared_pages_and_unenrolled_capture_pays_no_page_custody(vault, attempts, registered_custody):
+    """An enrolled Source leaves no copy on the shared pages, so a later unenrolled write there needs no custody."""
+    from exomem import generated_fragment_store
+
+    manager, call = attempts
+    pages = [vault / "Knowledge Base" / relative for relative in ("Sources/index.md", "index.md", "log.md")]
+    before = {path: path.read_bytes() for path in pages}
+    enrolled = {**authored(), "title": "Retained café 🧭"}
+    ticket = reserve(call, enrolled)
+    assert call("capture_source", **enrolled, capture_reservation=ticket)["capture_outcome"] == "created"
+    assert call("settle_source_capture", reservation=ticket)["owned_targets"]
+    assert {path: path.read_bytes() for path in pages} == before
+    later = {**authored(), "title": "Unenrolled later survey", "content": "A different observation.",
+             "source_identity": {"system": "unlisted", "record_id": "later", "revision": "one"}}
+    captured = call("capture_source", **later)
+    assert captured["capture_outcome"] == "created"
+    for path in pages:
+        assert Path(captured["source"]["path"]).stem in path.read_text(), path
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        try:
+            assert store.path.exists() and not store.holds_slots()
+        finally:
+            store.close()
+
+
+def _forge_earlier_listing(vault, manager, reference: str, source_path: str) -> None:
+    """Write what builds before this exclusion left: the enrolled Source listed on shared pages, its lines owned."""
+    import hashlib
+
     from exomem import (
         generated_fragment_store,
         generated_fragments,
         generated_output_plan,
+        indexes,
         source_native_custody,
     )
 
-    manager, call = attempts
-    paths = [vault / "Knowledge Base" / relative for relative in ("Sources/index.md", "index.md", "log.md")]
-    for path in paths:
-        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
-    first = {**authored(), "title": "Retained café 🧭"}
-    ticket = reserve(call, first)
-    captured = call("capture_source", **first, capture_reservation=ticket)
-    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
-    second = {**authored(), "title": "Unenrolled later survey", "content": "A different observation.",
-              "source_identity": {"system": "unlisted", "record_id": "later", "revision": "one"}}
-    later = call("capture_source", **second)
-    assert captured["capture_outcome"] == later["capture_outcome"] == "created"
-    later_reference = memory_refs.ref_from_markdown((vault / later["source"]["path"]).read_text())
+    kb = vault / "Knowledge Base"
+    pages = (kb / "Sources/index.md", kb / "index.md", kb / "log.md")
+    listed = Path(source_path).with_suffix("").as_posix()
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
-        manifest, _ = source_custody.read_manifest(vault, later_reference)
-        assert manifest is None
         store = generated_fragment_store.GeneratedFragmentStore(vault)
-        native = source_native_custody.NativeCustody(vault)
         try:
-            for path in paths:
-                text, guard = vault_module.read_guarded_text(vault, path)
-                bound = generated_output_plan.read_before(store, native, path=path, text=text, guard=guard)
-                assert bound.current is not None and bound.binding.slot.pending is None
-                assert {fragment.source_ref for fragment in bound.mapping.after.fragments} == {reference}
-                erased, _ = generated_fragments.remove_source_fragments(text, bound.mapping,
-                                                                        generated_fragments.SourceRef(reference))
-                assert "Retained café" not in erased
-                if path.parent.name != "Sources":
-                    assert "Unenrolled later survey" in erased
+            producer = generated_output_plan.GeneratedProducer(store, source_native_custody.NativeCustody(vault))
+            update = indexes.compute_updates(vault, source_type="session", folder_title="Sessions",
+                folder_description="captured sessions", rel_source_path=listed, date_iso="2026-11-15",
+                activity_summary=f"Captured {Path(listed).name}", log_entry_body=f"Captured {Path(listed).name}.",
+                before_fragment_maps=producer.before_maps(pages))
+            writes = []
+            for path, content, guard in zip(pages,
+                    (update.sources_index_content, update.top_index_content, update.log_content),
+                    (update.sources_index_guard, update.top_index_guard, update.log_guard), strict=True):
+                image = generated_fragments._Image.before(content, update.fragment_plans[path.relative_to(vault).as_posix()],
+                                                          hashlib.sha256(content.encode()).hexdigest())
+                start = content.rindex("\n", 0, content.index(Path(listed).name)) + 1
+                end = content.index("\n", start) + 1
+                image.splice(start, end, image.slice(start, end).own(generated_fragments.SourceRef(reference)))
+                write = vault_module.PlannedWrite(path=path, content=content, guard=guard)
+                writes.append(producer.attach(write, image.plan(update.fragment_plans[path.relative_to(vault).as_posix()].before_sha256)))
+            vault_module.batch_atomic_write(writes, vault_root=vault, post_commit_fanout=False)
         finally:
             store.close()
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with generated_output_plan.producer(vault) as producer:
+            assert all(reference in {item.source_ref for item in producer.before(path).mapping.after.fragments}
+                       for path in pages)
 
 
 def test_fresh_default_off_capture_does_not_initialize_a_generated_catalogue(vault, attempts, monkeypatch):
@@ -712,8 +740,9 @@ def test_tracked_log_rotation_and_retry_keep_the_native_archive_map(vault, attem
     manager, call = attempts
     args = {**authored(), "title": "Archived café 🧭"}
     ticket = reserve(call, args)
-    call("capture_source", **args, capture_reservation=ticket)
+    captured = call("capture_source", **args, capture_reservation=ticket)
     reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    _forge_earlier_listing(vault, manager, reference, captured["source"]["path"])
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         padding = [vault_module.LogEntry("2026-11-15", "note", f"Notes/independent-{number}", "An independent finding.")
                    for number in range(vault_module.LOG_ROTATE_KEEP_ENTRIES)]
@@ -758,8 +787,9 @@ def test_note_preserve_and_edit_keep_capture_ownership_after_activity_trim_and_l
     manager, call = attempts
     first = {**authored(), "title": "Retained café 🧭"}
     ticket = reserve(call, first)
-    call("capture_source", **first, capture_reservation=ticket)
+    captured = call("capture_source", **first, capture_reservation=ticket)
     reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    _forge_earlier_listing(vault, manager, reference, captured["source"]["path"])
     later = {**authored(), "title": "Later unenrolled survey", "content": "Another observation.",
              "source_identity": {"system": "unlisted", "record_id": "later", "revision": "one"}}
     call("capture_source", **later)
@@ -809,8 +839,9 @@ def test_public_append_preserves_captured_source_log_map(vault, attempts, regist
     manager, call = attempts
     args = authored()
     ticket = reserve(call, args)
-    call("capture_source", **args, capture_reservation=ticket)
+    captured = call("capture_source", **args, capture_reservation=ticket)
     reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    _forge_earlier_listing(vault, manager, reference, captured["source"]["path"])
     log = vault / "Knowledge Base/log.md"
     target = vault / "Knowledge Base/Evidence/sidecar.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -838,8 +869,9 @@ def test_public_create_recovers_pending_custody_without_mutating_preview(vault, 
     manager, call = attempts
     args = authored()
     ticket = reserve(call, args)
-    call("capture_source", **args, capture_reservation=ticket)
+    captured = call("capture_source", **args, capture_reservation=ticket)
     reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    _forge_earlier_listing(vault, manager, reference, captured["source"]["path"])
     log = vault / "Knowledge Base/log.md"
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         with generated_output_plan.producer(vault) as producer:
@@ -900,8 +932,9 @@ def test_planning_preparation_keeps_generated_custody_unchanged(vault, attempts,
     manager, call = attempts
     args = authored()
     ticket = reserve(call, args)
-    call("capture_source", **args, capture_reservation=ticket)
+    captured = call("capture_source", **args, capture_reservation=ticket)
     reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    _forge_earlier_listing(vault, manager, reference, captured["source"]["path"])
     collection = "Knowledge Base/Planning/Work/_collection.md"
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         planning.create_collection(vault, collection, _manifest(), why="Retain intended work.")
@@ -921,7 +954,7 @@ def test_planning_preparation_keeps_generated_custody_unchanged(vault, attempts,
 
 
 def test_lost_acknowledgement_phase_keeps_the_capture_and_the_next_write_settles_its_slots(
-    vault, attempts, registered_custody, monkeypatch,
+    vault, source_schema, attempts, registered_custody, monkeypatch,
 ):
     """Catalogue work after native bytes is one deferred phase; losing it must not strand published output."""
     from exomem import generated_fragment_store, generated_output_plan
@@ -935,32 +968,38 @@ def test_lost_acknowledgement_phase_keeps_the_capture_and_the_next_write_settles
         if not lost and operation == "unit" and any(
                 item.kind == "slot" and value.pending is None and value.current_copy_id is not None
                 for item, value in values):
-            lost.extend(item for item, _ in values)
+            lost.extend(values)
             raise RuntimeError("process lost before its acknowledgements became durable")
         return commit(self, operation, values)
 
     args = authored()
     ticket = reserve(call, args)
+    enrolled = call("capture_source", **args, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    _forge_earlier_listing(vault, manager, reference, enrolled["source"]["path"])
+    unenrolled = {**authored(), "title": "Unenrolled survey", "content": "Another observation.",
+                  "source_identity": {"system": "unlisted", "record_id": "unenrolled", "revision": "one"}}
     with monkeypatch.context() as crashing:
         crashing.setattr(store_type, "_commit", lose_the_phase_that_settles_slots)
-        captured = call("capture_source", **args, capture_reservation=ticket)
-    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+        captured = call("capture_source", **unenrolled)
     assert lost and captured["capture_outcome"] == "created"
     assert (vault / captured["source"]["path"]).exists()
     log = vault / "Knowledge Base/log.md"
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         store = store_type(vault)
         try:
-            copies = [store.copy_record(item.object_id).value for item in lost if item.kind == "copy"]
-            assert copies and all(copy.outcome == "reserved" for copy in copies)
+            acknowledged = [item.object_id for item, value in lost if item.kind == "copy" and value.outcome == "present"]
+            assert acknowledged
+            assert {store.copy_record(copy_id).value.outcome for copy_id in acknowledged} == {"reserved"}
         finally:
             store.close()
         with generated_output_plan.producer(vault) as producer:
             assert producer.before(log).binding.slot.pending is not None
 
     later = {**authored(), "title": "Later survey", "content": "A later observation.",
-             "source_identity": {"system": "archive", "record_id": "later", "revision": "one"}}
-    assert call("capture_source", **later, capture_reservation=reserve(call, later))["capture_outcome"] == "created"
+             "source_identity": {"system": "unlisted", "record_id": "later", "revision": "one"}}
+    with request_scope(owner_principal(surface="mcp")):
+        assert dispatch(manager, vault, "capture_source", later, source_schema)["capture_outcome"] == "created"
     with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
         with generated_output_plan.producer(vault) as producer:
             settled = producer.before(log)
