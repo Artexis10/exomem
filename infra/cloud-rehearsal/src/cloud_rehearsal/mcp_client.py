@@ -165,6 +165,25 @@ def refusal_text(error: BaseException) -> str | None:
     return f"HTTP {error.response.status_code} {code}"
 
 
+# How much of a refused call's response body a report keeps.
+BODY_EXCERPT_BYTES = 120
+
+
+def refusal_excerpt(error: BaseException) -> str | None:
+    """The start of a refused call's response body, or None when the error has no body that was read.
+
+    `refusal_text` names the gateway's JSON error code and calls anything else "<non-JSON body>", which hid a
+    proxy's plain-text "Bad Gateway". An empty body is "", so it stays apart from a missing body."""
+
+    if not isinstance(error, httpx.HTTPStatusError):
+        return None
+    try:
+        raw = error.response.content
+    except httpx.ResponseNotRead:
+        return None
+    return raw[:BODY_EXCERPT_BYTES].decode("utf-8", errors="replace")
+
+
 def session_gone(error: BaseException) -> bool:
     """The server no longer knows the session (HTTP 404 on its id), so a client initializes a fresh session and
     repeats the call. The SDK answers that status with this fixed message instead of an HTTP error."""

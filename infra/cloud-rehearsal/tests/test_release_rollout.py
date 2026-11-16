@@ -351,6 +351,35 @@ def test_a_refused_call_names_the_gateways_error_code_and_the_next_poll_opens_a_
     assert summary["error_kinds"] == {"HTTP 429 RATE_LIMITED": 1}
 
 
+def _http_error(status: int, body: bytes) -> httpx.HTTPStatusError:
+    """The error the SDK raises on a refused streamed POST, with the body read as the harness's response hook reads it."""
+
+    async def refused() -> httpx.HTTPStatusError:
+        def answer(_request):
+            return httpx.Response(status, stream=httpx.ByteStream(body))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(answer), event_hooks={"response": [read_refusal_body]}) as client:
+            with pytest.raises(httpx.HTTPStatusError) as raised:
+                async with client.stream("POST", "https://mcp.rehearsal.test/mcp") as response:
+                    response.raise_for_status()
+        return raised.value
+
+    return asyncio.run(refused())
+
+
+def test_a_poll_error_keeps_its_time_and_the_start_of_a_plain_text_502() -> None:
+    """The error code alone calls a proxy's plain-text answer "<non-JSON body>", which hid the "Bad Gateway" behind a
+    failed step 23. The sample must name the time, to line up with the edge's log, and the start of the body."""
+
+    body = b"Bad Gateway" + b" and more" * 40
+    summary = _poll(_Connector(_Session(_http_error(502, body)), _Session("answers")), calls=3)
+    [sample] = summary["error_samples"]
+    assert sample["error"] == "HTTP 502 <non-JSON body>"
+    assert sample["response_body"] == body[:120].decode()
+    assert dt.datetime.fromisoformat(sample["at"]).utcoffset() == dt.timedelta(0)
+    assert "Bad Gateway" in poll_failures("C", summary)[0]
+
+
 class _Writer:
     """A session whose writes answer its script in order and repeat the last answer."""
 

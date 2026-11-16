@@ -49,7 +49,7 @@ from cellctl.storage_config import GIB, LocalStorage
 from mcp.shared.exceptions import McpError
 
 from . import build, images, tls
-from .mcp_client import MeasuredSession, refusal_text, session_gone
+from .mcp_client import MeasuredSession, refusal_excerpt, refusal_text, session_gone
 from .platform import CLOUD_NAMESPACE
 from .report import (
     BLOCKED,
@@ -192,6 +192,9 @@ def deploy_transport(client: httpx.Client):
 class Call:
     seconds: float
     error: str | None
+    # When the call ended, and the start of its response body when an HTTP error came with a body (redacted).
+    at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.UTC))
+    response_body: str | None = None
 
 
 @dataclass
@@ -207,6 +210,8 @@ class SwitchPoller:
     label: str
     tenant: Tenant
     interval: float
+    # Values that a recorded response body must not carry.
+    secrets: tuple[str, ...] = ()
     calls: list[Call] = field(default_factory=list)
     sessions: int = 0
     last_completed_at: dt.datetime | None = None
@@ -261,7 +266,10 @@ class SwitchPoller:
                 if not in_flight and self._stop.is_set():
                     break  # the session closing after the last call, with no call to blame
                 retrying = False
-                self._record(began, refusal_text(innermost(raised)) or _flatten(innermost(raised))[:200])
+                cause = innermost(raised)
+                excerpt = refusal_excerpt(cause)
+                self._record(began, refusal_text(cause) or _flatten(cause)[:200],
+                             None if excerpt is None else redact(excerpt, self.secrets))
                 await self._pause(began)
 
     async def _call(self, session: MeasuredSession) -> tuple[str | None, bool]:
@@ -275,9 +283,9 @@ class SwitchPoller:
             return f"tool error {result.error_code or 'unknown'}", False
         return None, False
 
-    def _record(self, began: float, error: str | None) -> None:
-        self.calls.append(Call(time.perf_counter() - began, error))
-        self.last_completed_at = dt.datetime.now(dt.UTC)
+    def _record(self, began: float, error: str | None, response_body: str | None = None) -> None:
+        self.calls.append(Call(time.perf_counter() - began, error, response_body=response_body))
+        self.last_completed_at = self.calls[-1].at
         self._first.set()
 
     async def _pause(self, began: float) -> None:
@@ -295,10 +303,18 @@ def summarize_calls(calls: list[Call]) -> dict[str, Any]:
         "p95_wait_seconds": round(percentile(waits, 0.95), 2) if waits else None,
         # A wait over the gateway's retry interval is a call held behind a restart.
         "held_calls": sum(1 for wait in waits if wait > 2.0),
-        "error_samples": [{"waited_seconds": round(call.seconds, 2), "error": call.error} for call in errors[:5]],
+        "error_samples": [{"at": call.at.isoformat(timespec="milliseconds"), "waited_seconds": round(call.seconds, 2),
+                           "error": call.error, "response_body": call.response_body} for call in errors[:5]],
         # How often each kind of error came, since the samples keep only the first few.
         "error_kinds": dict(Counter((call.error or "").splitlines()[0][:100] for call in errors)),
     }
+
+
+def sample_text(sample: dict[str, Any]) -> str:
+    """An error sample as a sentence part: its error, the UTC time, and its response body when the call had a body."""
+
+    body = sample.get("response_body")
+    return f"{sample['error']} at {sample['at']}" + ("" if body is None else f", response body {body!r}")
 
 
 def poll_failures(label: str, summary: dict[str, Any], budget: float = HOLD_BUDGET_SECONDS) -> list[str]:
@@ -312,10 +328,10 @@ def poll_failures(label: str, summary: dict[str, Any], budget: float = HOLD_BUDG
     early = [sample for sample in summary["error_samples"] if sample not in late]
     if early:
         problems.append(f"switch {label}: {len(early)} call(s) errored before the {budget:.0f} s hold budget ran out "
-                        f"(first: {early[0]['error']})")
+                        f"(first: {sample_text(early[0])})")
     if late:
         problems.append(f"switch {label}: {len(late)} call(s) errored after waiting out the {budget:.0f} s hold budget, "
-                        f"so the cell was down longer than the hold (first: {late[0]['error']})")
+                        f"so the cell was down longer than the hold (first: {sample_text(late[0])})")
     if summary["errors"] and not problems:
         problems.append(f"switch {label}: {summary['errors']} call(s) errored")
     return problems
@@ -713,7 +729,8 @@ class Rollout:
     outcome: dict[int, str] = field(default_factory=dict)
 
     def start_poller(self, label: str, tenant: Tenant, interval: float = 1.0) -> SwitchPoller:
-        poller = self.pollers[label] = SwitchPoller(label, tenant, interval)
+        secrets = self.ctx.substrate.secrets
+        poller = self.pollers[label] = SwitchPoller(label, tenant, interval, (secrets.admin_token, secrets.deploy_token))
         poller.start()
         return poller
 

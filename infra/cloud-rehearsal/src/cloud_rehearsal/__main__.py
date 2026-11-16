@@ -543,9 +543,14 @@ def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
         "events": ["get", "events", "--all-namespaces", "--sort-by=.lastTimestamp"],
         "cellctl": ["logs", "--namespace", platform.CLOUD_NAMESPACE, "deployment/cellctl", "--tail=400"],
         "gateway": ["logs", "--namespace", platform.CLOUD_NAMESPACE, "deployment/exomem-cloud-gateway", "--tail=400"],
+        # The stand-in Traefik's warnings and errors, and its access log of every 5xx it returned.
+        "traefik": ["logs", "--namespace", platform.EDGE_NAMESPACE, "deployment/rehearsal-traefik", "--tail=1000"],
     }.items():
         result = stack.k3s.kubectl(*command, check=False)
-        (out / f"{name}.txt").write_text(result.stdout + result.stderr, encoding="utf-8")
+        # The gateway logs only warnings and errors, so a healthy run leaves its log empty. An empty file reads
+        # as a collection that failed, so the file says the command ran and printed nothing.
+        text = result.stdout + result.stderr
+        (out / f"{name}.txt").write_text(text or f"(kubectl {' '.join(command)} printed nothing)\n", encoding="utf-8")
     artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
     if artifacts:
         shutil.copytree(out, Path(artifacts), dirs_exist_ok=True)

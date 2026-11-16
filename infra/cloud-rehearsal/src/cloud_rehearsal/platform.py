@@ -553,9 +553,18 @@ def _kubectl_apply(stack: Stack, documents: list[dict[str, Any]]) -> None:
     stack.k3s.kubectl("apply", "--server-side", "--field-manager=rehearsal", "--filename=-", input_text=payload)
 
 
-def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: str, image: str) -> None:
-    leaf = pki.leaves[tls.MCP_HOST]
-    dynamic = {
+def gateway_idle_conn_timeout() -> str:
+    """The chart's `cloudIngress.gatewayIdleConnTimeout`, which its ServersTransport gives every route to the gateway."""
+
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))
+    return values["cloudIngress"]["gatewayIdleConnTimeout"]
+
+
+def ingress_routing(ingress_source_value: str) -> dict[str, Any]:
+    """The stand-in Traefik's file-provider routing: the chart's route to the gateway, with its trusted-ingress
+    header and its ServersTransport, which closes an idle backend connection before the gateway's Node server does."""
+
+    return {
         "http": {
             "middlewares": {
                 "trusted-ingress": {"headers": {"customRequestHeaders": {TRUSTED_INGRESS_HEADER: ingress_source_value}}}
@@ -569,17 +578,24 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
                     "tls": {},
                 }
             },
+            "serversTransports": {"gateway": {"forwardingTimeouts": {"idleConnTimeout": gateway_idle_conn_timeout()}}},
             "services": {
                 "gateway": {
                     "loadBalancer": {
                         "servers": [{"url": f"http://exomem-cloud-gateway.{CLOUD_NAMESPACE}.svc.cluster.local:8080"}],
                         "passHostHeader": True,
+                        "serversTransport": "gateway",
                     }
                 }
             },
         },
         "tls": {"certificates": [{"certFile": "/tls/tls.crt", "keyFile": "/tls/tls.key"}]},
     }
+
+
+def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: str, image: str) -> None:
+    leaf = pki.leaves[tls.MCP_HOST]
+    dynamic = ingress_routing(ingress_source_value)
     labels = {"app.kubernetes.io/name": "rehearsal-traefik", "exomem.io/ingress": "traefik"}
     documents = [
         {
@@ -621,6 +637,12 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
                                     "--entryPoints.websecure.address=:8443",
                                     "--providers.file.filename=/config/dynamic.json",
                                     "--log.level=WARN",
+                                    # Traefik logs the cause of a 502 only at debug level, which would also print the
+                                    # trusted-ingress header's value. Its access log, filtered to the 5xx it returned,
+                                    # names each failure's time, path and status, and drops request headers by default.
+                                    "--accesslog=true",
+                                    "--accesslog.format=json",
+                                    "--accesslog.filters.statuscodes=500-599",
                                     # No call home: nothing in the run may reach a real server.
                                     "--global.checkNewVersion=false",
                                     "--global.sendAnonymousUsage=false",
