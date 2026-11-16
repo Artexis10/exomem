@@ -574,6 +574,7 @@ def _bindings(
     if home_set.findings:
         group.detail = "the homes overlay is invalid"
     group.values = [
+        # The plan refuses a vault that is already `root`, so the homes it reads sit in `nested`.
         _bound("homes", layout.home_folder(home, layout.Layout.NESTED), registry, today, after)
         for home in home_set.homes
         if home.active

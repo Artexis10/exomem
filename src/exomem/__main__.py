@@ -1150,11 +1150,17 @@ def _serve_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from . import server
+    from .cli_ops import OpError
 
     try:
         server.run(transport=args.transport, host=args.host, port=args.port)
     except KeyboardInterrupt:
         return 130
+    except OpError as error:
+        # `str(error)` drops the remedy, and a refusal at start (such as a vault layout that no
+        # record settles) is only useful with the change it asks for.
+        print(f"exomem failed: {error}\n{error.remediation}", file=sys.stderr)
+        return 1
     except Exception as e:  # noqa: BLE001 — top-level CLI guard: report and exit non-zero
         print(f"exomem failed: {e}", file=sys.stderr)
         return 1

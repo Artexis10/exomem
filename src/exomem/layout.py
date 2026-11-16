@@ -5,7 +5,8 @@ vault and compiled notes sit under a `Notes/` parent. In `root`, the managed roo
 vault root and each compiled area is a top-level folder. This module holds what depends on
 that choice and on no other state:
 
-- `resolve` reads which layout a vault has, from its layout record;
+- `resolve` reads which layout a vault has, from its layout record, and `of` answers from a cache
+  that a change to the record or to a schema folder invalidates;
 - `area_folder`, `home_folder` and `translate_path` say where an area, a home or an authored
   path selector sits in a layout;
 - `place` maps a single page of a `nested` vault to its folder and name class in `root`;
@@ -13,14 +14,16 @@ that choice and on no other state:
   a corrected title, cut to the byte cap, unique across the vault.
 
 No area or folder name is spelled here. Areas come from the note-type and home registries,
-the collection profiles and the managed-root helpers in `kbdir`. Nothing in the read or write
-paths calls this module yet: only the read-only relayout plan and `layout_report`, which feeds
-status and doctor, do.
+the collection profiles and the managed-root helpers in `kbdir`. Vault resolution and service
+start call `of`, so a vault that cannot say its layout refuses to start; the read-only relayout
+plan and `layout_report`, which feeds status and doctor, call `inspect` and never refuse.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import threading
 from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
@@ -32,15 +35,10 @@ import yaml
 
 from . import collection_profiles, extraction_parts, homes, kbdir, note_types, vault
 from .cli_ops import OpError
+from .freshness import signature_from_stat
 from .held_fs import vault_name_key
+from .kbdir import Layout
 from .vault import corrected_title_name, fit_filename
-
-
-class Layout(StrEnum):
-    """Where the managed root sits. The vault-layout schema fixes these two values."""
-
-    NESTED = "nested"
-    ROOT = "root"
 
 
 class LayoutError(OpError):
@@ -70,6 +68,12 @@ class LayoutRecord:
 def _schema_folders() -> tuple[str, str]:
     """The two places a schema folder can be, relative to the vault root: the vault root, then the managed root."""
     return vault.SCHEMA_OVERLAY_DIRNAME, kbdir.managed_join(vault.SCHEMA_OVERLAY_DIRNAME)
+
+
+def schema_folder(layout: Layout | str) -> str:
+    """The schema folder of `layout`, relative to the vault root: where that layout's record belongs."""
+    root_folder, wrapper_folder = _schema_folders()
+    return root_folder if Layout(layout) is Layout.ROOT else wrapper_folder
 
 
 def _record_rels() -> tuple[str, str]:
@@ -195,6 +199,74 @@ def inspect(vault_root: Path) -> Resolved:
 def resolve(vault_root: Path) -> Layout:
     """The layout of the vault at `vault_root`; see `inspect` for the rules and for what else they find."""
     return inspect(vault_root).layout
+
+
+#: What `of` answered, by vault root and managed-root name, with the fingerprint it answered under.
+_ANSWERS: dict[tuple[str, str], tuple[tuple, Layout]] = {}
+_ANSWERS_LOCK = threading.Lock()
+#: A process serves a few vault roots. Past this the cache clears and refills, as `vault_store.mode` does.
+_ANSWERS_LIMIT = 256
+
+
+def _fingerprint(root: Path) -> tuple | None:
+    """What `inspect` reads, as it stands now, in a few stats and no walk; None when it cannot be taken.
+
+    The record is a stored page (its revision and hash) or a file (its stat signature and inode),
+    and each schema folder counts as present or absent. A record that an editor rewrites in place
+    within a single clock tick and at its old size is not seen; every Exomem writer replaces the file.
+    """
+    from .vault_store import mode, read
+
+    base = os.fspath(root)
+    taken: list[object] = []
+    try:
+        stored = mode.store_mode_for_reads(root)  # read once: it holds until the manifest changes
+        for rel in _record_rels():
+            if stored:
+                try:
+                    meta = read.owned_meta(root, rel)
+                except FileNotFoundError:
+                    taken.append(("stored", None))  # the store serves this path and holds no page
+                    continue
+                if meta is not None:
+                    taken.append(("stored", meta.revision, meta.sha256))
+                    continue
+            try:
+                found = os.stat(f"{base}/{rel}")
+            except (FileNotFoundError, NotADirectoryError):
+                taken.append(("file", None))
+            else:
+                taken.append(("file", signature_from_stat(found), found.st_ino))
+        taken.extend(os.path.isdir(f"{base}/{folder}") for folder in _schema_folders())
+    except Exception:  # noqa: BLE001 - what cannot be fingerprinted is read afresh, and `inspect` names the failure
+        return None
+    return tuple(taken)
+
+
+def of(vault_root: Path) -> Layout:
+    """The layout of the vault at `vault_root`, read once and kept until its record or schema folders change.
+
+    Vault resolution, service start and the writers call this on every operation, so the answer
+    comes from a cache keyed by vault root and managed-root name. A call takes the fingerprint of
+    the record and folders first (a few stats) and reads them again only when it differs from the
+    fingerprint that the cached answer was read under. A refusal and a failed read are never
+    cached, so writing the record that a refusal asks for takes effect on the next call, without
+    a restart. Raises what `inspect` raises.
+    """
+    root = Path(vault_root)
+    key = (os.fspath(root), kbdir.managed_root_rel())
+    fingerprint = _fingerprint(root)
+    with _ANSWERS_LOCK:
+        cached = _ANSWERS.get(key)
+    if fingerprint is not None and cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    answer = inspect(root).layout
+    if fingerprint is not None:
+        with _ANSWERS_LOCK:
+            if len(_ANSWERS) >= _ANSWERS_LIMIT:
+                _ANSWERS.clear()
+            _ANSWERS[key] = (fingerprint, answer)
+    return answer
 
 
 # --------------------------------------------------------------------------- #

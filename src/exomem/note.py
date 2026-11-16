@@ -70,7 +70,7 @@ from . import (
 )
 from . import project_keys as project_keys_module
 from .governance.membership import MembershipUnresolved
-from .kbdir import managed_join, managed_relative
+from .kbdir import managed_join, managed_relative, managed_root
 from .vault import (
     MISSING_CONTENT_HASH,
     InvalidSlugError,
@@ -1258,7 +1258,8 @@ def _type_default(
 ) -> _Placement:
     """The folder and stem of the type's own layout: its folder, partition and stem kind."""
     definition = _definition(vault_root, note_type)
-    folder = kb_root(vault_root) / str(layout.area_folder(definition, layout.Layout.NESTED))
+    lay = layout.of(vault_root)
+    folder = managed_root(vault_root, layout=lay) / str(layout.area_folder(definition, lay))
     if definition.partition == "project":
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
@@ -1386,7 +1387,6 @@ def _place(
     )
     if home_set is None or not home_set.homes:
         return default
-    kb = kb_root(vault_root)
     if predecessor is not None:
         parent = (vault_root / predecessor).parent
         if _home_containing(vault_root, parent, home_set) is not None:
@@ -1397,7 +1397,8 @@ def _place(
         home = next((home_set.by_topic[topic] for topic in topics if topic in home_set.by_topic), None)
     if home is None:
         return default
-    return _Placement(kb / layout.home_folder(home, layout.Layout.NESTED), default.stem)
+    lay = layout.of(vault_root)
+    return _Placement(managed_root(vault_root, layout=lay) / layout.home_folder(home, lay), default.stem)
 
 
 def _resolve_path(

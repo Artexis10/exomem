@@ -56,6 +56,7 @@ def append_only_areas() -> frozenset[str]:
     from . import layout, note_types
 
     areas = (
+        # A raw type's area does not depend on the layout, so no vault is read for it.
         layout.area_folder(note_type, layout.Layout.NESTED)
         for note_type in note_types.shipped(note_types.raw)
     )

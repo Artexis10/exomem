@@ -53,6 +53,7 @@ from . import (
 )
 from .held_fs import vault_name_key
 from .kbdir import (
+    IMPORT_STAGE_DIRNAME,
     is_managed_root_name,
     managed_form,
     managed_join,
@@ -285,9 +286,6 @@ _SHIPPED_SCHEMA_SUBDIR = "schema"
 _SCHEMA_SENTINEL = "SKILL.md"
 
 
-# The vault folder that holds staged imports, one `<import_id>` folder each.
-IMPORT_STAGE_DIRNAME = "_Imports"
-
 # Machinery and operational-state folders that no content walk enters, in the vault or in the
 # Knowledge Base corpus.
 #
@@ -484,7 +482,8 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
 
     Resolved from the ``{env_var}`` environment variable — the vault *root*, i.e.
     the folder that contains ``Knowledge Base/``. Raises if it is unset or does
-    not point at a vault. (This is cross-platform: there are no machine-specific
+    not point at a vault, or if the vault cannot say its layout (`layout.LayoutError`, which
+    names the record to write). (This is cross-platform: there are no machine-specific
     fallback paths — every host sets the env var to its own vault.)
     """
     override = os.environ.get(env_var)
@@ -501,6 +500,9 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
             f"{env_var}={override!r} does not look like a vault "
             f"(no schema contract in .exomem/schema/ or {managed_join('_Schema/')})"
         )
+    from . import layout  # imported here: `layout` imports this module
+
+    layout.of(path)  # refuses a vault whose layout the record and folders cannot say; never while a record exists
     return path
 
 

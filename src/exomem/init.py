@@ -40,6 +40,7 @@ def _area_folders() -> tuple[str, ...]:
     """
     folders: list[str] = []
     for note_type in note_types.shipped():
+        # `init` creates `nested` vaults until it selects the layout at creation (task 4.6b).
         area = layout.area_folder(note_type, layout.Layout.NESTED)
         if area is None:
             continue
@@ -52,6 +53,7 @@ def _area_folders() -> tuple[str, ...]:
 def _entity_area() -> str:
     """The folder that holds a group folder for each entity type."""
     for note_type in note_types.shipped(note_types.entity):
+        # Same reason as `_area_folders`: `init` creates `nested` vaults for now.
         area = layout.area_folder(note_type, layout.Layout.NESTED)
         if area is not None:
             return area

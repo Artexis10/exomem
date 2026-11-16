@@ -10,15 +10,52 @@ Everything outside this module reaches the folder through the ``managed_*`` help
 below, never through ``kb_dirname``/``kb_prefix``. The helpers own how a managed-root-relative
 path (``Sources/x.md``) becomes a vault-relative path (``Knowledge Base/Sources/x.md``) and
 back, so a different root layout changes here only.
+
+The helpers take an optional layout. ``None`` and ``nested`` return today's strings exactly. In
+``root`` the vault root is the managed root: there is no wrapper to add or remove, and a path
+whose first component sits outside Exomem's care (a dot folder, the import staging folder or an
+entry that the layout record lists as unmanaged) is outside the managed root.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
+from enum import StrEnum
 from pathlib import Path
 
 _DEFAULT = "Knowledge Base"
+
+#: The vault folder that holds staged imports, with a folder for each `<import_id>`.
+IMPORT_STAGE_DIRNAME = "_Imports"
+
+
+class Layout(StrEnum):
+    """Where the managed root sits. The vault-layout schema fixes these two values."""
+
+    NESTED = "nested"
+    ROOT = "root"
+
+
+def _is_root(layout: Layout | str | None) -> bool:
+    """Whether ``layout`` is `root`. ``None`` is `nested`; a name that is neither refuses, so a typo never reads as `nested`."""
+    return layout is not None and Layout(layout) is Layout.ROOT
+
+
+def _outside_root(
+    head: str, unmanaged: Collection[str], key: Callable[[str], str] | None
+) -> bool:
+    """Whether the top-level entry ``head`` sits outside the managed root of a `root` vault.
+
+    A name that starts with a dot is the filesystem and Obsidian convention for an entry that no
+    tool reads as content. The staging folder holds uploads that are not pages yet.
+    """
+    if head.startswith("."):
+        return True
+    if key is None:
+        return head == IMPORT_STAGE_DIRNAME or head in unmanaged
+    folded = key(head)
+    return folded == key(IMPORT_STAGE_DIRNAME) or any(folded == key(name) for name in unmanaged)
 
 
 def kb_dirname() -> str:
@@ -42,23 +79,36 @@ def kb_prefix() -> str:
     return kb_dirname() + "/"
 
 
-def managed_join(rel: str) -> str:
+def managed_join(rel: str, *, layout: Layout | str | None = None) -> str:
     """The vault-relative path of ``rel``, a path relative to the managed root.
 
     ``managed_join("")`` is the managed root's own prefix (``"Knowledge Base/"``): the
     result is always the prefix followed by ``rel``, and a trailing slash on ``rel`` is kept.
+    In ``root`` the vault root is the managed root, so the result is ``rel`` itself.
     """
-    return kb_prefix() + rel
+    return rel if _is_root(layout) else kb_prefix() + rel
 
 
-def managed_split(vault_rel: str, *, key: Callable[[str], str] | None = None) -> str | None:
+def managed_split(
+    vault_rel: str,
+    *,
+    key: Callable[[str], str] | None = None,
+    layout: Layout | str | None = None,
+    unmanaged: Collection[str] = frozenset(),
+) -> str | None:
     """The managed-root-relative part of ``vault_rel``, or ``None`` outside the managed root.
 
     The inverse of ``managed_join``: the path must start with the root's prefix, so the
     root's bare name is outside and ``"Knowledge Base/"`` splits to ``""``. A ``key`` (such as
     ``str.casefold``) compares the root's name through it, for callers whose own rule is looser
     than byte equality; the remainder keeps the caller's spelling.
+
+    In ``root`` the path is already managed-root-relative, so it comes back as it is, unless its
+    first component is a dot name, the import staging folder or a name in ``unmanaged`` (the names
+    that the layout record lists, compared through ``key`` when given): those are outside.
     """
+    if _is_root(layout):
+        return None if _outside_root(vault_rel.partition("/")[0], unmanaged, key) else vault_rel
     if key is not None:
         head, separator, tail = vault_rel.partition("/")
         return tail if separator and key(head) == key(kb_dirname()) else None
@@ -66,25 +116,40 @@ def managed_split(vault_rel: str, *, key: Callable[[str], str] | None = None) ->
     return vault_rel[len(prefix):] if vault_rel.startswith(prefix) else None
 
 
-def managed_splitter() -> Callable[[str], str | None]:
+def managed_splitter(
+    *, layout: Layout | str | None = None, unmanaged: Collection[str] = frozenset()
+) -> Callable[[str], str | None]:
     """``managed_split`` with the root read once, for a loop over many paths.
 
     Reading the root costs an environment lookup, so a loop over a corpus binds it here and
-    calls the result per path, as it would hoist a prefix string.
+    calls the result per path, as it would hoist a prefix string. ``layout`` and ``unmanaged``
+    are those of ``managed_split``.
     """
+    if _is_root(layout):
+        names = frozenset(unmanaged)
+        return lambda vault_rel: (
+            None if _outside_root(vault_rel.partition("/")[0], names, None) else vault_rel
+        )
     prefix = kb_prefix()
     size = len(prefix)
     return lambda vault_rel: vault_rel[size:] if vault_rel.startswith(prefix) else None
 
 
 def managed_split_parts(
-    parts: Sequence[str], *, key: Callable[[str], str] | None = None
+    parts: Sequence[str],
+    *,
+    key: Callable[[str], str] | None = None,
+    layout: Layout | str | None = None,
+    unmanaged: Collection[str] = frozenset(),
 ) -> tuple[str, ...] | None:
     """The components below the managed root, or ``None`` when ``parts`` is outside it.
 
     The components form of ``managed_split`` for paths already split on ``/``. The root
-    itself (its name alone) gives an empty tuple. ``key`` compares the name as in ``managed_split``.
+    itself (its name alone) gives an empty tuple. ``key``, ``layout`` and ``unmanaged`` are those of
+    ``managed_split``; in ``root`` the empty tuple is the root itself.
     """
+    if _is_root(layout):
+        return None if parts and _outside_root(parts[0], unmanaged, key) else tuple(parts)
     if parts and is_managed_root_name(parts[0], key=key):
         return tuple(parts[1:])
     return None
@@ -131,9 +196,9 @@ def managed_respell(rel: str) -> str:
     return rel
 
 
-def managed_root(vault_root: Path) -> Path:
-    """The managed root directory of the vault at ``vault_root``."""
-    return vault_root / kb_dirname()
+def managed_root(vault_root: Path, *, layout: Layout | str | None = None) -> Path:
+    """The managed root directory of the vault at ``vault_root``: the vault root itself in ``root``."""
+    return vault_root if _is_root(layout) else vault_root / kb_dirname()
 
 
 def managed_root_rel() -> str:
