@@ -897,3 +897,9 @@ The planned 0.116-to-0.114 rehearsal crosses collection schema 10 to schema 8.
 Readiness and manifest compatibility IDs do not prove those routes work.
 Never restore the older S0 backup over post-upgrade writes. Do not add a downmigration or another product endpoint.
 A successful refusal/recovery test proves safe handling of incompatibility; it does not prove successful historical rollback.
+
+A cell created on the release that starts new archives in shared original storage, or a later one, turns that storage on at its first start.
+An image without shared storage refuses such a cell at startup; record that refusal as the step 5 outcome.
+To recover the cell, roll forward to its creating release or a later one.
+To move its data to an older image instead, make a compatibility export, as "Downgrade to a release without shared storage" in `docs/deployment.md` describes.
+A cell created before that release keeps ordinary storage through every upgrade, because only its owner's conversion changes it.

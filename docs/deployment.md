@@ -1972,14 +1972,29 @@ Three kinds of copy exist:
 
 ### New archives
 
-A new archive starts in shared storage only when the process that creates it
-has launcher support for the format. A managed worker gets that support from
-its launcher; a standalone server, including a Cloud cell, is its own
-launcher. Without that support, the archive starts in ordinary storage.
-`exomem init`, the setup wizard, the terminal interface and Cloud cell
-provisioning run without it today, so they create ordinary storage.
-`exomem init` and the setup wizard print the reason and the conversion action. `exomem init --force` on an existing archive never changes its
-storage.
+A new archive starts in shared storage. `exomem init`, the setup wizard, the
+terminal interface and Cloud cell provisioning record this in the archive's
+state when they create it. The first service start with launcher support for
+the format then turns on shared storage, before the service serves a request.
+A standalone server, including a Cloud cell, is its own launcher, so its first
+start turns it on. A managed worker gets that support from its launcher.
+
+A managed service whose launcher predates shared storage keeps a new archive
+in ordinary storage and keeps the record for a later start. Its startup log
+and the `original_storage` block of `/health/ready` name the fix: update the
+launcher, as
+[A supervisor older than the vault's state](managed-service-upgrades.md#a-supervisor-older-than-the-vaults-state)
+describes, then restart the service. `exomem init` and the setup wizard print
+when shared storage starts.
+
+Originals filed before shared storage turns on keep their ordinary files, and
+the archive holds both kinds. An existing archive never changes its storage
+when you upgrade or start a release, and `exomem init --force` on an existing
+archive never changes its storage either.
+
+Once shared storage is on, a release without shared storage refuses the new
+archive, as it refuses a converted one. "Downgrade to a release without shared
+storage" below gives the way back.
 
 ### Convert an existing archive
 
@@ -2129,15 +2144,26 @@ Replace the three paths, and give the `vault_id` that the export used. The
 staging folder must not exist yet either. The restore never writes over an
 existing folder.
 
-A copy of the folder made in another way does not record the requirement. Do
-not start a release without shared storage on such a copy, because that
-release serves the pages without their originals. Make a compatibility export
-for that release.
+A copy of the folder made in another way, such as a plain folder copy or a
+Cloud import, does not record the requirement. This release records it at the
+copy's first service start, before the service serves a request. A managed
+service whose launcher predates shared storage refuses to start on such a copy
+with `SHARED_ORIGINALS_LAUNCHER_UPDATE_REQUIRED`; update the launcher, then
+restart the service. Do not start a release without shared storage on such a
+copy, because that release serves the pages without their originals. Make a
+compatibility export for that release.
 
 ### Downgrade to a release without shared storage
 
 An earlier release refuses an archive that records shared storage, and the
-conversion has no in-place undo. To move an archive to such a release:
+conversion has no in-place undo. An archive or Cloud cell created on this
+release or a later one records shared storage at its first service start with
+launcher support, as "New archives" describes. This floor then applies to it
+without a conversion. An archive or cell created earlier keeps ordinary
+storage through every upgrade until its owner converts it.
+
+To recover from that refusal, roll forward to this release or a later one.
+To move an archive to an earlier release instead:
 
 1. With the current release, make a compatibility export.
 2. With the earlier release, restore the export as "Restore a whole-archive export" describes.
