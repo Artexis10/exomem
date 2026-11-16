@@ -612,3 +612,11 @@ def test_the_hook_renders_the_same_working_set_with_the_stance_on_or_off(stance_
     assert stance_complete and "Keep a source for each claim." in on_text
     assert [line for line in on_lines if not line.startswith("- stance:")] == off_text.splitlines()
     assert on_complete == off_complete
+
+
+def test_the_hook_stance_cap_is_the_most_a_vault_may_set():
+    """A vault budget above the hook's cap would have the hook cut a well-formed stance and re-send it forever."""
+    from exomem import activation_conventions
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    assert hook._STANCE_MAX_CHARS == activation_conventions.BUDGET_BOUNDS["stance_max_chars"][1]
