@@ -236,7 +236,9 @@ def _load_policy(root: Path) -> tuple[str, governance_policy.Policy | None, str]
     except Exception as error:  # noqa: BLE001 -- any failure to read the policy is the visible state unknown, not an empty diff
         return STATE_UNKNOWN, None, f"the policy could not be read: {type(error).__name__}"
     if loaded.blocked:
-        findings = sorted({finding.get("code", "") for finding in loaded.findings} - {""})
+        findings = sorted(
+            {f["code"] for f in loaded.findings if f.get("severity", "error") != "warning"}
+        )
         return (
             STATE_UNKNOWN,
             None,

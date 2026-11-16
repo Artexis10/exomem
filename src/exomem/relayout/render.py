@@ -78,7 +78,9 @@ def outcome(plan: RelayoutPlan) -> str:
         f"Relayout plan from {plan.current.value} to {plan.target.value}: the content of {managed} moves to the vault root.",
         f"{counts['moved_files']} of {counts['files']} files move and {counts['renamed_files']} get a new file name.",
         f"{counts['link_edits']} links change in {counts['link_edit_pages']} pages"
-        f" and {counts['pointer_edits']} pointer fields change.",
+        f" and {counts['pointer_edits']} pointer fields change;"
+        f" {counts['link_edits_in_collection_and_part_pages']} more link edits sit in pages"
+        " that the collection store and the part writer own.",
         _disclosure_sentence(plan),
     ]
     attention = _attention(plan)

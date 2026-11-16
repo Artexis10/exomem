@@ -146,3 +146,115 @@ def build_nested_vault(root: Path) -> None:
     _page(
         root, "Insights/Idea.md", None, "A folder that the relayout's Insights area would join.\n"
     )
+
+
+# Scope ids are invented, in the form a policy file requires.
+SCOPE_AREA = "01ARZ3NDEKTSV4RRFFQ69G5FA1"
+SCOPE_PROJECT = "01ARZ3NDEKTSV4RRFFQ69G5FA2"
+SCOPE_RENAMED = "01ARZ3NDEKTSV4RRFFQ69G5FA3"
+SCOPE_PARTITION = "01ARZ3NDEKTSV4RRFFQ69G5FA4"
+SCOPE_MEDIA = "01ARZ3NDEKTSV4RRFFQ69G5FA5"
+RENAMED_REF = f"{KB}/Notes/Insights/rust-go.md"
+RENAMED_GLOB = f"{KB}/Notes/Insights/dup-*"
+CLIP_FRAME = f"{VIDEO}.frames/frame-001.md"
+TALK = f"{KB}/Sources/Media/talk.mp4"
+GHOST = f"{KB}/Sources/Media/ghost.mp4"
+
+
+def _scope(root: Path, name: str, scope_id: str, selectors: str) -> None:
+    text = f"governance_version: 1\nid: {scope_id}\nname: {name}\n{selectors}"
+    _write(root, f"{KB}/_Governance/scopes/{name}.yaml", text)
+
+
+def add_governed_content(root: Path) -> None:
+    """Add scopes, an access file and the pages they select to the vault that `build_nested_vault` wrote.
+
+    Five scopes each cover a case: a compiled area by path, a project with an `exclude_paths`
+    value, a path ref and a file-name glob that name pages the plan renames, a glob over a
+    partition folder (it changes only if the partition folders flatten), and a tag that a video
+    page carries and its frames inherit. Three videos cover the inheritance edge: `clip` keeps
+    its page name, `talk` has a page that moves to another area, and `ghost` has a frame whose
+    pointer names a video file that does not exist.
+    """
+    _scope(
+        root,
+        "area",
+        SCOPE_AREA,
+        f'paths: ["{KB}/Notes/Insights/**"]\nexclude:\n  paths: ["{KB}/Notes/Insights/Why churn rose.md"]\n',
+    )
+    _scope(
+        root,
+        "project",
+        SCOPE_PROJECT,
+        f'projects: [pricing]\nexclude:\n  paths: ["{KB}/Evidence/**"]\n',
+    )
+    _scope(root, "renamed", SCOPE_RENAMED, f'refs: ["{RENAMED_REF}"]\npaths: ["{RENAMED_GLOB}"]\n')
+    _scope(root, "partition", SCOPE_PARTITION, f'paths: ["{KB}/Notes/Research/Pricing/*"]\n')
+    _scope(
+        root,
+        "media",
+        SCOPE_MEDIA,
+        f'tags: [media-restricted]\npaths: ["{KB}/Sources/Media/*.mp4"]\n',
+    )
+    _write(
+        root,
+        f"{KB}/_access.yaml",
+        yaml.safe_dump(
+            {
+                "readonly": ["Notes/Insights/hidden.md", "Notes/Failures"],
+                "excluded": ["Notes/Productions"],
+            }
+        ),
+    )
+
+    _page(
+        root,
+        f"{KB}/Notes/Research/Pricing/pricing-model.md",
+        {"type": "research-note", "title": "Pricing model", "project": "pricing"},
+    )
+    _page(
+        root,
+        f"{KB}/Evidence/Pricing/c/Receipt.md",
+        {"type": "evidence", "title": "Receipt", "project": "pricing"},
+    )
+    _page(root, f"{VIDEO}.md", {"tags": ["media-restricted"]})
+    _write(root, TALK, b"video")
+    _page(root, f"{TALK}.md", {"type": "source", "title": "Talk", "tags": ["media-restricted"]})
+    _page(
+        root,
+        f"{TALK}.frames/frame-001.md",
+        {"title": "Talk frame", "parent_media": TALK, "frame_ts": 2.5},
+    )
+    _page(root, f"{GHOST}.md", {"tags": ["media-restricted"]})
+    _page(
+        root,
+        f"{GHOST}.frames/frame-001.md",
+        {"title": "Ghost frame", "parent_media": GHOST, "frame_ts": 3.5},
+    )
+
+
+RECORD_PAGE = f"{KB}/Records/Receipts/receipt-001.md"
+RETIRED_LINKER = f"{KB}/Notes/Insights/retired-pointer.md"
+RETIRED_TARGET = f"{KB}/Records/Receipts/receipt-gone"
+
+
+def add_links_from_collection_and_part_pages(root: Path) -> None:
+    """Add the pages that the collection store and the part writer own, each with a link the plan would edit.
+
+    The record page also links to a collection page that does not exist, and so does an ordinary
+    page: neither link can be repointed, and neither is an unresolved link in the usual sense.
+    """
+    with (root / PART_FOLDER / "part-02.md").open("a", encoding="utf-8") as part:
+        part.write("See [[Knowledge Base/Notes/Insights/Why churn rose]].\n")
+    _page(
+        root,
+        RECORD_PAGE,
+        {"type": "record", "title": "Receipt 001"},
+        f"Filed after [[Knowledge Base/Notes/Insights/Why churn rose]] and [[{RETIRED_TARGET}]].\n",
+    )
+    _page(
+        root,
+        RETIRED_LINKER,
+        {"type": "insight", "title": "Retired pointer"},
+        f"The receipt at [[{RETIRED_TARGET}]] was retired.\n",
+    )

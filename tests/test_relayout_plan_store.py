@@ -1,8 +1,9 @@
 """The relayout plan over a store-mode vault: it reads the store's pages, never the deleted files.
 
 The vault is the migration suite's generated vault with the nested relayout fixture written into
-it and moved into store mode by `store-mode migrate`. The plan of the same vault, read as files
-before their projections go, is the reference.
+it, with its scopes, access file and collection pages, and moved into store mode by
+`store-mode migrate`. The plan of the same vault, read as files before their projections go, is
+the reference.
 """
 
 from __future__ import annotations
@@ -13,9 +14,16 @@ import sys
 from pathlib import Path
 
 import pytest
-from relayout_fixture import KB, build_nested_vault
+from relayout_fixture import (
+    KB,
+    RECORD_PAGE,
+    add_governed_content,
+    add_links_from_collection_and_part_pages,
+    build_nested_vault,
+)
 from test_collection_store_migration import vault_bytes
 from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_relayout_plan import PART_PAGE
 from test_vault_store_migration import build_indexes, migrate_apply, vault  # noqa: F401
 
 from exomem import __main__ as cli
@@ -53,6 +61,8 @@ def test_a_store_mode_plan_equals_the_file_mode_plan_and_changes_nothing(
     monkeypatch,
 ):
     build_nested_vault(vault)
+    add_governed_content(vault)
+    add_links_from_collection_and_part_pages(vault)
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     capsys.readouterr()
@@ -80,6 +90,11 @@ def test_a_store_mode_plan_equals_the_file_mode_plan_and_changes_nothing(
         "store",
     )
     assert from_store["diagnostics"]["read"]["store_revision"] == revision_before
+    # The equality below holds a disclosure that read policy, pages and collection pages.
+    assert from_store["disclosure"]["scopes"]["state"] == "evaluated"
+    assert from_store["disclosure"]["figures"]["differences"] > 0
+    foreign = from_store["links_in_collection_and_part_pages"]["edits"]["items"]
+    assert {RECORD_PAGE, PART_PAGE} <= {edit["page"] for edit in foreign}
     assert from_store["counts"]["files"] == from_files["counts"]["files"] == expected_files
     # The read section names the mode, the revision and the stage timings, so it differs by design.
     del from_files["diagnostics"]["read"], from_store["diagnostics"]["read"]
