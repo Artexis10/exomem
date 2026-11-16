@@ -512,6 +512,10 @@ def prepare_sample(root, monkeypatch, request, sample):
     if sample == "maintain_memory:reconcile":
         # Reconcile verifies the receipt journal, which each call extends: keep it as prepared.
         monkeypatch.setattr(egress, "emit_boundary_receipt", lambda _collector: None)
+    if sample == "maintain_memory:convert-originals":
+        # Its preview refuses where the launcher cannot start a conversion; this sample proves its inventory read.
+        from exomem import artifact_lifecycle
+        monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
     if sample == "schema_memory:census":
         from exomem import relation_census
         monkeypatch.setattr(relation_census, "_cohort_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
