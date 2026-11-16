@@ -1396,8 +1396,12 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
     write into an error report.
     """
     from . import deferred_index, graph_sync
+    from .vault_store import mode as store_mode
 
     try:
+        if store_mode.store_mode_for_reads(vault_root):
+            # A store commit carries its graph rows; file mode's frozen checkpoint is not its outcome.
+            return None
         committed = graph_sync.read_checkpoint(vault_root)
         if committed is None:
             return None
@@ -6442,6 +6446,7 @@ class LeaseManager:
             ):
                 from . import audit as audit_module
                 from .epistemic_graph import EpistemicGraphIndex
+                from .vault_store import graph_state
 
                 def graph_is_current() -> bool:
                     return (
@@ -6453,8 +6458,12 @@ class LeaseManager:
                     )
 
                 try:
-                    graph_current = graph_is_current()
-                    if not graph_current and not has_reconcile_handoff:
+                    # A store-mode vault has no file-mode graph to close: its answer is the store's.
+                    store_graph = graph_state.read(root)
+                    graph_current = (
+                        store_graph.current if store_graph is not None else graph_is_current()
+                    )
+                    if not graph_current and store_graph is None and not has_reconcile_handoff:
                         # A startup/background mutation can supersede the exact
                         # checkpoint reconcile joined while its canonical guard
                         # is still held. Reconcile is the one command whose
