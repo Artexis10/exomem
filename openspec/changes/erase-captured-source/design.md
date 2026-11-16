@@ -12,7 +12,8 @@ Reuse these mechanisms. The added maintenance cost is one small custody ledger, 
 
 Prove logical erasure of an independent captured incarnation through the existing governed operation surfaces.
 Keep each persistence owner responsible for its own retained copies and publication fences.
-Keep ordinary preservation, capture activity and navigation behavior.
+Keep ordinary preservation, and keep capture activity and navigation for Sources outside custody.
+An enrolled Source stays off the shared navigation and activity pages; the captured-Source inventory lists it.
 
 Earlier backups, downloaded exports, caller-held responses, external synchronization history and forensic remnants remain outside the guarantee.
 Restoring those copies can reintroduce the Source. Erasure does not infer semantic dependence from prose or ask a model for permission.
@@ -181,6 +182,7 @@ A phase change holds at most `MAX_STEP` objects; a larger phase commits as conse
 The Source result journal forgets a closed publication only after its closing change is durable.
 Each commit deletes at most two change records below the retained window, instead of rewriting the head twice for each operation.
 A capture therefore makes a fixed number of canonical commits, whatever the vault size or catalogue age.
+An enrolled capture writes no shared navigation or activity page, so its phases carry only the Source's own copies and result images.
 This keeps a service caller's capture inside its 30-second request timeout.
 
 A freshly allocated Source can receive `generated_birth={catalogue_id,birth_epoch}` only before any generated output can survive.
@@ -291,6 +293,7 @@ Dependent writes and deferred publishers check the target's retirement fence bef
 
 Owned artifacts include canonical pages and originals, generated navigation and activity entries, capture guidance, replay and recovery records, staging and rollback copies.
 Owner locators identify exact entries or versions. Cleanup never removes text by matching a title, URL or record identifier globally.
+Enrolled Sources write no shared navigation or activity entries, so this cleanup covers only ownership that earlier builds recorded.
 Shared navigation and rotated logs need ownership-aware removal or regeneration that also retires their retained versions.
 Generated fragments carry exact producer identity through trimming, copying, rotation and batch before-images.
 A dropped activity excerpt copied into another Source's log entry keeps its original fragment ownership.

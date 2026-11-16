@@ -42,6 +42,10 @@ A fresh invocation key can reconcile after explicit replay expires.
 Different identities with identical content create separate Sources.
 Explicit promotion into Evidence preserves recovery at the promoted page's path and the same stable reference.
 
+A capture under erasure custody adds no line to the top index, the activity log or the Sources index.
+Erasure custody covers a capture with an issued capture reservation, or one whose identity system the host erasure policy enables.
+List those Sources with `inspect_memory` operation `sources.inventory`. Other captures keep their listing on those pages.
+
 The original capture digest covers text, trimmed title, resolved kind and domain, URL, normalized tags, reason, projects, requested slug and raw protection.
 It excludes invocation identifiers, response detail, compilation hints, timestamps, allocated paths and server identifiers.
 The initial atomic Source write stores identity and `capture_input_digest`; later metadata and back-reference updates preserve both.

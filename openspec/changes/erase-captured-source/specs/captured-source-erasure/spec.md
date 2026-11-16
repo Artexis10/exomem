@@ -62,8 +62,12 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **THEN** the result remains pending and target_retired is false
 
 #### Scenario: Shared log contains another Source
-- **WHEN** cleanup removes an owned entry from shared or rotated activity data
+- **WHEN** cleanup removes an entry that an earlier build recorded as owned from shared or rotated activity data
 - **THEN** it removes only the proved target's entries and preserves unrelated entries
+
+#### Scenario: An enrolled capture left no shared activity
+- **WHEN** the target was captured under custody by a build that keeps enrolled Sources off the shared pages
+- **THEN** cleanup finds no shared navigation or activity entry for the target and needs no shared-page removal
 
 #### Scenario: Trimmed activity copied an older Source
 - **WHEN** another Source's entry contains an owned excerpt from the target's earlier activity
