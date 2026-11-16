@@ -110,13 +110,17 @@ class Store(Protocol):
     def open(self, name: str, version: str): ...
 
 
-def _digest(stream: BinaryIO) -> ObjectHead:
+def _digest(stream: BinaryIO, *, deadline: float | None = None) -> ObjectHead:
+    """The size and SHA-256 of a stream; a request's `deadline` stops the pass as the ordinary hold's hash does."""
     digest = hashlib.sha256()
     size = 0
-    while chunk := stream.read(1024 * 1024):
+    while True:
+        reserved_paths._copy_deadline(deadline)
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            return ObjectHead(size, digest.hexdigest())
         size += len(chunk)
         digest.update(chunk)
-    return ObjectHead(size, digest.hexdigest())
 
 
 def _chunks(stream: BinaryIO):
@@ -1836,10 +1840,11 @@ def pooled_head(vault: Path, relative: str, snapshot: OriginalSnapshot) -> Objec
 
 @contextmanager
 def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False,
-                  job: MediaJob | None = None):
+                  job: MediaJob | None = None, deadline: float | None = None):
     """Pin before resolution; retain verified bytes through the caller's read.
 
-    `read` marks an owner's playback or viewing; processing and imports record no read.
+    `read` marks an owner's playback or viewing; processing and imports record no read. A request passes its
+    `deadline`, which bounds the hash of a cached original whose recorded identity no longer matches.
     """
     from . import original_pool
 
@@ -1877,7 +1882,7 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
                 raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the shared original differs from its binding") from error
             _bind_pin(ledger, token, snapshot, source, job=job)
             if snapshot.reference is not None and not cache_matches(vault, target, snapshot=snapshot):
-                if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+                if _digest(source.stream, deadline=deadline) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                     raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the cached original differs")
                 source.require_current()
                 conn = ledger._connect()
@@ -1923,7 +1928,7 @@ def logical_view(vault: Path, path: str | Path, *, job: MediaJob | None = None):
 def hold_original(vault: Path, path: str, *, recorded_sha256: Callable[[held_fs.FileVersion], str | None],
                   deadline: float | None = None):
     """Retain a logical original for checked whole-file and range delivery, including pooled bytes."""
-    return reserved_paths._hold_binary_file(vault, path, open_original(vault, path, read=True),
+    return reserved_paths._hold_binary_file(vault, path, open_original(vault, path, read=True, deadline=deadline),
                                            recorded_sha256=recorded_sha256, deadline=deadline)
 
 
