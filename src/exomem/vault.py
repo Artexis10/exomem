@@ -625,6 +625,71 @@ def sanitize_title_filename(title: str, max_length: int = SLUG_MAX_LENGTH) -> st
     return collapsed
 
 
+#: A filename holds at most this many UTF-8 bytes, extension and collision suffix included.
+#: ext4 and APFS allow 255 bytes per name; the margin keeps room for a temporary name beside it.
+MAX_FILENAME_BYTES = 200
+
+#: The corrections that `corrected_title_name` can report. Each is a closed value of its own result.
+CORRECTION_LINK_CHARACTERS = "link_characters"
+CORRECTION_LEADING_DOTS = "leading_dots"
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectedName:
+    """A title as a filename stem. `name` is empty when no usable name survives."""
+
+    name: str
+    corrections: tuple[str, ...] = ()
+
+
+def corrected_title_name(title: str) -> CorrectedName:
+    """`sanitize_title_filename` with the link-grammar characters and leading dots removed.
+
+    A grammar character becomes a space and the spaces collapse, as for the characters that
+    the sanitiser already removes. The result is sanitised again, because a name that loses
+    its dots can become a reserved device name. The byte cap is not applied here: it depends
+    on the date prefix and the collision suffix, so `fit_filename` applies it.
+    """
+    base = sanitize_title_filename(title)
+    corrections: list[str] = []
+    name = base
+    if not LINK_FILENAME_REFUSED.isdisjoint(name):
+        corrections.append(CORRECTION_LINK_CHARACTERS)
+        name = sanitize_title_filename(
+            "".join(
+                " " if character in LINK_FILENAME_REFUSED else character for character in name
+            )
+        )
+    if name.startswith("."):
+        corrections.append(CORRECTION_LEADING_DOTS)
+        name = sanitize_title_filename(name.lstrip(". "))
+    return CorrectedName(name, tuple(corrections))
+
+
+def fit_filename(
+    title: str,
+    *,
+    date_prefix: str = "",
+    number: int = 1,
+    extension: str = ".md",
+) -> tuple[str, bool] | None:
+    """The file stem for `title` under the byte cap, and whether the title was cut.
+
+    The stem is the date prefix, the title and, from `number` 2, the suffix ` (<number>)`.
+    The title part is the only part that shrinks, and it is cut at a code point. None when no
+    title text fits beside the prefix, the suffix and the extension.
+    """
+    tail = f" ({number})" if number > 1 else ""
+    budget = MAX_FILENAME_BYTES - len((date_prefix + tail + extension).encode())
+    shown = title
+    if len(title.encode()) > budget:
+        # Cutting the bytes leaves at most a partial code point, which `ignore` drops.
+        shown = title.encode()[: max(budget, 0)].decode("utf-8", errors="ignore").rstrip(". ")
+    if not shown:
+        return None
+    return date_prefix + shown + tail, shown != title
+
+
 def resolve_filename_style(vault_root: Path | None = None) -> str:
     """The filename style in force, by documented precedence.
 
@@ -9593,6 +9658,9 @@ def normalize_body_wikilinks(
 #: `#` as an anchor, `|` as an alias, the brackets as the link's own edge, and a line break ends it.
 #: A backtick opens a code span, which blanks the link, or the links up to the next backtick, for a writer.
 _LINK_TITLE_REFUSED = frozenset("/#|[]`\r\n")
+#: A filename that holds any of these cannot be linked as `[[Name]]`: the title characters above, plus `^`,
+#: which opens a block reference. A single set, derived from the title set, so the parser's grammar is read once.
+LINK_FILENAME_REFUSED = _LINK_TITLE_REFUSED | frozenset("^")
 
 
 @dataclass(frozen=True, slots=True)

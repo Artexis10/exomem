@@ -2582,7 +2582,7 @@ def _store_mode_main(argv: list[str]) -> int:
         description=(
             "Owner operations that move this vault's pages, lexical rows and graph rows into the "
             "collection store and back. Behind the vault-store-v1 release gate; vault files are "
-            "never rewritten by a migration."
+            "never rewritten by a migration. `relayout --plan` reads the vault and writes nothing."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -2627,7 +2627,21 @@ def _store_mode_main(argv: list[str]) -> int:
         "--claim", help="the claim id that the refusal or --dry-run names (required with --apply)"
     )
     release.add_argument("--why", help="reason for the release (required with --apply)")
-    for command in (status, migrate, rollback, release):
+    relayout = subcommands.add_parser(
+        "relayout",
+        help="plan the move of the managed folder's content to the vault root; the plan reads "
+        "the vault and writes nothing",
+    )
+    relayout.add_argument(
+        "--plan",
+        action="store_true",
+        required=True,
+        help="print the plan: outcome, counts, alternatives and samples of each listing",
+    )
+    relayout.add_argument(
+        "--full", action="store_true", help="list every entry instead of the first 20 of each listing"
+    )
+    for command in (status, migrate, rollback, release, relayout):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2651,7 +2665,7 @@ def _store_mode_main(argv: list[str]) -> int:
         )
         return 2
 
-    from . import state_migration
+    from . import relayout, state_migration
     from .cli_ops import OpError
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
@@ -2673,14 +2687,16 @@ def _store_mode_main(argv: list[str]) -> int:
                     if applying
                     else store_release.dry_run(root)
                 )
+            elif args.command == "relayout":
+                result = relayout.render(relayout.plan(root), full=args.full)
             elif applying:
                 result = store_rollback.apply_route(
                     root, export_to=args.export_to, why=args.why, export_held=args.export_held
                 )
             else:
                 result = store_rollback.dry_run(root)
-        # A release leads with its outcome sentence, so its keys keep their order; the rest sort.
-        print(json.dumps(result, sort_keys=args.command != "release"))
+        # A release and a relayout plan lead with their outcome sentence, so their keys keep their order; the rest sort.
+        print(json.dumps(result, sort_keys=args.command not in ("release", "relayout")))
     except (
         CollectionStoreError,
         OpError,

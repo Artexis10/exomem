@@ -255,6 +255,7 @@ def test_the_shipped_pack_reproduces_each_former_type_set() -> None:
         note_types.sources_required: {"research-note", "insight", "failure", "pattern"},
         note_types.ranks_as_source: {"source"},
         note_types.raw: {"source", "evidence"},
+        note_types.titled_name: compiled | {"entity", "source"},
     }
     for predicate, members in former_sets.items():
         assert {note_type.key for note_type in note_types.shipped(predicate)} == members, predicate
