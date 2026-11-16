@@ -823,7 +823,9 @@ store = connection.store_path(vault)
 with tempfile.TemporaryDirectory() as scratch:
     expected = Path(scratch) / "expected.sqlite"
     verify.derive_expected(vault, expected)
-    conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+    # The product's reader registers the SQL functions that a collection's expression indexes call,
+    # so the integrity check can evaluate them.
+    conn = connection.open_reader(store)
     drift = 0
     try:
         stored = dict(conn.execute("SELECT path, mtime_ns FROM pages"))
