@@ -199,28 +199,6 @@ def companion_binding(fields: dict[str, object], *, sidecar_path: str) -> Binary
     return binary
 
 
-def referenced_binding(
-    fields: dict[str, object], *, sidecar_path: str, store: StoreBinding,
-) -> tuple[BinaryBinding, StoredObject] | None:
-    """Read a canonical reference without requiring the original's physical presence.
-
-    A caller supplies the companion's authoritative path before any Trash relocation.
-    Missing or foreign references count as none; malformed selected-store custody raises, and a
-    well-formed one away from its companion path raises `DisplacedReference`.
-    """
-    if "stored_object" not in fields:
-        return None
-    reference = stored_reference(fields["stored_object"])
-    if reference is None:
-        raise ValueError("stored reference is malformed")
-    if reference.store != store.store:
-        return None
-    binary = companion_binding(fields, sidecar_path=sidecar_path)
-    if binary is None:
-        raise ValueError("stored reference has no valid binary binding")
-    return binary, reference
-
-
 def configuration(vault: Path) -> dict[str, object] | None:
     """Read explicit per-vault configuration, retaining identity while disabled.
 
