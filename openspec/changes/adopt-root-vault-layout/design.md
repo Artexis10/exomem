@@ -78,7 +78,7 @@ Each refusal names the remedy, and the record that fits depends on the refusal:
 - `_Schema/` only at the vault root means the vault was laid out as `root`. Write a `root` record in that folder.
 - `_Schema/` in both places with no record means an interrupted relayout or a stray folder. Write the record for the layout that the pages are in, which is `nested` when the pages sit under the wrapper. A wrong record hides every page.
 
-The two delivered refusals differ. The refusal for a vault-root `_Schema/` with no record (`LAYOUT_RECORD_MISSING`) names the `root` record only. The refusal for `_Schema/` in both places with no record (`LAYOUT_AMBIGUOUS`) names both records and when each applies (`root` when the vault root is the managed root, `nested` when it is not). Task 4.6b makes each refusal name the record that fits it.
+The two delivered refusals differ. The refusal for a vault-root `_Schema/` with no record (`LAYOUT_RECORD_MISSING`) names the `root` record only. The refusal for `_Schema/` in both places with no record (`LAYOUT_AMBIGUOUS`) names both records and when each applies (`root` when the vault root is the managed root, `nested` when it is not). Each refusal already names the record that fits it.
 
 While a record exists, a leftover second `_Schema/` is reported and never refused. `layout.inspect` reports it, the plan carries it in its diagnostics, and status and doctor report it (task 4.6a). Both folders exist during the relayout's projection window, and a refusal would leave a crashed relayout unresolvable.
 
