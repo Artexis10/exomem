@@ -382,3 +382,39 @@ def test_preserved_evidence_pools_its_binary_but_keeps_a_dataset_resident(vault,
                                     data=b"date,amount\n2026-11-16,12.50\n", today=dt.date(2026, 11, 16))
     assert (vault / table.path).is_file()
     assert originals.pooled(vault, table.path) is None
+
+
+def test_derived_state_cleanup_and_rebuilds_leave_pooled_originals_intact(vault, tmp_path, monkeypatch) -> None:
+    """An owner who adopts external state and rebuilds derived rows must not lose canonical original bytes.
+
+    A cleanup that sorted the pool with machine-local state would delete bytes that no index can rebuild.
+    """
+    from exomem import commands, lexstore, media_store, state_migration
+    from exomem import reconcile as reconcile_module
+    from exomem.kbdir import kb_dirname
+
+    data = b"Speaker A: the only copy of this recording."
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "briefing.txt", data)
+    orphan = b"published before a crash, never filed"
+    with original_pool.prepare(vault, hashlib.sha256(orphan).hexdigest(), len(orphan),
+                               held_fs.Chunks(lambda: [orphan])) as prepared:
+        prepared.publish()
+    pool = original_pool.pool_root(vault)
+    before = {path.relative_to(vault): path.read_bytes() for path in pool.rglob("*") if path.is_file()}
+    assert len(before) == 3  # the marker and two objects
+    stray = vault / kb_dirname() / ".graph-sync.json"
+    stray.write_bytes(b'{"epoch": "left by an older release"}')
+
+    state_migration.reset_state_resolution_cache_for_tests()
+    state_migration.migrate_vault_state_offline(
+        vault, authority=state_migration.assert_offline_migration_authority(source="pool cleanup test"),
+        adopt="external")
+    assert not stray.exists()  # the cleanup really ran over this vault
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
+    assert lexstore.get_store(vault).rebuild_atomic() is True
+    reconcile_module.reconcile(vault, dry_run=False, rebuild_graph=True)
+    commands.op_maintain_memory(vault, mode="reconcile")
+
+    assert {path.relative_to(vault): path.read_bytes() for path in pool.rglob("*") if path.is_file()} == before
+    assert original_pool.enabled(vault)
+    assert media_store.read_original_bytes(vault, added.artifact_path).data == data
