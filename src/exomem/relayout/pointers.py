@@ -11,8 +11,9 @@ from __future__ import annotations
 import posixpath
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
-from .. import kbdir
+from .. import kbdir, scene_frames
 from ..governance import membership
 from .facts import INGESTED_INTO, PAGE_RELATIVE_POINTERS, PARENT_MEDIA, PageFact
 from .links import LinkRewriter, Outcome
@@ -56,6 +57,19 @@ class PointerPlan:
     unchanged: int = 0
 
 
+def _new_parent_media(video: str, moved: Mapping[str, str]) -> str | None:
+    """The new `parent_media` of a frame whose video file is `video`, or None when the file has no new path.
+
+    The kernel reads a frame's video page as `parent_media` plus `.md`, so a page that the plan
+    renames takes its video's name with it: the value follows the page's new path, not the file's.
+    """
+    new = moved.get(video)
+    new_page = moved.get(scene_frames.video_page(PurePosixPath(video)).as_posix())
+    if new is None or new_page is None:
+        return new
+    return scene_frames.video_of_page(PurePosixPath(new_page)).as_posix()
+
+
 def _relative_target(page: str, value: str) -> str:
     return posixpath.normpath(posixpath.join(posixpath.dirname(page), value))
 
@@ -86,7 +100,9 @@ def plan_pointers(
                 relative = posixpath.relpath(new, posixpath.dirname(new_page))
                 _record(result, fact.path, field_name, value, relative)
                 continue
-            new = moved.get(value)
+            new = (
+                _new_parent_media(value, moved) if field_name == PARENT_MEDIA else moved.get(value)
+            )
             if new is None:
                 if _below_managed_root(value):
                     result.left.append(PointerNote(fact.path, field_name, value, NOT_FOUND))

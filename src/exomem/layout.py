@@ -348,6 +348,7 @@ class FixedBecause(StrEnum):
     NO_TITLE = "no_frontmatter_title"
     NO_USABLE_NAME = "no_usable_name"
     EXTRACTION_PART = "extraction_part"
+    SCENE_FRAME = "scene_frame"
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,7 +403,7 @@ def place(
     level and is named in `unregistered_folder`. The name class follows the page's note type,
     and the first rule that keeps a name wins.
     """
-    from . import semantic_contract
+    from . import scene_frames, semantic_contract
     from .vault_store import ownership
 
     below = kbdir.managed_split(current_path)
@@ -424,8 +425,10 @@ def place(
             NameClass.FIXED,
             stem,
             extension,
-            # A part page is named by its position and shares that name with the parts of every other page.
-            holds_name=markdown and not machinery and because is not FixedBecause.EXTRACTION_PART,
+            # A part page or a frame is named by its position and shares that name with those of every other page.
+            holds_name=markdown
+            and not machinery
+            and because not in (FixedBecause.EXTRACTION_PART, FixedBecause.SCENE_FRAME),
             fixed_because=because,
             unregistered_folder=unregistered,
         )
@@ -436,6 +439,8 @@ def place(
         return keep(FixedBecause.MACHINERY)
     if extraction_parts.source_page_for(PurePosixPath(current_path)) is not None:
         return keep(FixedBecause.EXTRACTION_PART)
+    if scene_frames.owner_page_of(PurePosixPath(current_path)) is not None:
+        return keep(FixedBecause.SCENE_FRAME)
     # The write gate's own list of generated navigation names; a bare Markdown name matches no folder.
     if semantic_contract.compiled_route_exempt(filename):
         return keep(FixedBecause.NAVIGATION)
@@ -604,18 +609,29 @@ def allocate(placements: Iterable[Placement]) -> Allocations:
 
 
 def final_paths(placements: Iterable[Placement], allocations: Allocations) -> dict[str, str]:
-    """The new path of every placed file. A part page follows its source page's new folder, never its own."""
+    """The new path of every placed file.
+
+    A companion folder follows its owner page by name, so a file inside it never keeps its own
+    folder: a part page takes the new folder of its source page, and a scene frame takes the
+    frames folder of its video's page, named after that page's new file name.
+    """
+    from . import scene_frames
+
     moved = {allocation.current_path: allocation.new_path for allocation in allocations.placed}
     for placement in placements:
-        if placement.fixed_because is not FixedBecause.EXTRACTION_PART:
-            continue
         if placement.current_path not in moved:
             continue
-        source = extraction_parts.source_page_for(PurePosixPath(placement.current_path))
-        new_source = moved.get(source.as_posix()) if source is not None else None
-        if new_source is not None:
-            folder = extraction_parts.folder_for(PurePosixPath(new_source))
+        path = PurePosixPath(placement.current_path)
+        # The two companion folders that name an owner page; each module owns its folder rule.
+        if (owner := extraction_parts.source_page_for(path)) is not None:
+            folder_for = extraction_parts.folder_for
+        elif (owner := scene_frames.owner_page_of(path)) is not None:
+            folder_for = scene_frames.frames_dir_for_page
+        else:
+            continue
+        new_owner = moved.get(owner.as_posix())
+        if new_owner is not None:
             moved[placement.current_path] = (
-                folder / PurePosixPath(placement.current_path).name
+                folder_for(PurePosixPath(new_owner)) / path.name
             ).as_posix()
     return moved

@@ -18,10 +18,10 @@ from relayout_fixture import (
     RECORD_PAGE,
     RETIRED_LINKER,
     SCOPE_PARTITION,
-    TALK,
     add_container_member_and_companion,
     add_governed_content,
     add_links_from_collection_and_part_pages,
+    add_renamed_video,
     build_nested_vault,
 )
 from test_relayout_plan import PART_PAGE, full_report, tree_state
@@ -124,7 +124,7 @@ def test_a_page_that_moves_without_a_frame_pointer_leaves_the_media_scope_of_its
 def test_an_inheritance_edge_that_breaks_names_its_reason_and_what_the_page_gets_instead(
     governed_vault, capsys
 ):
-    """Two frames break in different ways. A frame whose video page keeps its name (clip) does not appear."""
+    """Only the frame whose video file is missing breaks. A video page that is renamed takes its frames along."""
     disclosure = disclosure_of(capsys, governed_vault)
 
     broken = {
@@ -136,13 +136,20 @@ def test_an_inheritance_edge_that_breaks_names_its_reason_and_what_the_page_gets
             "frame_pointer_not_repointed",
             "page_takes_its_own_scopes_only",
         ),
-        f"{TALK}.frames/frame-001.md": (
-            "parent_page_absent_after_the_move",
-            "membership_unresolved_so_access_is_refused",
-        ),
     }
-    # The talk frame cannot be placed in any scope after the move; it is counted, not dropped.
-    assert disclosure["files_not_evaluated"]["membership_unresolved_after"] == 1
+    assert disclosure["files_not_evaluated"]["membership_unresolved_after"] == 0
+
+
+def test_the_frames_of_a_video_page_that_the_plan_renames_keep_inheriting_its_scopes(
+    governed_vault, capsys
+):
+    """A frame inherits from its video page; a rename that left the frame behind would cut it off."""
+    add_renamed_video(governed_vault)
+    disclosure = disclosure_of(capsys, governed_vault)
+
+    broken = {item["page"] for item in disclosure["broken_inheritance_edges"]["items"]}
+    assert broken == {f"{GHOST}.frames/frame-001.md"}
+    assert disclosure["files_not_evaluated"]["membership_unresolved_after"] == 0
 
 
 def test_the_access_tier_of_a_page_that_the_plan_renames_changes_when_the_prefix_names_the_file(
@@ -234,7 +241,7 @@ def test_a_policy_that_does_not_compile_is_unknown_and_never_an_empty_diff(gover
     # What does not depend on the policy is still read.
     assert disclosure["access_tiers"]["state"] == "evaluated"
     assert figures["tiers_changed"] == 2
-    assert figures["broken_inheritance_edges"] == 2
+    assert figures["broken_inheritance_edges"] == 1
 
 
 def test_an_access_file_that_does_not_parse_is_unknown_and_never_all_open(governed_vault, capsys):

@@ -322,3 +322,34 @@ def add_container_member_and_companion(root: Path) -> None:
         f"{MEMO}.md",
         {"type": "evidence", "title": "Memo", "governance_companion": {"artifact_path": MEMO}},
     )
+
+
+REEL = f"{KB}/Sources/Media/reel.mp4"
+REEL_FRAMES = tuple(f"scene-{index:03d}-t{ms}ms.jpg" for index, ms in enumerate((0, 4500)))
+
+
+def add_renamed_video(root: Path) -> None:
+    """Add a video whose page a title renames, and two scene frames in the folder that its file name owns.
+
+    A frame sits in `<video file name>.frames/` and names the video file in `parent_media`; the
+    access kernel reads the frame's video page as that value plus `.md`. The frame pages are typed
+    like the pages that the sidecar writer produces, so a title rule would rename them if the plan let it.
+    """
+    _write(root, REEL, b"video")
+    _page(
+        root,
+        f"{REEL}.md",
+        {"type": "source", "title": "Reel highlights", "tags": ["media-restricted"]},
+    )
+    for index, name in enumerate(REEL_FRAMES):
+        _write(root, f"{REEL}.frames/{name}", b"jpg")
+        _page(
+            root,
+            f"{REEL}.frames/{name}.md",
+            {
+                "type": "source",
+                "title": f"Evidence: {name}",
+                "parent_media": REEL,
+                "frame_ts": index * 4.5,
+            },
+        )
