@@ -324,7 +324,7 @@ def test_the_evidence_stub_path_is_unchanged(vault: Path) -> None:
     media_processing.reconcile_media(vault, vault / stored.path, explicit=True)
 
     after = page.read_text(encoding="utf-8")
-    assert "source_type: other" in after
+    assert "source_type: unclassified" in after
     assert 'title: "Evidence: 2026-08-23-shot.png"' in after
     assert "tags: [evidence, riverside, screenshots]" in after
     assert "processing_state: pending" in after

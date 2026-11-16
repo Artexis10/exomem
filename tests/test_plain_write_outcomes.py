@@ -578,6 +578,23 @@ def test_a_discard_summary_says_discarded_not_saved() -> None:
     assert summary.startswith("Discarded")
 
 
+def test_a_reclassification_that_keeps_the_source_in_place_says_updated_not_moved() -> None:
+    """A pointer repair leaves the source where it is; "Moved -> <same path>" tells the person it moved."""
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "manage_memory_file")
+    source = "Knowledge Base/Sources/Datasets/tides.md"
+    terminal = mutation_terminal.committed_terminal(
+        {"old_path": source, "path": source, "relocated": False, "repointed": ["evidence_file"]},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-1",
+        idempotency_key=None,
+    )
+    verb = command_surface.outcome_verb_of(command, {"operation": "reclassify"})
+
+    summary = mutation_terminal.project_terminal(terminal, outcome_verb=verb)["user_summary"]
+
+    assert summary == f"Updated -> {source} (personal Exomem)"
+
+
 def _declared_verbs() -> list[tuple[str, object]]:
     """Every write command, and every write operation row of a grouped command, with its verb."""
     declared: list[tuple[str, object]] = []

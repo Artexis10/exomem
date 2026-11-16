@@ -72,7 +72,7 @@ A row withheld from the caller SHALL be reported exactly as an absent row. A sta
 - **THEN** the refusal is identical to the refusal for an id that names no row
 
 ### Requirement: Filtered and sorted Records queries are bounded by the page
-`query_records` with filters, a sort or an aggregate on a store collection SHALL evaluate them in the store, within the interactive query profile, over released rows only. Its cost SHALL depend on the rows that the filter and page touch, not on decoding every row of the collection. Its rows, order, totals, continuation and aggregates SHALL equal the legacy evaluation of the same request.
+`query_records` with filters, a sort or an aggregate on a store collection SHALL decide them in the store service, within the `records` query profile, over released rows only. It SHALL read only the values that its filters, sort, date bounds and aggregate decide on, and SHALL rebuild only the rows it returns and, when the request names no columns, the leading rows that name the default columns. Its rows, order, totals, continuation and aggregates SHALL equal the legacy evaluation of the same request. Where a selected answer could differ from the whole read, the query SHALL keep the whole read under the same deadline.
 
 #### Scenario: A filter on a small collection does not time out
 - **WHEN** a caller filters a 154-row store collection by `startswith` on a string field while background passes run
@@ -107,7 +107,7 @@ Import `status` SHALL answer from a read snapshot without waiting for the collec
 - **THEN** status answers within 250 ms with the job's phase, counts and timings, and is never refused `COLLECTION_STORE_BUSY`
 
 ### Requirement: Records records its load target
-The Records bounds SHALL hold for a store collection of up to 100,000 rows on one personal service under the interactive profile:
+The Records bounds SHALL hold for a store collection of up to 100,000 rows on one personal service under the shipped query profiles:
 
 | Operation | Bound |
 |---|---|

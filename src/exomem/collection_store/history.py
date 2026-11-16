@@ -86,12 +86,12 @@ def _effect_material(conn, txn):
     material = {}
     for encoding, generation, collection_id in groups:
         if encoding == typed_storage.JSON_V1:
-            layout = fields = None
+            layout = metadata = None
             payload = "LEFT JOIN item_versions t ON t.row_id=v.row_id AND t.row_version=v.row_version"
             columns = "t.values_json,t.body"
         else:
             layout = typed_storage.version_layout(conn, collection_id, generation)
-            fields = typed_storage.shared_fields(conn, layout)
+            metadata = typed_storage.shared_metadata(conn, layout)
             payload = (f"LEFT JOIN {layout.version_table} t ON t.row_id=v.row_id "  # noqa: S608
                        "AND t.row_version=v.row_version")
             columns = f"t.body,{','.join(f't.{name}' for name in (*layout.value_columns, 'r'))},t.row_id"
@@ -110,7 +110,7 @@ def _effect_material(conn, txn):
                 if stored[-1] is None:
                     raise typed_storage.TypedStorageError("typed version payload is absent")
                 body = stored[0]
-                values = typed_storage.decode_row(layout, stored[1:-1], connection=conn, fields=fields)
+                values = typed_storage.decode_row(layout, stored[1:-1], connection=conn, metadata=metadata)
             if payload_hash != hash_after or tokens.payload_hash(schema_version, key, values, body) != payload_hash:
                 _fail(txn, "immutable version differs from its audit effect")
             material[ordinal] = {"key": key, "payload_hash": hash_after,

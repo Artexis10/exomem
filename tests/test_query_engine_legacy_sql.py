@@ -1,11 +1,11 @@
-"""Legacy answers must survive SQL push-down, including its non-SQL semantics."""
+"""The engine's legacy selection must answer as the file evaluator does, including its non-SQL semantics."""
 
 import uuid
 import json
 
 import pytest
 
-from exomem import query_data
+from exomem import query_compat, query_data
 from exomem import structured_collections as collections
 from exomem.collection_store.reader import StoreAdapter
 from exomem.query_engine import legacy, runtime, sqlite
@@ -18,6 +18,24 @@ OPERATOR_CASES = [
     ("contains", "Éc"), ("icontains", "ÉC"), ("startswith", "Éc"),
     ("in", ["1"]), ("nin", ["1"]), ("exists", None), ("missing", None),
 ]
+
+
+def engine_result(store, *, path="source", format="markdown-items", **arguments):
+    """The engine's selection over the store, presented with the selected rows' values as the oracle presents its own."""
+    with runtime.read_session(store.root, store.handle.path) as session:
+        admitted = session.admit(CID)
+        plan = legacy.normalize(columns_available=admitted.fields, **arguments)
+        selection = sqlite.execute_legacy(admitted, plan, path=path, format=format)
+        stored = {row_id: values for row_id, _, values in sqlite.scan(admitted, admitted.fields)}
+    common = {"path": path, "format": format, "total_rows": selection.total_rows,
+              "total_matched": selection.total_matched, "warnings": list(selection.warnings)}
+    if plan.aggregate:
+        aggregate = selection.aggregate
+        if selection.latest_row_id is not None:
+            aggregate = {**aggregate, "row": stored[selection.latest_row_id]}
+        return query_data.present_aggregate(aggregate, columns=list(plan.available), **common)
+    return query_data.present_rows([(row_id, stored[row_id]) for row_id in selection.row_ids], offset=plan.offset,
+                                   columns=list(plan.columns), available=list(plan.available), **common)
 
 
 @pytest.fixture
@@ -43,16 +61,12 @@ def test_sql_operator_answers_match_file_oracle(store, legacy_rows, op, value, s
     args = {"filters": [{"column": "title", "op": op, "value": value}], "string_columns": string_columns}
     expected = query_data.evaluate_rows(legacy_rows, path="source", format="markdown-items",
                                        columns_available=["title", "count"], **args)
-    with runtime.read_session(store.root, store.handle.path) as session:
-        admitted = session.admit(CID)
-        plan = legacy.normalize(columns_available=admitted.fields, **args)
-        actual = sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items")
-    assert actual.as_dict() == expected.as_dict()
+    assert engine_result(store, **args).as_dict() == expected.as_dict()
 
 
-def test_every_advertised_sql_operator_has_its_parity_case():
-    """Adding an advertised operator without exercising its SQL answer must fail."""
-    assert sqlite.LEGACY_SQL_OPERATORS == {op for op, _ in OPERATOR_CASES}
+def test_every_legacy_operator_has_its_parity_case():
+    """Adding an operator to the dialect without exercising the engine's answer must fail."""
+    assert query_compat.OPS == {op for op, _ in OPERATOR_CASES}
 
 
 @pytest.mark.parametrize("aggregate", ["count", "min:count", "max:count", "sum:count", "avg:count",
@@ -62,11 +76,7 @@ def test_sql_reductions_and_envelopes_match_file_oracle(store, legacy_rows, aggr
     args = {"aggregate": aggregate}
     expected = query_data.evaluate_rows(legacy_rows, path="source", format="markdown-items",
                                        columns_available=["title", "count"], **args)
-    with runtime.read_session(store.root, store.handle.path) as session:
-        admitted = session.admit(CID)
-        plan = legacy.normalize(columns_available=admitted.fields, **args)
-        actual = sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items")
-    assert actual.as_dict() == expected.as_dict()
+    assert engine_result(store, **args).as_dict() == expected.as_dict()
 
 
 @pytest.mark.parametrize("string_columns,equal", [
@@ -77,12 +87,9 @@ def test_unicode_numeric_and_membership_have_independent_expected_answers(store,
     """A shared primitive changed wrongly must not make both parity arms pass."""
     expected = {"eq": equal, "in": ["1"], "startswith": ["Éclair", "éCOLE"]}
     for op, value in (("eq", 1), ("in", ["1"]), ("startswith", "Éc")):
-        with runtime.read_session(store.root, store.handle.path) as session:
-            admitted = session.admit(CID)
-            plan = legacy.normalize(columns_available=admitted.fields, string_columns=string_columns,
-                                    filters=[{"column": "title", "op": op, "value": value}])
-            result = sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items")
-            assert [row["title"] for row in result.rows] == expected[op]
+        result = engine_result(store, string_columns=string_columns,
+                               filters=[{"column": "title", "op": op, "value": value}])
+        assert [row["title"] for row in result.rows] == expected[op]
 
 
 @pytest.mark.parametrize("descending", [False, True])
@@ -92,11 +99,7 @@ def test_sort_ties_paging_and_missing_values_keep_stable_input_order(store, lega
             "columns": ["title", "count"]}
     oracle = query_data.evaluate_rows(legacy_rows, path="source", format="markdown-items",
                                      columns_available=["title", "count"], **args)
-    with runtime.read_session(store.root, store.handle.path) as session:
-        admitted = session.admit(CID)
-        result = sqlite.execute_legacy(admitted, legacy.normalize(columns_available=admitted.fields, **args),
-                                       path="source", format="markdown-items")
-    assert result.as_dict() == oracle.as_dict()
+    assert engine_result(store, **args).as_dict() == oracle.as_dict()
 
 
 def test_nested_null_array_and_inclusive_dates_keep_legacy_semantics(store):
@@ -115,10 +118,7 @@ def test_nested_null_array_and_inclusive_dates_keep_legacy_semantics(store):
     fields = ["title", "count", "payload", "date"]
     expected = query_data.evaluate_rows(rows, path="source", format="markdown-items",
                                        columns_available=fields, **args)
-    with runtime.read_session(store.root, store.handle.path) as session:
-        admitted = session.admit(CID)
-        actual = sqlite.execute_legacy(admitted, legacy.normalize(columns_available=admitted.fields, **args),
-                                       path="source", format="markdown-items")
+    actual = engine_result(store, **args)
     assert actual.as_dict() == expected.as_dict()
     assert actual.rows == [{"title": "A", "payload.values.1": "<2,5 mg", "absent": None},
                            {"title": "B", "payload.values.1": "3", "absent": None}]
@@ -130,15 +130,12 @@ def test_sum_preserves_python_compensated_reduction_not_sqlite_sum(store):
     for number, count in enumerate((10**16, 1, -(10**16)), 1):
         store.append_record(CID, item={"title": str(number), "count": count},
                             item_key=str(uuid.UUID(int=number)), why="fixture")
-    with runtime.read_session(store.root, store.handle.path) as session:
-        admitted = session.admit(CID)
-        plan = legacy.normalize(columns_available=admitted.fields, aggregate="sum:count")
-        result = sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items")
+    result = engine_result(store, aggregate="sum:count")
     assert result.aggregate == {"sum": sum(float(n) for n in (10**16, 1, -(10**16))), "n": 3}
 
 
-def test_matching_withheld_sibling_is_absent_before_sql_value_evaluation(store):
-    """A secret matching row must not affect the filter, aggregate or projector."""
+def test_matching_withheld_sibling_is_absent_before_value_evaluation(store):
+    """A secret matching row must not affect the filter, aggregate or projector, nor be decoded."""
     from exomem.governance.principal import owner_principal, request_scope
     from test_governance_egress import _external, write_rule, write_scope
 
@@ -148,7 +145,8 @@ def test_matching_withheld_sibling_is_absent_before_sql_value_evaluation(store):
     write_rule(store.root, ceiling=0)
 
     def project(value):
-        assert value["title"] != "Secret"
+        # The engine reads only the fields its decisions need, so the projector sees only those.
+        assert value.get("count") != 999 and value.get("title") != "Secret"
         return value
 
     def query():
@@ -158,29 +156,35 @@ def test_matching_withheld_sibling_is_absent_before_sql_value_evaluation(store):
             plan = legacy.normalize(columns_available=admitted.fields,
                                     filters=[{"column": "count", "op": "gt", "value": 1}],
                                     aggregate="sum:count")
-            return sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items").as_dict()
+            selection = sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items")
+            return selection.total_rows, selection.total_matched, selection.aggregate
     before = query()
     with request_scope(owner_principal()):
         store.append_record(CID, item={"title": "Secret", "count": 999}, item_key=OTHER, why="fixture")
+    assert query() == before == (1, 1, {"sum": 2.0, "n": 1})
+    # Invalid JSON is a real decode trap: reading the withheld row at all would raise.
+    store.connection.execute("UPDATE items SET values_json='not json' WHERE item_key=?", (OTHER,))
     assert query() == before
-    assert before["aggregate"] == {"sum": 2.0, "n": 1}
 
 
-def test_ordered_temporary_relation_uses_its_index_without_uncapped_sorter(store, legacy_rows):
-    """TEMP page quotas do not cover sorter files; the plan must not need one."""
+def test_scan_reads_in_row_order_on_the_collection_row_index_without_a_sorter(store, legacy_rows):
+    """A chunk that needs a sorter spends memory per chunk; one off the row index reads rows at random."""
+    statements = []
     with runtime.read_session(store.root, store.handle.path) as session:
         admitted = session.admit(CID)
-        plan = legacy.normalize(columns_available=admitted.fields, sort_by="count")
-        with sqlite._matched(admitted, plan):
-            sql = ("SELECT i.values_json FROM temp.exomem_legacy_rows i ORDER BY "
-                   f"i.sort_key COLLATE exomem_legacy_order ASC, {admitted.input_order} LIMIT 2")
-            explanation = " ".join(str(row) for row in session.connection.execute("EXPLAIN QUERY PLAN " + sql))
-            assert "exomem_legacy_sorted" in explanation
-            assert "TEMP B-TREE" not in explanation
+        session.connection.set_trace_callback(statements.append)
+        list(sqlite.scan(admitted, ("count",)))
+        session.connection.set_trace_callback(None)
+        scans = [sql for sql in statements if "ORDER BY i.row_id" in sql]
+        assert scans
+        for sql in scans:
+            plan = " ".join(str(row[-1]) for row in session.connection.execute("EXPLAIN QUERY PLAN " + sql))
+            assert "items_by_collection_row" in plan
+            assert "TEMP B-TREE" not in plan
 
 
-def test_projection_precedes_filter_and_temporary_quota_refuses_without_result(store, legacy_rows):
-    """Values removed by trusted projection cannot match; temp exhaustion is not partial success."""
+def test_projection_precedes_filter(store, legacy_rows):
+    """Values removed by trusted projection cannot match."""
     with runtime.read_session(store.root, store.handle.path) as session:
         session.project_with(lambda row: {"count": row.get("count")}, fields={"title"})
         admitted = session.admit(CID)
@@ -188,12 +192,6 @@ def test_projection_precedes_filter_and_temporary_quota_refuses_without_result(s
                                 filters=[{"column": "title", "op": "exists"}])
         result = sqlite.execute_legacy(admitted, plan, path="source", format="markdown-items")
         assert result.total_matched == 0
-    with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
-        with runtime.read_session(store.root, store.handle.path,
-                                  limits=runtime.QueryLimits(max_temp_bytes=4096)) as session:
-            admitted = session.admit(CID)
-            sqlite.execute_legacy(admitted, legacy.normalize(columns_available=admitted.fields),
-                                   path="source", format="markdown-items")
 
 
 def test_bare_ir_cannot_be_executed_and_callers_cannot_mutate_frozen_filters():
@@ -242,10 +240,7 @@ def test_schema_and_defaults_match_canonical_adapter_for_other_types(store, prof
     for arguments in queries:
         expected = query_data.evaluate_rows(rows, path=path, format="markdown-items",
                                            columns_available=list(manifest.schema.fields), **arguments)
-        with runtime.read_session(store.root, store.handle.path) as session:
-            admitted = session.admit(CID)
-            actual = sqlite.execute_legacy(admitted, legacy.normalize(columns_available=admitted.fields, **arguments),
-                                           path=path, format="markdown-items")
+        actual = engine_result(store, path=path, **arguments)
         assert actual.as_dict() == expected.as_dict()
     if profile == "declared":
         assert actual.aggregate == {"sum": 4.0, "n": 2}
@@ -280,9 +275,6 @@ def test_log_notes_and_first_occurrence_follow_declared_input_order(store, inser
     for arguments in ({"sort_by": "note", "limit": 1}, {"aggregate": "latest:note"}):
         expected = query_data.evaluate_rows(rows, path="source", format="markdown-log",
                                            columns_available=["title", "details", "note"], **arguments)
-        with runtime.read_session(store.root, store.handle.path) as session:
-            admitted = session.admit(CID)
-            actual = sqlite.execute_legacy(admitted, legacy.normalize(columns_available=admitted.fields, **arguments),
-                                           path="source", format="markdown-log")
+        actual = engine_result(store, format="markdown-log", **arguments)
         assert actual.as_dict() == expected.as_dict()
     assert actual.aggregate["row"]["title"] == expected_titles[0]

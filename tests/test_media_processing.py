@@ -387,7 +387,7 @@ def test_partial_pending_sidecar_is_canonically_repaired_with_prose(vault: Path)
     frontmatter, body = _frontmatter_and_body(sidecar)
     assert uuid.UUID(str(frontmatter["exomem_id"]))
     assert frontmatter["title"] == "Evidence: partial.m4a"
-    assert frontmatter["source_type"] == "other"
+    assert frontmatter["source_type"] == "unclassified"
     assert frontmatter["captured"]
     assert isinstance(frontmatter["tags"], list)
     assert frontmatter["ingested_into"] == []
