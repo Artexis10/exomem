@@ -232,6 +232,29 @@ def test_a_breach_logs_one_event_per_interval(monkeypatch: pytest.MonkeyPatch) -
     assert len(events) == 2
 
 
+def test_slow_upload_cancellation_breaks_its_own_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancellation has a one-second p95 budget; the catch-all MCP bar has none, so it would never alert."""
+    from exomem import log_events
+
+    events: list[dict] = []
+    monkeypatch.setattr(
+        log_events, "log_event",
+        lambda logger, level, event, *, fields=None, content=None, exc_info=None: events.append(
+            {"event": event, "fields": dict(fields or {})}
+        ),
+    )
+    watch, _clock = _watch()
+    for _ in range(20):
+        watch.observe(tool="cancel_uploads", client="claude-ai/1.0", deep=False, total_ms=250,
+                      spans=None, surface="mcp", outcome="ok")
+    assert events == []
+    for _ in range(20):
+        watch.observe(tool="cancel_uploads", client="claude-ai/1.0", deep=False, total_ms=1500,
+                      spans=None, surface="mcp", outcome="ok")
+    assert [e["event"] for e in events] == ["latency_ceiling_exceeded"]
+    assert events[0]["fields"]["bar_id"] == "cancel-uploads-warm"
+
+
 @pytest.mark.parametrize("full", [False, True])
 def test_bootstrap_block_reports_only_the_calling_client(full: bool) -> None:
     from exomem.request_latency_contract import load_contract

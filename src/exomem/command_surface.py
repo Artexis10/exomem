@@ -953,7 +953,7 @@ def bind_vault(
                     write=False,
                     default_detail=getattr(command, "response_detail", None),
                 )
-            from .commands import invocation_is_read_only
+            from .commands import invocation_is_read_only, invocation_writes_outside_writer
             from .governance.egress import SelectorCoverageError
             from .writer_lease import invoke_command
 
@@ -966,7 +966,9 @@ def bind_vault(
                 invocation_read_only = False
             from . import call_ledger
 
-            call_ledger.note_call_access(invocation_read_only)
+            call_ledger.note_call_access(
+                invocation_read_only and not invocation_writes_outside_writer(command, kwargs)
+            )
             request_id = mcp_request_id()
             tool_name = command.name
             # Computed at most once per call, and only for a mutation: a
