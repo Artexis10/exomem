@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
 import pytest
+import yaml
 
 from cellctl import main, reconcile
 from cellctl.catalogue_build import BuildConfig, BuildJob
@@ -33,7 +34,7 @@ from cellctl.manifests import (
 from cellctl.state import SNAPSHOT_BACKUP, CellRow, ClusterObservation, RolloutRow
 from cellctl.upgrade_window import Idle, WindowConfig, is_due
 
-from .test_platform_chart_headers import _find, _helm_template
+from .test_platform_chart_headers import PLATFORM_CHART, _find, _helm_template
 from .test_reconcile import IMAGE_A, IMAGE_B, FakeClusterGateway, _cluster_config
 
 NOW = datetime(2026, 1, 1, 16, 5, tzinfo=UTC)
@@ -139,7 +140,11 @@ def test_enabled_chart_delivers_profile_timeout_admission_and_quota_together(mon
     for entry in env:
         if entry["name"].startswith("CELLCTL_CATALOGUE_"):
             monkeypatch.setenv(entry["name"], entry["value"])
-    assert main.build_catalogue_prewarm() == BuildConfig(PROFILE, 1800)
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))["cellctl"]
+    chart = values["catalogueBuildResources"]
+    expected = ResourceSettings(chart["requests"]["cpu"], chart["limits"]["cpu"],
+                                chart["requests"]["memory"], chart["limits"]["memory"])
+    assert main.build_catalogue_prewarm() == BuildConfig(expected, values["catalogueBuildTimeoutSeconds"])
     scope = _find(docs, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     rules = "\n".join(rule["expression"] for rule in scope["spec"]["validations"])
     assert "^catalogue-build-[0-9a-f]{16}$" in rules

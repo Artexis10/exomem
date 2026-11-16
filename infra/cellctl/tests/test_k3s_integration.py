@@ -3623,8 +3623,12 @@ def test_catalogue_build_admission_denies_placement_and_volume_forgery(k3s: K3sC
         "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
     ))
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
-    spec = CellManifestSpec(_cell_id(), image, 1, False,
-                            catalogue_build_resources=ResourceSettings("2", "2", "3Gi", "3Gi"))
+    deployment = next(doc for doc in documents
+                      if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "cellctl")
+    env = {entry["name"]: entry.get("value") for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    profile = json.loads(env["CELLCTL_CATALOGUE_BUILD_RESOURCES"])
+    spec = CellManifestSpec(_cell_id(), image, 1, False, catalogue_build_resources=ResourceSettings(
+        profile["requests"]["cpu"], profile["limits"]["cpu"], profile["requests"]["memory"], profile["limits"]["memory"]))
     _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
     build = render_catalogue_build_job(spec, deadline_seconds=1800, node=k3s.name)
     controller = "--as=system:serviceaccount:exomem-cloud:cellctl"
