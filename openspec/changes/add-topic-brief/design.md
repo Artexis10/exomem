@@ -53,6 +53,8 @@ The brief cache is an in-memory LRU of 128 entries under a lock. Its key holds:
 - a digest of the closing relations that target member units;
 - the registry digest and the limits.
 
+The registry digest covers every registry instance, the private instances' definitions included: a private instance can reinterpret a unit with no edit to the page, so the page's content hash does not name that change. An entry also ends on the first day after an authored `until` or `check_by` date of one of its units, because that day changes a unit's currency with no edit to any page.
+
 The member walk reads content hashes from the index, so a cache hit reads no page.
 
 The walk itself is kept for the owner, in a second LRU of 128 entries that holds the walk and its closing edges. Its key is the root, the caller binding, the seed path, the graph snapshot's token, the recall policy identity and the registry digest. The token is `(schema_version, extension_registry_hash, generation, instance)`, read in the walk's own read transaction. Every write of graph rows bumps `generation` in the transaction that writes them, and a full rebuild replaces `instance`, so any edit, however small, ends the entry. An owner's warm read of an unchanged graph reads no edge. A restricted caller's release decision reads governance policy, tombstones and authorization that no graph token names, so its walk is made again on every read.
@@ -64,7 +66,9 @@ A recorded precedent declined a build cache for topic profiles, because no key c
 
 ### D5. A watermark per principal in a private sidecar
 
-A sqlite sidecar in the state root, modelled on `served_context`, holds one row per principal audience and brief seed. A row stores member content hashes, unit hashes and `read_at`. It advances when the last page is served, so a client that reads one page of a long brief does not lose the rest of the diff. Bounds: 10,000 rows, least-recently-read eviction, 400-day retention. A user returns to a subject after months, so the retention is longer than that of `served_context`. The sidecar is private metadata that only the owner can read and never usage telemetry. The diff is computed after the caller's view filter, so a withheld member never appears as removed or new.
+A sqlite sidecar in the state root, modelled on `served_context`, holds one row per view and brief seed. A view is the audience, the declared purpose and the connector ceiling, which is the connector's denied scopes. The ceiling, not the client or the login, names what a connector may see, so a returning client keeps its watermark and two connectors that see alike share one. A login's own grants reach the diff only through the view filter. A row stores short member content hashes, short unit digests (at most 500, with a flag when cut) and `read_at`. When a row was cut, a unit that the row does not hold may be an old one, so `new_units` is left empty and `new_units_exact: false` says so.
+
+The watermark advances in the terminal egress guard, after the last page has passed it, so a client that reads one page of a long brief does not lose the rest of the diff and a refused read moves nothing. Bounds: 10,000 rows, least-recently-read eviction, 400-day retention. A user returns to a subject after months, so the retention is longer than that of `served_context`. The sidecar is private metadata that only the owner can read and never usage telemetry. The diff is computed after the caller's view filter: a withheld member never appears as new, changed or removed, and a stored member that the caller may no longer see is dropped from `removed` by the same filter.
 
 ### D6. Surface
 
@@ -79,7 +83,7 @@ The product load target is 20,000 pages, about 100,000 units, 120,000 edges and 
 - **Warm read for a restricted caller** (walk, digest, cache hit, watermark diff): p95 under the cold bar, 1000 ms. Its release filter reads state that no graph token names, so its walk is not memoized. The map views exclude restricted builds from their cache for the same reason.
 - **Topic text** adds one hybrid search.
 
-Per-request work is bounded by the member caps and the page size. The walk passes only through compiled notes, so a 10,000-link hub cannot widen it. Proof: cold and warm timings on a generated store at the load target, plus a read-count test showing that a warm read reads zero pages. Production latency and errors are recorded under the route label `read_page:brief`.
+Per-request work is bounded by the member caps and the page size. The walk passes only through compiled notes, and each step reads a bounded number of edge rows shared among the pages it expands, so a 10,000-link hub costs a step its share, not its degree. A page that has more rows than its share is reported with `exact: false`. A restricted caller's read decides the release of each row's other end, so the bound counts only visible rows. Proof: cold and warm timings on a generated store at the load target, plus a read-count test showing that a warm read reads zero pages. Production latency and errors are recorded in the series `exomem_brief_reads_total`, `exomem_brief_failures_total` and `exomem_brief_read_duration_ms`, apart from `exomem_tool_*`, which already counts each brief read once as a `read_page` call.
 
 ## Evaluation
 

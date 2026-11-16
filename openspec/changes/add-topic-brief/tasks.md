@@ -13,7 +13,7 @@
 - [x] 2.4 Cache the compiled brief under the input digest (D4). A warm read reads no page.
 - [x] 2.5 Serve `exomem://brief/<seed id>` as a derived view with pagination and continuation, and add the `brief` branch to the terminal egress guard.
 - [x] 2.6 Add the watermark sidecar and `changed_since` (D5).
-- [x] 2.7 Record brief-read latency and errors under their own route label. Teach the call in the scaffold operations reference.
+- [x] 2.7 Record brief-read latency and errors in metric series of their own. Teach the call in the scaffold operations reference.
 - [x] 2.8 Keep an owner's member walk under the graph snapshot's token (D4). A warm owner read of an unchanged graph reads no edge.
 
 ## 3. Proof
@@ -24,13 +24,17 @@
   - cache invalidation and a warm read with zero page reads;
   - `changed_since` per principal;
   - `missing` and `related`.
-- [x] 3.2 Record cold and warm timings on a generated store at the load target, within the budgets.
-  - Measured on a generated store of 20,401 pages, 180,401 graph nodes and 420,130 edges, with two 10,000-link hubs that are not compiled notes, as the owner, one request at a time on one machine. Cold reads clear the compiled-brief cache and the walk memo. Steady warm reads are the second pass on, after the first pass has filled both.
-  - Without the walk memo (the commit before it), steady warm: ordinary page p50 213 ms and p95 568 ms (n=120); a page next to a hub p95 481 to 513 ms; a 10,000-link hub as the seed 870 to 936 ms (n=7).
-  - With the walk memo, steady warm: ordinary page p50 33 ms and p95 38 ms (n=120); a page next to a hub p95 35 to 44 ms (n=60); a 10,000-link hub as the seed 30 to 31 ms (n=7). The slowest steady reads were 379 ms (ordinary page) and 310 ms (a page that links a hub). The warm budget holds for the owner.
-  - Cold is unchanged by the memo. Ordinary page: p50 256 ms and p95 544 ms (n=40), within the budget. A 10,000-link hub as the seed: 788 ms and 914 ms (one read each); ten cold hub reads across five runs ranged from 788 to 1,087 ms, so that budget is at its limit.
-  - A restricted caller's walk is made on every read. Its warm read costs what the no-memo numbers show: p95 481 to 568 ms, within its budget (design, Load target).
-  - A 10,000-link hub as the seed is recorded as the worst single shape: 788 to 1,087 ms cold over ten reads (design, Load target).
+- [ ] 3.2 Record cold and warm timings on a generated store at the load target, within the budgets. The cold budget is not met on this store; see the last item.
+  - Store: 20,401 pages in folders of 200, 180,401 graph nodes, 420,130 edges, a compiled note that links 10,000 pages from its body, and an entity page that 10,000 pages link. One request at a time on one machine in file mode, as the owner and as a caller that cannot read 10 percent of the pages. Cold reads clear the compiled-brief cache and the walk memo; steady warm reads are the second pass on. Another session's workers kept the machine at a load average of 9 to 12 on 20 cores during every run, so a cold p95 moves by up to a factor of two between runs.
+  - Before (the commit before the bounded walk), owner: cold p50 391 to 1,400 ms and p95 1,414 to 1,529 ms (four shapes, n=19 to 40); warm p95 44 to 49 ms.
+  - Before, restricted caller: each of the five shapes that reach the compiled hub made 10,642 to 10,708 release decisions and took 9.4 to 11.4 s, warm and cold alike (n=1 to 3 per shape). The page that does not reach it made 632 decisions.
+  - After, owner, two runs on the final code: warm p95 37 to 53 ms (budget 250 ms). Cold p95 586 to 1,963 ms over eight shape-runs of n=19 to 40; three of the eight are above 1,000 ms (1,963, 1,055 and 1,079 ms). The same four shapes in two earlier runs of this branch gave 517 to 750 ms.
+  - After, restricted caller, the same runs: warm p95 636 to 980 ms (budget 1,000 ms), slowest read 1,037 ms. Cold p95 1,000 to 1,433 ms over eight shape-runs.
+  - Release decisions per restricted read, after: 313 to 887 one by one, in both runs, and 125 to 200 pages decided in batches, against 10,642 to 10,708 before.
+  - The first read of a process with the compiled hub as the seed fills the policy, membership and link caches once: 9.6 and 11.2 s restricted (21.9 and 25.3 s before), 1.1 and 5.1 s as the owner (2.4 s before).
+  - A restricted caller is not memoized (design, D4), so each warm read pays its decisions, about 0.6 ms each in file mode.
+  - Open: the restricted cold p95 is above the 1,000 ms cold budget in every shape, by up to 43 percent, and the owner's is above it in three of eight shape-runs under this load. The budget is not relaxed. Store mode decides rows in batches and is not measured here.
+  - Commands: the generated-store probe, run once per caller kind and code state with the workspace `src` or the pre-change `src` on `PYTHONPATH`. Logs: `probe19-before.log` and `probe20-before-restricted.log` (before), `probe22-after.log` and `probe23-after.log` (after), kept outside this repository.
 
 ## 4. Release and acceptance
 
