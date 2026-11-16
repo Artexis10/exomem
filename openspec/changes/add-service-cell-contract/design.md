@@ -224,15 +224,25 @@ When consumers have moved to their own principals, the agent door refuses servic
 
 ### D7. Exomem binds subjects from verified assertions (Stage 3)
 
-A service request MAY carry a **subject assertion**: a short-lived JWS signed with a key that the control plane registered for the principal, with the cell as audience.
-On a Cloud cell the gateway verifies the assertion and signs the subject into the origin proof. The cell derives the subject's audience id with the kernel's existing normalization of issuer and subject, using the principal as issuer. Two services' subjects therefore never share an id.
+Two questions stay apart: whom a request acts as, and whom an item is about.
 
-- An item written in a subject-bound request belongs to that subject's partition. Exomem sets the partition. No request field can set or change it.
-- The kernel discloses a partitioned item only to a request bound to the same subject, within the principal's own ceiling.
-- A request without an assertion sees no partitioned item.
+- A **subject binding** says whom a request acts as. For a member it is a **subject assertion**: a short-lived JWS signed with a key that the control plane registered for the principal, with the cell as audience. For a platform subject it is a rights-path proof, once that later path exists (D14).
+- A **data-subject attribution** says whom a written item is about. The principal attaches it to a write as a JWS that is signed and verified the same way as a subject assertion. It names a member or a platform identity.
+
+On a Cloud cell the gateway verifies both tokens and signs their identity into the origin proof. Neither token is a body field.
+The cell derives a member's audience id with the kernel's existing normalization of issuer and subject, using the principal as issuer. Two services' subjects therefore never share an id.
+The cell derives a platform identity's id from the principal, the platform and that platform's account id. An attribution and a later rights-path proof for that identity therefore find the same partition.
+
+- An item written in a subject-bound request belongs to that subject's partition. An item written with an attribution belongs to the attributed identity's partition. A write carries at most one of the two, and the cell refuses a write that carries both.
+- Exomem sets the partition. No request field can set or change it.
+- An attribution is not a subject binding. It lets only the principal that holds a platform-identity partition read that partition, within its own ceiling (D14). It gives the subject, the owner and other principals no access.
+- The kernel discloses a partitioned item only to a request with a verified subject binding to the same identity, within the principal's own ceiling. The owner's grant (D12) and the holding principal's attributed read (D14) are the only other paths.
+- A subject-erasure request needs a verified subject binding, or an attribution for that identity (D14). Erasure discloses no item.
+- A request on none of these paths sees no partitioned item.
 - Filters, tags and references in a request only narrow this result.
 
 Exomem cannot detect a service that asserts the wrong subject. The service mints assertions only at its authentication edge and carries them in request context, so ordinary business code never chooses a subject.
+Exomem cannot detect a wrong attribution either. A wrong attribution places an item in another person's partition, where that person can read it. The service derives each attribution from the platform's record of the author, never from the item's content.
 The partition key needs a page fact. In store mode it belongs with the page admission facts of `make-vault-store-canonical` (D13 of that change). The Stage 3 change decides whether file mode gets an equivalent or Stage 3 requires store mode.
 
 ### D8. Per-person content waits for Stage 3
@@ -240,7 +250,7 @@ The partition key needs a page fact. In store mode it belongs with the page admi
 No service stores cell-authoritative content about one person until Stage 3 ships on that cell. That covers member-private memory and member feedback.
 Until then a service credential is owner-equivalent inside its cell. Isolation between tenants holds today, because each tenant has its own cell and credential.
 Index-only evidence needs no partition, because the service authorizes its own records.
-D14 keeps the same rule for platform subjects until their platform has a rights path.
+The same wait holds for platform subjects. From Stage 3 their items land in the platform identity's partition (D14).
 
 ### D9. The audit export reuses existing chains (Stage 4)
 
@@ -295,17 +305,27 @@ This change states the forwarding contract that the release implements, as a `ho
 ### D14. Subjects who are not principals (Stage 3, Stage 5)
 
 Members are only part of a tenant's audience. Most of the audience reaches the product through third-party platforms, for example as commenters or repliers on a video platform or a social network.
-These people hold no account with the product. They cannot sign in to see or erase what the product keeps about them.
+These people hold no account with the product. They cannot sign in to see or erase what the product keeps about them. The platform governs them instead.
 
 - **Data subject, not principal.** The product may know a person only by a platform identity: the platform and that platform's account id. Such a person is a data subject, not a principal.
-  The product never authenticates them at its own edge, so it mints no D7 subject assertion for them. The D7 path gives them no access.
-- **Rights path.** Such a subject still needs access and erasure. The rights path lets them prove control of the platform identity. Examples are a sign-in with that platform and a challenge posted from that account.
-  A request that passes the rights path binds to that identity's partition, under the same rules as a member's partition (D12). The Stage 3 change decides which component verifies the proof.
-- **Default until a rights path exists (recommended).** Until a platform has a rights path, the cell keeps no durable per-person memory about that platform's subjects.
-  It keeps only context for one conversation and aggregates under D12's smallest-group rule. This default mirrors D8's safeguard. Open question 9 asks whether to relax it.
+  The product never authenticates them at its own edge, so it mints no D7 subject assertion for them. The D7 subject-binding path gives them no access.
+- **Writes.** The cell keeps durable per-person memory about these subjects. The product writes each item about one of them with a data-subject attribution (D7). The attribution places the item in that platform identity's partition. The product reads the partition back with the same attribution, as its own custody; the attribution gives no one else access (D7).
+  Each partition belongs to one platform identity of one principal. The cell holds no link between partitions. Any link across platforms stays in the product's own identity layer, so a deletion signal from one platform erases exactly that platform's partition.
+  Exomem cannot detect personal data in an item without an attribution. The service contract therefore requires the product to attribute every per-person write.
+  The service door is stateless, so context for one conversation belongs to the product, not the cell.
+- **Erasure.** The platform's governed signals drive erasure. The product verifies each signal and relays it as a subject-erasure request for that partition:
+  1. the platform's deletion or deauthorization callback;
+  2. the platform's retention rule for data obtained through its API;
+  3. a periodic existence check, where the platform sends no push.
+
+  A relayed request carries the attribution for that identity. It erases the partition and discloses no item. Exomem cannot verify a platform's signal, so it trusts the relaying principal, as it does for attributions.
+  Stage 5 proves that one relayed deletion signal erases its partition, and that no other partition loses an item.
+  The first service already runs such flows. A signed deletion callback deletes one platform user's data within a tenant, together with deauthorization expiry. Retention custody covers data from a video platform's API. It also keeps an audience-identity link across platforms in its own identity layer.
+- **Rights path (later).** A person may want to be forgotten without leaving the platform. A later addition gives them a self-service rights path: they prove control of the platform identity, for example by a sign-in with that platform or a challenge posted from that account.
+  A request that passes it carries a verified subject binding for that identity, which reads and erases the partition under D12's rules. The rights path is not a precondition for keeping memory.
 - **Minimisation and notice.** By default these subjects get stricter retention and minimisation than members: a shorter retention window and only the fields that the product's stated purpose needs. The Stage 3 change sets both defaults.
   The service contract requires that the tenant's privacy notice disclose this processing. This design states a contract need, not legal advice.
-- **Erasure.** Stage 5 subject erasure covers these subjects. A request that passes the platform-identity rights path erases that identity's partition.
+- **Owner access.** The owner reads a platform subject's partition only under a D12 grant, as for a member.
 
 ## Planned deltas for later stages
 
@@ -322,7 +342,7 @@ These people hold no account with the product. They cannot sign in to see or era
 | Concern | Consumer product | Cell |
 |---|---|---|
 | Ownership | may provision, host and pay for the cell; acts as a service principal | belongs to the tenant, whose policy grants and bounds the product (D11) |
-| End-user identity | authenticates its users; mints subject assertions at its edge | binds subjects from gateway-verified assertions |
+| End-user identity | authenticates its users; mints subject assertions at its edge; attributes each per-person write | binds subjects and attributions from gateway-verified tokens |
 | Media | acquires media and checks provider access | stores the passages it receives |
 | Media processing | runs each component that a measured comparison on its data places in the consumer | runs a component only when that comparison places it in the cell |
 | Desired state | decides what each record should be in the cell; schedules convergence | reports what it holds and its index state |
@@ -341,9 +361,9 @@ Today transcription and segmentation live in the consumer, and embedding lives i
 | S0 | Enrolled Sources stay off shared generated pages | none | Proven in the passage-evidence delivery (D5) | #2852 |
 | S1 | Typed service API, first version | `EXOMEM_SERVICE_API` | Each operation returns equal data through both doors on one disposable cell; every response validates against the document; the Cloud boundary refuses as on `/mcp`; passage bars hold at the service door | #2852 merged; the gateway release and chart change (D13) |
 | S2 | Service principals under the tenant's grant (D6, D11) | `EXOMEM_SERVICE_PRINCIPALS` | Two principals on one cell cannot reach each other's Sources through any operation or argument; a principal without a committed grant reaches nothing; a narrowed or revoked grant refuses the next request; the tenant's own agents and the product reach only their own scopes; existing audiences' decisions are unchanged | S1; containment D1 in force on Cloud |
-| S3 | Subject-bound requests and private member partitions (D7, D12); no durable per-person memory for platform subjects without a rights path (D14) | `EXOMEM_SERVICE_SUBJECTS` | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references; the owner reads a partition only under a grant, and each such read writes a receipt; without a grant the owner receives aggregates only; a platform subject without a rights path has no durable per-person item | S2; the partition fact of the single store |
+| S3 | Subject-bound requests, data-subject attributions and private partitions (D7, D12, D14) | `EXOMEM_SERVICE_SUBJECTS` | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references; the owner reads a partition only under a grant, and each such read writes a receipt; without a grant the owner receives aggregates only; an attributed write about a platform subject lands in that platform identity's partition; only the principal that holds that partition reads it with an attribution | S2; the partition fact of the single store |
 | S4 | Audit export | `EXOMEM_SERVICE_AUDIT_EXPORT` | An exported window verifies end to end against the chain; an injected gap reports incomplete | S1; S2 for principal ids; a ledger retention rule |
-| S5 | Subject erasure (D12, D14) | the host erasure policy, per principal | After the erasure request of a member, or of a platform subject through its rights path, completes, no door returns an item of the partition; progress reports complete, pending, failed or unknown | S3; `erase-captured-source` |
+| S5 | Subject erasure (D12, D14) | the host erasure policy, per principal | After a member's erasure request, or one relayed platform deletion signal, completes, no door returns an item of that partition and no other partition loses an item; progress reports complete, pending, failed or unknown | S3; `erase-captured-source` |
 
 Each stage after S1 writes its requirements into a successor change before its code starts, and cites these decisions.
 
@@ -389,7 +409,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 
 ## Open Questions
 
-These choices belong to the operator. Each has a recommendation.
+These choices belong to the operator. Each open question has a recommendation, and question 9 is decided.
 
 1. **Does Exomem publish generated client packages?** Recommend publishing only the document until a second consumer exists.
 2. **Do hosted and self-hosted enterprise cells get the service API in S1?** Recommend Cloud cells first. Other cell modes get the same setting when they have a verifier that their own operator cannot swap, and matching discovery.
@@ -399,4 +419,4 @@ These choices belong to the operator. Each has a recommendation.
 6. **Where is the load target recorded?** Recommend the per-cell target above, plus a cells-per-node target from the Cloud platform, recorded once in the repository.
 7. **Who may issue the owner's read grant for one member's partition (D12)?** Recommend the owner, for a stated purpose and a bounded expiry, with each read audited.
 8. **What happens to member partitions when the product's grant ends (D11, D12)?** Recommend that they stay closed to the owner and are erased after a retention window that the tenant's policy sets.
-9. **May a cell keep durable per-person memory about platform subjects before their platform has a rights path (D14)?** Recommend no. Keep only context for one conversation and aggregates until a rights path lets those subjects see and erase their data.
+9. **Decided: may a cell keep durable per-person memory about platform subjects before a self-service rights path exists (D14)?** Yes. The platform's deletion, deauthorization and retention signals drive erasure, and the product relays them. The self-service rights path is a later addition. The service door is stateless, so context for one conversation stays in the product.
