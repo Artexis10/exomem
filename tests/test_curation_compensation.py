@@ -40,6 +40,7 @@ def test_compensation_mapping_is_closed_and_reverses_committed_order() -> None:
         {"step_id": "edit", "kind": "edit"},
         {"step_id": "supersede", "kind": "supersede"},
         {"step_id": "move", "kind": "move"},
+        {"step_id": "repoint", "kind": "repoint-links"},
         {"step_id": "delete", "kind": "delete"},
         {"step_id": "recover", "kind": "recover"},
     ]
@@ -47,7 +48,8 @@ def test_compensation_mapping_is_closed_and_reverses_committed_order() -> None:
     assert curation.compensation_descriptors(forward) == [
         {"forward_step_id": "recover", "kind": "delete"},
         {"forward_step_id": "delete", "kind": "recover"},
-        {"forward_step_id": "move", "kind": "move"},
+        {"forward_step_id": "repoint", "kind": "unrepoint-links"},
+        {"forward_step_id": "move", "kind": "unmove"},
         {"forward_step_id": "supersede", "kind": "supersede"},
         {"forward_step_id": "edit", "kind": "supersede"},
         {"forward_step_id": "relation", "kind": "supersede"},

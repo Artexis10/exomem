@@ -116,7 +116,8 @@ these plans, which could not then run as sealed:
 
 - a later step bound to a path that an earlier step writes, except a
   `repoint-links` step, which SHALL bind a page that an earlier `move` step
-  writes at that step's sealed after hash;
+  writes, or that an earlier `edit` step writes as a pointer correction of an
+  append-only page, at that step's sealed after hash;
 - a step that links to a page an earlier step supersedes;
 - a step that gives a relation disposition while it links to a page an earlier
   step creates, because that link is its relation once the page exists.
@@ -144,6 +145,13 @@ refuses through its leaf when it runs.
   earlier step writes, links to a page an earlier step supersedes, or gives a
   relation disposition while it links to a page an earlier step creates
 - **THEN** proposal refuses with `CURATION_STEP_CONFLICT` and stores no plan
+
+#### Scenario: A rehome corrects a Source that links to a moved note
+
+- **WHEN** a plan moves a note, corrects the `project` field of a Source that
+  links to it through an `edit` step, and ends with `repoint-links`
+- **THEN** proposal accepts the plan, and `repoint-links` binds the Source at
+  the sealed after hash of the `edit` step that corrected it
 
 #### Scenario: Moved pages link to each other
 
@@ -380,7 +388,8 @@ or that follows no `move` step.
 
 At proposal, the step SHALL seal every referrer of every earlier `move` step
 with its exact before hash and its rewritten bytes. A referrer that an earlier
-`move` step writes SHALL be bound at that step's sealed after hash. The step
+`move` step writes, or that an earlier `edit` step corrects as a pointer write,
+SHALL be bound at that step's sealed after hash. The step
 SHALL give each referrer exactly one outcome, as a move preview does:
 `rewritten`, `pointer-repointed (append-only page)`,
 `unchanged: resolves via prior path`, `unchanged: keeps the old path`, or

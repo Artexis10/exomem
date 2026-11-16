@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -126,7 +126,10 @@ def set_frontmatter_field(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     _validate_frontmatter: Callable[[str, str], None] | None = None,
+    _pointer_operation: str | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
+    """Set one frontmatter field. `_pointer_operation` is curation's alone: the operation id
+    under which a pointer correction's record is found, so its compensation reverts it."""
     if not field or not field.strip():
         raise SetFrontmatterError(
             code="INVALID_SET", reason="field is required"
@@ -160,7 +163,7 @@ def set_frontmatter_field(
         return _set_pointer_field(
             vault_root, abs_path, rel_path, field=field, value=value, why=why,
             expected_hash=expected_hash, today=today, validate_only=validate_only,
-            semantic_transition_token=semantic_transition_token,
+            semantic_transition_token=semantic_transition_token, operation=_pointer_operation,
         )
     if append_only:
         raise SetFrontmatterError(
@@ -349,6 +352,7 @@ def _set_pointer_field(
     today: dt.date | None,
     validate_only: bool,
     semantic_transition_token: str | None,
+    operation: str | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
     """Correct a pointer field of an append-only page through the governed pointer write.
 
@@ -436,7 +440,7 @@ def _set_pointer_field(
         ) from error
     warnings = [note for note in (log_plan.warning, log_plan.rotation_note) if note is not None]
     try:
-        with pointer_write.recording(vault_root, [(write, record_id)]):
+        with pointer_write.recording(vault_root, [(write, record_id)], operation=operation):
             committed = semantic_writes.commit_existing(
                 vault_root,
                 preflight=preflight,
@@ -451,6 +455,51 @@ def _set_pointer_field(
         path=rel_path, field=field, old_value=old_value, new_value=value,
         warnings=warnings, semantic=committed.as_dict(), pointer_write=record_id,
     )
+
+
+def apply_pointer_patch(
+    vault_root: Path, rel_path: str, text: str, fields: Mapping[str, Any]
+) -> str:
+    """`text` with each field of `fields` set, as `set_frontmatter_field` would set it.
+
+    A rehome moves a page and changes where it belongs in one commit (a curation `move` step's
+    `fields` patch). The caller limits `fields` to registry pointer fields, and
+    `pointer_patch_writes` plans the registry writes that their values need.
+    """
+    from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+    front, _body, block = parse_frontmatter(text)
+    if block is None:
+        raise SetFrontmatterError(
+            code="FRONTMATTER_REQUIRED",
+            reason=f"{rel_path} has no frontmatter block to hold the patched fields",
+        )
+    values = {
+        field: _governed_enum_value(
+            field, value, page_type=front.get("type"), page=(vault_root, rel_path, front)
+        )
+        for field, value in fields.items()
+    }
+    try:
+        return splice_markdown_frontmatter(text, values)
+    except FrontmatterSpliceError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+
+
+def pointer_patch_writes(vault_root: Path, fields: Mapping[str, Any]) -> tuple[PlannedWrite, ...]:
+    """The registry writes that the values of a `fields` patch need, one per registry file."""
+    writes: dict[Path, PlannedWrite] = {}
+    for field, value in fields.items():
+        for write in _plan_project_keys(vault_root, field, value):
+            held = writes.get(write.path)
+            if held is not None and held.content != write.content:
+                raise SetFrontmatterError(
+                    code="FIELDS_PATCH_CONFLICT",
+                    reason="the patched fields register different keys in one registry; "
+                    "patch them in separate steps",
+                )
+            writes[write.path] = write
+    return tuple(writes.values())
 
 
 def _plan_project_keys(

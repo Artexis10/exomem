@@ -217,30 +217,45 @@ def identity_at(vault_root: Path, rel: str) -> str | None:
     return memory_refs.normalize_id(front.get(memory_refs.ID_FIELD)) if block is not None else None
 
 
-def page_matcher(vault_root: Path, moves: Mapping[str, str]) -> Callable[[str, str], bool]:
+def page_matcher(
+    vault_root: Path, moves: Mapping[str, str], *, settled: bool = False
+) -> Callable[[str, str], bool]:
     """Whether an old and a new link target name one page with an `exomem_id`, across `moves`.
 
     A target resolves where the vault serves it now. A target that names a pending move's new
-    path, which holds no page yet, stands for the page that moves there.
+    path, which holds no page yet, stands for the page that moves there. With `settled` the
+    moves have committed: a target that names a move's old path stands for the page now at its
+    new path, as a curation `repoint-links` step reads the pages its plan's moves placed.
     """
     root = Path(vault_root)
     arriving: dict[str, str] = {}
     for old_rel, new_rel in moves.items():
-        no_ext = new_rel.removesuffix(".md")
+        named, held = (old_rel, new_rel) if settled else (new_rel, old_rel)
+        no_ext = named.removesuffix(".md")
         for form in (no_ext, managed_relative(managed_form(no_ext))):
-            arriving[form] = old_rel
+            arriving[form] = held
+
+    held_resolver: list[vault.WikilinkResolver] = []
+
+    def resolver() -> vault.WikilinkResolver:
+        # One resolver per matcher: a resolver per link reads every page of the vault again.
+        if not held_resolver:
+            from .find import shared_resolver
+
+            held_resolver.append(shared_resolver(root))
+        return held_resolver[0]
 
     def page_of(target: str) -> str | None:
         key = target.removesuffix(".md")
         if key in arriving:
             return identity_at(root, arriving[key])
-        canonical, warning = vault.normalize_wikilink(key, root)
+        canonical, warning = vault.normalize_wikilink(key, root, resolver_factory=resolver)
         if warning is not None:
             if "/" not in key:
-                # A bare name of a page that arrives under a new name, which no live page holds.
-                for form, old_rel in arriving.items():
+                # A bare name that no live page holds, of a page that one of the moves renames.
+                for form, held in arriving.items():
                     if form.rsplit("/", 1)[-1] == key:
-                        return identity_at(root, old_rel)
+                        return identity_at(root, held)
             return None
         resolved = canonical.split("#", 1)[0]
         return identity_at(root, resolved if resolved.endswith(".md") else resolved + ".md")
@@ -577,19 +592,15 @@ def reverted_text(loaded: Mapping[str, Any], current: str) -> str:
     return text
 
 
-def revert(vault_root: Path, record_id: str) -> PointerWrite:
-    """Restore the page a record names to its recorded before bytes, and record the revert."""
-    root = Path(vault_root)
-    loaded = load_record(root, record_id)
-    rel = str(loaded.get("page"))
-    absolute, rel = vault.resolve_under_vault(root, rel, must_exist=True, must_be_file=True)
-    current, guard = vault.read_guarded_text(root, absolute)
-    before = reverted_text(loaded, current)
-    write = PointerWrite(
-        rel,
+def revert_write(
+    loaded: Mapping[str, Any], record_id: str, current: str, *, path: str | None = None
+) -> PointerWrite:
+    """The write that returns a recorded page from `current` to its before bytes, to commit and record."""
+    return PointerWrite(
+        path or str(loaded.get("page")),
         f"revert of pointer write {record_id}",
         current,
-        before,
+        reverted_text(loaded, current),
         tuple(
             Span(
                 span["kind"], span["key"], span["after_at"], span["before_at"],
@@ -598,8 +609,19 @@ def revert(vault_root: Path, record_id: str) -> PointerWrite:
             for span in loaded.get("spans") or ()
         ),
     )
+
+
+def revert(vault_root: Path, record_id: str) -> PointerWrite:
+    """Restore the page a record names to its recorded before bytes, and record the revert."""
+    root = Path(vault_root)
+    loaded = load_record(root, record_id)
+    absolute, rel = vault.resolve_under_vault(
+        root, str(loaded.get("page")), must_exist=True, must_be_file=True
+    )
+    current, guard = vault.read_guarded_text(root, absolute)
+    write = revert_write(loaded, record_id, current, path=rel)
     with recording(root, [(write, new_record_id())]):
         vault.batch_atomic_write(
-            [vault.PlannedWrite(path=absolute, content=before, guard=guard)], vault_root=root
+            [vault.PlannedWrite(path=absolute, content=write.after, guard=guard)], vault_root=root
         )
     return write

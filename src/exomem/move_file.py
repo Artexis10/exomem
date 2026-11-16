@@ -135,6 +135,9 @@ class MoveFileValidation:
     after: tuple[dict[str, Any], ...]
     rename_after: tuple[dict[str, Any], ...]
     atomic_supported: bool
+    #: The moved page's bytes at its new path, for a Markdown page; curation seals them so a later
+    #: step of its plan can bind that page and its compensation can restore the pre-step bytes.
+    after_text: str | None = None
 
 
 def _in_episode_folder(vault_root: Path, rel: str) -> bool:
@@ -587,6 +590,8 @@ def move_file(
     preview_digest: str | None = None,
     record_repoints: bool = False,
     _preview_call: Mapping[str, object] = _MOVE_PREVIEW,
+    _stage: Callable[[str], None] | None = None,
+    _exact_content: bool = False,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file; see `_move_file_local`.
 
@@ -600,6 +605,11 @@ def move_file(
 
     `preview` validates without writing and returns the result with one outcome per referrer
     and the `preview_digest` that a commit repointing append-only pages must pass.
+
+    `_stage` is curation's seam around a file-mode rename: it is called once with
+    `before-rename` immediately before the rename, `after-rename` after it and `after-batch`
+    after the batch commits. `_exact_content` makes `content_transform` alone decide the moved
+    bytes, with no lineage entry added or removed: curation's guarded inverse restores sealed bytes.
     """
     manager = writer_lease.active_manager()
     validate_only = validate_only or preview
@@ -607,7 +617,7 @@ def move_file(
     # Protect semantic creation and rollback, then release before standalone index fan-out.
     with ExitStack() as mutation_context, ExitStack() as originals_context:
         mutation_context.enter_context(boundary(vault_root, operation="move_file"))
-        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call)
+        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content)
 
 
 def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: str) -> None:
@@ -776,6 +786,8 @@ def _move_file_local(
     preview_digest: str | None = None,
     record_repoints: bool = False,
     _preview_call: Mapping[str, object] = _MOVE_PREVIEW,
+    _stage: Callable[[str], None] | None = None,
+    _exact_content: bool = False,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
@@ -1274,7 +1286,7 @@ def _move_file_local(
         warnings.append(f"{len(left_unchanged)} visible linking page(s) outside your write scope keep their link to the old path")
 
     def validation_result(
-        *, source_hash: str, destination_hash: str
+        *, source_hash: str, destination_hash: str, after_text: str | None = None
     ) -> MoveFileValidation:
         before = [{"path": old_rel, "content_hash": source_hash}]
         after = [
@@ -1311,6 +1323,7 @@ def _move_file_local(
             paired_binary is None
             and old_rel.lower().endswith(".md")
             and new_rel.lower().endswith(".md"),
+            after_text,
         )
 
     today = today or dt.date.today()
@@ -1359,12 +1372,13 @@ def _move_file_local(
     log_plan: LogWritePlan
     if old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md"):
         # The page's lineage changes last, so it records the move of the final bytes.
-        content_transform = _compose_transforms(
-            content_transform,
-            _lineage_transform(
-                old_rel, new_rel, lineage_entry, undo_lineage, keep_vacated=keep_vacated
-            ),
-        )
+        if not _exact_content:
+            content_transform = _compose_transforms(
+                content_transform,
+                _lineage_transform(
+                    old_rel, new_rel, lineage_entry, undo_lineage, keep_vacated=keep_vacated
+                ),
+            )
         try:
             source, source_guard = read_guarded_text(vault_root, old_abs)
             moved_source = source
@@ -1502,6 +1516,10 @@ def _move_file_local(
                     ) from error
 
             if validate_only:
+                if not preview:
+                    # A curation plan seals this validation, so a step that validates is one
+                    # whose contract its commit accepts.
+                    semantic_writes.refuse_blocked_move(preflight)
                 if store_writer is not None:
                     # Prepared as the commit prepares it, so a move that validates is one whose
                     # catalog accepts it; file mode prepares it only at the commit.
@@ -1509,6 +1527,7 @@ def _move_file_local(
                 validation = validation_result(
                     source_hash=content_hash(source),
                     destination_hash=content_hash(moved_source),
+                    after_text=moved_source,
                 )
                 return validation.result if preview else validation
 
@@ -1553,6 +1572,8 @@ def _move_file_local(
                     working_set_heat.abandon_commit(heat_move)
                     raise
                 try:
+                    if _stage is not None:
+                        _stage("before-rename")
                     _held_rename(vault_root, old_rel, new_rel)
                     # The bytes follow the page inside the same transaction.
                     # A rollback below undoes both, so a failure can never
@@ -1571,6 +1592,8 @@ def _move_file_local(
                                 _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                             _held_rename(vault_root, new_rel, old_rel, rollback=True)
                             raise
+                    if _stage is not None:
+                        _stage("after-rename")
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
                     if move_epoch is not None:
@@ -1627,6 +1650,8 @@ def _move_file_local(
                     if move_epoch is not None:
                         graph_sync.restore_deletion_epoch(move_epoch)
                     raise
+                if _stage is not None:
+                    _stage("after-batch")
                 heat_moved.append(working_set_heat.observe_commit(heat_move))
 
             if visible is not None:
@@ -2027,6 +2052,186 @@ def _move_file_local(
         # The index outcome covers every rewritten page, so a mover other
         # than the owner receives none.
         index=None if restricted else index_feedback,
+    )
+
+
+def adopt_move(
+    vault_root: Path,
+    *,
+    old_path: str,
+    new_path: str,
+    source_hash: str,
+    content_transform: Callable[[str], str] | None = None,
+    extra_writes: tuple[PlannedWrite, ...] = (),
+    today: dt.date | None = None,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
+    exact_content: bool = False,
+) -> MoveFileResult:
+    """Publish a move whose rename already ran, without renaming.
+
+    Curation adopts a move that a crash cut between its rename and its batch: the page sits at
+    `new_path` with the bytes it held at `old_path` (`source_hash`), and `old_path` is absent.
+    This commits what the move's batch would have committed: the destination bytes with their
+    lineage entry and `content_transform`, and the move's semantic, graph, catalog, index and
+    activity-log effects. The guards bind that rename-after state, so a page that changed or
+    returned to its old path refuses. Only an unpaired Markdown page in a file-mode vault
+    adopts, as only such a move records a curation intent. `exact_content` adopts an inverse
+    move, whose `content_transform` alone decides the bytes (`move_file`'s `_exact_content`).
+    """
+    from . import file_watcher, index_sync
+
+    manager = writer_lease.active_manager()
+    with ExitStack() as mutation_context:
+        mutation_context.enter_context(manager.mutation_guard(vault_root, operation="move_file"))
+        old_rel, new_rel = old_path, new_path
+        new_abs = vault_root / new_rel
+        try:
+            source, source_guard = read_guarded_text(vault_root, new_abs)
+        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+            raise MoveFileError("SOURCE_CHANGED", "the renamed page is unreadable") from error
+        if content_hash(source) != source_hash:
+            raise MoveFileError(
+                "SOURCE_CHANGED", "the renamed page changed before its move was adopted"
+            )
+        transform = (
+            content_transform or (lambda text: text)
+            if exact_content
+            else _compose_transforms(
+                content_transform, _lineage_transform(old_rel, new_rel, None, False)
+            )
+        )
+        moved_source = transform(source)
+        _admit_publication(vault_root, new_rel, moved_source.encode("utf-8"))
+        absent_guard = PathGuard.capture(vault_root, old_rel, leaf_policy="absent")
+        try:
+            preflight = semantic_writes.preflight_move(
+                vault_root,
+                old_path=old_rel,
+                new_path=new_rel,
+                source=source,
+                moved_source=moved_source,
+                source_guard=source_guard,
+                destination_guard=absent_guard,
+                content_transform=transform,
+                adopt=True,
+            )
+        except semantic_writes.SemanticWriteError as error:
+            raise MoveFileError(error.code, error.reason) from error
+        semantic_states = {
+            item.after.path: semantic_index.from_semantic_page_state(item.after)
+            for item in preflight.evaluations
+        }
+        new_rel_no_ext = new_rel.removesuffix(".md")
+        log_plan = plan_log_entry(
+            vault_root,
+            date_iso=(today or dt.date.today()).isoformat(),
+            op="move_file",
+            rel_path_no_ext=new_rel_no_ext,
+            body=(
+                f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2, adopted after an "
+                "interrupted rename. wikilinks_updated=0 across 0 file(s)."
+            ),
+        )
+        catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
+        index_reports: list[object] = []
+
+        def mutate(lifecycle_writes, required_guards, bound_absence: PathGuard) -> None:
+            nonlocal catalog_target
+            bound_absence.recheck(vault_root)
+            destination = PlannedWrite(
+                path=new_abs, content=moved_source, expected_hash=source_hash
+            )
+            catalog_writes = (
+                *lifecycle_writes,
+                PlannedWrite(path=new_abs, content=moved_source, create_only=True),
+                *extra_writes,
+                *log_plan.writes,
+            )
+            try:
+                catalog_target = catalog_publication.prepare_catalog_membership_batch(
+                    vault_root,
+                    writes=catalog_writes,
+                    removals=(catalog_publication.CatalogRemoval(old_rel, source_hash),),
+                    graph_replacement_provider=lambda: (
+                        graph_producer.replacements_for_semantic_transition(
+                            vault_root,
+                            before_corpus=preflight.before_corpus,
+                            after_corpus=preflight.after_corpus,
+                            writes=catalog_writes,
+                            semantic_states={
+                                item.after.path: item.after for item in preflight.evaluations
+                            },
+                        )
+                    ),
+                    now=int(time.time()),
+                    part_folders={},
+                )
+            except catalog_publication.CatalogPublicationError as error:
+                raise MoveFileError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", reason=str(error)
+                ) from error
+            combined = [*lifecycle_writes, destination, *extra_writes]
+            if catalog_target is not None:
+                combined.extend(log_plan.writes)
+            if _validate_prepared_bindings is not None:
+                _validate_prepared_bindings()
+            epoch = graph_sync.prepare_rename_epoch(vault_root, [(old_rel, new_rel)], adopted=True)
+            try:
+                if epoch is not None:
+                    graph_sync.publish_rename_epoch(epoch)
+                batch_atomic_write(
+                    combined,
+                    vault_root=vault_root,
+                    required_guards=required_guards,
+                    index_reports=index_reports,
+                    _validate_prepared_bindings=_validate_prepared_bindings,
+                    semantic_states={
+                        rel: semantic_states[rel]
+                        for write in combined
+                        if (rel := write.path.relative_to(vault_root).as_posix())
+                        in semantic_states
+                    },
+                )
+            except BaseException:
+                # No rename runs here, so nothing rolls back; the graph repairs from its floor.
+                if epoch is not None:
+                    graph_sync.provision_rename_recovery(epoch)
+                raise
+
+        try:
+            committed = semantic_writes.commit_move(vault_root, preflight=preflight, mutate=mutate)
+        except semantic_writes.SemanticWriteError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
+        except PathGuardError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
+        except ContentHashMismatchError as error:
+            raise MoveFileError(
+                "SOURCE_CHANGED", "the renamed page changed before its move was adopted"
+            ) from error
+        if catalog_target is not None:
+            try:
+                catalog_publication.publish_markdown_batch(catalog_target)
+            except catalog_publication.CatalogPublicationError as error:
+                raise MoveFileError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                    reason="the adopted move committed but its catalog publication did not "
+                    "reach a verified terminal",
+                ) from error
+    try:
+        file_watcher.register_self_delete(vault_root, [old_rel])
+    except Exception:  # noqa: BLE001 — suppression is independently observed
+        log.debug("adopted move delete suppression registration failed", exc_info=True)
+    try:
+        index_sync.delete_after_remove(vault_root, [old_rel])
+    except Exception:  # noqa: BLE001 — the move stands; reconcile repairs the index
+        log.exception("index delete failed for adopted move source %s", old_rel)
+    return MoveFileResult(
+        old_path=old_rel,
+        new_path=new_rel,
+        wikilinks_updated=0,
+        files_touched=[],
+        warnings=[],
+        semantic=committed.as_dict(),
     )
 
 

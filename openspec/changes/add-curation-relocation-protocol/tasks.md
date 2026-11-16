@@ -16,7 +16,7 @@
 - [x] 2.2 Implement the pointer write: caller-declared spans, a parsed before/after span diff, same-`exomem_id` proof for link spans, and `APPEND_ONLY` for any other difference. Test: only the declared spans of a Source differ and its body, provenance and media hashes are unchanged.
 - [x] 2.3 Refuse a link repoint whose new target resolves to another `exomem_id`, and a change to an undeclared field or to body text. Test: each crafted change refuses and leaves the page's bytes unchanged.
 - [x] 2.4 Write one create-only, owner-only record per pointer write, with its reason, and add its revert. Test: a revert restores the exact before bytes, and a revert after later work refuses.
-- [ ] 2.5 Require a curation plan approval or a matching preview digest for a pointer write to a page the call did not name, refusing with `POINTER_PREVIEW_REQUIRED`; the call approves writes to the page it names. Test: a referrer repoint without the digest changes nothing, and a direct move of a Source commits without one.
+- [x] 2.5 Require a curation plan approval or a matching preview digest for a pointer write to a page the call did not name, refusing with `POINTER_PREVIEW_REQUIRED`; the call approves writes to the page it names. Test: a referrer repoint without the digest changes nothing, and a direct move of a Source commits without one.
 - [x] 2.6 Narrow the `APPEND_ONLY` refusal in `set_frontmatter_field.py` so a registry pointer field passes to the pointer write as a value-span patch that sets no `updated`; its preview returns the old and new value. Test: a Source's `project` correction changes only that span, and a `title` patch still refuses.
 
 ## 3. `move_file`
@@ -29,20 +29,20 @@
 
 ## 4. Curation
 
-- [ ] 4.1 Narrow the relocation predicate to `delete` and `recover`; update the pinned refusals in `tests/test_curation_execution.py` and `tests/test_curation_store.py`. Test: a plan with `delete` or `recover` still refuses with no run store, and a plan with `move` proposes.
-- [ ] 4.2 Add the optional `fields` patch to `move`, limited to registry pointer fields, and drop `update_wikilinks` from the curation `move` schema. Test: a `fields` key that is not a pointer refuses with `CURATION_STEP_INVALID`.
-- [ ] 4.3 Add `repoint-links` as the last step: seal every referrer of the plan's moves, bind pages earlier moves wrote at their sealed after hash, and commit all rewrites and pointer repoints in one batch with the witness. Test: two moved pages that link to each other propose without `CURATION_STEP_CONFLICT`.
-- [ ] 4.4 Publish and flush the create-only intent record from a seam that runs once before the rename. Test: an outside rename back after the intent record blocks with `CURATION_RENAME_HISTORY_UNPROVABLE` and no rename runs.
-- [ ] 4.5 Build the adopt branch: an adopt-mode semantic preflight over the virtual before corpus, an adopt commit that rechecks the rename-after guards, a graph rename epoch that reads the new path, and the reused catalog, batch and index steps. Test: after a crash past the rename, resume leaves the page indexed, cataloged and graphed at the new path.
-- [ ] 4.6 Replace the placement stubs with the recovery state table and add a `BaseException` barrier before the intent record, after it, after the rename and after the batch. Test: at every barrier, recovery issues no second rename and loses no lineage entry.
-- [ ] 4.7 Compensate `move` by restoring sealed pre-step bytes and `repoint-links` by restoring each rewritten page, using the pointer write's revert for append-only pages. Test: an undone rehome restores every moved page, referrer and Source to its pre-step hash.
-- [ ] 4.8 Let an `edit` step with `patch_frontmatter` correct a registry pointer field on an append-only page as a pointer write, with no `updated` minting and exact-byte binding; compensate it through the revert. Test: a plan that corrects `project` on several Sources applies and its compensation restores each Source's before hash.
-- [ ] 4.9 Run the end-to-end rehome workflow through the curation dispatcher: three notes, a `project` patch, a Source referrer and `repoint-links`. Test: every note sits at its new path with one lineage entry and the Source changed only in its link span.
+- [x] 4.1 Narrow the relocation predicate to `delete` and `recover`; update the pinned refusals in `tests/test_curation_execution.py` and `tests/test_curation_store.py`. Test: a plan with `delete` or `recover` still refuses with no run store, and a plan with `move` proposes.
+- [x] 4.2 Add the optional `fields` patch to `move`, limited to registry pointer fields, and drop `update_wikilinks` from the curation `move` schema. Test: a `fields` key that is not a pointer refuses with `CURATION_STEP_INVALID`.
+- [x] 4.3 Add `repoint-links` as the last step: seal every referrer of the plan's moves, bind pages earlier moves wrote at their sealed after hash, and commit all rewrites and pointer repoints in one batch with the witness. Test: two moved pages that link to each other propose without `CURATION_STEP_CONFLICT`.
+- [x] 4.4 Publish and flush the create-only intent record from a seam that runs once before the rename. Test: an outside rename back after the intent record blocks with `CURATION_RENAME_HISTORY_UNPROVABLE` and no rename runs.
+- [x] 4.5 Build the adopt branch: an adopt-mode semantic preflight over the virtual before corpus, an adopt commit that rechecks the rename-after guards, a graph rename epoch that reads the new path, and the reused catalog, batch and index steps. Test: after a crash past the rename, resume leaves the page indexed, cataloged and graphed at the new path.
+- [x] 4.6 Replace the placement stubs with the recovery state table and add a `BaseException` barrier before the intent record, after it, after the rename and after the batch. Test: at every barrier, recovery issues no second rename and loses no lineage entry.
+- [x] 4.7 Compensate `move` by restoring sealed pre-step bytes and `repoint-links` by restoring each rewritten page, using the pointer write's revert for append-only pages. Test: an undone rehome restores every moved page, referrer and Source to its pre-step hash.
+- [x] 4.8 Let an `edit` step with `patch_frontmatter` correct a registry pointer field on an append-only page as a pointer write, with no `updated` minting and exact-byte binding; compensate it through the revert. Test: a plan that corrects `project` on several Sources applies and its compensation restores each Source's before hash.
+- [x] 4.9 Run the end-to-end rehome workflow through the curation dispatcher: three notes, a `project` patch, a Source referrer and `repoint-links`. Test: every note sits at its new path with one lineage entry and the Source changed only in its link span.
 
 ## 5. Teaching
 
-- [ ] 5.1 Return worked examples from `read_instructions(topic="curation.propose")`: a split with each child's `project`, a `move` with its preview outcomes, and a rehome plan whose `edit` steps correct its Sources' `project`. Test: proposal accepts each example's plan in a fixture vault.
-- [ ] 5.2 Update the workflow skills under `src/exomem/_scaffold/_Schema/` that say Sources and Evidence stay immutable: content stays immutable and pointers change through governed moves. Keep the text generic. Test: `tests/test_scaffold_no_leak.py` passes.
+- [x] 5.1 Return worked examples from `read_instructions(topic="curation.propose")`: a split with each child's `project`, a `move` with its preview outcomes, and a rehome plan whose `edit` steps correct its Sources' `project`. Test: proposal accepts each example's plan in a fixture vault.
+- [x] 5.2 Update the workflow skills under `src/exomem/_scaffold/_Schema/` that say Sources and Evidence stay immutable: content stays immutable and pointers change through governed moves. Keep the text generic. Test: `tests/test_scaffold_no_leak.py` passes.
 
 ## 6. Outcome check
 

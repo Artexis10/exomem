@@ -52,6 +52,17 @@ def atomic_witness(
         _ACTIVE.reset(token)
 
 
+@contextmanager
+def suspended() -> Iterator[None]:
+    """Run a write of the step's own bookkeeping, such as a move's intent record, outside the seam:
+    inside it, that batch would be offered the witness."""
+    token = _ACTIVE.set(None)
+    try:
+        yield
+    finally:
+        _ACTIVE.reset(token)
+
+
 def pending_for(vault_root: Path | None) -> PendingWitness | None:
     state = _ACTIVE.get()
     if state is None or state.consumed or vault_root is None:
@@ -101,11 +112,8 @@ def publication_hook(state: PendingWitness | None) -> Callable[[], None] | None:
     write = state.before_publication
 
     def run() -> None:
-        token = _ACTIVE.set(None)
-        try:
+        with suspended():
             write()
-        finally:
-            _ACTIVE.reset(token)
 
     return run
 

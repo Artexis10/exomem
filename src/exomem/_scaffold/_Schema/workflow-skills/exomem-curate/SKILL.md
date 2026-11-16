@@ -1,8 +1,8 @@
 ---
 name: exomem-curate
-description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
+description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence.
 metadata:
-  skill_contract: 7a1f53dc262a115f19e5e35a422923eef2bd3bb678862c216470143be4383f3d
+  skill_contract: 3b83f244656d40195e3602e112563b9ea003ba922e5824623189356d2397d57a
   version: "0.2.0"
 ---
 
@@ -24,8 +24,9 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Content outside the managed Knowledge Base is
+read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
@@ -75,11 +76,11 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 1. Search related notes with `search_memory`; use `inspect_memory(operation="connections.suggest_links")` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
 2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `list_review_items(queue='unlinked')` for pages with no outbound edges and `list_review_items(queue='relation_suggestions')` for already-reviewed candidates.
 3. For a bounded set of explicitly selected pages, call `inspect_memory(operation="curation.work_item", arguments={'curation_action': 'work-item', 'refs': [...], 'paths': [...]})`. This is `structural_suggestions`: it assembles recorded context and never chooses semantics or writes content.
-4. Author the typed plan yourself: `{'version': 1, 'title': <one line>, 'steps': [{'step_id': 's1', 'kind': <step kind>, 'args': {...}}]}`, with each step's args from the work item's `step_schemas`. A refusal names what is missing or not allowed; correct the plan from it. Submit it with `manage_memory(operation="curation.propose", arguments={'curation_action': 'propose', 'plan': ...})`, or on the CLI `manage_memory` with `mode="curation"`, `curation_action="propose"`, and `plan`. Inspect it with `inspect_memory(operation="curation.preview", arguments={'run_id': ...})`; preview the immutable plan once and surface its exact actions, blockers, fingerprint, and compensation classes.
+4. Author the typed plan yourself: `{'version': 1, 'title': <one line>, 'steps': [{'step_id': 's1', 'kind': <step kind>, 'args': {...}}]}`, with each step's args from the work item's `step_schemas`. `read_instructions(topic='curation.propose')` returns worked split, move and rehome plans. A refusal names what is missing or not allowed; correct the plan from it. Submit it with `manage_memory(operation="curation.propose", arguments={'curation_action': 'propose', 'plan': ...})`, or on the CLI `manage_memory` with `mode="curation"`, `curation_action="propose"`, and `plan`. Inspect it with `inspect_memory(operation="curation.preview", arguments={'run_id': ...})`; preview the immutable plan once and surface its exact actions, blockers, fingerprint, and compensation classes.
 5. Before any execution, treat the plan as `restructure_execution`: obtain one explicit confirmation for that exact plan fingerprint. Do not infer confirmation from the request to inspect or improve notes, and do not accept standing approval.
 6. On confirmation, call `manage_memory(operation="curation.apply")` (CLI `curation_action="apply"`), the returned `run_id`, `plan_id`, `expected_plan_fingerprint`, and `why`. If the phase remains `executing`, resume automatically one step per request through `manage_memory(operation="curation.resume")` (CLI `curation_action="resume"`) until terminal; stop on `partial` or `blocked` and report the durable evidence instead of improvising.
 7. Compensation is a new reviewed plan, never rollback. `manage_memory(operation="curation.propose_compensation")` (CLI `curation_action="propose-compensation"`) is `structural_suggestions`: use it to derive the plan, then preview it and obtain a fresh exact-plan confirmation before `manage_memory(operation="curation.apply_compensation")` (CLI `curation_action="apply-compensation"`). Continue the already-approved compensation plan only through the same one-step `resume` route; resume does not need a fresh confirmation for each step.
-8. Leave raw `Sources/` and `Evidence/` untouched except for metadata the core contract explicitly allows.
+8. Leave the content of raw `Sources/` and `Evidence/` untouched. A plan changes their links only through its `repoint-links` step, and a registered pointer field such as `project` through a `patch_frontmatter` edit step.
 9. Check `inspect_memory(operation="maintenance.audit", arguments={'categories': ['unregistered_relation']})` for relation labels that recur but are not registered; promote the ones that have earned it with `inspect_memory(operation="schema.propose_relation", arguments={"subject": "relations", "proposal": ...})`, which turns them into real typed edges instead of standing review debt.
 
 Remote and local clients run the same curation workflow. MCP and REST expose
@@ -112,7 +113,7 @@ Summarize changes made or proposed, citing affected paths. Flag risky changes in
 Preserve history. Prefer supersession when meaning changes. Keep links useful, not decorative.
 
 ## Mistakes to avoid
-Do not rewrite raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, silently continue a partial or blocked run, or turn one confirmation into standing approval.
+Do not rewrite the content of raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, silently continue a partial or blocked run, or turn one confirmation into standing approval.
 
 <!-- exomem-semantic-authoring:v11 sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8 -->
 ## Semantic authoring contract

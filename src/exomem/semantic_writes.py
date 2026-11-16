@@ -3643,6 +3643,46 @@ def _move_evaluation_pairs(
     return tuple((pairs[path], path) for path in sorted(pairs))
 
 
+def _corpus_before_rename(
+    root: Path,
+    disk: semantic_contract.SemanticCorpusContext,
+    *,
+    old_path: str,
+    new_path: str,
+    source: str,
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    status_basis: lifecycle_statuses.Basis,
+) -> semantic_contract.SemanticCorpusContext:
+    """The corpus as it stood before a rename that already ran: the page back at `old_path`."""
+    held = disk.pages.get(new_path)
+    if held is None or held.source_hash != vault.content_hash(source):
+        raise SemanticWriteError(
+            "STALE_SEMANTIC_WRITE", "the renamed page changed before its move was adopted"
+        )
+    restored = semantic_contract.build_page_state(
+        root,
+        old_path,
+        source,
+        relation_registry=registry,
+        language_registry=language,
+        status_basis=status_basis,
+    )
+    pages = {path: state for path, state in disk.pages.items() if path != new_path}
+    pages[old_path] = restored
+    identity_census = semantic_contract.StableIdentityCensus(
+        tuple(entry for entry in disk.identity_census.entries if entry.path != new_path),
+        disk.identity_census.reference_only_entries,
+    ).with_page(restored, casefold_paths=vault.vault_casefolds(root))
+    return semantic_contract.SemanticCorpusContext.from_states(
+        root,
+        pages.values(),
+        registry=registry,
+        identity_census=identity_census,
+        prior_claims=disk.prior_claims,
+    )
+
+
 def preflight_move(
     vault_root: Path,
     *,
@@ -3655,8 +3695,14 @@ def preflight_move(
     rewrites: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     content_transform: Callable[[str], str] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    adopt: bool = False,
 ) -> MovePreflight:
     """Evaluate a move and all exact inbound rewrites against one final corpus.
+
+    `adopt` evaluates a move whose rename already ran (curation adopts an interrupted move):
+    `source_guard` binds the new path holding `source` and `destination_guard` the old path's
+    absence, so `commit_move` rechecks the rename-after state. The before corpus is the vault
+    with the page put back at its old path.
 
     `content_transform` lets a caller declare a content change the move carries —
     today only source reclassification, which rewrites classification frontmatter.
@@ -3667,11 +3713,12 @@ def preflight_move(
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     rewrite_tuple = tuple(rewrites)
+    held_at, absent_at = (new_path, old_path) if adopt else (old_path, new_path)
     if (
-        source_guard.target != old_path
+        source_guard.target != held_at
         or not source_guard.binds_bytes
         or source_guard.expected_content_hash != vault.content_hash(source)
-        or destination_guard.target != new_path
+        or destination_guard.target != absent_at
         or not destination_guard.expects_absence
     ):
         raise SemanticWriteError(
@@ -3702,6 +3749,11 @@ def preflight_move(
     before_corpus = semantic_contract.build_corpus_context(
         root, registry=registry, language_registry=language, status_basis=status_basis
     )
+    if adopt:
+        before_corpus = _corpus_before_rename(
+            root, before_corpus, old_path=old_path, new_path=new_path, source=source,
+            registry=registry, language=language, status_basis=status_basis,
+        )
     before_moved = before_corpus.pages.get(old_path)
     if before_moved is None or before_moved.source_hash != vault.content_hash(source):
         raise SemanticWriteError(
@@ -3969,14 +4021,8 @@ def _plan_move_lifecycle(
     return tuple(writes), tuple(guards), tuple(states)
 
 
-def commit_move(
-    vault_root: Path,
-    *,
-    preflight: MovePreflight,
-    mutate: MoveMutation,
-) -> MoveCommit:
-    """Commit a preflighted move while holding the shared semantic namespace."""
-    root = Path(vault_root)
+def refuse_blocked_move(preflight: MovePreflight) -> None:
+    """Refuse a move whose contract blocks, as its commit does."""
     if preflight.should_block:
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
@@ -3987,6 +4033,17 @@ def commit_move(
                 for finding in item.contract_result.blocking_findings
             ),
         )
+
+
+def commit_move(
+    vault_root: Path,
+    *,
+    preflight: MovePreflight,
+    mutate: MoveMutation,
+) -> MoveCommit:
+    """Commit a preflighted move while holding the shared semantic namespace."""
+    root = Path(vault_root)
+    refuse_blocked_move(preflight)
     if not preflight.manifest_install_required:
         activation_manifest.ensure_manifest(root, commit_point=False)
     if preflight.manifest_install_required:

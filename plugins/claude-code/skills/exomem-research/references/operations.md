@@ -77,9 +77,18 @@ identifiers on either route.
 
 Use `inspect_memory(operation="curation.work_item")` when one reviewed structural improvement
 spans multiple compiled notes or combines typed creation, relation acceptance,
-edit, supersession, move, delete, or recovery. The active agent remains the
+edit, supersession, or move. The active agent remains the
 semantic author: `curation_action="work-item"` assembles only explicit refs and
 paths, and `curation_action="propose"` validates the agent-authored typed plan.
+`read_instructions(topic="curation.propose")` returns worked split, move and
+rehome plans.
+
+A `move` step records the old path in the page's `moved_from`, so old links
+keep resolving. Its optional `fields` patch sets pointer fields only. One
+`repoint-links` step, last in the plan, rewrites every link to the plan's
+moved pages in one batch. In a Source or Evidence page it changes only the
+link span. Preview lists one outcome per referrer. Curation refuses `delete`
+and `recover`.
 
 Call `curation_action="preview"` once for the immutable plan and show its exact
 actions, blockers, fingerprint, and compensation classes. That review is
@@ -95,8 +104,10 @@ confirmation before `curation_action="apply-compensation"`. Never treat
 compensation as rollback, reuse a forward approval, grant standing approval, or
 route Planning, Records, Sources, Evidence, workflow contracts, schema/admin
 paths, or trash internals through curation page steps. The two fold steps in
-[vault-care](vault-care.md#curation) are the only exception: they retire a
+[vault-care](vault-care.md#curation) are the only steps that retire a
 duplicate Source or Evidence page, or an episode's old recap files.
+`repoint-links` and an `edit` with `patch_frontmatter` of a registered pointer
+field change only the pointers of a Source or Evidence page, never its content.
 
 ## Records
 

@@ -8788,17 +8788,22 @@ def find_inbound_wikilinks(
 
 
 def find_inbound_wikilinks_many(
-    vault_root: Path, targets: Iterable[str], *, held: bool = False
+    vault_root: Path,
+    targets: Iterable[str],
+    *,
+    held: bool = False,
+    visible: Callable[[str], bool] | None = None,
 ) -> dict[str, list[InboundLink]]:
-    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them.
+    """`find_inbound_wikilinks` without lineage for several targets over one index read.
 
     `held` says that the vault holds every target, as a store holds a page that may have no file
     yet: a target that the index did not read counts toward its basename, as `target_has_no_file`
     does for one target, and the index answers which ones those are without a look at the disk.
-    A store-mode vault answers from its inbound rows, where `held` is moot.
+    A store-mode vault answers from its inbound rows, where `held` is moot. `visible` is a
+    reader's view, as for `find_inbound_wikilinks`; `None` is the owner's.
     """
     targets = list(targets)
-    stored = _store_inbound(vault_root, targets, None)
+    stored = _store_inbound(vault_root, targets, visible)
     if stored is not None:
         return stored
     data = _inbound_index(vault_root)
@@ -8808,7 +8813,7 @@ def find_inbound_wikilinks_many(
         target: _select_inbound_wikilinks(
             snapshot,
             target,
-            None,
+            visible,
             target_has_no_file=held and target not in snapshot.sources,
         )
         for target, snapshot in snapshots.items()
