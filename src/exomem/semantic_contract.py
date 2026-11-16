@@ -6197,6 +6197,46 @@ def _finding_sort_key(finding: ContractFinding) -> tuple[Any, ...]:
     )
 
 
+def _profile_topic_findings(page: SemanticPageState, vault_root: Path) -> list[ContractFinding]:
+    """A profile page covers one domain or all of them: two domains is an error, an unregistered one a warning.
+
+    A page that names two domains would serve one profile for both. A topic the registry does not know yet is only
+    a warning, because a governed write registers a new topic; until then the page supplies nothing and is not global.
+    """
+    if not _type_basis(page).selects(normalized_compiled_type(page.page_type), note_types.profile):
+        return []
+    # Imported here: the taxonomy reads the vault's registry files, which a pure page judgement otherwise never needs.
+    from . import source_taxonomy, vocabulary_resolution
+
+    scope = vocabulary_resolution.profile_scope(
+        source_taxonomy.load_taxonomy(vault_root), page.frontmatter.get("topics"),
+    )
+    named = ", ".join(scope.topics)
+    if scope.kind == vocabulary_resolution.SCOPE_MULTIPLE:
+        return [ContractFinding(
+            code="INVALID_PROFILE_TOPICS", severity="error", path=page.path, span=None,
+            detail=f"a profile covers one domain, and this page names several: {named}",
+            remediation=(
+                "Keep one topic on this page and write each other domain its own profile page, "
+                "or remove the topics to make it the global profile."
+            ),
+            governed_element_identity=("frontmatter", "topics"),
+            resolved_rule=("semantic_contract", "profile", "one_domain"),
+        )]
+    if scope.kind == vocabulary_resolution.SCOPE_UNRESOLVED:
+        return [ContractFinding(
+            code="UNRESOLVED_PROFILE_TOPIC", severity="warning", path=page.path, span=None,
+            detail=f"the topic {named} is not a registered domain, so this profile is served for no turn",
+            remediation=(
+                "Register the domain in the domains registry, or name a registered domain; "
+                "remove the topics only to make this the global profile."
+            ),
+            governed_element_identity=("frontmatter", "topics"),
+            resolved_rule=("semantic_contract", "profile", "registered_domain"),
+        )]
+    return []
+
+
 def _raw_findings(
     page: SemanticPageState,
     contracts: memory_schema.ResolvedMemoryContracts,
@@ -6235,6 +6275,7 @@ def _raw_findings(
             governed_element_identity=("frontmatter", "stance"),
             resolved_rule=("semantic_contract", "stance", "boolean"),
         ))
+    findings.extend(_profile_topic_findings(page, corpus.vault_root))
     findings.extend(_diagnostic_findings(page))
     minimum_finding = _missing_semantic_unit_finding(page)
     if minimum_finding is not None:
