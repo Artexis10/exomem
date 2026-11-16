@@ -55,12 +55,15 @@ bounded: no file is renamed, and a link written by title resolves under both.
 Case and Unicode-form clashes are caught by `unique_path` and the entity check
 before any write.
 
-A dated name is not a title name. A Source is `YYYY-MM-DD-<name>`; an
-experiment and a production log are `YYYY-MM-<name>`. The caller marks each
-`dated` (for a note, its type's registry `stem` is not the bare slug); with no
-style configured it keeps the slug form, so the default flip renames no kind of
-dated page. A style that a vault or the environment sets applies to a dated page
-as it did before.
+A Source is `YYYY-MM-DD-<name>`. Its caller marks it `dated`; with no style
+configured it keeps the slug form, so the default flip renames no Source. A style
+that a vault or the environment sets applies to a Source as it did before.
+
+An experiment and a production log are `YYYY-MM-<name>`: a compiled note, so they
+take the default like any other. The caller passes the date text as `date_prefix`
+(from the type's registry `stem`), and `fit_filename` counts it against the byte
+cap. The name that `resolve_filename_slug` returns never includes the prefix, and
+a `FILENAME_ADJUSTED` warning shows the whole stem that the page is linked by.
 
 ### A changed name is reported once
 

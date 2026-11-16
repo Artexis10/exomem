@@ -755,6 +755,7 @@ def resolve_filename_slug(
     *,
     vault_root: Path | None = None,
     dated: bool = False,
+    date_prefix: str = "",
 ) -> tuple[str, list[str]]:
     """Resolve a new filename component without conflating it with display title.
 
@@ -767,10 +768,11 @@ def resolve_filename_slug(
     caller pins a name it already intends to link to. Omitting `vault_root`
     resolves the style from the environment alone.
 
-    `dated` marks a name that carries a date: a Source's, or an experiment's or
-    production log's. A vault that configured no style keeps the slug form there,
-    so the default change renames no kind of dated page; a configured style
-    applies as it always did.
+    `dated` marks a Source's name. A vault that configured no style keeps the slug
+    form there, so the default change renames no Source; a configured style applies
+    as it always did. A note whose name starts with a date follows the style like any
+    other note: its caller passes the text it puts before the name as `date_prefix`,
+    so the byte cap counts it. The name returned never includes the prefix.
     """
     if slug is not None:
         if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
@@ -786,9 +788,10 @@ def resolve_filename_slug(
         style = "slug"
     if style == "title":
         corrected = corrected_title_name(title)
-        fitted = fit_filename(corrected.name) if corrected.name else None
+        fitted = fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
         if fitted is not None:
-            readable, cut_to_fit = fitted
+            stem, cut_to_fit = fitted
+            readable = stem.removeprefix(date_prefix)
             # No transliteration warning here: nothing was transliterated. That
             # warning exists because the slug path is lossy for non-ASCII text,
             # and this path is what a vault sets to stop paying that cost.
@@ -806,7 +809,7 @@ def resolve_filename_slug(
             warnings = []
             if changes:
                 warnings.append(
-                    f"FILENAME_ADJUSTED: the file name is {readable!r} ({'; '.join(changes)}); "
+                    f"FILENAME_ADJUSTED: the file name is {stem!r} ({'; '.join(changes)}); "
                     "the title is stored as given. Link to this note by that name."
                 )
             return readable, warnings

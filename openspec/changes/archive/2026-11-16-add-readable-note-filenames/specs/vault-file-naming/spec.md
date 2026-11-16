@@ -7,8 +7,9 @@ style SHALL be one of `slug` (lowercase ASCII kebab-case, today's behaviour) or
 `title` (the human title preserved, corrected for filesystem and link safety).
 The default SHALL be `title` for a new compiled note and a new entity, and `slug`
 SHALL remain available as the opt-out. A Source, whose name follows its capture
-date, and an experiment or production log, whose name carries a month, SHALL keep
-their dated slug names in a vault that sets no style. An entity
+date, SHALL keep its dated slug name in a vault that sets no style. A note whose
+name starts with a month, such as an experiment or a production log, SHALL follow
+the default and keep its date prefix. An entity
 follows the requirement "Entity Filenames Follow The Vault Naming Path".
 
 Resolution order SHALL be: an explicit per-call `slug` argument, then
@@ -35,11 +36,17 @@ caller pins a name it intends to link to.
 - **WHEN** a Source is captured in a vault that sets no filename style
 - **THEN** the file is named `<date>-<kebab slug of the title>.md`
 
-#### Scenario: An experiment keeps its dated slug name
+#### Scenario: An experiment is named by its title after its date prefix
 
-- **WHEN** an experiment started in May 2026 is written to a vault that sets no filename style
-- **THEN** the file is named `2026-05-<kebab slug of the title>.md`
-- **AND** a vault that configures `title` names it `2026-05-<title>.md`
+- **WHEN** an experiment started in May 2026 and titled `Brûlée Soak Trial` is written to a vault that sets no filename style
+- **THEN** the file is named `2026-05-Brûlée Soak Trial.md`
+- **AND** the stored title is `Brûlée Soak Trial`
+
+#### Scenario: An experiment in a slug vault keeps its dated slug name
+
+- **GIVEN** a vault whose `project-keys.yaml` sets filename style `slug`
+- **WHEN** an experiment started in May 2026 and titled `Brûlée Soak Trial` is written
+- **THEN** the file is named `2026-05-brulee-soak-trial.md`
 
 #### Scenario: Title style preserves the title on disk
 
@@ -120,6 +127,12 @@ name the file by its name and the page by its title, never by a storage path.
 
 - **WHEN** a note whose title is longer than the byte cap allows is written
 - **THEN** the filename is at most 200 bytes
+- **AND** the warning says the name was shortened
+
+#### Scenario: A date prefix counts toward the byte cap
+
+- **WHEN** an experiment is written whose title fits the byte cap alone but not beside its `YYYY-MM-` prefix
+- **THEN** the title part is cut so that the whole filename is at most 200 bytes
 - **AND** the warning says the name was shortened
 
 #### Scenario: A clean name carries no warning

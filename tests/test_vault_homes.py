@@ -139,7 +139,7 @@ def test_a_home_keeps_the_type_stem(vault: Path) -> None:
         today=TODAY,
     )
 
-    assert experiment.destination == f"{HOME}/2026-09-pump-soak.md"
+    assert experiment.destination == f"{HOME}/2026-09-Pump soak.md"
 
 
 @pytest.mark.parametrize(
@@ -157,11 +157,11 @@ def test_a_home_keeps_the_type_stem(vault: Path) -> None:
                 "started": "2026-09-14",
                 "duration": "2 weeks",
             },
-            f"{KB}/Notes/Experiments/Health/2026-09-the-title.md",
+            f"{KB}/Notes/Experiments/Health/2026-09-The title.md",
         ),
         (
             {"note_type": "production-log", "medium": "posts"},
-            f"{KB}/Notes/Productions/Posts/2026-10-the-title.md",
+            f"{KB}/Notes/Productions/Posts/2026-10-The title.md",
         ),
     ],
 )

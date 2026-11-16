@@ -105,15 +105,46 @@ def _experiment(vault_root: Path, title: str) -> note_module.NoteResult:
     )
 
 
-def test_an_experiment_keeps_its_dated_slug_name_unless_the_vault_chose_a_style(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    by_default = _experiment(vault, "Retry Budget Trial")
-    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "title")
-    by_choice = _experiment(vault, "Retry Budget Trial Two")
+def test_an_experiment_is_named_by_its_title_after_its_date_prefix(vault: Path) -> None:
+    result = _experiment(vault, "Brûlée Soak Trial")
 
-    assert Path(by_default.path).name == "2026-05-retry-budget-trial.md"
-    assert Path(by_choice.path).name == "2026-05-Retry Budget Trial Two.md"
+    assert Path(result.path).name == "2026-05-Brûlée Soak Trial.md"
+    assert _stored_title(vault, result.path) == "Brûlée Soak Trial"
+
+
+def test_a_production_log_is_named_by_its_title_after_the_month_it_is_written(vault: Path) -> None:
+    draft = note_module.note(
+        vault,
+        content="## Observations\n\n- [finding] An invented outcome.\n",
+        note_type="production-log",
+        title="Launch Recap Ünit",
+        medium="posts",
+        validate_only=True,
+        today=TODAY,
+    )
+
+    assert Path(draft.destination).name == "2026-05-Launch Recap Ünit.md"
+
+
+def test_a_long_dated_title_is_cut_so_the_date_prefix_fits_under_the_byte_cap(vault: Path) -> None:
+    # The name alone fits the cap; only the prefix beside it pushes the file over.
+    title = "あ" * 63 + "xx"
+
+    result = _experiment(vault, title)
+
+    name = Path(result.path).name
+    assert name.startswith("2026-05-") and len(name.encode()) <= vault_module.MAX_FILENAME_BYTES
+    assert _stored_title(vault, result.path) == title
+    adjusted = [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
+    assert len(adjusted) == 1 and "name shortened" in adjusted[0]
+
+
+def test_an_experiment_in_a_vault_that_chooses_slug_keeps_its_dated_slug_name(vault: Path) -> None:
+    _choose_slug_in_the_vault(vault)
+
+    result = _experiment(vault, "Brûlée Soak Trial")
+
+    assert Path(result.path).name == "2026-05-brulee-soak-trial.md"
 
 
 def test_titles_that_differ_only_by_case_get_separate_files(vault: Path) -> None:

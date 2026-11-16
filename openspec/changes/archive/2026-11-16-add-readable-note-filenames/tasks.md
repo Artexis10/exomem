@@ -76,8 +76,8 @@
 
 - [x] 7.1 Make `title` the default for new compiled notes and entities, with `slug`
       as the opt-out, and delete the entity-only default of task 6.3. A Source
-      keeps its dated slug name when no style is set, as do an experiment and a
-      production log.
+      keeps its dated slug name when no style is set. An experiment and a
+      production log take `title` and keep their date prefix (`date_prefix`).
 - [x] 7.2 Name a title-style page through `corrected_title_name` and `fit_filename`,
       so that no name breaks a wikilink or passes the byte cap, and warn once when
       the name differs from the title (`FILENAME_ADJUSTED`).

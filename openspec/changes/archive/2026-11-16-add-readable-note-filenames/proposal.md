@@ -72,9 +72,10 @@ Two facts make it tractable anyway:
 - **The default is `title`.** A vault that sets no style names each new compiled
   note and entity by its title, and `slug` is the opt-out through
   `EXOMEM_FILENAME_STYLE` or the vault key. The default changes the name of new
-  pages only: no file on disk is renamed. A page whose name carries a date keeps
-  its slug name when no style is set: a Source (`<date>-<name>`), an experiment
-  and a production log (`YYYY-MM-<name>`). An Episode keeps its dated name too.
+  pages only: no file on disk is renamed. A Source
+  (`<date>-<name>`) keeps its slug name when no style is set, and so does an
+  Episode. An experiment and a production log (`YYYY-MM-<name>`) take the
+  default and keep their date prefix.
 - **A title name is link-safe.** The name passes through `corrected_title_name`
   and `fit_filename`: the characters `# [ ] ^ |` that break a wikilink become
   spaces, leading dots are dropped, and the name is cut under the byte cap. The

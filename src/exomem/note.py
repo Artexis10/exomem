@@ -631,9 +631,7 @@ def _legacy_note(
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     try:
-        filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root, dated=_dated_name(note_type)
-        )
+        filename_slug, slug_warnings = resolve_filename_slug(title, slug, vault_root=vault_root)
     except InvalidSlugError as e:
         raise NoteError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
 
@@ -1259,10 +1257,7 @@ def _type_default(
         folder /= _medium_folder(medium)
     if definition.stem == "started":
         assert started  # validated above
-        return _Placement(folder, f"{started[:7]}-{slug}")  # YYYY-MM-<slug>
-    if definition.stem == "dated":
-        return _Placement(folder, f"{date_iso[:7]}-{slug}")  # YYYY-MM-<slug>
-    return _Placement(folder, slug)
+    return _Placement(folder, _stem_prefix(note_type, started=started, date_iso=date_iso) + slug)
 
 
 def _homes_warnings(home_set: homes_module.HomeSet) -> list[str]:
@@ -1842,10 +1837,19 @@ def _frontmatter_lines(fields: Mapping[str, str | Sequence[str]]) -> str:
     return "\n".join(lines)
 
 
-def _dated_name(note_type: str) -> bool:
-    """Whether the type's file name carries a date: its registry `stem` is not the bare slug."""
+def _stem_prefix(note_type: str, *, started: str | None, date_iso: str) -> str:
+    """The `YYYY-MM-` that a type's file name starts with; empty for a type named by its name alone.
+
+    A `started` stem takes the month the work started, a `dated` stem the month of the write.
+    """
     definition = note_types.shipped_registry().types.get(note_type)
-    return definition is not None and definition.stem != "slug"
+    if definition is None:
+        return ""
+    if definition.stem == "started":
+        return f"{started[:7]}-" if started else ""
+    if definition.stem == "dated":
+        return f"{date_iso[:7]}-"
+    return ""
 
 
 def planned_destination(
@@ -1866,8 +1870,12 @@ def planned_destination(
     creates the note later passes the same day to `note` as `_path_date`.
     """
     root = Path(vault_root)
+    date_iso = date_iso or temporal.render_date(temporal.now())
     filename_slug, _warnings = resolve_filename_slug(
-        title, slug, vault_root=root, dated=_dated_name(note_type)
+        title,
+        slug,
+        vault_root=root,
+        date_prefix=_stem_prefix(note_type, started=None, date_iso=date_iso),
     )
     path = _resolve_path(
         vault_root=root,
@@ -1877,7 +1885,7 @@ def planned_destination(
         domain=domain,
         medium=None,
         started=None,
-        date_iso=date_iso or temporal.render_date(temporal.now()),
+        date_iso=date_iso,
         create_parents=False,
         home_set=homes_module.load(root),
     )
@@ -1965,12 +1973,6 @@ def note(
                 )
             raise NoteError(error.code, ["topics"], error.reason, error.details) from error
         topic_writes = topic_plan.writes
-    try:
-        filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root, dated=_dated_name(note_type)
-        )
-    except InvalidSlugError as error:
-        raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
     if status is None:
         status = "planned" if note_type == "production-log" else "active"
 
@@ -2002,6 +2004,23 @@ def note(
             project_keys_module.ProjectKeyIntroduction(item.key, item.folder, item.category)
             for item in token_value.registrations
         )
+    # The draft token pins the *path* date across the draft->commit gap, so a
+    # note keeps its filename whichever side of midnight it is committed on.
+    # Knowledge time is stamped at commit instead: it records when the write
+    # actually happened, not when the draft was prepared.
+    now = today or temporal.now()
+    render_date = token_value.render_date if token_value is not None else temporal.render_date(now)
+    stamp_iso = token_value.stamp() if token_value is not None else temporal.stamp(now)
+    try:
+        # A dated type's name starts with the date the path will carry, and the byte cap counts it.
+        filename_slug, slug_warnings = resolve_filename_slug(
+            title,
+            slug,
+            vault_root=vault_root,
+            date_prefix=_stem_prefix(note_type, started=started, date_iso=_path_date or render_date),
+        )
+    except InvalidSlugError as error:
+        raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
     try:
         key_plan = project_keys_module.plan_project_keys(
             root,
@@ -2055,13 +2074,6 @@ def note(
             raise NoteError(error.code, ["domain"], error.reason, error.details) from error
 
     identity = draft_id or memory_refs.new_id()
-    # The draft token pins the *path* date across the draft->commit gap, so a
-    # note keeps its filename whichever side of midnight it is committed on.
-    # Knowledge time is stamped at commit instead: it records when the write
-    # actually happened, not when the draft was prepared.
-    now = today or temporal.now()
-    render_date = token_value.render_date if token_value is not None else temporal.render_date(now)
-    stamp_iso = token_value.stamp() if token_value is not None else temporal.stamp(now)
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
         for item in key_plan.introductions

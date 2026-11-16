@@ -693,6 +693,11 @@ the derived name under every style and does not change the stored title. Exomem
 does not attempt language-aware transliteration, and it never renames existing
 pages on upgrade or reconcile.
 
+These examples show the `slug` style. The default `title` style names a note, an
+experiment, a production log or an entity by its title instead, after the same date
+prefix where it has one: an experiment becomes `2026-05-Day low-carb.md`. A Source
+keeps its slug name until the vault sets a style.
+
 - Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
 - Notes (research, insight, failure, pattern, procedure): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
 - Experiments: date-prefixed (start month), dash-slug, lowercase: `2026-05-30-day-low-carb.md`
