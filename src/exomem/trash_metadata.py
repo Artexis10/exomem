@@ -416,6 +416,8 @@ def addressed_original(vault: Path, binary_path: str) -> tuple[str, bytes, origi
         if data is None:
             data = reserved_paths.read_generic_bytes(vault, page).data
         fields, _body, marker = parse_frontmatter(data.decode("utf-8"), custody=True)
+        if originals.bound_path(fields) == binary_path:
+            return None  # A companion that binds the Trash path itself retains an ordinary Trash entry, not a filing.
         census = PlacementCensus(vault)
         binding = census.resolve(page, fields) if marker is not None else None
         census.require_current()
