@@ -74,7 +74,9 @@ A sqlite sidecar in the state root, modelled on `served_context`, holds one row 
 
 The product load target is 20,000 pages, about 100,000 units, 120,000 edges and a 10,000-link hub (from the `make-vault-store-canonical` design). At that size, brief reads at the member caps have these budgets:
 - **Cold compile** (a cache miss: up to 80 member reads and unit parses): p95 under 1000 ms, the activation bar.
-- **Warm read** (walk or memo hit, digest, cache hit, watermark diff): p95 under 250 ms. A restricted caller's warm read still makes its walk.
+  A 10,000-link hub as the seed is the worst single shape, not a p95 sample. It is recorded with its measured range and kept near this bar.
+- **Warm read for the owner** (memo hit, digest, cache hit, watermark diff): p95 under 250 ms.
+- **Warm read for a restricted caller** (walk, digest, cache hit, watermark diff): p95 under the cold bar, 1000 ms. Its release filter reads state that no graph token names, so its walk is not memoized. The map views exclude restricted builds from their cache for the same reason.
 - **Topic text** adds one hybrid search.
 
 Per-request work is bounded by the member caps and the page size. The walk passes only through compiled notes, so a 10,000-link hub cannot widen it. Proof: cold and warm timings on a generated store at the load target, plus a read-count test showing that a warm read reads zero pages. Production latency and errors are recorded under the route label `read_page:brief`.

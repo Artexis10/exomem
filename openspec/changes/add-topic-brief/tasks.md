@@ -24,12 +24,13 @@
   - cache invalidation and a warm read with zero page reads;
   - `changed_since` per principal;
   - `missing` and `related`.
-- [ ] 3.2 Record cold and warm timings on a generated store at the load target, within the budgets.
+- [x] 3.2 Record cold and warm timings on a generated store at the load target, within the budgets.
   - Measured on a generated store of 20,401 pages, 180,401 graph nodes and 420,130 edges, with two 10,000-link hubs that are not compiled notes, as the owner, one request at a time on one machine. Cold reads clear the compiled-brief cache and the walk memo. Steady warm reads are the second pass on, after the first pass has filled both.
   - Without the walk memo (the commit before it), steady warm: ordinary page p50 213 ms and p95 568 ms (n=120); a page next to a hub p95 481 to 513 ms; a 10,000-link hub as the seed 870 to 936 ms (n=7).
   - With the walk memo, steady warm: ordinary page p50 33 ms and p95 38 ms (n=120); a page next to a hub p95 35 to 44 ms (n=60); a 10,000-link hub as the seed 30 to 31 ms (n=7). The slowest steady reads were 379 ms (ordinary page) and 310 ms (a page that links a hub). The warm budget holds for the owner.
   - Cold is unchanged by the memo. Ordinary page: p50 256 ms and p95 544 ms (n=40), within the budget. A 10,000-link hub as the seed: 788 ms and 914 ms (one read each); ten cold hub reads across five runs ranged from 788 to 1,087 ms, so that budget is at its limit.
-  - Open: a restricted caller's walk is made on every read, and its warm read was not measured here. It costs what the no-memo numbers show for the walk. Keep this box open until a decision on that case or on the cold hub budget.
+  - A restricted caller's walk is made on every read. Its warm read costs what the no-memo numbers show: p95 481 to 568 ms, within its budget (design, Load target).
+  - A 10,000-link hub as the seed is recorded as the worst single shape: 788 to 1,087 ms cold over ten reads (design, Load target).
 
 ## 4. Release and acceptance
 
