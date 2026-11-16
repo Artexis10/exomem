@@ -33,7 +33,6 @@ _MAX_CORPUS_FILES = 10_000
 _MAX_CORPUS_BYTES = 128 * 1024 * 1024
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 _RECEIPT_VERSION = 1
-_WIKILINK = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +167,9 @@ def _rewrite_links(
     *,
     allow_bare: bool,
 ) -> tuple[str, int, bool]:
+    # Not `semantic_writes.rewrite_wikilinks_for_move`: a migration counts every link that names the
+    # moved item, and refuses a bare-name link it cannot attribute (`ambiguous`); the move rewrite counts
+    # only links whose bytes change and has no refusal.
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
     old_full = managed_form(old_no_ext)
@@ -203,7 +205,7 @@ def _rewrite_links(
             return f"[[{new_basename}{anchor_suffix}{alias}]]"
         return match.group(0)
 
-    return _WIKILINK.sub(replace, text), changed, ambiguous
+    return semantic_writes.MOVE_WIKILINK_PATTERN.sub(replace, text), changed, ambiguous
 
 
 def _path_is_transactionally_writable(root: Path, relative: str) -> bool:
@@ -1007,6 +1009,3 @@ def apply(
     except Exception:  # noqa: BLE001 - derived indexes reconcile from Markdown
         pass
     return receipt
-
-
-_ = semantic_writes.rewrite_wikilinks_for_move  # keep the shared rewrite contract visible
