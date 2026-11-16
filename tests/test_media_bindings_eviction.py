@@ -270,3 +270,48 @@ def test_rebinding_after_read_admission_pins_and_ages_the_bytes_actually_acquire
             assert source.stream.read() == second_bytes
         ledger.complete(reclaimed)
     assert media_store.evict(vault, vault / second.path)
+
+
+def test_a_drain_latch_keeps_a_shared_object_resident_through_every_filing(
+    vault, selected_store, monkeypatch,  # noqa: F811
+):
+    """Catches a shared object's eviction that ignores the drain latch, so a drained cell's zero stops proving local bytes.
+
+    Both filings could be recovered from the store, so only the latch refuses the eviction. A served policy releases it.
+    """
+    from test_media_store import _configure, _retained
+
+    content = b"one original with two independent archive filings"
+    with library_scope():
+        first = preserve.preserve_stream(vault, scope="Archive", category="documents", filename="first.txt",
+                                        stream=io.BytesIO(content))
+        second = preserve.preserve_stream(vault, scope="Archive", category="documents", filename="second.txt",
+                                         stream=io.BytesIO(content), raw_protection=True)
+    for item in (first, second):
+        assert media_store.offload(vault, vault / item.path) is not None
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    digest = hashlib.sha256(content).hexdigest()
+    with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(lambda: [content])) as prepared:
+        with media_store._guard(vault, "test_shared_original_publication"):
+            prepared.publish()
+            for item in (first, second):
+                (vault / item.path).unlink()
+    for item in (first, second):
+        with media_store.open_original(vault, item.path) as source:
+            assert source.stream.read() == content
+    _retained(selected_store, vault)
+    assert media_bindings.rebuild(vault)  # A policy change makes the binding facts stale until they are rebuilt.
+
+    assert media_store.drain_census(vault) == (0, 0)
+    assert media_store.drain_record(vault).latched
+    for item in (first, second):
+        assert not media_store.evict(vault, vault / item.path)
+    assert original_pool.object_path(vault, digest).read_bytes() == content
+
+    _configure(selected_store, vault)
+    media_store.drain_tick(vault)
+    assert media_store.drain_record(vault) is None
+    assert media_bindings.rebuild(vault)
+    assert media_store.evict(vault, vault / first.path)
+    assert not original_pool.object_path(vault, digest).exists()
