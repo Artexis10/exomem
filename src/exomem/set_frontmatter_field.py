@@ -28,7 +28,6 @@ from .vault import (
     governed_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
-    kb_root,
     parse_frontmatter,
     plan_log_writes,
     read_guarded_text,
@@ -356,7 +355,7 @@ def _plan_project_keys(
 
     # Keep the auxiliary target/content digest stable across an exact retry
     # after a newly introduced key was written but before the primary page.
-    registry_path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    registry_path = vault_root / project_keys.registry_relpath(vault_root)
     try:
         current, guard = read_guarded_text(vault_root, registry_path)
     except FileNotFoundError:
