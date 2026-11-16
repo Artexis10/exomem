@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from . import collection_profiles, homes, kbdir, note_types, vault
+from . import collection_profiles, extraction_parts, homes, kbdir, note_types, vault
 from .cli_ops import OpError
 from .held_fs import vault_name_key
 
@@ -410,6 +410,7 @@ class FixedBecause(StrEnum):
     OUTSIDE_AREA = "outside_registered_area"
     NO_TITLE = "no_frontmatter_title"
     NO_USABLE_NAME = "no_usable_name"
+    EXTRACTION_PART = "extraction_part"
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,7 +479,8 @@ def place(
             NameClass.FIXED,
             stem,
             extension,
-            holds_name=markdown and not machinery,
+            # A part page is named by its position and shares that name with the parts of every other page.
+            holds_name=markdown and not machinery and because is not FixedBecause.EXTRACTION_PART,
             fixed_because=because,
             unregistered_folder=unregistered,
         )
@@ -487,6 +489,8 @@ def place(
         return keep(FixedBecause.NOT_MARKDOWN)
     if machinery:
         return keep(FixedBecause.MACHINERY)
+    if extraction_parts.source_page_for(PurePosixPath(current_path)) is not None:
+        return keep(FixedBecause.EXTRACTION_PART)
     # The write gate's own list of generated navigation names; a bare Markdown name matches no folder.
     if semantic_contract.compiled_route_exempt(filename):
         return keep(FixedBecause.NAVIGATION)

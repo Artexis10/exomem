@@ -2,14 +2,17 @@
 
 Obsidian reads `[[Name]]` against the basenames of the Markdown files it sees, and
 `[[group/Name]]` against the ends of their paths. A link text that two files satisfy
-resolves to neither of them for a writer that needs the link to be stable. These pure
+resolves to neither of them for a writer that needs the link to be stable, unless the text
+is a file's full path, which names that file whatever else ends with it. These pure
 functions encode that rule over an index, so a planner, a writer and a verifier share it:
 
 - the index maps `basename_key` of a file to the paths of every file with that basename
   (`build_index` builds it);
-- `resolve_link` applies the rule to a link text;
-- `link_form` returns the shortest link text that resolves to a given file, and `link_forms`
-  does so for every file of an index in a single pass;
+- `resolve_link` applies the rule to a link text: the exact vault path first, then the
+  strict union of basename and trailing-path matches;
+- `link_form` returns the shortest link text that resolves to a given file, or its full
+  vault path when no shorter text is unique, and `link_forms` does so for every file of an
+  index in a single pass;
 - `link_text` puts that page text back into a link, keeping its anchor and alias.
 
 Nothing here reads a file or the vault. Paths are relative to Obsidian's vault root and
@@ -88,27 +91,34 @@ def build_index(paths: Iterable[str]) -> dict[str, list[str]]:
 def resolve_link(page: str, index: Index) -> LinkMatch:
     """Apply Obsidian's rule to the page part of a link text (no `#anchor`, no `|alias`).
 
-    A text with `/` names the files whose path equals it or ends with `/<text>`, with `.md`
-    implied. A bare name names the files that have that basename. Both compare under
-    `vault_name_key`. A single file resolves; none is unresolved; several are ambiguous.
+    The exact vault path comes first: a text that, with `.md` implied, names a file's full
+    path resolves to that file. Without an exact match, the text names every file whose path
+    ends with it at a folder boundary; a bare name names every file with that basename. Both
+    compare under `vault_name_key`. A single file resolves; none is unresolved; several are
+    ambiguous, whichever file Obsidian itself would prefer, so a writer never relies on that.
     """
     text = _without_suffix(page.strip())
     group = index.get(basename_key(text), ()) if text else ()
-    if "/" in text:
-        key = vault_name_key(text)
+    key = vault_name_key(text)
+    keyed = [(path, vault_name_key(_without_suffix(path))) for path in group]
+    found = tuple(sorted({path for path, path_key in keyed if path_key == key}))
+    if not found:
         tail = "/" + key
-        group = [
-            path
-            for path in group
-            if (path_key := vault_name_key(_without_suffix(path))) == key or path_key.endswith(tail)
-        ]
-    found = tuple(sorted(set(group)))
+        found = tuple(sorted({path for path, path_key in keyed if path_key.endswith(tail)}))
     if not found:
         return LinkMatch(Resolution.UNRESOLVED)
     return LinkMatch(Resolution.RESOLVED if len(found) == 1 else Resolution.AMBIGUOUS, found)
 
 
-def _group_forms(group: Iterable[str]) -> dict[str, str | None]:
+@dataclass(frozen=True, slots=True)
+class LinkForm:
+    """The link text of a file. `full_path` says that no shorter text is unique, so `text` is the full vault path."""
+
+    text: str
+    full_path: bool = False
+
+
+def _group_forms(group: Iterable[str]) -> dict[str, LinkForm]:
     """The link form of every path in a basename group, from a single pass over the group."""
     paths = list(dict.fromkeys(group))
     keys = {path: vault_name_key(_without_suffix(path)).split("/") for path in paths}
@@ -116,10 +126,10 @@ def _group_forms(group: Iterable[str]) -> dict[str, str | None]:
     holders = Counter(
         "/".join(parts[-depth:]) for parts in keys.values() for depth in range(1, len(parts) + 1)
     )
-    forms: dict[str, str | None] = {}
+    forms: dict[str, LinkForm] = {}
     for path in paths:
         segments = _without_suffix(path).split("/")
-        forms[path] = next(
+        unique = next(
             (
                 "/".join(segments[-depth:])
                 for depth in range(1, len(segments) + 1)
@@ -127,29 +137,33 @@ def _group_forms(group: Iterable[str]) -> dict[str, str | None]:
             ),
             None,
         )
+        # The full vault path always names its own file first, so it is the form that never fails.
+        forms[path] = (
+            LinkForm(unique) if unique is not None else LinkForm("/".join(segments), full_path=True)
+        )
     return forms
 
 
-def link_forms(index: Index) -> dict[str, str | None]:
+def link_forms(index: Index) -> dict[str, LinkForm]:
     """`link_form` of every file in the index, at the cost of a single pass over each basename group.
 
     A planner that needs the form of many files calls this once; `link_form` per file would
     read the whole group each time, which grows with the square of a large group.
     """
-    forms: dict[str, str | None] = {}
+    forms: dict[str, LinkForm] = {}
     for group in index.values():
         forms.update(_group_forms(group))
     return forms
 
 
-def link_form(target: str, index: Index) -> str | None:
-    """The shortest trailing path of `target`, cut at a folder boundary, that resolves to exactly `target`.
+def link_form(target: str, index: Index) -> LinkForm:
+    """The shortest trailing path of `target`, cut at a folder boundary, that names only `target`.
 
-    `Name` when the basename is unique, else `group/Name`, then longer. It reads only the
-    target's own basename group. None when no trailing path is unique: another file's path
-    ends with all of the target's. Raises `ValueError` when `target` is not in its group,
-    which means the index was built without it. Each call reads the whole group, so use
-    `link_forms` for many files.
+    `Name` when the basename is unique, else `group/Name`, then longer. When another path ends
+    with all of the target's own, no trailing path is unique, and the form is the target's full
+    vault path, which resolves by exact match (`LinkForm.full_path`). It reads only the target's
+    own basename group. Raises `ValueError` when `target` is not in its group, which means the
+    index was built without it. Each call reads the whole group, so use `link_forms` for many files.
     """
     group = index.get(basename_key(target), ())
     if target not in group:
