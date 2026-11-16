@@ -470,8 +470,19 @@ _IMPORT_GUIDE = (
     "and repeat it until `filing` is `done`. A repeat, or a call that was cut short, carries on the same import and unpacks nothing again. "
     "A refused archive names the member and leaves nothing unpacked."
 )
+_FILE_GUIDE = (
+    "Keep one file from this client's disk, not an attached file handle, as its original bytes, in four steps. "
+    "1. Take the file's SHA-256. "
+    "2. Call upload_files with lane `source` (an original) or `evidence` (proof) and that expected_sha256. "
+    "The digest holds the upload for this session, so `hold` is optional. The reply is a handoff that stores nothing yet. "
+    "3. Send the bytes: save the reply as JSON and run `exomem attach <file> --handoff-file <json> --root .`, "
+    "or, from a sandbox with no `exomem`, POST the file to the reply's `upload_url` with the header `Authorization: Bearer <token>` and the form fields `file`, `hold=1` and `lane`. "
+    "The token is a secret: never show it to the person. The send returns a held `file` handle. "
+    "4. Call save_source or save_evidence with that handle in `files`. A held upload lasts an hour and only the same session can redeem it. "
+    "The save's receipt proves the file is kept: check each row's `hash` against the digest of step 1 before you tell the person it is saved. "
+)
 #: Teaching that read_instructions adds to a topic whose use takes more than its arguments show.
-_GUIDES = {"upload_files": _IMPORT_GUIDE, "imports.file": _IMPORT_GUIDE}
+_GUIDES = {"upload_files": f"{_FILE_GUIDE}{_IMPORT_GUIDE}", "imports.file": _IMPORT_GUIDE}
 
 
 def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:

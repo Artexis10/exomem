@@ -480,6 +480,25 @@ def test_the_import_lane_is_refused_on_exomem_cloud(agent):
     assert "UPLOAD_LANE_UNAVAILABLE" in str(refused.value) and "exomem cloud import" in str(refused.value)
 
 
+@pytest.mark.parametrize("lane", ["source", "evidence"])
+def test_a_digest_without_hold_gets_a_held_upload_instead_of_a_download_refusal(agent, lane):
+    """Catches `expected_sha256` on an upload lane falling into download recovery's INVALID_MODE."""
+
+    async def scenario():
+        async with agent.mcp() as client:
+            return await client.call_tool(
+                "upload_files", {"lane": lane, "expected_sha256": hashlib.sha256(b"photo").hexdigest()},
+                raise_on_error=False)
+
+    result = asyncio.run(scenario())
+
+    assert not result.is_error, result
+    step = result.structured_content
+    assert "error" not in step, step
+    assert (step["lane"], step["hold"], step["handoff_status"]) == (lane, True, "handoff_prepared")
+    assert step["committed"] is False
+
+
 @pytest.mark.parametrize("pack", [_tar, _zip], ids=["tar", "zip"])
 def test_the_import_runs_on_a_platform_without_statvfs_or_sync(agent, duplicate_index, monkeypatch, pack):
     """Catches a Unix-only call on the route, which would fail every import on a Windows host."""
