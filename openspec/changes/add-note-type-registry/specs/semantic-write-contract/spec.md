@@ -23,6 +23,18 @@ covers, including a registered home. Structural validation SHALL reject a page i
 type folder whose type is missing or not compiled, and SHALL reject a recognized
 compiled type outside the Notes root, before applicability is evaluated.
 
+In a `root` vault the Notes root is the vault root. There the gate SHALL read a
+top-level folder as a compiled destination unless a source, evidence or entity type
+holds it as its area or it is a collection layer (`Records`, `Planning`), and SHALL
+refuse a compiled type in the vault root and in those held folders. A top-level folder
+that no role holds, such as a home, is as free as a folder below `Notes/`. A leftover
+`Notes/<X>` folder SHALL keep its meaning: it is read as area `<X>` when `<X>` is a
+registered area or home, and it is left outside the gate otherwise. A `root` vault
+has a single folder namespace, so the registry save check SHALL refuse a compiled
+type or home whose area equals, case-insensitively after Unicode normalization, the
+area of a type of another role or a group folder, with a finding that names the
+field to change. A `nested` vault keeps the folders apart and SHALL not refuse.
+
 The boundary SHALL then expose one deterministic
 `requires_semantic_unit(after_state)` predicate, separate from relation
 disposition. It SHALL be true only when compiled intent has passed that
@@ -85,6 +97,21 @@ interpreted as an inactive page or a false minimum-unit obligation.
 #### Scenario: A compiled type outside Notes is refused
 - **WHEN** a page of a compiled type is created outside the Notes root
 - **THEN** structural validation refuses it with `COMPILED_DESTINATION_MISMATCH`
+
+#### Scenario: A root vault reads its top-level areas as the compiled destinations
+- **WHEN** a page of type `insight` is created at `Insights/<name>.md` in a `root` vault
+- **THEN** structural validation accepts it
+- **AND** the same page at the vault root or under `Sources/` is refused with `COMPILED_DESTINATION_MISMATCH`
+
+#### Scenario: A leftover Notes folder keeps its meaning in a root vault
+- **WHEN** a page without a compiled type is created in `Notes/Insights` of a `root` vault, and `Insights` is a registered area
+- **THEN** structural validation refuses it with `COMPILED_TYPE_MISMATCH`
+- **AND** the same page in `Notes/<unregistered>` is left outside the gate
+
+#### Scenario: A root vault refuses a folder that two roles would share
+- **WHEN** a save gives a compiled type or a home the folder `Entities` in a `root` vault
+- **THEN** the save is refused with `NOTE_TYPE_AREA_COLLIDES` or `HOME_AREA_COLLIDES` and names `attributes.folder`
+- **AND** the same save in a `nested` vault is accepted
 
 ### Requirement: Observe-Memory Refusals Distinguish Legacy Schema From Policy
 
