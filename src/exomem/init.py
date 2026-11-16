@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from . import indexes
+from . import indexes, layout, note_types
 from .entity_types import (
     ENTITY_TYPE_REGISTRY,
     extension_registry_path,
@@ -31,19 +31,32 @@ from .vault import (
 
 _SCAFFOLD = Path(__file__).parent / "_scaffold"
 
-# Typed folder tree laid down up-front. Deeper folders (Sources/Articles,
-# Notes/Research/<Project>, …) are created on demand by the writers.
-_FOLDERS = (
-    "Sources",
-    "Notes/Research",
-    "Notes/Insights",
-    "Notes/Failures",
-    "Notes/Patterns",
-    "Notes/Experiments",
-    "Notes/Productions",
-    *(f"Entities/{definition.folder}" for definition in ENTITY_TYPE_REGISTRY),
-    "Evidence",
-)
+def _area_folders() -> tuple[str, ...]:
+    """The typed folder tree laid down up-front: every shipped type's area, and a group per core entity type.
+
+    The note-type registry names the areas and the layout places them; a new vault is `nested` until
+    the layout is selected at creation. Deeper folders (Sources/Articles, Notes/Research/<Project>,
+    ...) are created on demand by the writers.
+    """
+    folders: list[str] = []
+    for note_type in note_types.shipped():
+        area = layout.area_folder(note_type, layout.Layout.NESTED)
+        if area is None:
+            continue
+        folders.append(area)
+        if note_types.entity(note_type):
+            folders.extend(f"{area}/{definition.folder}" for definition in ENTITY_TYPE_REGISTRY)
+    return tuple(folders)
+
+
+def _entity_area() -> str:
+    """The folder that holds one group folder per entity type."""
+    for note_type in note_types.shipped(note_types.entity):
+        area = layout.area_folder(note_type, layout.Layout.NESTED)
+        if area is not None:
+            return area
+    raise LookupError("the shipped note-type pack has no entity type with a folder")
+
 
 #: Scaffold entries the PRODUCT owns: the governance contract the agent follows.
 #: `install-skill` redeploys its copy of these from this same source on every
@@ -302,14 +315,14 @@ def _overlay_in_store(vault_root: Path) -> dict:
             dest.parent.mkdir(parents=True, exist_ok=True)
             package_skills.copy_shipped_file(src, dest)
             created.append(dest.relative_to(vault_root).as_posix())
-        for folder in _FOLDERS:
+        for folder in _area_folders():
             (kb / folder).mkdir(parents=True, exist_ok=True)
         # The registry is a page: the store says whether the vault holds it, not its file.
         registry = extension_registry_path(vault_root).relative_to(vault_root).as_posix()
         if read.page_exists(vault_root, registry):
             for definition in entity_registry.extensions.values():
                 if definition.status == "active":
-                    (kb / "Entities" / definition.folder).mkdir(parents=True, exist_ok=True)
+                    (kb / _entity_area() / definition.folder).mkdir(parents=True, exist_ok=True)
 
     _commit_offline(vault_root, "exomem init --force", overlay, then=write_files)
     return {"vault": str(vault_root), "kb": str(kb), "created": created}
@@ -357,21 +370,21 @@ def init_vault(
         package_skills.copy_shipped_file(src, dest)
         created.append(dest.relative_to(vault_root).as_posix())
 
-    for folder in _FOLDERS:
+    for folder in _area_folders():
         (kb / folder).mkdir(parents=True, exist_ok=True)
 
     entity_registry = load_entity_types(vault_root)
     if extension_registry_path(vault_root).is_file():
         for definition in entity_registry.extensions.values():
             if definition.status == "active":
-                (kb / "Entities" / definition.folder).mkdir(parents=True, exist_ok=True)
+                (kb / _entity_area() / definition.folder).mkdir(parents=True, exist_ok=True)
 
-    entity_index = kb / "Entities" / "index.md"
+    entity_index = kb / _entity_area() / "index.md"
     if entity_index.is_file():
         current = entity_index.read_text(encoding="utf-8")
         refreshed = indexes._refresh_entities_subindex_text(
             current,
-            counts_by_type=indexes._count_entities(kb / "Entities", registry=entity_registry),
+            counts_by_type=indexes._count_entities(kb / _entity_area(), registry=entity_registry),
             registry=entity_registry,
         )
         refreshed = render_wikilinks_for_vault(refreshed, vault_root)
