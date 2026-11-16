@@ -93,8 +93,8 @@ MAX_ROW_BYTES = 1 << 20
 MAX_DEPTH = 32
 MAX_BATCH_ROWS = 500
 MAX_BATCH_BYTES = 4 << 20
-# A batch's row work, timed between rows before its commit: a contended process reads rows slowly and
-# commits a smaller batch, so its write holds the vault boundary for less (the import hold budget).
+# The import hold budget, spent on reading a store batch's rows before it takes the vault boundary: a
+# process that reads rows slowly commits smaller batches. It does not time the write (design Decision 6).
 BATCH_SECONDS = 0.25
 PREVIEW_ROWS = 100
 # Preview runs on the store thread, where every store write and status call waits behind it.
