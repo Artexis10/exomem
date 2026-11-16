@@ -38,6 +38,7 @@ from exomem import (
     originals,
     preserve,
     state_migration,
+    state_paths,
     vault_portability,
 )
 from exomem.governance.principal import library_scope
@@ -536,6 +537,40 @@ def test_a_capable_restore_brings_back_the_pool_bindings_format_and_cloud_refere
     assert not any((restored / path).exists() for path in originals_bytes)
     assert {page: (restored / page).read_bytes() for page in pages} == pages
     assert reference is not None and originals.original_state(restored, stored).reference == reference
+
+
+def test_a_pooled_restore_that_fails_after_recording_its_format_succeeds_when_retried(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches a failed pooled restore whose rollback leaves the state it already moved out of the archive behind, so
+    the owner's retry of the same restore refuses, or publishes a tree that lacks those bytes."""
+    originals_bytes, pages = _converted_filings(vault, monkeypatch)
+    # Review state lives in external state and travels in the archive; publication moves it back out of the tree.
+    review = json.dumps({"schema_version": 1, "records": {"review": "dismissed"}}).encode()
+    (state_paths.vault_state_dir(vault) / ".review-state.json").write_bytes(review)
+    exported = vault_portability.export_quiesced_vault(vault, tmp_path / "exports", context=_context())
+    prepared = vault_portability.prepare_restore(exported.archive_path, tmp_path / "staging",
+                                                 context=_context(lifecycle_state="restore-staging"))
+    # The journalled restore of an armed archive covers this failure; an unarmed one has no journal.
+    assert prepared.manifest["schema_version"] != vault_portability.ARMED_MANIFEST_SCHEMA_VERSION
+    record = state_migration.restore_shared_originals_offline
+
+    def lost_after_recording(*args, **kwargs):
+        record(*args, **kwargs)
+        raise OSError("disk lost after the format was recorded")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(state_migration, "restore_shared_originals_offline", lost_after_recording)
+        with pytest.raises(vault_portability.PortabilityError, match="PUBLICATION_FAILED"):
+            vault_portability.publish_prepared_restore(prepared, tmp_path / "restored")
+
+    restored = vault_portability.publish_prepared_restore(prepared, tmp_path / "restored").live_root
+
+    state_migration.require_vault_state_ready(restored)
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(restored)
+    with library_scope():
+        assert {path: media_store.read_original_bytes(restored, path).data for path in originals_bytes} == originals_bytes
+    assert {page: (restored / page).read_bytes() for page in pages} == pages
+    assert (state_paths.vault_state_dir(restored) / ".review-state.json").read_bytes() == review
 
 
 def test_a_grant_on_one_restored_filing_does_not_reveal_another_that_shares_its_object(

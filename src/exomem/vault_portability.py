@@ -2190,6 +2190,29 @@ def publish_prepared_restore(
             _fail("RESTORE_JOURNAL_CONFLICT", "restore continuation cannot be verified")
 
 
+def _relocated_by_failed_attempt(staging: Path, live: Path, manifest: Mapping[str, Any]) -> bool:
+    """Whether a failed attempt of this restore left the archive's portable state where its migration put it.
+
+    An unarmed pooled restore migrates state after it publishes. A failure after that rolls the tree back to
+    staging but leaves the external state, which now holds the archive's portable members. A complete manifest
+    and those members' exact bytes bind the state to this archive, so a retry publishes over it as it stands.
+    """
+    if not any(record["classification"] == ArtifactClass.PORTABLE_DERIVED.value for record in manifest["files"]):
+        return False  # Nothing in this archive moves to external state, so no earlier attempt explains a mismatch.
+    state_dir = state_paths.vault_state_dir(live)
+    try:
+        earlier = state_migration._load_manifest(state_dir, vault_root=live)
+    except state_migration.StateMigrationManifestError:
+        return False
+    if earlier is None or earlier.get("state") != "complete":
+        return False
+    try:
+        _verify_migrated_archive(staging, manifest, state_dir)
+    except PortabilityError:
+        return False
+    return True
+
+
 def _publish_prepared_restore(
     prepared: PreparedRestore,
     live_root: Path | str,
@@ -2217,6 +2240,7 @@ def _publish_prepared_restore(
     physical = live if resumed_live else staging
     if not physical.is_dir() or physical.is_symlink():
         _fail("STAGING_ROOT_UNAVAILABLE", "prepared restore root is unavailable")
+    retried = False
     migrated = state_migration._load_manifest(state_paths.vault_state_dir(live), vault_root=live) if resumed_live else None
     if migrated is not None and migrated.get("state") == "complete":
         _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
@@ -2227,7 +2251,12 @@ def _publish_prepared_restore(
             or os.path.lexists(live.joinpath(*PurePosixPath(record["path"]).parts))]}
         _verify_staged_files(live, present_manifest, recovery=recovery)
     else:
-        _verify_staged_files(physical, prepared.manifest, recovery=recovery)
+        try:
+            _verify_staged_files(physical, prepared.manifest, recovery=recovery)
+        except PortabilityError:
+            if recovery is not None or not _relocated_by_failed_attempt(staging, live, prepared.manifest):
+                raise
+            retried = True
     live.parent.mkdir(parents=True, exist_ok=True)
     publisher = publish or os.replace
     relocated = False
@@ -2236,7 +2265,9 @@ def _publish_prepared_restore(
             publisher(staging, live)
         if not live.is_dir() or live.is_symlink():
             _fail("PUBLICATION_FAILED", "publication did not produce a live vault")
-        if not resumed_live:
+        if retried:
+            _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live))
+        elif not resumed_live:
             _verify_staged_files(live, prepared.manifest, recovery=recovery)
         from . import original_pool
 
