@@ -7506,6 +7506,11 @@ class FrontmatterError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
+# PyYAML's safe constructors reject a malformed scalar (`!!bool invalid`, `2026-99-99`) with these
+# exceptions, not a YAMLError, so `parse_frontmatter` raises them in every mode. FrontmatterError is a ValueError.
+MALFORMED_FRONTMATTER_ERRORS = (ValueError, KeyError, AttributeError)
+
+
 def yaml_safe_load(text: str):
     """`yaml.safe_load` via libyaml when available (hot-path frontmatter seam).
 

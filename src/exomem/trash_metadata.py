@@ -125,14 +125,16 @@ def _backlink(fields: dict[str, object]) -> str | None:
 
 
 def _companion_fields(text: str | None) -> dict[str, object]:
-    from .vault import FrontmatterError, parse_frontmatter
+    from .vault import MALFORMED_FRONTMATTER_ERRORS, parse_frontmatter
 
     if text is None:
         return {}
     try:
         return parse_frontmatter(text, custody=True)[0]
-    except FrontmatterError:
-        return {}  # Malformed frontmatter cannot satisfy the retirement census either.
+    except MALFORMED_FRONTMATTER_ERRORS:
+        # A retirement image is re-rendered from parsed fields, so a text that fails to parse never
+        # hashes to a witness and has no backlink to honour. A RecursionError depends on stack depth and propagates.
+        return {}
 
 
 def _matches_retirement(text: str | None, fields: dict[str, object], metadata: str, proof: Retirement) -> bool:
