@@ -6271,8 +6271,8 @@ def _window_order(
                 pending=pending,
                 include_units=plan is not None and plan.has_unit_predicate,
             )
-            keys.update({row.path: row.updated for row in emitted_rows if row.path in metadata})
-            if any(metadata[rel].updated != updated for rel, updated in keys.items()):
+            read = {row.path: row.updated for row in emitted_rows if row.path in metadata} | keys
+            if any(metadata[rel].updated != updated for rel, updated in read.items()):
                 raise RetrievalIndexWarming(site="browse_ordering_stale")
             eligible = (
                 None

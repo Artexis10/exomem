@@ -1,0 +1,381 @@
+"""A store-mode browse reads an ordered window of the store and answers as the exhaustive browse does.
+
+OpenSpec make-vault-store-canonical, task 3.2 (browse latency budget). The window is an
+optimisation, so every case compares its answer with the exhaustive route's (the window declined,
+the way a store without the browse index declines it) and with file mode on the same pages.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from contextlib import nullcontext
+from dataclasses import asdict
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_vault_store_browse_drill import CELLS as DRILL_CELLS
+from test_vault_store_browse_drill import HUB_LINKS, PROBE, commit_drill_pages
+from test_vault_store_migration import build_indexes, migrate_apply, vault  # noqa: F401
+from test_vault_store_read_write import stored, writer  # noqa: F401
+from test_vault_store_readers import EXTERNAL, restrict_external
+
+from exomem import commands, lexstore, structured_filters
+from exomem import find as find_module
+from exomem.cli_ops import OpError
+from exomem.governance.principal import request_scope
+
+NOTES = "Knowledge Base/Notes/Browse"
+OPEN = "Knowledge Base/Notes/Open"
+HUB = f"{NOTES}/Hub.md"
+SECRET_FRAME_TEXT = "confidential frame excerpt"
+
+
+def page(title, *, kind="note", updated=None, tags=(), body=None, **frontmatter):
+    lines = ["---", f"title: {title}", f"type: {kind}"]
+    if updated:
+        lines.append(f"updated: {updated}")
+    if tags:
+        lines.append("tags: [" + ", ".join(tags) + "]")
+    lines += [f"{key}: {value}" for key, value in frontmatter.items()]
+    lines += ["---", f"# {title}", "", body or f"A note about {title}.", ""]
+    return "\n".join(lines).encode()
+
+
+def video(stem, updated):
+    return f"{stem}.md", page(f"Clip {stem}", kind="source", updated=updated, evidence_file=stem)
+
+
+def frame(parent, name, ts, updated, *, parent_media=None, **kwargs):
+    """A scene-frame child, reported as its parent video when the parent can be reported."""
+    return f"{parent}.frames/{name}.jpg.md", page(
+        f"Frame {name}",
+        kind=kwargs.pop("kind", "source"),
+        updated=updated,
+        parent_media=parent_media or parent,
+        evidence_file=f"{parent}.frames/{name}.jpg",
+        frame_ts=ts,
+        **kwargs,
+    )
+
+
+def plain_pages():
+    """Ties on `updated`, no `updated`, non-ASCII names, a hub that ten pages link to, and units."""
+    pages = {}
+    for index in range(24):
+        unit = "\n- [config] The lantern oil is trimmed #lamp ^oil\n" if index in (3, 4, 5) else ""
+        pages[f"{NOTES}/Plain-{index:02d}.md"] = page(
+            f"Plain {index}",
+            kind=("note", "insight")[index % 2],
+            updated=f"2026-03-0{1 + index % 4}",
+            tags=["secret"] if index in (2, 13) else (),
+            body=("It follows [[Hub]]." if index < 10 else f"The lamp {index} burns.") + unit,
+        )
+    pages[HUB] = page("Hub", updated="2026-03-02")
+    pages[f"{NOTES}/Café.md"] = page("Cafe", updated="2026-03-04")
+    pages[f"{NOTES}/日本語.md"] = page("Nihongo", updated="2026-03-04")
+    pages[f"{NOTES}/Undated.md"] = page("Undated")
+    for index in range(6):  # older than every page above, so a withheld folder is walked past
+        pages[f"{OPEN}/Open-{index}.md"] = page(
+            f"Open {index}", kind=("note", "insight")[index % 2], updated=f"2026-01-0{1 + index}"
+        )
+    return pages
+
+
+def clean_families():
+    """Scene-frame parents with children newer and older than the parent, a withheld child and an orphan."""
+    one, two, six = (f"{NOTES}/Clip-{name}.mp4" for name in ("One", "Two", "Six"))
+    pages = dict(
+        [
+            video(one, "2026-03-02"),
+            frame(one, "scene-000-005.000", 5.0, "2026-03-04"),  # newer than its parent
+            frame(one, "scene-001-010.000", 10.0, "2026-02-01"),  # older than its parent
+            video(two, "2026-03-03"),
+            frame(two, "scene-000-001.000", 1.0, "2026-03-04", tags=["secret"], body=SECRET_FRAME_TEXT),
+            frame(two, "scene-001-002.000", 2.0, "2026-02-15"),
+            # The child matches no type that the parent does, so only the parent's columns admit it.
+            video(six, "2026-03-01"),
+            frame(six, "scene-000-007.000", 7.0, "2026-03-04", kind="insight"),
+            # No page exists for this child's parent, so the child is reported as itself.
+            frame(f"{NOTES}/Orphan.mp4", "scene-000-001.000", 1.0, "2026-03-03"),
+        ]
+    )
+    return pages
+
+
+def hostile_families():
+    """A parent outside the knowledge base and a parent in a directory that the vault walk skips."""
+    outside, archived = "Elsewhere/Clip-Three.mp4", "Knowledge Base/_archive/Clip-Five.mp4"
+    return dict(
+        [
+            video(outside, "2026-03-03"),
+            frame(f"{NOTES}/Clip-Three.mp4", "scene-000-003.000", 3.0, "2026-03-02", parent_media=outside),
+            video(archived, "2026-03-03"),
+            frame(f"{NOTES}/Clip-Five.mp4", "scene-000-004.000", 4.0, "2026-03-02", parent_media=archived),
+        ]
+    )
+
+
+def write_files(root, pages):
+    for rel, body in pages.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(body)
+
+
+#: The browse cells. A unit-axis plan has no file-mode counterpart here: an offline caller answers
+#: it from a sidecar that this vault has not built for the new pages.
+CELLS = {
+    "no filter": {},
+    "types=note": {"types": ["note"]},
+    "types=insight": {"types": ["insight"]},
+    "types=source": {"types": ["source"]},
+    "relation_of hub": {"relation_of": HUB},
+    "relation_of hub, types=note": {"relation_of": HUB, "types": ["note"]},
+    "categories=config": {"categories": ["config"]},
+}
+LIMITS = (3, 7, 100)
+
+OWNER = (None, nullcontext)
+EXTERNAL_CALLER = lambda: request_scope(EXTERNAL)  # noqa: E731
+CALLERS = {
+    "owner": OWNER,
+    "few withheld": ('tags: ["secret"]', EXTERNAL_CALLER),
+    "most withheld": (f'paths: ["{NOTES}/**"]', EXTERNAL_CALLER),
+}
+
+
+def browse(root, caller, limit, cell):
+    """The hits of one browse as plain data, or the refusal it ends in."""
+    find_module.clear_cache()
+    with caller():
+        try:
+            hits = find_module.find(
+                root, query="", limit=limit, graph=False, rerank=False, mode="keyword", **cell
+            )
+        except OpError as refused:
+            return ("refused", refused.code)
+    return [asdict(hit) for hit in hits]
+
+
+def file_view(answer):
+    """What file mode and store mode must agree on: the page, its excerpt and its scene frame."""
+    if isinstance(answer, tuple):
+        return answer
+    return [
+        (hit["path"], hit["title"], hit["updated"], hit["excerpt"], hit["scene_frame"], hit["scene_frame_ts"])
+        for hit in answer
+    ]
+
+
+@pytest.fixture
+def routes(monkeypatch):
+    """Which route answered each browse: the exhaustive route reads the whole scope's rows first."""
+    exhaustive = []
+    real = find_module._index_resolved_scope_rows
+
+    def counting(*args, **kwargs):
+        exhaustive.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(find_module, "_index_resolved_scope_rows", counting)
+    return exhaustive
+
+
+def declined_window(monkeypatch):
+    """The browse index reads as missing, which is how the window declines for an older store."""
+    monkeypatch.setattr(lexstore, "BROWSE_INDEX", "pages_browse_declined")
+
+
+def answers(root, caller):
+    found = {}
+    for limit in LIMITS:
+        for name, cell in CELLS.items():
+            found[(limit, name)] = browse(root, caller, limit, cell)
+    return found
+
+
+def build_world(vault, caller_name, families):  # noqa: F811
+    selector, caller = CALLERS[caller_name]
+    if selector:
+        restrict_external(vault, selector)
+    write_files(vault, plain_pages())
+    write_files(vault, families)
+    build_indexes(vault)
+    file_mode = {
+        key: file_view(answer)
+        for key, answer in answers(vault, caller).items()
+        if key[1] != "categories=config"
+    }
+    assert migrate_apply(vault) == 0
+    return SimpleNamespace(name=caller_name, root=vault, caller=caller, file_mode=file_mode)
+
+
+@pytest.fixture(params=CALLERS)
+def world(request, vault):  # noqa: F811
+    return build_world(vault, request.param, clean_families())
+
+
+def test_the_window_answers_as_the_exhaustive_browse_and_file_mode_do(world, routes, monkeypatch):
+    """A window that orders, groups or admits a page differently from the exhaustive browse: ties on
+    `updated`, a page with no `updated`, non-ASCII names, children newer and older than their
+    parent, an orphan child, a withheld page, and a limit that ends inside a tie or a family."""
+    windowed = answers(world.root, world.caller)
+    assert routes == [], "the window must answer every cell, or this comparison proves nothing"
+    declined_window(monkeypatch)
+    exhaustive = answers(world.root, world.caller)
+    assert routes, "the declined window must take the exhaustive route"
+
+    for key, answer in windowed.items():
+        assert answer == exhaustive[key], key
+        if key[1] != "categories=config":
+            assert file_view(answer) == world.file_mode[key], key
+    # A comparison of two empty answers proves nothing.
+    assert all(windowed[(100, name)] for name in CELLS), {
+        name: windowed[(100, name)] for name in CELLS
+    }
+
+
+def test_a_hostile_parent_gives_the_exhaustive_answer(vault, routes, monkeypatch):  # noqa: F811
+    """A parent outside the knowledge base, or in a skipped directory, is reported where the
+    exhaustive browse reports it, whichever route answers."""
+    world = build_world(vault, "few withheld", {**clean_families(), **hostile_families()})
+    windowed = answers(world.root, world.caller)
+    declined_window(monkeypatch)
+    exhaustive = answers(world.root, world.caller)
+    assert windowed == exhaustive
+    assert all(windowed[(100, name)] for name in CELLS)
+
+
+def test_a_withheld_frame_never_reaches_a_visible_parents_hit(world):
+    """A withheld child's excerpt or frame time on its visible parent's hit, or a withheld page that
+    changes which pages the caller sees or in which order."""
+    if world.name == "owner":
+        pytest.skip("the owner is withheld nothing")
+    owner = browse(world.root, nullcontext, 100, {})
+    clip = next(hit for hit in owner if hit["path"] == f"{NOTES}/Clip-Two.mp4.md")
+    # The control: the newer, secret child is what the parent shows to a caller who may see it.
+    assert clip["scene_frame_ts"] == 1.0
+    assert SECRET_FRAME_TEXT in clip["excerpt"]
+
+    everyone = [hit["path"] for hit in browse(world.root, world.caller, 100, {})]
+    assert everyone == [hit["path"] for hit in owner if hit["path"] in set(everyone)]
+    for limit in LIMITS:
+        seen = browse(world.root, world.caller, limit, {})
+        assert SECRET_FRAME_TEXT not in json.dumps(seen), limit
+        assert not any(hit["scene_frame_ts"] == 1.0 for hit in seen), limit
+        # A withheld page leaves no gap and no reorder: the first `limit` of the visible pages.
+        assert [hit["path"] for hit in seen] == everyone[:limit], limit
+
+
+def test_the_user_sees_no_withheld_frame_in_the_final_answer(vault):  # noqa: F811
+    """The same, through the tool that a caller uses, which applies egress after the browse."""
+    world = build_world(vault, "few withheld", clean_families())
+    with request_scope(EXTERNAL):
+        answer = commands.op_find(world.root, query="", limit=100, graph=False)
+    text = json.dumps(answer, default=str)
+    assert "Clip-Two.mp4.md" in text
+    assert SECRET_FRAME_TEXT not in text
+    assert "scene-000-001.000" not in text
+
+
+def test_the_window_runs_only_where_the_store_can_answer_it_whole(stored, monkeypatch):  # noqa: F811
+    """A window that answers a browse that it cannot answer whole: with a query, a pending overlay
+    to merge, a dimension predicate, a plan that only the offline oracle answers, a file-mode vault
+    or a store without the index."""
+    none = SimpleNamespace(empty=True)
+
+    def window(**changes):
+        arguments = dict(
+            plan=None, query_norm="", pending=none, dimension_lookups=None, timings=None,
+            resolve_plan=None,
+        )
+        return find_module._browse_window(stored, **{**arguments, **changes})
+
+    assert window() is not None, "the control: an empty query with nothing pending is windowed"
+    plan = structured_filters.compile_filter({"page.type": {"$eq": "note"}})
+    assert window(plan=plan).keyed is False
+    assert window(query_norm="lighthouse") is None
+    assert window(pending=SimpleNamespace(empty=False)) is None
+    assert window(dimension_lookups=object()) is None
+    unnarrowed = structured_filters.compile_filter(None)
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        window(plan=unnarrowed)  # a refusal stays a refusal; the window does not answer it
+    monkeypatch.setattr(lexstore, "store_rows_serve", lambda _root: False)
+    assert window() is None
+
+
+def test_a_file_mode_vault_takes_no_window(vault, routes):  # noqa: F811
+    """A window over a vault whose rows are a sidecar's: file mode keeps its own browse."""
+    window = find_module._browse_window(
+        vault, plan=None, query_norm="", pending=SimpleNamespace(empty=True),
+        dimension_lookups=None, timings=None, resolve_plan=None,
+    )
+    assert window is None
+
+
+def window_plan(root, monkeypatch, **cell):
+    """`EXPLAIN QUERY PLAN` of the window's own statement, as the store runs it."""
+    store = lexstore.get_store(root)
+    real = store._serve_from_ready_catalog_result
+    plans = []
+
+    def serve(scope, freshness, query, message):
+        def traced(conn):
+            statements = []
+            conn.set_trace_callback(statements.append)
+            try:
+                value = query(conn)
+            finally:
+                conn.set_trace_callback(None)
+            for sql in statements:
+                if sql.lstrip().startswith("SELECT r.path, r.updated") and "ORDER BY" in sql:
+                    plans.append([row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)])
+            return value
+
+        return real(scope, freshness, traced, message)
+
+    monkeypatch.setattr(store, "_serve_from_ready_catalog_result", serve)
+    browse(root, nullcontext, 15, cell)
+    return plans
+
+
+@pytest.mark.parametrize("cell", ["no filter", "types=note"])
+def test_the_window_walks_the_browse_index_without_sorting(stored, writer, monkeypatch, cell):  # noqa: F811
+    """A window statement that scans every page and sorts them: its cost then grows with the vault
+    in SQLite, where the count of rows and decodes cannot see it."""
+    commit_drill_pages(writer, 400)
+    plans = window_plan(stored, monkeypatch, **DRILL_CELLS[cell])
+    assert plans, "the browse must run the window statement"
+    text = " | ".join(plans[0])
+    assert "pages_browse" in text, text
+    assert "TEMP B-TREE" not in text, text
+
+
+@pytest.mark.parametrize("pages", [400, 1600])
+def test_a_browse_reads_what_its_limit_needs_whatever_the_vault_holds(stored, writer, pages):  # noqa: F811
+    """A browse whose catalogue rows plus view decodes grow with the pages in the vault: it must
+    stay within four times its limit (the drill's pages have no children), at both sizes."""
+    commit_drill_pages(writer, pages)
+    limit = 15
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    done = subprocess.run(
+        [sys.executable, "-c", PROBE, str(stored), json.dumps(DRILL_CELLS), source],
+        check=True, capture_output=True, text=True, timeout=600,
+        env={**os.environ, "PYTHONPATH": source},
+    )
+    figures = json.loads(done.stdout.splitlines()[-1])
+    for name in ("types=note", "types=insight", "no filter"):
+        for state in ("cold", "warm"):
+            read = figures[name][state]
+            assert read["hits"], name
+            assert read["rows"] + read["decodes"] <= 4 * limit, (pages, name, state, read)
+    # A relation browse reads its relation set (fixed here), and decodes what its limit needs.
+    for state in ("cold", "warm"):
+        read = figures["relation_of hub"][state]
+        assert read["hits"]
+        assert read["decodes"] <= 4 * limit, (pages, state, read)
+        assert read["rows"] <= HUB_LINKS + 4 * limit, (pages, state, read)

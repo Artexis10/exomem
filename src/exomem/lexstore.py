@@ -4683,7 +4683,8 @@ def browse_rows_result(
             conn.execute(
                 f"SELECT r.path, r.updated, r.emitted_parent_path, r.{col}, "
                 f"r.eligibility_view_json IS NOT NULL, {own}, {via} FROM pages r "
-                "WHERE r.in_vault = 1 AND r.path IN (SELECT value FROM json_each(?))",
+                # `+` keeps the planner on the key lookup: the vault flag would pick a scan of the index.
+            "WHERE +r.in_vault = 1 AND r.path IN (SELECT value FROM json_each(?))",
                 [*plan_params, *plan_params, json.dumps(sorted(paths), ensure_ascii=False)],
             ).fetchall()
         )
