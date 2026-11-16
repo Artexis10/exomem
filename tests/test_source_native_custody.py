@@ -6,7 +6,7 @@ import hashlib
 import os
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 
 import pytest
@@ -423,8 +423,10 @@ def test_unavailable_private_database_does_not_report_empty_proof(vault, monkeyp
         assert custody.observe(reservation.binding_id).state == "unknown"
 
 
-def test_replaced_database_cannot_reuse_cached_ledger_even_with_identical_rows(vault, tmp_path):
-    with owner(vault) as custody:
+@pytest.mark.parametrize("batch", [False, True])
+def test_replaced_database_cannot_reuse_cached_ledger_even_with_identical_rows(vault, tmp_path, batch):
+    # A batch session holds its connection open, so it must still refuse a database replaced underneath it.
+    with owner(vault) as custody, (native.session() if batch else nullcontext()):
         reservation = reserve(custody)
         store = writer_lease.active_manager().idempotency
         replacement_path = tmp_path / "replacement.sqlite3"
@@ -437,3 +439,17 @@ def test_replaced_database_cannot_reuse_cached_ledger_even_with_identical_rows(v
         os.replace(replacement_path, store.path)
         assert custody.lookup().state == "unknown"
         assert custody.observe(reservation.binding_id).state == "unknown"
+
+
+def test_batch_session_commits_each_fact_before_the_next_operation(vault):
+    # A kill mid-batch keeps every finished fact only if the shared connection commits each operation.
+    def outcome(binding_id):
+        with writer_lease.active_manager().idempotency._connect() as other:
+            return other.execute("SELECT outcome FROM source_native_bindings WHERE binding_id=?",
+                                 (binding_id,)).fetchone()
+
+    with owner(vault) as custody, native.session():
+        reservation = reserve(custody)
+        assert outcome(reservation.binding_id) == (None,)
+        assert custody.cleanup(reservation.binding_id).state == "closed"
+        assert outcome(reservation.binding_id) == ("not_written",)

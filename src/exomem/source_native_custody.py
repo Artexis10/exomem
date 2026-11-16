@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,6 +20,36 @@ from . import held_fs, reserved_paths, source_capture, source_custody, state_pat
 from .held_fs import FileVersion, HeldFile, StableIdentity
 
 OWNER = "source_native_custody"  # This native owner token addresses the closed copy-custody protocol.
+
+# A connection belongs to the thread that opened it, so a batch session lives in that thread only.
+_THREAD = threading.local()
+
+
+class _Session:
+    def __init__(self) -> None:
+        # Keyed by the store object itself, so a recycled id can never reach another database.
+        self.connections: dict[object, sqlite3.Connection] = {}
+        self.busy: set[object] = set()
+
+
+@contextmanager
+def session() -> Iterator[None]:
+    """Keep one connection per custody database open for this thread's writer batch.
+
+    Every operation still commits its own transaction with a synced WAL commit; the session saves
+    only the open, close and last-close checkpoint that a fresh connection pays per operation.
+    A nested session joins the outer one.
+    """
+    if getattr(_THREAD, "session", None) is not None:
+        yield
+        return
+    current = _THREAD.session = _Session()
+    try:
+        yield
+    finally:
+        _THREAD.session = None
+        for connection in current.connections.values():
+            connection.close()
 
 
 # These closed states describe native allocation facts, not a content vocabulary.
@@ -261,19 +292,53 @@ class NativeCustody:
                 or not _same(database_parent, self._database_identity[0])
                 or database_file != self._database_identity[1]):
             raise NativeCustodyUnavailable("native custody physical owner changed")
+        current = getattr(_THREAD, "session", None)
+        key = self._store
+        if current is None or key in current.busy:
+            # Outside a batch, or nested in another operation, a separate connection keeps transactions apart.
+            with self._open() as conn:
+                yield from self._checked(conn)
+            return
+        conn = current.connections.get(key)
+        if conn is None:
+            conn = self._open()
+            try:
+                # The session skips the last-close checkpoint, so each commit must sync the WAL itself.
+                conn.execute("PRAGMA synchronous=FULL")
+            except BaseException:
+                conn.close()
+                raise
+            current.connections[key] = conn
+        current.busy.add(key)
         try:
-            connection = self._store._connect()
+            yield from self._checked(conn)
+            conn.commit()
+        except BaseException:
+            # A failed operation retires the shared connection; the next one opens afresh.
+            current.connections.pop(key, None)
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+            raise
+        finally:
+            current.busy.discard(key)
+
+    def _open(self) -> sqlite3.Connection:
+        try:
+            return self._store._connect()
         except RuntimeError as error:
             raise NativeCustodyUnavailable("native custody database is unavailable") from error
-        with connection as conn:
-            row = conn.execute("SELECT ledger_id FROM capture_attempt_ledger WHERE singleton=1").fetchone()
-            if row is None or row[0] != self._ledger_id:
-                raise NativeCustodyUnavailable("native custody ledger changed")
-            yield conn
-            database_parent, database_file = self._database_file_identity()
-            if (not _same(database_parent, self._database_identity[0])
-                    or database_file != self._database_identity[1]):
-                raise NativeCustodyUnavailable("native custody database changed during access")
+
+    def _checked(self, conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+        row = conn.execute("SELECT ledger_id FROM capture_attempt_ledger WHERE singleton=1").fetchone()
+        if row is None or row[0] != self._ledger_id:
+            raise NativeCustodyUnavailable("native custody ledger changed")
+        yield conn
+        database_parent, database_file = self._database_file_identity()
+        if (not _same(database_parent, self._database_identity[0])
+                or database_file != self._database_identity[1]):
+            raise NativeCustodyUnavailable("native custody database changed during access")
 
     @contextmanager
     def _held(self, binding: _Binding | None = None, *, destination: bool = False, flush: bool = False):

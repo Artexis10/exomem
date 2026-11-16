@@ -5802,10 +5802,12 @@ def batch_atomic_write(
             )
         caller_writes = list(writes)
         _require_distinct_destinations(caller_writes)
-        from . import generated_fragment_store, generated_output_custody
+        from . import generated_fragment_store, generated_output_custody, source_native_custody
 
         if vault_root is not None and (_payload_custody is not None
                                        or any(write.generated_image is not None for write in caller_writes)):
+            # Native allocation facts share one connection; it outlives the unit's closing change.
+            custody_stack.enter_context(source_native_custody.session())
             # Pre-byte catalogue work commits as one phase; acknowledgements share one closing change.
             custody_stack.enter_context(generated_fragment_store.unit(vault_root))
         if _prepare is None:
