@@ -571,7 +571,11 @@ def managed_event(vault: Path, path: Path) -> str | None:
 
 
 def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[OriginalSnapshot]:
-    """Discover sidecar bindings, including unsupported or physically absent originals."""
+    """Discover sidecar bindings, including unsupported or physically absent originals.
+
+    A binding whose Trash retirement is unconfirmed raises `originals.RetirementUnconfirmed`: its original is
+    unknown, and a walk that left it out would read as complete.
+    """
     from .backfill import iter_kb_files
     from .vault import parse_frontmatter
 
@@ -593,6 +597,8 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             snapshot = original_state(vault, relative)
             if snapshot.sidecar_path == sidecar and snapshot.binary_sha256 is not None:
                 yield snapshot
+        except originals.RetirementUnconfirmed:
+            raise
         except (UnicodeError, ValueError):
             continue
         except reserved_paths.ReservedPathLeafError as error:
@@ -1844,7 +1850,7 @@ def _read_state(vault: Path, target: Path) -> OriginalSnapshot:
     try:
         return original_state(vault, target)
     except originals.RetirementUnconfirmed as error:
-        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original's retirement to Trash is unconfirmed") from error
+        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", error.reason) from error
 
 
 @contextmanager

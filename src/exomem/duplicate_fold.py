@@ -257,7 +257,7 @@ def _pair(
     members = ((canonical[0], kept), (copy[0], retired))
     shared = [
         path for path, payload in members
-        if payload.artifact_path is not None and originals.digest_addressed(vault_root, payload.artifact_path) is not None
+        if payload.artifact_path is not None and fold_leaf.addressed(vault_root, payload.artifact_path, code) is not None
     ]
     if (why := shared_storage_refusal([path for path, _ in members], shared)) is not None:
         raise fold_leaf.refuse(code, why)

@@ -154,7 +154,10 @@ def delete_file(
     _fold: Placement | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
     with ExitStack() as originals_context:
-        return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash, originals_context=originals_context, _fold=_fold)
+        try:
+            return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash, originals_context=originals_context, _fold=_fold)
+        except originals.RetirementUnconfirmed as error:
+            raise DeleteFileError(code=error.code, reason=error.reason) from error
 
 
 def _delete_file_local(

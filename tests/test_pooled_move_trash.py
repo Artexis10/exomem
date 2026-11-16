@@ -241,9 +241,8 @@ def test_a_companion_retired_to_trash_is_no_filing_of_the_bytes_another_filing_p
     assert media_store.read_original_bytes(vault, other).data == ORIGINAL_BYTES
 
 
-def test_a_companion_whose_trash_retirement_is_unconfirmed_refuses_reads(vault, selected_store, monkeypatch):
-    """Catches a damaged Trash entry that lets the companion at a trashed original's path read as a live filing of
-    the bytes another filing pools, or as a path with nothing at it."""
+def _unconfirmed_retirement(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A companion at `LOOSE` whose Trash entry was partly emptied after another filing pooled the same bytes."""
     from test_vault_store_media import ORIGINAL_BYTES
 
     trashed = _evicted_in_trash(vault, monkeypatch)
@@ -251,11 +250,54 @@ def test_a_companion_whose_trash_retirement_is_unconfirmed_refuses_reads(vault, 
     _pool(vault, monkeypatch, other, ORIGINAL_BYTES)
     (vault / f"{trashed.trash_path}.md").unlink()  # A partly emptied Trash keeps the entry's placement metadata.
 
+
+def test_a_companion_whose_trash_retirement_is_unconfirmed_refuses_reads(vault, selected_store, monkeypatch):
+    """Catches a damaged Trash entry that lets the companion at a trashed original's path read as a live filing of
+    the bytes another filing pools, or as a path with nothing at it."""
+    _unconfirmed_retirement(vault, monkeypatch)
+
     with pytest.raises(media_store.MediaStoreError) as refused, media_store.open_original(vault, vault / LOOSE):
         pass
     assert refused.value.code == "MEDIA_ORIGINAL_UNVERIFIED"
     with pytest.raises(originals.RetirementUnconfirmed):
         originals.digest_addressed(vault, LOOSE)
+
+
+def test_a_delete_of_an_original_whose_trash_retirement_is_unconfirmed_names_the_entry_to_fix(
+        vault, selected_store, monkeypatch):
+    """Catches a delete that answers with a raw internal error, which tells the owner nothing to change."""
+    _unconfirmed_retirement(vault, monkeypatch)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(vault, path=LOOSE, confirm=True)
+
+    assert refused.value.code == "ORIGINAL_RETIREMENT_UNCONFIRMED"
+    assert f"{LOOSE}.md" in refused.value.reason and "empty or restore that Trash entry" in refused.value.reason
+
+
+def test_a_move_of_an_original_whose_trash_retirement_is_unconfirmed_names_the_entry_to_fix(
+        vault, selected_store, monkeypatch):
+    """Catches a move that answers with a raw internal error, which tells the owner nothing to change."""
+    _unconfirmed_retirement(vault, monkeypatch)
+
+    with pytest.raises(move_file.MoveFileError) as refused:
+        move_file.move_file(vault, old_path=LOOSE, new_path=f"{FOLDER}/moved.txt")
+
+    assert refused.value.code == "ORIGINAL_RETIREMENT_UNCONFIRMED"
+    assert (vault / f"{LOOSE}.md").exists()
+
+
+def test_a_folder_delete_refuses_a_member_whose_trash_retirement_is_unconfirmed(vault, selected_store, monkeypatch):
+    """Catches the binding walk leaving out a member whose original is unknown, so the folder goes to Trash as if
+    that member had no original to account for."""
+    _unconfirmed_retirement(vault, monkeypatch)
+    folder = LOOSE.rsplit("/", 1)[0]
+
+    with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
+        delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True)
+
+    assert refused.value.code == "ORIGINAL_RETIREMENT_UNCONFIRMED"
+    assert (vault / f"{LOOSE}.md").exists()
 
 
 def test_an_archive_without_shared_storage_still_moves_its_ordinary_bytes(vault):
@@ -295,6 +337,29 @@ def test_a_fold_of_filings_that_share_one_stored_copy_says_so_instead_of_calling
 
     assert refused.value.code == "CURATION_STEP_INVALID"
     assert "already share one stored copy" in refused.value.reason and "keep each filing" in refused.value.reason
+
+
+def test_a_fold_whose_copy_has_an_unconfirmed_trash_retirement_names_the_entry_to_fix(vault, monkeypatch):
+    """Catches the fold answering with a raw internal error when a member's Trash witness no longer confirms it."""
+    from exomem import curation, trash_metadata
+
+    canonical, copy = _identical_pooled_evidence(vault, monkeypatch)
+
+    def unconfirmed(_vault, companion, *_args):
+        raise originals.RetirementUnconfirmed(companion)
+
+    # The damaged witness itself: building it under Evidence takes a fold, an eviction and a partly emptied Trash.
+    monkeypatch.setattr(trash_metadata, "retired_companion", unconfirmed)
+    pinned = {path: {"path": path, "expected_hash": vault_module.content_hash((vault / path).read_text(encoding="utf-8"))}
+              for path in (canonical, copy)}
+    step = {"step_id": "dedup", "kind": "fold-duplicate",
+            "args": {"canonical": pinned[canonical], "copy": pinned[copy], "why": "The same bytes are filed twice."}}
+
+    with library_scope(), pytest.raises(curation.CurationError) as refused:
+        curation.propose(vault, {"version": 1, "title": "Fold", "steps": [step]})
+
+    assert refused.value.code == "CURATION_STEP_INVALID"
+    assert "empty or restore that Trash entry" in refused.value.reason
 
 
 def test_the_audit_reports_filings_that_share_one_stored_copy_with_no_fold_and_nothing_to_free(vault, monkeypatch):

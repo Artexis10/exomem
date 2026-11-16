@@ -151,12 +151,17 @@ def is_reference_only_companion(fields: dict[str, object], body: str) -> bool:
 class RetirementUnconfirmed(ValueError):
     """A companion whose Trash retirement witness names it, but no longer confirms it.
 
-    Its original is neither live nor absent, so each read refuses (`trash_metadata.retired_companion`).
+    Its original is neither live nor absent, so each read refuses (`trash_metadata.retired_companion`). A tool
+    refuses with `code` and `reason`, which name what the owner changes.
     """
 
+    code = "ORIGINAL_RETIREMENT_UNCONFIRMED"
+
     def __init__(self, companion: str) -> None:
-        super().__init__("the companion's retirement to Trash is unconfirmed")
         self.companion = companion
+        self.reason = (f"the Trash retirement of the original that {companion} names could not be confirmed; "
+                       "empty or restore that Trash entry first")
+        super().__init__(self.reason)
 
 
 class DisplacedReference(ValueError):

@@ -474,7 +474,10 @@ def move_file(
     # Protect semantic creation and rollback, then release before standalone index fan-out.
     with ExitStack() as mutation_context, ExitStack() as originals_context:
         mutation_context.enter_context(boundary(vault_root, operation="move_file"))
-        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context)
+        try:
+            return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context)
+        except originals.RetirementUnconfirmed as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
 
 
 def _evicted_source(

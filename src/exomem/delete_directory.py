@@ -289,7 +289,10 @@ def delete_directory(
     now: dt.datetime | None = None,
 ) -> DeleteDirectoryResult:
     with ExitStack() as originals_context:
-        return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now, originals_context=originals_context)
+        try:
+            return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now, originals_context=originals_context)
+        except originals.RetirementUnconfirmed as error:
+            raise DeleteDirectoryError(code=error.code, reason=error.reason) from error
 
 
 def _delete_directory_local(
