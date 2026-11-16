@@ -263,3 +263,51 @@ def test_a_reclassification_repoints_an_evidence_link_and_its_revert_restores_th
     assert moved["pointer_repointed"] == ["vacuum measurements"]
     assert repointed == original.replace(_link(SOURCE), _link(moved["path"]))
     assert evidence.read_text(encoding="utf-8") == original
+
+
+def test_a_reclassified_source_does_not_say_how_many_pages_it_repointed(vault: Path) -> None:
+    """A lineage entry that lists the pointer-write records, so any reader of the Source counts
+    the append-only pages the correction repointed, withheld ones included; or a revert that can
+    no longer find those records once the page names only the correction."""
+    from exomem import private_state
+    from exomem.vault import parse_frontmatter
+
+    def newest_entry(rel: str) -> dict:
+        return parse_frontmatter((vault / rel).read_text(encoding="utf-8"))[0]["moved_from"][-1]
+
+    _with_identity(vault, SOURCE)
+    correction = {"source_kind": "research-report", "domain": "health"}
+    alone = writer_lease.invoke_command(
+        MANAGE, vault, operation="reclassify", path=SOURCE, reason="a survey", **correction
+    )
+    entry_alone = newest_entry(alone["path"])
+    writer_lease.invoke_command(
+        MANAGE, vault, operation="revert-reclassification", path=alone["path"], reason="undo"
+    )
+    referrers = [
+        _write(vault, EVIDENCE, f"---\ntype: evidence\n---\n\nQuoted from {_link(SOURCE)}.\n"),
+        _write(
+            vault, "Knowledge Base/Evidence/Tuning/dose-table.md",
+            f"---\ntype: evidence\n---\n\nDoses as in {_link(SOURCE)}.\n",
+        ),
+    ]
+    originals = [page.read_text(encoding="utf-8") for page in referrers]
+    proposal = writer_lease.invoke_command(
+        MANAGE, vault, operation="propose-reclassification", path=SOURCE, **correction
+    )
+    moved = writer_lease.invoke_command(
+        MANAGE, vault, operation="reclassify", path=SOURCE, reason="a survey",
+        preview_digest=proposal["preview_digest"], **correction,
+    )
+    moved_text = (vault / moved["path"]).read_text(encoding="utf-8")
+    entry_two = newest_entry(moved["path"])
+    record_ids = [path.stem for path in private_state.store(vault, pointer_write.STORE).iterdir()]
+    writer_lease.invoke_command(
+        MANAGE, vault, operation="revert-reclassification", path=moved["path"], reason="undo"
+    )
+
+    assert len(record_ids) == 2
+    assert not any(record_id in moved_text for record_id in record_ids)
+    assert entry_two["operation"] != entry_alone["operation"]
+    assert {**entry_two, "operation": None} == {**entry_alone, "operation": None}
+    assert [page.read_text(encoding="utf-8") for page in referrers] == originals

@@ -6,7 +6,7 @@ A move that stays within one append-only tree SHALL be permitted. It SHALL carry
 
 A move that updates wikilinks SHALL repoint each link inside a page in `Sources/` or `Evidence/` through the governed pointer write when the moved page carries an `exomem_id`. When the moved page carries no `exomem_id`, a move that would rewrite such a link SHALL be refused with `APPEND_ONLY`, as before. A move SHALL also be refused with `APPEND_ONLY` when its change to such a page is not a pointer change. A page withheld from a restricted mover stays unchanged instead, and the move commits. A generated `index.md` in those trees is not captured content, and the move SHALL rewrite it. A path in an `Evidence/` page's `ingested_into` field is a pointer field, and the move SHALL repoint it through the same governed pointer write. The body outside the repointed spans and every other field of that page SHALL keep their bytes.
 
-Every governed move SHALL follow this rule, in file mode and in store mode. A reclassification is a governed move: it SHALL repoint its append-only referrers in the same way, and its revert SHALL restore them from their pointer-write records. Lineage SHALL stay the safety net for every reference that a move does not write.
+Every governed move SHALL follow this rule, in file mode and in store mode. A reclassification is a governed move: it SHALL repoint its append-only referrers in the same way, and its revert SHALL restore from their pointer-write records the ones its caller may see and write. Lineage SHALL stay the safety net for every reference that a move does not write.
 
 #### Scenario: Source becomes case-relevant
 
@@ -68,9 +68,25 @@ classification keys. A legacy `reclassified_from` value SHALL read as lineage
 entries older than every `moved_from` entry, and no writer SHALL rewrite it to
 rename the key. A page without a frontmatter block SHALL move without lineage.
 
-An undo SHALL remove the lineage entry that its forward move appended and
-SHALL append none. A reclassification revert and a curation compensation are
-undos. A plain move back to an old path is a move and appends an entry.
+The entry of an undoable move, such as a reclassification, SHALL name the
+move's operation id, whether or not the move repointed a page, and SHALL name
+no pointer-write record. Owner-only state SHALL map the operation id to the
+pointer-write record of each page the move repointed, and the undo SHALL find
+the records through that map. A reader of the page therefore learns nothing
+about how many pages the move repointed. Prior paths SHALL come only from the
+entries' paths and the relayout record, never from that map.
+
+An undo SHALL remove the lineage entry that its forward move appended. A
+reclassification revert and a curation compensation are undos. An undo whose
+caller is not restricted SHALL append no entry, and it SHALL restore every
+page that its forward move repointed to that page's exact before bytes. An
+undo whose caller is restricted SHALL also append an entry naming the path
+that it vacates, whatever pages link that path. It SHALL restore from their
+records only the pages that the caller may see and write. Its answer and the
+moved page's bytes then do not depend on any page withheld from the caller. A
+withheld page that still links the vacated path resolves through the lineage,
+and its pointer-write record stays valid. A plain move back to an old path is
+a move and appends an entry.
 
 #### Scenario: A note moves twice
 
@@ -86,9 +102,31 @@ undos. A plain move back to an old path is a move and appends an entry.
 
 #### Scenario: A revert removes its own entry
 
-- **WHEN** a reclassification is reverted
+- **WHEN** the owner reverts a reclassification
 - **THEN** the Source no longer lists the path it returned from, and no entry
   names the path it left
+
+#### Scenario: A lineage entry does not count repoints
+
+- **WHEN** a reclassification repoints two `Evidence/` pages that link the
+  Source by path
+- **THEN** the Source's new lineage entry holds the same keys as the entry of a
+  reclassification that repointed none, and its operation id is the only value
+  that differs
+- **AND** a revert finds both records through the operation id and restores
+  each page's exact bytes
+
+#### Scenario: A restricted revert leaves a withheld referrer resolving
+
+- **WHEN** the owner's reclassification repointed an `Evidence/` page that is
+  withheld from a restricted caller, and that caller reverts the
+  reclassification
+- **THEN** the Source returns to its earlier path and its lineage names the path
+  it vacated
+- **AND** the withheld page keeps the link that its pointer-write record holds,
+  and that link resolves to the Source
+- **AND** the caller's answer and the Source's bytes are the same as in a vault
+  without the withheld page
 
 ### Requirement: Links resolve through a page's prior paths
 

@@ -3,9 +3,10 @@
 Each move of a Markdown page that has a frontmatter block appends one entry naming the
 old path to the page's `moved_from` list, oldest first, in the same commit as the move.
 A legacy `reclassified_from` value reads as entries older than every `moved_from`
-entry and keeps its bytes. An undo removes the entry its forward move appended and
-appends none. A page without a frontmatter block moves without lineage: Exomem never
-invents a block in a page it does not otherwise own.
+entry and keeps its bytes. An undo removes the entry its forward move appended. A
+restricted caller's undo, which may not restore every repoint, also appends an entry
+naming the path it vacates. A page without a frontmatter block moves without lineage:
+Exomem never invents a block in a page it does not otherwise own.
 
 Lineage is the durable source of a page's prior paths. The derived `prior_paths`
 index (`memory_refs`) is refilled from these entries and the relayout record.
@@ -24,9 +25,10 @@ LINEAGE_FIELD = "moved_from"
 LEGACY_FIELD = "reclassified_from"
 #: The entry key that names a path the page left; also fixed by the specification.
 PATH_KEY = "path"
-#: The entry key that lists the pointer-write records of the referrers an undoable move
-#: repointed, so its undo restores them; the relocation record format fixes it.
-REPOINTS_KEY = "pointer_writes"
+#: The entry key that names the undoable move that appended the entry. Its undo finds the
+#: move's pointer-write records by it in owner-only state, so the page never says how many
+#: referrers the move repointed; the relocation record format fixes it.
+OPERATION_KEY = "operation"
 
 
 class LineageError(ValueError):
@@ -135,12 +137,12 @@ def latest_entry(front: Mapping[str, Any]) -> Any | None:
     return found[-1] if found else None
 
 
-def latest_repoints(text: str) -> tuple[str, ...]:
-    """The pointer-write record ids that the page's newest lineage entry lists, if any."""
+def latest_operation(text: str) -> str | None:
+    """The operation id that the page's newest lineage entry names, if any."""
     front, _body, block = vault.parse_frontmatter(text)
     entry = latest_entry(front) if block is not None else None
-    ids = entry.get(REPOINTS_KEY) if isinstance(entry, Mapping) else None
-    return tuple(str(value) for value in ids) if isinstance(ids, list) else ()
+    operation = entry.get(OPERATION_KEY) if isinstance(entry, Mapping) else None
+    return operation if isinstance(operation, str) else None
 
 
 def remove_latest(text: str, expected_path: str) -> str:
@@ -180,9 +182,15 @@ def append_transform(
     return lambda text: append_entry(text, old_path, extra)
 
 
-def undo_transform(expected_path: str) -> Callable[[str], str]:
-    """An undo's content transform that removes the entry naming `expected_path`."""
-    return lambda text: remove_latest(text, expected_path)
+def undo_transform(expected_path: str, vacated: str | None = None) -> Callable[[str], str]:
+    """An undo's content transform that removes the entry naming `expected_path`.
+
+    With `vacated`, it then appends an entry naming the path the undo leaves, so a link that
+    still names that path resolves to the page.
+    """
+    if vacated is None:
+        return lambda text: remove_latest(text, expected_path)
+    return lambda text: append_entry(remove_latest(text, expected_path), vacated)
 
 
 def iter_claims(

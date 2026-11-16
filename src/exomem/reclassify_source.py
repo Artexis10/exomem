@@ -770,6 +770,7 @@ def _referrer_outcome(
     move, which restores append-only pages from their records.
     """
     from .governance import connector_boundary, egress
+    from .vault_store import read as store_read
 
     relocating = destination != rel
     writable_page = connector_boundary.effect_admission(vault_root)
@@ -822,7 +823,8 @@ def _referrer_outcome(
                 "path": rel,
                 "reason": "the source links itself by its path, and its own bytes cannot change",
             })
-        if (vault_root / destination).exists() and (visible is None or visible(destination)):
+        occupied = store_read.holds_file(vault_root, destination)
+        if occupied and (visible is None or visible(destination)):
             refusals.append({
                 "code": "DEST_EXISTS",
                 "path": destination,
@@ -861,8 +863,8 @@ def _write_correction(
     source's lineage or, with `undo_lineage`, removes the entry naming the
     destination. The preview's refusals are raised first, so a correction
     refuses for exactly the reasons its preview gave. The move repoints append-only
-    referrers only with the preview's `preview_digest`, and lists their pointer-write
-    records in the lineage entry; an undo restores each of them from its record.
+    referrers only with the preview's `preview_digest`, and its lineage entry names the
+    move's operation, by which an undo finds their pointer-write records and restores each.
     """
     if destination == rel:
         batch_atomic_write(
@@ -1091,7 +1093,9 @@ def revert(
     """Restore the source's latest recorded location, kind and domain.
 
     The revert runs through the same guarded relocation as a correction and
-    removes the lineage entry it restores. It restores a recorded `other`
+    removes the lineage entry it restores. A restricted caller's revert also records
+    the path it leaves, so a page withheld from it that links that path still finds the
+    source (`move_file`). It restores a recorded `other`
     kind, because the entry states what the source was rather than choosing a
     new kind. It refuses an entry that records no kind and domain, such as a
     later plain move's or a legacy path-only entry, and a previous location
@@ -1114,7 +1118,10 @@ def revert(
     destination = _previous_location(vault_root, recorded_path)
     current_kind, _ = _current_classification(text)
     _refuse_episode_kind(current_kind, kind)
-    if destination != rel and (vault_root / destination).exists():
+    from .vault_store import read as store_read
+
+    # The store's answer where it serves the path: a store move leaves the file it vacated.
+    if destination != rel and store_read.holds_file(vault_root, destination):
         raise ReclassifyError(
             "PREVIOUS_PATH_OCCUPIED",
             f"another page now occupies {destination}, so the source cannot "

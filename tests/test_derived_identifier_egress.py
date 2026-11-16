@@ -3362,14 +3362,15 @@ def test_a_restricted_abstention_and_its_token_carry_no_index_generation(
         assert decoded["refs"] == []
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_linked_it(
     tmp_path: Path, audience: str
 ) -> None:
-    """A correction moves the source and rewrites every linking page, including
-    one withheld from the mover. Its answer, and its revert's, carry nothing
-    that rewrite produced, in every response detail: no graph outcome either,
-    since a withheld rewrite can move whether the graph join finishes in time."""
+    """A correction moves the source and rewrites the linking pages its writer may
+    see, never one withheld from it. Its answer, and its revert's, carry nothing
+    that depends on the withheld page, in every response detail: no graph outcome
+    either, since a withheld page can move whether the graph join finishes in time."""
     source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
     base = {
         source: _page("Tide table", "High water 06:12.", type="source", source_type="other"),
@@ -3399,11 +3400,72 @@ def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_
                 {"operation": "revert-reclassification", "path": destination,
                  "reason": "keep it in the drain queue"},
             ):
-                answer = _call(vault, _principal(audience), "manage_memory_file", **request, **extra)
+                answer = _call(vault, _writer(audience), "manage_memory_file", **request, **extra)
+                assert "__error__" not in answer, (variant, detail, answer)
                 answers[variant].append(_VOLATILE_TEXT.sub("<v>", _text(answer)))
 
-    assert '"__error__"' not in _text(answers["B"]), answers["B"]
     assert not any('"graph_sync' in answer for answer in answers["B"]), answers["B"]
     assert answers["A"] == answers["B"]
     assert answers["C"] == answers["B"]
     assert f"[[{source[:-3]}]]" in page_bytes(vaults["A"], hidden).decode()
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_revert_leaves_a_withheld_repointed_page_resolving_and_answers_alike(
+    tmp_path: Path, audience: str
+) -> None:
+    """The owner's correction repoints a captured page withheld from a later reverter. A revert
+    that strands that page's link on the path the source leaves, or whose answer or page bytes
+    differ when such a page exists, so the reverter learns of it."""
+    from exomem.vault import normalize_wikilink
+
+    source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
+    destination = f"{KB}/Sources/Datasets/Travel/2026-01-02-tide-table.md"
+    base = {
+        source: _page(
+            "Tide table", "High water 06:12.", type="source", source_type="other",
+            exomem_id="0b9f3c52-6a51-4f43-9d0e-2f6f5e1c7a11",
+        ),
+        f"{KB}/log.md": "# Log\n\n",
+    }
+    hidden = f"{KB}/Evidence/Withheld/tide-proof.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _page("Tide proof", f"From [[{source[:-3]}]].", type="evidence")},
+        "C": {**base, hidden: _page("Tide proof", "Unrelated.", type="evidence")},
+    }
+    vaults = {
+        variant: _materialize(
+            tmp_path / variant / "vault", files, audience, scope="Evidence/Withheld/**"
+        )
+        for variant, files in variants.items()
+    }
+    correction = {"path": source, "source_kind": "dataset", "domain": "travel"}
+    answers: dict[str, str] = {}
+    pages: dict[str, str] = {}
+    for variant, vault in vaults.items():
+        proposal = _call(
+            vault, None, "manage_memory_file", operation="propose-reclassification", **correction
+        )
+        moved = _call(
+            vault, None, "manage_memory_file", operation="reclassify",
+            reason="a table of measurements", preview_digest=proposal["preview_digest"],
+            **correction,
+        )
+        assert moved.get("path") == destination, moved
+        answer = _call(
+            vault, _writer(audience), "manage_memory_file", operation="revert-reclassification",
+            path=destination, reason="keep it in the drain queue",
+        )
+        assert "__error__" not in answer, answer
+        answers[variant] = _VOLATILE_TEXT.sub("<v>", _text(answer))
+        pages[variant] = _VOLATILE_TEXT.sub("<v>", page_bytes(vault, source).decode())
+
+    assert answers["A"] == answers["B"] == answers["C"]
+    assert pages["A"] == pages["B"] == pages["C"]
+    # The withheld page keeps the repoint that its pointer record holds, and the link still
+    # finds the source.
+    assert f"[[{destination[:-3]}]]" in page_bytes(vaults["A"], hidden).decode()
+    with library_scope():
+        assert normalize_wikilink(destination[:-3], vaults["A"]) == (source[:-3], None)

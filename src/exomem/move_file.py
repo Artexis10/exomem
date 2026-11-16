@@ -329,13 +329,21 @@ def _repoint_artifact(old_binary: str, new_binary: str):
 
 
 def _lineage_transform(
-    old_rel: str, new_rel: str, extra: Mapping[str, Any] | None, undo: bool
+    old_rel: str,
+    new_rel: str,
+    extra: Mapping[str, Any] | None,
+    undo: bool,
+    *,
+    keep_vacated: bool = False,
 ) -> Callable[[str], str]:
-    """A content transform that records the move in the page's lineage, or undoes the entry."""
+    """A content transform that records the move in the page's lineage, or undoes the entry.
+
+    With `keep_vacated`, an undo also records the path it vacates, as a move back does.
+    """
     from . import page_lineage
 
     change = (
-        page_lineage.undo_transform(new_rel)
+        page_lineage.undo_transform(new_rel, old_rel if keep_vacated else None)
         if undo
         else page_lineage.append_transform(old_rel, extra)
     )
@@ -366,11 +374,11 @@ def records_lineage(vault_root: Path, old_rel: str, new_rel: str, *, undo: bool)
     return block is not None
 
 
-def _undo_records(vault_root: Path, old_rel: str) -> dict[str, Mapping[str, Any]]:
-    """The pointer-write records that the newest lineage entry of the page lists, by page.
+def _undo_records(vault_root: Path, old_rel: str) -> dict[str, str]:
+    """The pointer-write record id of each page that the move an undo reverses repointed.
 
-    They are the repoints of the move that an undo reverses; the undo restores each page
-    from its record.
+    The page's newest lineage entry names that move's operation; the owner-only map of the
+    operation gives the records, by page (`pointer_write.operation_records`).
     """
     from . import page_lineage, pointer_write
     from .vault import served_page_bytes
@@ -378,14 +386,8 @@ def _undo_records(vault_root: Path, old_rel: str) -> dict[str, Mapping[str, Any]
     raw = served_page_bytes(vault_root, old_rel)
     if raw is None:
         return {}
-    records: dict[str, Mapping[str, Any]] = {}
-    for record_id in page_lineage.latest_repoints(raw.decode("utf-8", errors="replace")):
-        try:
-            loaded = pointer_write.load_record(vault_root, record_id)
-        except pointer_write.PointerWriteError as error:
-            raise MoveFileError(code=error.code, reason=error.reason) from None
-        records[str(loaded.get("page"))] = loaded
-    return records
+    operation = page_lineage.latest_operation(raw.decode("utf-8", errors="replace"))
+    return pointer_write.operation_records(vault_root, operation)
 
 
 def _repoint_parts(new_page: str):
@@ -476,7 +478,9 @@ def plan_inbound_rewrites(
         vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
     ) if pages else ()
     pointers = page_fields.pointer_fields(vault_root) if pages else frozenset()
-    restore = _undo_records(vault_root, old_rel) if pages and undo else {}
+    # Read on the first append-only page the undo changes, so pages it does not plan never
+    # reach the records.
+    restore: dict[str, str] | None = None
     identified = (
         bool(pages)
         and old_rel.lower().endswith(".md")
@@ -508,8 +512,13 @@ def plan_inbound_rewrites(
         repoint = refusal = None
         restored = False
         if append_tree is not None and n_changed:
-            record = restore.get(rel)
+            record = None
             try:
+                if undo:
+                    if restore is None:
+                        restore = _undo_records(vault_root, old_rel)
+                    if rel in restore:
+                        record = pointer_write.load_record(vault_root, restore[rel])
                 if undo and record is None:
                     raise pointer_write.PointerWriteError(
                         "POINTER_RECORD_UNKNOWN",
@@ -583,9 +592,11 @@ def move_file(
 
     `lineage_entry` adds keys to the lineage entry the move appends, such as a
     reclassification's prior classification. `undo_lineage` marks the move as an undo:
-    it removes the newest lineage entry, which must name the destination, and appends none.
-    `record_repoints` lists the pointer-write records of the append-only referrers the move
-    repoints in that entry, so the undo restores each one from its record.
+    it removes the newest lineage entry, which must name the destination, and appends none,
+    except for a restricted caller, whose undo appends an entry naming the path it vacates.
+    `record_repoints` marks the move undoable: its entry names its operation, which the
+    owner-only map of the move's pointer-write records keys, so the undo restores each
+    append-only referrer from its record.
 
     `preview` validates without writing and returns the result with one outcome per referrer
     and the `preview_digest` that a commit repointing append-only pages must pass.
@@ -1149,7 +1160,14 @@ def _move_file_local(
     batch_fanout_paths: list[Path] = []
     left_unchanged: list[str] = []
     writable_page = connector_boundary.effect_admission(vault_root)
-    keeps_lineage = records_lineage(vault_root, old_rel, new_rel, undo=undo_lineage)
+    # A restricted caller may be denied a page that the move it undoes repointed, so its undo
+    # cannot restore every repoint. It records the path it vacates instead, as a move back does,
+    # whatever pages exist: its answer and the page's bytes never depend on a withheld page, and
+    # a withheld page that still links the vacated path resolves through the lineage.
+    keep_vacated = undo_lineage and restricted
+    keeps_lineage = records_lineage(
+        vault_root, old_rel, new_rel, undo=undo_lineage and not keep_vacated
+    )
     # One outcome per referrer the mover may see, and the pointer writes the move makes to
     # append-only pages: those it restores from the records of the move it undoes, and the
     # others, which the call does not name and the preview digest approves.
@@ -1227,18 +1245,23 @@ def _move_file_local(
             )
         except pointer_write.PointerWriteError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from None
-    # Each record is named before the commit, so an undoable move's lineage entry can list it.
-    pointer_records = [(write, pointer_write.new_record_id()) for write in (*repoints, *restored)]
-    if record_repoints and repoints:
-        lineage_entry = {
-            **dict(lineage_entry or {}),
-            page_lineage.REPOINTS_KEY: [record_id for _, record_id in pointer_records[: len(repoints)]],
-        }
+    # An undoable move's lineage entry names its operation whether or not it repoints a page, so
+    # the page never says how many it repointed; owner-only state maps the operation to them.
+    operation = pointer_write.new_operation_id() if record_repoints else None
+    if operation is not None:
+        lineage_entry = {**dict(lineage_entry or {}), page_lineage.OPERATION_KEY: operation}
+    repoint_records = [(write, pointer_write.new_record_id()) for write in repoints]
+    restore_records = [(write, pointer_write.new_record_id()) for write in restored]
 
     def record_pointer_writes() -> list[str]:
         """Record each pointer write around the commit: its record outlives the move only when
         its page holds the write (`pointer_write.recording`)."""
-        return mutation_context.enter_context(pointer_write.recording(vault_root, pointer_records))
+        return [
+            *mutation_context.enter_context(
+                pointer_write.recording(vault_root, repoint_records, operation=operation)
+            ),
+            *mutation_context.enter_context(pointer_write.recording(vault_root, restore_records)),
+        ]
 
     if kept_mentions:
         # Captured pages cannot change; the page count carries no path, so a restricted caller keeps it.
@@ -1337,7 +1360,10 @@ def _move_file_local(
     if old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md"):
         # The page's lineage changes last, so it records the move of the final bytes.
         content_transform = _compose_transforms(
-            content_transform, _lineage_transform(old_rel, new_rel, lineage_entry, undo_lineage)
+            content_transform,
+            _lineage_transform(
+                old_rel, new_rel, lineage_entry, undo_lineage, keep_vacated=keep_vacated
+            ),
         )
         try:
             source, source_guard = read_guarded_text(vault_root, old_abs)
@@ -1858,7 +1884,7 @@ def _move_file_local(
             warnings=warnings,
             semantic=semantic,
             pointer_writes=pointer_writes,
-            pointer_repointed=[write.reported() for write, _record_id in pointer_records],
+            pointer_repointed=[write.reported() for write in (*repoints, *restored)],
             # A bound store filters every caller, so the caller decides who reads the row report,
             # as file mode decides it: the paths it names may include pages withheld from others.
             index=(
@@ -1997,7 +2023,7 @@ def _move_file_local(
         warnings=warnings,
         semantic=semantic,
         pointer_writes=pointer_writes,
-        pointer_repointed=[write.reported() for write, _record_id in pointer_records],
+        pointer_repointed=[write.reported() for write in (*repoints, *restored)],
         # The index outcome covers every rewritten page, so a mover other
         # than the owner receives none.
         index=None if restricted else index_feedback,

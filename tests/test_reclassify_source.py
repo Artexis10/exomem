@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 import yaml
@@ -311,8 +312,9 @@ def test_the_correction_records_its_reason_and_previous_path(
     )
     after = _front(vault, result.new_path)
     assert str(after["reclassified"]) == TODAY.isoformat()
+    # The entry names the correction's operation, never the pages it repointed.
     assert after["moved_from"] == [
-        {"path": captured.path, "kind": "unclassified", "domain": "travel"}
+        {"path": captured.path, "kind": "unclassified", "domain": "travel", "operation": ANY}
     ]
     assert "reclassified_from" not in after
     assert after["reclassified_reason"] == "it is a written investigation"
@@ -807,8 +809,8 @@ def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_opera
     }
     assert preview["refusals"] == []
     assert history == [
-        {"path": source, "kind": "other", "domain": None},
-        {"path": first["path"], "kind": "dataset-export", "domain": "travel"},
+        {"path": source, "kind": "other", "domain": None, "operation": ANY},
+        {"path": first["path"], "kind": "dataset-export", "domain": "travel", "operation": ANY},
     ]
     assert second["path"].removesuffix(".md") in note_after_moves
     assert back_once["path"] == first["path"]
@@ -894,7 +896,7 @@ def test_a_legacy_previous_path_is_kept_but_never_reverted_by_guessing(vault: Pa
     legacy_line = f"reclassified_from: {legacy_path}\n"
     assert legacy_line in (vault / moved.new_path).read_text(encoding="utf-8")
     assert _front(vault, moved.new_path)["moved_from"] == [
-        {"path": source, "kind": "other", "domain": None},
+        {"path": source, "kind": "other", "domain": None, "operation": ANY},
     ]
     reverted = rc.revert(vault, path=moved.new_path, reason="undo", today=TODAY)
     assert reverted.new_path == source

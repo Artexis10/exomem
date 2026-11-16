@@ -55,8 +55,25 @@ The two field names are protocol tokens that this specification fixes, so code
 holds them with a one-line reason. They are not vocabulary.
 
 An undo is not a move. A reclassification revert and a curation compensation
-remove the lineage entry that the forward move appended and append none. A
-plain move back to an old path appends an entry as any move does.
+remove the lineage entry that the forward move appended. An unrestricted
+caller's undo appends none and restores every repointed referrer to its exact
+bytes. A restricted caller's undo cannot restore a referrer withheld from it,
+and it must not reveal that one exists. It therefore always appends an entry
+that names the path it vacates, as a move back does, whatever pages link that
+path. Its answer and the page's bytes are then the same with and without a
+withheld referrer, and a withheld referrer that keeps its repointed link
+resolves through lineage, with its pointer-write record still valid. The
+choice depends only on the caller's own restriction, which the caller already
+knows. A refusal that fired only when a withheld record existed would itself
+disclose that record. A plain move back to an old path appends an entry as any
+move does.
+
+An undoable move's entry names its operation id and no pointer-write record.
+Owner-only state maps the operation id to the record of each page that the
+move repointed, and the undo finds them there. Every undoable entry carries
+the id, so a reader of the page cannot count the repoints, withheld ones
+included. Prior paths still come only from entry paths and the relayout
+record.
 
 Lineage also makes every move change the page's bytes. The child batch after
 the rename is therefore never empty, and a curation witness always rides in it.
@@ -150,7 +167,8 @@ A missing or stale digest refuses with `POINTER_PREVIEW_REQUIRED`.
 
 Each write creates one create-only, owner-only record. It names the page, the
 write's reason, the before and after content hashes, and each span's location,
-old bytes and new bytes. A curation write keeps that record in its run evidence. A revert applies
+old bytes and new bytes. An undoable move also writes one owner-only map from
+its operation id to its records, by page, before its commit. A curation write keeps that record in its run evidence. A revert applies
 only while the page holds the recorded after hash, and its result must hash to
 the recorded before hash.
 
@@ -293,6 +311,9 @@ target does.
   refuse writers that claim no reservation. A create that races a move onto
   the move's old path can therefore commit within that one-write window. The
   new page then takes the address, and the owner moves it to release the path.
+- A restricted caller's revert leaves the Source with a lineage entry for the
+  path it vacated, so that path stays reserved and a later revert finds no
+  classification to restore. The owner reclassifies explicitly instead.
 
 ## Coordination
 

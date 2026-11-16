@@ -14,9 +14,11 @@ what changed: the frontmatter through the YAML composer, the links through the w
 
 Each committed write leaves one create-only, owner-only record of its reason, its before and
 after hashes and each span's location and bytes. The record is written pending before the commit
-and published after it, so a write that never commits leaves no record (`recording`). A revert
-applies only while the page holds the recorded after hash, and its result must hash to the
-recorded before hash.
+and published after it, so a write that never commits leaves no record (`recording`). An undoable
+move also leaves an owner-only map from its operation id to the records of the pages it
+repointed; its lineage entry names only the operation, so the page never says how many there
+were. A revert applies only while the page holds the recorded after hash, and its result must
+hash to the recorded before hash.
 """
 
 from __future__ import annotations
@@ -37,6 +39,8 @@ from .kbdir import managed_form, managed_relative
 
 #: The owner-only store under the vault's state directory that holds the records.
 STORE = "pointer-writes"
+#: The owner-only store that maps an undoable move's operation id to its records, by page.
+OPERATIONS = "pointer-write-operations"
 _SCHEMA_VERSION = 1
 #: The two span kinds a record holds; the record format fixes them.
 FIELD_SPAN = "field"
@@ -388,18 +392,45 @@ def new_record_id() -> str:
     return uuid.uuid4().hex
 
 
+#: An operation id has the shape of a record id; both are fresh random hex.
+new_operation_id = new_record_id
+
+
+def _is_id(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and all(c in "0123456789abcdef" for c in value)
+
+
 @contextlib.contextmanager
 def recording(
-    vault_root: Path, writes: Sequence[tuple[PointerWrite, str]]
+    vault_root: Path,
+    writes: Sequence[tuple[PointerWrite, str]],
+    *,
+    operation: str | None = None,
 ) -> Iterator[list[str]]:
     """Record each write, under its id, around the commit that makes it; yield the ids.
 
     Each record is flushed pending before the block runs, so a crash after the commit keeps it,
     and published when the block returns. When the block raises, a record is published only
     while its page holds the write's after hash: a write that never committed leaves no record.
-    A caller names the ids before the commit (`new_record_id`) when a page must list them.
+    With `operation`, the map from that operation id to each write's page and record is written
+    first, and removed again when no record survives a failed block.
     """
     store = private_state.store(vault_root, STORE)
+    operations = private_state.store(vault_root, OPERATIONS) if operation and writes else None
+    if operations is not None:
+        private_state.write_record(
+            operations,
+            str(operation),
+            {
+                "schema_version": _SCHEMA_VERSION,
+                "operation": operation,
+                "records": {write.path: record_id for write, record_id in writes},
+            },
+            temp_suffix=".tmp",
+            durable=True,
+            create_only=True,
+        )
+        private_state.sync_directory(operations)
     for write, record_id in writes:
         private_state.write_record(
             store,
@@ -423,13 +454,18 @@ def recording(
     try:
         yield [record_id for _write, record_id in writes]
     except BaseException:
+        published = False
         for write, record_id in writes:
             if _holds(vault_root, write.path, write.after_hash):
                 _publish(store, record_id)
+                published = True
             else:
                 private_state.remove(store / f"{record_id}{_PENDING}.json")
         if writes:
             private_state.sync_directory(store)
+        if operations is not None and not published:
+            private_state.remove(operations / f"{operation}.json")
+            private_state.sync_directory(operations)
         raise
     for _write, record_id in writes:
         _publish(store, record_id)
@@ -461,7 +497,7 @@ def load_record(vault_root: Path, record_id: str) -> dict[str, Any]:
     A pending record, which a stop between a commit and its publication leaves, is published
     here when its page holds its after hash; otherwise its write never committed.
     """
-    if not record_id or not all(char in "0123456789abcdef" for char in record_id):
+    if not _is_id(record_id):
         raise PointerWriteError("POINTER_RECORD_UNKNOWN", "no pointer-write record has that id")
     store = private_state.store(vault_root, STORE)
     path = store / f"{record_id}.json"
@@ -479,6 +515,32 @@ def load_record(vault_root: Path, record_id: str) -> dict[str, Any]:
     if loaded.get("schema_version") != _SCHEMA_VERSION:
         raise PointerWriteError("POINTER_RECORD_UNKNOWN", "the pointer-write record is unreadable")
     return loaded
+
+
+def operation_records(vault_root: Path, operation: str | None) -> dict[str, str]:
+    """The record id of each page that operation `operation` repointed, by page.
+
+    An operation that repointed no page has no map, and so none. A caller loads only the
+    records of the pages it may restore (`load_record`).
+    """
+    if operation is None:
+        return {}
+    if not _is_id(operation):
+        raise PointerWriteError("POINTER_RECORD_UNKNOWN", "no move has that operation id")
+    path = private_state.store(vault_root, OPERATIONS) / f"{operation}.json"
+    if not path.exists():
+        return {}
+    loaded = _read_record(path)
+    records = loaded.get("records") if loaded is not None else None
+    if (
+        loaded is None
+        or loaded.get("schema_version") != _SCHEMA_VERSION
+        or not isinstance(records, dict)
+    ):
+        raise PointerWriteError(
+            "POINTER_RECORD_UNKNOWN", "the pointer-write records of that move are unreadable"
+        )
+    return {str(page): str(record_id) for page, record_id in records.items()}
 
 
 def _read_record(path: Path) -> dict[str, Any] | None:
