@@ -19,9 +19,9 @@ This change took over design D12 and task group 9 of `make-vault-store-canonical
 **Measured facts.** The read-only plan reproduces every count below on any copy. The counts come from two sources, and the private copies are not in the repository.
 
 From `relayout --plan` on a disposable real-vault copy, 2026-11-16. They decided O1 to O7:
-- Flattening the partition folders below areas moves 683 more pages, adds no name collision and changes no access rule. This replaces an earlier pass's count of 70 to 82 colliding Evidence names.
+- The plan's flattening alternative counts only title-named pages of the note types that declare a partition: 683 more of them move. They take no extra suffix, because derived names are already unique across the vault (O3). The count leaves out the domain level below `Sources/<Kind>/` and pages with fixed names in partition folders (navigation pages, pages without a title, sidecars and artifacts), so collisions between fixed names under full flattening are not measured yet (task 5.1b). No governance scope changes members, because the copy defines none, and the alternative does not evaluate `_access.yaml` tiers. Evidence keeps its scope and category folders, so an earlier pass's 70 to 82 colliding Evidence names no longer apply.
 - The relayout renames 12,119 existing derived pages to their title names.
-- Names unique across the vault need 1,452 ` (2)`-type suffixes. Names unique only per folder would need 1,379. These replace an earlier pass's 1,505 and 1,651.
+- Names unique across the vault need 1,452 ` (2)`-type suffixes. Names unique only per folder would need 1,379. These replace an earlier pass's 1,651 across the vault and 1,505 per folder.
 - Three top-level entries outside the old wrapper clash with an area name, `index.md` or `log.md`: two empty folders and a stray view file.
 - Of 76 links that Obsidian resolves and Exomem does not, 59 point into the `_Schema/` folder, 14 are bare names that differ only in letter case, and 3 point into a folder outside the wrapper.
 
@@ -192,7 +192,7 @@ relayouts:
         new_path: <path after>
 ```
 
-The prior-path index reads it. `reverted` is true for an entry that a revert undid, and the revert writes its own entry, whose rows run from the root-layout path back to the nested path. In store mode the record is a stored page, as the layout record is. The index rebuilds from both sources. A page that carries `moved_from` from an earlier governed move keeps it, and its relayout row adds the newer prior path. Resolution, visibility, reserved paths and the index's squatter guard apply to a relayout row exactly as to a `moved_from` row, so a prior path to a page that the caller may not see answers as a missing page. The relayout writes no `moved_from` into pages, so page bytes change only in link spans and pointer fields.
+The prior-path index reads it. `reverted` is true for an entry that a revert undid, and such an entry claims no prior path. The revert writes its own entry, whose rows run from the root-layout path back to the nested path. In store mode the record is a stored page, as the layout record is. The index rebuilds from both sources. A page that carries `moved_from` from an earlier governed move keeps it, and its relayout row adds the newer prior path. Resolution, visibility, reserved paths and the index's squatter guard apply to a relayout row exactly as to a `moved_from` row, so a prior path to a page that the caller may not see answers as a missing page. The relayout writes no `moved_from` into pages, so page bytes change only in link spans and pointer fields.
 
 The resolver never calls `kbdir.kb_relative_form`. The prior-path step sits in the resolver, and the managed-relative form that the hosted protected-tree guard and the executors share must agree with it. Three guard bypasses came from two rel-forms that disagreed, so task 5.8 tests that the resolver and the guard read a relayout row as the same current path. The relayout record sits in the vault, so a store-mode rollback keeps it with the other pages and this change adds no export of its own (task 5.9).
 
@@ -306,7 +306,7 @@ Cuts considered. Task order after the writer PRs would delay the owner's evidenc
 The owner decided all seven choices from `relayout --plan` on a disposable real-vault copy. Each entry gives the answer first, then the counts, the option that the owner did not take and the requirements that follow. Examples use an invented insight "Why churn rose in Q3", a research note "Churn drivers" in project "Alpha", and a source article "Pricing basics" of domain "Economics". "Today" means a nested vault whose Obsidian opens the outer vault.
 
 **O1. Partition folders below an area: flatten.** The tree is `Research/Churn drivers.md` and `Sources/Articles/2026-05-02-Pricing basics.md`. The group folders stay: `Sources/<Kind>/`, `Entities/<Type>/`, `Records/<collection>/`, `Planning/<collection>/` and `Evidence/<scope>/<category>/`. Every other role, compiled included, has no group folder, and the typed writer adds no project, domain or medium folder. A domain-only reclassification moves no file.
-- Plan on the copy: 683 more pages move, no extra name collision appears, and no access rule changes.
+- Plan on the copy: 683 more title-named pages of partitioned note types move, with no extra suffix. The domain level below `Sources/<Kind>/` and fixed-name pages in partition folders are not counted yet (task 5.1b).
 - A vault whose path scope names a partition folder fails the disclosure diff. The plan then refuses until the operator converts that scope to a `projects:` selector.
 - Not taken: keep the partitions (`Research/Alpha/Churn drivers.md`).
 - Follows: the requirements "Pages sit flat inside areas" and "Relayout places every page by rule", and the `adoption-studio` delta (flat `Sources/<Kind>/`).
