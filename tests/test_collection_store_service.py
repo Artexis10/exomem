@@ -1491,6 +1491,7 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
         assert queued == []  # it never entered the store thread's queue, which the held batch keeps
         assert (status["state"], status["rows"]["imported"], status["resumable"], status["cancellable"]) == (
             "running", 10, False, True)
+        assert status["authority"] == "current"  # the snapshot runs the same fresh authority check
         activity = status["activity"]
         assert (activity["phase"], activity["batch"], activity["timed_batches"]) == ("writing", 2, 2)
         assert activity["phase_ms"] >= 0 and activity["since"] is not None
