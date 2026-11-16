@@ -240,6 +240,7 @@ The partition key needs a page fact. In store mode it belongs with the page admi
 No service stores cell-authoritative content about one person until Stage 3 ships on that cell. That covers member-private memory and member feedback.
 Until then a service credential is owner-equivalent inside its cell. Isolation between tenants holds today, because each tenant has its own cell and credential.
 Index-only evidence needs no partition, because the service authorizes its own records.
+D14 keeps the same rule for platform subjects until their platform has a rights path.
 
 ### D9. The audit export reuses existing chains (Stage 4)
 
@@ -291,6 +292,21 @@ A custom Starlette route skips FastMCP's bearer check, and `CloudOriginMiddlewar
 On Cloud, S1 depends on a gateway release that forwards the service prefix and the document path with the same proof. It also depends on a chart change that configures them. The gateway lives in a separate repository, so that release is a dependency of S1, not a task of this repository.
 This change states the forwarding contract that the release implements, as a `hosted-gateway-contract` requirement.
 
+### D14. Subjects who are not principals (Stage 3, Stage 5)
+
+Members are only part of a tenant's audience. Most of the audience reaches the product through third-party platforms, for example as commenters or repliers on a video platform or a social network.
+These people hold no account with the product. They cannot sign in to see or erase what the product keeps about them.
+
+- **Data subject, not principal.** The product may know a person only by a platform identity: the platform and that platform's account id. Such a person is a data subject, not a principal.
+  The product never authenticates them at its own edge, so it mints no D7 subject assertion for them. The D7 path gives them no access.
+- **Rights path.** Such a subject still needs access and erasure. The rights path lets them prove control of the platform identity. Examples are a sign-in with that platform and a challenge posted from that account.
+  A request that passes the rights path binds to that identity's partition, under the same rules as a member's partition (D12). The Stage 3 change decides which component verifies the proof.
+- **Default until a rights path exists (recommended).** Until a platform has a rights path, the cell keeps no durable per-person memory about that platform's subjects.
+  It keeps only context for one conversation and aggregates under D12's smallest-group rule. This default mirrors D8's safeguard. Open question 9 asks whether to relax it.
+- **Minimisation and notice.** By default these subjects get stricter retention and minimisation than members: a shorter retention window and only the fields that the product's stated purpose needs. The Stage 3 change sets both defaults.
+  The service contract requires that the tenant's privacy notice disclose this processing. This design states a contract need, not legal advice.
+- **Erasure.** Stage 5 subject erasure covers these subjects. A request that passes the platform-identity rights path erases that identity's partition.
+
 ## Planned deltas for later stages
 
 | Capability | Stage | What changes |
@@ -325,9 +341,9 @@ Today transcription and segmentation live in the consumer, and embedding lives i
 | S0 | Enrolled Sources stay off shared generated pages | none | Proven in the passage-evidence delivery (D5) | #2852 |
 | S1 | Typed service API, first version | `EXOMEM_SERVICE_API` | Each operation returns equal data through both doors on one disposable cell; every response validates against the document; the Cloud boundary refuses as on `/mcp`; passage bars hold at the service door | #2852 merged; the gateway release and chart change (D13) |
 | S2 | Service principals under the tenant's grant (D6, D11) | `EXOMEM_SERVICE_PRINCIPALS` | Two principals on one cell cannot reach each other's Sources through any operation or argument; a principal without a committed grant reaches nothing; a narrowed or revoked grant refuses the next request; the tenant's own agents and the product reach only their own scopes; existing audiences' decisions are unchanged | S1; containment D1 in force on Cloud |
-| S3 | Subject-bound requests and private member partitions (D7, D12) | `EXOMEM_SERVICE_SUBJECTS` | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references; the owner reads a partition only under a grant, and each such read writes a receipt; without a grant the owner receives aggregates only | S2; the partition fact of the single store |
+| S3 | Subject-bound requests and private member partitions (D7, D12); no durable per-person memory for platform subjects without a rights path (D14) | `EXOMEM_SERVICE_SUBJECTS` | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references; the owner reads a partition only under a grant, and each such read writes a receipt; without a grant the owner receives aggregates only; a platform subject without a rights path has no durable per-person item | S2; the partition fact of the single store |
 | S4 | Audit export | `EXOMEM_SERVICE_AUDIT_EXPORT` | An exported window verifies end to end against the chain; an injected gap reports incomplete | S1; S2 for principal ids; a ledger retention rule |
-| S5 | Subject erasure (D12) | the host erasure policy, per principal | After a member's erasure request completes, no door returns an item of the partition; progress reports complete, pending, failed or unknown | S3; `erase-captured-source` |
+| S5 | Subject erasure (D12, D14) | the host erasure policy, per principal | After the erasure request of a member, or of a platform subject through its rights path, completes, no door returns an item of the partition; progress reports complete, pending, failed or unknown | S3; `erase-captured-source` |
 
 Each stage after S1 writes its requirements into a successor change before its code starts, and cites these decisions.
 
@@ -383,3 +399,4 @@ These choices belong to the operator. Each has a recommendation.
 6. **Where is the load target recorded?** Recommend the per-cell target above, plus a cells-per-node target from the Cloud platform, recorded once in the repository.
 7. **Who may issue the owner's read grant for one member's partition (D12)?** Recommend the owner, for a stated purpose and a bounded expiry, with each read audited.
 8. **What happens to member partitions when the product's grant ends (D11, D12)?** Recommend that they stay closed to the owner and are erased after a retention window that the tenant's policy sets.
+9. **May a cell keep durable per-person memory about platform subjects before their platform has a rights path (D14)?** Recommend no. Keep only context for one conversation and aggregates until a rights path lets those subjects see and erase their data.
