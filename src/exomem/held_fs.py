@@ -15,7 +15,7 @@ import threading
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
@@ -54,6 +54,16 @@ def vault_name_key(name: str, *, form: str = "NFC") -> str:
     `form="NFKC"` serves the looser audit and vocabulary comparisons.
     """
     return unicodedata.normalize(form, name).casefold()
+
+
+def split_relative(path: str) -> tuple[str, str]:
+    """A vault-relative path's parent and leaf, the parent joined with forward slashes.
+
+    Held paths are POSIX-style on every platform. `str(Path(...))` would join the parent with
+    backslashes on Windows, which the held filesystem refuses as an unsafe path.
+    """
+    relative = PurePosixPath(path)
+    return relative.parent.as_posix(), relative.name
 
 
 def name_variants(names: Iterable[str], name: str) -> list[str]:
