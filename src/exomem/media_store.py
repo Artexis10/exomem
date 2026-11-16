@@ -2276,7 +2276,7 @@ def _cache_selection(vault: Path, conn, parameters: dict[str, object]) -> tuple[
     physical = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone()
     access = "media_access.binary_rel = media_cache.binary_rel"
     jobs = "jobs.binary_rel = media_cache.binary_rel"
-    pending = jobs
+    queued = "EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel AND jobs.state = 'pending')"
     lifetime = ""
     if physical:
         pooled = "substr(media_cache.binary_rel, 1, length(:pool_prefix)) = :pool_prefix"
@@ -2284,8 +2284,10 @@ def _cache_selection(vault: Path, conn, parameters: dict[str, object]) -> tuple[
                   f"AND (media_access.binary_rel = media_cache.binary_rel OR {pooled})")
         jobs = ("jobs.object_key = media_cache.binary_rel OR jobs.object_key IS NULL "
                 f"AND (jobs.binary_rel = media_cache.binary_rel OR {pooled})")
-        pending = ("jobs.binary_rel = media_cache.binary_rel OR jobs.binary_rel IN "
-                   "(SELECT binary_rel FROM media_bindings WHERE object_key = media_cache.binary_rel)")
+        # Two indexed lookups: an OR inside one subquery made each candidate scan every pending job. CROSS JOIN
+        # fixes SQLite's loop order, so the object's few filings drive the path lookups.
+        queued += (" OR EXISTS (SELECT 1 FROM media_bindings pb CROSS JOIN jobs ON jobs.binary_rel = pb.binary_rel "
+                   "WHERE pb.object_key = media_cache.binary_rel AND jobs.state = 'pending')")
         lifetime = (f" AND (NOT ({pooled}) OR (:bindings_current AND "
                     "EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = media_cache.binary_rel) AND "
                     "NOT EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = media_cache.binary_rel "
@@ -2297,9 +2299,8 @@ def _cache_selection(vault: Path, conn, parameters: dict[str, object]) -> tuple[
                 "AND (owner_read IS NULL OR owner_read <= :idle_before) "
                 f"AND NOT EXISTS (SELECT 1 FROM media_access WHERE ({access})) "
                 f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE ({jobs}) AND {_JOB_PINS})" + lifetime)
-    order = ("ORDER BY owner_read IS NOT NULL, "
-             f"CASE WHEN owner_read IS NULL THEN EXISTS (SELECT 1 FROM jobs WHERE ({pending}) "
-             "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read, binary_rel")
+    order = (f"ORDER BY owner_read IS NOT NULL, CASE WHEN owner_read IS NULL THEN {queued} ELSE 0 END, "
+             "size DESC, owner_read, binary_rel")
     return eligible, order, parameters
 
 

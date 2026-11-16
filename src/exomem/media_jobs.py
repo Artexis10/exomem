@@ -990,6 +990,8 @@ class MediaJobStore:
         if "returns" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN returns INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS jobs_hydrated_claims ON jobs(pinned) WHERE hydrated = 1")
+        # A pin check reads only the claimed jobs, so a backlog of pending jobs never enters an eviction decision.
+        conn.execute("CREATE INDEX IF NOT EXISTS jobs_pins ON jobs(pinned) WHERE pinned = 1")
         # One rule for every path that fails or blocks a job, including engine waits and stop limits.
         conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_release_pin AFTER UPDATE OF state ON jobs "
                      "WHEN NEW.state IN ('failed', 'blocked') "
