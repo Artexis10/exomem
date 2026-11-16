@@ -201,13 +201,16 @@ cellctl:
   # cell, longer on a larger vault. A broken image keeps the canary cell down for the
   # whole deadline. The schema allows 5 to 120.
   upgradeReadyDeadlineMinutes: 30
-  # warm-cell-catalogue: rehearsal sets the measured profile and real timeout before enabling.
+  # warm-cell-catalogue: the rehearsal measured a 12,000-note build at 129 to 223 s, 1.1 to
+  # 1.5 cores and 117 MB of anonymous memory (memory.peak 1.9 GB with page cache). The requests
+  # leave room for larger production vaults; the limits keep the earlier ceiling, and page cache
+  # above the memory limit is reclaimed. The timeout covers a build several times that long.
   cataloguePrewarm: false
   catalogueBuildTimeoutSeconds: 1800
   catalogueBuildResources:
     requests:
-      cpu: "2"
-      memory: 3Gi
+      cpu: "1"
+      memory: 1Gi
     limits:
       cpu: "2"
       memory: 3Gi

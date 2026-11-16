@@ -120,4 +120,4 @@ Rollback disables the flag and cancels unfinished build Jobs. Old images ignore 
 
 ## Open Questions
 
-- Rehearsal replaces the conservative resource estimate and sets the bounded build Job timeout. Neither value changes the attempt deadlines or scheduling decision.
+- Rehearsal replaces the conservative resource estimate and sets the bounded build Job timeout. Neither value changes the attempt deadlines or scheduling decision. Answered 2026-11-16 from task 3.1's runs: a 12,000-note build took 129 to 223 s at 1.1 to 1.5 cores and 117 MB of anonymous memory (memory.peak 1.9 GB including page cache). The chart now requests 1 CPU and 1 GiB, so a build fits beside serving cells more often, and keeps 2 CPU and 3 GiB as limits for larger vaults; a cold rebuild on one production cell takes about 8 minutes. The timeout stays 1800 s, several times the longest measured build.
