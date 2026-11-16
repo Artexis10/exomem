@@ -18,7 +18,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Literal
 
 from .. import document_containers, find_corpus, memory_refs, reserved_paths
@@ -618,12 +618,11 @@ def inheritance_edge(
     """
     from .. import extraction_parts, scene_frames
 
-    page = PurePosixPath(rel_path)
+    # `Path`, as the readers before this function used: on Windows its comparison folds case, as NTFS does.
+    page = Path(rel_path)
     if part_of and (source := extraction_parts.source_page_for(page)) is not None:
         return InheritanceEdge(PART_EDGE, source.as_posix())
-    if parent_media is not None and page.parent == scene_frames.frames_dir_for(
-        PurePosixPath(parent_media)
-    ):
+    if parent_media is not None and page.parent == scene_frames.frames_dir_for(Path(parent_media)):
         return InheritanceEdge(FRAME_EDGE, parent_media + ".md")
     return None
 

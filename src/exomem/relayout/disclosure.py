@@ -219,6 +219,21 @@ class Disclosure:
             + len(self.untranslatable or ())
         )
 
+    def unevaluated_governed(self) -> int:
+        """Governed files whose members the plan could not compare, so a zero difference is partial.
+
+        Files that no policy governs, files outside the managed folder and files with no new path
+        (listed as unmappable) are left out of this count on purpose.
+        """
+        skipped = self.not_evaluated
+        return (
+            skipped[FROM_CONTAINER]
+            + skipped[FROM_COMPANION]
+            + skipped["registry_bound"]
+            + skipped["membership_unresolved_today"]
+            + skipped["membership_unresolved_after"]
+        )
+
     def figures(self) -> dict[str, int | None]:
         """The headline figures as counts; None marks a figure whose source did not load."""
         return {

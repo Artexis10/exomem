@@ -42,6 +42,10 @@ def _attention(plan: RelayoutPlan) -> list[str]:
             figures.get("untranslatable_selectors") or 0,
             "policy selectors that cannot be translated",
         ),
+        (
+            plan.disclosure.unevaluated_governed() if plan.disclosure is not None else 0,
+            "governed files whose disclosure the plan could not compare",
+        ),
     ]
     return [f"{sentence}: {count}" for count, sentence in found if count]
 
