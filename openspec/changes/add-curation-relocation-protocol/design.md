@@ -1,215 +1,308 @@
 ## Context
 
-The prepared-relocation protocol in this change is blocked on a capability the
-held filesystem does not have. Every guarantee below rests on a durable
-monotonic parent-namespace generation token for both the retained source and
-destination parents: restart-comparable, non-repeating within its filesystem
-epoch, and changing for every namespace-entry mutation including a rename
-followed by its inverse. Without that token, a stable file identity plus a
-post-crash placement hash cannot tell a completed rename from a crash followed
-by an external inverse rename, and `test_curation_execution.py::test_matching_
-relocation_hashes_cannot_authorize_placement_recovery` pins exactly that
-indistinguishability. The ordered candidate/authorization records, the
-both-parent flush discipline, and exact-target adoption are all consumers of the
-token; none of them can be built first and retrofitted with it, because each one
-decides what to do by comparing generations.
+Curation refuses every relocation step because a crash between a rename and
+its witness could not be told apart from a crash followed by an outside
+inverse rename. The former design closed that gap with a durable
+parent-namespace generation token. No supported filesystem exposes one, so
+that design could never start.
 
-## Decision
+Two further mechanisms stop a rehome even outside curation. A move refuses with
+`APPEND_ONLY` when it would rewrite a link inside a Source or Evidence page.
+The resolver forgets a page's old path, so any link that Exomem cannot rewrite
+dangles. The owner ruled on 2026-11-16 that the content and provenance of
+Sources and Evidence never change, and that their pointers change only through
+a governed, approved, proven, audited and reversible write.
 
-Sequence the ABI work before the protocol work. Add and prove the generation-token
-capability probe in the held filesystem, with its own tests for the reset,
-unavailable, non-monotonic, cross-epoch, and incomparable cases, and only then
-implement candidate publication, authorization, rename, and recovery on top of
-it. Until that lands, `add-governed-curation-lane`'s v1 fail-closed requirement
-is the whole of the shipped behavior, and this change stays unstarted rather
-than half-built: a partially implemented relocation protocol is strictly worse
-than a refusal, because it can publish a transition record it cannot later
-adjudicate.
+This design replaces the token protocol with page lineage, a governed pointer
+write and rename-free recovery.
 
-## The deferred prepared-relocation protocol
+**Goals:** a page moves, alone or in a curation plan, without a dangling link;
+an append-only page changes only in its pointer spans, with proof and an
+exact revert; a crash during a curation move never causes a second rename and
+never loses lineage.
 
-Moved verbatim from `add-governed-curation-lane`'s design when the relocation
-protocol was carved out of that change. It describes the target behavior, not
-shipped behavior: v1 refuses every relocation step fail-closed, and nothing
-below exists in code today.
+**Non-goals:** `delete` and `recover` in curation; moving Source or Evidence
+pages through curation `move` (reclassification relocates them); store-mode
+alias tables.
 
-Filesystem placement leaves (`move`, `delete`, and `recover`) cannot atomically
-commit a namespace rename and a separate witness file on the supported POSIX
-and Windows filesystems. They use an ordered durable prepared-relocation
-protocol instead of claiming impossible cross-file atomicity. V1 placement
-requires the source and destination parents to exist already; it never creates
-knowledge or trash destination directories as an unrecorded precursor effect.
-After canonical leaf validation and exact destination allocation, but before any
-transition artifact or rename, the leaf completes the held-parent capability,
-identity, generation, and durability preflight described below. It then publishes
-canonical create-only `prepared.json` as an inert candidate, flushes its file and
-the transition directory and every newly created governed-run ancestor entry,
-and only then publishes create-only `authorized.json`, flushes that file, and
-flushes its containing transition directory. The authorization binds the
-immutable plan and approval digests to the complete prepared-file digest. Only
-a fully verified authorization permits the rename; a candidate alone has no
-effect authority.
+**Load target and budget:** the design of `make-vault-store-canonical`
+records the product's load target: 20,000 pages, about 100,000 units and
+120,000 edges, with a hub of 10,000 links. The move and create write paths keep
+their current latency budget. Every new lookup is an indexed read, batched per
+request. No write scans the vault, and the resolver reads lineage from a
+derived index, not from page bytes. A move of a hub page rewrites every
+referrer in one batch, as `update_wikilinks` does today. A plan may omit
+`repoint-links` and leave those referrers to resolve through lineage.
 
-The prepared candidate binds the run, plan, approval, ordinal, step and operation
-identity; source and destination; exact source SHA-256, size and stable held-
-filesystem identity; both parent identities and filesystem epoch; destination
-absence; lifecycle and graph transition identities where present; the complete
-deterministic auxiliary-write manifest; parent compensation identity; a logical
-witness-time basis; and the complete deterministic final-witness bytes and
-closed-terminal projection, including their digests. The logical time basis
-records preparation/authorization lineage and does not claim to be the
-unknowable physical instant of a rename recovered after a crash.
+## Decisions
 
-The identities avoid a digest cycle. `preparation_id` hashes a domain separator
-and the immutable candidate core. `authorization_id` hashes its own domain,
-approval digest, operation id, and `preparation_id`. The final witness binds
-those two ids, the logical time basis, and closed result digest. `prepared.json`
-then contains the core, ids, exact final-witness bytes, and witness SHA-256;
-`authorized.json` contains the approval digest, approved plan membership,
-operation and preparation ids, SHA-256 of the complete `prepared.json` bytes,
-final-witness SHA-256, and `authorization_id`. Both files are re-read and
-verified before rename.
+### 1. Lineage lives on the page
 
-Before candidate publication, both existing parents are opened through held no-
-follow operations; a missing parent refuses without creating it. The held
-filesystem capability probe must capture durable, monotonic
-namespace-generation tokens for both source and destination parents (one token
-when they are the same parent), bind the parent identities and filesystem epoch,
-certify that the token is non-repeating within that epoch and changes for every
-namespace-entry mutation including rename followed by inverse rename, and
-durably flush those parents. Unrelated entry changes may conservatively block.
-A volume without comparable restart-durable tokens and retained-parent flush
-capability refuses placement before candidate publication. The rename
-revalidates the held source identity, destination absence, authorization, and
-parent generations, then performs one no-replace executor rename attempt. It flushes
-the held source parent and then the held destination parent, or the shared parent
-once, with a recoverable cut before and between those flushes. Exact-prior
-recovery may reissue the rename only after unchanged lineage proves no durable
-namespace transition. The invariant is at most one durable or adopted placement
-effect, not at most one rename syscall across power loss. A post-rename
-flush failure never triggers an inverse rename; it leaves the authorized
-transition unwitnessed for exact recovery. Exact-target recovery repeats both
-idempotent parent flushes before any auxiliary suffix. The final witness
-reproduces the exact bytes sealed by `prepared.json`, and its file plus containing
-evidence directory are durable before any terminal receipt is created.
+Each move of a Markdown page that has a frontmatter block appends
+`{path: <old path>}` to `moved_from`, oldest first, through `move_file`'s
+`content_transform`, in the same commit as the rename. A reclassification
+entry also carries its prior classification keys, as today. `reclassified_from`
+stays readable as the legacy spelling and is never rewritten to rename the
+key. The page's lineage is the legacy entries followed by the `moved_from`
+entries.
 
-The preparation and authorization are immutable recovery evidence and are never
-deleted. Before ordinary stale-binding blockers run, recovery verifies the
-approved plan, authorization, candidate, capability and live generations, then
-classifies exact placement:
+The page carries its own history. That works in file mode now and in store
+mode later, because a store move already carries new page bytes. A page
+without a frontmatter block moves without lineage, as today: Exomem does not
+invent a frontmatter block in a page it does not otherwise own.
 
-- a candidate without authorization is pre-effect only while exact source,
-  absent destination, and every live guard still match; resume may recreate only
-  its deterministic authorization, while any target placement blocks;
-- with authorization, exact source plus absent destination permits the same
-  operation to retry only when both parent namespace-generation tokens remain
-  exactly at their prepared values and every guard matches; an advanced,
-  unavailable, reset, or incomparable token is
-  `CURATION_RENAME_HISTORY_UNPROVABLE`, never evidence that the rename did not
-  happen;
-- absent source plus exact destination with the prepared stable identity means
-  the authorized desired placement currently exists. Recovery adopts that exact
-  placement without claiming whether the executor or an external actor produced
-  it, issues no executor rename, repeats both parent flushes, and only then rolls
-  forward the bound missing auxiliary writes, graph/lifecycle suffix, exact
-  prepared witness, and terminal receipt. Parent generations must be comparable
-  in the same filesystem epoch and show a namespace transition; an exact target
-  with unchanged generations is invalid;
-- a final witness without a terminal receipt is verified and receipted without
-  invoking the leaf; and
-- missing, reset, incomparable, or non-monotonic parent generation history,
-  including unchanged generations at exact target, is
-  `CURATION_RENAME_HISTORY_UNPROVABLE` and blocks before placement attribution;
-- both paths, neither path, a wrong hash or stable identity, a competing or
-  substituted transition record, a missing authorization after target placement,
-  a third-state auxiliary write, or any authorization/preparation/witness/live
-  disagreement is `CURATION_OUTCOME_UNCERTAIN` and blocks.
+The two field names are protocol tokens that this specification fixes, so code
+holds them with a one-line reason. They are not vocabulary.
 
-The recovery cut this protocol adds to the executor's enumerated cuts, also
-verbatim from the v1 design's five-cut list, where it was cut 3:
+An undo is not a move. A reclassification revert and a curation compensation
+remove the lineage entry that the forward move appended and append none. A
+plain move back to an old path appends an entry as any move does.
 
-3. a placement transition with no final witness: a lone prepared candidate is
-   inert; an authorized exact-prior placement retries only with unchanged parent
-   generations; an authorized exact-target placement is adopted and rolls
-   forward with no recovery-issued rename; and any other state blocks as
-   uncertain;
+Lineage also makes every move change the page's bytes. The child batch after
+the rename is therefore never empty, and a curation witness always rides in it.
 
-## Residual v1 design text moved here
+### 2. Resolution follows lineage for reads; write targets stay literal
 
-Removed from `add-governed-curation-lane`'s design when the relocation protocol
-was carved out of that change, so that design agrees with its own spec and
-tasks. Every block below is verbatim, labelled by the v1 design section it came
-from. It describes target behavior for this change, not shipped behavior.
+`_normalize_wikilink` gains two steps. The order becomes: exact path, wrapper-
+prefixed path, prior path, retired collection path, stem, title, prior stem.
+Slash paths take the path steps and bare names take the name steps, as today.
 
-### From decision 2, canonical run layout
+- A prior path resolves only when exactly one live page that the caller may see
+  claims it. The visibility filter runs before claimants are counted. A hidden
+  claimant answers as missing.
+- A lineage entry equal to the page's current path claims nothing.
+- A prior stem resolves only when no live name matches and exactly one page
+  claims that stem.
+- A→B→C needs no chain walk, because the page at C carries both A and B.
+- Graph, audit and inbound-link owners use this resolver, so a derived owner
+  never disagrees with a read.
 
-Two entries in the run-layout tree:
+Write targets never follow lineage: the path argument of edit, move, delete or
+create names the file it acts on, so the guard and the executor judge the same
+path. Link resolution inside written content does follow lineage, and the
+writer renders a link that names a prior path as a link to the current path.
 
-```
-  transitions/<operation_id>/prepared.json
-  transitions/<operation_id>/authorized.json
-```
+Lineage has two durable sources. The first is the page's own lineage. The
+second is the relayout record that `adopt-root-vault-layout` keeps in the
+vault. Each row of that record names an `exomem_id` or none, an old path and a
+new path. A bulk relayout writes no `moved_from`, because rewriting every page
+would multiply its write cost. A row with an `exomem_id` claims its old path
+for the live page that holds that id. A row without one claims it for the live
+page whose current path or lineage holds the row's new path. Both sources
+follow the same resolution, visibility, reserved-path and squatter-guard
+rules. A row that a relayout revert reverses claims nothing.
 
-and the state-reconstruction sentences:
+The lookup reads a derived `prior_paths(prior_path, path)` table beside
+`identities`. The writers that refill an identity row refill its prior-path
+rows in the same statement, in both the sidecar and the store. The refill
+folds in the relayout rows that claim for that page, so each row maps a prior
+path straight to its current claimant and a read never walks a chain. The
+relayout record is indexed by `exomem_id` and by new path for that refill. The
+table is a derived index, not a third source: a rebuild derives it from page
+bytes and the relayout record alone.
+`find_inbound_wikilinks` also reads the target's own lineage from its bytes,
+so delete and move checks never depend on a stale index. The resolver reuses
+the per-request batch object of `collection_store.aliases.LinkTargets`.
 
-can be rebuilt from immutable plans, approvals, relocation candidates,
-relocation authorizations, witnesses, and receipts, so a stale state projection
-is repairable rather than authoritative. Each operation has exactly one
-canonical `prepared.json` candidate and one canonical `authorized.json`; digest-
-named preparation aliases and competing candidates are refused.
+### 3. Prior paths stay reserved
 
-### From decision 7, partial failure
+`unique_path` and every create-only check treat a prior path that a live page
+claims as taken. A page may move back to a path in its own lineage. A holder
+that the caller may not see answers with the non-disclosing `WRITE_REFUSED`.
 
-with the same operation id after guards are rechecked. A placement failure after
-relocation preparation is classified from its verified candidate, authorization,
-namespace lineage, and exact placement before retry, roll-forward, or refusal.
+A file without an `exomem_id` at a reserved path does not take the address.
+Following a dead link in an editor creates exactly such an empty file. The
+resolver keeps sending the link to the lineage claimant, and the audit flags
+the file for removal.
 
-### From decision 8, compensation
+### 4. The governed pointer write
 
-It is immutable, has its own fingerprint and approval rationale, uses the same
-one-step content-witness or prepared-relocation evidence protocol and terminal
-receipts, and links every result to the forward plan.
+The pointer write is the only way an append-only page changes after capture.
+The capture writers that finish a page's processing record or assign its
+`exomem_id` keep their own rules; they are part of capture.
+It has four callers: a move that repoints referrers, the curation
+`repoint-links` step, reclassification, and the in-place pointer correction.
+Every governed move behaves the same way. Reclassification uses the write for
+the Source's own classification fields and folder, and it repoints its
+append-only referrers like any move. Its revert restores those referrers from
+their pointer-write records. Lineage stays the safety net for every reference
+that a move does not write. Each caller declares the spans it intends to
+change. The write admits a span only when it is one of these:
 
-### From decision 9, hosted and standalone
+- a wikilink target whose old and new forms resolve to the same `exomem_id`;
+- the value of a frontmatter field that the `page-fields` registry declares
+  with `role: pointer`;
+- through a move, the page's own folder and the lineage entry that the move
+  appends or its undo removes.
 
-same retained filesystem epoch reconstructs from those vault artifacts. If a
-placement transition's filesystem epoch or parent tokens become incomparable,
-the same portable evidence still powers status but recovery blocks with
-`CURATION_RENAME_HISTORY_UNPROVABLE`; portability does not manufacture rename
-history on a different filesystem.
+The write parses the page and compares the before and after span lists. Every
+byte outside an admitted, declared span must be identical. Any other
+difference refuses with `APPEND_ONLY`. A regex never decides what changed.
+Original media, body text and provenance therefore never change.
 
-### Relocation fault-injection barriers, from decision 10
+A call approves the writes to the page it names: a direct move, promotion,
+reclassification or in-place correction needs no digest. A pointer write to a
+page that the call did not name, such as a referrer repoint, needs a curation
+plan approval or a commit bound to the digest of the preview that listed it.
+The digest proves that the caller saw the side effects. It is not operator
+approval, so on the named page it would cost a round trip and prevent nothing.
+A missing or stale digest refuses with `POINTER_PREVIEW_REQUIRED`.
 
-The curation executor exposes test-only barriers after prepared-state commit;
-for placement leaves, after each retained-parent preflight flush, candidate-file
-flush, each newly created governed-run ancestor-entry flush, candidate containing-
-parent flush, authorization-file flush, authorization-parent flush, rename before
-any parent flush, each distinct parent flush, each bound auxiliary-write prefix,
-graph/lifecycle finalisation, final-witness file flush, and witness-parent flush;
-for content leaves,
-after leaf+witness commit; after terminal-receipt commit; and after each
-equivalent compensation cut. Tests terminate/recreate the executor with an
-abrupt `BaseException` at every barrier, then call read-only `status` and exact
-replay. Acceptance requires zero or one durable/adopted semantic effect, at most
-one durable/adopted placement and no recovery-issued rename from an exact target,
-one terminal receipt, correct next-step selection, and byte-
-identical plan identity at every cut. A changed
-plan id/fingerprint, altered target, substituted stable identity, advanced or
-unavailable prior-state generation, unchanged target-state generation,
-cross-epoch lineage, or ambiguous placement must refuse, not recover
-optimistically.
+Each write creates one create-only, owner-only record. It names the page, the
+write's reason, the before and after content hashes, and each span's location,
+old bytes and new bytes. A curation write keeps that record in its run evidence. A revert applies
+only while the page holds the recorded after hash, and its result must hash to
+the recorded before hash.
 
-### From Risks / Trade-offs
+**In-place correction.** A pointer field on an append-only page can be wrong
+without the page moving, for example a Source whose `project` names a project
+that the owner has merged into another. `edit_memory` already routes its
+`patch_frontmatter` operation to `set_frontmatter_field`, which refuses every
+append-only page with `APPEND_ONLY`. That refusal narrows: a field whose
+registry role is `pointer` passes to the pointer write, and every other field
+keeps the refusal. The correction patches the value span only. It sets no
+`updated` and keeps line endings, because `updated` is not a pointer and the
+span proof would refuse it. Curation needs no new step kind: its `edit` step
+already dispatches `patch_frontmatter` through `op_edit_memory`, so a plan
+carries the correction and the plan approval is its approval. Compensation
+reverses it through the pointer write's revert, because a superseding
+correction is refused on a Source.
 
-- **[Risk] Commit evidence touches several mature writers.** → Keep the content
-  witness seam private and additive; use ordered durable operation-bound
-  candidate and authorization records for rename leaves; test every allowed
-  adapter against its ordinary leaf; and reject a step kind whose effect is
-  neither same-batch witnessed nor exactly reconstructible at every transition
-  cut.
+The registry replaces a code list. `access._APPEND_ONLY` stays as old C4 debt
+for the content refusal; this change does not extend it.
 
-### From the Migration Plan
+### 5. Moves repoint, and the preview names every outcome
 
-3. Add the private content-leaf commit-witness seam and the placement-leaf
-   prepared-relocation seam, one adapter at a time with crash tests before
-   enabling its step kind.
+For a page with an `exomem_id`, an append-only referrer no longer refuses the
+move. The move repoints it through the pointer write in the same batch. The
+preview gives each referrer exactly one outcome:
+
+- `rewritten` for a writable page;
+- `pointer-repointed (append-only page)`;
+- `unchanged: resolves via prior path` for a page the mover may not write or
+  see, and for references Exomem does not own, such as Records rows, planning
+  items, Evidence JSON and other clients' memories;
+- `refused`, with its cause.
+
+A commit that repoints an append-only page must carry the digest of the
+preview that listed it. That is the approval, under the rule of Decision 4.
+A page without an `exomem_id` keeps today's `APPEND_ONLY` refusal, because
+nothing can prove that a repointed link still names it.
+
+Control costs: the digest prevents an unreviewed side effect on a captured
+page that the caller did not name. It fires wrongly only when the preview is
+stale, and then the agent previews again at the cost of one call.
+
+### 6. Curation runs `move`, rehomes with `fields`, and repoints once
+
+The relocation predicate narrows to `delete` and `recover`. A curation `move`
+step moves bytes and lineage only; it takes no `update_wikilinks`. It takes an
+optional `fields` patch, limited to registry pointer fields, so a rehome
+changes `project` in the same commit. A `move` still refuses Sources and
+Evidence: reclassification relocates them.
+
+A new final step, `repoint-links`, rewrites the referrers of every earlier
+`move` step in one batch. It binds a page that an earlier move wrote at that
+move's sealed after hash, as the fold `Projection` already does, so a plan of
+many moves never hits `CURATION_STEP_CONFLICT`. Between the moves and the
+repoint, every link resolves through lineage, so the run has no dangling
+window. A plan without `repoint-links` is valid; its referrers keep resolving
+through prior paths.
+
+### 7. Recovery adopts a completed rename and never renames
+
+Before the rename, the executor publishes and flushes a create-only intent
+record from a pre-rename seam that runs once. The record binds the operation
+id, both paths, the sealed before hash and the sealed rename-after state.
+Recovery reads the live state:
+
+| State found on recovery | Outcome |
+|---|---|
+| No intent record; page at the old path with the sealed bytes | Exact retry, if every guard still matches |
+| Intent record; page at the old path with the sealed bytes | `CURATION_RENAME_HISTORY_UNPROVABLE`; the owner re-proposes the rest |
+| Intent record; old path absent; new path holds the sealed rename-after bytes | Adopt, and roll the batch forward |
+| Witness and new path match the sealed postcondition | Committed, through the existing witness recovery |
+| Page at the old path with other bytes | `CURATION_BINDING_STALE` |
+| Page at neither path, at both, or any other mix | `CURATION_OUTCOME_UNCERTAIN` |
+
+What the strict second row prevents: re-applying a move that someone outside
+Exomem undid during the crash window. What it costs when it fires wrongly: one
+re-proposal. The fold leaf already decides recovery from live state without a
+token, so this is no weakening.
+
+A non-curation move keeps its old crash window between the rename and the
+batch. That is old debt and out of scope.
+
+### 8. Adopt publishes the move without a rename
+
+The spike drove a move to a crash right after the rename and then published it
+with no rename. In a plain vault, identity, graph nodes and edges, and lexical
+search matched an uninterrupted move. In an enrolled vault the catalog served
+the stale old path after the crash and the new path after adopt. The adopt
+branch reuses most of the move:
+
+- **Semantic preflight:** `preflight_move` must run against a virtual before
+  corpus. The disk corpus already holds the page at the new path, so the
+  branch puts it back at the old path with `_move_state_map`. The guards bind
+  the rename-after state (old path absent, new path holding the sealed bytes),
+  not the pre-rename state. Needs an adopt mode.
+- **Lifecycle:** `commit_move` rechecks pre-rename guards and cannot be used.
+  The branch plans `_plan_move_lifecycle` under the semantic creation lock and
+  rechecks the rename-after guards. Needs an adopt commit.
+- **Graph:** `prepare_rename_epoch` reads the new bytes from the old path.
+  The branch needs an epoch over the same two paths that reads them from the
+  new path, then `publish_rename_epoch`.
+- **Reused unchanged:** `prepare_catalog_membership_batch` with the old path
+  removal bound to the sealed before hash, `publish_markdown_batch`,
+  `batch_atomic_write` with the destination bound to the sealed bytes, and
+  `index_sync.delete_after_remove` for the old path.
+- **Not yet exercised:** the curation witness in the batch, store mode,
+  paired binaries and part folders, the activity log entry, working-set heat,
+  watcher suppression and restricted movers.
+
+In store mode the move commits in one store transaction, so there is no
+rename window and recovery reads committed or not committed from the store.
+
+### 9. Compensation restores sealed bytes
+
+Compensating a `move` moves the page back with its sealed pre-step bytes:
+the lineage entry and the `fields` patch go away. Compensating `repoint-links`
+returns each rewritten page to its sealed pre-step bytes, and each
+append-only page through the pointer write's revert. Compensating an `edit`
+step that corrected a pointer field on an append-only page also uses that
+revert. Compensation runs in reverse order, so referrers return before their
+target does.
+
+## Risks / Trade-offs
+
+- A stale `prior_paths` row can miss a claim after an outside edit. The link
+  then reads as unresolved, never as another page, and the next index refresh
+  repairs it. Inbound and delete checks read lineage from bytes.
+- Reserving prior paths can refuse a create that the owner meant as reuse. The
+  refusal names the claimant when the caller may see it, and moving the
+  claimant releases nothing: the owner renames the new page instead.
+- Lineage grows with each move. Entries are short paths, and pages rarely move
+  more than a few times.
+
+## Coordination
+
+`make-source-reclassification-reversible` shipped Phase 1 with
+`reclassified_from`. Its delta now names `moved_from` and records this change
+as the delivery of its Phase 2, whose history-aware reads this change widens
+from Sources to every page with lineage. Its path-link scenario changes from a
+refusal to a repoint through the pointer write, and its revert restores the
+repointed pages from their records. That change archives after this one ships.
+This change does not modify its reclassification requirements.
+
+`adopt-root-vault-layout` keeps the relayout record in the vault as the second
+lineage source, with the row shape above. Its `command-surface` delta of
+"Append-Only Tree Relocation", which allowed link-only repoints in store mode,
+moves into this change. This change's version is the single rule for both
+modes, so that change drops its delta and archives after this one. The
+relayout's link and pointer-field edits in append-only pages run through the
+pointer write, approved by the digest of the relayout plan.
+
+## Open Questions
+
+- Pages without an `exomem_id` keep the `APPEND_ONLY` refusal. Older vaults may
+  hold many such pages; a census on a real vault copy would size the gap.
