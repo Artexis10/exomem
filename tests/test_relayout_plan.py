@@ -29,7 +29,7 @@ from relayout_fixture import (
     add_attachment_links,
     add_container_member_and_companion,
     add_markdown_original_with_links,
-    add_renamed_video,
+    add_video_with_titled_pages,
     build_nested_vault,
 )
 
@@ -272,43 +272,25 @@ def test_a_part_page_follows_its_source_pages_new_name_and_keeps_its_own(vault, 
     assert (move["name_class"], move["fixed_because"]) == ("fixed", "extraction_part")
 
 
-def test_the_frames_of_a_video_whose_page_is_renamed_move_to_the_frames_folder_of_the_new_name(
-    vault, capsys
-):
-    add_renamed_video(vault)
+def test_a_page_named_after_the_file_beside_it_keeps_its_name_whatever_its_title(vault, capsys):
+    add_video_with_titled_pages(vault)
     report = full_report(capsys, vault)
 
-    folder = "Sources/Media/Reel highlights.frames"
-    assert move_of(report, f"{REEL}.md")["new_path"] == "Sources/Media/Reel highlights.md"
+    folder = "Sources/Media/reel.mp4.frames"
+    # The video, its page, the frames folder and the frame pages keep their names; only the prefix drops.
+    page = move_of(report, f"{REEL}.md")
+    assert (page["new_path"], page["fixed_because"]) == (
+        "Sources/Media/reel.mp4.md",
+        "sidecar_of_a_file",
+    )
     assert move_of(report, REEL)["new_path"] == "Sources/Media/reel.mp4"
     for name in REEL_FRAMES:
-        # The frame page and its image keep their own names, whatever title the page carries.
         sidecar = move_of(report, f"{REEL}.frames/{name}.md")
         assert (sidecar["new_path"], sidecar["fixed_because"]) == (
             f"{folder}/{name}.md",
-            "scene_frame",
+            "sidecar_of_a_file",
         )
         assert move_of(report, f"{REEL}.frames/{name}")["new_path"] == f"{folder}/{name}"
-
-
-def test_a_frame_of_a_renamed_video_page_is_repointed_so_the_kernel_still_finds_its_video_page(
-    vault, capsys
-):
-    add_renamed_video(vault)
-    report = full_report(capsys, vault)
-
-    edits = {
-        (edit["page"], edit["field"]): (edit["old"], edit["new"])
-        for edit in items(report["pointer_edits"])
-    }
-
-    for name in REEL_FRAMES:
-        # The value plus `.md` is the page that the frame's folder name points to.
-        assert edits[(f"{REEL}.frames/{name}.md", "parent_media")] == (
-            REEL,
-            "Sources/Media/Reel highlights",
-        )
-    assert report["diagnostics"]["pointer_failures"] == []
 
 
 def test_a_page_in_a_notes_folder_that_no_type_owns_keeps_its_path_and_is_reported(vault, capsys):

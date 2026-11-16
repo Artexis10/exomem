@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
@@ -348,7 +349,8 @@ class FixedBecause(StrEnum):
     NO_TITLE = "no_frontmatter_title"
     NO_USABLE_NAME = "no_usable_name"
     EXTRACTION_PART = "extraction_part"
-    SCENE_FRAME = "scene_frame"
+    # The writer, the access kernel and the backfills bind a page named `<file>.md` to the file beside it by that name.
+    FILE_SIDECAR = "sidecar_of_a_file"
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +396,7 @@ def place(
     type_value: object,
     title: object,
     registry: Registry,
+    files: AbstractSet[str] = frozenset(),
 ) -> Placement | None:
     """Where the page at `current_path` goes in `root`, or None when it is outside the managed root.
 
@@ -401,9 +404,10 @@ def place(
     frontmatter. The folder follows a prefix rewrite: the managed root drops, and `Notes/`
     drops before a registered area. A `Notes/<X>` folder with no registered area keeps its
     level and is named in `unregistered_folder`. The name class follows the page's note type,
-    and the first rule that keeps a name wins.
+    and the first rule that keeps a name wins. `files` holds the path of every file the plan
+    lists, so that a page named after the file beside it is found by that file's existence.
     """
-    from . import scene_frames, semantic_contract
+    from . import semantic_contract
     from .vault_store import ownership
 
     below = kbdir.managed_split(current_path)
@@ -425,10 +429,8 @@ def place(
             NameClass.FIXED,
             stem,
             extension,
-            # A part page or a frame is named by its position and shares that name with those of every other page.
-            holds_name=markdown
-            and not machinery
-            and because not in (FixedBecause.EXTRACTION_PART, FixedBecause.SCENE_FRAME),
+            # A part page is named by its position and shares that name with the parts of every other page.
+            holds_name=markdown and not machinery and because is not FixedBecause.EXTRACTION_PART,
             fixed_because=because,
             unregistered_folder=unregistered,
         )
@@ -439,8 +441,8 @@ def place(
         return keep(FixedBecause.MACHINERY)
     if extraction_parts.source_page_for(PurePosixPath(current_path)) is not None:
         return keep(FixedBecause.EXTRACTION_PART)
-    if scene_frames.owner_page_of(PurePosixPath(current_path)) is not None:
-        return keep(FixedBecause.SCENE_FRAME)
+    if current_path[: -len(extension)] in files:
+        return keep(FixedBecause.FILE_SIDECAR)
     # The write gate's own list of generated navigation names; a bare Markdown name matches no folder.
     if semantic_contract.compiled_route_exempt(filename):
         return keep(FixedBecause.NAVIGATION)
@@ -609,29 +611,18 @@ def allocate(placements: Iterable[Placement]) -> Allocations:
 
 
 def final_paths(placements: Iterable[Placement], allocations: Allocations) -> dict[str, str]:
-    """The new path of every placed file.
-
-    A companion folder follows its owner page by name, so a file inside it never keeps its own
-    folder: a part page takes the new folder of its source page, and a scene frame takes the
-    frames folder of its video's page, named after that page's new file name.
-    """
-    from . import scene_frames
-
+    """The new path of every placed file. A part page follows its source page's new folder, never its own."""
     moved = {allocation.current_path: allocation.new_path for allocation in allocations.placed}
     for placement in placements:
+        if placement.fixed_because is not FixedBecause.EXTRACTION_PART:
+            continue
         if placement.current_path not in moved:
             continue
-        path = PurePosixPath(placement.current_path)
-        # The two companion folders that name an owner page; each module owns its folder rule.
-        if (owner := extraction_parts.source_page_for(path)) is not None:
-            folder_for = extraction_parts.folder_for
-        elif (owner := scene_frames.owner_page_of(path)) is not None:
-            folder_for = scene_frames.frames_dir_for_page
-        else:
-            continue
-        new_owner = moved.get(owner.as_posix())
-        if new_owner is not None:
+        source = extraction_parts.source_page_for(PurePosixPath(placement.current_path))
+        new_source = moved.get(source.as_posix()) if source is not None else None
+        if new_source is not None:
+            folder = extraction_parts.folder_for(PurePosixPath(new_source))
             moved[placement.current_path] = (
-                folder_for(PurePosixPath(new_owner)) / path.name
+                folder / PurePosixPath(placement.current_path).name
             ).as_posix()
     return moved

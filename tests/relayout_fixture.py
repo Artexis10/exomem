@@ -328,12 +328,13 @@ REEL = f"{KB}/Sources/Media/reel.mp4"
 REEL_FRAMES = tuple(f"scene-{index:03d}-t{ms}ms.jpg" for index, ms in enumerate((0, 4500)))
 
 
-def add_renamed_video(root: Path) -> None:
-    """Add a video whose page a title renames, and two scene frames in the folder that its file name owns.
+def add_video_with_titled_pages(root: Path) -> None:
+    """Add a video and two scene frames, each with a page that carries a title and a note type.
 
-    A frame sits in `<video file name>.frames/` and names the video file in `parent_media`; the
-    access kernel reads the frame's video page as that value plus `.md`. The frame pages are typed
-    like the pages that the sidecar writer produces, so a title rule would rename them if the plan let it.
+    A page named `<file name>.md` beside its file is bound to that file by its name: the frame sits
+    in `<video file name>.frames/` and names the video file in `parent_media`, and the access
+    kernel reads the frame's video page as that value plus `.md`. The titles are those that the
+    sidecar writer produces, so a title rule would rename every page if the plan let it.
     """
     _write(root, REEL, b"video")
     _page(
@@ -363,12 +364,12 @@ RATE_LINKER = f"{KB}/Notes/Insights/rate-linker.md"
 def add_markdown_original_with_links(root: Path) -> None:
     """Add a Markdown original kept as evidence, the page that describes it, and a page that links to both.
 
-    The page's file name is the original's name plus `.md`, so it ends in `.md.md`. The plan
-    leaves it untitled, so it keeps that name and moves with its folder. Obsidian reads `[[rate-notes.md]]`
+    The page's file name is the original's name plus `.md`, so it ends in `.md.md`, and the plan keeps
+    that name because the page is named after the file beside it. Obsidian reads `[[rate-notes.md]]`
     as the original and needs `[[rate-notes.md.md]]` for the page.
     """
     _write(root, RATE_ORIGINAL, "Rates agreed in the call.\n")
-    _page(root, RATE_PAGE, {"type": "evidence"})
+    _page(root, RATE_PAGE, {"type": "evidence", "title": "Rate notes"})
     _page(
         root,
         RATE_LINKER,

@@ -23,8 +23,8 @@ import math
 import os
 import re
 import tempfile
-from pathlib import Path, PurePath
-from typing import TYPE_CHECKING, BinaryIO, TypeVar
+from pathlib import Path
+from typing import TYPE_CHECKING, BinaryIO
 
 from . import embeddings, index_sync, semantic_contract
 from .governance import projected_retrieval
@@ -45,7 +45,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 FRAMES_DIR_SUFFIX = ".frames"
-_PathT = TypeVar("_PathT", bound=PurePath)
 JPEG_MAX_SIDE = 1280  # downscale bound — keeps slide/terminal text legible for OCR
 JPEG_QUALITY = 80
 
@@ -59,37 +58,9 @@ def scene_frames_enabled() -> bool:
     return embeddings.scene_frames_enabled()
 
 
-def frames_dir_for(video_path: _PathT) -> _PathT:
+def frames_dir_for(video_path: Path) -> Path:
     """`<dir>/<video-filename>.frames/` — the sibling directory owning this video's frames."""
     return video_path.with_name(video_path.name + FRAMES_DIR_SUFFIX)
-
-
-def video_page(video: _PathT) -> _PathT:
-    """The page that describes a video: its file name plus `.md`, as the sidecar writer names it."""
-    return video.with_name(video.name + ".md")
-
-
-def video_of_page(page: _PathT) -> _PathT:
-    """The path that names a video's page without its `.md`, which `parent_media` holds."""
-    return page.with_name(page.name.removesuffix(".md"))
-
-
-def frames_dir_for_page(page: _PathT) -> _PathT:
-    """The frames folder of the video that the page at `page` describes."""
-    return frames_dir_for(video_of_page(page))
-
-
-def owner_page_of(frame: _PathT) -> _PathT | None:
-    """The video page that owns the frames folder `frame` sits in, or None when it sits in none.
-
-    Resolved from the path alone, as the kernel's frame edge reads it: a folder named
-    `<video file name>.frames` belongs to the page `<video file name>.md` beside it.
-    """
-    folder = frame.parent
-    video = folder.name.removesuffix(FRAMES_DIR_SUFFIX)
-    if video == folder.name or not video:
-        return None
-    return video_page(folder.with_name(video))
 
 
 def frame_timestamp_ms(ts: float) -> int:

@@ -215,6 +215,7 @@ def _place_all(
     inventory: Inventory, facts: Mapping[str, PageFact], registry: layout.Registry
 ) -> list[layout.Placement]:
     placements: list[layout.Placement] = []
+    files = frozenset(item.path for item in inventory.managed)
     for item in inventory.managed:
         fact = facts.get(item.path)
         placement = layout.place(
@@ -222,6 +223,7 @@ def _place_all(
             type_value=fact.type_value if fact else None,
             title=fact.title if fact else None,
             registry=registry,
+            files=files,
         )
         if placement is not None:
             placements.append(placement)

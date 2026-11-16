@@ -21,7 +21,7 @@ from relayout_fixture import (
     add_container_member_and_companion,
     add_governed_content,
     add_links_from_collection_and_part_pages,
-    add_renamed_video,
+    add_video_with_titled_pages,
     build_nested_vault,
 )
 from test_relayout_plan import PART_PAGE, full_report, tree_state
@@ -140,11 +140,11 @@ def test_an_inheritance_edge_that_breaks_names_its_reason_and_what_the_page_gets
     assert disclosure["files_not_evaluated"]["membership_unresolved_after"] == 0
 
 
-def test_the_frames_of_a_video_page_that_the_plan_renames_keep_inheriting_its_scopes(
+def test_the_frames_of_a_video_with_a_titled_page_keep_inheriting_its_scopes(
     governed_vault, capsys
 ):
-    """A frame inherits from its video page; a rename that left the frame behind would cut it off."""
-    add_renamed_video(governed_vault)
+    """A frame inherits from the page named after its video; a title name for that page would cut it off."""
+    add_video_with_titled_pages(governed_vault)
     disclosure = disclosure_of(capsys, governed_vault)
 
     broken = {item["page"] for item in disclosure["broken_inheritance_edges"]["items"]}
