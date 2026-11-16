@@ -217,7 +217,7 @@ def test_capture_then_cite_updates_both_sides(vault: Path) -> None:
 
     assert (vault / result.path).is_file()
     source_text = (vault / source_rel).read_text(encoding="utf-8")
-    assert "[[Knowledge Base/Notes/Insights/capture-then-cite]]" in source_text
+    assert f"[[{result.path.removesuffix('.md')}]]" in source_text
 
 
 def test_backref_keeps_a_default_style_ingested_into_list_readable(vault: Path) -> None:
@@ -381,7 +381,7 @@ def test_retry_after_original_capture_commits_the_unchanged_derived_write(
     committed = _remember(vault, title="Retry after capture", sources=[supplied])
 
     assert (vault / committed.path).is_file()
-    assert "retry-after-capture" in (vault / source_rel).read_text(encoding="utf-8")
+    assert Path(committed.path).stem in (vault / source_rel).read_text(encoding="utf-8")
 
 
 def test_concurrent_source_change_refuses_without_half_publishing(

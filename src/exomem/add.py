@@ -417,7 +417,7 @@ def prepare_source_metadata(
         raise AddError(code=err.code, missing=list(err.missing), reason=err.reason)
     try:
         filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root
+            title, slug, vault_root=vault_root, dated=True
         )
     except InvalidSlugError as e:
         raise AddError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e

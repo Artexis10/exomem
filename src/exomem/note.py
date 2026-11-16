@@ -631,7 +631,9 @@ def _legacy_note(
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     try:
-        filename_slug, slug_warnings = resolve_filename_slug(title, slug, vault_root=vault_root)
+        filename_slug, slug_warnings = resolve_filename_slug(
+            title, slug, vault_root=vault_root, dated=_dated_name(note_type)
+        )
     except InvalidSlugError as e:
         raise NoteError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
 
@@ -1840,6 +1842,12 @@ def _frontmatter_lines(fields: Mapping[str, str | Sequence[str]]) -> str:
     return "\n".join(lines)
 
 
+def _dated_name(note_type: str) -> bool:
+    """Whether the type's file name carries a date: its registry `stem` is not the bare slug."""
+    definition = note_types.shipped_registry().types.get(note_type)
+    return definition is not None and definition.stem != "slug"
+
+
 def planned_destination(
     vault_root: Path,
     *,
@@ -1858,7 +1866,9 @@ def planned_destination(
     creates the note later passes the same day to `note` as `_path_date`.
     """
     root = Path(vault_root)
-    filename_slug, _warnings = resolve_filename_slug(title, slug, vault_root=root)
+    filename_slug, _warnings = resolve_filename_slug(
+        title, slug, vault_root=root, dated=_dated_name(note_type)
+    )
     path = _resolve_path(
         vault_root=root,
         note_type=note_type,
@@ -1956,7 +1966,9 @@ def note(
             raise NoteError(error.code, ["topics"], error.reason, error.details) from error
         topic_writes = topic_plan.writes
     try:
-        filename_slug, slug_warnings = resolve_filename_slug(title, slug, vault_root=vault_root)
+        filename_slug, slug_warnings = resolve_filename_slug(
+            title, slug, vault_root=vault_root, dated=_dated_name(note_type)
+        )
     except InvalidSlugError as error:
         raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
     if status is None:

@@ -1,4 +1,4 @@
-"""Search hits and entity refusals name a page by its title, not its storage path or stored link.
+"""Search hits, page reads, entity candidates and entity refusals name a page by its title, not its storage path or stored link.
 
 Each case drives the real MCP server over a temporary vault, as an agent does. `detail="full"` on a
 search keeps the path and the stored link, for a harness that reads vault files.
@@ -121,5 +121,43 @@ def test_entity_filename_clash_refusal_names_the_holder_by_title(build) -> None:
             assert refused["code"] == "ENTITY_EXISTS"
             assert "Orbit Lab" in refused["message"]
             assert "Knowledge Base/" not in refused["message"]
+
+    asyncio.run(run())
+
+
+def test_read_page_leads_with_the_title_and_its_id_opens_the_page(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            await _create_entity(client)
+
+            read = await _call(client, "read_page", {"page": ENTITY_NAME})
+
+            assert next(iter(read)) == "title" and read["title"] == ENTITY_NAME
+            assert "path" not in read
+            assert read["diagnostics"]["path"].endswith("Jäne Exämple.md")
+            # The handle in the reply opens the same page in a follow-up call.
+            for handle in (read["id"], read["ref"]):
+                again = await _call(client, "read_page", {"page": handle})
+                assert again["title"] == ENTITY_NAME and again["content_hash"] == read["content_hash"]
+
+    asyncio.run(run())
+
+
+def test_resolve_entity_candidates_lead_with_the_title_and_their_handle_works(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            await _create_entity(client)
+
+            answer = await _call(
+                client, "connect_memory", {"operation": "resolve-entity", "name": ENTITY_NAME}
+            )
+
+            candidate = answer["candidates"][0]
+            assert next(iter(candidate)) == "title" and candidate["title"] == ENTITY_NAME
+            assert "path" not in candidate
+            assert candidate["diagnostics"]["path"].endswith("Jäne Exämple.md")
+            for handle in (candidate["id"], candidate["ref"]):
+                opened = await _call(client, "read_page", {"page": handle})
+                assert opened["title"] == ENTITY_NAME
 
     asyncio.run(run())

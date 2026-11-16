@@ -386,7 +386,10 @@ def _stored(vault: Path, title: str) -> str:
     return ""
 
 
-def test_an_agent_reads_a_title_link_and_edits_the_span_it_copied(build, vault) -> None:
+def test_an_agent_reads_a_title_link_and_edits_the_span_it_copied(build, vault, monkeypatch) -> None:
+    # The `slug` style makes the stored path differ from the title, which is what the link display bridges.
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+
     async def scenario(client):
         await _call(client, "create_note", {
             "title": "Backoff ceiling", "type": "insight", "unlinked_reason": "A standalone test note.",
@@ -427,7 +430,9 @@ def test_an_agent_reads_a_title_link_and_edits_the_span_it_copied(build, vault) 
     )["body"]
 
 
-def test_an_observation_written_with_a_title_link_stores_the_path_form(build, vault) -> None:
+def test_an_observation_written_with_a_title_link_stores_the_path_form(build, vault, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+
     async def scenario(client):
         for title in ("Backoff ceiling", "Jitter policy"):
             await _call(client, "create_note", {

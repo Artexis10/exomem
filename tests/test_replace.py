@@ -208,8 +208,8 @@ def test_replace_renders_supersession_links_for_kb_rooted_obsidian(vault: Path) 
 
     old_text = _read(vault / result.old_path)
     new_text = _read(vault / result.new_path)
-    assert "[[Notes/Insights/nested-root-new]]" in old_text
-    assert "[[Notes/Insights/nested-root-old]]" in new_text
+    assert f"[[Notes/Insights/{Path(result.new_path).stem}]]" in old_text
+    assert f"[[Notes/Insights/{Path(old_rel).stem}]]" in new_text
     assert "[[Knowledge Base/" not in old_text + new_text
 
 

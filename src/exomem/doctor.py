@@ -642,6 +642,38 @@ def _check_vault_layout(vault_root: Path | None) -> list[DoctorCheck]:
     ]
 
 
+def _check_filename_style(vault_root: Path | None) -> list[DoctorCheck]:
+    """Report the filename style new pages are named in, and where that choice came from.
+
+    An unrecognised value refuses every write that derives a name, so it is a failure here
+    rather than something to read out of a write error.
+    """
+    if vault_root is None:
+        return []
+    from .vault import FILENAME_STYLES, InvalidSlugError, filename_style_source
+
+    try:
+        style, source = filename_style_source(vault_root)
+    except InvalidSlugError as error:
+        return [
+            _check(
+                "vault.filename_style",
+                "fail",
+                f"{error}.",
+                "Set `EXOMEM_FILENAME_STYLE` or `filename_style` in `_Schema/project-keys.yaml` "
+                f"to one of {', '.join(FILENAME_STYLES)}, or remove it to take the default.",
+            )
+        ]
+    return [
+        _check(
+            "vault.filename_style",
+            "pass",
+            f"New pages are named in the {style} style (from {source}).",
+            details={"style": style, "source": source},
+        )
+    ]
+
+
 def _resolved_embedding_backend() -> str:
     """The runtime actually configured to serve the bi-encoder.
 
@@ -4013,6 +4045,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         vault_check,
         *_check_schema_files(vault_root),
         *_check_vault_layout(vault_root),
+        *_check_filename_style(vault_root),
         _check_repo_env(),
         _check_registry(),
         _check_resource_posture(profile),

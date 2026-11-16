@@ -759,11 +759,8 @@ def link(
     requested_type = entity_type
     entity_type = definition.id
     try:
-        # The vault's one naming path. An entity is named after the thing it is, so a
-        # vault that set no style gets the title style; `slug` stays an explicit opt-out.
-        filename_slug, slug_warnings = resolve_filename_slug(
-            name, slug, vault_root=vault_root, default_style="title"
-        )
+        # The vault's one naming path: an entity is named like any compiled note.
+        filename_slug, slug_warnings = resolve_filename_slug(name, slug, vault_root=vault_root)
     except InvalidSlugError as error:
         raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
     folder = kb_root(vault_root) / "Entities" / definition.folder

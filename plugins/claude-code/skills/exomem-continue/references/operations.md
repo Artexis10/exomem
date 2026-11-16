@@ -358,8 +358,9 @@ None.
    directly. There is no fallback kind: when no known kind fits, name a new
    slug (see `frontmatter.md` § source).
 2. Generate filename: `YYYY-MM-DD-<slug>.md` where slug is dash-separated
-   lowercase ASCII, ≤ 100 chars. An explicit `slug` controls only the filename;
-   the Unicode display title is stored unchanged.
+   lowercase ASCII, ≤ 100 chars, unless the vault sets the `title` filename
+   style. An explicit `slug` controls only the filename; the Unicode display
+   title is stored unchanged.
 3. Write file with full frontmatter per `frontmatter.md` § source. `ingested_into: []`.
 4. Body: `# <Title>` → `> brief description` → `## Capture` (raw content) → `## Why captured` (one or two sentences).
 5. Update `Sources/index.md` with a new line.
@@ -410,8 +411,8 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
 - For experiments: domain. Plus hypothesis, protocol summary, duration, started date.
 - For production-logs: medium. Plus projects, host, editor (if known), recording / publish status.
 - Human-facing title (Unicode is fine), plus an optional explicit lowercase
-  ASCII filename `slug`; propose the slug separately when portability or
-  readability matters.
+  ASCII filename `slug` that overrides the derived name; propose the slug
+  separately only when the name must be something other than the title.
 
 ### Procedure
 1. Determine note type and target folder:
@@ -421,11 +422,14 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
    - `pattern` → `Notes/Patterns/`
    - `experiment` → `Notes/Experiments/<domain>/`
    - `production-log` → `Notes/Productions/<medium>/`
-2. Generate filename:
-   - Research / insight / failure / pattern: `<topic-slug>.md` (no date prefix).
-   - Experiment / production-log: `YYYY-MM-<slug>.md` (start month prefix).
-   Slugs are capped at 100 characters. Automatic slugging remains compatible
-   with older releases and may use language-blind transliteration; for any
+2. Generate filename. Unless the vault sets the `slug` filename style, the name is
+   the title with only filesystem- and link-unsafe characters removed or replaced
+   (`#`, `[`, `]`, `^`, `|`, `/` and a leading dot), cut at 100 characters:
+   - Research / insight / failure / pattern: `<Title>.md` (no date prefix).
+   - Experiment / production-log: `YYYY-MM-<Title>.md` (start month prefix).
+   A reply warning `FILENAME_ADJUSTED` names the file name when it differs from
+   the title; link to the note by that name. Under the `slug` style the name is
+   a lowercase ASCII slug that may use language-blind transliteration; for a
    non-Latin title, prefer an explicit meaningful ASCII slug. The real title is
    always stored in frontmatter and the H1.
 3. Resolve every non-empty `sources:` entry to an authorized captured Source or

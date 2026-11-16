@@ -69,18 +69,30 @@ Two facts make it tractable anyway:
   and inner punctuation, removing only what a filesystem or Obsidian cannot carry:
   the Windows-reserved set `< > : " / \ | ? *`, control characters, reserved
   device names, and trailing dots or spaces. The result is NFC-normalised.
-- **The default is `slug` in this change.** Changing the default would change the
-  identity of every note written by an existing install on upgrade, which is not a
-  default's job to do. New vaults may opt in at setup; existing vaults opt in
-  deliberately. A pending task (7.1) moves the default to `title` for new compiled
-  notes and entities, with `slug` as the opt-out, once the sanitiser correction it
-  depends on is agreed.
+- **The default is `title`.** A vault that sets no style names each new compiled
+  note and entity by its title, and `slug` is the opt-out through
+  `EXOMEM_FILENAME_STYLE` or the vault key. The default changes the name of new
+  pages only: no file on disk is renamed. A page whose name carries a date keeps
+  its slug name when no style is set: a Source (`<date>-<name>`), an experiment
+  and a production log (`YYYY-MM-<name>`). An Episode keeps its dated name too.
+- **A title name is link-safe.** The name passes through `corrected_title_name`
+  and `fit_filename`: the characters `# [ ] ^ |` that break a wikilink become
+  spaces, leading dots are dropped, and the name is cut under the byte cap. The
+  title is stored as given. When the name differs from the title, the write
+  carries one `FILENAME_ADJUSTED` warning that names the corrections and whether
+  the name was cut.
+- **`exomem doctor` shows the filename style** and where it came from
+  (environment, `project-keys.yaml` or the default).
+- **A public page read and a resolve-entity candidate lead with the title.** The
+  reply carries the title and the handle (`id` and `ref`) that every tool accepts;
+  the path moves under `diagnostics`.
 - **Entity creation uses the vault naming path.** An entity filename is derived
   by `resolve_filename_slug`, as a compiled note's is, so it keeps the name as
   written: diacritics, case and punctuation. It no longer passes through a
   second, private sanitiser. The existence check is case- and NFC-insensitive
   against the folder, so two titles that map to one file are refused before the
-  write. A vault that sets no style keeps the title-style entity filenames it had.
+  write. An entity follows the vault's style, so a vault that keeps `slug` names
+  its entities that way.
 - Existing files are **never renamed** by this change. The style governs
   derivation of new names only, so no link that resolves today stops resolving.
 - Cap derived names on a word boundary at a configurable length, defaulting to
@@ -100,9 +112,10 @@ Two facts make it tractable anyway:
   `vault.slugify_with_truncation_check`, the `_Schema/project-keys.yaml` reader
   in `project_keys.py`, the entity writer in `link.py`, and the tool surfaces that
   accept a `slug` argument.
-- No migration. No existing file changes name. A vault that never sets the key
-  behaves exactly as it does today, which is the property that makes this safe to
-  land before anyone decides what the default should eventually be.
+- No migration. No existing file changes name, and a link that resolves today
+  keeps resolving. A vault that sets no key names its new compiled notes and
+  entities by title from this release; a vault that wants the old names sets
+  `filename_style: slug`.
 - Cross-platform: the reserved-character set is the union across Windows, macOS
   and Linux, applied everywhere, so a vault authored on one and opened on another
   cannot contain a name the other cannot represent.

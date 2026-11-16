@@ -929,7 +929,7 @@ def test_public_note_preparation_preserves_draft_shape_and_defaults(vault: Path)
     )
 
     assert payload == prepared.as_dict()
-    assert payload["destination"] == "Knowledge Base/Notes/Insights/public-draft.md"
+    assert payload["destination"] == "Knowledge Base/Notes/Insights/Public draft.md"
     assert payload["mutated"] is False
     assert "source" not in payload
     frontmatter, _body, _raw = vault_module.parse_frontmatter(prepared.source)
@@ -970,7 +970,7 @@ def test_note_validate_only_freezes_path_and_date_without_any_mutation(vault: Pa
     assert validation.mutated is False
     assert validation.draft_token
     assert validation.destination == (
-        "Knowledge Base/Notes/Research/Vehicles/delayed-note.md"
+        "Knowledge Base/Notes/Research/Vehicles/Delayed note.md"
     )
     assert _tree_bytes(vault) == before
     assert not (vault / "Knowledge Base/Notes/Research/Vehicles").exists()

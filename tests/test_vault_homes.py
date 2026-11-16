@@ -147,9 +147,9 @@ def test_a_home_keeps_the_type_stem(vault: Path) -> None:
     [
         (
             {"note_type": "research-note", "project": "project-alpha"},
-            f"{KB}/Notes/Research/Project Alpha/the-title.md",
+            f"{KB}/Notes/Research/Project Alpha/The title.md",
         ),
-        ({"note_type": "insight"}, f"{KB}/Notes/Insights/the-title.md"),
+        ({"note_type": "insight"}, f"{KB}/Notes/Insights/The title.md"),
         (
             {
                 "note_type": "experiment",
@@ -200,7 +200,7 @@ def test_a_superseding_page_stays_in_its_predecessors_home(vault: Path) -> None:
 
     draft = _replacement_draft(vault, old["path"], "failure")
 
-    assert draft["destination"] == f"{HOME}/pump-pressure-v2.md"
+    assert draft["destination"] == f"{HOME}/Pump pressure v2.md"
 
 
 def test_a_superseding_page_follows_its_type_when_the_predecessor_is_no_home_page(
@@ -211,7 +211,7 @@ def test_a_superseding_page_follows_its_type_when_the_predecessor_is_no_home_pag
 
     draft = _replacement_draft(vault, old["path"], "failure")
 
-    assert draft["destination"] == f"{KB}/Notes/Failures/pump-pressure-v2.md"
+    assert draft["destination"] == f"{KB}/Notes/Failures/Pump pressure v2.md"
 
 
 # --------------------------------------------------------------------------- #

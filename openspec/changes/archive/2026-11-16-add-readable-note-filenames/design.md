@@ -26,7 +26,7 @@ title is already independent of how the file is named.
 
 - One vault-level setting, not a per-call argument nobody remembers to pass.
 - A `title` style that produces the same name on Windows, macOS and Linux.
-- Zero change for any vault that does not opt in.
+- No change to any file already on disk, whichever style a vault uses.
 
 **Non-Goals**
 
@@ -37,26 +37,38 @@ title is already independent of how the file is named.
   from display, but it is a new frontmatter field on every note and a second
   resolution key; it should be proposed on its own merits, not smuggled in as
   the enabling half of a filename change.
-- Changing the default. Discussed below.
+- Renaming a Source or an Episode: a dated name stays as it is.
 
 ## Decisions
 
-### The default stays `slug`, for now
+### The default is `title`, for new compiled notes and entities
 
-The tempting move is to default `title` on, since the issue argues it is the
-better name and the product's pitch supports that. The reason not to: the
-filename is the identity, so flipping the default would silently change the
-address of every note written after an upgrade, in vaults whose owners never
-asked. Half a vault named one way and half the other, caused by a version bump,
-is worse than a vault consistently named the less pretty way.
+The filename is the identity, so the default decides the address of every page
+written after an upgrade. It is `title` because a title name is the readable one,
+and because the name is link-safe: `corrected_title_name` turns `# [ ] ^ |` into
+spaces and drops leading dots, so no title yields a name that a wikilink cannot
+carry, and `fit_filename` keeps the name under the byte cap. A vault that wants
+the old names sets `slug` in `EXOMEM_FILENAME_STYLE` or `project-keys.yaml`.
 
-New vaults can be offered the choice at setup, where the answer is a decision
-rather than a side effect.
+The risk of a mixed vault (old pages slugged, new pages titled) is accepted and
+bounded: no file is renamed, and a link written by title resolves under both.
+Case and Unicode-form clashes are caught by `unique_path` and the entity check
+before any write.
 
-This decision is provisional. The intended end state is `title` for new compiled
-notes and entities, with `slug` as the opt-out (task 7.1). It waits on the
-sanitiser correction, because a default that every new note inherits must first
-produce names that a reader can trust.
+A dated name is not a title name. A Source is `YYYY-MM-DD-<name>`; an
+experiment and a production log are `YYYY-MM-<name>`. The caller marks each
+`dated` (for a note, its type's registry `stem` is not the bare slug); with no
+style configured it keeps the slug form, so the default flip renames no kind of
+dated page. A style that a vault or the environment sets applies to a dated page
+as it did before.
+
+### A changed name is reported once
+
+The title is stored as given. When the filename differs from it, the write
+carries one `FILENAME_ADJUSTED` warning. It names the corrections
+(`CorrectedName.corrections`) and whether the name was cut, and it shows the name
+and the title, not a path. The rule functions are not changed here; the warning
+is the only text this change adds.
 
 ### Entities use the vault naming path
 
@@ -69,10 +81,6 @@ An entity is create-only, so a clash must refuse rather than disambiguate. The
 writer lists the folder and compares each leaf by `held_fs.name_variants`, the
 same key the vault uses for case and NFC. The refusal names the page that holds
 the name, in that page's own spelling.
-
-Until task 7.1 lands, an entity in a vault that sets no style keeps the title
-style it had. The entity call passes that as its own default to
-`resolve_filename_slug`; task 7.1 deletes the parameter.
 
 ### Sanitise by the union, not by the host
 
@@ -105,7 +113,7 @@ default macOS. The check therefore cannot be `path.exists()`; it has to be a
 case-insensitive comparison against the directory, on every platform, so a vault
 does not behave differently depending on where the write happened.
 
-### Length cap stays at 100 by default
+### Length cap stays at 100 characters by default
 
 #598 suggests truncating near 60 and says it "costs nothing". It does not: the
 warning quoted above exists because a truncated name is not re-derivable from the
@@ -128,9 +136,6 @@ warning fire on more notes. The cap becomes configurable, defaults to today's
 
 ## Open Questions
 
-- Should `exomem setup` ask, or default new vaults to `title` without asking?
-  Asking adds a prompt to a flow whose value is being short; defaulting new-only
-  makes two vaults on one machine differ for a reason their owner may not recall.
 - Is a permalink field worth proposing separately? It is the only thing that
   would make renaming existing files safe, and therefore the only route to a
   fully readable existing vault.

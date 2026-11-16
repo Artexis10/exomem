@@ -108,13 +108,17 @@ _RESERVED_DEVICE_NAMES = frozenset(
     | {f"com{digit}" for digit in range(1, 10)}
     | {f"lpt{digit}" for digit in range(1, 10)}
 )
-#: The two styles a vault may name derived files in. `slug` is the historical
-#: behaviour and stays the default: the filename is the note's identity here
-#: (there is no permalink field), so changing the default would change the
-#: address of every note written after an upgrade in vaults nobody asked.
+#: The two styles a vault may name derived files in. `title` is the default, so a
+#: new page carries the name its author wrote; `slug` is the opt-out. The style
+#: governs new names only: no file is renamed, and a link to an existing one keeps
+#: resolving, so changing the default changes nothing already written.
 FILENAME_STYLES = ("slug", "title")
-DEFAULT_FILENAME_STYLE = "slug"
+DEFAULT_FILENAME_STYLE = "title"
 _FILENAME_STYLE_ENV = "EXOMEM_FILENAME_STYLE"
+#: Where the filename style in force came from. Closed: `filename_style_source` returns one of these.
+FILENAME_STYLE_FROM_ENVIRONMENT = "environment"
+FILENAME_STYLE_FROM_PROJECT_KEYS = "project-keys.yaml"
+FILENAME_STYLE_FROM_DEFAULT = "default"
 _EXPLICIT_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
@@ -690,33 +694,35 @@ def fit_filename(
     return date_prefix + shown + tail, shown != title
 
 
-def resolve_filename_style(
-    vault_root: Path | None = None, *, default: str = DEFAULT_FILENAME_STYLE
-) -> str:
-    """The filename style in force, by documented precedence.
+def filename_style_source(vault_root: Path | None = None) -> tuple[str, str]:
+    """The filename style in force and where it came from, by documented precedence.
 
     Environment first so a run can be pinned without editing the vault, then the
-    vault's own key, then `default` (the built-in one unless a caller names its
-    own, as entity creation does). An unrecognised value is refused rather
+    vault's own key, then the default. An unrecognised value is refused rather
     than quietly treated as the default -- a typo in a config key that silently
     means "carry on" is how a user concludes the setting does not work.
     """
     configured = os.environ.get(_FILENAME_STYLE_ENV)
-    source = "environment"
+    source = FILENAME_STYLE_FROM_ENVIRONMENT
     if configured is None and vault_root is not None:
         from . import project_keys
 
         configured = project_keys.filename_style(vault_root)
-        source = "project-keys.yaml"
+        source = FILENAME_STYLE_FROM_PROJECT_KEYS
     if configured is None:
-        return default
+        return DEFAULT_FILENAME_STYLE, FILENAME_STYLE_FROM_DEFAULT
     normalized = str(configured).strip().lower()
     if normalized not in FILENAME_STYLES:
         raise InvalidSlugError(
             f"filename style {configured!r} from {source} is not one of "
             f"{', '.join(FILENAME_STYLES)}"
         )
-    return normalized
+    return normalized, source
+
+
+def resolve_filename_style(vault_root: Path | None = None) -> str:
+    """The filename style in force; `filename_style_source` also says where it came from."""
+    return filename_style_source(vault_root)[0]
 
 
 def slugify_title(title: str, max_length: int = SLUG_MAX_LENGTH) -> str:
@@ -748,7 +754,7 @@ def resolve_filename_slug(
     slug: str | None = None,
     *,
     vault_root: Path | None = None,
-    default_style: str = DEFAULT_FILENAME_STYLE,
+    dated: bool = False,
 ) -> tuple[str, list[str]]:
     """Resolve a new filename component without conflating it with display title.
 
@@ -759,9 +765,12 @@ def resolve_filename_slug(
     `vault_root` selects the vault's filename style for the DERIVED branch only.
     An explicit `slug` keeps its contract under every style, because it is how a
     caller pins a name it already intends to link to. Omitting `vault_root`
-    resolves the style from the environment alone, which keeps every existing
-    caller on today's behaviour. `default_style` is the style of a vault that
-    configured none.
+    resolves the style from the environment alone.
+
+    `dated` marks a name that carries a date: a Source's, or an experiment's or
+    production log's. A vault that configured no style keeps the slug form there,
+    so the default change renames no kind of dated page; a configured style
+    applies as it always did.
     """
     if slug is not None:
         if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
@@ -772,23 +781,39 @@ def resolve_filename_slug(
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
-    if resolve_filename_style(vault_root, default=default_style) == "title":
-        readable = sanitize_title_filename(title)
-        if readable:
+    style, source = filename_style_source(vault_root)
+    if dated and source == FILENAME_STYLE_FROM_DEFAULT:
+        style = "slug"
+    if style == "title":
+        corrected = corrected_title_name(title)
+        fitted = fit_filename(corrected.name) if corrected.name else None
+        if fitted is not None:
+            readable, cut_to_fit = fitted
             # No transliteration warning here: nothing was transliterated. That
             # warning exists because the slug path is lossy for non-ASCII text,
             # and this path is what a vault sets to stop paying that cost.
+            # The sanitiser's own word-boundary cap is the other way a name is cut.
+            cut = cut_to_fit or sanitize_title_filename(title) != sanitize_title_filename(
+                title, max_length=0
+            )
+            changes = []
+            if CORRECTION_LINK_CHARACTERS in corrected.corrections:
+                changes.append("link characters replaced by spaces")
+            if CORRECTION_LEADING_DOTS in corrected.corrections:
+                changes.append("leading dots dropped")
+            if cut:
+                changes.append("name shortened")
             warnings = []
-            if readable != sanitize_title_filename(title, max_length=0):
+            if changes:
                 warnings.append(
-                    f"SLUG_TRUNCATED: filename truncated to {readable!r}; link to "
-                    "this note using that name or its frontmatter title -- "
-                    "re-deriving a name from the full title will not resolve."
+                    f"FILENAME_ADJUSTED: the file name is {readable!r} ({'; '.join(changes)}); "
+                    "the title is stored as given. Link to this note by that name."
                 )
             return readable, warnings
-        # A title that is entirely reserved characters has no readable form, so
-        # fall through to the slug path rather than failing the write. One note
-        # named the old way beats a refused write.
+        # A title with no usable name (all reserved characters, or no bytes left
+        # under the cap) has no readable form, so fall through to the slug path
+        # rather than failing the write. One note named the old way beats a
+        # refused write.
 
     resolved, truncation_warning = slugify_with_truncation_check(title)
     warnings = [truncation_warning] if truncation_warning else []

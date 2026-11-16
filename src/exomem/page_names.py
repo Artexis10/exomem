@@ -395,6 +395,47 @@ def _name_hit(
     return named
 
 
+def _name_candidate(root: Path, candidate: Any, *, keep_path: bool) -> Any:
+    """A candidate page with its title first and its short id in place of its path.
+
+    A candidate that carries a `ref` keeps it: a ref and an id are both handles that every tool
+    takes. The path moves under `diagnostics`; `keep_path` (`detail="full"`) keeps it in place and
+    adds the id. A candidate whose bytes cannot be read has no id to offer, so it keeps its path.
+    """
+    if not isinstance(candidate, Mapping) or not isinstance(candidate.get("path"), str):
+        return candidate
+    found = read_identity(root, candidate["path"])
+    if found is None:
+        return candidate
+    if keep_path:
+        return {**candidate, "id": found.id}
+    rest = {key: value for key, value in candidate.items() if key not in ("path", "title", "diagnostics")}
+    diagnostics = candidate.get("diagnostics")
+    return {
+        "title": candidate.get("title") or found.title,
+        **rest,
+        "id": found.id,
+        "diagnostics": {**(diagnostics if isinstance(diagnostics, Mapping) else {}), "path": candidate["path"]},
+    }
+
+
+def _name_read(reply: dict[str, Any]) -> dict[str, Any]:
+    """A page read with its title in place of its path, the path kept under `diagnostics`.
+
+    The reply's `id` (and `ref`, when the page has one) is the handle for the next call. A reply
+    with no `id` is not a Markdown page read: it has no handle to offer, so it keeps its path.
+    """
+    path, frontmatter = reply.get("path"), reply.get("frontmatter")
+    if not (isinstance(path, str) and isinstance(reply.get("id"), str) and isinstance(frontmatter, Mapping)):
+        return reply
+    body = reply.get("body")
+    title = vault.resolve_display_title(dict(frontmatter), body if isinstance(body, str) else "", path)
+    diagnostics = reply.get("diagnostics")
+    named = _renamed(reply, {"path": {"title": title}})
+    named["diagnostics"] = {**(diagnostics if isinstance(diagnostics, Mapping) else {}), "path": path}
+    return named
+
+
 def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
     """The id of the version a write produced, not of the page as it is now.
 
@@ -476,10 +517,12 @@ def name_released_reply(
     A write reply swaps `path` for `title` and `id`; `response_detail="full"` still carries the
     path under `diagnostics.operational`. A search reply swaps each page hit's `path` for its `id`
     (the hit keeps its `title` and `ref`) and, on the public tool shape, shows the links in its
-    excerpt by title where a resolver is resident. `keep_paths`, set for `detail="full"`, adds the
-    `id` and keeps the path and the stored links, for a harness that reads vault files. A page
-    that cannot be read keeps its path. This runs after the egress release, so it names only what
-    that filter let through. A reply that is none of these comes back unchanged.
+    excerpt by title where a resolver is resident. A resolve-entity reply names each candidate the
+    same way, and a page read puts its `title` first; both keep the path under `diagnostics`.
+    `keep_paths`, set for `detail="full"`, adds the `id` and keeps the path and the stored links,
+    for a harness that reads vault files. A page that cannot be read keeps its path. This runs after the egress
+    release, so it names only what that filter let through. A reply that is none of these comes
+    back unchanged.
     """
     root = Path(root)
     hits = reply.get("hits")
@@ -493,4 +536,9 @@ def name_released_reply(
             render = _title_link_renderer(root)
         named = [_name_hit(root, hit, keep_paths=keep_paths, render=render) for hit in hits]
         return {**reply, "hits": named}
+    candidates = reply.get("candidates")
+    if isinstance(candidates, list):
+        return {**reply, "candidates": [_name_candidate(root, item, keep_path=keep_paths) for item in candidates]}
+    if "content_hash" in reply and "frontmatter" in reply:
+        return reply if keep_paths else _name_read(reply)
     return _name_write(root, reply)
