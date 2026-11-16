@@ -311,6 +311,7 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 - `EXOMEM_CLOUD_CONNECT_TIMEOUT_MS` bounds each connect attempt.
 - `EXOMEM_CLOUD_UPSTREAM_TIMEOUT_SECONDS` bounds the time from the first forwarded byte to the response headers. When it runs out, the gateway answers `504 CELL_TIMEOUT` and frees its slot.
 - Stateless FastMCP answers with SSE, so headers arrive early. `EXOMEM_CLOUD_UPSTREAM_IDLE_SECONDS` therefore bounds the gap between response body chunks. When it runs out, the gateway closes the stream and frees its slot. Its value stays above the longest tool call that task 1.4 records.
+- Traefik closes an idle connection to the gateway after `cloudIngress.gatewayIdleConnTimeout`, 4 s, before the gateway's Node server closes it at 5 s plus a 1 s buffer. Otherwise Traefik can send a POST on a connection the gateway has closed, and the client gets Traefik's plain `502`. The rehearsal's run 43770645662 hit that race once. A local repro on the same Traefik and Node images answered 6 of 80 such POSTs with `502`, and 0 of 80 with the 4 s timeout.
 
 **Client limits (task 1.4, 2026-11-15).** A local stand-in held each `tools/call` with no response bytes for 10, 30, 45, 60 and 120 s. A second run answered the first `tools/call` with `503` and `Retry-After: 2`. The measurements ran by hand; the stand-in and its output are not in the repository.
 
