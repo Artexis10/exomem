@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
 from . import call_spans, item_keys, memory_refs, query_compat, reserved_paths, vault
-from .collection_profiles import profile_for
+from .collection_profiles import RECORDS_PROFILE, profile_for
 from .kbdir import managed_join, managed_split, managed_split_parts
 from .planning_values import PlanningValues, Unavailable
 
@@ -1450,7 +1450,7 @@ def discover_legacy_trackers(
             "INVALID_DISCOVERY_LIMIT", "legacy discovery limit is outside supported bounds"
         )
     root = Path(vault_root)
-    records_root = vault.kb_root(root) / "Records"
+    records_root = vault.kb_root(root) / RECORDS_PROFILE.placement_layer
     if not records_root.is_dir():
         return (), False
     authorize = authorize_path or (lambda _path: True)
@@ -3842,7 +3842,7 @@ def _require_records_layer(path: str, name: str) -> None:
     """Keep Records paths in the exact portable layer used by recall policy."""
     parts = path.split("/")
     below = managed_split_parts(parts)
-    if below is None or len(below) < 2 or below[0] != "Records":
+    if below is None or len(below) < 2 or below[0] != RECORDS_PROFILE.placement_layer:
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/Records"
         )

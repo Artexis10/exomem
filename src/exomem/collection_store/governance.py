@@ -165,7 +165,7 @@ def write_withheld(access_rules, path):
     """The write floor: a read-only access rule or an append-only top folder refuses a change at ``path``."""
     relative = access._kb_relative(path)
     return (access._matches(access_rules["readonly"], relative)
-            or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY})
+            or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access.append_only_areas()})
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,6 +26,7 @@ untouched. The migration that folds the curated trees into the KB seeds
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 from collections.abc import Callable
@@ -43,9 +44,23 @@ TIER_READONLY = "readonly"
 TIER_APPEND_ONLY = "append-only"
 TIER_READ_WRITE = "read-write"
 
-# Append-only KB subtrees — kept here (not just vault.py) so access_tier is the
-# single source of truth for the tier of a path.
-_APPEND_ONLY = ("Sources", "Evidence")
+
+@functools.cache
+def append_only_areas() -> frozenset[str]:
+    """The append-only KB subtrees: the areas of the shipped raw (source and evidence) note types.
+
+    Kept here (not just vault.py) so access_tier is the single source of truth for the tier of a
+    path. A raw type's area sits at the managed root in every layout.
+    """
+    # layout imports modules that import access, so the registry waits for the first call.
+    from . import layout, note_types
+
+    areas = (
+        layout.area_folder(note_type, layout.Layout.NESTED)
+        for note_type in note_types.shipped(note_types.raw)
+    )
+    return frozenset(area for area in areas if area is not None)
+
 
 # (stat signature, byte fingerprint, parsed config) per config-file path. Find
 # refreshes the byte fingerprint once before its hot-cache lookup; page-level
@@ -278,7 +293,7 @@ def tier_in(cfg: dict[str, list[str]], rel_path: str) -> str:
     head = kb_rel.split("/", 1)[0]
     # Case-insensitive: an uppercase `SOURCES/` aliases the real `Sources/` on a
     # case-insensitive filesystem, and the tier must not depend on path casing.
-    if any(head.casefold() == a.casefold() for a in _APPEND_ONLY):
+    if any(head.casefold() == a.casefold() for a in append_only_areas()):
         return TIER_APPEND_ONLY
     return TIER_READ_WRITE
 

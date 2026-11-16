@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
 from . import capabilities, held_fs, trash_metadata, vault
-from .collection_profiles import PLANNING_PROFILE
+from .collection_profiles import PLANNING_PROFILE, RECORDS_PROFILE
 from .kbdir import managed_root, managed_split
 from .vault import (
     BatchWriteError,
@@ -552,7 +552,7 @@ def normalize_target_path(
     if allow_records:
         # The exact layer `structured_collections._require_profile_layer` places
         # Records collections under; no folded spelling stands in for it.
-        if parts[0] != "Records" or len(parts) < 2:
+        if parts[0] != RECORDS_PROFILE.placement_layer or len(parts) < 2:
             raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside Records")
         return raw
     if (first in PROTECTED_TREES and not (allow_fold and first in _FOLD_TREES)) or compact.startswith(
