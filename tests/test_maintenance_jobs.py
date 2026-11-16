@@ -69,6 +69,7 @@ def _session(server, scenario):
 #: The door operation that carries each maintenance kind, on the read door and on the write door.
 _DOOR_OPERATIONS = {
     "backfill-ids": "maintenance.backfill_ids",
+    "convert-originals": "maintenance.convert_originals",
     "fix": "maintenance.fix",
     "reconcile": "maintenance.reconcile",
     "maintenance-job": "maintenance.job",
@@ -455,6 +456,35 @@ def test_start_without_plan_and_reason_is_refused_and_leaves_no_job(server, vaul
     assert refused["error"]["message"].endswith("Nothing was saved.")
     assert _jobs(listed) == []
     assert _page_ids(vault) == before
+
+
+def test_a_remote_conversion_runs_only_as_the_owners_previewed_job(server, vault, monkeypatch) -> None:
+    """Catches a remote conversion that starts without the reviewed plan, or that the job framework cannot run."""
+    import datetime as dt
+
+    from exomem import artifact_lifecycle, originals, preserve
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+
+    with principal_module.library_scope():
+        filed = preserve.preserve_bytes(vault, scope="work", category="receipts", filename="receipt.png",
+                                        data=b"receipt photo bytes" * 64, today=dt.date(2026, 11, 16))
+
+    async def scenario(client):
+        refused = await _call(client, "repair_memory", {"kind": "convert-originals", "dry_run": False})
+        _, preview = await _preview_job(client, {"kind": "convert-originals"})
+        started = await _call(client, "repair_memory", {
+            "kind": "convert-originals", "dry_run": False, "plan_id": preview["receipt"]["result"]["plan_id"],
+            "why": "store each original once"})
+        return refused, preview, await _until_terminal(client, started["run_id"])
+
+    refused, preview, applied = _session(server, scenario)
+
+    assert refused["error"]["code"] == "MAINTENANCE_PLAN_REQUIRED"
+    assert preview["receipt"]["result"]["would_convert"] == 1
+    assert applied["state"] == "completed", applied
+    assert applied["receipt"]["result"]["converted"] == 1
+    assert not (vault / filed.path).exists() and originals.pooled(vault, filed.path) is not None
 
 
 def test_start_succeeds_while_another_writer_holds_the_boundary(server, vault) -> None:

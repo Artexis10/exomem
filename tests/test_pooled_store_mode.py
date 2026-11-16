@@ -37,11 +37,13 @@ from exomem import (
     list_trash,
     media_bindings,
     media_store,
+    original_conversion,
     original_pool,
     originals,
     recover_from_trash,
 )
 from exomem import vault as vault_module
+from exomem.governance.principal import library_scope
 from exomem.vault_store import importer, projector, read
 from exomem.vault_store import media as store_media
 from exomem.vault_store import targets as store_targets
@@ -177,3 +179,55 @@ def test_an_original_evicted_in_trash_before_pooling_recovers_by_its_trash_path_
     assert originals.original_state(vault, rel).local_path is None
     assert listed == {"entries": [], "count": 0, "orphan_sidecars": [], "orphan_files": []}
     assert not original_pool.object_path(vault, hashlib.sha256(ORIGINAL_BYTES).hexdigest()).exists()
+
+
+def test_a_store_mode_conversion_drops_the_binary_record_of_the_file_it_retires(
+    vault, stored_original, original_thread, monkeypatch  # noqa: F811 - the store-mode suite's fixtures
+):
+    """A conversion that keeps the record of a file it retired leaves a shape no pooled capture has: a store rollback
+    reads that original as deleted. One that rewrites the page breaks the grants bound to its bytes."""
+    rel = stored_original
+    page = originals.original_state(vault, rel).sidecar_path.relative_to(vault).as_posix()
+    page_before = read.owned_bytes(vault, page)
+    data = (vault / rel).read_bytes()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+
+    def convert():
+        with library_scope():
+            return original_conversion.convert(vault, dry_run=False)
+
+    report = on_store_thread(original_thread, convert)
+
+    assert report["converted"] == 1
+    assert media_state(vault, rel)["binary"] == []
+    assert not (vault / rel).exists()
+    assert originals.pooled(vault, rel).local_path.read_bytes() == data
+    assert read.owned_bytes(vault, page) == page_before
+
+
+def test_a_refused_record_retirement_is_reported_and_a_rerun_completes_it(
+    vault, stored_original, original_thread, monkeypatch  # noqa: F811 - the store-mode suite's fixtures
+):
+    """Catches a conversion that reports a filing converted while its store record survives a refused commit."""
+    from exomem.vault_store import batch as store_batch
+    from exomem.vault_store.write import StoreConflict
+
+    rel = stored_original
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    commit = store_batch.commit_batch
+
+    def refuse(*_args, **_kwargs):
+        raise StoreConflict(rel, "another writer changed the record")
+
+    def convert():
+        with library_scope():
+            return original_conversion.convert(vault, dry_run=False)
+
+    monkeypatch.setattr(store_batch, "commit_batch", refuse)
+    refused = on_store_thread(original_thread, convert)
+    monkeypatch.setattr(store_batch, "commit_batch", commit)
+    rerun = on_store_thread(original_thread, convert)
+
+    assert (refused["converted"], refused["skipped_changed"]) == (0, [rel])
+    assert rerun["converted"] == 1
+    assert media_state(vault, rel)["binary"] == []

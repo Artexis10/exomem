@@ -475,13 +475,15 @@ def follow_store(vault: Path, *, batch: int = 256) -> bool:
             return applied and reached == head
 
 
-def _pages(vault: Path):
+def _pages(vault: Path, *, join_request: bool = False):
+    """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own."""
     from contextlib import nullcontext
 
     from .kbdir import managed_join, managed_root_rel
     from .vault_store import mode, read
 
-    with (read.snapshot(vault, join_request=False) if mode.store_mode_for_reads(vault) else nullcontext(None)) as view:
+    with (read.snapshot(vault, join_request=join_request) if mode.store_mode_for_reads(vault)
+          else nullcontext(None)) as view:
         if view is not None:
             # Authoritative store pages include companions not projected to disk yet.
             # One streaming query avoids a body lookup per companion in a large archive.
