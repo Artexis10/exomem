@@ -2161,13 +2161,20 @@ def _batch_rows(
     One file written alone has no rows; its stored leaf says `already_stored` when the bytes were
     already there, and names the earlier copy it resolved to.
     """
-    rows = []
+    named: list[tuple[str, str]] = []
+    unnamed: list[tuple[str, str]] = []
     for item in artifact_receipt.get("files", ()):
         state = _artifact_state(item)
         state = "already_stored" if state == "replayed" else state
         if state in _ARTIFACT_STATES:
-            # A row whose path did not read still names the file by the id the caller gave it.
-            rows.append((state, item.get("stored_path") or item.get("file_id", "")))
+            # A row whose path did not read still names the file by the id the caller gave it. Those rows
+            # follow the rows with a path, in their own order, so a sentence leads with a path whatever
+            # the order of the files.
+            if item.get("stored_path"):
+                named.append((state, item["stored_path"]))
+            else:
+                unnamed.append((state, item.get("file_id", "")))
+    rows = named + unnamed
     for item in media.get("media_results", ()):
         rows.append(("failed" if item["outcome"] == "failed" else "stored", item["path"]))
     if (
@@ -2248,10 +2255,10 @@ def _user_summary(
         names = []
     # A stored row whose path did not read is in the batch rows, named by its `file_id`, but not in `paths`.
     # The sentence counts the files the rows say were stored, so it never reads as fewer than `summary.stored`.
-    # Readable paths lead whatever the row order, and the ids of the unnamed files follow them.
+    # `_batch_rows` lists the rows with a path first, so the ids of the unnamed files follow the paths.
     stored_rows = [name for state, name in batch if state == "stored"]
     if len(stored_rows) > len(names):
-        names = [*names, *(name for name in stored_rows if name not in names)]
+        names = stored_rows
     if not names:
         return head
     if verb == "moved" and len(names) == 2:

@@ -232,6 +232,27 @@ def test_a_batch_sentence_counts_a_stored_file_whose_path_did_not_read(unnamed_f
     )
 
 
+def test_a_partial_batch_sentence_leads_with_a_readable_path_when_the_unnamed_file_is_first() -> None:
+    from exomem.mutation_terminal import committed_terminal, project_terminal
+
+    failed = {"file_id": "file-three", "outcome": "failed", "code": "FETCH_FAILED", "reason": "download refused"}
+    terminal = committed_terminal(
+        {
+            "files": [_stored_row(file_id="file-two", stored_path=None), _stored_row(), failed],
+            "summary": {"stored": 2, "failed": 1},
+        },
+        request_id="request",
+        receipt_id="receipt",
+        idempotency_key=None,
+    )
+
+    compact = project_terminal(terminal, outcome_verb="saved")
+
+    assert compact["user_summary"].startswith(
+        "Saved 2 of 3 files -> Knowledge Base/Evidence/case/raw/proof.bin and 1 more; 1 file could not be saved"
+    )
+
+
 def test_a_sentence_names_a_lone_stored_file_by_its_id_when_its_path_did_not_read() -> None:
     compact = _compact_batch(_stored_row(stored_path=None), {"stored": 1, "failed": 0})
 
