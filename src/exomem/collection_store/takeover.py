@@ -408,6 +408,18 @@ def install(session, staged, token, check):
     return identity
 
 
+def _flush(fs, parent, leaf, held):
+    """Flush ``held``'s file through a handle that can write it.
+
+    The handle held for the rename is not writable on Windows, where it carries delete authority alone,
+    and a flush needs write access. The file flushed must be the one held.
+    """
+    with fs.file(parent, leaf, access="write").require() as writable:
+        if not held_fs._same_file_identity(writable.identity, held.identity):
+            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging store changed")
+        os.fsync(writable.descriptor)
+
+
 def replace_live(session, leaf, check, *, subdirectory=None, expected_identity=None, expected_version=None):
     """Rename a closed, journal-free store file into place as this host's live store.
 
@@ -452,7 +464,7 @@ def replace_live(session, leaf, check, *, subdirectory=None, expected_identity=N
                 if (session.path.parent / (session.path.name + suffix)).exists():
                     raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open")
             check()
-            os.fsync(adopted.descriptor)
+            _flush(fs, source, leaf, adopted)
             require_source()
             superseded = None
             if session.path.exists():

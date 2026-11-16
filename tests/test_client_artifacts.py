@@ -147,41 +147,66 @@ def test_cli_file_handle_validation_is_bounded_and_content_free(files: str) -> N
     assert "signature" not in error.value.message
 
 
-def test_compact_terminal_keeps_bounded_failure_for_malformed_artifact_rows() -> None:
-    from exomem.mutation_terminal import committed_terminal, project_terminal
+def _stored_row(**overrides) -> dict:
+    return {
+        "file_id": "file-one",
+        "outcome": "stored",
+        "stored_path": "Knowledge Base/Evidence/case/raw/proof.bin",
+        "size": 11,
+        "hash": "a" * 64,
+        "hash_algorithm": "sha256",
+        "content_type": "application/octet-stream",
+        "media_id": None,
+        "warnings": [],
+        **overrides,
+    }
 
-    terminal = committed_terminal(
-        {
-            "files": [
-                {
-                    "file_id": "file-one",
-                    "outcome": "stored",
-                    "stored_path": "Knowledge Base/Evidence/case/raw/proof.bin",
-                    "size": True,
-                    "hash": "a" * 64,
-                    "hash_algorithm": "sha256",
-                    "content_type": "application/octet-stream",
-                    "media_id": None,
-                    "warnings": ["x" * 301],
-                }
-            ],
-            "summary": {"stored": True, "failed": 0},
-        },
+
+def _terminal(row: dict, summary: dict) -> dict:
+    from exomem.mutation_terminal import committed_terminal
+
+    return committed_terminal(
+        {"files": [row], "summary": summary},
         request_id="request",
         receipt_id="receipt",
         idempotency_key=None,
     )
 
-    compact = project_terminal(terminal)
-    assert compact["files"] == [
-        {
-            "file_id": "file-one",
-            "outcome": "failed",
-            "code": "INVALID_ARTIFACT_RECEIPT",
-            "reason": "artifact result was invalid",
-        }
-    ]
-    assert compact["summary"] == {"stored": 0, "failed": 1}
+
+def _compact_batch(row: dict, summary: dict) -> dict:
+    from exomem.mutation_terminal import project_terminal
+
+    return project_terminal(_terminal(row, summary), outcome_verb="saved")
+
+
+def test_a_stored_file_with_a_malformed_identity_field_is_not_reported_as_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bytes are committed, so a receipt field that does not read is named, never a failure."""
+    with caplog.at_level("WARNING", logger="exomem.mutation_terminal"):
+        compact = _compact_batch(_stored_row(size=True), {"stored": True, "failed": 0})
+
+    [row] = compact["files"]
+    assert row["outcome"] == "stored"
+    assert row["unverified_fields"] == ["size"]
+    assert "size" not in row and row["hash"] == "a" * 64
+    assert compact["summary"] == {"stored": 1, "failed": 0}
+    assert compact["user_summary"].startswith("Saved -> Knowledge Base/Evidence/case/raw/proof.bin")
+    assert "fields=size" in caplog.text
+
+
+def test_an_over_long_warning_trims_to_the_bound_and_keeps_the_stored_file_stored() -> None:
+    warnings = ["x" * 301] + [f"advisory {number}" for number in range(9)]
+
+    summary = {"stored": 1, "failed": 0}
+
+    [row] = _compact_batch(_stored_row(warnings=warnings), summary)["files"]
+
+    assert row["outcome"] == "stored" and "unverified_fields" not in row
+    assert row["warnings"] == ["x" * 300] + [f"advisory {number}" for number in range(7)]
+    assert row["warnings_omitted"] == 2
+    # The count a caller can trust still covers every warning the write raised.
+    assert _terminal(_stored_row(warnings=warnings), summary)["warnings_count"] == 10
 
 
 def test_client_artifact_url_validation_never_returns_the_signed_url() -> None:

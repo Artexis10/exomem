@@ -42,12 +42,13 @@ from . import (
     semantic_language_registry,
     source_closure,
     temporal,
+    trash_metadata,
     vault,
 )
 from . import (
     find as find_module,
 )
-from .kbdir import managed_form, managed_join, managed_relative, managed_split
+from .kbdir import managed_form, managed_relative, managed_split
 from .mutation_timings import MutationTimings, mutation_timing_span
 from .vault_store import read
 
@@ -73,7 +74,8 @@ _POSTHOC_FINDING_LIMIT = 256
 _POSTHOC_PATH_LIMIT = 64
 _POSTHOC_SUMMARY_LIMIT = 64
 _POSTHOC_BYTE_BUDGET = 120 * 1024
-_MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
+# The wikilink shape a move rewrites; `structured_files` rewrites the same links through it.
+MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 _MAX_REVIEWED_STAMP_AGE = dt.timedelta(hours=24)
 _MAX_REVIEWED_STAMP_SKEW = dt.timedelta(minutes=5)
 
@@ -161,7 +163,7 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
             changed += 1
         return rewritten
 
-    return _MOVE_WIKILINK_PATTERN.sub(replace, text), changed
+    return MOVE_WIKILINK_PATTERN.sub(replace, text), changed
 
 
 def _bounded_feedback_text(value: str, truncation: dict[str, int]) -> str:
@@ -4349,7 +4351,7 @@ def _plan_recovery_lifecycle(
                     for path in preflight.before_corpus.identity_census.paths_by_identity.get(
                         item.after.identity, ()
                     )
-                    if not path.startswith(managed_join("_trash/"))
+                    if not trash_metadata.is_inside_trash(path)
                 )
                 trash_proof = relation_review.LifecycleTrashProof(
                     page_identity=item.after.identity,

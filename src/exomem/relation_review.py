@@ -25,6 +25,7 @@ from . import (
     relation_registry,
     semantic_contract,
     semantic_language_registry,
+    trash_metadata,
     vault,
 )
 from .cli_ops import OpError
@@ -1663,7 +1664,7 @@ def _capture_bounded_lifecycle_sidecar_guard(
 
 
 def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
-    start = managed_join("_trash")
+    start = managed_join(trash_metadata.TRASH_SUBPATH)
     pending = [start]
     files: set[str] = set()
     file_identities: dict[str, vault.PathIdentity] = {}
@@ -1879,7 +1880,7 @@ def _prepared_primary_binding(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(managed_join("_trash/"))
+        if not trash_metadata.is_inside_trash(path)
     )
     if len(owner_paths) == 1 and owner_paths[0] in corpus.pages:
         state = corpus.pages[owner_paths[0]]
@@ -1909,7 +1910,7 @@ def _trash_proof_for_prepared(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(managed_join("_trash/"))
+        if not trash_metadata.is_inside_trash(path)
     )
     target_guards: list[vault.PathGuard] = []
     parts = PurePosixPath(prepared.after_path).parts
@@ -2086,7 +2087,7 @@ def _live_identity_owner_paths(
     return tuple(
         path
         for path in census.paths_by_identity.get(page_identity, ())
-        if not path.startswith(managed_join("_trash/"))
+        if not trash_metadata.is_inside_trash(path)
     )
 
 

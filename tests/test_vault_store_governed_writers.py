@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -50,10 +49,6 @@ from exomem.governance.recovery import reconcile_governance_operations
 from exomem.governance.tool import GovernanceCrash, GovernanceError, op_govern_memory
 from exomem.vault_store import availability, read
 from exomem.vault_store import write as store_write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
 

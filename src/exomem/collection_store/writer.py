@@ -1376,8 +1376,9 @@ class CollectionWriter:
 
         path, cid = facts["path"], facts["collection_id"]
         vault._safe_guard_target(path)
-        with held_fs.acquire(self.root).require() as fs, fs.parent(str(Path(path).parent)).require() as parent:
-            with fs.file(parent, Path(path).name).require() as file:
+        parent_path, name = held_fs.split_relative(path)
+        with held_fs.acquire(self.root).require() as fs, fs.parent(parent_path).require() as parent:
+            with fs.file(parent, name).require() as file:
                 version = file.version()
                 raw = fs.read(file, max_bytes=record_formats._MAX_ITEM_BYTES).require()
                 if (file.version() != version or asdict(version) != facts["version"]
