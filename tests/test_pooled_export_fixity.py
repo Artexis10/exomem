@@ -684,6 +684,44 @@ def test_a_pooled_restore_that_fails_after_recording_its_format_succeeds_when_re
     assert (state_paths.vault_state_dir(restored) / ".review-state.json").read_bytes() == review
 
 
+def test_a_rerun_of_a_failed_pooled_restore_publishes_into_a_new_folder_and_the_old_folder_names_that_way_out(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches an operator rerun of the documented restore, which needs a new staging folder, that cannot publish
+    after an attempt failed past its state migration, or that meets the attempt's leftover state in the old
+    restore folder with an error that does not say what to change."""
+    originals_bytes, pages = _converted_filings(vault, monkeypatch)
+    review = json.dumps({"schema_version": 1, "records": {"review": "dismissed"}}).encode()
+    (state_paths.vault_state_dir(vault) / ".review-state.json").write_bytes(review)
+    exported = vault_portability.export_quiesced_vault(vault, tmp_path / "exports", context=_context())
+
+    def prepared(staging: str) -> vault_portability.PreparedRestore:
+        return vault_portability.prepare_restore(exported.archive_path, tmp_path / staging,
+                                                 context=_context(lifecycle_state="restore-staging"))
+
+    record = state_migration.restore_shared_originals_offline
+
+    def lost_after_recording(*args, **kwargs):
+        record(*args, **kwargs)
+        raise OSError("disk lost after the format was recorded")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(state_migration, "restore_shared_originals_offline", lost_after_recording)
+        with pytest.raises(vault_portability.PortabilityError, match="PUBLICATION_FAILED"):
+            vault_portability.publish_prepared_restore(prepared("staging"), tmp_path / "restored")
+
+    restored = vault_portability.publish_prepared_restore(prepared("staging-2"), tmp_path / "restored-2").live_root
+
+    state_migration.require_vault_state_ready(restored)
+    with library_scope():
+        assert {path: media_store.read_original_bytes(restored, path).data for path in originals_bytes} == originals_bytes
+    assert {page: (restored / page).read_bytes() for page in pages} == pages
+    assert (state_paths.vault_state_dir(restored) / ".review-state.json").read_bytes() == review
+    with pytest.raises(vault_portability.PortabilityError, match="PUBLICATION_FAILED") as refused:
+        vault_portability.publish_prepared_restore(prepared("staging-3"), tmp_path / "restored")
+    assert "new restore folder" in str(refused.value)
+    assert not (tmp_path / "restored").exists()
+
+
 def test_a_grant_on_one_restored_filing_does_not_reveal_another_that_shares_its_object(
         vault: Path, tmp_path: Path, monkeypatch) -> None:
     """Catches a restore that resolves access through the shared object, so a reader granted one protected filing

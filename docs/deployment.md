@@ -2164,6 +2164,10 @@ Replace the three paths, and give the `vault_id` that the export used. The
 staging folder must not exist yet either. The restore never writes over an
 existing folder.
 
+If the script stops with `PUBLICATION_FAILED`, run it again with a new staging
+folder and a new restore folder. A failed attempt can leave state for its
+restore folder, so a rerun into that folder refuses.
+
 A copy of the folder made in another way, such as a plain folder copy or a
 Cloud import, does not record the requirement. This release records it at the
 copy's first service start, before the service serves a request. A managed

@@ -2296,6 +2296,10 @@ def _publish_prepared_restore(
             _rollback_failed_publication(staging, live)
         if isinstance(exc, PortabilityError) and exc.code == "PUBLICATION_FAILED":
             raise
+        if recovery is None and isinstance(exc, state_migration.StatePlacementConflict):
+            _fail("PUBLICATION_FAILED", "machine-local state for this restore folder already exists outside it, as "
+                  "an earlier failed attempt leaves it; prepare the restore again into a new staging folder and "
+                  "publish it into a new restore folder")
         _fail("PUBLICATION_FAILED", "prepared restore could not be published atomically")
 
     if rebuild_derived is None:
