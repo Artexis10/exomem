@@ -14061,7 +14061,13 @@ def _neighbor_edges(
     *,
     limit: int,
     after: str | None = None,
+    end_types: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], bool]:
+    """Up to `limit` edges touching `frontier` in edge-key order, and whether more remain.
+
+    With `end_types` a row counts only when the page at its far end has one of those page types,
+    so rows that cannot reach a page of the wanted kind spend none of the limit.
+    """
     if not frontier:
         return [], False
     select = (
@@ -14078,6 +14084,20 @@ def _neighbor_edges(
         relation_placeholders = ",".join("?" for _ in relations)
         where += f" AND relation_type IN ({relation_placeholders})"
         params.extend(relations)
+    if end_types:
+        kinds = sorted(end_types)
+        kind_placeholders = ",".join("?" for _ in kinds)
+        # The far page of a row: a source-side key reaches the page its `dst_page_key` names, and a
+        # destination-side key reaches the page that authored the row. Both are file nodes, whose
+        # stored page type is what a reader selects on.
+        far_kind = f"far.page_type IN ({kind_placeholders})"
+        where += (
+            f" AND ((src_key IN ({placeholders}) AND EXISTS (SELECT 1 FROM graph_nodes AS far"
+            f" WHERE far.node_key = graph_edges.dst_page_key AND {far_kind}))"
+            f" OR (dst_key IN ({placeholders}) AND EXISTS (SELECT 1 FROM graph_nodes AS far"
+            f" WHERE far.node_key = 'file:' || graph_edges.source_path AND {far_kind})))"
+        )
+        params.extend([*keys, *kinds, *keys, *kinds])
     if after is not None:
         where += " AND edge_key > ?"
         params.append(after)
@@ -14087,6 +14107,20 @@ def _neighbor_edges(
     ).fetchall()
     overflow = len(rows) > limit
     return [_edge_row_to_dict(row) for row in rows[:limit]], overflow
+
+
+def _rows_within(conn: sqlite3.Connection, frontier: set[str], limit: int) -> bool:
+    """Whether at most `limit` rows touch `frontier`: an indexed read that stops at one more."""
+    if not frontier:
+        return True
+    keys = sorted(frontier)
+    placeholders = ",".join("?" for _ in keys)
+    found = conn.execute(
+        "SELECT 1 FROM graph_edges"
+        f" WHERE src_key IN ({placeholders}) OR dst_key IN ({placeholders}) LIMIT ?",
+        (*keys, *keys, limit + 1),
+    ).fetchall()
+    return len(found) <= limit
 
 
 #: Edge origins whose target a wikilink resolution chose. Frontmatter and
@@ -15097,11 +15131,15 @@ class GraphView:
         }
 
     def _visible_rows(
-        self, frontier: set[str], row_limit: int
+        self,
+        frontier: set[str],
+        row_limit: int,
+        end_types: frozenset[str] = frozenset(),
     ) -> tuple[list[dict[str, Any]], bool]:
         """Rows touching `frontier`, in edge-key order, whose other end the reader may see.
 
-        Takes at most `row_limit` rows. A frontier with no more rows than that gives all of them.
+        Takes at most `row_limit` rows, counting only rows whose far page has one of `end_types`
+        when it names any. A frontier with no more rows than that gives all of them.
         Otherwise the rows come in batches and each batch's other ends are decided as one set before
         its rows count, so the read stops after `row_limit` visible rows and costs what they cost,
         not the frontier's degree. A link to a placeholder is no page, and a reader
@@ -15115,7 +15153,12 @@ class GraphView:
             # a long run of withheld rows from costing one query each.
             want = max(row_limit - len(rows) + 1, _VIEW_ROW_FLOOR)
             batch, more = _neighbor_edges(
-                self.conn, frontier, set(), limit=min(_VIEW_ROW_BATCH, want), after=after
+                self.conn,
+                frontier,
+                set(),
+                limit=min(_VIEW_ROW_BATCH, want),
+                after=after,
+                end_types=end_types,
             )
             if after is None and not more and len(batch) <= row_limit:
                 # Within the bound whoever the reader may see: no row is cut, so no decision is
@@ -15150,10 +15193,19 @@ class GraphView:
                 return rows, False
             after = str(batch[-1]["edge_key"])
 
+    def rows_fit(self, frontier: set[str], row_limit: int) -> bool:
+        """Whether every row touching `frontier` fits `row_limit`, whoever may see the rows.
+
+        A bounded read of such a frontier cuts nothing, so a caller that splits its reads by
+        `end_types` to keep one kind from crowding out another has nothing to split.
+        """
+        return _rows_within(self.conn, frontier, row_limit)
+
     def neighbor_edges(
         self, frontier: set[str], *, limit: int,
         accept: Callable[[dict[str, Any]], bool] | None = None,
         row_limit: int | None = None,
+        end_types: frozenset[str] = frozenset(),
     ) -> tuple[list[dict[str, Any]], bool]:
         """Live edges touching `frontier`, interpreted before the inspection cap.
 
@@ -15167,15 +15219,22 @@ class GraphView:
         reader may see, so a withheld page leaves the bound where a vault without it would. A
         bounded read also decides the admission of its rows' source pages as one set, so a hub's
         rows cost one store request per batch of pages, not one per page.
+
+        `end_types` names the page types that a row's far page must have to yield what the caller
+        wants. A bounded read then counts no other row, so `row_limit` cuts among rows that can
+        yield something and the rows of a hub that point at pages of no wanted type cannot crowd
+        them out.
         """
         if row_limit is None:
             rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
         else:
             row_limit = min(row_limit, _VIEW_ROW_LIMIT)
             if self.keep is None:
-                rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=row_limit)
+                rows, overflow = _neighbor_edges(
+                    self.conn, frontier, set(), limit=row_limit, end_types=end_types
+                )
             else:
-                rows, overflow = self._visible_rows(frontier, row_limit)
+                rows, overflow = self._visible_rows(frontier, row_limit, end_types)
         if self.keep is not None:
             pages = {
                 path

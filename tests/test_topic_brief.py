@@ -608,6 +608,32 @@ def test_a_withheld_spoke_leaves_the_row_bound_where_a_vault_without_it_would(tm
     assert served["missing"] == []
 
 
+def test_a_hub_that_cites_many_sources_still_serves_every_sister_note(tmp_path, monkeypatch) -> None:
+    """A step's row bound counts rows by what they can yield, so many cited Sources cannot crowd a linked note out of the walk."""
+    monkeypatch.setattr(topic_brief, "STEP_ROWS", 16, raising=False)
+    monkeypatch.setattr(topic_brief, "PAGE_ROWS_FLOOR", 16, raising=False)
+    sisters = [f"sister-{n}" for n in range(8)]
+    articles = [f"article-{n:02d}" for n in range(40)]
+    vault = _vault(tmp_path, monkeypatch)
+    for name in articles:
+        _source(vault, name)
+    for name in sisters:
+        _note(vault, name, f"## Claim\n\n{name} is a short one.\n")
+    _note(vault, "hub", f"Sisters: {' '.join(f'[[{name}]]' for name in sisters)}\n\n## Claim\n\nThe hub has eight sisters.\n", head=_cites(*articles))
+    _withhold(vault, _note(vault, "classified", "Classified.\n"), ceiling=0)
+    _index(vault)
+    _reset_caches()
+
+    for caller in (None, _external()):
+        brief = _read(vault, f"{NOTES}/hub.md", caller)
+
+        served = {item["path"] for item in brief["items"] if item["kind"] == "note"}
+        assert served == {f"{NOTES}/{name}.md" for name in ["hub", *sisters]}
+        (cut,) = brief["missing"]  # the Sources were cut at the bound; the notes were not
+        # The rows past the bound were never read, so how many Sources they hold is unknown: the count says so, never 0.
+        assert cut == {"role": "source", "reason": "cap", "count": None, "exact": False}
+
+
 def test_a_cut_source_list_counts_what_it_left_out(tmp_path, monkeypatch) -> None:
     vault = _vault(tmp_path, monkeypatch)
     monkeypatch.setattr(topic_brief, "SOURCE_CAP", 2)

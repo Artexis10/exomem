@@ -66,12 +66,18 @@ SOURCE_CAP = 40
 RELATED_CAP = 10
 #: Edge rows a closing read inspects before it stops; a bound on work, never a count served.
 EDGE_LIMIT = 20_000
-#: Edge rows one walk step reads in all, shared evenly among the pages it expands and never fewer than `PAGE_ROWS_FLOOR` each,
-#: so a hub that links thousands of pages costs a step its share, not its degree. A cut is reported as an inexact count.
+#: Edge rows one walk step reads for each role, shared evenly among the pages it expands and never fewer than `PAGE_ROWS_FLOOR`
+#: each, so a hub that links thousands of pages costs a step its share, not its degree. A row counts toward a share only when its
+#: far page is of that role, so rows that cannot yield a member spend none. A cut is reported as an inexact count.
 #: A restricted reader decides each row's other end, about 0.6 ms each: on a generated store with a 10,000-link hub a step
 #: of 4,000 rows cost such a read about 4 s and a step of 500 rows under 1 s (tasks.md 3.2), so the bound is the budget.
 STEP_ROWS = 500
 PAGE_ROWS_FLOOR = 50
+#: What a walk step reads, by the role a far page plays in a brief, with the type predicate that selects it. The names are the
+#: `missing` roles of the response schema. Types come from the registry through the predicate, never from a list here.
+COMPILED_NOTE = "compiled_note"
+SOURCE = "source"
+_ROLES = {COMPILED_NOTE: note_types.compiled, SOURCE: note_types.captured_source}  # nosemgrep: ep-word-set -- the response schema's own role names.
 #: Candidates past a cap that the walk checks for visibility before it reports a lower bound: a bound on work, never a count served.
 COUNT_BOUND = 40
 #: Bound parameters per statement, well under SQLite's variable limit.
@@ -241,11 +247,12 @@ class _Graph:
 
     def _edges(
         self, groups: Iterable[Sequence[str]], accept: Callable[[dict[str, Any]], bool], *, row_limit: int | None = None,
+        end_types: frozenset[str] = frozenset(),
     ) -> tuple[list[dict[str, Any]], bool]:
         """The live edges that `accept` takes at each group of node keys, and whether a bound cut the read.
 
         Each group is read on its own, so a hub in one group cannot spend the rows of the others; without a `row_limit`
-        the read keeps the graph's own bounds.
+        the read keeps the graph's own bounds. With `end_types` a bounded read counts only rows whose far page is of one.
         """
         edges: dict[str, dict[str, Any]] = {}
         overflow = False
@@ -253,6 +260,7 @@ class _Graph:
             for chunk in _chunks(list(keys)):
                 found, over = self.view.neighbor_edges(
                     set(chunk), limit=EDGE_LIMIT if row_limit is None else row_limit, accept=accept, row_limit=row_limit,
+                    end_types=end_types,
                 )
                 overflow = overflow or over
                 edges.update({str(edge["edge_key"]): edge for edge in found})
@@ -264,26 +272,43 @@ class _Graph:
         definition = registry.definition(str(edge.get("relation_type") or ""))
         return definition is not None and traversal_profiles.relation_allowed(self.profile, definition)
 
-    def adjacent(self, frontier: Sequence[str]) -> tuple[dict[str, set[str]], bool]:
+    def adjacent(
+        self, frontier: Sequence[str], roles: Iterable[str] = _ROLES,
+    ) -> tuple[dict[str, set[str]], frozenset[str]]:
         """The pages joined to the frontier by an edge of the profile, in either direction.
 
-        Returns each such page with the frontier pages it touches, and whether the edge bound cut the read.
+        Returns each such page with the frontier pages it touches, and the roles whose rows the bound cut. A page whose
+        rows all fit its share is read once. A page that does not fit is read once per role, counting only rows whose far
+        page plays that role, so many cited Sources cannot spend the rows of the linked notes and a row that cannot
+        yield a member spends none. A withheld page moves neither choice: it counts toward neither test.
         """
         # One read per page, each with an even share of the step's rows: the frontier's order is fixed, so the cut is too.
         share = max(PAGE_ROWS_FLOOR, STEP_ROWS // max(1, len(frontier)))
-        edges, overflow = self._edges(self.node_keys(frontier).values(), self._walkable, row_limit=share)
-        ends = self._paths_of({key for edge in edges for key in (edge["src_key"], edge["dst_key"])})
+        edges: dict[str, dict[str, Any]] = {}
+        cut: set[str] = set()
+        for page_keys in self.node_keys(frontier).values():
+            for chunk in _chunks(page_keys):
+                fits = self.view.rows_fit(set(chunk), share)
+                for role in (None,) if fits else roles:
+                    end_types = frozenset() if role is None else frozenset(self.types.keys(_ROLES[role]))
+                    if role is not None and not end_types:
+                        continue
+                    found, overflow = self._edges([chunk], self._walkable, row_limit=share, end_types=end_types)
+                    if overflow and role is not None:
+                        cut.add(role)
+                    edges.update({str(edge["edge_key"]): edge for edge in found})
+        ends = self._paths_of({key for edge in edges.values() for key in (edge["src_key"], edge["dst_key"])})
         near = set(frontier)
         touches: dict[str, set[str]] = {}
-        for edge in edges:
-            source, target = ends.get(edge["src_key"]), ends.get(edge["dst_key"])
+        for key in sorted(edges):
+            source, target = ends.get(edges[key]["src_key"]), ends.get(edges[key]["dst_key"])
             if source is None or target is None or source == target:
                 continue
             if source in near and target not in near:
                 touches.setdefault(target, set()).add(source)
             if target in near and source not in near:
                 touches.setdefault(source, set()).add(target)
-        return touches, overflow
+        return touches, frozenset(cut)
 
     def closing(self, paths: Sequence[str]) -> tuple[tuple[str, str, str], ...]:
         """The edges, from pages the caller sees, that settle or bear on a unit of these pages: (edge, relation, unit key).
@@ -384,7 +409,7 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
 
     Compiled notes within `MAX_HOPS` of the seed through the profile's families, passing only through compiled
     notes; the Sources they attach. A candidate is filtered by what the caller sees before anything counts it.
-    Each page's edges are read once, and a page's neighbours are checked for visibility only as far as a cap needs.
+    Each page's edges are read once for each role, and a page's neighbours are checked for visibility only as far as a cap needs.
     """
     compiled = graph.types.selects(seed.page_type, note_types.compiled)
     distance: dict[str, int] = {seed.path: 0}
@@ -392,22 +417,23 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
     #: Each page next to an expanded page, with the expanded pages it touches.
     adjacency: dict[str, set[str]] = {}
     expanded: set[str] = set()
-    walked = True
+    #: The roles whose rows a step's bound cut: what the step left unread is of unknown number.
+    row_cut: set[str] = set()
 
-    def expand(pages: Sequence[str]) -> tuple[dict[str, set[str]], bool]:
-        touches, overflow = graph.adjacent(pages)
+    def expand(pages: Sequence[str], roles: Iterable[str] = _ROLES) -> dict[str, set[str]]:
+        touches, cut_roles = graph.adjacent(pages, roles)
         expanded.update(pages)
+        row_cut.update(cut_roles)
         for page, near in touches.items():
             adjacency.setdefault(page, set()).update(near)
-        return touches, overflow
+        return touches
 
     # The seed starts the walk even when it is no compiled note: a brief of a Source reads its citing notes.
     frontier = [seed.path]
     cut, exact, unnamed_notes = 0, True, 0
     for hop in range(1, MAX_HOPS + 1):
-        touches, overflow = expand(frontier)
-        walked = walked and not overflow
-        exact = exact and not overflow
+        touches = expand(frontier)
+        exact = exact and COMPILED_NOTE not in row_cut
         found = graph.nodes([path for path in touches if path not in distance])
         candidates = _newest_first([
             node for node in found.values() if graph.types.selects(node.page_type, note_types.compiled)
@@ -427,8 +453,7 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
     anchors = list(dict.fromkeys([seed.path, *(node.path for node in notes)]))
     unread = [path for path in anchors if path not in expanded]
     if unread:
-        _touches, overflow = expand(unread)
-        walked = walked and not overflow
+        expand(unread, (SOURCE,))  # a note at the last hop is read only for the Sources it cites
     found = graph.nodes([path for path in adjacency if path not in anchors])
     attached = {
         node.path: min(distance[near] for near in adjacency[node.path])
@@ -441,13 +466,14 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
     ordered = _newest_first([found[path] for path in attached])
     ordered.sort(key=lambda node: attached[node.path])
     sources, left_sources, unnamed_sources, complete_sources = graph.admit(ordered, SOURCE_CAP)
-    exact_sources = walked and complete_sources
+    exact_sources = SOURCE not in row_cut and complete_sources
     missing = []
+    # A lower bound: when a bound cut rows before any candidate was counted, the count is unknown and says so, never 0.
     if cut or not exact:
-        missing.append({"role": "compiled_note", "reason": "cap", "count": cut, "exact": exact})
+        missing.append({"role": COMPILED_NOTE, "reason": "cap", "count": cut or None, "exact": exact})
     if left_sources or not exact_sources:
-        missing.append({"role": "source", "reason": "cap", "count": left_sources, "exact": exact_sources})
-    for role, count in (("compiled_note", unnamed_notes), ("source", unnamed_sources)):
+        missing.append({"role": SOURCE, "reason": "cap", "count": left_sources or None, "exact": exact_sources})
+    for role, count in ((COMPILED_NOTE, unnamed_notes), (SOURCE, unnamed_sources)):
         if count:
             missing.append({"role": role, "reason": "unreferenced", "count": count})
     ranked = _newest_first(notes)

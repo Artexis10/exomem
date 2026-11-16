@@ -24,11 +24,15 @@ The brief SHALL gather members deterministically from the seed alone over the ca
 - Source pages that a member cites through its `sources` field, a citation or provenance relation, or an episode's `ingested_into` field.
 The brief SHALL cap compiled-note members at 40 and Source members at 40. A candidate cut by a cap SHALL be counted in `missing` with reason `cap`. A member that has no stable ref to serve its items under SHALL be counted in `missing` with reason `unreferenced`, never left out silently. Search hits SHALL never add members; on a topic-text read they appear only in `related`. The member walk SHALL take its relation families from the traversal-profile registry, never from a list in code.
 
-The edge rows that one walk step reads SHALL be bounded, shared evenly among the pages that the step expands. A page whose edges exceed its share, such as a hub that links thousands of pages, SHALL cost the step its share and not its degree, and the `missing` entry that the cut affects SHALL carry `exact: false`, so that its count is a lower bound and never read as a total. A row counts toward a share only when the page at its other end is visible to the caller, so a withheld page SHALL NOT move the bound, the order or the count.
+The edge rows that one walk step reads SHALL be bounded for each role that a far page plays, compiled note or Source, and shared evenly among the pages that the step expands. A page whose rows of one role exceed its share, such as a hub that links thousands of pages, SHALL cost the step that share and not its degree. The `missing` entry of the role that the cut affects SHALL carry `exact: false` and a `count` that is a lower bound, or null when the cut left no candidate to count, never 0. A row counts toward a share only when the page at its other end plays that role and is visible to the caller, so that cited Sources cannot spend the share of the linked notes, and a withheld page SHALL NOT move the bound, the order or the count.
 
 #### Scenario: A page that links more pages than a step reads
 - **WHEN** a caller reads the brief of a compiled note that links more pages than one walk step reads
 - **THEN** the brief serves the members that the step read, and `missing` reports the cut with `exact: false`
+
+#### Scenario: A hub that cites more Sources than a step reads
+- **WHEN** a caller reads the brief of a hub note that links eight sister notes and cites more Sources than one walk step reads
+- **THEN** all eight sister notes are members, and only the `missing` entry for Sources reports a cut, with `exact: false` and a null `count`
 
 #### Scenario: A withheld spoke at the bound
 - **WHEN** a hub links five visible and five withheld pages and the step reads six rows
