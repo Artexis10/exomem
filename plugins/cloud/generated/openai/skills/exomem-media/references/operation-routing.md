@@ -254,6 +254,7 @@ reference for the canonical operation leaves that product commands route to.
 - "what do I have on X," "find my notes on Y," "have I covered Z" → **find**
 - "why was this note changed," "show the history of this page" → **get** (`read_page(part="history")`)
 - "what did I used to think about X," "show me the superseded version" → **find** (`prefer_active=false`)
+- "give me everything on X," "what do my notes conclude about X," "what is still open on X" → **get** (`read_page(part="brief")`)
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what does this connect to in the graph," "show typed relations" → **graph_context**
 - "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**
