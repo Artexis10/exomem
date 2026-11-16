@@ -643,7 +643,7 @@ def _open_view(fs, stack, parents, path):
     """The view's file as a context manager, or None when it or its directory is missing.
 
     ``parents`` keeps each directory opened on ``stack``, so a window opens it once."""
-    relative = str(Path(path).parent)
+    relative = held_fs.split_relative(path)[0]
     if relative not in parents:
         opened = fs.parent(relative)
         if not opened.ok and opened.error.code != "MISSING":

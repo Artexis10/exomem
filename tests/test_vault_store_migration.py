@@ -12,13 +12,13 @@ import hashlib
 import json
 import multiprocessing
 import os
-import signal
 import sqlite3
 import sys
 import time
 from contextlib import closing
 
 import pytest
+from hard_kill import KILLED, kill_self
 from test_collection_store_migration import (
     MIGRATE,
     OPERATOR,
@@ -46,10 +46,6 @@ from exomem.collection_store import capability, connection, custody, replica, sc
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 from exomem.vault_store import migrate, mode, ownership, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -273,7 +269,7 @@ def _migrate_and_die(environment, released):
     capability.RELEASED = released
 
     def die(*arguments, **keywords):
-        os.kill(os.getpid(), signal.SIGKILL)
+        kill_self()
 
     migrate._recheck_files = die  # runs after the rows are copied and before the commit
     with library_scope():
@@ -298,7 +294,7 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
     assert not mode.store_mode_active(vault)
     assert store_objects(vault) == objects
     assert state_migration.VAULT_STORE_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(
@@ -494,9 +490,14 @@ def test_a_rollback_moves_a_vacated_file_into_the_trash_with_every_write_to_it(
     person = vacate_a_persons_edit(vault)
 
     with (vault / BETA).open("ab") as editor:  # an editor that holds the file open throughout
-        assert rollback_apply(vault, tmp_path / "export", "--export-held") == 0, (
-            capsys.readouterr().err
-        )
+        outcome = rollback_apply(vault, tmp_path / "export", "--export-held")
+        if os.name == "nt":
+            # Python opens a file without FILE_SHARE_DELETE, so Windows refuses the rename while
+            # the editor holds it: the rollback stops with VAULT_STORE_TRASH_REFUSED, in store mode.
+            assert outcome == 1 and "VAULT_STORE_TRASH_REFUSED" in capsys.readouterr().err
+            assert mode.store_mode_active(vault)
+            return
+        assert outcome == 0, capsys.readouterr().err
         editor.write(b"Saved after the export.\n")
 
     latest = person + b"Saved after the export.\n"
@@ -537,7 +538,10 @@ def test_a_rollback_and_its_dry_run_settle_a_vacated_folder_that_became_a_link(
     target = tmp_path / "elsewhere"
     target.mkdir()
     (target / "kept.txt").write_text("outside the vault\n", encoding="utf-8")
-    (vault / "Knowledge Base/Linked").symlink_to(target, target_is_directory=True)
+    try:
+        (vault / "Knowledge Base/Linked").symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("this process cannot create symlinks (Windows privilege)")
     gamma = b"# Gamma\n\nA new page.\n"
     queue_change(
         vault, puts=(write.PagePut(GAMMA, gamma),), vacated_folders=("Knowledge Base/Linked",)
@@ -567,7 +571,7 @@ def _rollback_and_die(environment, released, export):
 
     def die_on_the_second(self, *arguments):
         if recorded:
-            os.kill(os.getpid(), signal.SIGKILL)
+            kill_self()
         recorded.append(arguments)
         return record(self, *arguments)
 
@@ -596,7 +600,7 @@ def test_a_rollback_killed_while_it_projects_is_finished_by_the_next_run(vault, 
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
     assert mode.store_mode_active(vault)
     client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
     _until(lambda: (client.status().expires_at or 0) < time.time(), seconds=30)

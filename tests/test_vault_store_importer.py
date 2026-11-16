@@ -14,9 +14,7 @@ import itertools
 import multiprocessing
 import os
 import queue
-import signal
 import sqlite3
-import sys
 import threading
 import time
 from contextlib import closing
@@ -26,6 +24,7 @@ import pytest
 import test_managed_collections_migration as managed_suite
 import test_vault_store_migration as migration_suite
 import test_vault_store_projector as projector_suite
+from hard_kill import KILLED, kill_self
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, migrate_apply
 from test_vault_store_projector import NOTES, commit, put, rows
 
@@ -42,10 +41,6 @@ vault = migration_suite.vault
 stored = projector_suite.stored
 writer = projector_suite.writer
 projecting = projector_suite.projecting
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 GENERATED = f"{NOTES}/Generated"
 PERSON = b"A person edited this page in an outside editor.\n"
@@ -343,7 +338,7 @@ def test_a_killed_importer_leaves_no_duplicate_imports(stored):
     )
     child.start()
     child.join(300)
-    assert child.exitcode == -signal.SIGKILL, "the child must be killed inside the fifth import"
+    assert child.exitcode == KILLED, "the child must be killed inside the fifth import"
     done = {path for path, _ in imports(root)}
     assert len(done) == 4, "each import before the kill is durable on its own"
 
@@ -377,7 +372,7 @@ def _import_and_die(environment, root, countdown):
             if statement.startswith("INSERT INTO store_audit"):
                 seen.add(statement)
                 if len(seen) == countdown:
-                    os.kill(os.getpid(), signal.SIGKILL)
+                    kill_self()
 
         handle.connection.set_trace_callback(trace)
         importer.Importer(root, run=lambda work: work(CollectionWriter(root, handle))).sweep()
@@ -492,7 +487,9 @@ def test_a_path_the_importer_cannot_read_is_reported_and_never_taken_for_a_delet
     (stored / ALPHA).unlink()
     (stored / ALPHA).symlink_to(target)
     folder = stored / "Knowledge Base" / "Sources"
-    if os.geteuid() != 0:
+    # A POSIX mode is the only way to make this folder unreadable; Windows has no such mode, so
+    # there the test covers the symlink refusal alone.
+    if os.name == "posix" and os.geteuid() != 0:
         folder.chmod(0)
     try:
         events = importing.import_paths([ALPHA])

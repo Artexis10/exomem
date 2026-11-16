@@ -200,8 +200,9 @@ class Census:
                                    (limit,)).fetchall()
             for old, path, cid in rows:
                 try:
-                    with held_fs.acquire(self._root).require() as fs, fs.parent(str(Path(path).parent)).require() as parent:
-                        opened = fs.file(parent, Path(path).name)
+                    parent_path, name = held_fs.split_relative(path)
+                    with held_fs.acquire(self._root).require() as fs, fs.parent(parent_path).require() as parent:
+                        opened = fs.file(parent, name)
                         if opened.ok:
                             with opened.require() as file:
                                 self._candidate(fs, file, path, cid, now, old=old)

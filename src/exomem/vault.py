@@ -3170,7 +3170,8 @@ class _BatchWorkspace:
                     raise PathGuardError(
                         "PATH_GUARD_CHANGED", "batch rollback target changed"
                     )
-                inverse_recheck()
+                # No path recheck here: it reopens the leaf by name, which Windows refuses while this
+                # delete-capable handle is open. The identity above and the hash below prove the leaf.
                 if _descriptor_hash(descriptor, expected.identity) != expected.content_hash:
                     raise PathGuardError(
                         "PATH_GUARD_CONTENT", "batch rollback content changed"

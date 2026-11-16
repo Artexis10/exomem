@@ -62,10 +62,6 @@ from exomem.vault_store import availability, importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
-
 SENTINEL = b"POISONED PROJECTION: a reader served this file instead of the store\n"
 #: How many pages only the store holds; the drill at scale sets it from the environment.
 GENERATED = int(os.environ.get("EXOMEM_READERS_DRILL_PAGES", "40"))
@@ -862,6 +858,10 @@ def test_a_file_that_the_store_does_not_own_is_answered_from_the_rows_that_its_s
 CLAIMED = "Knowledge Base/Notes/Gen/Claimed.md"
 
 
+@pytest.mark.skipif(
+    not vault_module.STAT_GENERATION_TRUSTED,
+    reason="ctime does not move on a write here, so a file-mode read is never remembered",
+)
 @pytest.mark.timeout(300)
 def test_a_container_claim_is_read_from_the_stored_page_though_a_file_mode_read_remembered_none(
     vault, monkeypatch  # noqa: F811
@@ -1078,9 +1078,16 @@ def test_the_terminal_filter_withholds_a_stored_page_under_each_spelling_whateve
     assert released == {"entries": [{"path": visible}]}
 
 
+@pytest.fixture
+def case_sensitive_volume() -> None:
+    """The test builds folders that differ only in case, which a folding volume merges into one."""
+    if sys.platform in {"win32", "darwin"}:
+        pytest.skip("needs a case-sensitive volume: Windows and default macOS volumes fold case")
+
+
 @pytest.mark.parametrize("store", (False, True), ids=("file", "store"))
 def test_a_spelling_that_two_pages_share_once_case_is_folded_is_released_only_when_both_are(
-    vault, store  # noqa: F811
+    vault, store, case_sensitive_volume  # noqa: F811
 ):
     """The terminal filter decided a case-folded spelling against one matching page, the first in
     the directory's order on disk and in name order in the store. With `secret/Ledger.md` withheld
