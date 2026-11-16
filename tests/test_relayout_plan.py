@@ -14,7 +14,7 @@ import unicodedata
 from pathlib import Path
 
 import pytest
-from relayout_fixture import KB, build_nested_vault
+from relayout_fixture import CHART, CHART_LINKER, KB, add_attachment_links, build_nested_vault
 
 from exomem import __main__ as cli
 
@@ -310,6 +310,29 @@ def test_each_link_to_a_moved_page_gets_the_shortest_text_that_stays_unique(vaul
         (LINK_LAB, f"{KB}/Scratch", "Scratch", True),
     ]
     assert report["counts"]["links_with_full_path_text"] == 4
+
+
+def test_embeds_of_a_moved_image_are_resolved_and_the_path_form_is_rewritten(vault, capsys):
+    before = full_report(capsys, vault)["counts"]
+    add_attachment_links(vault)
+    report = full_report(capsys, vault)
+    counts = report["counts"]
+
+    chart_edits = [
+        (edit["old"], edit["new"], edit["attachment"])
+        for edit in items(report["link_edits"])
+        if edit["page"] == CHART_LINKER
+    ]
+    left = report["links_left_as_written"]["unresolved"]
+
+    # The full-path embed would break after the move, so it gets the image's new short text.
+    assert chart_edits == [("Notes/Insights/chart.png", "chart.png", True)]
+    assert move_of(report, CHART)["new_path"] == "Insights/chart.png"
+    assert not [note for note in items(left) if note["page"] == CHART_LINKER]
+    # Three live links on the new page: two embeds of the image and a title that holds a dot.
+    assert (counts["links_to_attachments"], counts["link_edits_to_attachments"]) == (2, 1)
+    assert counts["links"] == before["links"] + 3
+    assert counts["links_unresolved"] == before["links_unresolved"]
 
 
 def test_a_link_inside_code_and_a_path_written_as_plain_text_are_left_alone(vault, capsys):

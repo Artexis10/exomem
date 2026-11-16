@@ -200,3 +200,22 @@ def test_anchor_and_alias_keep_their_bytes_when_the_page_text_changes():
     }
     for inner, text in expected.items():
         assert links.link_text(inner, page) == text, inner
+
+
+def test_an_image_link_keeps_its_extension_and_a_dotted_page_title_stays_a_page_link():
+    """A file link keeps its extension; a text like `Release 1.2` is still tried against the pages."""
+    attachments = links.build_attachment_index(
+        ["Insights/chart.png", "Archive/chart.png", "Insights/.hidden/logo.png", "Insights/Plan.md"]
+    )
+
+    exact = links.resolve_link("Insights/chart.png", attachments)
+    bare = links.resolve_link("chart.png", attachments)
+    hidden = links.resolve_link("logo.png", attachments)
+
+    assert (exact.outcome, exact.path) == (Resolution.RESOLVED, "Insights/chart.png")
+    assert bare.outcome is Resolution.AMBIGUOUS
+    assert hidden.outcome is Resolution.UNRESOLVED
+    assert links.names_attachment("Notes/chart.png")
+    assert links.names_attachment("Release 1.2")
+    assert not links.names_attachment("Plan.md")
+    assert not links.names_attachment("Plan")

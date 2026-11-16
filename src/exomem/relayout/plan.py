@@ -139,7 +139,9 @@ class RelayoutPlan:
             "unmappable_files": len(self.unmappable),
             "pages_scanned_for_links": links.pages_scanned,
             "links": links.links,
+            "links_to_attachments": links.attachment_links,
             "link_edits": links.edits,
+            "link_edits_to_attachments": links.attachment_edits,
             "link_edit_pages": links.edit_pages,
             "link_edit_pages_in_append_only_areas": links.append_only_edit_pages,
             "link_edits_in_frontmatter": links.frontmatter_edits,
@@ -321,6 +323,9 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
         markdown_moved = {
             current: new for current, new in moved.items() if current.lower().endswith(".md")
         }
+        outside_attachments = [
+            path for entry in inventory.outside.values() for path in entry.attachments
+        ]
         post_index = obsidian_links.build_index([*markdown_moved.values(), *outside_markdown])
         resolver = vault.WikilinkResolver.from_entries(root, entries)
         rewriter = LinkRewriter(
@@ -329,6 +334,18 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
             moved,
             post_index,
             {path.removesuffix(".md"): path for path, _title in entries},
+            attachments_today=obsidian_links.build_attachment_index(
+                [
+                    *(item.path for item in inventory.managed if not item.markdown),
+                    *outside_attachments,
+                ]
+            ),
+            attachments_after=obsidian_links.build_attachment_index(
+                [
+                    *(new for current, new in moved.items() if current not in markdown_moved),
+                    *outside_attachments,
+                ]
+            ),
         )
         scan = LinkScan()
         foreign = LinkScan()

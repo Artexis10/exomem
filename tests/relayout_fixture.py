@@ -258,3 +258,28 @@ def add_links_from_collection_and_part_pages(root: Path) -> None:
         {"type": "insight", "title": "Retired pointer"},
         f"The receipt at [[{RETIRED_TARGET}]] was retired.\n",
     )
+
+
+CHART = f"{KB}/Notes/Insights/chart.png"
+CHART_LINKER = f"{KB}/Notes/Insights/chart-notes.md"
+
+
+def add_attachment_links(root: Path) -> None:
+    """Add an image below an area and a page that embeds it by its full path and by its bare name.
+
+    Obsidian resolves both embeds today. The relayout moves the image and the page, so the
+    full-path embed breaks unless the plan rewrites it. The page also links to a Markdown page
+    whose title holds a dot, which reads like a file name and must still resolve as a page.
+    """
+    _write(root, CHART, b"png")
+    _page(
+        root,
+        f"{KB}/Notes/Insights/release-notes.md",
+        {"type": "insight", "title": "Release 1.2 notes"},
+    )
+    _page(
+        root,
+        CHART_LINKER,
+        {"type": "insight", "title": "Chart notes"},
+        "![[Notes/Insights/chart.png]] and ![[chart.png]] and [[Release 1.2 notes]].\n",
+    )

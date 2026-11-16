@@ -2,10 +2,13 @@
 
 Today's resolver is built once. A link that it resolves to a page the plan moves gets the
 shortest link text that Obsidian's rule resolves to that page's new path
-(`obsidian_links.link_form`). A link that it leaves unresolved or ambiguous keeps its bytes
-and is counted. Each planned text is then resolved again under Obsidian's rule over the
-vault as it will be, and a text that does not reach its page is reported as a plan failure.
-Pages are scanned singly: a body is read, scanned and dropped.
+(`obsidian_links.link_form`). A link text that ends in a file extension other than `.md`
+names a file by its full name, so it resolves against the files that are not Markdown by the
+same rule, and its new text comes from the same link-form rule over those files after the move.
+A link that it leaves unresolved or ambiguous keeps its bytes and is counted. Each planned text
+is then resolved again under Obsidian's rule over the vault as it will be, and a text that does
+not reach its page is reported as a plan failure. Pages are scanned singly: a body is read,
+scanned and dropped.
 """
 
 from __future__ import annotations
@@ -37,6 +40,8 @@ class Target:
 
     outcome: Outcome
     path: str | None = None
+    #: The path names a file that is not Markdown, which a link reads by its full file name.
+    attachment: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +57,7 @@ class LinkEdit:
     old: str
     new: str
     full_path: bool = False
+    attachment: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,11 +81,17 @@ class OutsideLink:
 
 @dataclass(slots=True)
 class LinkCounts:
-    """What the scan found, by outcome. `links` excludes links in code and in origin carriers."""
+    """What the scan found, by outcome. `links` excludes links in code and in origin carriers.
+
+    `attachment_links` and `attachment_edits` are the links that resolve to a file that is not
+    Markdown, and the edits among them; both are part of `links` and `edits`, not apart from them.
+    """
 
     pages_scanned: int = 0
     links: int = 0
     carrier_links: int = 0
+    attachment_links: int = 0
+    attachment_edits: int = 0
     edits: int = 0
     unchanged: int = 0
     to_outside: int = 0
@@ -124,11 +136,13 @@ def _inner(text: str, start: int, end: int) -> str:
 class LinkRewriter:
     """Rewrites the links of pages, against a single resolver and a single post-relayout index.
 
-    `moved` maps the current path of each Markdown page the plan moves to its new path;
-    `post_index` is Obsidian's basename index of the vault as it will be. The resolver answers
-    for today's vault. `retired` is not consulted, because it asks the collection store, which
-    a plan never opens: a link that resolves to no page and names a path inside a collection
-    layer is counted as a link to a retired collection path instead of an unresolved link.
+    `moved` maps the current path of each file the plan moves to its new path; `post_index` is
+    Obsidian's basename index of the Markdown files of the vault as it will be, and
+    `attachments_today` and `attachments_after` are the same index of the other files before and
+    after the move. The resolver answers for today's Markdown files. `retired` is not consulted,
+    because it asks the collection store, which a plan never opens: a link that resolves to no
+    page and names a path inside a collection layer is counted as a link to a retired collection
+    path instead of an unresolved link.
     """
 
     def __init__(
@@ -138,15 +152,20 @@ class LinkRewriter:
         moved: Mapping[str, str],
         post_index: obsidian_links.Index,
         path_of_key: Mapping[str, str],
+        attachments_today: obsidian_links.Index,
+        attachments_after: obsidian_links.Index,
     ) -> None:
         self._resolver = resolver
         self._vault_root = vault_root
         self._moved = moved
         self._forms = obsidian_links.link_forms(post_index)
         self._post_resolver = obsidian_links.IndexResolver(post_index)
+        self._attachment_forms = obsidian_links.link_forms(attachments_after)
+        self._attachments_today = obsidian_links.IndexResolver(attachments_today)
+        self._post_attachments = obsidian_links.IndexResolver(attachments_after)
         self._path_of_key = path_of_key
         self._targets: dict[str, Target] = {}
-        self._checked: dict[tuple[str, str], bool] = {}
+        self._checked: dict[tuple[str, str, bool], bool] = {}
 
     def target(self, inner: str) -> Target:
         """What today's resolver makes of the link text `inner`, answered once per page part."""
@@ -159,6 +178,12 @@ class LinkRewriter:
     def _resolve(self, inner: str, page: str) -> Target:
         if page.endswith("/"):
             return Target(Outcome.FOLDER)
+        if obsidian_links.names_attachment(page):
+            found = self._attachments_today.resolve(page)
+            if found.outcome is obsidian_links.Resolution.RESOLVED:
+                return Target(Outcome.RESOLVED, found.path, attachment=True)
+            if found.outcome is obsidian_links.Resolution.AMBIGUOUS:
+                return Target(Outcome.AMBIGUOUS)
         try:
             canonical, _warning = vault.normalize_wikilink(
                 inner,
@@ -180,18 +205,19 @@ class LinkRewriter:
         None when the target page has no new path or no link form: the link keeps its bytes.
         """
         new_path = self._moved.get(target.path or "")
-        form = self._forms.get(new_path or "")
+        form = (self._attachment_forms if target.attachment else self._forms).get(new_path or "")
         if form is None:
             return None
         return obsidian_links.link_text(inner, form.text), form.full_path
 
-    def reaches(self, text: str, new_path: str) -> bool:
+    def reaches(self, text: str, new_path: str, *, attachment: bool = False) -> bool:
         """Whether Obsidian's rule over the post-relayout vault resolves the link text to `new_path`."""
         page, _anchor = vault.split_wikilink_target(text)
-        key = (page, new_path)
+        key = (page, new_path, attachment)
         known = self._checked.get(key)
         if known is None:
-            known = self._checked[key] = self._post_resolver.resolve(page).path == new_path
+            resolver = self._post_attachments if attachment else self._post_resolver
+            known = self._checked[key] = resolver.resolve(page).path == new_path
         return known
 
     def _entries(
@@ -248,6 +274,7 @@ class LinkRewriter:
         counts = scan.counts
         target = self.target(inner)
         note = LinkNote(page, inner)
+        counts.attachment_links += target.attachment
         if target.outcome is Outcome.UNRESOLVED and _names_collection_path(inner):
             counts.to_retired_collection_paths += 1
             scan.retired_collection.append(note)
@@ -278,8 +305,9 @@ class LinkRewriter:
             counts.edits += 1
             counts.frontmatter_edits += region == "frontmatter"
             counts.full_path_forms += full_path
-            scan.edits.append(LinkEdit(page, region, inner, new, full_path))
-            if not self.reaches(new, self._moved[target.path or ""]):
+            counts.attachment_edits += target.attachment
+            scan.edits.append(LinkEdit(page, region, inner, new, full_path, target.attachment))
+            if not self.reaches(new, self._moved[target.path or ""], attachment=target.attachment):
                 scan.failures.append(note)
 
     def scan_outside(self, scan: LinkScan, page: str, data: bytes) -> None:
@@ -296,6 +324,10 @@ class LinkRewriter:
             new_path = self._moved[target.path or ""]
             scan.outside.append(
                 OutsideLink(
-                    page, inner, target.path or "", new_path, not self.reaches(inner, new_path)
+                    page,
+                    inner,
+                    target.path or "",
+                    new_path,
+                    not self.reaches(inner, new_path, attachment=target.attachment),
                 )
             )

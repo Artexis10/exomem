@@ -159,6 +159,14 @@ class Group:
 
 
 @dataclass(slots=True)
+class TierChange:
+    """The files that move from a single tier to another: all counted, a bounded few named."""
+
+    files: int = 0
+    sample: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class Tiers:
     """The `_access.yaml` tiers of every file today and after, and the files whose tier changes."""
 
@@ -166,7 +174,7 @@ class Tiers:
     detail: str = ""
     before: Counter[str] = field(default_factory=Counter)
     after: Counter[str] = field(default_factory=Counter)
-    changes: dict[tuple[str, str], list[dict[str, str]]] = field(default_factory=dict)
+    changes: dict[tuple[str, str], TierChange] = field(default_factory=dict)
     changed_files: int = 0
     prefixes: Group = field(default_factory=lambda: Group(STATE_NONE))
 
@@ -609,10 +617,9 @@ def _tiers(
         result.after[after_tier] += 1
         if before_tier != after_tier:
             result.changed_files += 1
-            _note(
-                result.changes.setdefault((before_tier, after_tier), []),
-                {"path": current, "new_path": new},
-            )
+            change = result.changes.setdefault((before_tier, after_tier), TierChange())
+            change.files += 1
+            _note(change.sample, {"path": current, "new_path": new})
     result.prefixes = Group(
         STATE_EVALUATED,
         values=[
@@ -802,6 +809,7 @@ def _scope_report(scope: ScopeDiff) -> dict[str, object]:
         "members_after": scope.after,
         "entering": scope.entering,
         "leaving": scope.leaving,
+        "sample_limit": SAMPLE_LIMIT,
         "entering_sample": scope.entering_sample,
         "leaving_sample": scope.leaving_sample,
     }
@@ -833,8 +841,14 @@ def report(disclosure: Disclosure) -> dict[str, object]:
             "files_whose_tier_changes": tiers.changed_files,
             "tiers_changed": tiers.tiers_changed,
             "changes": [
-                {"from": before, "to": after, "files": len(sample), "sample": sample}
-                for (before, after), sample in sorted(tiers.changes.items())
+                {
+                    "from": before,
+                    "to": after,
+                    "files": change.files,
+                    "sample_limit": SAMPLE_LIMIT,
+                    "sample": change.sample,
+                }
+                for (before, after), change in sorted(tiers.changes.items())
             ],
             "prefixes": _group_report(tiers.prefixes),
         }

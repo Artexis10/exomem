@@ -41,7 +41,8 @@ class ManagedFile:
 class OutsideEntry:
     """A top-level entry of the vault root that sits outside the managed root, with what it holds.
 
-    `markdown` lists the paths of its Markdown files that Obsidian shows. A hidden file or
+    `markdown` lists the paths of its Markdown files that Obsidian shows, and `attachments`
+    those of its other files, which a link names by their full file name. A hidden file or
     folder below it is not counted.
     """
 
@@ -49,6 +50,7 @@ class OutsideEntry:
     is_directory: bool
     files: int = 0
     markdown: list[str] = field(default_factory=list)
+    attachments: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -155,7 +157,7 @@ def _walk_managed(
 def _walk_outside(
     directory: Path, rel_dir: str, entry: OutsideEntry, skipped: Counter[str]
 ) -> None:
-    """Count the files below an outside folder and list its Markdown, never following a link."""
+    """Count the files below an outside folder and list its Markdown and other files, never following a link."""
     entries = _scan(directory)
     if entries is None:
         skipped[f"outside:{SKIPPED_UNREADABLE}"] += 1
@@ -173,8 +175,9 @@ def _walk_outside(
             _walk_outside(Path(child.path), rel, entry, skipped)
         elif kind in (EntryKind.REGULAR, EntryKind.HARD_LINKED):
             entry.files += 1
-            if ownership.is_markdown(rel) and not is_sync_conflict_copy(child.name):
-                entry.markdown.append(rel)
+            if not is_sync_conflict_copy(child.name):
+                listed = entry.markdown if ownership.is_markdown(rel) else entry.attachments
+                listed.append(rel)
         else:
             skipped[f"outside:{_KIND_REASON[kind]}"] += 1
 
@@ -206,8 +209,11 @@ def _list_vault(root: Path, view: read.StoreSnapshot | None) -> Inventory:
             _walk_outside(Path(entry.path), entry.name, record, skipped)
         elif kind in (EntryKind.REGULAR, EntryKind.HARD_LINKED):
             record.files = 1
-            if ownership.is_markdown(entry.name) and not is_sync_conflict_copy(entry.name):
-                record.markdown.append(entry.name)
+            if not is_sync_conflict_copy(entry.name):
+                listed = (
+                    record.markdown if ownership.is_markdown(entry.name) else record.attachments
+                )
+                listed.append(entry.name)
         else:
             skipped[f"outside:{_KIND_REASON[kind]}"] += 1
             continue

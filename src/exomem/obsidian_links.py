@@ -7,7 +7,8 @@ is a file's full path, which names that file whatever else ends with it. These p
 functions encode that rule over an index, so a planner, a writer and a verifier share it:
 
 - the index maps `basename_key` of a file to the paths of every file with that basename
-  (`build_index` builds it);
+  (`build_index` builds it for Markdown files, `build_attachment_index` for every other file,
+  which a link names by its full file name, extension included);
 - `resolve_link` applies the rule to a link text: the exact vault path first, then the
   strict union of basename and trailing-path matches, and `IndexResolver` does so for many
   link texts over a single index;
@@ -75,6 +76,37 @@ def visible(path: str) -> bool:
     # Obsidian's documented behaviour: it hides a file or folder whose name starts with a dot.
     hidden = any(segment.startswith(".") for segment in segments)
     return path.lower().endswith(MARKDOWN_SUFFIX) and not hidden
+
+
+def visible_attachment(path: str) -> bool:
+    """Whether Obsidian lists a file that is not Markdown: no dot-named folder or name above it."""
+    return not path.lower().endswith(MARKDOWN_SUFFIX) and not any(
+        segment.startswith(".") for segment in path.split("/")
+    )
+
+
+def names_attachment(page: str) -> bool:
+    """Whether the page part of a link text ends in a file extension other than `.md`.
+
+    Obsidian reads such a text as the full name of a file, and `.md` is only implied for a
+    text without an extension. A text that this accepts may still name a Markdown file whose title holds
+    a dot, so a caller tries the attachments first and falls back to the Markdown files.
+    """
+    name = page.strip().rsplit("/", 1)[-1]
+    stem, dot, extension = name.rpartition(".")
+    return bool(stem and dot and extension) and extension.lower() != MARKDOWN_SUFFIX[1:]
+
+
+def build_attachment_index(paths: Iterable[str]) -> dict[str, list[str]]:
+    """The basename index of the non-Markdown files Obsidian would list among `paths`; its keys keep the extension."""
+    index: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for path in paths:
+        if path in seen or not visible_attachment(path):
+            continue
+        seen.add(path)
+        index.setdefault(basename_key(path), []).append(path)
+    return index
 
 
 def build_index(paths: Iterable[str]) -> dict[str, list[str]]:

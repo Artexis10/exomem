@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 from relayout_fixture import (
     GHOST,
     KB,
@@ -160,6 +161,27 @@ def test_the_access_tier_of_a_page_that_the_plan_renames_changes_when_the_prefix
     assert (unmapped["value"], unmapped["files_after"]) == ("Notes/Insights/hidden.md", 0)
     # The excluded folder keeps its single page, so its tier does not move.
     assert tiers["files_by_tier_today"]["excluded"] == tiers["files_by_tier_after"]["excluded"] == 1
+
+
+def test_a_tier_change_is_counted_for_every_file_while_its_sample_stays_short(
+    governed_vault, capsys
+):
+    """Twenty-five pages lose their read-only tier: the report says 26 files, and lists 20 as a sample."""
+    access = governed_vault / KB / "_access.yaml"
+    config = yaml.safe_load(access.read_text(encoding="utf-8"))
+    for number in range(25):
+        name = f"bulk-{number:02d}"
+        page = governed_vault / KB / "Notes" / "Insights" / f"{name}.md"
+        page.write_text(f"---\ntype: insight\ntitle: Bulk note {number:02d}\n---\n", "utf-8")
+        config["readonly"].append(f"Notes/Insights/{name}.md")
+    access.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    tiers = disclosure_of(capsys, governed_vault)["access_tiers"]
+
+    (change,) = tiers["changes"]
+    assert (change["from"], change["to"]) == ("readonly", "read-write")
+    assert tiers["files_whose_tier_changes"] == change["files"] == 26
+    assert (len(change["sample"]), change["sample_limit"]) == (20, 20)
 
 
 def test_flattening_the_partition_folders_changes_a_scope_only_under_that_alternative(

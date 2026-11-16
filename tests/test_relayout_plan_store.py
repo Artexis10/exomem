@@ -17,6 +17,7 @@ import pytest
 from relayout_fixture import (
     KB,
     RECORD_PAGE,
+    add_attachment_links,
     add_governed_content,
     add_links_from_collection_and_part_pages,
     build_nested_vault,
@@ -63,6 +64,7 @@ def test_a_store_mode_plan_equals_the_file_mode_plan_and_changes_nothing(
     build_nested_vault(vault)
     add_governed_content(vault)
     add_links_from_collection_and_part_pages(vault)
+    add_attachment_links(vault)
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     capsys.readouterr()
@@ -96,6 +98,7 @@ def test_a_store_mode_plan_equals_the_file_mode_plan_and_changes_nothing(
     foreign = from_store["links_in_collection_and_part_pages"]["edits"]["items"]
     assert {RECORD_PAGE, PART_PAGE} <= {edit["page"] for edit in foreign}
     assert from_store["counts"]["files"] == from_files["counts"]["files"] == expected_files
+    assert from_store["counts"]["link_edits_to_attachments"] == 1
     # The read section names the mode, the revision and the stage timings, so it differs by design.
     del from_files["diagnostics"]["read"], from_store["diagnostics"]["read"]
     assert from_store == from_files
