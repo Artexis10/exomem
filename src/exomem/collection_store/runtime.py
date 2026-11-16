@@ -1371,7 +1371,7 @@ class StoreServer:
         from ..writer_lease import acknowledgement_budget_deadline
         from .source_dependencies import request_server
 
-        # These execution modes form the internal request protocol, never caller-configured business values.
+        # nosemgrep: ep-word-membership -- These execution modes form the internal request protocol, not caller values.
         if execution not in ("store", "record", "unit"):
             raise ValueError("unknown collection request execution mode")
         record_request = execution == "record"

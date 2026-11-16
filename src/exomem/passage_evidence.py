@@ -246,6 +246,7 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESULTS:
         raise ValueError(f"INVALID_PASSAGE_LIMIT: set limit to an integer from 1 to {MAX_RESULTS}")
     scope = request["scope"]
+    # nosemgrep: ep-word-membership -- The find API fixes these scope tokens.
     if scope not in ("kb", "kb-only", "vault"):
         raise ValueError("INVALID_PASSAGE_SCOPE: set scope to kb, kb-only, or vault")
     query = request["query"]

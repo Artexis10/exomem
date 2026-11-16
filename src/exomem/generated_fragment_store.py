@@ -34,6 +34,8 @@ CHANGE_WINDOW = 4096
 MAX_STEP = 128
 # Each commit removes at most this many retired change records, so the window keeps up at no extra head write.
 TRIM_STEP = 2
+# nosemgrep: ep-word-set -- This store's own top-level record directories, which it creates and reads.
+_FAMILIES = ("images", "copies", "slots", "uncertain")
 
 
 def _opaque(value: str) -> str:
@@ -526,7 +528,7 @@ class GeneratedFragmentStore:
         parts = Path(key).parts
         if ".." in parts or path.relative_to(self.path).as_posix() != key:
             raise ValueError("generated_object_key_invalid")
-        if not parts or parts[0] not in ("images", "copies", "uncertain", "slots"):
+        if not parts or parts[0] not in _FAMILIES:
             raise ValueError("generated_object_key_invalid")
         if parts[0] == "images" and len(parts) in (4, 5):
             image_id = _opaque(parts[2])
@@ -1574,7 +1576,7 @@ class GeneratedFragmentStore:
         if not acquired.ok:
             raise RuntimeError("generated census cannot acquire vault")
         with acquired.require() as filesystem:
-            for family in ("images", "copies", "slots", "uncertain"):
+            for family in _FAMILIES:
                 path = (self.path / family).relative_to(self.root).as_posix()
                 result = filesystem.parent(path)
                 if not result.ok:

@@ -138,7 +138,7 @@ def acquire(root, prepared, *, why, on_reject, lifetime):
         if origin is not None:
             origins.append(origin)
         outcomes.append({"index": index, **base, "outcome": "updated" if before else "inserted"})
-    # These outcome names are the bulk receipt protocol; caller row fields remain declaration-defined data.
+    # nosemgrep: ep-word-search -- The bulk receipt protocol fixes these outcome names; row fields stay declared data.
     counts = {name: sum(outcome["outcome"] == name for outcome in outcomes)
               for name in ("inserted", "updated", "unchanged", "rejected")}
     prepared.result = dict(operation="bulk_upsert", collection_id=manifest.collection_id, batch_id=prepared.batch_id,
