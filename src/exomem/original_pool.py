@@ -65,6 +65,30 @@ def enabled(vault: Path) -> bool:
     return True
 
 
+#: What an archive that keeps ordinary original storage tells its owner when no launcher support is proven.
+LIFECYCLE_ACTION = ("Convert the archive's originals with maintain_memory mode=convert-originals through the service. "
+                    "A managed service whose launcher predates shared originals needs the offline launcher update "
+                    "in docs/managed-service-upgrades.md first.")
+
+
+def activate_new(vault: Path) -> dict[str, str]:
+    """Start a genuinely new archive in the shared layout when this process proves launcher support.
+
+    Without that proof the archive keeps ordinary original storage, and the result names the action. Every
+    new-archive creator calls this once its state is initialized for the final path.
+    """
+    ordinary = {"layout": "ordinary", "reason": "no launcher support for shared originals is proven in this process",
+                "action": LIFECYCLE_ACTION}
+    # Checked first because the refusal below logs an offline-migration error, which is no fault of a new archive.
+    if not artifact_lifecycle.supports(state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID):
+        return ordinary
+    try:
+        enable(vault)
+    except state_migration.StateMigrationOfflineRequired:
+        return ordinary  # Standby withdrew support after the check.
+    return {"layout": "shared"}
+
+
 def enable(vault: Path) -> None:
     """Enrol compatibility before publishing the marker; callers own explicit layout activation."""
     required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID

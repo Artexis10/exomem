@@ -3438,6 +3438,11 @@ def _init_main(argv: list[str]) -> int:
         return 1
     print(f"Initialized {managed_root_rel()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
+    if (storage := report.get("original_storage")) is not None:
+        if storage["layout"] == "shared":
+            print("  Originals are stored once, however many filings share their bytes.")
+        else:
+            print(f"  Originals keep ordinary storage: {storage['reason']}. {storage['action']}")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
