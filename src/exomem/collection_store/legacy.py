@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .. import held_fs, records, reserved_paths, vault
 from .. import structured_collections as collections
+from ..kbdir import managed_join, managed_root_rel
 from .connection import CollectionStoreError
 
 _PREFIX = ".exomem-collection-audit-"
@@ -402,12 +403,11 @@ class LegacyAuditSpool:
         try:
             with held_fs.acquire(self._root).require() as filesystem:
                 self._observe(".", "anchor", filesystem.root_identity, recheck=recheck)
-                kb = vault.kb_prefix().rstrip("/")
-                self._directory(filesystem, kb, recheck=recheck)
-                self._directory(filesystem, kb + "/_archive", recheck=recheck)
-                archive = kb + "/_archive/logs"
+                self._directory(filesystem, managed_root_rel(), recheck=recheck)
+                self._directory(filesystem, managed_join("_archive"), recheck=recheck)
+                archive = managed_join("_archive/logs")
                 exists = self._directory(filesystem, archive, recheck=recheck)
-                self._file(filesystem, kb + "/log.md", "live", recheck=recheck, ingest=not recheck)
+                self._file(filesystem, managed_join("log.md"), "live", recheck=recheck, ingest=not recheck)
                 if exists:
                     with (
                         filesystem.parent(archive).require() as parent,

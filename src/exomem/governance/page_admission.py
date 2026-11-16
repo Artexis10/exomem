@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import document_containers, find_corpus, vault
 from ..find_types import ParsedPage
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root_rel
 from . import bridges, membership, raw_protection
 from .policy import Policy
 
@@ -158,7 +158,7 @@ def _scope_header(root: Path, policy: Policy, memo: dict) -> tuple:
 
     Read once for each request.
     """
-    key = (__name__, "scope header", policy.fingerprint, kb_dirname())
+    key = (__name__, "scope header", policy.fingerprint, managed_root_rel())
     kept = memo.get(key)
     if kept is None:
         kept = memo[key] = (FACTS_VERSION, *membership.subject_inputs(root, policy))

@@ -37,7 +37,7 @@ from . import (
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_root_rel
 from .vault import (
     MISSING_CONTENT_HASH,
     VAULT_SCAN_SKIP_DIRS,
@@ -424,7 +424,7 @@ def reconcile_media(
     except ValueError as error:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must resolve inside {kb_dirname()}: {binary}",
+            f"media path must resolve inside {managed_root_rel()}: {binary}",
         ) from error
     if (
         reserved_paths.classify_logical(lexical_relative).disposition
@@ -772,7 +772,7 @@ def reconcile_all_media(
     reconcile_one = reconcile_one or (
         lambda binary: reconcile_media(vault, binary, explicit=False)
     )
-    kb = vault / kb_dirname()
+    kb = managed_root(vault)
     if not kb.is_dir():
         return 0
 
@@ -1537,13 +1537,13 @@ def _retire_completed_ocr(
 
 def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
     try:
-        binary.relative_to(vault / kb_dirname())
+        binary.relative_to(managed_root(vault))
         resolved = binary.resolve(strict=True)
-        resolved.relative_to((vault / kb_dirname()).resolve(strict=True))
+        resolved.relative_to(managed_root(vault).resolve(strict=True))
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must resolve inside {kb_dirname()}: {binary}",
+            f"media path must resolve inside {managed_root_rel()}: {binary}",
         ) from exc
     if not resolved.is_file():
         raise MediaProcessingError(
@@ -1556,13 +1556,13 @@ def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
 def _confine_sidecar(vault: Path, sidecar: Path) -> None:
     """Reject an existing sidecar symlink that escapes the governed tree."""
     try:
-        sidecar.relative_to(vault / kb_dirname())
+        sidecar.relative_to(managed_root(vault))
         resolved = sidecar.resolve(strict=False)
-        resolved.relative_to((vault / kb_dirname()).resolve(strict=True))
+        resolved.relative_to(managed_root(vault).resolve(strict=True))
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media sidecar must resolve inside {kb_dirname()}: {sidecar}",
+            f"media sidecar must resolve inside {managed_root_rel()}: {sidecar}",
         ) from exc
 
 

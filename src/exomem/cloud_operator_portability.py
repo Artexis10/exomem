@@ -24,13 +24,13 @@ from .collection_store import (
     schema,
     snapshot,
 )
+from .kbdir import managed_root_rel
 
 
 def archive_members(vault: Path) -> list[Path]:
-    from .kbdir import kb_dirname
     from .media_store import local_originals
 
-    with local_originals(vault, (kb_dirname(),)):
+    with local_originals(vault, (managed_root_rel(),)):
         return _archive_members_local(vault)
 
 

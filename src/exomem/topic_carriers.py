@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any
 
 from . import note_types, tag_variants
-from .kbdir import kb_prefix
+from .kbdir import managed_relative
 from .vault import kb_root
 from .vocabulary import registry
 
@@ -177,7 +177,7 @@ def protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, bool
         if note_type.folder:
             parts = fold_folder(note_type.folder)
             out.append((parts, f"note type {note_type.key}", note_type.partition == "project"))
-    entities = entity_recurrence.entities_prefix().removeprefix(kb_prefix()).rstrip("/")
+    entities = managed_relative(entity_recurrence.entities_prefix()).rstrip("/")
     for definition in entity_types.load_entity_types(vault_root).active_definitions:
         parts = fold_folder(str(PurePosixPath(entities, definition.folder)))
         out.append((parts, f"entity type {definition.id}", False))

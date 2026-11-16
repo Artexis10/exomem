@@ -22,7 +22,7 @@ from typing import Any, TypeAlias
 import yaml
 
 from . import vault
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .vocabulary import registry as vocabulary_registry
 
 EXTENSION_SCHEMA_VERSION = 1
@@ -357,7 +357,7 @@ def core_registry() -> EntityTypeRegistry:
 
 
 def extension_registry_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "entity-types.yaml"
+    return managed_root(Path(vault_root)) / "_Schema" / "entity-types.yaml"
 
 
 def load_entity_types(
@@ -471,7 +471,7 @@ def observed_extension_ids(vault_root: Path) -> frozenset[str]:
     from .governance import connector_boundary
 
     connector_boundary.require_global_observation(vault_root)
-    entities = Path(vault_root) / kb_dirname() / "Entities"
+    entities = managed_root(Path(vault_root)) / "Entities"
     registry = load_entity_types(vault_root)
     observed: set[str] = set()
     if not entities.is_dir():

@@ -29,7 +29,7 @@ from . import (
     vault,
 )
 from . import find as find_module
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .vocabulary.registry import PUBLIC_INSTANCE
 
 SCHEMA_VERSION = 1
@@ -1957,7 +1957,7 @@ def load_contract(vault_root: Path, name: str) -> tuple[MemoryContract, str, str
 def load_saved_contracts(vault_root: Path) -> tuple[LoadedMemoryContract, ...]:
     """Load every direct saved contract, failing closed on any bad YAML file."""
     vault_root = Path(vault_root)
-    directory = vault_root / kb_dirname() / "_Schema" / "contracts"
+    directory = managed_root(vault_root) / "_Schema" / "contracts"
     if directory.is_symlink():
         raise ValueError(
             "INVALID_CONTRACT: contracts directory must not be a symlink"
@@ -2796,7 +2796,7 @@ def contract_from_dict(data: dict[str, Any]) -> MemoryContract:
 
 def contract_path(vault_root: Path, name: str) -> Path:
     filename = f"{_validate_name(name)}.yaml"
-    return Path(vault_root) / kb_dirname() / "_Schema" / "contracts" / filename
+    return managed_root(Path(vault_root)) / "_Schema" / "contracts" / filename
 
 
 def _select_pages(vault_root: Path, scope: ContractScope):
@@ -2805,7 +2805,7 @@ def _select_pages(vault_root: Path, scope: ContractScope):
     from .governance.principal import effective_principal
 
     who = effective_principal()
-    kb = Path(vault_root) / kb_dirname()
+    kb = managed_root(Path(vault_root))
     if not kb.is_dir() and not find_corpus.store_serves(vault_root):
         return []
     pages = []

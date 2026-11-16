@@ -42,7 +42,7 @@ from . import (
 )
 from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
-from .kbdir import kb_dirname
+from .kbdir import managed_split_parts
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
@@ -130,8 +130,9 @@ def _in_episode_folder(vault_root: Path, rel: str) -> bool:
     if recap_folder.in_inbox(vault_root, rel, casefold=True):
         return True
     parts = rel.replace("\\", "/").split("/")
-    if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
-        parts = parts[1:]
+    below = managed_split_parts(parts, key=str.casefold)
+    if len(parts) > 1 and below is not None:
+        parts = below
     return (
         len(parts) > 2
         and parts[0].casefold() == source_taxonomy.SOURCES_ROOT.casefold()

@@ -44,7 +44,7 @@ from . import (
     vocabulary_auxiliaries,
     vocabulary_resolution,
 )
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .source_coverage import CAPTURE_HEADING
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -789,7 +789,7 @@ def add(
             folder_title=folder_name,
             folder_description=taxonomy.category_description(folder_name),
             rel_source_path=(
-                f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
+                f"{managed_join('')}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
                 if in_sources else rel_source_no_ext
             ),
             date_iso=date_iso,
@@ -1633,7 +1633,7 @@ def _activity_summary(
     The index is a derived output bound to the Source page, so the gate never classifies its
     links: the caller's title and tags stay inert text here, as they do in the log body.
     """
-    base = f"`{rel_source_no_ext.replace(kb_prefix(), '')}` (source, {source_type}, mobile capture via exomem)"
+    base = f"`{managed_relative(rel_source_no_ext)}` (source, {source_type}, mobile capture via exomem)"
     excerpt = f"\"{title.strip()}\""
     tags_part = f"; tags: {tags}" if tags else ""
     return f"{base} — {escape_wikilinks_for_log(excerpt + tags_part)}"

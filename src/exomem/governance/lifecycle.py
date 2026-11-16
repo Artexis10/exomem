@@ -31,7 +31,7 @@ from .. import (
     semantic_index,
 )
 from ..cli_ops import OpError
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root
 from ..vault import parse_frontmatter
 from . import membership, receipts
 from . import policy as policy_module
@@ -124,7 +124,7 @@ def _digest(value: Any) -> str:
 
 
 def _governance_root(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / policy_module.GOVERNANCE_DIRNAME
+    return managed_root(Path(vault_root)) / policy_module.GOVERNANCE_DIRNAME
 
 
 def _tombstone_root(vault_root: Path) -> Path:
@@ -190,7 +190,7 @@ def protected_path(vault_root: Path, rel_path: str) -> bool:
     """Whether moving ``rel_path`` would move receipt/tombstone evidence."""
     target = (Path(vault_root) / _normalize_rel(rel_path)).resolve()
     governed_root = _governance_root(vault_root).resolve()
-    kb_root = (Path(vault_root) / kb_dirname()).resolve()
+    kb_root = managed_root(Path(vault_root)).resolve()
     try:
         target.relative_to(governed_root)
         return True

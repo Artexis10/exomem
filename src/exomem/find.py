@@ -57,7 +57,7 @@ from .find_types import (
     SemanticUnitHit,
 )
 from .governance import policy as governance_policy
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_root, managed_split, managed_splitter
 
 if TYPE_CHECKING:
     from .vault import WikilinkResolver
@@ -743,7 +743,7 @@ class FreshnessSnapshot:
     ) -> set[str]:
         candidates = {
             path for path in self.recall_paths(scope)
-            if scope == "vault" or path.startswith(kb_prefix())
+            if scope == "vault" or managed_split(path) is not None
         }
         paths = self._published_admitted_paths(scope, admit_path, candidates)
         if paths is None:
@@ -1091,7 +1091,7 @@ def _corpus_walk(vault_root: Path, scope: str) -> Iterable[Path]:
 
     def disk(**walk: Any) -> Iterable[Path]:
         if scope == "kb":
-            kb = vault_root / kb_dirname()
+            kb = managed_root(vault_root)
             return _walk_md(kb, **walk) if kb.is_dir() else ()
         from .vault import walk_vault_md
 
@@ -1104,7 +1104,7 @@ def _kb_missing(vault_root: Path) -> bool:
     """Whether the Knowledge Base folder is missing: a store-mode vault holds its pages in the
     store, so it needs no folder.
     """
-    return not (vault_root / kb_dirname()).is_dir() and not find_corpus.store_serves(vault_root)
+    return not managed_root(vault_root).is_dir() and not find_corpus.store_serves(vault_root)
 
 
 def _resolve_page(
@@ -1202,11 +1202,11 @@ def _merge_pending_walk(
                 continue
             seen.add(rel_path)
         yield path
-    prefix = kb_prefix()
+    under = managed_splitter()
     for row in pending.current_pages():
         if row.rel_path in seen:
             continue
-        if scope != "vault" and not row.rel_path.startswith(prefix):
+        if scope != "vault" and under(row.rel_path) is None:
             continue
         yield vault_root / row.rel_path
 
@@ -1228,10 +1228,10 @@ def _pending_keyword_paths(
     scoring or any cap.
     """
     admitted: list[str] = []
-    prefix = kb_prefix()
+    under = managed_splitter()
     for row in pending.current_pages():
         rel = row.rel_path
-        if scope != "vault" and not rel.startswith(prefix):
+        if scope != "vault" and under(rel) is None:
             continue
         if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
             continue
@@ -5691,11 +5691,11 @@ def _merge_pending_candidates(candidates: set[str], *, pending: Any, scope: str)
     reaches the results through the empty-query filter-only lane — a page the
     scope was asked to exclude.
     """
-    prefix = kb_prefix()
+    under = managed_splitter()
     return set(pending.shadow(candidates)) | {
         row.rel_path
         for row in pending.current_pages()
-        if scope == "vault" or row.rel_path.startswith(prefix)
+        if scope == "vault" or under(row.rel_path) is not None
     }
 
 
@@ -6193,7 +6193,7 @@ def _find_managed_keyword(
                 ),
                 "matches": bool(
                     page is not None and path in (pending_paths or ())
-                    and (scope == "vault" or path.startswith(kb_prefix()))
+                    and (scope == "vault" or managed_split(path) is not None)
                     and path.rsplit("/", 1)[-1].lower() not in _NAVIGATION_BASENAMES
                     and (allowed_paths is None or path in allowed_paths)
                     and _make_excerpt(page, query_norm) is not None
@@ -6360,7 +6360,7 @@ def _find_keyword(
                 if not catalog.complete:
                     _raise_catalog_outcome(catalog)
         if scope == "kb" and _kb_missing(vault_root):
-            log.error("KB directory missing: %s", vault_root / kb_dirname())
+            log.error("KB directory missing: %s", managed_root(vault_root))
             return []
         walk = _corpus_walk(vault_root, scope)
         _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
@@ -7283,8 +7283,8 @@ def _widening_allowed_paths(
         return None
     except structured_filters.FilterError:
         return None
-    prefix = kb_prefix()
-    return {path for path in eligible if not path.startswith(prefix)}
+    under = managed_splitter()
+    return {path for path in eligible if under(path) is None}
 
 
 def _find_outside_kb(
@@ -7381,7 +7381,7 @@ def _find_outside_kb(
         )
         post_eligibility = eligible_paths
         allowed_outside = (
-            {path for path in eligible_paths or () if not path.startswith(kb_prefix())}
+            {path for path in eligible_paths or () if managed_split(path) is None}
             if eligible_paths is not None
             else None
         )
@@ -7389,7 +7389,7 @@ def _find_outside_kb(
     if admit_path is not None:
         with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
             admitted_paths = snapshot.admitted_paths("vault", admit_path)
-        admitted_outside = {path for path in admitted_paths if not path.startswith(kb_prefix())}
+        admitted_outside = {path for path in admitted_paths if managed_split(path) is None}
         allowed_outside = admitted_outside if allowed_outside is None else allowed_outside & admitted_outside
         post_eligibility = allowed_outside
     # A structured filter ranks the EXACT outside-KB eligible set, so no
@@ -7474,7 +7474,7 @@ def _find_outside_kb(
             # whenever no filter narrowed it, and an unrestricted vault-scope
             # query returns knowledge-base rows.
             restricted = catalog_served and allowed_outside is not None
-            if restricted or not path.startswith(kb_prefix()):
+            if restricted or managed_split(path) is None:
                 candidates.append(path)
                 score_by_path[path] = float(_score)
     except RetrievalIndexWarming:
@@ -7677,7 +7677,7 @@ def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
             rel = path.resolve().relative_to(vault_resolved).as_posix()
         except ValueError:
             continue
-        if rel.startswith(kb_prefix()):
+        if managed_split(rel) is not None:
             continue
         page = _CACHE.get(path, vault_root)
         if page is None:
@@ -7895,7 +7895,7 @@ def _keyword_match_paths(
         walk: Iterable[Path] = (
             vault_root / rel
             for rel in allowed_paths
-            if scope != "kb" or rel.startswith(kb_prefix())
+            if scope != "kb" or managed_split(rel) is not None
         )
     elif scope == "kb" and _kb_missing(vault_root):
         return []
@@ -7972,7 +7972,7 @@ def _outbound_wikilink_paths(
         rel_with_md = rel if rel.endswith(".md") else rel + ".md"
         # Sanity: only walk into the KB itself for graph expansion; curated
         # trees are intentional out-of-graph references.
-        if not rel_with_md.startswith(kb_prefix()):
+        if managed_split(rel_with_md) is None:
             continue
         if (
             rel_with_md not in allowed_paths

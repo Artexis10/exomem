@@ -26,7 +26,7 @@ from .. import (
     ranking_config,
 )
 from ..find_types import GraphProvenance, Hit
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root_rel
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -1749,7 +1749,7 @@ def _find_projected_hits_pinned(
             window=candidate_depth,
         )
 
-    knowledge_base_name = kb_dirname()
+    knowledge_base_name = managed_root_rel()
     lane_hits = {
         lane: _retain_projected_scope_lane(
             hits,

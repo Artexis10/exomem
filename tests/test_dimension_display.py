@@ -739,7 +739,7 @@ def test_a_served_search_returns_the_scans_groups_with_one_graph_read_and_no_sca
 ) -> None:
     """Catches a served reader that reads the corpus to group its hits, reads the graph again for
     the display, or groups the same hits differently from the scan."""
-    from exomem.vault import kb_dirname
+    from exomem.kbdir import kb_dirname
 
     vault = _vault(tmp_path, {**PAGES, **ARGUMENT_PAGES}, registry=QUESTIONS_ONLY)
     offline = {name: _groups(_search(vault, filters)) for name, filters in SERVED_GROUPS.items()}

@@ -35,7 +35,7 @@ from . import (
     scene_frames,
     semantic_segments,
 )
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root
 from .vault import VAULT_SCAN_SKIP_DIRS, in_append_only_tree
 
 log = logging.getLogger(__name__)
@@ -219,7 +219,7 @@ def backfill_artifact_pages(
     only — and without a page they are absent from find, from the graph, and
     from every `sources:` citation. Idempotent.
     """
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     if not kb.is_dir():
         return 0
     created = 0
@@ -259,9 +259,9 @@ def backfill_media(
     semantic segmentation. One re-extraction serves both flags when both are requested.
     """
     stats = BackfillStats()
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     if not kb.is_dir():
-        log_fn(f"no {kb_prefix()} directory; nothing to back-fill")
+        log_fn(f"no {managed_join('')} directory; nothing to back-fill")
         return stats
     # Non-media artifacts first: it is a cheap metadata pass, and it makes them
     # citable even if the expensive extraction below is disabled or fails.
@@ -321,7 +321,7 @@ def backfill_media(
         key=lambda p: (_order.get(extract.media_type_for(p), 9), p.as_posix()),
     )
     stats.scanned = len(files)
-    log_fn(f"scanning {len(files)} media file(s) under {kb_prefix()} (dry_run={dry_run})")
+    log_fn(f"scanning {len(files)} media file(s) under {managed_join('')} (dry_run={dry_run})")
 
     for i, f in enumerate(files, 1):
         if not _is_automatic_media_candidate(vault_root, f):

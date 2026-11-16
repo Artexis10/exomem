@@ -11,7 +11,7 @@ from typing import Any, Literal, cast
 
 from . import capabilities, cloud_cell, operation_entries, page_ids, relation_registry
 from . import curation as curation_module
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
 
 log = logging.getLogger(__name__)
@@ -497,7 +497,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
         return (
             isinstance(value, str)
             and 0 < len(value) <= 2048
-            and value.startswith(kb_prefix())
+            and managed_split(value) is not None
             and "\\" not in value
             and "\x00" not in value
         )
@@ -1187,7 +1187,7 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
         if not (
             isinstance(collection, str)
             and 0 < len(collection) <= _MAX_ROUTING_COLLECTION_CHARS
-            and collection.startswith("Knowledge Base/Records/")
+            and collection.startswith(managed_join("Records/"))
             and collection.endswith("/_collection.md")
             and ".." not in collection.split("/")
         ):

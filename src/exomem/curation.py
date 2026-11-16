@@ -24,7 +24,7 @@ from typing import Any, Final, NoReturn
 
 from . import capabilities, held_fs, vault
 from .collection_profiles import PLANNING_PROFILE
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_split
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
@@ -380,6 +380,12 @@ def store_request_id(run_identity: str, operation_identity: str) -> str:
     return f"{run_identity}/{operation_identity}"
 
 
+def _is_governed_trash(path: str) -> bool:
+    """Whether `path` lies in the managed root's trash folder, compared without regard to case."""
+    below = managed_split(path, key=str.casefold)
+    return below is not None and below.casefold().startswith("_trash/")
+
+
 def _records_store_unsupported(kind: str) -> CurationError:
     """A Records leaf on a collection the store owns runs only on the store thread of the service
     that serves it; anywhere else it refuses, and names the Records action that makes the same
@@ -529,14 +535,13 @@ def normalize_target_path(
         or any(part in {"", ".", ".."} for part in raw.split("/"))
     ):
         raise _error("INVALID_CURATION_PATH", f"{field} is not a confined vault path")
-    prefix = f"{kb_dirname()}/"
-    if not raw.startswith(prefix):
+    relative = managed_split(raw)
+    if relative is None:
         raise _error("CURATION_TARGET_PROTECTED", f"{field} must target governed knowledge")
     if _native_paths is not None:
         if raw not in _native_paths:
             raise _error("CURATION_TARGET_PROTECTED", "path is outside the sealed native core")
         return raw
-    relative = raw[len(prefix) :]
     parts = relative.split("/")
     first = _folded_segment(parts[0])
     compact = "/".join(_folded_segment(part) for part in parts).replace("_", "-")
@@ -700,7 +705,7 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         trash_path = normalize_target_path(
             args.get("trash_path"), field="trash_path", allow_trash=True
         )
-        if not trash_path.casefold().startswith(f"{kb_dirname().casefold()}/_trash/"):
+        if not _is_governed_trash(trash_path):
             raise _error(
                 "INVALID_CURATION_PLAN", "recover requires an exact governed trash identity"
             )
@@ -999,7 +1004,7 @@ def _schema_rows(vault_root: Path) -> list[dict[str, str]]:
     from . import semantic_language_registry
     from .vault_store import mode
 
-    schema_root = Path(vault_root) / kb_dirname() / "_Schema"
+    schema_root = managed_root(Path(vault_root)) / "_Schema"
     registry = semantic_language_registry.registry_path(vault_root)
     contracts_root = schema_root / "contracts"
     if mode.store_mode_for_reads(Path(vault_root)):
@@ -2876,7 +2881,7 @@ def _validate_witness(
             for path, shape in normalized
             if path != source
             and shape == "content"
-            and path.casefold().startswith(f"{kb_dirname().casefold()}/_trash/")
+            and _is_governed_trash(path)
         ]
         required = {(source, "absent"), *((path, "content") for path in trash)}
         if len(trash) != 1:
@@ -4541,7 +4546,7 @@ class CurationStore:
 
     def __init__(self, vault_root: Path):
         self.vault_root = Path(vault_root)
-        self.root = self.vault_root / kb_dirname() / "_Governance" / "curation" / "runs"
+        self.root = managed_root(self.vault_root) / "_Governance" / "curation" / "runs"
 
     def _assert_safe(self, target: Path) -> None:
         try:

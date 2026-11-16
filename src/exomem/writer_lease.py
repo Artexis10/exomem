@@ -44,6 +44,7 @@ from . import call_spans, durable_write, mutation_journal, mutation_lock, reques
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
+from .kbdir import managed_root
 from .mutation_lock import (
     COORDINATOR_IDENTITY_DOMAIN,
     COORDINATOR_IDENTITY_GATE,
@@ -4603,9 +4604,8 @@ def _effective_idempotency_key(
 
 def _is_receipt_vault_root(root: Path) -> bool:
     """Receipt storage is allowed only inside an existing vault scaffold."""
-    from .kbdir import kb_dirname
 
-    return (root / kb_dirname()).is_dir()
+    return managed_root(root).is_dir()
 
 
 # Every keyed write: a busy boundary is the server's problem to wait out, not

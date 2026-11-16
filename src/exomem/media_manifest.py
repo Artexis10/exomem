@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import originals, runtime_resources
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .media_jobs import job_store_path
 from .vault import parse_frontmatter, read_frontmatter_header
 
@@ -115,7 +115,7 @@ def _references(vault: Path) -> frozenset[tuple[str, str]]:
     """
     references: set[tuple[str, str]] = set()
     failed = 0
-    pending = [vault / kb_dirname()]
+    pending = [managed_root(vault)]
     while pending:
         try:
             with os.scandir(pending.pop()) as listing:

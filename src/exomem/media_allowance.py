@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from . import held_fs, originals, reserved_paths, runtime_resources, trash_metadata
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root_rel
 from .vault import parse_frontmatter
 
 # These refusal codes belong to the closed media protocol, not a content vocabulary.
@@ -139,7 +139,7 @@ def _binding(
     try:
         return originals.referenced_binding(fields, sidecar_path=path, store=store)
     except ValueError:  # A live page's `DisplacedReference` goes to `bound_references`, which confirms it.
-        if not PurePosixPath(path).is_relative_to(PurePosixPath(kb_dirname()) / trash_metadata.TRASH_SUBPATH):
+        if not PurePosixPath(path).is_relative_to(PurePosixPath(managed_join(trash_metadata.TRASH_SUBPATH))):
             raise
     # A Trash page that sat away from its companion path before its deletion goes to the same confirmation.
     displaced: originals.DisplacedReference | None = None
@@ -212,21 +212,21 @@ def bound_references(
             # Markdown and Trash metadata extensions belong to the fixed vault format.
             if (PurePosixPath(relative).is_relative_to(trash_metadata.TRASH_SUBPATH)
                     and relative.endswith(trash_metadata.METADATA_SUFFIX)):
-                metadata[f"{kb_dirname()}/{relative[:-len(trash_metadata.METADATA_SUFFIX)]}"] = f"{kb_dirname()}/{relative}"
+                metadata[managed_join(relative[:-len(trash_metadata.METADATA_SUFFIX)])] = managed_join(relative)
             if relative.lower().endswith(".md"):
                 yield relative
 
     def header_failed(relative: str, error: Exception) -> None:
         assert unreadable is not None
-        unreadable(f"{kb_dirname()}/{relative}", error)
+        unreadable(managed_join(relative), error)
 
     with reserved_paths.open_generic_tree(
-        vault, kb_dirname(), select=select, require_complete=True,
+        vault, managed_root_rel(), select=select, require_complete=True,
         markdown_header_limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
         markdown_header_failed=None if unreadable is None else header_failed,
     ) as entries:
         for entry in entries:
-            path = f"{kb_dirname()}/{entry.relative_path}"
+            path = managed_join(entry.relative_path)
             try:
                 if entry.markdown is None:
                     raise ValueError("companion header was not read")

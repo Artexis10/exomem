@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from . import held_fs, originals, reserved_paths
-from .kbdir import kb_dirname
+from .kbdir import managed_split_parts
 
 if TYPE_CHECKING:
     from .graph_sync import GraphLifecycleTransition
@@ -19,8 +19,8 @@ METADATA_SUFFIX = ".meta.json"
 
 
 def is_trash_path(path: str) -> bool:
-    parts = PurePosixPath(path).parts
-    return len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH
+    below = managed_split_parts(PurePosixPath(path).parts)
+    return below is not None and below[:1] == (TRASH_SUBPATH,)
 
 
 def destination_paths(target: Path) -> tuple[Path, Path, Path]:

@@ -30,7 +30,7 @@ from pathlib import Path
 from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
 from .delete_file import planned_trash_path
 from .governance import catalog_publication, graph_producer, lifecycle
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_split
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import (
     DIRECTORY_TRANSITION_LIMIT,
@@ -97,8 +97,8 @@ def _refuse_protected(vault_root: Path, rel_path: str, *, allow_curated: bool) -
         raise DeleteDirectoryError(code=error.code, reason=error.reason) from error
 
     # Don't allow deleting the trash itself, or trash subdirs.
-    parts = rel_path.split("/")
-    if len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH:
+    below = managed_split(rel_path)
+    if below is not None and below.split("/")[0] == TRASH_SUBPATH:
         raise DeleteDirectoryError(
             code="ALREADY_TRASHED",
             reason=(
@@ -300,7 +300,7 @@ def _delete_directory_local(
             code="UNCONFIRMED",
             reason=(
                 "delete_directory requires `confirm=true` explicitly. "
-                f"Deletes go to {kb_prefix()}_trash/ (recoverable) but the "
+                f"Deletes go to {managed_join('_trash/')} (recoverable) but the "
                 "action is still deliberate."
             ),
         )

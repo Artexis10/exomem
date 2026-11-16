@@ -34,7 +34,7 @@ from pathlib import Path
 
 import yaml
 
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_split_parts
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class PublicationPolicySnapshot:
 
 
 def access_config_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / "_access.yaml"
+    return managed_root(vault_root) / "_access.yaml"
 
 
 def _load_config(vault_root: Path) -> dict[str, list[str]]:
@@ -231,8 +231,9 @@ def _kb_relative(rel_path: str) -> str:
     """
     rel = rel_path.replace("\\", "/").strip("/")
     parts = rel.split("/")
-    if parts and parts[0].casefold() == kb_dirname().casefold():
-        return "/".join(parts[1:])
+    below = managed_split_parts(parts, key=str.casefold)
+    if below is not None:
+        return "/".join(below)
     return rel
 
 

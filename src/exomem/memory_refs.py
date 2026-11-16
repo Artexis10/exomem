@@ -17,7 +17,7 @@ from urllib.parse import unquote
 
 from . import call_spans, foreground_priority, reserved_paths, state_paths
 from . import vault as vault_module
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_split
 
 if TYPE_CHECKING:
     from .pending_recall import ReferenceProjection
@@ -278,10 +278,10 @@ def _managed_runtime() -> bool:
 def _sidecar_prefix() -> str:
     """The one prefix `rebuild_all` can reach, resolved at call time.
 
-    `kb_dirname()` is configurable per vault, so this cannot be a module
+    The managed root's name is configurable per vault, so this cannot be a module
     constant without freezing the first vault a process sees.
     """
-    return f"{kb_dirname()}/"
+    return managed_join("")
 
 
 def _decline_if_managed(vault_root: Path) -> None:
@@ -1353,13 +1353,13 @@ def _backfill_candidates(vault_root: Path) -> Iterator[tuple[str, Path]]:
     from .vault_store import ownership as page_ownership
 
     root = Path(vault_root)
-    kb = root / kb_dirname()
+    kb = managed_root(root)
     if mode.store_mode_for_reads(root):
         try:
             with read.snapshot(root) as view:
                 # `rglob("*.md")` below matches the suffix case-sensitively; stored pages do too.
                 stored = {
-                    root / meta.path: meta.path for meta in view.pages(f"{kb_dirname()}/")
+                    root / meta.path: meta.path for meta in view.pages(managed_join(""))
                     if meta.path.endswith(".md") and is_scanned_page(meta.path)
                 }
         except connection.CollectionStoreError as error:
@@ -1575,10 +1575,10 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
         for row in _scan_pages(vault_root)
     }
     if not index.path.exists():
-        return ([{"path": f"{kb_dirname()}/", "reason": "reference sidecar missing"}]
+        return ([{"path": managed_join(""), "reason": "reference sidecar missing"}]
                 if current else [])
     if not index.available():
-        return [{"path": f"{kb_dirname()}/", "reason": "reference sidecar incompatible"}]
+        return [{"path": managed_join(""), "reason": "reference sidecar incompatible"}]
     try:
         conn = index._connect_readonly()
         try:
@@ -1588,7 +1588,7 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
         finally:
             conn.close()
     except (OSError, RuntimeError, sqlite3.Error) as exc:
-        return [{"path": f"{kb_dirname()}/", "reason": f"reference sidecar unreadable: {exc}"}]
+        return [{"path": managed_join(""), "reason": f"reference sidecar unreadable: {exc}"}]
     indexed = {
         str(path): (
             str(exomem_id) if exomem_id is not None else None,
@@ -1744,8 +1744,7 @@ def _relative_markdown(vault_root: Path, path: Path) -> str | None:
 
 def is_scanned_page(rel: str) -> bool:
     """Whether the reference scan reads this path: a Markdown page in the Knowledge Base."""
-    prefix = f"{kb_dirname()}/"
-    if not rel.startswith(prefix) or not rel.lower().endswith(".md"):
+    if managed_split(rel) is None or not rel.lower().endswith(".md"):
         return False
     return not vault_module.in_excluded_scan_dir(rel)
 
@@ -1852,7 +1851,7 @@ def replace_identity_row(
 
 
 def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]:
-    return _scan_directory(vault_root, Path(vault_root) / kb_dirname())
+    return _scan_directory(vault_root, managed_root(Path(vault_root)))
 
 
 def _scan_directory(

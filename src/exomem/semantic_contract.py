@@ -46,7 +46,7 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError, relation_review_stable_id_remediation
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_split_parts
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
@@ -136,7 +136,7 @@ def _reference_only_directory_names() -> tuple[str, ...]:
         sorted(
             name
             for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
-            if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+            if not vault.in_excluded_scan_dir(managed_join(name))
         )
     )
 
@@ -144,11 +144,8 @@ def _reference_only_directory_names() -> tuple[str, ...]:
 def _is_reference_only_path(rel_path: str) -> bool:
     """Whether a vault-relative path lies under a reference-only directory."""
     segments = PurePosixPath(rel_path).parts
-    return (
-        len(segments) > 2
-        and segments[0] == kb_dirname()
-        and segments[1] in _reference_only_directory_names()
-    )
+    below = managed_split_parts(segments)
+    return below is not None and len(below) > 1 and below[0] in _reference_only_directory_names()
 
 
 def _reference_only_entries(root: Path) -> tuple[StableIdentityEntry, ...]:
@@ -979,9 +976,10 @@ def _route_name(path: str) -> str | None:
     if _path_excluded_from_compiled_destination(path):
         return None
     parts = _path_parts(path)
-    if len(parts) < 4 or parts[:2] != (kb_dirname().casefold(), note_types.NOTES_FOLDER.casefold()):
+    below = managed_split_parts(parts, key=str.casefold)
+    if below is None or len(below) < 3 or below[0] != note_types.NOTES_FOLDER.casefold():
         return None
-    return parts[2]
+    return below[1]
 
 
 def _type_basis(page: SemanticPageState) -> note_types.Basis:
@@ -1099,7 +1097,7 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             span=None,
             detail=(
                 f"compiled frontmatter type {normalized_compiled_type(page.page_type)!r} "
-                f"sits outside a {kb_dirname()}/{note_types.NOTES_FOLDER}/<Folder> destination"
+                f"sits outside a {managed_join(f'{note_types.NOTES_FOLDER}/')}<Folder> destination"
             ),
             remediation=(
                 f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
@@ -2075,7 +2073,7 @@ def _resolve_reference_wikilink_from_context(
         return ReferenceWikilinkResolution("unresolved")
 
     if "/" in cleaned:
-        for key in (cleaned, f"{vault.kb_prefix()}{cleaned}"):
+        for key in (cleaned, managed_join(cleaned)):
             matches = vault.wikilink_candidates(
                 context.resolver_candidates_by_key, (key,), visible=visible
             )
@@ -2084,7 +2082,7 @@ def _resolve_reference_wikilink_from_context(
             if matches:
                 return ReferenceWikilinkResolution("resolved", matches[0].path)
         # No Knowledge-Base-relative step follows: `normalize_wikilink` matches that form
-        # by `kb_prefix() + cleaned` in `full_paths`, which the second candidate above
+        # by `managed_join(cleaned)` in `full_paths`, which the second candidate above
         # already tried. Testing `kb_stripped` instead would let a hidden vault-root page
         # with the same name decide the result.
         return ReferenceWikilinkResolution("unresolved")

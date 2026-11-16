@@ -58,7 +58,13 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError
-from .kbdir import kb_page_target, kb_prefix, resolve_stored_page_target
+from .kbdir import (
+    kb_page_target,
+    managed_join,
+    managed_relative,
+    managed_split,
+    resolve_stored_page_target,
+)
 from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
@@ -443,7 +449,7 @@ def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
     # root?", so it must not go through `kbdir.kb_page_relative_form`, whose
     # whole job is to supply the prefix `_resolve` wants and this does not.
     given = given.strip().replace("\\", "/").lstrip("/")
-    if given.startswith(kb_prefix()):
+    if managed_split(given) is not None:
         return None  # caller explicitly addressed KB/ — a genuine miss stays one
     rel = given if given.endswith(".md") else given + ".md"
     candidate = vault_root / rel
@@ -475,8 +481,8 @@ def _missing_page_error(vault_root: Path, path: str, rel: str) -> EditError:
         return EditError(
             code="OUTSIDE_GOVERNED_ROOT", missing=["path"],
             reason=(
-                f"page exists at {outside} but is outside {kb_prefix()}"
-                f" — exomem only edits governed content under {kb_prefix()};"
+                f"page exists at {outside} but is outside {managed_join('')}"
+                f" — exomem only edits governed content under {managed_join('')};"
                 " move it under the governed root or address it there"
             ),
         )
@@ -525,7 +531,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
         raise EditError(
             code="INVALID_PATH",
             missing=["path"],
-            reason=f"path escapes {kb_prefix()}: {e}",
+            reason=f"path escapes {managed_join('')}: {e}",
         ) from None
     # A page the caller may not see is answered exactly as a missing one, and
     # never loaded (see `egress.write_target_withheld`).
@@ -545,7 +551,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # syscalls). On a case-insensitive filesystem a caller addressing
     # `…/Acme/x.md` for an on-disk `…/ACME/` would otherwise carry its own
     # spelling into every identity comparison keyed on `rel_path`. Rebuilding
-    # from `kb_prefix()` also re-spells segment 1 to the configured KB name,
+    # from the managed root also re-spells segment 1 to the configured KB name,
     # matching `vault.canonical_vault_rel`; fail open to the literal form.
     #
     # Adopted ONLY when the rewrite is casing-only — `resolved` has followed any
@@ -555,7 +561,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # adds no syscalls, so the property this mirror exists for is preserved.
     canonical = kb_relative.as_posix()
     if canonical and canonical != ".":
-        canonical = kb_prefix() + canonical
+        canonical = managed_join(canonical)
         if is_casing_only_rewrite(canonical, rel):
             rel = canonical
     return candidate, rel
@@ -1380,7 +1386,7 @@ def _clean_tags(tags: list[str]) -> list[str]:
 def _prepend_log_entry(
     text: str, *, date_iso: str, rel_no_ext: str, body: str, op: str = "edit"
 ) -> str:
-    title = rel_no_ext.replace(kb_prefix(), "", 1)
+    title = managed_relative(rel_no_ext)
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:

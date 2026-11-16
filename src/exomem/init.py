@@ -18,7 +18,7 @@ from .entity_types import (
     extension_registry_path,
     load_entity_types,
 )
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root
 from .vault import (
     PathGuard,
     PathGuardError,
@@ -108,7 +108,7 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
     """
     vault_root = Path(vault_root)
     vault_root.mkdir(parents=True, exist_ok=True)
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     if not kb.is_dir():
         return []
     from . import workflow_contracts
@@ -189,7 +189,7 @@ def _scaffold_plan(vault_root: Path) -> tuple[list[Path], list[tuple[Path, Path]
     registry, not the add/drop grammar accepted at this vault-owned override path, so even a force
     overlay leaves an owner's override intact.
     """
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     # The product-owned markdown lands outside the note namespace; everything else -- index.md,
     # log.md, the typed tree, and the per-vault YAML registries that also live under `_Schema/` --
     # is the user's and stays in the Knowledge Base where they can see and edit it (#488).
@@ -230,7 +230,7 @@ def _overlay_in_store(vault_root: Path) -> dict:
     from .activation_manifest import manifest_path, new_manifest
     from .vault_store import ownership, read, write
 
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     folders, files = _scaffold_plan(vault_root)
     pages: dict[str, Path] = {}
     copies: list[tuple[Path, Path]] = []
@@ -242,8 +242,8 @@ def _overlay_in_store(vault_root: Path) -> dict:
             copies.append((src, dest))
     marker = workflow_contracts.migration_marker_path(vault_root).relative_to(vault_root).as_posix()
     manifest = manifest_path(vault_root).relative_to(vault_root).as_posix()
-    entity_index = f"{kb_dirname()}/Entities/index.md"
-    entities = f"{kb_dirname()}/Entities/"
+    entity_index = managed_join("Entities/index.md")
+    entities = managed_join("Entities/")
     entity_registry = load_entity_types(vault_root)
     created: list[str] = []
 
@@ -335,7 +335,7 @@ def init_vault(
     if force and _store_mode(vault_root):
         return _overlay_in_store(vault_root)
     vault_root.mkdir(parents=True, exist_ok=True)
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     fresh_vault = not kb.exists()
     if kb.exists() and not force:
         raise FileExistsError(
@@ -420,7 +420,7 @@ def reclaim_legacy_shipped_schema(vault_root: Path, *, apply: bool = False) -> d
     vault_root = Path(vault_root)
     if _store_mode(vault_root):
         return _reclaim_in_store(vault_root, apply=apply)
-    legacy_root = vault_root / kb_dirname() / "_Schema"
+    legacy_root = managed_root(vault_root) / "_Schema"
     target_root = shipped_schema_target(vault_root)
     removed: list[str] = []
     declined: list[dict[str, str]] = []
@@ -480,7 +480,7 @@ def _reclaim_in_store(vault_root: Path, *, apply: bool) -> dict:
     """
     from .vault_store import read, write
 
-    legacy = f"{kb_dirname()}/_Schema"
+    legacy = managed_join("_Schema")
     target_root = shipped_schema_target(vault_root)
     relatives = [
         source.relative_to(_SCAFFOLD).as_posix().split("/", 1)[1]

@@ -51,7 +51,7 @@ from . import (
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_split, managed_splitter
 from .state_paths import vault_state_dir
 from .working_set_runtime import READY
 
@@ -805,7 +805,7 @@ class _Fold:
 
         self.root = vault_root
         self.prove = prove
-        self.kb = kb_dirname()
+        self.under = managed_splitter()
         self.registry = activation_conventions.load_conventions(vault_root)
         self.skip_folders = self.registry.conventions.skip_folders
         self.basis = lifecycle_statuses.Basis(vault_root)
@@ -996,10 +996,10 @@ class _Fold:
 
     def _in_walk(self, rel: str) -> bool:
         """Whether the KB walk would reach `rel`: the per-path twin of `working_set_index._walk_kb`'s skip rule."""
-        prefix = f"{self.kb}/"
-        if not rel.startswith(prefix) or not rel.lower().endswith(".md"):
+        below = self.under(rel)
+        if below is None or not rel.lower().endswith(".md"):
             return False
-        return not any(part.startswith(".") or part in self.skip_folders for part in rel[len(prefix):].split("/"))
+        return not any(part.startswith(".") or part in self.skip_folders for part in below.split("/"))
 
     def _kind_of(self, rel: str) -> tuple[str, str] | None:
         """`(kind, anchor_kind)` a page is, or None when it is not an entry. Anchor, collection, thread, then note."""
@@ -1219,8 +1219,8 @@ def _folder_segments(path: str) -> list[str]:
 
     The one rule for folder reach: a folder carrier reaches exactly the entries whose segments start with its own.
     """
-    kb = kb_prefix()
-    return path.removeprefix(kb).split("/")[:-1] if path.startswith(kb) else []
+    below = managed_split(path)
+    return below.split("/")[:-1] if below is not None else []
 
 
 def folder_of(path: str) -> tuple[str, ...]:
