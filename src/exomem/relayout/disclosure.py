@@ -574,7 +574,7 @@ def _bindings(
     if home_set.findings:
         group.detail = "the homes overlay is invalid"
     group.values = [
-        _bound("homes", home.folder, registry, today, after)
+        _bound("homes", layout.home_folder(home, layout.Layout.NESTED), registry, today, after)
         for home in home_set.homes
         if home.active
     ]

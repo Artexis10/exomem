@@ -392,9 +392,10 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "is compiled"
         ),
         # Rendered from the shipped pack, so the list has one source. The contract
-        # is vault-independent: a vault-defined type never enters it.
+        # is vault-independent: a vault-defined type never enters it, and a folder reads
+        # as the `nested` layout spells it (`layout` imports this module, so it cannot supply it).
         "compiled_destinations": {
-            note_type.key: note_type.folder
+            note_type.key: note_types.nested_folder(str(note_type.folder))
             for note_type in note_types.shipped(note_types.compiled)
         },
         "applies_when": [

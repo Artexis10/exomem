@@ -168,21 +168,22 @@ def _finding(code: str, entry: registry.Entry, detail: str) -> dict[str, str]:
 
 def protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, bool]]:
     """Every folder that groups by type or placement: `(casefolded segments, owner, split by project)`."""
-    from . import entity_recurrence, entity_types, homes
+    from . import entity_recurrence, entity_types, homes, layout
 
     out: list[tuple[tuple[str, ...], str, bool]] = []
     # The effective registries, shipped plus overlay: an overlay type owns a folder as well.
     snapshot = registry.load(note_types.SPEC, vault_root)
     for note_type in snapshot.typed.types.values():
-        if note_type.folder:
-            parts = fold_folder(note_type.folder)
+        # A compiled type groups pages by type; a source, evidence or entity area is not grouped by it.
+        if note_types.compiled(note_type) and note_type.folder:
+            parts = fold_folder(str(layout.area_folder(note_type, layout.Layout.NESTED)))
             out.append((parts, f"note type {note_type.key}", note_type.partition == "project"))
     entities = managed_relative(entity_recurrence.entities_prefix()).rstrip("/")
     for definition in entity_types.load_entity_types(vault_root).active_definitions:
         parts = fold_folder(str(PurePosixPath(entities, definition.folder)))
         out.append((parts, f"entity type {definition.id}", False))
     for home in homes.load(vault_root).homes:
-        out.append((fold_folder(home.folder), f"home {home.key}", False))
+        out.append((fold_folder(layout.home_folder(home, layout.Layout.NESTED)), f"home {home.key}", False))
     return out
 
 

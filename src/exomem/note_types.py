@@ -210,6 +210,7 @@ class NoteTypeRegistry:
 def _folder_name(folder: object, key: str) -> str:
     """The casefolded area name that a type's `folder` declares, with or without its `Notes/` parent."""
     below = folder_below_notes(folder) if isinstance(folder, str) else ()
+    # `.` and `..` are the relative-path tokens the filesystem fixes, not vocabulary.
     if len(below) != 1 or below[0] in {".", ".."}:
         raise registry.RegistryError(
             f"INVALID_NOTE_TYPE_FOLDER: {key} needs a single area name as its folder "

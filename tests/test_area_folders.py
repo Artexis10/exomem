@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import access, commands, homes, init, layout, note_types
+from exomem import access, commands, homes, init, layout, note_types, topic_carriers
 from exomem.governance.principal import library_scope
 from exomem.layout import Layout
 from exomem.vocabulary import registry
@@ -173,6 +173,24 @@ def test_a_home_in_a_shipped_type_area_is_refused_in_either_spelling(tmp_path: P
         findings = homes.load(tmp_path).findings
 
         assert [item["detail"] for item in findings if "HOME_FOLDER_TAKEN" in item["detail"]], spelling
+
+
+def test_a_topic_carrier_cannot_take_the_folder_of_a_type_or_home_named_by_its_area_alone(
+    vault: Path,
+) -> None:
+    """A carrier folder is refused when it groups by type; a bare spelling must still resolve below `Notes/`."""
+    _save_note_type(vault, "playbook", {"role": "compiled", "folder": "Playbooks"})
+    _write(
+        vault,
+        f"{KB}/_Schema/homes.yaml",
+        "schema_version: 1\nentries:\n  equipment:\n    label: Equipment\n"
+        "    description: Workshop notes.\n    attributes: {folder: Equipment, topics: [equipment]}\n",
+    )
+
+    owners = {owner: parts for parts, owner, _ in topic_carriers.protected_folders(vault)}
+
+    assert owners["note type playbook"] == ("notes", "playbooks")
+    assert owners["home equipment"] == ("notes", "equipment")
 
 
 # --------------------------------------------------------------------------- #
