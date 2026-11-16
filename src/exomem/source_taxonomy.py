@@ -37,11 +37,11 @@ from typing import Any
 import yaml
 from slugify import slugify as _slugify
 
+from .kbdir import Layout, managed_root
 from .project_keys import _closest_existing_key, _title_case_slug
 from .vault import (
     PathGuard,
     PlannedWrite,
-    kb_root,
     read_guarded_text,
 )
 from .vocabulary import registry as vocabulary_registry
@@ -509,7 +509,9 @@ class SourceTaxonomy:
 
 
 def registry_path(vault_root: Path) -> Path:
-    return kb_root(Path(vault_root)) / "_Schema" / _REGISTRY_FILENAME
+    from . import layout  # imported here: `layout` imports modules that import this module
+
+    return Path(vault_root) / layout.schema_relpath(Path(vault_root), _REGISTRY_FILENAME)
 
 
 def core_taxonomy() -> SourceTaxonomy:
@@ -724,16 +726,19 @@ def _report_segment_collisions(
 # Projection
 # --------------------------------------------------------------------------
 def source_segments(
-    kind: Resolution, domain: Resolution | None = None
+    kind: Resolution, domain: Resolution | None = None, *, layout: Layout | str | None = None
 ) -> tuple[str, ...]:
     """`Sources/<Kind>[/<Domain>]` as path segments.
 
     Every segment comes from a `Resolution`, whose `path_label` is either a
     registry value already checked by `_validate_path_label` or one derived from
     a key that matched `_KEY_RE`. Raw caller input never reaches here.
+
+    A `root` vault files a source by its kind alone: the domain is frontmatter there, so
+    correcting it moves no file (decision O1). `nested`, which `layout=None` means, keeps the folder.
     """
     segments = [SOURCES_ROOT, kind.path_label]
-    if domain is not None:
+    if domain is not None and not (layout is not None and Layout(layout) is Layout.ROOT):
         segments.append(domain.path_label)
     depth = len(segments) - 1
     if depth > MAX_PROJECTION_DEPTH:  # pragma: no cover - structural guard
@@ -747,7 +752,10 @@ def source_directory(
     vault_root: Path, kind: Resolution, domain: Resolution | None = None
 ) -> Path:
     """Absolute destination directory for a capture with this classification."""
-    return kb_root(Path(vault_root)).joinpath(*source_segments(kind, domain))
+    from . import layout  # imported here: `layout` imports modules that import this module
+
+    lay = layout.of(Path(vault_root))
+    return managed_root(Path(vault_root), layout=lay).joinpath(*source_segments(kind, domain, layout=lay))
 
 
 # --------------------------------------------------------------------------

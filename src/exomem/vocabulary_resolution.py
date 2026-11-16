@@ -18,7 +18,8 @@ from typing import Any
 import yaml
 from yaml.resolver import BaseResolver
 
-from . import source_taxonomy, vault
+from . import layout, source_taxonomy, vault
+from .kbdir import managed_root
 from .text_scripts import comparison_words
 from .vault import kb_root
 
@@ -347,9 +348,13 @@ class SourceDomainBinding:
     match_kind: str
     snapshot: str
     registry_guard: vault.PathGuard
+    #: True in a `root` vault, where a source is filed by its kind alone and the domain is frontmatter.
+    flat: bool = False
 
     @property
     def segments(self) -> tuple[str, ...]:
+        if self.flat:
+            return (source_taxonomy.SOURCES_ROOT, self.kind.path_label)
         return (source_taxonomy.SOURCES_ROOT, self.kind.path_label, self.destination_folder)
 
     def as_dict(self) -> dict[str, str]:
@@ -376,7 +381,8 @@ def resolve_source_domain(vault_root: Path, *, kind: object, domain: object) -> 
     taxonomy, registry_guard, snapshot = _strict_taxonomy(root)
     kind_resolution = taxonomy.resolve_kind(kind)
     resolved = taxonomy.resolve_domain(domain)
-    parent = kb_root(root) / source_taxonomy.SOURCES_ROOT / kind_resolution.path_label
+    lay = layout.of(root)
+    parent = managed_root(root, layout=lay) / source_taxonomy.SOURCES_ROOT / kind_resolution.path_label
     return SourceDomainBinding(
         taxonomy=taxonomy,
         kind=kind_resolution,
@@ -385,6 +391,7 @@ def resolve_source_domain(vault_root: Path, *, kind: object, domain: object) -> 
         match_kind=_match_kind(domain, resolved),
         snapshot=snapshot,
         registry_guard=registry_guard,
+        flat=lay is layout.Layout.ROOT,
     )
 
 

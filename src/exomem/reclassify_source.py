@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from . import move_file as move_file_module
 from . import (
+    layout,
     originals,
     path_mentions,
     record_formats,
@@ -45,6 +45,7 @@ from . import (
     source_taxonomy,
     vocabulary_resolution,
 )
+from . import move_file as move_file_module
 from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
@@ -186,8 +187,8 @@ class ReclassifyResult:
         return value
 
 
-def _sources_root() -> str:
-    return managed_join(source_taxonomy.SOURCES_ROOT)
+def _sources_root(vault_root: Path) -> str:
+    return managed_join(source_taxonomy.SOURCES_ROOT, layout=layout.of(vault_root))
 
 
 def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
@@ -195,19 +196,20 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
     rel = str(path).replace("\\", "/").strip().lstrip("/")
     if not rel:
         raise ReclassifyError("PATH_REQUIRED", "supply the source page to reclassify.")
-    if managed_split(rel) is None:
-        rel = managed_join(rel)
+    managed = layout.managed_of(vault_root)
+    if managed_split(rel, layout=managed.layout, unmanaged=managed.unmanaged) is None:
+        rel = managed_join(rel, layout=managed.layout)
     if not rel.lower().endswith(".md"):
         rel = f"{rel}.md"
     try:
         admit_write_target(vault_root, rel)
     except VaultPathError as refusal:
         raise ReclassifyError(refusal.code, refusal.reason) from None
-    prefix = f"{_sources_root()}/"
+    prefix = f"{_sources_root(vault_root)}/"
     if not rel.startswith(prefix):
         raise ReclassifyError(
             "NOT_A_SOURCE",
-            f"{rel} is not under {_sources_root()}/. Only captured sources carry a "
+            f"{rel} is not under {_sources_root(vault_root)}/. Only captured sources carry a "
             f"source kind and a domain; compiled notes are corrected with edit or "
             f"replace.",
         )
@@ -427,7 +429,7 @@ def _plan_pointer(
     path) is refused: the repair there is to move the file back beside the card.
     """
     target = artifact_path.replace("\\", "/").strip().lstrip("/")
-    if target:
+    if target and layout.of(vault_root) is not layout.Layout.ROOT:
         target = managed_form(target)
     found = source_pointers.pointers(front)
     if any(source_pointers.bound(rel, pointer.field, pointer.path) for pointer in found):
@@ -467,8 +469,9 @@ def _restorable_pointer(entry: Any) -> dict[str, str | None]:
 
 
 def _destination(vault_root: Path, rel: str, kind, domain) -> str:
-    segments = source_taxonomy.source_segments(kind, domain)
-    return managed_join("/".join((*segments, rel.rsplit("/", 1)[-1])))
+    lay = layout.of(vault_root)
+    segments = source_taxonomy.source_segments(kind, domain, layout=lay)
+    return managed_join("/".join((*segments, rel.rsplit("/", 1)[-1])), layout=lay)
 
 
 def _projection(
@@ -507,7 +510,9 @@ def _projection(
             domain_resolution,
             _destination(vault_root, rel, kind_resolution, domain_resolution),
         )
-    destination = managed_join("/".join((*binding.segments, rel.rsplit("/", 1)[-1])))
+    destination = managed_join(
+        "/".join((*binding.segments, rel.rsplit("/", 1)[-1])), layout=layout.of(vault_root)
+    )
     return binding.kind, binding.domain, destination
 
 
@@ -1001,13 +1006,13 @@ def _previous_location(vault_root: Path, recorded: str) -> str:
     rel = recorded.replace("\\", "/").strip().lstrip("/")
     if (
         ".." in rel.split("/")
-        or not rel.startswith(f"{_sources_root()}/")
+        or not rel.startswith(f"{_sources_root(vault_root)}/")
         or not rel.lower().endswith(".md")
     ):
         raise ReclassifyError(
             "INVALID_HISTORY",
             f"the latest history entry names {recorded!r}, which is not a source "
-            f"page under {_sources_root()}/.",
+            f"page under {_sources_root(vault_root)}/.",
         )
     try:
         _, rel = resolve_under_vault(vault_root, rel)
