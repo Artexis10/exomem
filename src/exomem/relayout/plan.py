@@ -181,13 +181,10 @@ def _read_facts(inventory: Inventory) -> tuple[dict[str, PageFact], list[str]]:
     """The first pass: the facts of every managed Markdown file, and the files that could not be read."""
     facts: dict[str, PageFact] = {}
     unreadable: list[str] = []
-    for item in inventory.managed:
-        if not item.markdown:
-            continue
-        data = inventory.read(item.path)
+    for path, data in inventory.read_all(item.path for item in inventory.managed if item.markdown):
         if data is None:
-            unreadable.append(item.path)
-        facts[item.path] = read_fact(item.path, data)
+            unreadable.append(path)
+        facts[path] = read_fact(path, data)
     return facts, unreadable
 
 
@@ -349,18 +346,17 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
         )
         scan = LinkScan()
         foreign = LinkScan()
-        for item in inventory.managed:
-            if not item.markdown:
-                continue
+        pages = [item for item in inventory.managed if item.markdown]
+        for item, (_, data) in zip(
+            pages, inventory.read_all(item.path for item in pages), strict=True
+        ):
             # A collection page and a part page have another owner; its links are counted apart.
             into = scan if item.owned else foreign
-            data = inventory.read(item.path)
             if data is None:
                 into.counts.unreadable_pages += 1
                 continue
             rewriter.scan_managed(into, item.path, data, frozenset(facts[item.path].ingested))
-        for path in outside_markdown:
-            data = inventory.read(path)
+        for path, data in inventory.read_all(outside_markdown):
             if data is not None:
                 rewriter.scan_outside(scan, path, data)
         pointers = plan_pointers(facts.values(), moved, rewriter)

@@ -14,7 +14,17 @@ import unicodedata
 from pathlib import Path
 
 import pytest
-from relayout_fixture import CHART, CHART_LINKER, KB, add_attachment_links, build_nested_vault
+from relayout_fixture import (
+    BUNDLE,
+    CHART,
+    CHART_LINKER,
+    KB,
+    MEMBER_ARTIFACT,
+    MEMO,
+    add_attachment_links,
+    add_container_member_and_companion,
+    build_nested_vault,
+)
 
 from exomem import __main__ as cli
 
@@ -424,6 +434,32 @@ def test_pointer_fields_follow_their_files_and_ingested_into_follows_its_page(va
     ]
     assert report["counts"]["pointers_left"] == 0
     assert report["diagnostics"]["pointer_failures"] == []
+
+
+def test_the_paths_of_a_container_binding_and_a_companion_follow_the_files_they_name(vault, capsys):
+    add_container_member_and_companion(vault)
+    report = full_report(capsys, vault)
+
+    edits = {
+        (edit["page"], edit["field"]): (edit["old"], edit["new"])
+        for edit in items(report["pointer_edits"])
+    }
+    member_page = f"{MEMBER_ARTIFACT}.md"
+    new_path = {move["current_path"]: move["new_path"] for move in all_moves(report)}
+
+    for key in ("parent_path", "parent_page", "artifact_path"):
+        old, new = edits[(member_page, f"container_member.{key}")]
+        assert new == new_path[old]
+    assert (
+        edits[(member_page, "container_member.parent_path")][1]
+        == "Evidence/Pricing/bundle/pack.asice"
+    )
+    assert edits[(member_page, "container_member.artifact_path")][0] == MEMBER_ARTIFACT
+    assert edits[(f"{MEMO}.md", "governance_companion.artifact_path")] == (
+        MEMO,
+        "Evidence/Pricing/b/memo.pdf",
+    )
+    assert BUNDLE in new_path
 
 
 # --------------------------------------------------------------------------- #

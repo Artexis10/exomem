@@ -82,7 +82,25 @@ def test_a_store_mode_plan_equals_the_file_mode_plan_and_changes_nothing(
     bytes_before = vault_bytes(vault)
     revision_before = read.current_revision(vault)
 
-    from_store = planned(capsys, vault)
+    body_reads: list[str] = []
+
+    def counted_reader(method):
+        def reading(self, *args, **options):
+            body_reads.append(method.__name__)
+            return method(self, *args, **options)
+
+        return reading
+
+    with monkeypatch.context() as counted:
+        # Each call is a store query: `page` reads a single page, `bodies` reads a batch of up to 500.
+        for name in ("page", "bodies"):
+            counted.setattr(
+                read.StoreSnapshot, name, counted_reader(getattr(read.StoreSnapshot, name))
+            )
+        from_store = planned(capsys, vault)
+
+    # Two passes read every page; a query per page and pass would cost twice the page count.
+    assert 0 < len(body_reads) <= len(owned) // 4
 
     assert (
         from_files["diagnostics"]["read"]["mode"],

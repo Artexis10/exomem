@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +22,11 @@ from ..vault_store import mode, ownership, read
 
 SKIPPED_CONFLICT_COPY = "conflict_copy"
 SKIPPED_UNREADABLE = "unreadable"
+
+#: A read batch holds at most this many pages and about this many bytes (a larger page is a batch
+#: of its own), so a plan keeps a bounded few bodies in memory while it reads the store in few queries.
+BATCH_PAGES = 200
+BATCH_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +76,8 @@ class Inventory:
     hidden: list[str]
     revision: int | None = None
     _view: read.StoreSnapshot | None = None
-    _stored: frozenset[str] = frozenset()
+    #: The size in bytes of each page that the store holds, by path.
+    _stored: Mapping[str, int] = field(default_factory=dict)
 
     def read(self, rel: str) -> bytes | None:
         """The bytes of the file at `rel`, from the store when it holds the page, else from the disk.
@@ -81,10 +87,41 @@ class Inventory:
         if rel in self._stored and self._view is not None:
             page = self._view.page(rel)
             return None if page is None else page.body
+        return self._read_disk(rel)
+
+    def _read_disk(self, rel: str) -> bytes | None:
         try:
             return (self.root / rel).read_bytes()
         except OSError:
             return None
+
+    def read_all(self, rels: Iterable[str]) -> Iterator[tuple[str, bytes | None]]:
+        """Each file of `rels` with its bytes, in order, read a batch at a time.
+
+        A batch of stored pages costs a single store query where `read` costs a query per page.
+        Only the batch being yielded is in memory; the caller consumes each body and drops it.
+        """
+        batch: list[str] = []
+        held = 0
+        for rel in rels:
+            size = self._stored.get(rel, 0)
+            if batch and (len(batch) >= BATCH_PAGES or held + size > BATCH_BYTES):
+                yield from self._read_batch(batch)
+                batch, held = [], 0
+            batch.append(rel)
+            held += size
+        if batch:
+            yield from self._read_batch(batch)
+
+    def _read_batch(self, batch: list[str]) -> Iterator[tuple[str, bytes | None]]:
+        view = self._view
+        stored = [rel for rel in batch if rel in self._stored] if view is not None else []
+        bodies = view.bodies(stored) if view is not None and stored else {}
+        for rel in batch:
+            if view is not None and rel in self._stored:
+                yield rel, bodies.get(rel)
+            else:
+                yield rel, self._read_disk(rel)
 
 
 def _scan(directory: Path) -> list[os.DirEntry[str]] | None:
@@ -218,17 +255,17 @@ def _list_vault(root: Path, view: read.StoreSnapshot | None) -> Inventory:
             skipped[f"outside:{_KIND_REASON[kind]}"] += 1
             continue
         outside[entry.name] = record
-    stored: frozenset[str] = frozenset()
+    stored: dict[str, int] = {}
     if view is not None:
         prefix = kbdir.managed_join("")
-        pages = {meta.path for meta in view.pages(prefix)}
+        pages = {meta.path: meta.size for meta in view.pages(prefix)}
         for rel in sorted(pages):
             managed[rel] = ManagedFile(rel, ownership.is_markdown(rel), ownership.classify(rel))
         for binary in view.binaries(prefix):
             managed[binary.path] = ManagedFile(
                 binary.path, ownership.is_markdown(binary.path), ownership.classify(binary.path)
             )
-        stored = frozenset(pages)
+        stored = pages
     return Inventory(
         root,
         [managed[path] for path in sorted(managed)],

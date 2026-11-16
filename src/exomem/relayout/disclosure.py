@@ -22,26 +22,25 @@ import posixpath
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
 
 from .. import (
     access,
-    extraction_parts,
+    document_containers,
     homes,
     kbdir,
     layout,
     project_keys,
-    scene_frames,
     topic_carriers,
 )
 from ..governance import connector_boundary, membership
 from ..governance import policy as governance_policy
 from ..held_fs import vault_name_key
 from ..vocabulary import instances
-from .facts import PARENT_MEDIA, PART_OF, PageFact
+from .facts import COMPANION_FIELDS, PARENT_MEDIA, PageFact
 from .sampled import SAMPLE_LIMIT, Sampled
 
 if TYPE_CHECKING:
@@ -52,10 +51,13 @@ STATE_EVALUATED = "evaluated"
 STATE_NONE = "none"
 STATE_UNKNOWN = "unknown"
 
-#: The two inheritance edges that membership reads: a frame joins its video page's scopes and a part
-#: page takes its Source page's. The membership kernel fixes both.
-FRAME = "frame"
-PART = "part"
+#: The two inheritance edges that membership reads, named by the kernel that fixes them.
+FRAME = membership.FRAME_EDGE
+PART = membership.PART_EDGE
+
+#: Why a file's scopes are not evaluated here: the kernel reads them from a source that the plan does not read.
+FROM_CONTAINER = "scopes_from_a_document_container"
+FROM_COMPANION = "scopes_from_a_companion"
 
 #: Why an edge breaks and what that does to the page's scopes. These are the plan's own report values.
 FRAME_LEAVES_FRAMES_FOLDER = "frame_leaves_its_frames_folder"
@@ -352,24 +354,21 @@ def _edge(
     pointer: Callable[[str, str], str],
     resolve: Callable[[str], str | None],
 ) -> Inherit:
-    """The page that the file at `path` inherits scopes from, by the kernel's own tests for a part and a frame.
+    """The page that the file at `path` inherits scopes from, by the kernel's own edge function.
 
     `pointer(field, value)` is a pointer field's value in the layout read; `resolve(page)` is the
     current path of the file that sits at `page` in that layout, or None.
     """
-    fields = dict(fact.pointers)
-    if PART_OF in fields:
-        source = extraction_parts.source_page_for(PurePosixPath(path))
-        if source is not None:
-            target = resolve(source.as_posix())
-            return Inherit(PART, target, unresolved=target is None)
-    media = fields.get(PARENT_MEDIA)
-    if media is not None:
-        parent = pointer(PARENT_MEDIA, media)
-        if PurePosixPath(path).parent == scene_frames.frames_dir_for(PurePosixPath(parent)):
-            target = resolve(parent + ".md")
-            return Inherit(FRAME, target, unresolved=target is None)
-    return NO_EDGE
+    media = fact.parent_media
+    found = membership.inheritance_edge(
+        path,
+        part_of=fact.declares_part_of,
+        parent_media=None if media is None else pointer(PARENT_MEDIA, media),
+    )
+    if found is None:
+        return NO_EDGE
+    target = resolve(found.parent)
+    return Inherit(found.kind, target, unresolved=target is None)
 
 
 def _edges_after(
@@ -660,7 +659,7 @@ def build(plan: RelayoutPlan, vault_root: Path) -> Disclosure:
     candidates = {
         path: fact
         for path, fact in facts.items()
-        if any(name in (PARENT_MEDIA, PART_OF) for name, _value in fact.pointers)
+        if fact.declares_part_of or fact.parent_media is not None
     }
     edits = {(edit.page, edit.field): edit.new for edit in plan.pointers.edits}
     edges_today = _edges_before(candidates, facts)
@@ -683,6 +682,8 @@ def build(plan: RelayoutPlan, vault_root: Path) -> Disclosure:
     not_evaluated = {
         "no_new_path": len(plan.unmappable),
         "not_governed_content": 0,
+        FROM_CONTAINER: 0,
+        FROM_COMPANION: 0,
         "registry_bound": 0,
         "membership_unresolved_today": 0,
         "membership_unresolved_after": 0,
@@ -733,11 +734,15 @@ def _count_members(reading: _Reading, not_evaluated: dict[str, int]) -> tuple[in
     )
     diffs = {scope_id: ScopeDiff(scope_id, scope.name) for scope_id, scope in policy.scopes.items()}
     evaluated = 0
+    elsewhere = _scoped_elsewhere(moved, facts, reading.edges_today)
     for item in sorted(moved):
         if governance_policy.is_governance_path(item) or governance_policy.is_workflow_state_path(
             item
         ):
             not_evaluated["not_governed_content"] += 1
+            continue
+        if item in elsewhere:
+            not_evaluated[elsewhere[item]] += 1
             continue
         if reading.armed:
             bound = _registry_bound(reading.root, item, policy)
@@ -768,6 +773,38 @@ def _count_members(reading: _Reading, not_evaluated: dict[str, int]) -> tuple[in
             diffs[scope_id].under_flatten += 1
             _note(diffs[scope_id].under_flatten_sample, who)
     return evaluated, list(diffs.values())
+
+
+def _scoped_elsewhere(
+    moved: Mapping[str, str], facts: Mapping[str, PageFact], edges: Mapping[str, Inherit]
+) -> dict[str, str]:
+    """The files whose scopes the kernel reads from a container binding or a companion page, each with its reason.
+
+    A document container's member takes its parent's scopes, and so does everything that sits
+    in the payload tree. A binary that a page names as a companion's artifact or as a dataset
+    card's data file takes the semantic scopes of that page. A part or a frame whose parent is
+    such a file takes them too. The plan reads none of those bindings, so it counts these
+    files apart rather than evaluating their path alone.
+    """
+    companion_files = {
+        value
+        for fact in facts.values()
+        for name, value in fact.pointers
+        if name in COMPANION_FIELDS
+    }
+    found: dict[str, str] = {}
+    for item in moved:
+        fact = facts.get(item)
+        if (fact is not None and fact.container_member) or document_containers.in_payload_tree(
+            item
+        ):
+            found[item] = FROM_CONTAINER
+        elif fact is None and item in companion_files:
+            found[item] = FROM_COMPANION
+    for item, edge in edges.items():
+        if item in moved and item not in found and edge.target in found:
+            found[item] = found[edge.target]
+    return found
 
 
 def _registry_bound(root: Path, item: str, policy: governance_policy.Policy) -> bool | None:
@@ -868,7 +905,7 @@ def report(disclosure: Disclosure) -> dict[str, object]:
         "files_evaluated": disclosure.items_evaluated,
         "files_not_evaluated": dict(disclosure.not_evaluated),
         "limits": [
-            "A file that is not a page is evaluated by its path and refs; scopes that a companion descriptor or a document container gives it are not read.",
+            "A file that is not a page is evaluated by its path and refs, unless a companion page or a document container gives it scopes; those files are counted under files_not_evaluated, because the plan does not read the bindings.",
             "Files outside the managed folder carry no scopes today and are governed content in the root layout; they are counted, not evaluated.",
             "A version 2 vocabulary binding assigns scopes to its storage files; those files are counted, not evaluated, and the binding's own path values are listed under bindings.",
             "The O1 count reads the translated policy at the flattened paths, with the pointer edits of the primary plan.",

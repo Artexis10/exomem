@@ -283,3 +283,42 @@ def add_attachment_links(root: Path) -> None:
         {"type": "insight", "title": "Chart notes"},
         "![[Notes/Insights/chart.png]] and ![[chart.png]] and [[Release 1.2 notes]].\n",
     )
+
+
+BUNDLE = f"{KB}/Evidence/Pricing/bundle/pack.asice"
+MEMBER_ARTIFACT = f"{BUNDLE}.documents/{'ab' * 32}.pdf"
+MEMO = f"{KB}/Evidence/Pricing/b/memo.pdf"
+
+
+def add_container_member_and_companion(root: Path) -> None:
+    """Add a document container with a single member, and a binary that a companion page gives scopes.
+
+    The member page holds the binding that names its parent, the parent's page and its own
+    artifact by vault path. The memo's page holds a companion descriptor that names the memo.
+    """
+    _write(root, BUNDLE, b"zip")
+    _page(root, f"{BUNDLE}.md", {"type": "evidence", "title": "Pack"})
+    _write(root, MEMBER_ARTIFACT, b"pdf")
+    _page(
+        root,
+        f"{MEMBER_ARTIFACT}.md",
+        {
+            "container_member": {
+                "version": 1,
+                "parent_path": BUNDLE,
+                "parent_page": f"{BUNDLE}.md",
+                "parent_sha256": "cd" * 32,
+                "parent_size": 3,
+                "artifact_path": MEMBER_ARTIFACT,
+                "artifact_sha256": "ef" * 32,
+                "artifact_size": 3,
+                "member_path": "docs/terms.pdf",
+            }
+        },
+    )
+    _write(root, MEMO, b"pdf")
+    _page(
+        root,
+        f"{MEMO}.md",
+        {"type": "evidence", "title": "Memo", "governance_companion": {"artifact_path": MEMO}},
+    )

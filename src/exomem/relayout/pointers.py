@@ -1,8 +1,8 @@
 """Frontmatter fields that name another file: which of them change when the files move.
 
-A page names a file in four ways. `originals` pointers and `parent_media` hold a path from the
-vault root, `next_part` and `part_of` hold a path from the page's own folder, and
-`ingested_into` holds wikilinks. A path field changes when its target moves. A page-relative
+A page names a file in four ways. `originals` pointers, the paths of a container member's
+binding and `parent_media` hold a path from the vault root, `next_part` and `part_of` hold a
+path from the page's own folder, and `ingested_into` holds wikilinks. A path field changes when its target moves. A page-relative
 value changes only when the page or its part folder is renamed, because the two stay together.
 """
 
@@ -11,9 +11,9 @@ from __future__ import annotations
 import posixpath
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 
-from .. import kbdir, scene_frames
+from .. import kbdir
+from ..governance import membership
 from .facts import INGESTED_INTO, PAGE_RELATIVE_POINTERS, PARENT_MEDIA, PageFact
 from .links import LinkRewriter, Outcome
 
@@ -94,12 +94,13 @@ def plan_pointers(
                     result.unchanged += 1
                 continue
             _record(result, fact.path, field_name, value, new)
-            if field_name == PARENT_MEDIA:
-                frames = scene_frames.frames_dir_for(Path(new)).as_posix()
-                if posixpath.dirname(new_page) != frames:
-                    result.failures.append(
-                        PointerNote(fact.path, field_name, value, LEAVES_FRAMES_FOLDER)
-                    )
+            # The frame stays a frame only while it sits in its video's frames folder, by the kernel's own rule.
+            if field_name == PARENT_MEDIA and not membership.inheritance_edge(
+                new_page, part_of=False, parent_media=new
+            ):
+                result.failures.append(
+                    PointerNote(fact.path, field_name, value, LEAVES_FRAMES_FOLDER)
+                )
         for entry in fact.ingested:
             _plan_entry(result, rewriter, fact.path, entry)
     return result

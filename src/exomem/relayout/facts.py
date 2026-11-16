@@ -23,6 +23,14 @@ PART_OF = "part_of"
 #: The pointers whose value is a path from the page's own folder, not from the vault root.
 PAGE_RELATIVE_POINTERS = (NEXT_PART, PART_OF)
 INGESTED_INTO = "ingested_into"
+#: The version 1 container binding fixes this field and its three vault-relative path keys.
+CONTAINER_MEMBER = "container_member"
+# nosemgrep: ep-word-set -- closed binding-schema keys of document_containers, not vocabulary.
+CONTAINER_PATH_KEYS = ("parent_path", "parent_page", "artifact_path")
+#: The pointer fields by which a page names a binary and gives it semantic scopes: a companion
+#: descriptor's artifact, and the data file of a dataset card (the companion registry binds both).
+# nosemgrep: ep-word-set -- closed pointer-field names of the companion registry, not vocabulary.
+COMPANION_FIELDS = (f"{originals.GOVERNANCE_COMPANION}.{originals.NESTED_PATH_KEY}", "data_file")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +40,12 @@ class PageFact:
     `type_value` and `title` are the frontmatter values as authored, or None. `display_title`
     is the title that link resolution uses, and None when the page is not UTF-8 text.
     `pointers` lists `(field, value)` for each field that names a file by path:
-    `originals` scalar and nested pointers and `parent_media` hold a vault-relative path,
-    and `next_part` and `part_of` hold a path relative to the page. `ingested` holds the wikilink entries
+    `originals` scalar and nested pointers, a container member's binding paths and `parent_media`
+    hold a vault-relative path, and `next_part` and `part_of` hold a path relative to the page.
+    `declares_part_of`, `parent_media` and `container_member` are the three facts that the
+    membership kernel reads to find where a page takes scopes from: whether the frontmatter has a
+    `part_of` key, the `parent_media` value as `ParsedPage` reads it, and whether it has a
+    `container_member` key. `ingested` holds the wikilink entries
     of `ingested_into`. `exomem_id` is the page's normalized identity, and `subject` is the
     selector input that governance membership reads (projects, tags, type, classes, identity),
     built by the membership kernel itself; both are None for a file that is not UTF-8 text.
@@ -47,6 +59,9 @@ class PageFact:
     ingested: tuple[str, ...] = ()
     exomem_id: str | None = None
     subject: membership.MarkdownSubject | None = None
+    declares_part_of: bool = False
+    parent_media: str | None = None
+    container_member: bool = False
 
 
 def _frontmatter_valid(frontmatter: dict, block: str | None) -> bool:
@@ -85,21 +100,26 @@ def read_fact(path: str, data: bytes | None) -> PageFact:
         value = descriptor.get(originals.NESTED_PATH_KEY) if isinstance(descriptor, dict) else None
         if isinstance(value, str) and value:
             pointers.append((f"{key}.{originals.NESTED_PATH_KEY}", value))
+    binding = frontmatter.get(CONTAINER_MEMBER)
+    if isinstance(binding, dict):
+        for key in CONTAINER_PATH_KEYS:
+            value = binding.get(key)
+            if isinstance(value, str) and value:
+                pointers.append((f"{CONTAINER_MEMBER}.{key}", value))
     for key in (PARENT_MEDIA, *PAGE_RELATIVE_POINTERS):
         value = frontmatter.get(key)
         if isinstance(value, str) and value:
             pointers.append((key, value))
-    subject = membership.markdown_subject(
-        ParsedPage(
-            path=Path(path),
-            rel_path=path,
-            frontmatter=frontmatter,
-            body="",
-            title="",
-            mtime=0,
-            frontmatter_valid=_frontmatter_valid(frontmatter, block),
-        )
+    parsed = ParsedPage(
+        path=Path(path),
+        rel_path=path,
+        frontmatter=frontmatter,
+        body="",
+        title="",
+        mtime=0,
+        frontmatter_valid=_frontmatter_valid(frontmatter, block),
     )
+    subject = membership.markdown_subject(parsed)
     return PageFact(
         path,
         frontmatter.get("type"),
@@ -109,4 +129,7 @@ def read_fact(path: str, data: bytes | None) -> PageFact:
         tuple(fold_leaf.ingested_entries(frontmatter.get(INGESTED_INTO))),
         memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD)),
         subject,
+        PART_OF in frontmatter,
+        parsed.parent_media,
+        CONTAINER_MEMBER in frontmatter,
     )

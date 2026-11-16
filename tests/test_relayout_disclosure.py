@@ -19,6 +19,7 @@ from relayout_fixture import (
     RETIRED_LINKER,
     SCOPE_PARTITION,
     TALK,
+    add_container_member_and_companion,
     add_governed_content,
     add_links_from_collection_and_part_pages,
     build_nested_vault,
@@ -182,6 +183,22 @@ def test_a_tier_change_is_counted_for_every_file_while_its_sample_stays_short(
     assert (change["from"], change["to"]) == ("readonly", "read-write")
     assert tiers["files_whose_tier_changes"] == change["files"] == 26
     assert (len(change["sample"]), change["sample_limit"]) == (20, 20)
+
+
+def test_files_that_a_container_or_a_companion_gives_their_scopes_are_not_evaluated(
+    governed_vault, capsys
+):
+    """The plan reads no binding, so path-only scopes for these files would pass as the whole answer."""
+    add_container_member_and_companion(governed_vault)
+    report = full_report(capsys, governed_vault)
+    disclosure = report["disclosure"]
+    held = disclosure["files_not_evaluated"]
+
+    # The member's page and its artifact sit in the payload tree; the memo binary is a companion's artifact.
+    assert (held["scopes_from_a_document_container"], held["scopes_from_a_companion"]) == (2, 1)
+    # Every planned file is evaluated or counted under a reason; none is both.
+    outside = held["outside_the_managed_folder"]
+    assert disclosure["files_evaluated"] + sum(held.values()) - outside == report["counts"]["files"]
 
 
 def test_flattening_the_partition_folders_changes_a_scope_only_under_that_alternative(
