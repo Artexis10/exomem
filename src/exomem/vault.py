@@ -34,7 +34,6 @@ from contextlib import ExitStack, contextmanager
 from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from types import EllipsisType
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
@@ -67,8 +66,6 @@ from .kbdir import (
 from .log_events import log_event
 
 if TYPE_CHECKING:
-    from .generated_fragments import _Image
-    from .generated_output_plan import BoundText, GeneratedImagePlan, GeneratedProducer
     from .graph_sync import GraphSyncCheckpoint
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
@@ -4885,7 +4882,6 @@ class PlannedWrite:
     guard: PathGuard | None = None
     expected_hash: str | None = None
     ensure_directories: tuple[Path, ...] = ()
-    generated_image: GeneratedImagePlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -5783,8 +5779,7 @@ def batch_atomic_write(
 
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
-            writes = list(writes)
-            if _payload_custody is not None or any(write.generated_image is not None for write in writes):
+            if _payload_custody is not None:
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")
             return store_batch.commit_batch(
@@ -5802,16 +5797,13 @@ def batch_atomic_write(
             )
         caller_writes = list(writes)
         _require_distinct_destinations(caller_writes)
-        from . import generated_fragment_store, generated_output_custody, source_native_custody
+        from . import generated_fragment_store, source_native_custody
 
-        if vault_root is not None and (_payload_custody is not None
-                                       or any(write.generated_image is not None for write in caller_writes)):
+        if vault_root is not None and _payload_custody is not None:
             # Native allocation facts share one connection; it outlives the unit's closing change.
             custody_stack.enter_context(source_native_custody.session())
             # Pre-byte catalogue work commits as one phase; acknowledgements share one closing change.
             custody_stack.enter_context(generated_fragment_store.unit(vault_root))
-        if _prepare is None:
-            _payload_custody = generated_output_custody.batch(vault_root, caller_writes, _payload_custody, lifetime=custody_stack)
         if _prepare is not None:
             from . import vocabulary_gate
 
@@ -9914,7 +9906,7 @@ def render_title_links(
 _LOG_WIKILINK_TOKEN = re.compile(r"\[\[|\]\]|\n")
 
 
-def escape_wikilinks_for_log(text: str, *, _tracking: _Image | None = None) -> str:
+def escape_wikilinks_for_log(text: str) -> str:
     """Neutralize wikilink syntax in free text bound for log.md.
 
     Rationale strings (`why`, descriptions) are interpolated verbatim into
@@ -9929,12 +9921,9 @@ def escape_wikilinks_for_log(text: str, *, _tracking: _Image | None = None) -> s
     regex substitution repeated until stable gave the same text on ordinary lines, but nested or
     unclosed brackets made it quadratic.
     """
-    if _tracking is not None and _tracking.text != text:
-        raise ValueError("fragment_log_escape_image_changed")
     if "[[" not in text:
         return text
     pieces: list[str] = []
-    replacements: list[tuple[int, int, str]] = []
     # Each unpaired `[[` on this line, earliest first: its index in `pieces` and its end in `text`.
     opened: deque[tuple[int, int]] = deque()
     position = 0
@@ -9947,7 +9936,6 @@ def escape_wikilinks_for_log(text: str, *, _tracking: _Image | None = None) -> s
         elif token == "[[":
             opened.append((len(pieces), position))
         elif opened:
-            closing = "`"
             if opened[0][1] == start:
                 # `[[]]` holds nothing, so only a `]]` one character later can close it: `[[]]]`.
                 if not text.startswith("]", position):
@@ -9955,21 +9943,13 @@ def escape_wikilinks_for_log(text: str, *, _tracking: _Image | None = None) -> s
                     continue
                 pieces.append("]")
                 position += 1
-                closing = "]`"
             index, _end = opened.popleft()
-            opening_start = _end - 2 - int(pieces[index - 1].endswith("!"))
-            replacements.extend(((opening_start, _end, "`"), (start, position, closing)))
             pieces[index] = "`"
             pieces[index - 1] = pieces[index - 1].removesuffix("!")
             token = "`"
         pieces.append(token)
     pieces.append(text[position:])
-    output = "".join(pieces)
-    if _tracking is not None:
-        _tracking.replace_ranges(replacements)
-        if _tracking.text != output:
-            raise ValueError("fragment_log_escape_image_changed")
-    return output
+    return "".join(pieces)
 
 
 def document_newline(text: str) -> str:
@@ -10115,8 +10095,6 @@ def prepend_log_entry(
     body: str,
     provenance: Mapping[str, Any] | None = None,
     machine_generated: bool = False,
-    _tracking: _Image | None = None,
-    _generated_body: BoundText | None = None,
 ) -> str:
     """Insert a `## [date] <op> | <rel>` block after the log's `---` separator.
 
@@ -10127,59 +10105,23 @@ def prepend_log_entry(
     """
     title = managed_relative(rel_path_no_ext)
     newline = document_newline(log_text)
-    body_image = None
-    if _tracking is not None:
-        from . import generated_fragments
-
-        if _tracking.text != log_text:
-            raise ValueError("fragment_log_input_changed")
-        body_image = (_generated_body.image.slice(0, len(body)) if _generated_body is not None
-                      else generated_fragments._Image(body))
-    if _generated_body is not None and (_tracking is None or _generated_body.image.text != body):
-        raise ValueError("generated log body differs from its bound text")
-    rendered_body = escape_wikilinks_for_log(body, _tracking=body_image)
+    rendered_body = escape_wikilinks_for_log(body)
     # Only server-serialized audit events opt out; caller prose cannot mint log structure.
     if not machine_generated:
-        if body_image is None:
-            rendered_body = "\n".join("> " + line for line in rendered_body.splitlines())
-        else:
-            pieces = []
-            for line in body_image.lines(0, len(body_image.text)):
-                if pieces:
-                    pieces.append(generated_fragments._Image("\n"))
-                pieces.extend((generated_fragments._Image("> "), line))
-            body_image = generated_fragments._Image.join(pieces)
-            rendered_body = body_image.text
-    heading = f"## [{date_iso}] {op} | {title}\n\n"
-    new_entry = heading + rendered_body + "\n"
-    provenance_text = ""
+        rendered_body = "\n".join("> " + line for line in rendered_body.splitlines())
+    new_entry = f"## [{date_iso}] {op} | {title}\n\n{rendered_body}\n"
     if provenance is not None:
         # The fixed fence token versions the operation-log protocol, not vocabulary.
         encoded = json.dumps(provenance, ensure_ascii=False, sort_keys=True).replace("`", "\\u0060")
-        provenance_text = f"\n```exomem-operation-v1\n{encoded}\n```\n"
-        new_entry += provenance_text
+        new_entry += f"\n```exomem-operation-v1\n{encoded}\n```\n"
     new_entry = with_newline(new_entry, newline)
     if new_entry in log_text:
         return log_text
-    entry_image = None
-    if _tracking is not None:
-        assert body_image is not None
-        entry_image = generated_fragments._Image.join((generated_fragments._Image(heading), body_image,
-                                                       generated_fragments._Image("\n" + provenance_text)))
-        entry_image.restore_newlines(newline)
-        if entry_image.text != new_entry:
-            raise ValueError("fragment_log_entry_changed")
     # Reuse the same separator the indexes module emits.
     sep_idx, separator = _find_log_separator(log_text)
     if sep_idx == -1:
-        if _tracking is not None:
-            _tracking.splice(len(log_text.rstrip()), len(log_text), generated_fragments._Image.join((
-                generated_fragments._Image(newline * 2), entry_image, generated_fragments._Image(newline))))
         return log_text.rstrip() + newline * 2 + new_entry + newline
     insertion_point = sep_idx + len(separator)
-    if _tracking is not None:
-        _tracking.splice(insertion_point, insertion_point, generated_fragments._Image.join((
-            generated_fragments._Image(newline), entry_image, generated_fragments._Image(newline))))
     return (
         log_text[:insertion_point]
         + newline
@@ -10224,13 +10166,9 @@ def _plan_log_content(
     log_text: str,
     live_guard: PathGuard,
     operation_token: str,
-    _tracking: _Image | None = None,
-    generated_producer: GeneratedProducer | None = None,
 ) -> LogWritePlan:
     """Plan deterministic rotation for already-final live-log bytes."""
     root = Path(vault_root)
-    if _tracking is not None and _tracking.text != log_text:
-        raise ValueError("fragment_log_rotation_image_changed")
     log_file = kb_root(root) / "log.md"
     token_hash = hashlib.sha256(operation_token.encode("utf-8")).hexdigest()
     archive_path = kb_root(root) / "_archive" / "logs" / f"log-{token_hash[:20]}.md"
@@ -10257,28 +10195,23 @@ def _plan_log_content(
         tail = entries_text[cut:]
         moved = len(starts) - LOG_ROTATE_KEEP_ENTRIES
         newline = document_newline(log_text)
-        archive_prefix = (
+        archive_text = (
             f"# log.md archive segment ({token_hash}){newline}{newline}"
             f"Rotated out of `{managed_join('log.md')}` — {moved} entrie(s), newest "
-            f"first, byte-exact.{newline}{separator}"
+            f"first, byte-exact.{newline}{separator}{tail}"
         )
-        archive_text = archive_prefix + tail
         if current_archive is not None and current_archive != archive_text:
             raise ValueError("LOG_ARCHIVE_COLLISION: deterministic archive already differs")
-        archive_write = PlannedWrite(archive_path, archive_text, create_only=not existing_archive, guard=archive_guard)
-        live_write = PlannedWrite(log_file, live_text, guard=live_guard)
-        if generated_producer is not None:
-            from . import generated_fragments
-
-            assert _tracking is not None
-            absolute_cut = head_end + cut
-            archive_image = generated_fragments._Image.join((generated_fragments._Image(archive_prefix),
-                _tracking.slice(absolute_cut, len(log_text))))
-            generated_producer.attach(archive_write,
-                archive_image.plan(generated_producer.before(archive_path).mapping.before_sha256))
-            generated_producer.attach(live_write, _tracking.slice(0, absolute_cut).plan(live_guard.expected_content_hash))
         return LogWritePlan(
-            (archive_write, live_write),
+            (
+                PlannedWrite(
+                    archive_path,
+                    archive_text,
+                    create_only=not existing_archive,
+                    guard=archive_guard,
+                ),
+                PlannedWrite(log_file, live_text, guard=live_guard),
+            ),
             rotation_note=f"log.md rotated: {moved} older entrie(s) → {archive_rel}",
         )
 
@@ -10287,17 +10220,8 @@ def _plan_log_content(
     # and digest remain identical on retry.
     writes: list[PlannedWrite] = []
     if current_archive is not None:
-        archive_write = PlannedWrite(archive_path, current_archive, guard=archive_guard)
-        if generated_producer is not None:
-            # Retry retains the archive's native current map; equal bytes do not select ownership.
-            before = generated_producer.before(archive_path)
-            generated_producer.attach(archive_write, before.mapping)
-        writes.append(archive_write)
-    live_write = PlannedWrite(log_file, log_text, guard=live_guard)
-    if generated_producer is not None:
-        assert _tracking is not None
-        generated_producer.attach(live_write, _tracking.plan(live_guard.expected_content_hash))
-    writes.append(live_write)
+        writes.append(PlannedWrite(archive_path, current_archive, guard=archive_guard))
+    writes.append(PlannedWrite(log_file, log_text, guard=live_guard))
     return LogWritePlan(tuple(writes))
 
 
@@ -10315,7 +10239,6 @@ class LogEntry:
     body: str
     operation_token: str = ""
     provenance: Mapping[str, Any] | None = None
-    generated_body: BoundText | None = None
 
 
 def plan_log_entries(
@@ -10325,7 +10248,6 @@ def plan_log_entries(
     operation_token: str,
     machine_generated: bool = False,
     required: bool = False,
-    generated_producer: GeneratedProducer | None | EllipsisType = ...,
 ) -> LogWritePlan:
     """Plan one combined log update carrying one entry per item, oldest first.
 
@@ -10345,26 +10267,9 @@ def plan_log_entries(
         return LogWritePlan(())
     if not store_read.holds_file(vault_root, relative_posix(log_file, vault_root)):
         return LogWritePlan((), warning=f"{managed_join('log.md')} missing; skipped log entry")
-    if generated_producer is Ellipsis:
-        from . import generated_output_plan
-
-        # Omitted ownership uses existing file custody; explicit None preserves preview/store opt-outs.
-        with generated_output_plan.producer(vault_root) as producer:
-            return plan_log_entries(vault_root, entries, operation_token=operation_token,
-                machine_generated=machine_generated, required=required, generated_producer=producer)
     current, live_guard = read_guarded_text(vault_root, log_file)
-    tracking = None
-    if generated_producer is not None:
-        from . import generated_fragments
-
-        before = generated_producer.before(log_file)
-        tracking = generated_fragments._Image.before(current, before.mapping, live_guard.expected_content_hash)
     updated = current
     for entry in entries:
-        if entry.generated_body is not None:
-            if generated_producer is None:
-                raise ValueError("generated log body requires its producer")
-            generated_producer.include(entry.generated_body.inputs)
         provenance = entry.provenance
         if provenance is not None:
             provenance = {
@@ -10383,16 +10288,12 @@ def plan_log_entries(
             body=entry.body,
             provenance=provenance,
             machine_generated=machine_generated,
-            _tracking=tracking,
-            _generated_body=entry.generated_body,
         )
     return _plan_log_content(
         vault_root,
         log_text=updated,
         live_guard=live_guard,
         operation_token=operation_token,
-        _tracking=tracking,
-        generated_producer=generated_producer,
     )
 
 
@@ -10407,17 +10308,14 @@ def plan_log_writes(
     provenance: Mapping[str, Any] | None = None,
     machine_generated: bool = False,
     required: bool = False,
-    generated_producer: GeneratedProducer | None | EllipsisType = ...,
-    generated_body: BoundText | None = None,
 ) -> LogWritePlan:
     """Purely plan one idempotent log entry and any deterministic rotation."""
     return plan_log_entries(
         vault_root,
-        [LogEntry(date_iso, op, rel_path_no_ext, body, operation_token, provenance, generated_body)],
+        [LogEntry(date_iso, op, rel_path_no_ext, body, operation_token, provenance)],
         operation_token=operation_token,
         machine_generated=machine_generated,
         required=required,
-        generated_producer=generated_producer,
     )
 
 
@@ -10585,24 +10483,16 @@ def rotate_log_if_needed(vault_root: Path) -> str | None:
         if not log_file.exists() or log_file.stat().st_size <= _log_rotate_bytes():
             return None
         text, live_guard = read_guarded_text(vault_root, log_file)
-        from . import generated_fragments, generated_output_plan
-
-        with generated_output_plan.producer(vault_root) as producer:
-            tracking = None
-            if producer is not None:
-                before = producer.before(log_file)
-                tracking = generated_fragments._Image.before(text, before.mapping, live_guard.expected_content_hash)
-            plan = _plan_log_content(
-                vault_root,
-                log_text=text,
-                live_guard=live_guard,
-                operation_token="standalone-rotation:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                _tracking=tracking,
-                generated_producer=producer,
-            )
-            if plan.rotation_note is None:
-                return None
-            batch_atomic_write(plan.writes, vault_root=vault_root)
+        plan = _plan_log_content(
+            vault_root,
+            log_text=text,
+            live_guard=live_guard,
+            operation_token="standalone-rotation:"
+            + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        if plan.rotation_note is None:
+            return None
+        batch_atomic_write(plan.writes, vault_root=vault_root)
         log.info(plan.rotation_note)
         return plan.rotation_note
     except Exception as e:  # noqa: BLE001 — rotation must never break a write

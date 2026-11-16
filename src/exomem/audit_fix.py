@@ -609,32 +609,28 @@ def _index_refresh_writes(
     ``_page_key``, so the refresh composes over their text. Any other index is read from disk,
     or from the store when the store serves it.
     """
-    from . import generated_output_plan
     from .vault_store import read
 
-    with generated_output_plan.producer(vault_root) as producer:
-        top_index_path = kb / "index.md"
-        top_base_write = planned_index_writes.get(_page_key(vault_root, top_index_path))
-        top_guard = top_base_write.guard if top_base_write is not None else None
-        if top_base_write is not None:
-            top_base = top_base_write.content
-        elif read.page_exists(vault_root, top_index_path.relative_to(vault_root).as_posix()):
-            top_base, top_guard = read_guarded_text(vault_root, top_index_path)
-        else:
-            top_base = None
-        top_write = (top_base_write or PlannedWrite(top_index_path, top_base, guard=top_guard)) if top_base is not None else None
-        if producer is not None and top_write is not None and top_base_write is None:
-            producer.attach(top_write, producer.before(top_index_path).mapping)
-        sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root,
-            top_index_write=top_write,
-            base_writes=planned_index_writes,
-            generated_producer=producer,
+    top_index_path = kb / "index.md"
+    top_base_write = planned_index_writes.get(_page_key(vault_root, top_index_path))
+    top_guard = top_base_write.guard if top_base_write is not None else None
+    if top_base_write is not None:
+        top_base = top_base_write.content
+    elif read.page_exists(vault_root, top_index_path.relative_to(vault_root).as_posix()):
+        top_base, top_guard = read_guarded_text(vault_root, top_index_path)
+    else:
+        top_base = None
+    sub_writes, new_top = indexes.compute_subindex_writes(
+        vault_root,
+        top_index_text=top_base,
+        base_writes=planned_index_writes,
+    )
+    refresh_writes: list[PlannedWrite] = list(sub_writes)
+    if new_top is not None and top_base is not None and new_top != top_base:
+        refresh_writes.append(
+            PlannedWrite(path=top_index_path, content=new_top, guard=top_guard)
         )
-        refresh_writes: list[PlannedWrite] = list(sub_writes)
-        if new_top is not None and top_base is not None and new_top.content != top_base:
-            refresh_writes.append(new_top)
-        return refresh_writes
+    return refresh_writes
 
 
 def _apply_whole(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: AuditFixReport) -> None:

@@ -299,39 +299,41 @@ def _add_manifest_index_writes(
     rel_path: str,
     today: dt.date,
 ) -> list[str]:
-    from . import generated_fragments, generated_output_plan
-
-    with generated_output_plan.producer(root) as producer:
-        warnings: list[str] = []
-        kb = kb_root(root)
-        rel_no_ext = rel_path[:-3] if rel_path.endswith(".md") else rel_path
-        top_index = kb / "index.md"
-        if top_index.exists():
-            top_write, _trims = indexes.plan_recent_activity(root, ((today.isoformat(),
-                f"`{managed_relative(rel_no_ext)}` (adoption manifest) — saved scan-first existing-vault report"),),
-                generated_producer=producer)
-            sub_writes, counted_top = indexes.compute_subindex_writes(root, top_index_write=top_write,
-                                                                       generated_producer=producer)
-            writes.append(counted_top or top_write)
-            writes.extend(sub_writes)
-        else:
-            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
-        log_file = kb / "log.md"
-        if log_file.exists():
-            text, guard = read_guarded_text(root, log_file)
-            tracking = None
-            if producer is not None:
-                before = producer.before(log_file)
-                tracking = generated_fragments._Image.before(text, before.mapping, guard.expected_content_hash)
-            updated = prepend_log_entry(text, date_iso=today.isoformat(), op="adopt", rel_path_no_ext=rel_no_ext,
-                body="Saved existing-vault adoption manifest. Originals remain untouched.", _tracking=tracking)
-            write = PlannedWrite(log_file, updated, guard=guard)
-            if producer is not None:
-                producer.attach(write, tracking.plan(before.mapping.before_sha256))
-            writes.append(write)
-        else:
-            warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
-        return warnings
+    warnings: list[str] = []
+    kb = kb_root(root)
+    rel_no_ext = rel_path[:-3] if rel_path.endswith(".md") else rel_path
+    top_index = kb / "index.md"
+    if top_index.exists():
+        top_text, _trim = indexes._prepend_recent_activity(
+            top_index.read_text(encoding="utf-8"),
+            date_iso=today.isoformat(),
+            summary=f"`{managed_relative(rel_no_ext)}` (adoption manifest) — saved scan-first existing-vault report",
+        )
+        sub_writes, top_text = indexes.compute_subindex_writes(
+            root,
+            top_index_text=top_text,
+        )
+        writes.append(PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8")))
+        writes.extend(sub_writes)
+    else:
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
+    log_file = kb / "log.md"
+    if log_file.exists():
+        writes.append(
+            PlannedWrite(
+                path=log_file,
+                content=prepend_log_entry(
+                    log_file.read_text(encoding="utf-8"),
+                    date_iso=today.isoformat(),
+                    op="adopt",
+                    rel_path_no_ext=rel_no_ext,
+                    body="Saved existing-vault adoption manifest. Originals remain untouched.",
+                ),
+            )
+        )
+    else:
+        warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
+    return warnings
 
 
 def _save_manifest(
@@ -978,99 +980,89 @@ def commit_import_items(
             if folder not in folders:
                 folders.append(folder)
 
-        from . import generated_fragments, generated_output_plan
+        sources_index = sources_dir / "index.md"
+        warnings: list[str] = []
+        if sources_index.exists():
+            sources_current, sources_guard = indexes.read_guarded_universal_text(root, sources_index)
+            sources_text = indexes._replace_by_type_section(
+                sources_current,
+                folder_title=folders[0],
+                folder_description="copied legacy-vault material with provenance",
+                counts=post_counts,
+                vault_root=root,
+            )
+            for row in reversed(copied):
+                sources_text = indexes._prepend_recent_capture(
+                    sources_text, date_iso=date_iso, rel_source_path=row["source_path"][:-3]
+                )
+            derived.append(("index", PlannedWrite(path=sources_index, content=sources_text, guard=sources_guard)))
+        else:
+            warnings.append(f"{managed_join('Sources/index.md')} missing; skipped Sources index update")
 
-        with generated_output_plan.producer(root) as producer:
-            sources_index = sources_dir / "index.md"
-            warnings: list[str] = []
-            if sources_index.exists():
-                sources_current, sources_guard = read_guarded_text(root, sources_index)
-                tracking = None
-                if producer is not None:
-                    before = producer.before(sources_index)
-                    tracking = generated_fragments._Image.before(sources_current, before.mapping, sources_guard.expected_content_hash)
-                    tracking.normalize_newlines()
-                sources_current = sources_current.replace("\r\n", "\n").replace("\r", "\n")
-                sources_text = indexes._replace_by_type_section(
-                    sources_current,
-                    folder_title=folders[0],
-                    folder_description="copied legacy-vault material with provenance",
-                    counts=post_counts,
-                    vault_root=root,
-                    _tracking=tracking,
-                )
-                for row in reversed(copied):
-                    sources_text = indexes._prepend_recent_capture(
-                        sources_text, date_iso=date_iso, rel_source_path=row["source_path"][:-3], _tracking=tracking,
-                    )
-                write = PlannedWrite(sources_index, sources_text, guard=sources_guard)
-                if producer is not None:
-                    producer.attach(write, tracking.plan(before.mapping.before_sha256))
-                derived.append(("index", write))
-            else:
-                warnings.append(f"{managed_join('Sources/index.md')} missing; skipped Sources index update")
+        where = ", ".join(f"Sources/{folder}/" for folder in folders)
+        top_index = kb / "index.md"
+        if top_index.exists():
+            # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
+            summary = escape_wikilinks_for_log(
+                f"{where} (imported sources) - copied "
+                f"{len(copied)} selected file(s) with original path/hash provenance"
+            )
+            top_current, top_guard = indexes.read_guarded_universal_text(root, top_index)
+            top_text, trim_note = indexes._update_top_index(
+                top_current,
+                counts=post_counts,
+                date_iso=date_iso,
+                activity_summary=summary,
+            )
+            sub_writes, top_text = indexes.compute_subindex_writes(
+                root,
+                top_index_text=top_text,
+                pending_paths=[row["source_path"] for row in copied if row["source_path"] not in existing_sources],
+                include_sources_index=False,  # The Sources index write above supplies that page.
+                sources_counts=pre_counts,
+            )
+            derived.append(("index", PlannedWrite(path=top_index, content=top_text or top_current, guard=top_guard)))
+            derived.extend(("index", write) for write in sub_writes)
+            if trim_note:
+                warnings.append(trim_note)
+        else:
+            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
-            where = ", ".join(f"Sources/{folder}/" for folder in folders)
-            top_index = kb / "index.md"
-            if top_index.exists():
-                # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
-                summary = escape_wikilinks_for_log(
-                    f"{where} (imported sources) - copied "
-                    f"{len(copied)} selected file(s) with original path/hash provenance"
-                )
-                top_write, trims = indexes.plan_recent_activity(root, ((date_iso, summary),), generated_producer=producer)
-                trim_note = trims[0].text if trims[0] is not None else None
-                sub_writes, top_text = indexes.compute_subindex_writes(
-                    root,
-                    top_index_write=top_write,
-                    pending_paths=[row["source_path"] for row in copied if row["source_path"] not in existing_sources],
-                    include_sources_index=False,  # The Sources index write above supplies that page.
-                    sources_counts=pre_counts,
-                    generated_producer=producer,
-                )
-                derived.append(("index", top_text or top_write))
-                derived.extend(("index", write) for write in sub_writes)
-                if trim_note:
-                    warnings.append(trim_note)
-            else:
-                warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
-
-            body_lines = [
-                f"Copied {len(copied)} selected file(s) into {where}. Originals remain unchanged.",
-                "",
-            ]
-            for row in copied:
-                body_lines.append(
-                    f"- {row['original_path']} -> {row['source_path']} sha256={row['original_sha256']}"
-                )
-            # Planned like any other log write, so a long import rotates the live log instead of growing it.
-            token = operation_token or hashlib.sha256(
-                    "\n".join(row["source_path"] for row in copied).encode("utf-8")
-                ).hexdigest()
-            # This field identifies a frozen import chunk, not a vault vocabulary entry.
-            provenance = {"import_chunk": token} if operation_token else None
-            logged = False
-            if reconcile and operation_token:
-                history = read_operation_log(root)
-                # A missing optional live log never blocked import; an unreadable existing log cannot prove deduplication.
-                missing_live_log = not os.path.lexists(root / managed_join("log.md"))
-                if history["files_unreadable"] > int(missing_live_log):
-                    raise AdoptError("IMPORT_RECOVERY_UNRESOLVED", "the import log cannot establish the chunk's publication state")
-                logged = any(entry.get("op") == "adopt-copy" and
-                             (entry.get("provenance") or {}).get("import_chunk") == token
-                             for entry in history["entries"])
-            if not logged:
-                log_plan = plan_log_entries(
-                    root,
-                    [LogEntry(date_iso, "adopt-copy", managed_join("Sources"), "\n".join(body_lines), token, provenance)],
-                    operation_token=token,
-                    generated_producer=producer,
-                )
-                derived.extend(("operation-log", write) for write in log_plan.writes)
-                if log_plan.warning is not None:
-                    warnings.append(log_plan.warning)
-                if log_plan.rotation_note is not None:
-                    warnings.append(log_plan.rotation_note)
+        body_lines = [
+            f"Copied {len(copied)} selected file(s) into {where}. Originals remain unchanged.",
+            "",
+        ]
+        for row in copied:
+            body_lines.append(
+                f"- {row['original_path']} -> {row['source_path']} sha256={row['original_sha256']}"
+            )
+        # Planned like any other log write, so a long import rotates the live log instead of growing it.
+        token = operation_token or hashlib.sha256(
+                "\n".join(row["source_path"] for row in copied).encode("utf-8")
+            ).hexdigest()
+        # This field identifies a frozen import chunk, not a vault vocabulary entry.
+        provenance = {"import_chunk": token} if operation_token else None
+        logged = False
+        if reconcile and operation_token:
+            history = read_operation_log(root)
+            # A missing optional live log never blocked import; an unreadable existing log cannot prove deduplication.
+            missing_live_log = not os.path.lexists(root / managed_join("log.md"))
+            if history["files_unreadable"] > int(missing_live_log):
+                raise AdoptError("IMPORT_RECOVERY_UNRESOLVED", "the import log cannot establish the chunk's publication state")
+            logged = any(entry.get("op") == "adopt-copy" and
+                         (entry.get("provenance") or {}).get("import_chunk") == token
+                         for entry in history["entries"])
+        if not logged:
+            log_plan = plan_log_entries(
+                root,
+                [LogEntry(date_iso, "adopt-copy", managed_join("Sources"), "\n".join(body_lines), token, provenance)],
+                operation_token=token,
+            )
+            derived.extend(("operation-log", write) for write in log_plan.writes)
+            if log_plan.warning is not None:
+                warnings.append(log_plan.warning)
+            if log_plan.rotation_note is not None:
+                warnings.append(log_plan.rotation_note)
 
         writes.extend(write for _role, write in derived)
         writes.extend(extra_writes)

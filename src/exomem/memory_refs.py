@@ -117,6 +117,14 @@ def parse_memory_ref(value: str) -> str | None:
     return normalize_id(raw[len(REF_PREFIX) :])
 
 
+def canonical_memory_ref(value: str) -> str:
+    """`value` unchanged when it is already a canonical memory ref; a ValueError otherwise."""
+    identity = parse_memory_ref(value)
+    if identity is None or memory_ref(identity) != value:
+        raise ValueError("memory_ref_not_canonical")
+    return value
+
+
 def ref_from_markdown(markdown: str) -> str | None:
     fm, _, _ = vault_module.parse_frontmatter(markdown)
     normalized = normalize_id(fm.get(ID_FIELD))

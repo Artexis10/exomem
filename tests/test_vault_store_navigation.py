@@ -46,13 +46,13 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
     def preview():
         top, _guard = vaults.read_guarded_text(vault, vault / "Knowledge Base/index.md")
         writes, counted_top = indexes.compute_subindex_writes(
-            vault, top_index_write=vaults.PlannedWrite(vault / "Knowledge Base/index.md", top, guard=_guard), include_unchanged=True,
+            vault, top_index_text=top, include_unchanged=True,
             pending_paths=[prefix + "Research/Navigation/new.md"],
         )
         log = vaults.plan_log_entries(vault, [
             vaults.LogEntry("2026-01-01", "note", prefix + "Research/Navigation/new", "New finding.", "preview"),
         ], operation_token="preview")
-        return counted_top.content if counted_top is not None else None, {
+        return counted_top, {
             write.path.relative_to(vault).as_posix(): write.content
             for write in (*writes, *log.writes)
         }, log.warning

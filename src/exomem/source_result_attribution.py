@@ -9,8 +9,8 @@ from typing import Annotated, Literal, Self, TypeVar
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 
+from . import memory_refs
 from .generated_fragment_store import MAX_RECORD_BYTES
-from .generated_fragments import SourceRef
 
 Path = tuple[str | int, ...]
 _Value = TypeVar("_Value")
@@ -32,7 +32,7 @@ class Contribution(BaseModel):
 
     # Selectors name producer schema fields and ordinals, never copied result values.
     path: Annotated[Path, AfterValidator(_path)]
-    source_refs: tuple[Annotated[str, AfterValidator(lambda value: SourceRef(value).value)], ...]
+    source_refs: tuple[Annotated[str, AfterValidator(memory_refs.canonical_memory_ref)], ...]
     action: Literal["omit", "count"] = "omit"
 
     @model_validator(mode="after")
@@ -137,7 +137,7 @@ def bind(
         if not refs:
             raise ValueError("source_result_sources_invalid")
         for ref in refs:
-            SourceRef(ref)
+            memory_refs.canonical_memory_ref(ref)
         items = tuple(Contribution(path=path, source_refs=refs, action=action) for path in (paths if paths is not None else ((),)))
         _register(value, items)
     except (TypeError, ValueError):

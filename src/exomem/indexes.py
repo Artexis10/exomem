@@ -16,18 +16,11 @@ import os
 import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 
-from . import (
-    call_spans,
-    generated_fragments,
-    homes,
-    markdown_relations,
-    note_types,
-)
+from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import is_managed_root_name, managed_join, managed_relative
 from .vault import (
@@ -39,13 +32,9 @@ from .vault import (
     kb_root,
     read_guarded_text,
     render_wikilinks_for_vault,
-    rewritable_link_ranges,
 )
 
 log = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from .generated_output_plan import BoundText, GeneratedProducer
 
 RECENT_ACTIVITY_CAP = 50
 
@@ -61,8 +50,7 @@ def sources_index_path(vault_root: Path) -> Path:
     return kb_root(vault_root) / "Sources" / "index.md"
 
 
-def _rewritten_in_place(text: str, rewrite: Callable[[str], str], *,
-                        _tracking: generated_fragments._Image | None = None) -> str:
+def _rewritten_in_place(text: str, rewrite: Callable[[str], str]) -> str:
     r"""Run an LF-only section rewriter without changing the document's endings.
 
     Every splice in this module is written against LF: `find("\n## ")`,
@@ -81,54 +69,10 @@ def _rewritten_in_place(text: str, rewrite: Callable[[str], str], *,
     mean anything.
     """
     newline = document_newline(text)
-    if _tracking is not None:
-        if _tracking.text != text:
-            raise ValueError("fragment_renderer_image_changed")
-        _tracking.normalize_newlines()
     rewritten = rewrite(text.replace("\r\n", "\n").replace("\r", "\n"))
-    if _tracking is not None:
-        if _tracking.text != rewritten:
-            raise ValueError("fragment_renderer_image_changed")
-        _tracking.restore_newlines(newline)
-        return _tracking.text
     if newline == "\n":
         return rewritten
     return rewritten.replace("\n", newline)
-
-
-def _rewrite_generated_matches(
-    text: str, pattern: re.Pattern[str], rewrite: Callable[[re.Match[str]], generated_fragments._Image],
-    tracking: generated_fragments._Image | None,
-) -> str:
-    """Apply exact spans from the existing generated-row format, without a text diff."""
-    replacements = [(match.start(), match.end(), rewrite(match)) for match in pattern.finditer(text)]
-    for start, end, replacement in reversed(replacements):
-        if tracking is not None:
-            tracking.splice(start, end, replacement)
-        text = text[:start] + replacement.text + text[end:]
-    return text
-
-
-def _matched_image(match: re.Match[str], group: str | int,
-                   tracking: generated_fragments._Image | None) -> generated_fragments._Image:
-    start, end = match.span(group)
-    if start == -1:
-        return generated_fragments._Image("")
-    return tracking.slice(start, end) if tracking is not None else generated_fragments._Image(match.group(group))
-
-
-def _render_tracked_links(text: str, root: Path, tracking: generated_fragments._Image | None) -> str:
-    output = render_wikilinks_for_vault(text, root)
-    if tracking is not None:
-        if tracking.text != text:
-            raise ValueError("fragment_renderer_image_changed")
-        for start, end in reversed(rewritable_link_ranges(text)):
-            replacement = render_wikilinks_for_vault(text[start:end], root)
-            if replacement != text[start:end]:
-                tracking.splice(start, end, generated_fragments._Image(replacement))
-        if tracking.text != output:
-            raise ValueError("fragment_renderer_image_changed")
-    return output
 
 
 @dataclass
@@ -141,7 +85,6 @@ class IndexUpdate:
     sources_index_guard: PathGuard
     top_index_guard: PathGuard
     log_guard: PathGuard
-    fragment_plans: dict[str, generated_fragments.FragmentPlan] = field(default_factory=dict)
 
 
 def read_guarded_universal_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
@@ -162,10 +105,6 @@ def compute_updates(
     log_entry_body: str,
     stamp_iso: str | None = None,
     source_counts: Mapping[str, int] | None = None,
-    before_fragment_maps: Mapping[
-        str, generated_fragments.FragmentMap | generated_fragments.FragmentPlan
-    ]
-    | None = None,
 ) -> IndexUpdate:
     """Build the new contents of Sources/index.md, top-level index.md, and log.md.
 
@@ -181,11 +120,6 @@ def compute_updates(
 
     `source_counts`, when supplied, includes the caller's planned Source.
     The snapshot stays local to this update.
-
-    Before-maps come from producer-owned metadata, never from Markdown. They
-    carry ownership that earlier builds recorded for enrolled Sources; this
-    renderer adds none. Carry FragmentPlan coverage forward when the earlier
-    image has incomplete ownership.
     """
     kb = kb_root(vault_root)
     sources_dir = kb / "Sources"
@@ -201,30 +135,9 @@ def compute_updates(
         raise FileNotFoundError(f"log.md missing: {log_file}")
 
     counts = _count_sources(sources_dir) if source_counts is None else dict(source_counts)
-    sources_index_text, sources_index_guard = read_guarded_text(vault_root, sources_index)
-    top_index_text, top_index_guard = read_guarded_text(vault_root, top_index)
-    log_text, log_guard = read_guarded_text(vault_root, log_file)
-    tracked: dict[str, generated_fragments._Image] = {}
-
-    def track(path: Path, text: str, guard: PathGuard) -> generated_fragments._Image | None:
-        if before_fragment_maps is None:
-            return None
-        relative = path.relative_to(vault_root).as_posix()
-        image = generated_fragments._Image.before(
-            text,
-            (before_fragment_maps or {}).get(relative),
-            guard.expected_content_hash,
-        )
-        image.normalize_newlines()
-        tracked[relative] = image
-        return image
-
-    sources_tracking = track(sources_index, sources_index_text, sources_index_guard)
-    top_tracking = track(top_index, top_index_text, top_index_guard)
-    log_tracking = track(log_file, log_text, log_guard)
-    sources_index_text = sources_index_text.replace("\r\n", "\n").replace("\r", "\n")
-    top_index_text = top_index_text.replace("\r\n", "\n").replace("\r", "\n")
-    log_text = log_text.replace("\r\n", "\n").replace("\r", "\n")
+    sources_index_text, sources_index_guard = read_guarded_universal_text(vault_root, sources_index)
+    top_index_text, top_index_guard = read_guarded_universal_text(vault_root, top_index)
+    log_text, log_guard = read_guarded_universal_text(vault_root, log_file)
 
     sources_index_new = _update_sources_index(
         sources_index_text,
@@ -234,78 +147,31 @@ def compute_updates(
         date_iso=date_iso,
         rel_source_path=rel_source_path,
         vault_root=vault_root,
-        _tracking=sources_tracking,
     )
 
-    trim_fragments: list[generated_fragments._Image] = []
     top_index_new, trim_note = _update_top_index(
         top_index_text,
         counts=counts,
         date_iso=date_iso,
         activity_summary=activity_summary,
-        _tracking=top_tracking,
-        _trim_fragments=trim_fragments,
     )
-
-    trim_separator = "\n\n"
-    log_body = log_entry_body + (trim_separator + trim_note if trim_note else "")
-    tracked_log_body = None
-    if log_tracking is not None:
-        tracked_log_body = generated_fragments._Image(escape_wikilinks_for_log(log_entry_body))
-        if trim_fragments:
-            trim = trim_fragments[0]
-            escaped = generated_fragments._Image(
-                escape_wikilinks_for_log(trim.text), unknown=trim.unknown,
-                unknown_through_epoch=trim.unknown_through_epoch,
-            )
-            for fragment in trim.spans:
-                if fragment.start == 0 and fragment.end == len(trim.text.encode("utf-8")):
-                    escaped.own(
-                        generated_fragments.SourceRef(fragment.source_ref),
-                        identity=fragment.identity,
-                    )
-                else:
-                    escaped.unknown += ("fragment_log_escape_boundary_unknown",)
-            tracked_log_body = generated_fragments._Image.join(
-                (
-                    tracked_log_body,
-                    generated_fragments._Image(trim_separator),
-                    escaped,
-                )
-            )
 
     log_new = _update_log(
         log_text,
         date_iso=stamp_iso or date_iso,
         rel_source_path=rel_source_path,
-        log_entry_body=log_body,
-        _tracking=log_tracking,
-        _tracked_body=tracked_log_body,
+        log_entry_body=log_entry_body
+        + (f"\n\n{trim_note}" if trim_note else ""),
     )
 
-    rendered = []
-    plans = {}
-    for path, text, guard in (
-        (sources_index, sources_index_new, sources_index_guard),
-        (top_index, top_index_new, top_index_guard),
-        (log_file, log_new, log_guard),
-    ):
-        relative = path.relative_to(vault_root).as_posix()
-        image = tracked.get(relative)
-        output = _render_tracked_links(text, vault_root, image)
-        if relative in tracked:
-            plans[relative] = image.plan(guard.expected_content_hash)
-        rendered.append(output)
-
     return IndexUpdate(
-        sources_index_content=rendered[0],
-        top_index_content=rendered[1],
-        log_content=rendered[2],
+        sources_index_content=render_wikilinks_for_vault(sources_index_new, vault_root),
+        top_index_content=render_wikilinks_for_vault(top_index_new, vault_root),
+        log_content=render_wikilinks_for_vault(log_new, vault_root),
         trim_note=trim_note,
         sources_index_guard=sources_index_guard,
         top_index_guard=top_index_guard,
         log_guard=log_guard,
-        fragment_plans=plans,
     )
 
 
@@ -541,7 +407,6 @@ def _update_sources_index(
     date_iso: str,
     rel_source_path: str,
     vault_root: Path | None = None,
-    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Bump the By-type count row and prepend a Recent-captures bullet.
 
@@ -554,14 +419,8 @@ def _update_sources_index(
         folder_description=folder_description,
         counts=counts,
         vault_root=vault_root,
-        _tracking=_tracking,
     )
-    text = _prepend_recent_capture(
-        text,
-        date_iso=date_iso,
-        rel_source_path=rel_source_path,
-        _tracking=_tracking,
-    )
+    text = _prepend_recent_capture(text, date_iso=date_iso, rel_source_path=rel_source_path)
     return text
 
 
@@ -601,7 +460,6 @@ def _replace_by_type_section(
     folder_description: str,
     counts: dict[str, int],
     vault_root: Path | None = None,
-    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Rewrite the entire By-type list from disk counts so we don't drift."""
     rows: list[str] = []
@@ -615,13 +473,7 @@ def _replace_by_type_section(
         rows.append(f"- [[{managed_join(f'Sources/{name}/')}|{name}]] — {desc} ({counts[name]})")
 
     new_block = SOURCES_BY_TYPE_HEADER + "\n\n" + "\n".join(rows) + "\n"
-    return _replace_section(
-        text,
-        SOURCES_BY_TYPE_HEADER,
-        new_block,
-        next_h2_or_end=True,
-        _tracking=_tracking,
-    )
+    return _replace_section(text, SOURCES_BY_TYPE_HEADER, new_block, next_h2_or_end=True)
 
 
 def _capped(bullets: list[str]) -> tuple[list[str], list[str]]:
@@ -629,36 +481,16 @@ def _capped(bullets: list[str]) -> tuple[list[str], list[str]]:
     return bullets[:RECENT_ACTIVITY_CAP], bullets[RECENT_ACTIVITY_CAP:]
 
 
-def _prepend_recent_capture(
-    text: str,
-    *,
-    date_iso: str,
-    rel_source_path: str,
-    _tracking: generated_fragments._Image | None = None,
-) -> str:
+def _prepend_recent_capture(text: str, *, date_iso: str, rel_source_path: str) -> str:
     """Insert a new bullet at the top of the Recent captures list, keeping the newest `RECENT_ACTIVITY_CAP`.
 
     An uncapped list grew with every Source, and each write re-read and re-parsed all of it.
     """
     entry = f"- {date_iso} — [[{rel_source_path}]]"
-    entry_line = entry + "\n"
-    inserted = generated_fragments._Image(entry_line)
     header_idx = text.find(SOURCES_RECENT_HEADER)
     if header_idx == -1:
         # No Recent captures section — append one at the end.
-        prefix = "\n\n" + SOURCES_RECENT_HEADER + "\n\n"
-        if _tracking is not None:
-            _tracking.splice(
-                len(text.rstrip()),
-                len(text),
-                generated_fragments._Image.join(
-                    (
-                        generated_fragments._Image(prefix),
-                        inserted,
-                    )
-                ),
-            )
-        return text.rstrip() + prefix + entry_line
+        return text.rstrip() + "\n\n" + SOURCES_RECENT_HEADER + "\n\n" + entry + "\n"
     section_end = text.find("\n## ", header_idx + len(SOURCES_RECENT_HEADER))
     if section_end == -1:
         section_end = len(text)
@@ -667,19 +499,7 @@ def _prepend_recent_capture(
     if body_start == -1:
         body_start = text.find("\n", header_idx, section_end)
         if body_start == -1:
-            prefix = "\n\n"
-            if _tracking is not None:
-                _tracking.splice(
-                    len(text.rstrip()),
-                    len(text),
-                    generated_fragments._Image.join(
-                        (
-                            generated_fragments._Image(prefix),
-                            inserted,
-                        )
-                    ),
-                )
-            return text.rstrip() + prefix + entry_line
+            return text.rstrip() + "\n\n" + entry + "\n"
         body_start += 1
     else:
         body_start += 2
@@ -690,15 +510,6 @@ def _prepend_recent_capture(
     kept, _dropped = _capped([entry, *(line for line in lines if line.startswith("- "))])
     rest = [line for line in lines if not line.startswith("- ")]
     body = "\n".join(kept) + "\n" + ("\n".join(rest) + "\n" if rest else "")
-    if _tracking is not None:
-        old_lines = _tracking.lines(body_start, section_end)
-        # The generated recent-list protocol fixes "- " as its row token.
-        old_bullets = [line for line in old_lines if line.text.startswith("- ")]
-        old_rest = [line for line in old_lines if not line.text.startswith("- ")]
-        pieces = [inserted]
-        for line in [*old_bullets[: RECENT_ACTIVITY_CAP - 1], *old_rest]:
-            pieces.extend((line, generated_fragments._Image("\n")))
-        _tracking.splice(body_start, section_end, generated_fragments._Image.join(pieces))
     return text[:body_start] + body + text[section_end:]
 
 
@@ -708,28 +519,17 @@ def _update_top_index(
     counts: dict[str, int],
     date_iso: str,
     activity_summary: str,
-    _tracking: generated_fragments._Image | None = None,
-    _trim_fragments: list[generated_fragments._Image] | None = None,
 ) -> tuple[str, str | None]:
     """Prepend Recent activity bullet (cap-50 trim) + rewrite the Sources Counts line."""
     text, trim_note = _prepend_recent_activity(
-        text,
-        date_iso=date_iso,
-        summary=activity_summary,
-        _tracking=_tracking,
-        _trim_fragments=_trim_fragments,
+        text, date_iso=date_iso, summary=activity_summary
     )
-    text = _rewrite_sources_count(text, counts=counts, _tracking=_tracking)
+    text = _rewrite_sources_count(text, counts=counts)
     return text, trim_note
 
 
 def _prepend_recent_activity(
-    text: str,
-    *,
-    date_iso: str,
-    summary: str,
-    _tracking: generated_fragments._Image | None = None,
-    _trim_fragments: list[generated_fragments._Image] | None = None,
+    text: str, *, date_iso: str, summary: str
 ) -> tuple[str, str | None]:
     """Insert `- <date> — <summary>` at the top of Recent activity. Trim to cap-50."""
     header_idx = text.find(INDEX_RECENT_HEADER)
@@ -741,8 +541,6 @@ def _prepend_recent_activity(
         section_end = len(text)
     section = text[header_idx:section_end]
     lines = section.splitlines()
-    new_bullet = f"- {date_iso} — {summary}"
-    inserted = generated_fragments._Image(new_bullet + "\n")
     # Locate where bullets start (first line beginning with "- ").
     bullet_start = None
     for i, line in enumerate(lines):
@@ -751,19 +549,13 @@ def _prepend_recent_activity(
             break
     if bullet_start is None:
         # No bullets yet — append after the section.
-        prefix = "\n\n"
-        new_section = section.rstrip("\n") + prefix + inserted.text
-        if _tracking is not None:
-            _tracking.splice(
-                header_idx + len(section.rstrip("\n")),
-                section_end,
-                generated_fragments._Image.join((generated_fragments._Image(prefix), inserted)),
-            )
+        new_section = section.rstrip("\n") + f"\n\n- {date_iso} — {summary}\n"
         return text[:header_idx] + new_section + text[section_end:], None
 
     bullets = [ln for ln in lines[bullet_start:] if ln.startswith("- ")]
     preamble = lines[:bullet_start]
 
+    new_bullet = f"- {date_iso} — {summary}"
     if new_bullet in bullets:
         return text, None
     bullets.insert(0, new_bullet)
@@ -771,30 +563,14 @@ def _prepend_recent_activity(
     trim_note: str | None = None
     bullets, dropped = _capped(bullets)
     if dropped:
+        bottom_excerpt = dropped[0]
         # Pull just the date + first chunk of the dropped bullet for the note.
-        bottom_excerpt = dropped[0][:120]
-        trim_prefix = (
+        trim_note = (
             f"(bottom entry drops off at cap-{RECENT_ACTIVITY_CAP}; "
-            f"trimmed {len(dropped)} this write — bottom was: "
+            f"trimmed {len(dropped)} this write — bottom was: {bottom_excerpt[:120]}…)"
         )
-        trim_suffix = "…)"
-        trim_note = trim_prefix + bottom_excerpt + trim_suffix
 
     new_section = "\n".join(preamble + bullets) + "\n"
-    if _tracking is not None:
-        old_lines = _tracking.lines(header_idx, section_end)
-        # The generated recent-list protocol fixes "- " as its row token.
-        old_bullets = [line for line in old_lines[bullet_start:] if line.text.startswith("- ")]
-        if dropped and _trim_fragments is not None:
-            excerpt = old_bullets[RECENT_ACTIVITY_CAP - 1].slice(0, len(bottom_excerpt))
-            _trim_fragments.append(excerpt.wrap_excerpt(trim_prefix, trim_suffix))
-        pieces = []
-        for line in old_lines[:bullet_start]:
-            pieces.extend((line, generated_fragments._Image("\n")))
-        pieces.append(inserted)
-        for line in old_bullets[: RECENT_ACTIVITY_CAP - 1]:
-            pieces.extend((line, generated_fragments._Image("\n")))
-        _tracking.splice(header_idx, section_end, generated_fragments._Image.join(pieces))
     return text[:header_idx] + new_section + text[section_end:], trim_note
 
 
@@ -877,52 +653,41 @@ def _rewrite_top_index_notes_and_entities_counts(
     *,
     notes_counts: dict[str, int],
     entities_counts: dict[str, int],
-    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Rewrite per-type rows and ensure true Notes/Entities total rows."""
-    def _replace_notes(m: re.Match[str]) -> generated_fragments._Image:
+    def _replace_notes(m: re.Match[str]) -> str:
         type_key = m.group(2)
         actual = notes_counts.get(type_key)
         if actual is None:
-            return _matched_image(m, 0, _tracking)
-        return generated_fragments._Image.join((
-            _matched_image(m, 1, _tracking), _matched_image(m, 2, _tracking),
-            _matched_image(m, 3, _tracking), generated_fragments._Image(str(actual)),
-        ))
+            return m.group(0)  # unknown type; leave alone
+        return f"{m.group(1)}{type_key}{m.group(3)}{actual}"
 
-    def _replace_entities(m: re.Match[str]) -> generated_fragments._Image:
+    def _replace_entities(m: re.Match[str]) -> str:
         type_key = m.group(2)
         actual = entities_counts.get(type_key)
         if actual is None:
-            return _matched_image(m, 0, _tracking)
-        return generated_fragments._Image.join((
-            _matched_image(m, 1, _tracking), _matched_image(m, 2, _tracking),
-            _matched_image(m, 3, _tracking), generated_fragments._Image(str(actual)),
-        ))
+            return m.group(0)
+        return f"{m.group(1)}{type_key}{m.group(3)}{actual}"
 
-    text = _rewrite_generated_matches(text, _NOTES_COUNT_LINE, _replace_notes, _tracking)
-    text = _rewrite_generated_matches(text, _ENTITIES_COUNT_LINE, _replace_entities, _tracking)
+    text = _NOTES_COUNT_LINE.sub(_replace_notes, text)
+    text = _ENTITIES_COUNT_LINE.sub(_replace_entities, text)
     text = _rewrite_or_insert_total_count(
-        text, label="Notes", total=sum(notes_counts.values()), pattern=_NOTES_TOTAL_LINE, _tracking=_tracking,
+        text, label="Notes", total=sum(notes_counts.values()), pattern=_NOTES_TOTAL_LINE
     )
     text = _rewrite_or_insert_total_count(
         text,
         label="Entities",
         total=sum(entities_counts.values()),
         pattern=_ENTITIES_TOTAL_LINE,
-        _tracking=_tracking,
     )
     return text
 
 
 def _rewrite_or_insert_total_count(
-    text: str, *, label: str, total: int, pattern: re.Pattern[str],
-    _tracking: generated_fragments._Image | None = None,
+    text: str, *, label: str, total: int, pattern: re.Pattern[str]
 ) -> str:
     line = f"- {label}: {total}"
-    if match := pattern.search(text):
-        if _tracking is not None:
-            _tracking.splice(match.start(), match.end(), generated_fragments._Image(line))
+    if pattern.search(text):
         return pattern.sub(line, text, count=1)
     counts_idx = text.find(INDEX_COUNTS_HEADER)
     if counts_idx == -1:
@@ -932,27 +697,20 @@ def _rewrite_or_insert_total_count(
         section_end = len(text)
     prefix = text[:section_end].rstrip("\n")
     suffix = text[section_end:]
-    if _tracking is not None:
-        _tracking.splice(len(prefix), section_end, generated_fragments._Image(f"\n{line}\n"))
     return f"{prefix}\n{line}\n{suffix}"
 
 
-def _rewrite_sources_count(
-    text: str,
-    *,
-    counts: dict[str, int],
-    _tracking: generated_fragments._Image | None = None,
-) -> str:
+def _rewrite_sources_count(text: str, *, counts: dict[str, int]) -> str:
     """Rewrite the `- Sources: <total> (<type>: <n>, ...)` line under Counts."""
     total = sum(counts.values())
     # Lowercase singular type name expected: "articles" not "Articles". Match the
     # convention used in the existing file: lowercased folder name with trailing 's'
     # already (Articles → articles, etc.). For new types: lowercase + plural-ish.
-    parts = ", ".join(f"{name.lower()}: {n}" for name, n in sorted(counts.items()))
+    parts = ", ".join(
+        f"{name.lower()}: {n}" for name, n in sorted(counts.items())
+    )
     new_line = f"- Sources: {total} ({parts})" if parts else f"- Sources: {total}"
-    if match := SOURCES_COUNT_PATTERN.search(text):
-        if _tracking is not None:
-            _tracking.splice(match.start(), match.end(), generated_fragments._Image(new_line))
+    if SOURCES_COUNT_PATTERN.search(text):
         return SOURCES_COUNT_PATTERN.sub(new_line, text, count=1)
     # Counts section exists but no Sources line — insert at top of Counts list.
     idx = text.find(INDEX_COUNTS_HEADER)
@@ -962,10 +720,7 @@ def _rewrite_sources_count(
     if body_start == -1:
         return text
     body_start += 2
-    replacement = new_line + "\n"
-    if _tracking is not None:
-        _tracking.splice(body_start, body_start, generated_fragments._Image(replacement))
-    return text[:body_start] + replacement + text[body_start:]
+    return text[:body_start] + new_line + "\n" + text[body_start:]
 
 
 # ---------------- sub-folder index refresh ----------------
@@ -1080,7 +835,6 @@ def _refresh_notes_subindex_text(
     counts_by_type: dict[str, int],
     counts_by_subfolder: dict[str, dict[str, int]],
     owners: tuple[_NotesOwner, ...] | None = None,
-    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Rewrite count numbers in `Notes/index.md` without touching descriptions.
 
@@ -1100,33 +854,30 @@ def _refresh_notes_subindex_text(
             (owner for owner in owners if folded in {title.casefold() for title in owner.titles}), None
         )
 
-    def _h3(m: re.Match[str]) -> generated_fragments._Image:
+    def _h3(m: re.Match[str]) -> str:
         owner = _owner_titled(m.group("name"))
         actual = counts_by_type.get(owner.token) if owner is not None else None
         if actual is None:
-            return _matched_image(m, 0, _tracking)
-        return generated_fragments._Image.join((
-            _matched_image(m, 1, _tracking), _matched_image(m, 3, _tracking),
-            generated_fragments._Image(f" ({actual})"),
-        ))
+            return m.group(0)
+        prefix = m.group(1)  # `### Research`
+        desc = m.group(3) or ""  # ` — description`
+        return f"{prefix}{desc} ({actual})"
 
-    def _bullet(m: re.Match[str]) -> generated_fragments._Image:
+    def _bullet(m: re.Match[str]) -> str:
         type_folder = m.group("typef")
         sub = m.group("sub")
+        rest = m.group("rest") or ""
         # `Research`-style: sub is the project folder (`Project Alpha`, `Work`).
         # For flat types where the bullet might not have a sub, we leave alone.
         per_type = counts_by_subfolder.get(type_folder, {})
         actual = per_type.get(sub)
         if actual is None:
-            return _matched_image(m, 0, _tracking)
-        return generated_fragments._Image.join((
-            _matched_image(m, 1, _tracking), generated_fragments._Image(f" ({actual})"),
-            _matched_image(m, "rest", _tracking),
-        ))
+            return m.group(0)
+        return f"{m.group(1)} ({actual}){rest}"
 
-    text = _rewrite_generated_matches(text, _NOTES_H3_COUNT, _h3, _tracking)
-    text = _add_home_sections(text, owners, counts_by_type, _owner_titled, _tracking=_tracking)
-    text = _rewrite_generated_matches(text, _notes_subfolder_bullet_re(managed_join("")), _bullet, _tracking)
+    text = _NOTES_H3_COUNT.sub(_h3, text)
+    text = _add_home_sections(text, owners, counts_by_type, _owner_titled)
+    text = _notes_subfolder_bullet_re(managed_join("")).sub(_bullet, text)
     return text
 
 
@@ -1135,8 +886,6 @@ def _add_home_sections(
     owners: tuple[_NotesOwner, ...],
     counts_by_type: dict[str, int],
     owner_titled: Callable[[str], _NotesOwner | None],
-    *,
-    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Give each home that has no section one, at the end of `## By type`."""
     lines = text.splitlines(keepends=True)
@@ -1174,10 +923,6 @@ def _add_home_sections(
     end = sum(len(line) for line in lines[:end_line])
     head, tail = text[:end].rstrip("\n"), text[end:].lstrip("\n")
     joined = head + "\n\n" + "\n\n".join(sections) + "\n"
-    if _tracking is not None:
-        removed = len(text[end:]) - len(tail)
-        replacement = "\n\n" + "\n\n".join(sections) + "\n" + ("\n" if tail else "")
-        _tracking.splice(len(head), end + removed, generated_fragments._Image(replacement))
     return joined + ("\n" + tail if tail else "")
 
 
@@ -1186,7 +931,6 @@ def _refresh_entities_subindex_text(
     *,
     counts_by_type: dict[str, int],
     registry: EntityTypeRegistry | None = None,
-    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Refresh registered entity rows while preserving hand-authored prose."""
     registry = registry or core_registry()
@@ -1197,18 +941,16 @@ def _refresh_entities_subindex_text(
         tuple(item.folder for item in registry.active_definitions),
     )
 
-    def _bullet(m: re.Match[str]) -> generated_fragments._Image:
+    def _bullet(m: re.Match[str]) -> str:
         folder = m.group("folder")
         definition = registry.by_folder.get(folder.casefold())
         if definition is None:
-            return _matched_image(m, 0, _tracking)
+            return m.group(0)
         actual = counts_by_type.get(definition.id, 0)
-        return generated_fragments._Image.join((
-            _matched_image(m, 1, _tracking), generated_fragments._Image(f" ({actual})"),
-            _matched_image(m, "rest", _tracking),
-        ))
+        rest = m.group("rest") or ""
+        return f"{m.group(1)} ({actual}){rest}"
 
-    refreshed = _rewrite_generated_matches(text, pattern, _bullet, _tracking)
+    refreshed = pattern.sub(_bullet, text)
     present = {match.group("folder").casefold() for match in pattern.finditer(refreshed)}
     missing = [
         definition
@@ -1235,100 +977,29 @@ def _refresh_entities_subindex_text(
     joined = f"{prefix}\n" + "\n".join(rows) + "\n"
     if suffix:
         joined += f"\n{suffix}"
-    if _tracking is not None:
-        removed = len(refreshed[section_end:]) - len(suffix)
-        replacement = "\n" + "\n".join(rows) + "\n" + ("\n" if suffix else "")
-        _tracking.splice(len(prefix), section_end + removed, generated_fragments._Image(replacement))
     return joined
-
-
-@dataclass(frozen=True)
-class ActivityTrim:
-    text: str
-    generated: BoundText | None = None
-
-
-def plan_recent_activity(
-    root: Path, entries: Iterable[tuple[str, str]], *, generated_producer: GeneratedProducer | None = None,
-) -> tuple[PlannedWrite, tuple[ActivityTrim | None, ...]]:
-    """Render activity from guarded original bytes and retain each displaced excerpt's input."""
-    from . import generated_output_plan
-
-    path = kb_root(root) / "index.md"
-    current, guard = read_guarded_text(root, path)
-    before, tracking = None, None
-    if generated_producer is not None:
-        before = generated_producer.before(path)
-        tracking = generated_fragments._Image.before(current, before.mapping, guard.expected_content_hash)
-        tracking.normalize_newlines()
-    updated = current.replace("\r\n", "\n").replace("\r", "\n")
-    trims = []
-    for date_iso, summary in entries:
-        copied = []
-        updated, trim = _prepend_recent_activity(updated, date_iso=date_iso, summary=summary,
-                                                _tracking=tracking, _trim_fragments=copied)
-        bound = generated_output_plan.BoundText(copied[0], (before,)) if copied and before is not None else None
-        trims.append(ActivityTrim(trim, bound) if trim is not None else None)
-    newline = document_newline(current)
-    if tracking is not None:
-        tracking.restore_newlines(newline)
-        updated = tracking.text
-    else:
-        updated = updated.replace("\n", newline)
-    write = PlannedWrite(path, updated, guard=guard)
-    if generated_producer is not None:
-        generated_producer.attach(write, tracking.plan(before.mapping.before_sha256))
-    return write, tuple(trims)
-
-
-def _refresh_index_write(
-    root: Path, write: PlannedWrite, rewrite: Callable[[str, generated_fragments._Image | None], str],
-    *, generated_producer: GeneratedProducer | None, current_input: bool = False,
-    fallback_guard: PathGuard | None = None,
-) -> PlannedWrite:
-    from . import generated_output_plan
-
-    write = replace(write, guard=write.guard or fallback_guard)
-    plan = write.generated_image
-    tracking, before = None, None
-    if plan is not None:
-        tracking = generated_fragments._Image.before(write.content, plan.after, plan.after.after.image_sha256)
-    elif generated_producer is not None:
-        before = generated_producer.before(write.path)
-        # A planned rewrite without a map cannot inherit ownership merely because its bytes match.
-        tracking = generated_fragments._Image.before(write.content, before.mapping if current_input else None,
-            before.mapping.before_sha256, current_epoch=before.checkpoint)
-    text = _rewritten_in_place(write.content, lambda logical: rewrite(logical, tracking), _tracking=tracking)
-    text = _render_tracked_links(text, root, tracking)
-    result = replace(write, content=text)
-    if plan is not None:
-        result.generated_image = generated_output_plan.seal(plan.before, content=text,
-            rendered=tracking.plan(plan.before.mapping.before_sha256), inputs=plan.inputs[1:])
-    elif generated_producer is not None:
-        generated_producer.attach(result, tracking.plan(before.mapping.before_sha256))
-    return result
 
 
 def compute_subindex_writes(
     vault_root: Path,
     *,
-    top_index_write: PlannedWrite | None = None,
+    top_index_text: str | None = None,
     base_writes: Mapping[Path, PlannedWrite] | None = None,
     pending_paths: list[str] | None = None,
     include_unchanged: bool = False,
     include_sources_index: bool = True,
     sources_counts: Mapping[str, int] | None = None,
-    generated_producer: GeneratedProducer | None = None,
-) -> tuple[list[PlannedWrite], PlannedWrite | None]:
+) -> tuple[list[PlannedWrite], str | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
-    Returns `(writes, top_index_write)`. The guarded `top_index_write` supplies
-    the base and ownership plan for count changes alongside Recent activity.
-    `base_writes` similarly supplies already-planned text and
+    Returns `(writes, top_index_new_text)`. If `top_index_text` is provided,
+    it is used as the base for rewriting top-index counts (so the caller's
+    in-flight changes to Recent activity don't get clobbered); the rewritten
+    text is returned. `base_writes` similarly supplies already-planned text and
     its guard for sub-indexes. This lets a caller compose independent edits to
     an index into one guarded write instead of scheduling competing replacements.
     Disk reads still bind a guard for indexes with no base write. Otherwise the
-    caller supplies no top-index write when it needs no top-index refresh.
+    caller is responsible for re-reading the top index from disk later.
 
     `sources_counts` is a Sources census the caller already holds for the state
     before `pending_paths`; it replaces the walk, which a caller that commits many
@@ -1402,18 +1073,17 @@ def compute_subindex_writes(
                 entities_counts[definition.id] = entities_counts.get(definition.id, 0) + 1
 
     # Top index counts refresh (Sources + Notes + Entities rows).
-    new_top_write: PlannedWrite | None = None
-    if top_index_write is not None:
-        new_top_write = _refresh_index_write(
-            vault_root, top_index_write,
-            lambda logical, tracking: _rewrite_top_index_notes_and_entities_counts(
-                _rewrite_sources_count(logical, counts=sources_counts, _tracking=tracking),
+    new_top_text: str | None = None
+    if top_index_text is not None:
+        new_top_text = _rewritten_in_place(
+            top_index_text,
+            lambda logical: _rewrite_top_index_notes_and_entities_counts(
+                _rewrite_sources_count(logical, counts=sources_counts),
                 notes_counts=notes_counts,
                 entities_counts=entities_counts,
-                _tracking=tracking,
             ),
-            generated_producer=generated_producer,
         )
+        new_top_text = render_wikilinks_for_vault(new_top_text, vault_root)
 
     # Sources/index.md refresh.
     sources_index = sources_index_path(vault_root)
@@ -1428,20 +1098,23 @@ def compute_subindex_writes(
             # Keep guarded reading outside the rendering cost: callers may
             # discard this text while still depending on its validation.
             with call_spans.span("indexes.sources_render"):
-                planned = _refresh_index_write(vault_root,
-                    base_write or PlannedWrite(sources_index, current, guard=guard),
-                    lambda logical, tracking: _replace_by_type_section(
+                new = _rewritten_in_place(
+                    base,
+                    lambda logical: _replace_by_type_section(
                         logical,
                         folder_title="Articles",
                         folder_description=_LEGACY_FOLDER_DESCRIPTIONS["Articles"],
                         counts=sources_counts,
                         vault_root=vault_root,
-                        _tracking=tracking,
                     ),
-                    generated_producer=generated_producer, current_input=base_write is None, fallback_guard=guard,
                 )
-            if include_unchanged or planned.content != base:
-                writes.append(planned)
+                new = render_wikilinks_for_vault(new, vault_root)
+            if include_unchanged or new != base:
+                writes.append(PlannedWrite(
+                    path=sources_index,
+                    content=new,
+                    guard=base_write.guard if base_write and base_write.guard else guard,
+                ))
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
@@ -1453,19 +1126,22 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(page_relative_path(notes_index, vault_root))
             base = base_write.content if base_write is not None else current
-            planned = _refresh_index_write(vault_root,
-                base_write or PlannedWrite(notes_index, current, guard=guard),
-                lambda logical, tracking: _refresh_notes_subindex_text(
+            new = _rewritten_in_place(
+                base,
+                lambda logical: _refresh_notes_subindex_text(
                     logical,
                     counts_by_type=notes_counts,
                     counts_by_subfolder=notes_by_subfolder,
                     owners=notes_owners,
-                    _tracking=tracking,
                 ),
-                generated_producer=generated_producer, current_input=base_write is None, fallback_guard=guard,
             )
-            if include_unchanged or planned.content != base:
-                writes.append(planned)
+            new = render_wikilinks_for_vault(new, vault_root)
+            if include_unchanged or new != base:
+                writes.append(PlannedWrite(
+                    path=notes_index,
+                    content=new,
+                    guard=base_write.guard if base_write and base_write.guard else guard,
+                ))
 
     # Entities/index.md refresh.
     entities_index = entities_dir / "index.md"
@@ -1477,20 +1153,23 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(page_relative_path(entities_index, vault_root))
             base = base_write.content if base_write is not None else current
-            planned = _refresh_index_write(vault_root,
-                base_write or PlannedWrite(entities_index, current, guard=guard),
-                lambda logical, tracking: _refresh_entities_subindex_text(
+            new = _rewritten_in_place(
+                base,
+                lambda logical: _refresh_entities_subindex_text(
                     logical,
                     counts_by_type=entities_counts,
                     registry=entity_registry,
-                    _tracking=tracking,
                 ),
-                generated_producer=generated_producer, current_input=base_write is None, fallback_guard=guard,
             )
-            if include_unchanged or planned.content != base:
-                writes.append(planned)
+            new = render_wikilinks_for_vault(new, vault_root)
+            if include_unchanged or new != base:
+                writes.append(PlannedWrite(
+                    path=entities_index,
+                    content=new,
+                    guard=base_write.guard if base_write and base_write.guard else guard,
+                ))
 
-    return writes, new_top_write
+    return writes, new_top_text
 
 
 def _update_log(
@@ -1499,58 +1178,22 @@ def _update_log(
     date_iso: str,
     rel_source_path: str,
     log_entry_body: str,
-    _tracking: generated_fragments._Image | None = None,
-    _tracked_body: generated_fragments._Image | None = None,
 ) -> str:
     """Prepend `## [<date>] add | <path>` entry right after the `---` separator."""
     title = managed_relative(rel_source_path)
-    heading = f"## [{date_iso}] add | {title}\n\n"
-    body = escape_wikilinks_for_log(log_entry_body)
-    entry_suffix = "\n"
-    new_entry = heading + body + entry_suffix
-    if _tracking is not None:
-        entry = generated_fragments._Image.join(
-            (
-                generated_fragments._Image(heading),
-                _tracked_body if _tracked_body is not None else generated_fragments._Image(body),
-                generated_fragments._Image(entry_suffix),
-            )
-        )
-        if entry.text != new_entry:
-            raise ValueError("fragment_renderer_log_body_changed")
+    new_entry = f"## [{date_iso}] add | {title}\n\n{escape_wikilinks_for_log(log_entry_body)}\n"
 
     sep_idx = text.find(LOG_SEPARATOR)
     if sep_idx == -1:
         # No separator — append at end.
-        start, end = len(text.rstrip()), len(text)
-        prefix = "\n\n"
-    else:
-        start = end = sep_idx + len(LOG_SEPARATOR)
-        prefix = "\n"
-    suffix = "\n"
-    replacement = prefix + new_entry + suffix
-    if _tracking is not None:
-        _tracking.splice(
-            start,
-            end,
-            generated_fragments._Image.join(
-                (
-                    generated_fragments._Image(prefix),
-                    entry,
-                    generated_fragments._Image(suffix),
-                )
-            ),
-        )
-    return text[:start] + replacement + text[end:]
+        return text.rstrip() + "\n\n" + new_entry + "\n"
+
+    insertion_point = sep_idx + len(LOG_SEPARATOR)
+    return text[:insertion_point] + "\n" + new_entry + "\n" + text[insertion_point:]
 
 
 def _replace_section(
-    text: str,
-    header: str,
-    new_block: str,
-    *,
-    next_h2_or_end: bool,
-    _tracking: generated_fragments._Image | None = None,
+    text: str, header: str, new_block: str, *, next_h2_or_end: bool
 ) -> str:
     """Replace the section starting at `header` with `new_block`.
 
@@ -1559,19 +1202,10 @@ def _replace_section(
     start = text.find(header)
     if start == -1:
         # Section missing — append before any trailing `## Counts` or just at end.
-        prefix = text.rstrip()
-        replacement = "\n\n" + new_block
-        if _tracking is not None:
-            _tracking.splice(len(prefix), len(text), generated_fragments._Image(replacement))
-        return prefix + replacement
+        return text.rstrip() + "\n\n" + new_block
     if next_h2_or_end:
         next_h2 = text.find("\n## ", start + len(header))
         end = next_h2 + 1 if next_h2 != -1 else len(text)
     else:
         end = len(text)
-    replacement = new_block.rstrip() + "\n\n"
-    suffix = text[end:].lstrip("\n")
-    if _tracking is not None:
-        removed = len(text[end:]) - len(suffix)
-        _tracking.splice(start, end + removed, generated_fragments._Image(replacement))
-    return text[:start] + replacement + suffix
+    return text[:start] + new_block.rstrip() + "\n\n" + text[end:].lstrip("\n")

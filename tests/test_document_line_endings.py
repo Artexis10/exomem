@@ -23,7 +23,6 @@ from exomem import find as find_module
 from exomem import indexes as indexes_module
 from exomem import replace as replace_module
 from exomem.vault import (
-    PlannedWrite,
     document_newline,
     parse_frontmatter,
     render_frontmatter_document,
@@ -193,13 +192,13 @@ def _settle_indexes(vault: Path) -> list[Path]:
     for _ in range(4):
         current_top = top.read_bytes().decode("utf-8")
         writes, new_top = indexes_module.compute_subindex_writes(
-            vault, top_index_write=PlannedWrite(top, current_top)
+            vault, top_index_text=current_top
         )
         for write in writes:
             write.path.write_bytes(write.content.encode("utf-8"))
         if new_top is not None:
-            top.write_bytes(new_top.content.encode("utf-8"))
-        if not writes and new_top is not None and new_top.content == current_top:
+            top.write_bytes(new_top.encode("utf-8"))
+        if not writes and new_top == current_top:
             break
     else:  # pragma: no cover - a non-converging refresh is itself the bug
         raise AssertionError("index refresh never reached a fixed point")
@@ -236,11 +235,11 @@ def test_a_settled_index_is_not_rewritten_just_for_its_line_ending(
     top = vault / "Knowledge Base" / "index.md"
 
     writes, new_top = indexes_module.compute_subindex_writes(
-        vault, top_index_write=PlannedWrite(top, top.read_bytes().decode("utf-8"))
+        vault, top_index_text=top.read_bytes().decode("utf-8")
     )
 
     assert writes == []
-    assert new_top is not None and new_top.content == top.read_bytes().decode("utf-8")
+    assert new_top == top.read_bytes().decode("utf-8")
     assert {path: path.read_bytes() for path in targets} == before
     for path in targets:
         assert _endings(path.read_bytes().decode("utf-8")) == {newline}

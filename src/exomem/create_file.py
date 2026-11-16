@@ -322,18 +322,14 @@ def create_file(
         log_body_parts.append(f"allow_curated=true (target tree: {curated}).")
     op_word = "create_file (overwrite)" if overwrite else "create_file"
     try:
-        from . import generated_output_plan
-
-        with generated_output_plan.producer(vault_root, preview=validate_only) as producer:
-            log_plan = plan_log_writes(
-                vault_root,
-                date_iso=stamp_iso,
-                op=op_word,
-                rel_path_no_ext=rel_no_ext,
-                body=" ".join(log_body_parts),
-                operation_token=creation_token,
-                generated_producer=producer,
-            )
+        log_plan = plan_log_writes(
+            vault_root,
+            date_iso=stamp_iso,
+            op=op_word,
+            rel_path_no_ext=rel_no_ext,
+            body=" ".join(log_body_parts),
+            operation_token=creation_token,
+        )
     except (OSError, UnicodeError, ValueError) as error:
         raise CreateFileError(
             "LOG_PLAN_CONFLICT", "file log update could not be planned safely"
@@ -377,22 +373,24 @@ def create_file(
             and preflight.applicability in {"full", "structural"}
             and connector_boundary.effect_admission(vault_root)(top_index)
         ):
-            with generated_output_plan.producer(vault_root) as producer:
-                top_write, _trims = indexes.plan_recent_activity(vault_root, ((date_iso, f"`{rel_no_ext}` (Tier 2 create)"),),
-                                                                 generated_producer=producer)
-                sub_writes, counted_top = indexes.compute_subindex_writes(
-                    vault_root,
-                    top_index_write=top_write,
-                    pending_paths=[rel_no_ext],
-                    include_unchanged=True,
-                    generated_producer=producer,
-                )
-                index_writes = [
-                    counted_top or top_write,
-                    *sub_writes,
-                ]
-                auxiliary.extend(index_writes)
-                derived_auxiliaries.extend(("index", write) for write in index_writes)
+            top_text, top_guard = read_guarded_text(vault_root, top_index)
+            new_top, _ = indexes._prepend_recent_activity(
+                top_text,
+                date_iso=date_iso,
+                summary=f"`{rel_no_ext}` (Tier 2 create)",
+            )
+            sub_writes, counted_top = indexes.compute_subindex_writes(
+                vault_root,
+                top_index_text=new_top,
+                pending_paths=[rel_no_ext],
+                include_unchanged=True,
+            )
+            index_writes = [
+                PlannedWrite(top_index, counted_top or new_top, guard=top_guard),
+                *sub_writes,
+            ]
+            auxiliary.extend(index_writes)
+            derived_auxiliaries.extend(("index", write) for write in index_writes)
         auxiliary.extend(log_plan.writes)
         derived_auxiliaries.extend(("operation-log", write) for write in log_plan.writes)
         try:

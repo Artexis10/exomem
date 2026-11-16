@@ -53,6 +53,7 @@ from .vault import (
     normalize_body_wikilinks,
     normalize_wikilink,
     plan_log_writes,
+    read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
     split_wikilink_target,
@@ -1023,63 +1024,61 @@ def link(
     )
     auxiliary: list[PlannedWrite] = list(key_plan.writes)
     derived_auxiliaries: list[tuple[str, PlannedWrite]] = []
-    from . import generated_output_plan
-
-    with generated_output_plan.producer(vault_root, preview=validate_only) as producer:
-        kb = kb_root(vault_root)
-        activity = _activity_summary(
-            rel_entity_no_ext=rel_entity_no_ext,
-            name=display_name,
-            entity_type=entity_type,
-            domain=domain,
-            project=project,
+    kb = kb_root(vault_root)
+    activity = _activity_summary(
+        rel_entity_no_ext=rel_entity_no_ext,
+        name=display_name,
+        entity_type=entity_type,
+        domain=domain,
+        project=project,
+    )
+    top_index = kb / "index.md"
+    if not top_index.is_file():
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
+    elif connector_boundary.effect_admission(vault_root)(top_index):
+        top_text, top_guard = read_guarded_text(vault_root, top_index)
+        new_top, _ = indexes._prepend_recent_activity(
+            top_text, date_iso=date_iso, summary=activity
         )
-        top_index = kb / "index.md"
-        if not top_index.is_file():
-            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
-        elif connector_boundary.effect_admission(vault_root)(top_index):
-            top_write, _trims = indexes.plan_recent_activity(vault_root, ((date_iso, activity),), generated_producer=producer)
-            sub_writes, counted_top = indexes.compute_subindex_writes(
-                vault_root,
-                top_index_write=top_write,
-                pending_paths=[rel_entity_no_ext],
-                include_unchanged=True,
-                generated_producer=producer,
-            )
-            index_writes = [counted_top or top_write, *sub_writes]
-            auxiliary.extend(index_writes)
-            derived_auxiliaries.extend(("index", write) for write in index_writes)
-        try:
-            from .relation_census import operation_provenance
+        sub_writes, counted_top = indexes.compute_subindex_writes(
+            vault_root,
+            top_index_text=new_top,
+            pending_paths=[rel_entity_no_ext],
+            include_unchanged=True,
+        )
+        index_writes = [PlannedWrite(top_index, counted_top or new_top, guard=top_guard), *sub_writes]
+        auxiliary.extend(index_writes)
+        derived_auxiliaries.extend(("index", write) for write in index_writes)
+    try:
+        from .relation_census import operation_provenance
 
-            log_plan = plan_log_writes(
-                vault_root,
-                date_iso=stamp_iso,
-                op="link",
-                rel_path_no_ext=rel_entity_no_ext,
-                body=_log_entry_body(
-                    entity_type=entity_type,
-                    name=display_name,
-                    domain=domain,
-                    project=project,
-                    decision_status=decision_status,
-                    tags=_clean_tags(tags),
-                    origin=origin,
-                ),
-                operation_token=token,
-                provenance=operation_provenance(preflight),
-                generated_producer=producer,
-            )
-        except (OSError, UnicodeError, ValueError) as error:
-            raise LinkError(
-                "LOG_PLAN_CONFLICT", [], "entity log update could not be planned safely"
-            ) from error
-        auxiliary.extend(log_plan.writes)
-        derived_auxiliaries.extend(("operation-log", write) for write in log_plan.writes)
-        if log_plan.warning is not None:
-            warnings.append(log_plan.warning)
-        if log_plan.rotation_note is not None:
-            warnings.append(log_plan.rotation_note)
+        log_plan = plan_log_writes(
+            vault_root,
+            date_iso=stamp_iso,
+            op="link",
+            rel_path_no_ext=rel_entity_no_ext,
+            body=_log_entry_body(
+                entity_type=entity_type,
+                name=display_name,
+                domain=domain,
+                project=project,
+                decision_status=decision_status,
+                tags=_clean_tags(tags),
+                origin=origin,
+            ),
+            operation_token=token,
+            provenance=operation_provenance(preflight),
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise LinkError(
+            "LOG_PLAN_CONFLICT", [], "entity log update could not be planned safely"
+        ) from error
+    auxiliary.extend(log_plan.writes)
+    derived_auxiliaries.extend(("operation-log", write) for write in log_plan.writes)
+    if log_plan.warning is not None:
+        warnings.append(log_plan.warning)
+    if log_plan.rotation_note is not None:
+        warnings.append(log_plan.rotation_note)
     if validate_only:
         return LinkResult(
             rel_entity,

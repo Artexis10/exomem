@@ -955,25 +955,16 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
 
     # ---- 1. Index counts (recompute from disk; preserve curated text) ----
     maintenance_jobs.checkpoint("indexes")
-    from . import generated_output_plan
-
-    with _phase_hold(vault_root, "reconcile_indexes", dry_run=dry_run), generated_output_plan.producer(vault_root, preview=dry_run) as producer:
+    with _phase_hold(vault_root, "reconcile_indexes", dry_run=dry_run):
         # Counted inside the hold, so the counts it writes are the vault's as it writes them.
         top_index_path = kb / "index.md"
-        from .vault_store import read as store_read
-
-        top_text, top_write = None, None
-        if store_read.page_exists(vault_root, top_index_path.relative_to(vault_root).as_posix()):
-            top_text, guard = read_guarded_text(vault_root, top_index_path)
-            top_write = PlannedWrite(top_index_path, top_text, guard=guard)
-            if producer is not None:
-                producer.attach(top_write, producer.before(top_index_path).mapping)
+        top_text = _current_text(vault_root, top_index_path)
         sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root, top_index_write=top_write, generated_producer=producer,
+            vault_root, top_index_text=top_text
         )
         writes: list[PlannedWrite] = _changed_writes(vault_root, list(sub_writes))
-        if new_top is not None and top_text is not None and new_top.content != top_text:
-            writes.append(new_top)
+        if new_top is not None and top_text is not None and new_top != top_text:
+            writes.append(PlannedWrite(path=top_index_path, content=new_top))
         report.indexes_updated = [_rel(w.path, vault_root) for w in writes]
         if writes and not dry_run:
             batch_atomic_write(writes, vault_root=vault_root)
