@@ -1970,6 +1970,26 @@ Three kinds of copy exist:
   export carries the canonical copies as they are. A compatibility export
   carries an ordinary file at each filing's path instead.
 
+### Uploads and what they reveal
+
+Shared storage does not change what an upload costs or what its answer says:
+
+- Exomem charges every upload in full. It stages and verifies all the bytes
+  of a new filing before it looks for a shared copy, so the allowance and the
+  upload session's limit count the whole file, also when an identical
+  original is already stored.
+- An upload tells a caller nothing about filings that the caller cannot see.
+  The answer names no other filing and reports no saved bytes. It also does
+  not say that a shared copy already existed. An upload of bytes that the
+  caller can already see gets the same "already stored" answer as before.
+
+This is not a promise that storage use reveals nothing. Shared storage saves
+real space, so free space that you check later can be larger than the sum of
+your filings. Cloud offload, which runs in the background, can also show
+allowance results after it reuses a stored copy that another filing owns.
+Both limits existed before shared storage, and this release does not change
+them.
+
 ### New archives
 
 A new archive starts in shared storage. `exomem init`, the setup wizard, the
