@@ -1,13 +1,14 @@
 ## ADDED Requirements
 
 ### Requirement: A vault has a single managed root
-A vault SHALL have a single managed root: the folder that holds `_Schema/`. In `root` layout the managed root SHALL be the vault root. In `nested` layout it SHALL be a folder inside the vault. A record at `_Schema/vault-layout.yaml` in the managed root of a `root` vault SHALL state the layout, `nested` or `root`, and the top-level entries that Exomem does not manage. `exomem init` and the relayout SHALL write the record, and in store mode it SHALL be a stored page. Exomem SHALL resolve the layout once per vault, and SHALL NOT infer `root` from where a folder sits. Resolution has four cases:
+A vault SHALL have a single managed root: the folder that holds `_Schema/`. In `root` layout the managed root SHALL be the vault root. In `nested` layout it SHALL be a folder inside the vault. A record at `_Schema/vault-layout.yaml` in the managed root SHALL state the layout, `nested` or `root`, and in `root` the top-level entries that Exomem does not manage. `exomem init` and the relayout SHALL write the record, and in store mode it SHALL be a stored page. Exomem SHALL resolve the layout once per vault, and SHALL NOT infer `root` from where a folder sits. Resolution SHALL read the record in the vault root's `_Schema/` first and then the record in the wrapper's `_Schema/`, and in store mode it SHALL read the stored page when the file is absent. The first record found decides. Resolution has five cases:
 - A record that says `root` SHALL give `root`.
-- No record and only the wrapper `_Schema/` SHALL give `nested`, which covers every existing vault.
+- A record that says `nested` SHALL give `nested`.
+- No record and `_Schema/` only in the wrapper folder, or nowhere, SHALL give `nested`, which covers every existing vault.
 - No record and `_Schema/` at the vault root only SHALL refuse with an error that names the missing record.
 - No record and `_Schema/` in both the vault root and a wrapper folder SHALL refuse with an error that names both folders.
 
-While a record exists, a leftover second `_Schema/` folder SHALL be reported by status and doctor and SHALL NOT be refused, because both folders exist during the relayout's projection window. A requirement that names `Knowledge Base/<rest>` SHALL mean `<managed root>/<rest>`, except that in `root` layout `Knowledge Base/Notes/<Area>/<rest>` SHALL mean `<Area>/<rest>` for a compiled area `<Area>`, because the `Notes/` level drops. An existing vault SHALL keep its layout until a relayout moves it, and an upgrade SHALL NOT move any file.
+Each refusal SHALL name the remedy: write a record that says `nested` or `root`. While a record exists, a leftover second `_Schema/` folder SHALL be reported by status and doctor and SHALL NOT be refused, because both folders exist during the relayout's projection window. A requirement that names `Knowledge Base/<rest>` SHALL mean `<managed root>/<rest>`, except that in `root` layout `Knowledge Base/Notes/<Area>/<rest>` SHALL mean `<Area>/<rest>` for a compiled area `<Area>`, because the `Notes/` level drops. An existing vault SHALL keep its layout until a relayout moves it, and an upgrade SHALL NOT move any file.
 
 #### Scenario: A governed write in a root vault has no wrapper segment
 - **WHEN** a governed write creates a compiled note in a vault whose layout is `root`
@@ -29,27 +30,47 @@ While a record exists, a leftover second `_Schema/` folder SHALL be reported by 
 - **THEN** it means `Insights/<Name>.md`
 
 #### Scenario: A record that says root decides
-- **WHEN** `_Schema/vault-layout.yaml` says `root`
+- **WHEN** `_Schema/vault-layout.yaml` at the vault root says `root`
 - **THEN** the vault root is the managed root
 - **AND** every path is read without a wrapper segment
+
+#### Scenario: A record that says nested decides
+- **WHEN** `_Schema/vault-layout.yaml` in the wrapper folder says `nested` and the vault root holds no record
+- **THEN** the wrapper folder is the managed root
+- **AND** every path keeps its wrapper segment
+
+#### Scenario: A stored record decides when its file is absent
+- **WHEN** a store-mode vault holds the layout record as a stored page and the projected file is absent
+- **THEN** resolution reads the stored page and gives its layout
 
 #### Scenario: A vault with only a wrapper folder is nested
 - **WHEN** no layout record exists and only the wrapper folder holds `_Schema/`
 - **THEN** the vault's layout is `nested`
 
+#### Scenario: A folder with no schema folder is nested
+- **WHEN** no layout record exists and no `_Schema/` folder exists in the vault root or in a wrapper folder
+- **THEN** the vault's layout is `nested`
+
 #### Scenario: A root-shaped vault without a record is refused
 - **WHEN** no layout record exists and `_Schema/` sits at the vault root with no wrapper folder
 - **THEN** resolution refuses and the error names the missing record
+- **AND** the error names the remedy: write a record that says `nested` or `root`
 - **AND** no file changes
 
 #### Scenario: A recorded layout decides between two roots
-- **WHEN** the layout record says `root` and both the vault root and a wrapper folder hold `_Schema/`, as during the relayout's projection window
+- **WHEN** a layout record says `root` and both the vault root and a wrapper folder hold `_Schema/`, as during the relayout's projection window
 - **THEN** the vault root is the managed root
+- **AND** status and doctor report the leftover `_Schema/` folder, and nothing refuses
+
+#### Scenario: A nested record decides while a root-level schema folder is left over
+- **WHEN** the wrapper folder's layout record says `nested` and the vault root also holds `_Schema/` without a record
+- **THEN** the wrapper folder is the managed root
 - **AND** status and doctor report the leftover `_Schema/` folder, and nothing refuses
 
 #### Scenario: Two roots with no record are refused
 - **WHEN** no layout record exists and both the vault root and a wrapper folder hold `_Schema/`
 - **THEN** resolution refuses and the error names both folders
+- **AND** the error names the remedy: write a record that says `nested` or `root`
 - **AND** no file changes
 
 ### Requirement: Areas come from registries
@@ -175,21 +196,26 @@ In a `root` vault, a write that chooses a name another page holds SHALL be refus
 - **THEN** the writer disambiguates it as `add-readable-note-filenames` defines
 
 ### Requirement: Links use the shortest trailing path that resolves to a single file
-A writer SHALL emit the shortest trailing path of the target page, cut at a folder boundary, that resolves to exactly a single file for both Exomem and Obsidian. That path SHALL be `[[Name]]` when no other file that Obsidian sees has that name. Graph rows SHALL keep the resolved vault path of the target. A link repoint SHALL change only the link's target text, and the repointed link SHALL resolve to the page it resolved to before.
+In a `root` vault, a writer SHALL emit the shortest trailing path of the target page, cut at a folder boundary, that resolves to exactly a single file for both Exomem and Obsidian. That path SHALL be `[[Name]]` when no other file that Obsidian sees has that name. Graph rows SHALL keep the resolved vault path of the target. A link repoint SHALL change only the link's target text, and the repointed link SHALL resolve to the page it resolved to before. A writer in a `nested` vault SHALL keep today's link form.
 
 #### Scenario: A unique name gives a bare link
-- **WHEN** a governed write links to a page whose name no other file holds
+- **WHEN** a governed write in a `root` vault links to a page whose name no other file holds
 - **THEN** the body carries `[[Name]]`
 - **AND** the graph edge ends at the target's vault path
 
 #### Scenario: A homonym outside the owned pages forces a longer path
-- **WHEN** a governed write links to `Insights/<Name>.md` and a file in `_trash` has the same name
+- **WHEN** a governed write in a `root` vault links to `Insights/<Name>.md` and a file in `_trash` has the same name
 - **THEN** the body carries `[[Insights/<Name>]]`
 
 #### Scenario: A grouped page keeps a real path suffix
-- **WHEN** a governed write links to `Evidence/alpha/receipts/Scan.md` and `Evidence/beta/receipts/Scan.md` also exists
+- **WHEN** a governed write in a `root` vault links to `Evidence/alpha/receipts/Scan.md` and `Evidence/beta/receipts/Scan.md` also exists
 - **THEN** the body carries `[[alpha/receipts/Scan]]`
 - **AND** the body does not carry `[[Evidence/Scan]]`, which is not a path suffix of either page
+
+#### Scenario: A nested vault keeps today's link form
+- **WHEN** a governed write links to a page in a `nested` vault
+- **THEN** the body carries the link form that the writer emits today
+- **AND** no link takes the trailing-path form
 
 ### Requirement: A governed write in a root vault renames a derived name to match the title
 In a `root` vault in store mode whose filename style is `title`, a governed write to a page SHALL rename the page when its name is derived and does not match the page's frontmatter title after the write. A name matches when it equals the name that the naming rule gives that title under the `title` style or the `slug` style, so a name derived under another style counts as matching and two writers with different settings never flip a name. The date prefix of a `dated` or `started` stem SHALL come from the page's recorded date, which is its `started` value for a `started` stem and, for a `dated` stem, its frontmatter `created` value, falling back to the page's first store audit row. It SHALL never come from the date of the write. The rename SHALL happen in the same transaction as the page's own change, and in the collision check the page's own current name SHALL count as free. A single transaction SHALL move the page's rows, repoint every inbound link that uses the old name, re-derive the pages it repoints and record the old path as an alias. A pinned name and a fixed name SHALL NOT change. An outside-edit import SHALL NOT rename a file, even when it changes the title, and the next governed write to that page SHALL rename a derived name to match the page's current title. In a `nested` vault, in either mode, a governed write SHALL NOT rename an existing file. A change of filename style SHALL rename nothing in either layout. Only the relayout gives an existing derived name the form of the vault's resolved filename style.
@@ -274,7 +300,7 @@ In store mode, a path alias table SHALL map each old path of a page to its curre
 
 `--verify` SHALL prove that every owned page maps to a single new path with its `exomem_id` unchanged, that every member set is equal by identity, that every link occurrence resolves to the same page as before, that page bytes equal the old bytes apart from the planned link and pointer-field edits, that binary files keep their content hashes, and that a fresh derivation equals the stored rows.
 
-`--revert` SHALL plan back to `nested` with the same planner. The relayout SHALL record each page's old path as an alias row and each link span's old text in its audit. The revert SHALL return every page that existed at the relayout to its recorded path, SHALL restore the old text of every recorded link span that is still byte-identical, and SHALL give a page created after the relayout nested placement by rule and today's link form. The managed upgrade migrator SHALL NOT run a relayout.
+`--revert` SHALL plan back to `nested` with the same planner. The relayout SHALL record each page's old path as an alias row and each link span's old text in its audit. The revert SHALL return every page that existed at the relayout to its recorded path, SHALL restore the old text of every recorded link span that is still byte-identical, and SHALL give a page created after the relayout nested placement by rule and today's link form. In the same store change it SHALL write a `nested` layout record in the wrapper's `_Schema/` and remove the record in the vault root. The managed upgrade migrator SHALL NOT run a relayout.
 
 #### Scenario: The plan writes nothing
 - **WHEN** `--plan` runs on a store-mode vault
@@ -330,6 +356,11 @@ In store mode, a path alias table SHALL map each old path of a page to its curre
 - **WHEN** `--revert` runs after a relayout
 - **THEN** every page that existed at the relayout returns to its recorded path
 - **AND** every recorded link span that is still byte-identical has its old text again
+
+#### Scenario: A revert records the nested layout
+- **WHEN** `--revert` runs after a relayout
+- **THEN** the wrapper's `_Schema/vault-layout.yaml` says `nested` and the vault root's record is removed in the same store change
+- **AND** resolution gives `nested`
 
 #### Scenario: A revert keeps a link that a person edited
 - **WHEN** a person edited a recorded link span after the relayout and `--revert` runs

@@ -14,9 +14,9 @@ Two partial fixes exist and do not reach Obsidian. `render_title_links` shows li
 
 - **Two layouts and an explicit record.** A vault is `nested` (the managed root is a folder inside the vault, today's layout) or `root` (the managed root is the vault root). A layout record at `_Schema/vault-layout.yaml` states the layout. Resolution never infers `root` from where a folder sits.
 - **Areas from registries.** Each area folder name comes from the note-type registry or a collection profile. `Notes/` exists only in `nested`. No area name enters code.
-- **Readable names.** In `root`, the default filename style is `title`. Three naming corrections (wikilink characters, leading dots, a 200-byte cap) apply in both layouts.
+- **Readable names.** In `root`, the default filename style is `title`. Three naming corrections (wikilink characters, leading dots, a 200-byte cap) apply in `root`, and in `nested` only if owner choice O7 accepts.
 - **Append-only repoint.** In store mode, a move repoints links in append-only `Sources/` and `Evidence/` pages and changes no other byte. File mode keeps its refusal.
-- **Short links.** Writers emit the shortest trailing path that resolves to a single file for both Exomem and Obsidian. The resolver gains a trailing-path step.
+- **Short links.** In `root`, writers emit the shortest trailing path that resolves to a single file for both Exomem and Obsidian. `nested` vaults keep today's link form. The resolver gains a trailing-path step.
 - **Path aliases.** In store mode, a path alias table keeps old paths resolving, inside the same managed-relative form that the hosted protected-tree guard uses.
 - **Verified relayout.** `exomem store-mode relayout` plans, applies, verifies and reverts the move of a store-mode vault from `nested` to `root`. The plan proves that no governance scope, access tier or binding changes its members. A crash marker makes an interrupted apply resumable.
 - **Owner choices.** Seven choices (O1 to O7) decide what the vault looks like. The read-only plan supplies the counts before anything is built for good. Requirements that depend on a choice are rewritten from the answer.

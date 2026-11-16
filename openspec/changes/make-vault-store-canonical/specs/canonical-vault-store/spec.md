@@ -213,7 +213,7 @@ In store mode, once stage 2 ships, every stored file SHALL carry a canonicity re
 - **THEN** it sees the file's origin, hash, size, format and derivation
 
 ### Requirement: Migration into the store is verified and reversible
-Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and, when the store has a path alias table, that table, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
+Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail and the canonicity records, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
@@ -221,7 +221,7 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 
 #### Scenario: Reverting rebuilds file mode from the projection
 - **WHEN** an operator reverts a store-mode vault with no queued intents and no held items to file mode
-- **THEN** the audit trail and the canonicity records are exported as files, and, when the store has a path alias table, that table too
+- **THEN** the audit trail and the canonicity records are exported as files
 - **AND** file mode rebuilds its lexical catalogue and graph from the projected Markdown
 - **AND** search and graph answers match the store's answers for the same pages
 
