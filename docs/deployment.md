@@ -2005,7 +2005,8 @@ and the `original_storage` block of `/health/ready` name the fix: update the
 launcher, as
 [A supervisor older than the vault's state](managed-service-upgrades.md#a-supervisor-older-than-the-vaults-state)
 describes, then restart the service. `exomem init` and the setup wizard print
-when shared storage starts.
+when shared storage starts. Once shared storage is on, `/health/ready` has no
+`original_storage` block, and the file `_Originals/format.json` exists.
 
 Originals filed before shared storage turns on keep their ordinary files, and
 the archive holds both kinds. An existing archive never changes its storage
@@ -2025,9 +2026,9 @@ It runs as a maintenance job on the running service.
 
 Before you convert:
 
-- The service needs launcher support. A managed service whose launcher
-  predates shared storage refuses with `ORIGINAL_POOL_LIFECYCLE_REQUIRED`.
-  Update the launcher first, as
+- The service needs launcher support. On a managed service whose launcher
+  predates shared storage, the preview's job ends `failed` with the error
+  code `ORIGINAL_POOL_LIFECYCLE_REQUIRED`. Update the launcher first, as
   [A supervisor older than the vault's state](managed-service-upgrades.md#a-supervisor-older-than-the-vaults-state)
   describes.
 - Keep a backup from before the conversion if you may need an older release.
@@ -2038,14 +2039,24 @@ Before you convert:
   four filings per batch, and it copies their bytes into shared storage before
   it removes their ordinary files.
 
+Make these calls from an MCP client that the service signs in as the vault
+owner. A local service without OAuth refuses an MCP request over HTTP that
+carries no sign-in. On such a service, use a local stdio MCP client, or call
+`POST /api/maintain_memory` with the REST key as the bearer token: `mode`
+`convert-originals` previews and starts, and `mode` `maintenance-job` reads
+the job.
+
 To convert:
 
 1. As the owner, call `inspect_memory` with `operation="maintenance.convert_originals"`.
 2. Read the job with `inspect_memory(operation="maintenance.job")` and its `run_id` until the state is `completed`.
 3. Check the receipt's `result`: `would_convert`, `already_shared`, `store_bound` and the `unreadable` list.
-4. Call `manage_memory` with `operation="maintenance.convert_originals"`, `dry_run=false`, the preview's `plan_id` and a `why`.
+4. Call `manage_memory` with `operation="maintenance.convert_originals"`, `dry_run=false`, the `plan_id` from the receipt's `result` and a `why`.
 5. Read the job until the state is `completed`, `failed`, `cancelled` or `interrupted`.
-6. Check `converted`, `skipped_changed` and `kept_pinned` in the receipt. Expect each original to read the same bytes.
+6. Check `converted`, `skipped_changed` and `kept_pinned` in the receipt's `result`. Expect each original to read the same bytes.
+
+A preview while another maintenance job runs answers `MAINTENANCE_JOB_ACTIVE`.
+Read that job until it ends, then preview again.
 
 The job keeps each page byte for byte and keeps current Cloud references. It
 starts no offload. An original whose only copy is a stored Cloud version counts
@@ -2061,8 +2072,9 @@ what remains and continues from there.
 `skipped_changed` lists originals whose bytes or page changed during the run.
 `kept_pinned` lists originals that a reader or a media job held. Such an
 original keeps both copies until a later run converts it. To finish them,
-preview and start the conversion again. A start with an old `plan_id` returns
-`STALE_MAINTENANCE_PLAN`, and you must preview again.
+preview and start the conversion again. A start with an old `plan_id` starts a
+job that ends `failed` with the error code `STALE_MAINTENANCE_PLAN` and moves
+nothing. Read that job until it ends, then preview again.
 
 ### Export for a release without shared storage
 
@@ -2118,7 +2130,10 @@ restore must give the same value.
 A failed export publishes no archive and leaves the source archive unchanged.
 It names one of these codes:
 
-- `DIGEST_MISMATCH`: an original differs from its page's digest or size.
+- `DIGEST_MISMATCH`: an original differs from its page's digest or size. Do
+  not edit a damaged shared copy. Exomem's background check of stored
+  originals restores it from a verified Cloud copy when the store holds one.
+  Otherwise, restore `_Originals/` from a backup of the archive.
 - `ORIGINAL_UNAVAILABLE`: Exomem could not read or fetch an original.
 - `ORIGINAL_RETIREMENT_UNCONFIRMED`: Exomem cannot confirm a Trash entry's
   retirement. Empty or restore that Trash entry first.
@@ -2144,6 +2159,7 @@ To restore an export:
 2. Choose a new restore folder whose path does not exist yet.
 3. In the service's environment, run the script below with the Python interpreter of the Exomem installation.
 4. If the script prints `published`, point the service at the restore folder, then start it.
+5. If the script prints a code, run step 3 again with a new staging folder and a new restore folder.
 
 ```python
 from datetime import datetime, timezone
@@ -2155,18 +2171,21 @@ context = vault_portability.PortabilityContext(
     created_at=datetime.now(timezone.utc).isoformat(), operator_authorized=True,
     lifecycle_state="restore-staging", routing_stopped=True, active_mutations=0,
     background_writers_stopped=True, reads_allowed=True)
-prepared = vault_portability.prepare_restore(
-    "/path/to/export.zip", "/path/to/staging-folder", context=context)
-print(vault_portability.publish_prepared_restore(prepared, "/path/to/restore-folder").state)
+try:
+    prepared = vault_portability.prepare_restore(
+        "/path/to/export.zip", "/path/to/staging-folder", context=context)
+    print(vault_portability.publish_prepared_restore(prepared, "/path/to/restore-folder").state)
+except vault_portability.PortabilityError as error:
+    raise SystemExit(f"{error.code} at {error.member or 'the archive'}: {error.reason}")
 ```
 
 Replace the three paths, and give the `vault_id` that the export used. The
 staging folder must not exist yet either. The restore never writes over an
 existing folder.
 
-If the script stops with `PUBLICATION_FAILED`, run it again with a new staging
-folder and a new restore folder. A failed attempt can leave state for its
-restore folder, so a rerun into that folder refuses.
+A refused or failed attempt, such as one that stops with `PUBLICATION_FAILED`,
+can leave files in its staging folder and state for its restore folder. A
+rerun into either folder refuses, so each rerun needs two new folders.
 
 A copy of the folder made in another way, such as a plain folder copy or a
 Cloud import, does not record the requirement. This release records it at the
@@ -2185,6 +2204,11 @@ release or a later one records shared storage at its first service start with
 launcher support, as "New archives" describes. This floor then applies to it
 without a conversion. An archive or cell created earlier keeps ordinary
 storage through every upgrade until its owner converts it.
+
+The refusal of Exomem 0.182.0 does not name shared storage. It prints
+`the state migration manifest is unreadable or invalid; startup refuses to
+guess`, and its `exomem doctor` advises a repair of the state authority. Do
+not follow that advice for an archive that records shared storage.
 
 To recover from that refusal, roll forward to this release or a later one.
 To move an archive to an earlier release instead:
