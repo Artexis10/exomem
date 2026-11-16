@@ -9588,6 +9588,9 @@ def normalize_body_wikilinks(
 #: `#` as an anchor, `|` as an alias, the brackets as the link's own edge, and a line break ends it.
 #: A backtick opens a code span, which blanks the link, or the links up to the next backtick, for a writer.
 _LINK_TITLE_REFUSED = frozenset("/#|[]`\r\n")
+#: A filename that holds any of these cannot be linked as `[[Name]]`: the title characters above, plus `^`,
+#: which opens a block reference. A single set, derived from the title set, so the parser's grammar is read once.
+LINK_FILENAME_REFUSED = _LINK_TITLE_REFUSED | frozenset("^")
 
 
 @dataclass(frozen=True, slots=True)
