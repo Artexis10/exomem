@@ -52,3 +52,26 @@ A profile edit SHALL commit only with the owner's confirmation of those exact li
 
 - **WHEN** the agent proposes adding a line to the games profile
 - **THEN** the page is unchanged until the owner confirms that line
+
+### Requirement: Profile writes need a reviewed preview
+
+A governed write that creates a profile page, or changes the content of one, SHALL commit only with the review hash returned by a preview of the same resulting content.
+A preview SHALL return that hash beside the resulting lines.
+A commit with no hash, or with a hash that does not match the content it would write, SHALL be refused and change nothing. The refusal SHALL name the preview as the remedy.
+Writes to other page types SHALL be unaffected.
+Editing a profile file directly in the vault SHALL need no preview. The next activation serves the edited lines.
+
+#### Scenario: An unreviewed profile edit is refused
+
+- **WHEN** an agent commits a change to the games profile without first previewing it
+- **THEN** the write is refused, the page is unchanged, and the refusal tells the agent to preview the change first
+
+#### Scenario: A reviewed profile edit commits
+
+- **WHEN** an agent previews a change to the games profile, shows the resulting lines, and commits with the returned review hash after the owner confirms
+- **THEN** the page holds exactly the previewed lines
+
+#### Scenario: A stale review is refused
+
+- **WHEN** an agent previews one change to the games profile and commits different content with that preview's hash
+- **THEN** the write is refused and the page is unchanged
