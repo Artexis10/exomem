@@ -32,11 +32,12 @@ rules:
       constant_propagation: false
     patterns:
       - pattern: '"$STR"'
-      # Matches the folder as a path component, so prose that says "the Knowledge Base" stays clear. The
+      # Matches the folder as a path component anywhere in the string, so prose that says "the Knowledge
+      # Base" stays clear. The regex is anchored at the start of the string, hence the leading `.*/`. The
       # name is kbdir._DEFAULT: change both together.
       - metavariable-regex:
           metavariable: $STR
-          regex: '(^|/)Knowledge Base(/|$)'
+          regex: '^(.*/)?Knowledge Base(/|$)'
     paths:
       include:
         - src/exomem
