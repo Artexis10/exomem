@@ -314,7 +314,7 @@ def _manifest_admits(root: Path, rel: str, data: bytes) -> bool:
 
     try:
         manifest = structured_collections.parse_manifest_bytes(root, rel, data)
-        admitted = manifest.semantic_profile in {"records", "planning"}
+        admitted = manifest.semantic_profile in PROFILES
     except (UnicodeError, ValueError):
         admitted = False
     with _MANIFEST_ADMISSION_LOCK:
@@ -486,6 +486,7 @@ def _is_structured_alias(parts: list[str]) -> bool:
     return (
         below is not None
         and len(below) >= 2
+        # nosemgrep: ep-word-membership -- layer names come from the collection profiles, a closed product registry
         and below[0].casefold() in _STRUCTURED_LAYERS_CASEFOLDED
     )
 
