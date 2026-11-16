@@ -462,6 +462,50 @@ def test_an_interrupted_compatibility_export_leaves_the_source_unchanged_and_pub
         assert {path: archive.read(path) for path in originals_bytes} == originals_bytes
 
 
+def test_a_compatibility_export_refuses_a_damaged_shared_object_and_publishes_nothing(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches a compatibility export that ships damaged shared bytes as a filing's original, so the only route back to
+    an older release hands over an archive whose original no longer matches its page."""
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "side-a.txt", TRANSCRIPT)
+    _damage(vault, hashlib.sha256(TRANSCRIPT).hexdigest())
+    damaged = _tree(vault)
+    exports = tmp_path / "exports"
+
+    with pytest.raises(vault_portability.PortabilityError) as refused:
+        vault_portability.export_compatible_vault(vault, exports, context=_context())
+
+    assert refused.value.code == "DIGEST_MISMATCH"
+    assert refused.value.member == added.artifact_path
+    assert not exports.exists() or list(exports.iterdir()) == []
+    assert _tree(vault) == damaged
+
+
+def test_a_compatibility_export_refuses_a_shared_object_that_vanishes_and_publishes_nothing(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches a compatibility export that skips an original it can no longer read and still publishes, so an archive
+    that lost bytes after the export began is delivered as complete."""
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "side-a.txt", TRANSCRIPT)
+    source = _tree(vault)
+    exports = tmp_path / "exports"
+    real_open = original_pool.open_object
+
+    @contextlib.contextmanager
+    def vanishing_open(*args, **kwargs):
+        if list(exports.glob("*.zip.partial")):  # The archive is being written: the object is gone.
+            raise held_fs.HeldFsError("MISSING", "the shared object vanished")
+        with real_open(*args, **kwargs) as opened:
+            yield opened
+
+    monkeypatch.setattr(original_pool, "open_object", vanishing_open)
+    with pytest.raises(vault_portability.PortabilityError) as refused:
+        vault_portability.export_compatible_vault(vault, exports, context=_context())
+
+    assert refused.value.code == "ORIGINAL_UNAVAILABLE"
+    assert refused.value.member == added.artifact_path
+    assert list(exports.iterdir()) == []
+    assert _tree(vault) == source
+
+
 def test_a_whole_vault_export_carries_a_page_that_a_trash_retirement_left_without_bytes(
         vault: Path, selected_store, tmp_path: Path) -> None:  # noqa: F811
     """Catches an export that opens the original of a page that a Trash retirement left at its path, and so fails
