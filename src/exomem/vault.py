@@ -662,17 +662,15 @@ def slugify_with_truncation_check(
 ) -> tuple[str, str | None]:
     """Return (slug, warning). `warning` is non-None if the slug was truncated.
 
-    The warning names both the truncated and full slug so the caller can
-    decide whether to abort, shorten the title, or accept.
+    The warning quotes the truncated slug once, so it stays short whatever the title's
+    length and the caller can decide whether to shorten the title or accept.
     """
     slug = slugify_title(title, max_length=max_length)
     full = _slugify(title, max_length=0, word_boundary=True, lowercase=True) or "untitled"
     if slug != full:
         return slug, (
-            f"SLUG_TRUNCATED: slug truncated to {slug!r} (full would have been "
-            f"{full!r}); link to this note using {slug!r} — re-deriving a slug "
-            f"from the title will not resolve. Shorten the title if the "
-            f"truncation drops meaning."
+            f"SLUG_TRUNCATED: slug truncated to {slug!r}; link to this note by that slug, "
+            "not one re-derived from the title. Shorten the title if the truncation drops meaning."
         )
     return slug, None
 

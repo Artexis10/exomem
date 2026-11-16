@@ -640,7 +640,7 @@ def test_compact_row_of_a_page_in_many_families_keeps_the_first_ones_and_the_tot
     assert compact["fields_not_applied"] == [{"field": "filename", "provided": "p" * 300, "kept": "one.bin"}]
 
 
-def test_compact_artifact_row_with_an_unknown_state_is_invalid() -> None:
+def test_compact_artifact_row_with_an_unknown_state_is_stored_with_the_state_unverified() -> None:
     mutation_terminal = _terminal_module()
     terminal = mutation_terminal.committed_terminal(
         {
@@ -667,12 +667,9 @@ def test_compact_artifact_row_with_an_unknown_state_is_invalid() -> None:
 
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
-    assert compact["files"][0] == {
-        "file_id": "f1",
-        "outcome": "failed",
-        "code": "INVALID_ARTIFACT_RECEIPT",
-        "reason": "artifact result was invalid",
-    }
+    row = compact["files"][0]
+    assert row["outcome"] == "stored" and "state" not in row
+    assert row["unverified_fields"] == ["state"]
 
 
 def test_full_terminal_retains_completed_graph_sync_fields() -> None:
