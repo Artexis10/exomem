@@ -1330,9 +1330,7 @@ def _activation_packet(
             try:
                 # The stance has its own bound, the vault's `stance_max_chars`, as the skills block has: it rides on
                 # every packet, so taking it from `max_chars` would cut the turn's leads on every call.
-                stance_block = stance.compile_block(
-                    root, caller, activation_conventions.BUDGET_BOUNDS["stance_max_chars"][1], catalogue=catalogue,
-                ) if stance.enabled() else None
+                stance_block = stance.compile_block(root, caller, catalogue=catalogue) if stance.enabled() else None
             except Exception:  # noqa: BLE001 - optional stance must leave the map available
                 stance_block = stance._empty("unavailable") if stance.enabled() else None  # noqa: SLF001
         available_chars = max_chars

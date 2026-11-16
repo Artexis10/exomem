@@ -52,8 +52,13 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
 
 
-def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None = None, catalogue: Any = None) -> dict[str, Any]:
-    """Compile only admitted inputs; a hidden line changes no generation, count or expiry."""
+def compile_block(
+    root: Path, caller: Any, max_chars: int | None = None, *, today: date | None = None, catalogue: Any = None,
+) -> dict[str, Any]:
+    """Compile only admitted inputs; a hidden line changes no generation, count or expiry.
+
+    The block's own bound is the vault's `budgets.stance_max_chars`; `max_chars` only tightens it.
+    """
     today = today or date.today()
     own_catalogue = catalogue is None
     catalogue = catalogue or context_catalogue.ContextCatalogue(root)
@@ -100,7 +105,9 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
     vault.recheck_path_guards(root, (guards[path] for path in {item.path for item in admitted}))
     admitted = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
     configured = activation_conventions.load_conventions(root).conventions.budget("stance_max_chars")
-    limit = max(0, max_chars if configured is None else min(configured, max_chars))
+    bounds = [value for value in (configured, max_chars) if value is not None]
+    # The shipped conventions file always sets the budget; the range's top only caps a broken install.
+    limit = max(0, min(bounds) if bounds else activation_conventions.BUDGET_BOUNDS["stance_max_chars"][1])
     # The source path and anchor join the key: terminal egress re-decides the page they name, so a
     # rename must not leave a cached entry pointing at whatever page now holds the old path.
     inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance), item.path, item.anchor) for item in admitted]

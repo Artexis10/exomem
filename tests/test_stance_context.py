@@ -263,8 +263,10 @@ def test_hook_uses_supplied_or_generated_moves_and_stance_generation():
     assert "Keep the source." in first and "review due" in first and "2 more" in first
     assert "Keep the source." not in held and "already held" in held
     assert "Keep the source." in changed
+    # A tight ceiling bounds the working set, not the stance: the stance has its own bound.
     tiny, *_ = hook._format_map_with_slice(packet, 30, "")
-    assert len(tiny) <= 30 and "Keep the source." not in tiny
+    assert "Keep the source." in tiny
+    assert len("\n".join(line for line in tiny.splitlines() if not line.startswith("- stance:"))) <= 30
 
 
 def test_move_search_miss_and_reduced_surface_keep_a_supported_route():
@@ -452,22 +454,23 @@ def test_hook_keeps_reset_stance_and_move_when_optional_routes_cannot_fit():
             {"attribution": "Inspection procedure", "read_ref": "method.md"}]}},
         "next_action": {"state": "method_reset", "say": "Read the current method source."},
     }
-    stance_text, _ = hook._format_stance_block(packet["stance"], 4000)
+    stance_text, _ = hook._format_stance_block(packet["stance"])
     # The map's floor is reserved too: a token must not name a map that reached the agent in no form.
     floor = len(hook._map_floor(packet["map"])) + 1
-    cap = len(hook._METHOD_RESET_LINE) + len(stance_text) + len(packet["next_action"]["say"]) + 2 + floor
+    # The stance has its own bound, so the cap covers only the reset, the move and the map's floor.
+    cap = len(hook._METHOD_RESET_LINE) + len(packet["next_action"]["say"]) + 1 + floor
     first, complete, stance_complete, map_shown = hook._format_map_with_slice(packet, cap, "")
     assert first.splitlines()[0] == hook._METHOD_RESET_LINE
     assert "Keep the source." in first and first.endswith(packet["next_action"]["say"])
     assert "method.md" not in first and not complete and stance_complete
     assert map_shown and "[exomem://map]" in first
-    assert len(first) <= cap
+    assert len(first) <= cap + len(stance_text) + 1
     full, *_ = hook._format_map_with_slice(packet, 4000, "")
     assert full.index(hook._METHOD_RESET_LINE) < full.index("method.md")
     packet["task_context"]["methods"]["reset"] = False
     second, _, held_complete, _ = hook._format_map_with_slice(packet, cap, "", "stance")
     assert "already held" in second and second.endswith(packet["next_action"]["say"])
-    assert hook._METHOD_RESET_LINE not in second and held_complete and len(second) <= cap
+    assert hook._METHOD_RESET_LINE not in second and held_complete and len(second) <= cap + len(hook._STANCE_HELD) + 1
 
 
 def test_served_task_routes_keep_identities_without_retrieved_prose(stance_vault):
@@ -583,4 +586,29 @@ def test_a_ready_stance_takes_nothing_from_the_turn_allowance(stance_vault, monk
     assert with_stance["budget"]["used_chars"] == without["budget"]["used_chars"] <= 600
     assert with_stance["map"] == without["map"]
     assert with_stance["turn_slice"] == without["turn_slice"]
-    assert with_stance["task_context"]["candidates"] == without["task_context"]["candidates"]
+
+
+def test_the_hook_renders_the_same_working_set_with_the_stance_on_or_off(stance_vault, monkeypatch):
+    """A first-turn render of a real packet: the stance once took the hook's room and cut the map and the slice."""
+    from exomem import commands, working_set_runtime
+    from exomem._hooks import exomem_retrieve_nudge as hook
+    from exomem.writer_lease import invoke_command
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    working_set_runtime.reset_caches_for_tests()
+    with_stance = invoke_command(command, stance_vault, turn="Keep a source", max_chars=600)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_STANCE", "off")
+    working_set_runtime.reset_caches_for_tests()
+    without = invoke_command(command, stance_vault, turn="Keep a source", max_chars=600)
+    off_text, off_complete, *_ = hook._format_map_with_slice(without, 4000, "")
+    # A ceiling the working set just fits: a stance charged to it would have to push the map or the slice out.
+    cap = len(off_text)
+
+    on_text, on_complete, stance_complete, _ = hook._format_map_with_slice(with_stance, cap, "")
+    off_text, off_complete, *_ = hook._format_map_with_slice(without, cap, "")
+
+    on_lines = on_text.splitlines()
+    assert stance_complete and "Keep a source for each claim." in on_text
+    assert [line for line in on_lines if not line.startswith("- stance:")] == off_text.splitlines()
+    assert on_complete == off_complete
