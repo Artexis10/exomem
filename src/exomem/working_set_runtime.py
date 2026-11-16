@@ -410,6 +410,16 @@ def identity_for(vault_root: Path) -> str:
         conn.close()
 
 
+def held_session_generation(block: Mapping[str, Any] | None) -> str | None:
+    """The generation a caller holds once it has been served a session block (stance or skills).
+
+    A `ready` or `unchanged` block names what the caller now holds; an empty or unavailable block is owed again.
+    """
+    if isinstance(block, Mapping) and block.get("state") in ("ready", "unchanged"):
+        return block.get("generation")
+    return None
+
+
 def encode_continuity(
     *,
     identity: str,

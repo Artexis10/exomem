@@ -173,23 +173,20 @@ def _as_held(
     return block, served
 
 
-def held_generation(block: dict[str, Any] | None) -> str | None:
-    """The generation a caller holds once it has been served `block`; an empty or unavailable block is owed again."""
-    if isinstance(block, dict) and block.get("state") in ("ready", "unchanged"):
-        return block.get("generation")
-    return None
-
-
 def _pin(root: Path, caller: Any, block: dict[str, Any], served: list[dict[str, Any]]) -> None:
     held = principal.invocation_served()
     if held is not None:
-        held[("stance", str(root), caller.binding, block["generation"])] = (copy.deepcopy(block), copy.deepcopy(served))
+        held[("stance", str(root), caller.binding, block["generation"], block["state"])] = (
+            copy.deepcopy(block), copy.deepcopy(served),
+        )
 
 
 def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any]:
     """Restore this invocation's block and decide its complete unit prose at terminal egress."""
     held = principal.invocation_served()
-    pinned = None if held is None else held.get(("stance", str(root), caller.binding, block.get("generation")))
+    pinned = None if held is None else held.get(
+        ("stance", str(root), caller.binding, block.get("generation"), block.get("state")),
+    )
     if pinned is None:
         return _empty("unavailable")
     block, served = pinned

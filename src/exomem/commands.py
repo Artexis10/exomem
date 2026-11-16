@@ -150,8 +150,6 @@ from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
-from . import skills_context as skills_context_module
-from . import stance as stance_module
 from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
@@ -8101,8 +8099,8 @@ def _op_activate_context_body(
                 identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
-                skills_generation=skills_context_module.held_generation(packet.get("skills")),
-                stance_generation=stance_module.held_generation(packet.get("stance")),
+                skills_generation=working_set_runtime_module.held_session_generation(packet.get("skills")),
+                stance_generation=working_set_runtime_module.held_session_generation(packet.get("stance")),
             )
             packet["task_context"] = context_task.pin(
                 vault_root, context_views_module.CallerView.current(vault_root, purpose=purpose),
