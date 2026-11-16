@@ -554,7 +554,9 @@ class Rig:
     def store_json(self, name: str, *arguments: str, **options: Any) -> dict[str, Any]:
         """A `store-mode` command and its JSON answer; a refusal is an answer, so it is returned.
 
-        The exit status is under ``_exit``; an answer that is not JSON is under ``unparsed``.
+        The exit status is under ``_exit``; an answer that is not JSON is under ``unparsed``, and
+        a refusal's code, which the command prints as ``CODE: message`` first on stderr, under
+        ``code``.
         """
         done = self.cli(
             "store-mode", name, *arguments, "--vault", str(self.layout.vault), **options
@@ -564,6 +566,9 @@ class Rig:
             data = json.loads(lines[-1])
         except (IndexError, ValueError):
             data = {"unparsed": (done.stdout[-300:] + done.stderr[-300:]).strip()}
+            head, colon, _ = done.stderr.strip().partition(":")
+            if colon and head and not any(c.isspace() for c in head):
+                data["code"] = head
         if not isinstance(data, dict):
             data = {"unparsed": str(data)[:300]}
         data["_exit"] = done.returncode
@@ -1630,21 +1635,25 @@ class Rehearsal:
                 with self.step("release the copy's standing store claim", fatal=True) as entry:
                     named = rig.store_json("release", "--dry-run", operator=True)
                     claim = named.get("diagnostics", {}).get("claim")
-                    if named["_exit"] != 0 or not claim:
-                        raise RuntimeError(f"the release dry run named no claim: {named}")
-                    released = rig.store_json(
-                        "release",
-                        "--apply",
-                        "--claim",
-                        claim,
-                        "--why",
-                        "release a vault copy's store claim for a rehearsal",
-                        operator=True,
-                        wait_for_lease=True,
-                    )
-                    if released["_exit"] != 0:
-                        raise RuntimeError(f"the release refused: {released}")
-                    entry["detail"] = {"claim": claim, "status": released.get("status")}
+                    if named.get("code") == "VAULT_STORE_RELEASE_NOTHING_HELD":
+                        # A copy of a file-mode vault, or of a released one, holds no claim.
+                        entry["detail"] = {"claim": None, "status": "nothing held"}
+                    else:
+                        if named["_exit"] != 0 or not claim:
+                            raise RuntimeError(f"the release dry run named no claim: {named}")
+                        released = rig.store_json(
+                            "release",
+                            "--apply",
+                            "--claim",
+                            claim,
+                            "--why",
+                            "release a vault copy's store claim for a rehearsal",
+                            operator=True,
+                            wait_for_lease=True,
+                        )
+                        if released["_exit"] != 0:
+                            raise RuntimeError(f"the release refused: {released}")
+                        entry["detail"] = {"claim": claim, "status": released.get("status")}
         elif not args.skip_enrol:
             with self.step("enrol the collection store", fatal=True) as entry:
                 manifest = layout.work / "store-enrolment.md"
