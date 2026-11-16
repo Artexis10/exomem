@@ -159,6 +159,8 @@ CI runs `oasdiff breaking` between the base branch's committed document and the 
 Every refusal carries one string code. Its HTTP status comes from `cli_ops.http_status_for`, the map that the REST facade, edge ingress and transfer routes already use.
 That map sends most codes to 400, including authority refusals such as `GOVERNANCE_AUTHORITY_REQUIRED`. The personal profile keeps the map unchanged.
 The service profile reads the same map through a service overlay. The overlay adds three classes: 401 for credential and proof refusals, 403 for authority refusals and 500 for unexpected failures.
+The overlay also sends every busy refusal to 503 with `Retry-After`. The shared map sends `MUTATION_BUSY` and `MUTATION_WARMING` to 409, and the personal profile keeps that status.
+A service client needs one status class for "busy, retry later", with a retry hint. A 409 means a conflict that the caller must resolve.
 The overlay lists its codes in `cli_ops`, next to the shared map, so one module holds every code-to-status rule. For any other code, the overlay returns the shared map's status.
 The other option was to change the shared map and declare the `/api` change. The personal facade has local clients and no version, so nothing would warn them of a new status. The spec promises them unchanged replies.
 
@@ -170,9 +172,9 @@ The service profile uses these classes:
 | 401 | credential or proof refused | stop; check the credential and the route |
 | 403 | authority refused | stop; the principal lacks authority |
 | 404 | resource not found, or operation unavailable | for a resource, check the identifier; for an operation, read discovery |
-| 409 | conflict or stale precondition | read current state, then decide |
+| 409 | conflict or stale precondition that the caller resolves | read current state, then decide |
 | 500 | unexpected failure | treat the outcome as unknown; read state, or repeat with the same identifier when the operation states it is safe |
-| 503 | busy or unavailable | retry after the hint |
+| 503 | busy or unavailable, including a busy mutation | retry after the hint |
 
 The service renderer refuses some requests before any leaf runs. Their codes are the same for every operation:
 
@@ -349,7 +351,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 ## Risks / Trade-offs
 
 - **Two doors to one leaf can drift.** → One registration and one leaf per operation; the conformance check runs every operation through both doors.
-- **Extracting one renderer can change the personal facade.** → The personal profile's existing tests and document stay unchanged as the acceptance check. A new test pins an authority code's status on both profiles, because no existing REST test pins it (task 1.5).
+- **Extracting one renderer can change the personal facade.** → The personal profile's existing tests and document stay unchanged as the acceptance check. A new test pins the status of an authority code and of a busy code on both profiles (task 1.5). No existing test pins the service side of either code.
 - **Typed result models add code to each rendered leaf.** → Seven operations in the first version; the models also replace the consumer's hand-written parsers.
 - **The OpenAPI diff tool can miss a semantic change.** → A meaning change still needs review; the committed document makes every schema change visible.
 - **String codes give up enum checks in clients.** → The known values stay in the document; the conformance run fails on an undeclared code.
