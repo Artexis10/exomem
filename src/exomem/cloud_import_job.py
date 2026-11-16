@@ -46,6 +46,7 @@ from .cloud_import import (
 )
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 from .governance.transaction import fsync_directory
+from .vault_store import cli_fence
 
 CHUNK_BYTES = 1024 * 1024
 
@@ -502,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cloud_containment.log_to_stderr()
     try:
+        cli_fence.require("cell-import", args.vault)
         cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
         _check_cell(args.vault.parent, cell_id)
         if args.operation == "prepare":
@@ -526,6 +528,8 @@ def main(argv: list[str] | None = None) -> int:
         result = {"ok": False, "error": error.code}
         if error.retry is not None:
             result["retry"] = error.retry
+    except cli_fence.StoreFenceRefusal as refused:
+        result = {"ok": False, "error": refused.code}
     except Exception:  # noqa: BLE001 -- errors may contain member names or signed URLs
         result = {"ok": False, "error": "IMPORT_FAILED"}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")

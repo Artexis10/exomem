@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 from . import cloud_containment, cloud_grant, vault_portability
 from .cloud_import_job import _check_cell
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
+from .vault_store import cli_fence
 
 # C6 fixes these failure tokens; they are protocol values, not user vocabulary.
 EXPORT_FAILED = "EXPORT_FAILED"
@@ -287,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             result["version"] = args.archive_version_id
             args.termination_log.write_text(json.dumps(result), encoding="ascii")
             return 0
+        cli_fence.require("cell-export", args.vault)
         usage = filesystem_use(args.vault.parent)
         _check_cell(args.vault.parent, cell_id)
         # A plain-HTTP part URL would carry the owner's plaintext archive unencrypted;
@@ -302,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
         result = {"error": error.code, "diagnostic": _failure_diagnostic(error), **usage}
     except vault_portability.PortabilityError as error:
         result = {"error": _portability_code(error), "diagnostic": _failure_diagnostic(error), **usage}
+    except cli_fence.StoreFenceRefusal as refused:
+        result = {"error": refused.code, **usage}
     except Exception as error:  # noqa: BLE001 -- only code identifiers leave the Job
         result = {"error": EXPORT_FAILED, "diagnostic": _failure_diagnostic(error), **usage}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")
@@ -317,6 +321,8 @@ def _run_phase(args: argparse.Namespace) -> int:
         cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
         if str(uuid.UUID(args.export_id)) != args.export_id or args.max_bytes <= 0:
             raise ExportRefused(EXPORT_FAILED)
+        if args.phase != steps.UPLOAD:  # the upload sends the packed spool and reads no vault
+            cli_fence.require("cell-export", args.vault)
         # The pause measures the cell volume. The pack and the upload measure their staging claim through
         # the spool, because the upload mounts only that directory of the claim.
         usage = filesystem_use(args.vault.parent if args.phase == steps.PAUSE
@@ -345,6 +351,8 @@ def _run_phase(args: argparse.Namespace) -> int:
         result = {"error": error.code, "diagnostic": _failure_diagnostic(error), **usage}
     except vault_portability.PortabilityError as error:
         result = {"error": _portability_code(error), "diagnostic": _failure_diagnostic(error), **usage}
+    except cli_fence.StoreFenceRefusal as refused:
+        result = {"error": refused.code, **usage}
     except Exception as error:  # noqa: BLE001 -- only code identifiers leave the Job
         result = {"error": EXPORT_FAILED, "diagnostic": _failure_diagnostic(error), **usage}
     result["phase"] = args.phase

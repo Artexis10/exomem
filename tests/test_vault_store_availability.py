@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -24,7 +25,7 @@ from exomem.collection_store import (
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import availability, migrate, ownership, write
+from exomem.vault_store import availability, cli_fence, migrate, ownership, write
 
 AT = "2026-11-08T00:00:00Z"
 LEASE_ENV = ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_TOPOLOGY", "EXOMEM_CLOUD_CELL")
@@ -282,3 +283,93 @@ def test_a_recorded_id_with_no_store_mode_warns_and_names_the_rollback_without_r
     check = doctor._check_vault_store_records(vault)
     assert (check.status, check.message) == ("warn", availability.marker_inconsistency(vault))
     assert "exomem store-mode rollback" in check.remediation
+
+
+def test_every_dispatched_subcommand_declares_what_it_touches_in_the_vault():
+    """Defect: a subcommand added to the dispatch table with no declaration reads or writes pages of a
+    store-mode vault that its handler never checks."""
+    declared = {name.split(" ")[0] for name in cli_fence.ACCESS}
+    assert set(cli._COMMANDS) == declared
+    assert cli._CLI_ONLY_SUBCOMMANDS <= set(cli._COMMANDS)
+    assert all(isinstance(access, cli_fence.VaultAccess) for access in cli_fence.ACCESS.values())
+
+
+def _entry_arguments(name, vault, scratch):
+    """The command line that makes each entry resolve `vault` and reach its first page access."""
+    where = str(vault)
+    manifest = scratch / "manifest.json"
+    manifest.write_text("{}")
+    folder = scratch / "folder"
+    folder.mkdir()
+    termination_log = str(scratch / "termination.log")
+    digest = "0" * 64
+    return {
+        "setup": ["setup", "--vault", where, "--yes"],
+        "init": ["init", "--vault", where],
+        "reclaim-schema": ["reclaim-schema", "--vault", where],
+        "package-skills": ["package-skills", "--vault", where, "--out", str(scratch / "skills")],
+        "personalize": ["personalize", "--vault", where, "--dry-run"],
+        "demo": ["demo", "--vault", where],
+        "warm": ["warm", "--vault", where],
+        "backfill-media": ["backfill-media", "--vault", where],
+        "index": ["index", "--vault", where],
+        "governance-schema plan-migration": ["governance-schema", "plan-migration", "--vault", where],
+        "governance-schema stage-migration": [
+            "governance-schema", "stage-migration", "--vault", where, "--expected-plan-digest", digest, "--yes"],
+        "governance-schema commit-migration": [
+            "governance-schema", "commit-migration", "--vault", where, "--expected-plan-digest", digest, "--yes"],
+        "relations": ["relations", "census", "--vault", where],
+        "collections adopt-local": ["collections", "adopt-local", "--why", "check", "--dry-run", "--vault", where],
+        "collections create": [
+            "collections", "create", "--manifest-path", "Planning/x.json", "--manifest-file", str(manifest),
+            "--why", "check", "--vault", where],
+        "collections rollback": ["collections", "rollback", "--vault", where],
+        "collections migrate": ["collections", "migrate", "--dry-run", "--vault", where],
+        "collections cutover": ["collections", "cutover", "--dry-run", "--vault", where],
+        "import": ["import", str(folder), "--vault", where],
+        "cell-import": ["cell-import", "prepare", "--import-id", "check", "--vault", where,
+                        "--termination-log", termination_log],
+        "cell-export": ["cell-export", "--export-id", str(uuid.uuid4()), "--max-bytes", "1", "--vault", where,
+                        "--termination-log", termination_log],
+        "cell-init": ["cell-init", "--vault", where],
+        "cell-media-census": ["cell-media-census", "--vault", where],
+        "cell-media-manifest": ["cell-media-manifest", "--vault", where],
+    }[name]
+
+
+@pytest.mark.parametrize("name", [
+    name for name, access in cli_fence.ACCESS.items() if access is cli_fence.VaultAccess.PAGES
+])
+def test_a_subcommand_that_touches_pages_refuses_a_store_mode_vault_as_the_registry_path_does(
+        store_mode_vault, monkeypatch, tmp_path, capsys, name):
+    """Defect: a CLI subcommand that the dispatcher routes before the registry path reads or rewrites the
+    Markdown, projections or file-mode indexes of a vault whose pages live in the store."""
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
+    if name == "warm":
+        monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)  # `warm` skips the vault it has no model for
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    argv = _entry_arguments(name, store_mode_vault, scratch)
+    before = _vault_bytes(store_mode_vault)
+
+    status = cli._dispatch_main(argv)
+
+    heard = capsys.readouterr()
+    reported = "".join(path.read_text() for path in scratch.glob("*.log"))
+    assert status != 0
+    assert availability.NOT_SERVED in heard.out + heard.err + reported
+    assert _vault_bytes(store_mode_vault) == before
+
+
+def test_the_store_route_and_a_fresh_vault_still_run_beside_the_fence(
+        store_mode_vault, monkeypatch, tmp_path, capsys):
+    """Defect: a fence that is too wide leaves the owner no command to read or leave store mode, or refuses a
+    command that creates its vault, which a missing vault does not put in store mode."""
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
+
+    assert cli._dispatch_main(["store-mode", "status", "--vault", str(store_mode_vault)]) == 0
+    assert availability.NOT_SERVED not in capsys.readouterr().out
+
+    created = tmp_path / "created"
+    assert cli._dispatch_main(["init", "--vault", str(created)]) == 0
+    assert (created / "Knowledge Base").is_dir()
