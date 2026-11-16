@@ -11,11 +11,15 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import reserved_paths, vault
 from ..collection_store import ownership as collection_ownership
 from ..find_corpus import EntryKind, entry_kind, is_sync_conflict_copy
-from ..kbdir import is_managed_root_name, managed_root, managed_root_rel, managed_split
+from ..kbdir import Layout, is_managed_root_name, managed_root, managed_root_rel, managed_split
+
+if TYPE_CHECKING:
+    from ..layout import Managed
 
 
 class Ownership(StrEnum):
@@ -62,9 +66,28 @@ def _is_dot_name(name: str) -> bool:
     return name.startswith(".")
 
 
-def _claimed(rel: str) -> Ownership | None:
+def _is_root(managed: Managed | None) -> bool:
+    """Whether `managed` describes a `root` vault. None is a `nested` vault, which is what a caller without a vault means."""
+    return managed is not None and managed.layout is Layout.ROOT
+
+
+def _split(rel: str, managed: Managed | None) -> str | None:
+    """The path below the managed root, or None outside it: the wrapper folder in `nested`, the vault root in `root`."""
+    if _is_root(managed):
+        return managed_split(rel, layout=managed.layout, unmanaged=managed.unmanaged)
+    return managed_split(rel)
+
+
+def _claimed(rel: str, managed: Managed | None = None) -> Ownership | None:
     """Rules 4 and 5 of ``classify``: the owner that the layers and the reserved registry name, or None."""
-    if collection_ownership.relevant(rel):
+    if _is_root(managed):
+        # imported here: `layout` imports modules that import this module
+        from ..layout import in_collection_layer
+
+        layered = in_collection_layer(rel, folder=True)
+    else:
+        layered = collection_ownership.relevant(rel)
+    if layered:
         return Ownership.NONE
     reserved = reserved_paths.classify_logical(rel)
     if reserved.blocked:
@@ -78,11 +101,11 @@ def is_markdown(rel: str) -> bool:
     return rel.lower().endswith(".md")
 
 
-def classify(rel: str) -> Ownership:
+def classify(rel: str, managed: Managed | None = None) -> Ownership:
     """Who owns one vault-relative POSIX path. It does no I/O, and the first matching rule wins.
 
-    1. A path outside the Knowledge Base folder is a read-only input: NONE.
-    2. A path with a dot-named component below the Knowledge Base folder is NONE.
+    1. A path outside the managed root is a read-only input: NONE.
+    2. A path with a dot-named component below the managed root is NONE.
     3. A Syncthing conflict copy is NONE, as the Knowledge Base walk treats it.
     4. A Records or Planning layer belongs to the collection store: NONE.
     5. A reserved family belongs to its own owner: NONE, unless its descriptor sets ``vault_store``.
@@ -90,16 +113,19 @@ def classify(rel: str) -> Ownership:
     7. Any other ``.md`` file, in any letter case, is PAGE.
     8. Everything else is BINARY.
 
+    The managed root is the Knowledge Base folder in a `nested` vault, which is what a call without
+    `managed` means. In a `root` vault it is the vault root, less the import staging folder and
+    the entries that the layout record lists as unmanaged (`layout.managed_of` returns both).
     The store owns content that search hides: ``_trash``, ``_archive``, ``_attachments`` and ``_Adoption``
     are owned, although the Knowledge Base walk skips them.
     """
-    below = managed_split(rel)
+    below = _split(rel, managed)
     if below is None:
         return Ownership.NONE
     parts = below.split("/")
     if any(_is_dot_name(part) for part in parts) or is_sync_conflict_copy(parts[-1]):
         return Ownership.NONE
-    claimed = _claimed(rel)
+    claimed = _claimed(rel, managed)
     if claimed is not None:
         return claimed
     if len(parts) > 1 and parts[0] == vault.SCHEMA_OVERLAY_DIRNAME:
@@ -109,29 +135,37 @@ def classify(rel: str) -> Ownership:
     return Ownership.BINARY
 
 
-def classify_many(rels: Iterable[str]) -> dict[str, Ownership]:
+def classify_many(rels: Iterable[str], managed: Managed | None = None) -> dict[str, Ownership]:
     """``classify`` for each distinct path of ``rels``, by the same rule: a path costs one classification."""
-    return {rel: classify(rel) for rel in dict.fromkeys(rels)}
+    return {rel: classify(rel, managed) for rel in dict.fromkeys(rels)}
 
 
-def owns_folder(rel: str) -> bool:
+def owns_folder(rel: str, managed: Managed | None = None) -> bool:
     """Whether the store owns the files that a folder holds, by the rules ``iter_owned`` walks by.
 
-    A folder below the Knowledge Base folder (or that folder itself) that no dot-named component,
+    A folder below the managed root (or that root itself) that no dot-named component,
     collection layer or reserved family takes. It does no I/O.
     """
-    below = "" if is_managed_root_name(rel) else managed_split(rel)
+    if _is_root(managed):
+        below = "" if rel in ("", ".") else _split(rel, managed)
+    else:
+        below = "" if is_managed_root_name(rel) else _split(rel, managed)
     if below is None:
         return False
     if any(_is_dot_name(part) for part in below.split("/")):
         return False
-    return _claimed(rel) is not Ownership.NONE
+    if below == "" and _is_root(managed):
+        return True
+    return _claimed(rel, managed) is not Ownership.NONE
 
 
 def iter_owned(
-    vault_root: Path, *, on_skip: Callable[[Skipped], None] | None = None,
+    vault_root: Path,
+    *,
+    on_skip: Callable[[Skipped], None] | None = None,
+    managed: Managed | None = None,
 ) -> Iterator[OwnedFile]:
-    """Yield every regular file that the store owns below the Knowledge Base folder.
+    """Yield every regular file that the store owns below the managed root.
 
     The walk is depth first and takes each folder's entries by name. It judges an entry as the Knowledge
     Base walk does (``find_corpus.entry_kind``): it leaves out a symlink, a junction, a file that is not
@@ -139,9 +173,17 @@ def iter_owned(
     It does not enter a folder that the collection layers or a reserved family own.
     It hands ``on_skip`` each owned-looking path it left out, and each folder it could not read,
     so a caller can tell a partial walk from a whole one. Without ``on_skip`` the walk stays silent.
+    ``managed`` is the vault's layout and unmanaged entries, as for ``classify``; the walk and the rule
+    must read the same layout, so without it the walk reads a `nested` vault and does not look the layout up.
     """
     report = on_skip or (lambda _skipped: None)
-    yield from _walk(managed_root(Path(vault_root)), managed_root_rel(), report)
+    in_root = _is_root(managed)
+    yield from _walk(
+        managed_root(Path(vault_root), layout=managed.layout if in_root else None),
+        "" if in_root else managed_root_rel(),
+        report,
+        managed,
+    )
 
 
 # Both enums are closed sets that code implements. A directory and a regular file never reach this map.
@@ -153,7 +195,9 @@ _SKIP_FOR_KIND = {
 }
 
 
-def _walk(directory: Path, rel_dir: str, report: Callable[[Skipped], None]) -> Iterator[OwnedFile]:
+def _walk(
+    directory: Path, rel_dir: str, report: Callable[[Skipped], None], managed: Managed | None
+) -> Iterator[OwnedFile]:
     try:
         with os.scandir(directory) as scanned:
             entries = sorted(scanned, key=lambda entry: entry.name)
@@ -163,20 +207,20 @@ def _walk(directory: Path, rel_dir: str, report: Callable[[Skipped], None]) -> I
     for entry in entries:
         if _is_dot_name(entry.name):
             continue
-        rel = f"{rel_dir}/{entry.name}"
+        rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
         try:
             # The directory entry's own stat has no link count on Windows, so the entry is stat'ed here.
             info = os.lstat(entry.path)
         except OSError:
-            if classify(rel) is not Ownership.NONE:
+            if classify(rel, managed) is not Ownership.NONE:
                 report(Skipped(rel, SkipReason.UNREADABLE))
             continue
         kind = entry_kind(entry.path, info)
         if kind is EntryKind.DIRECTORY:
-            if _claimed(rel) is not Ownership.NONE:
-                yield from _walk(Path(entry.path), rel, report)
+            if _split(rel, managed) is not None and _claimed(rel, managed) is not Ownership.NONE:
+                yield from _walk(Path(entry.path), rel, report, managed)
             continue
-        owner = classify(rel)
+        owner = classify(rel, managed)
         if owner is Ownership.NONE:
             continue
         if kind is EntryKind.REGULAR:
