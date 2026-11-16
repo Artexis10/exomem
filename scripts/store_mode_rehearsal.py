@@ -39,7 +39,11 @@ unset ``EXOMEM_STATE_ROOT`` falls back to the live state root. So the run refuse
 * an interpreter started as the children are started reports, from inside, the same settings
   (a ``.pth`` file or ``sitecustomize`` that sets one is caught there);
 * its coordinator listens on a free port that is not 8765 or 8770, and no served process
-  listens on any port (the run reads the sockets of each one and refuses a live port).
+  listens on any port (the run reads the sockets of each one and refuses a live port);
+* every child sets ``FASTMCP_CHECK_FOR_UPDATES=off``, so no child asks PyPI for a newer release,
+  and ``PYTHONDONTWRITEBYTECODE=1``, so none writes bytecode into the interpreter's install.
+
+The driver runs on Linux only: it finds and stops its processes through /proc.
 
 The two rollout guards of store mode (``VAULT_STORE_NOT_RELEASED``, ``VAULT_STORE_NOT_SERVED``)
 are lifted only in the children, by the same ``sitecustomize`` as the installed-wheel journey.
@@ -64,7 +68,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -104,13 +108,34 @@ def _overlap(first: Path, second: Path) -> bool:
     return first == second or first.is_relative_to(second) or second.is_relative_to(first)
 
 
+def folds_case(path: Path) -> bool:
+    """Whether the volume under ``path`` reads two names that differ in case as one name.
+
+    Asks the filesystem, as the product does (``vault._probe_casefolds``): the nearest existing
+    ancestor whose name re-cases to a sibling of the same length must give the same file back.
+    No such ancestor gives False, which compares the paths exactly, as before.
+    """
+    for ancestor in (path, *path.parents):
+        swapped = ancestor.name.swapcase()
+        if not ancestor.exists() or swapped == ancestor.name or len(swapped) != len(ancestor.name):
+            continue
+        sibling = ancestor.parent / swapped
+        return sibling.exists() and os.path.samefile(ancestor, sibling)
+    return False
+
+
 def refuse_overlaps(paths: Mapping[str, Path], never: Sequence[Path]) -> None:
     """Refuse a path that equals, sits inside or contains a path the run must never touch."""
-    guarded = [_resolved(path) for path in never]
+    guarded = [(_resolved(path), folds_case(_resolved(path))) for path in never]
     for label, path in paths.items():
         resolved = _resolved(path)
-        for protected in guarded:
-            if _overlap(resolved, protected):
+        for protected, folds in guarded:
+            same = (
+                _overlap(Path(str(resolved).casefold()), Path(str(protected).casefold()))
+                if folds
+                else _overlap(resolved, protected)
+            )
+            if same:
                 raise Refusal(
                     f"{label} ({resolved}) equals, sits inside or contains the --never path "
                     f"{protected}. Choose a {label} outside it."
@@ -233,6 +258,10 @@ def child_env(layout: Layout, settings: Settings, *, file_watcher: bool = True) 
             "XDG_DATA_HOME": str(layout.home / "data"),
             "FASTMCP_HOME": str(layout.home / "fastmcp"),
             "PYTHONUTF8": "1",
+            # No bytecode cache written into the interpreter's own install, which may be shared.
+            "PYTHONDONTWRITEBYTECODE": "1",
+            # FastMCP's banner asks PyPI for a newer release; the run makes no outbound request.
+            "FASTMCP_CHECK_FOR_UPDATES": "off",
             # The writer lease, on this run's coordinator. `single-host` takes a loopback origin.
             "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
             "EXOMEM_WRITER_LEASE_URL": settings.coordinator_url,
@@ -344,8 +373,6 @@ def check_interpreter(
         raise Refusal(
             f"the interpreter's lease coordinator is {seen['lease_url']}, not the run's own."
         )
-    if (layout.work / ".env").exists():
-        raise Refusal("the working directory holds a .env file, which the product would load.")
     return seen
 
 
@@ -717,27 +744,6 @@ def refusal_code(data: Any) -> str | None:
     return None
 
 
-def split_known(
-    differences: Sequence[dict[str, Any]], trashed: set[str]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split whole-table differences into those that a kill cannot have caused, and the rest.
-
-    The one known class: a trashed page keeps its ``unit_revisions`` row in the store, and a
-    re-derivation from the files has none. A trash with no kill reproduces it (see the findings),
-    so a kill is judged on what it did beyond it. A fix in the product deletes this function.
-    """
-    known, rest = [], []
-    for found in differences:
-        mine = found["keys"] if found["table"] == "unit_revisions" else []
-        explained = [key for key in mine if key in trashed]
-        other = [key for key in found["keys"] if key not in explained]
-        if explained:
-            known.append({"table": found["table"], "keys": explained})
-        if other:
-            rest.append({"table": found["table"], "keys": other})
-    return known, rest
-
-
 def describe(differences: Sequence[dict[str, Any]]) -> list[str]:
     return [
         f"table {d['table']}: {len(d['keys'])} key(s) differ, e.g. {', '.join(d['keys'][:5])}"
@@ -806,13 +812,11 @@ print(json.dumps(rows))
 _VERIFY_CHILD = """
 import json, os, sqlite3, sys, tempfile
 from pathlib import Path
-from exomem import compiled_history
 from exomem.collection_store import connection
 from exomem.vault_store import verify
 verify.KEYS_REPORTED = 1_000_000  # every differing key, not the first five
 vault = Path(sys.argv[1])
 store = connection.store_path(vault)
-history = compiled_history.history_root() + "/"
 with tempfile.TemporaryDirectory() as scratch:
     expected = Path(scratch) / "expected.sqlite"
     verify.derive_expected(vault, expected)
@@ -838,17 +842,9 @@ size = sum(
     os.path.getsize(f"{store}{suffix}")
     for suffix in ("", "-wal") if os.path.exists(f"{store}{suffix}")
 )
-# A re-derivation from the files has no row for a compiled-history file, which the store does hold,
-# so those keys are counted on their own and the other differences stay the verdict.
-differences, history_keys = [], {}
-for found in comparison.differences:
-    own = [key for key in found.keys if not key.startswith(history)]
-    if len(own) < len(found.keys):
-        history_keys[found.table] = len(found.keys) - len(own)
-    if own:
-        differences.append({"table": found.table, "keys": own})
+differences = [{"table": found.table, "keys": list(found.keys)} for found in comparison.differences]
 print(json.dumps({
-    "tables": len(comparison.tables), "differences": differences, "history_keys": history_keys,
+    "tables": len(comparison.tables), "differences": differences,
     "integrity": integrity, "pages": pages, "store_bytes": size, "mtime_differs_on": drift,
 }))
 """
@@ -1008,6 +1004,20 @@ class Page:
     trash: str | None = None
 
 
+def first_paragraph(text: str) -> str:
+    """The text of the first top-level paragraph of a page, read by the product's own parsers."""
+    from markdown_it import MarkdownIt
+
+    from exomem.vault import parse_frontmatter
+
+    _, body, _ = parse_frontmatter(text)
+    tokens = MarkdownIt("commonmark").parse(body)
+    for index, token in enumerate(tokens):
+        if token.type == "paragraph_open" and token.level == 0:
+            return " ".join(tokens[index + 1].content.split())
+    return ""
+
+
 class Stream:
     """A seeded write stream through governed commands, with a model of what it acknowledged."""
 
@@ -1031,18 +1041,12 @@ class Stream:
         self.folders = sorted({str(Path(rel).parent) for rel in self.samples})
         self.pages: list[Page] = []
         self.made = 0
-        #: Every path that a trash was tried on, whether or not a kill cut it (see `split_known`).
-        self.trash_attempts: set[str] = set()
 
     def _sample(self) -> tuple[str, str]:
         """A paragraph and a link target taken from a page of the copy."""
         rel = self.rng.choice(self.samples)
         text = (self.vault / rel).read_text(encoding="utf-8", errors="replace")
-        lines = text.split("\n---\n", 1)[-1].splitlines()
-        prose = next(
-            (ln.strip() for ln in lines if ln.strip() and ln.lstrip()[0] not in "#-|>`["), ""
-        )
-        return prose[:400], Path(rel).stem
+        return first_paragraph(text)[:400], Path(rel).stem
 
     def plan(self) -> dict[str, Any]:
         live = [page for page in self.pages if page.trash is None]
@@ -1108,7 +1112,6 @@ class Stream:
         elif kind == "trash":
             page = self.rng.choice(live)
             op["page"] = page
-            self.trash_attempts.add(page.path)
             op["tool"], op["arguments"] = (
                 "manage_memory",
                 {
@@ -1565,9 +1568,7 @@ class Rehearsal:
             work_left.append("the registry waits on paths")
         if dry_run.get("needs_export_held"):
             work_left.append("a rollback would need an export of held pages")
-        known, unexplained = split_known(verified["differences"], self.stream.trash_attempts)
-        trial["known_differences"] = {d["table"]: len(d["keys"]) for d in known}
-        wrong = describe(unexplained)
+        wrong = describe(verified["differences"])
         if verified["integrity"] != "ok":
             wrong.append(f"integrity check: {verified['integrity']}")
         if count_of(dry_run.get("edited_on_disk")) or count_of(dry_run.get("deleted_on_disk")):
@@ -1782,11 +1783,6 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> list[str]:
     return lines
 
 
-def _last_trial(report: dict[str, Any]) -> dict[str, Any]:
-    trials = report.get("kills", {}).get("trials", [])
-    return trials[-1] if trials else {}
-
-
 def _median(values: Sequence[float]) -> float | None:
     ordered = sorted(values)
     return ordered[len(ordered) // 2] if ordered else None
@@ -1795,7 +1791,6 @@ def _median(values: Sequence[float]) -> float | None:
 def summary_markdown(report: dict[str, Any], totals: dict[str, Any]) -> str:
     """The summary. Its opening section holds counts only, so it is safe to quote."""
     migrate = next((s for s in report["steps"] if s["step"] == "store-mode migrate --apply"), {})
-    last = _last_trial(report)
     lines = [
         "# Store-mode rehearsal",
         "",
@@ -1817,10 +1812,6 @@ def summary_markdown(report: dict[str, Any], totals: dict[str, Any]) -> str:
         f"{_median([o['seconds'] for o in report.get('stream', {}).get('ops', [])])}",
         f"- Projections queued after the stream's clean stop: "
         f"{report.get('stream', {}).get('queued_after_clean_stop')}",
-        f"- Compiled-history keys that the store holds and a re-derivation from the files lacks, "
-        f"by table, at the last kill check: {last.get('verify', {}).get('history_keys')}",
-        f"- Rows of trashed pages that the store keeps and a re-derivation lacks, by table, at the "
-        f"last kill check: {last.get('known_differences')}",
         f"- Registry applied every targeted revision while a service ran: "
         f"{report.get('registry', {}).get('settled')} "
         f"(applied {report.get('registry', {}).get('applied_revision')} of "
@@ -1915,6 +1906,11 @@ def synthesise(args: argparse.Namespace) -> int:
     preflight(layout, never, settings, python=args.python)
     layout.out.mkdir(parents=True, exist_ok=True)
     rig = Rig(layout, settings, python=args.python)
+    adopt_isolation(rig)
+    from markdown_it import MarkdownIt
+
+    from exomem.vault import parse_frontmatter
+
     made = rig.cli("init", "--vault", str(layout.vault))
     if made.returncode != 0:
         raise Refusal(f"`exomem init` failed: {made.stderr[-500:]}")
@@ -1935,16 +1931,21 @@ def synthesise(args: argparse.Namespace) -> int:
         path = layout.vault / rel
         words = rng.sample(topics[index % len(topics)], 14) + rng.sample(shared, 6)
         rng.shuffle(words)
-        lines = path.read_text(encoding="utf-8").splitlines()
-        lines = [
-            " ".join(words) + "." if line.startswith("Prose paragraph") else line for line in lines
-        ]
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        head = {
-            key: next(ln.split(": ", 1)[1] for ln in lines if ln.startswith(f"{key}: "))
-            for key in ("title", "exomem_id")
-        }
-        facts.append((rel, head["title"], head["exomem_id"]))
+        text = path.read_text(encoding="utf-8")
+        front, body, _ = parse_frontmatter(text)
+        # The generator's one top-level paragraph is the filler that the topic words replace.
+        paragraph = next(
+            token
+            for token in MarkdownIt("commonmark").parse(body)
+            if token.type == "paragraph_open" and token.level == 0
+        )
+        start, end = paragraph.map
+        body_lines = body.splitlines()
+        body_lines[start:end] = [" ".join(words) + "."]
+        path.write_text(
+            text[: len(text) - len(body)] + "\n".join(body_lines) + "\n", encoding="utf-8"
+        )
+        facts.append((rel, front["title"], front["exomem_id"]))
     cases = []
     for number, (rel, title, ident) in enumerate(rng.sample(facts, 8), start=1):
         cases.append(
@@ -1991,6 +1992,17 @@ def synthesise(args: argparse.Namespace) -> int:
 # --- Command line -----------------------------------------------------------------------------
 
 
+def adopt_isolation(rig: Rig) -> None:
+    """Give this process the children's environment, before it imports any product code.
+
+    What it imports then resolves nothing outside the scratch root, and writes no bytecode into
+    the interpreter's own install (the children get ``PYTHONDONTWRITEBYTECODE`` the same way).
+    """
+    os.environ.clear()
+    os.environ.update(rig.env)
+    sys.dont_write_bytecode = True
+
+
 def run_command(args: argparse.Namespace) -> int:
     layout = Layout(
         vault=_resolved(args.vault), scratch=_resolved(args.scratch), out=_resolved(args.out)
@@ -2010,10 +2022,7 @@ def run_command(args: argparse.Namespace) -> int:
     isolation = preflight(layout, never, settings, python=args.python)
     layout.out.mkdir(parents=True, exist_ok=True)
     rig = Rig(layout, settings, python=args.python, file_watcher=not args.no_file_watcher)
-    # From here the driver's own process holds the isolated environment too, so that what it
-    # imports can resolve nothing outside the scratch root.
-    os.environ.clear()
-    os.environ.update(rig.env)
+    adopt_isolation(rig)
     rehearsal = Rehearsal(args, rig, isolation)
     try:
         asyncio.run(rehearsal.run())
@@ -2032,6 +2041,25 @@ def run_command(args: argparse.Namespace) -> int:
         )
     print(json.dumps(totals))
     return 0 if totals["verdict"] == "clean" else 1
+
+
+#: `synth` samples eight pages for its answer cases, so fewer pages cannot make them.
+MIN_PAGES = 8
+
+
+def at_least(floor: int) -> Callable[[str], int]:
+    """An argument type: a whole number of at least ``floor``, else a refusal that says so."""
+
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+        if value < floor:
+            raise argparse.ArgumentTypeError(f"{value} is below the least allowed, {floor}")
+        return value
+
+    return parse
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2059,7 +2087,9 @@ def build_parser() -> argparse.ArgumentParser:
     common(run)
     run.add_argument("--canary-cases", required=True, help="a recall canary --cases file")
     run.add_argument("--query-cases", required=True, help="one query per line")
-    run.add_argument("--kills", type=int, default=20, help="SIGKILL trials (default 20)")
+    run.add_argument(
+        "--kills", type=at_least(1), default=20, help="SIGKILL trials, at least 1 (default 20)"
+    )
     run.add_argument("--ops", type=int, default=40, help="writes in the first stream (default 40)")
     run.add_argument("--seed", type=int, default=7, help="seeds the stream and the kill moments")
     run.add_argument(
@@ -2098,15 +2128,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     synth = sub.add_parser("synth", help="write a vault of invented pages and case files")
     common(synth)
-    synth.add_argument("--pages", type=int, default=1000)
+    synth.add_argument(
+        "--pages", type=at_least(MIN_PAGES), default=1000, help=f"at least {MIN_PAGES}"
+    )
     synth.add_argument("--seed", type=int, default=7)
     synth.set_defaults(handler=synthesise)
     return parser
 
 
+def require_linux() -> None:
+    """The driver finds, counts and stops its processes through /proc, which only Linux has."""
+    if sys.platform != "linux":
+        raise Refusal(
+            f"the driver reads /proc to find and stop its processes, so it runs on Linux only "
+            f"(this platform is {sys.platform}). Run it on Linux against a copy of the vault."
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        require_linux()
         return int(args.handler(args))
     except Refusal as refusal:
         print(f"refused: {refusal}", file=sys.stderr)

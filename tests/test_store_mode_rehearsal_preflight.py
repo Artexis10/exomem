@@ -45,6 +45,13 @@ def settings():
 
 
 @pytest.fixture
+def linux_only():
+    """A test that starts a child through the driver needs Linux, as the driver does."""
+    if sys.platform != "linux":
+        pytest.skip("the driver runs on Linux only: it reads /proc")
+
+
+@pytest.fixture
 def live(tmp_path):
     """A stand-in for the live vault and its state root: a path the run must never touch."""
     path = tmp_path / "live"
@@ -60,6 +67,16 @@ def test_a_path_that_meets_a_never_path_is_refused(tmp_path, live, where):
     chosen = {"equal": live, "inside": live / "deeper", "above": tmp_path}[where]
     with pytest.raises(rehearsal.Refusal, match="--never"):
         rehearsal.refuse_overlaps({"vault": chosen}, [live])
+
+
+def test_a_never_path_in_another_case_is_refused_on_a_volume_that_folds_case(
+    tmp_path, live, monkeypatch
+):
+    other_case = Path(str(live).upper())
+    # Only a volume that reads two spellings as one makes the second a way into the live path.
+    monkeypatch.setattr(rehearsal, "folds_case", lambda path: True)
+    with pytest.raises(rehearsal.Refusal, match="--never"):
+        rehearsal.refuse_overlaps({"vault": other_case}, [live])
 
 
 def test_a_symlink_into_a_never_path_is_refused(tmp_path, live):
@@ -141,7 +158,13 @@ def test_inherited_exomem_settings_never_reach_a_child(layout, settings, monkeyp
     assert env["EXOMEM_WRITER_LEASE_URL"] == settings.coordinator_url
 
 
-def test_an_isolated_layout_passes_with_the_real_interpreter(layout, settings, live):
+def test_a_child_neither_asks_pypi_for_a_release_nor_writes_bytecode(layout, settings):
+    env = rehearsal.child_env(layout, settings)
+    assert env["FASTMCP_CHECK_FOR_UPDATES"] == "off"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_an_isolated_layout_passes_with_the_real_interpreter(linux_only, layout, settings, live):
     proved = rehearsal.preflight(layout, [live], settings)
     assert proved["never_paths"] == 1
     assert (
@@ -150,7 +173,7 @@ def test_an_isolated_layout_passes_with_the_real_interpreter(layout, settings, l
 
 
 def test_an_interpreter_that_sets_a_setting_after_the_run_passed_is_refused(
-    layout, settings, live, tmp_path
+    linux_only, layout, settings, live, tmp_path
 ):
     """A `.pth` file or `sitecustomize` runs before the driver's code, and sets what it likes.
 
@@ -167,20 +190,40 @@ def test_an_interpreter_that_sets_a_setting_after_the_run_passed_is_refused(
         rehearsal.preflight(layout, [live], settings, python=str(launcher))
 
 
-# --- What a kill is judged on -----------------------------------------------------------------
+# --- The filler text of a write ---------------------------------------------------------------
 
 
-def test_a_difference_on_a_trashed_page_is_known_and_any_other_is_still_a_finding():
-    """A kill must not hide behind the known trash difference: only that row of that page is set
-    apart; the same table on another page, and every other table, still count against the kill.
-    """
-    differences = [
-        {"table": "unit_revisions", "keys": ["a/trashed.md", "a/live.md"]},
-        {"table": "pages", "keys": ["a/trashed.md"]},
-    ]
-    known, rest = rehearsal.split_known(differences, {"a/trashed.md"})
-    assert known == [{"table": "unit_revisions", "keys": ["a/trashed.md"]}]
-    assert rest == [
-        {"table": "unit_revisions", "keys": ["a/live.md"]},
-        {"table": "pages", "keys": ["a/trashed.md"]},
-    ]
+def test_the_filler_text_is_the_first_paragraph_after_the_front_matter_and_the_lists():
+    page = (
+        "---\ntitle: A\nnote: a line that starts like prose\n---\n\n# Heading\n\n"
+        "- a list item\n- another\n\n> a quote\n\nThe first paragraph\ncontinues here.\n\n"
+        "A second paragraph.\n"
+    )
+    assert rehearsal.first_paragraph(page) == "The first paragraph continues here."
+
+
+# --- The command line -------------------------------------------------------------------------
+
+
+def test_the_driver_refuses_at_once_on_a_platform_without_proc(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(rehearsal.Refusal, match="Linux only"):
+        rehearsal.require_linux()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--kills", "0"],
+        ["synth", "--pages", str(rehearsal.MIN_PAGES - 1)],
+    ],
+)
+def test_a_count_that_leaves_nothing_to_judge_is_refused_as_an_argument_error(argv):
+    """`--kills 0` would give a clean verdict with no kill; few pages crashed `synth`."""
+    required = [
+        "--vault", "v", "--scratch", "s", "--out", "o", "--never", "n",
+        *(["--canary-cases", "c", "--query-cases", "q"] if argv[0] == "run" else []),
+    ]  # fmt: skip
+    with pytest.raises(SystemExit) as stopped:
+        rehearsal.build_parser().parse_args([*argv, *required])
+    assert stopped.value.code == 2
