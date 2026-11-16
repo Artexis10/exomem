@@ -30,16 +30,6 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-#: What a writer reports when the settling finds derived state left, as file mode words it.
-_TRASH_NOT_EXACT = (
-    "trash succeeded but governed derived state is not exact; "
-    "content remains tombstoned until reconcile"
-)
-_RECOVERY_NOT_EXACT = (
-    "recovery staged but governed derived state is not exact; "
-    "content remains tombstoned until reconcile"
-)
-
 
 def begin_deletion(
     root: Path, *, source_rel: str, trash_rel: str, error_class: Callable[..., Exception]
@@ -110,11 +100,11 @@ def settle(root: Path, operation: Any, report: Any, warnings: list[str]) -> dict
     if operation.operation == "recovery":
         index = report.as_dict()
         if not lifecycle.finish_recovery(operation, index_report=index):
-            warnings.append(_RECOVERY_NOT_EXACT)
+            warnings.append(lifecycle.RECOVERY_NOT_EXACT)
         return index
     index = index_sync.with_component(report, _purge_vectors(root, operation)).as_dict()
     if not lifecycle.finish_deletion(operation, index_report=index):
-        warnings.append(_TRASH_NOT_EXACT)
+        warnings.append(lifecycle.TRASH_NOT_EXACT)
     return index
 
 
