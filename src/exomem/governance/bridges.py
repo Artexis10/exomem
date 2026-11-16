@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from .. import find_corpus, memory_refs, note_types, reserved_paths
+from ..kbdir import managed_split
 from . import membership
 from .policy import Policy, ReleaseGrant
 
@@ -165,9 +166,9 @@ def _reference_key(value: str) -> str:
     # Unicode defines which characters are whitespace, so a run of them is one separator here and in
     # every pack builder that collapses whitespace before the strip runs; this decides no meaning.
     text = " ".join(text.split())
-    prefix = "knowledge base/"
-    if text.startswith(prefix):
-        text = text[len(prefix) :]
+    below = managed_split(text, key=str.casefold)
+    if below is not None:
+        text = below
     if text.endswith(".md"):
         text = text[:-3]
     return text

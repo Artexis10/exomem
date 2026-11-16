@@ -49,6 +49,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
 
+from .kbdir import managed_join, managed_relative, managed_split
+
 log = logging.getLogger(__name__)
 
 #: The newest events the ring keeps. Several busy sessions; the aggregate over
@@ -852,11 +854,10 @@ def counts_toward_burst(path: str) -> bool:
     batch edit.
     """
     from . import find_corpus, source_taxonomy
-    from .kbdir import kb_prefix
 
     if path.rsplit("/", 1)[-1].casefold() in find_corpus.NAVIGATION_BASENAMES:
         return False
-    inner = path[len(kb_prefix()) :] if path.startswith(kb_prefix()) else path
+    inner = managed_relative(path)
     return not inner.startswith(f"Sources/{source_taxonomy.EPISODE_PATH_LABEL}/")
 
 
@@ -1656,14 +1657,13 @@ def _kb_relative(vault_root: Path, target: object) -> str | None:
     `None`. String work only: no resolve, no stat."""
     import os
 
-    from .kbdir import kb_prefix
 
     root = _root_key(vault_root)
     text = os.path.abspath(os.fspath(target))  # type: ignore[arg-type]
     if not text.startswith(root + os.sep) or not text.lower().endswith(".md"):
         return None
     rel = text[len(root) + 1 :].replace(os.sep, "/")
-    return rel if rel.startswith(kb_prefix()) else None
+    return rel if managed_split(rel) is not None else None
 
 
 def begin_commit(vault_root: Path | None, targets: Iterable[object]) -> Commit | None:
@@ -2003,7 +2003,6 @@ def cited_paths(vault_root: Path, sources: Iterable[object]) -> list[str]:
     them; a stable reference is resolved read-only; a value that names no
     file is dropped (one `stat` per source, on the write path)."""
     from . import memory_refs
-    from .kbdir import kb_prefix
 
     out: list[str] = []
     for raw in sources or ():
@@ -2018,8 +2017,8 @@ def cited_paths(vault_root: Path, sources: Iterable[object]) -> list[str]:
                 text = memory_refs.resolve_identifier_read_only(vault_root, text)
             except Exception:  # noqa: BLE001 - an unresolvable ref names nothing
                 continue
-        if not text.startswith(kb_prefix()):
-            text = kb_prefix() + text.lstrip("/")
+        if managed_split(text) is None:
+            text = managed_join(text.lstrip("/"))
         if not text.lower().endswith(".md"):
             text += ".md"
         try:

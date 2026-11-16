@@ -27,6 +27,7 @@ from . import records as record_events
 from . import structured_collections as collections
 from .collection_store.filenames import MAX_BLOCKERS as _MAX_BLOCKERS
 from .collection_store.filenames import MAX_PLAN_ITEMS as _MAX_PLAN_ITEMS
+from .kbdir import managed_form, managed_join, managed_relative, managed_split
 
 _MAX_CORPUS_FILES = 10_000
 _MAX_CORPUS_BYTES = 128 * 1024 * 1024
@@ -169,11 +170,10 @@ def _rewrite_links(
 ) -> tuple[str, int, bool]:
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
-    prefix = vault.kb_prefix()
-    old_full = old_no_ext if old_no_ext.startswith(prefix) else prefix + old_no_ext
-    new_full = new_no_ext if new_no_ext.startswith(prefix) else prefix + new_no_ext
-    old_stripped = old_full.removeprefix(prefix)
-    new_stripped = new_full.removeprefix(prefix)
+    old_full = managed_form(old_no_ext)
+    new_full = managed_form(new_no_ext)
+    old_stripped = managed_relative(old_full)
+    new_stripped = managed_relative(new_full)
     old_basename = old_no_ext.rsplit("/", 1)[-1]
     new_basename = new_no_ext.rsplit("/", 1)[-1]
     changed = 0
@@ -193,7 +193,7 @@ def _rewrite_links(
         target = target_path.removesuffix(".md")
         if target in {old_full, old_stripped}:
             changed += 1
-            replacement = new_full if target_path.startswith(prefix) else new_stripped
+            replacement = new_full if managed_split(target_path) is not None else new_stripped
             return f"[[{replacement}{anchor_suffix}{alias}]]"
         if "/" not in target and target == old_basename:
             if not allow_bare:
@@ -696,7 +696,7 @@ def preview(vault_root: Path, collection: str | Path) -> dict[str, Any]:
 
 
 def _receipt_path(root: Path, plan_id: str) -> Path:
-    return root / vault.kb_prefix() / "_Governance" / "structured-files" / f"{plan_id}.json"
+    return root / managed_join("_Governance/structured-files") / f"{plan_id}.json"
 
 
 def _load_receipt(root: Path, plan_id: str, source_snapshot: str) -> dict[str, Any] | None:

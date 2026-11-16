@@ -24,7 +24,7 @@ from typing import Any
 from . import find, find_corpus, memory_refs, page_ids, reserved_paths, semantic_contract, vault
 from .cli_ops import OpError
 from .governance import egress
-from .kbdir import kb_dirname, kb_page_target, kb_prefix
+from .kbdir import kb_page_target, managed_join, managed_root
 
 #: A refusal names at most this many pages to choose from.
 MAX_CANDIDATES = 5
@@ -108,7 +108,7 @@ def _names_a_file(root: Path, raw: str, visible: Callable[[str], bool] | None) -
 
     stem = raw.removesuffix(".md")
     with egress.decide_without_receipt():
-        for base in ("", kb_prefix()):
+        for base in ("", managed_join("")):
             for candidate in (f"{base}{raw}", f"{base}{stem}.md"):
                 try:
                     if read.holds_file(root, candidate) and (visible is None or visible(candidate)):
@@ -125,7 +125,7 @@ def _identity_owners(root: Path, serve_stale: bool) -> Iterable[str]:
     )
     if snapshot is not None:
         return tuple(snapshot.reference_owners)
-    owners = memory_refs.scan_reference_owners(root, root / kb_dirname())
+    owners = memory_refs.scan_reference_owners(root, managed_root(root))
     return tuple(owner for _path, owner in owners)
 
 

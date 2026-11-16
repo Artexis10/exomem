@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import access, freshness, vault
+from .kbdir import managed_split_parts
 
 RECALL_POLICY_VERSION = "structured-collection-manifest-only-v2"
 _MAX_MANIFEST_BYTES = 512 * 1024
@@ -465,7 +466,8 @@ def _vault_relative(root: Path, path: Path | str) -> str | None:
 
 
 def _is_structured_descendant(parts: list[str]) -> bool:
-    return len(parts) >= 3 and parts[0] == vault.kb_dirname() and parts[1] in {"Records", "Planning"}
+    below = managed_split_parts(parts)
+    return below is not None and len(below) >= 2 and below[0] in {"Records", "Planning"}
 
 
 def _is_collection_manifest(parts: list[str]) -> bool:
@@ -474,11 +476,8 @@ def _is_collection_manifest(parts: list[str]) -> bool:
 
 
 def _is_structured_alias(parts: list[str]) -> bool:
-    return (
-        len(parts) >= 3
-        and parts[0].casefold() == vault.kb_dirname().casefold()
-        and parts[1].casefold() in {"records", "planning"}
-    )
+    below = managed_split_parts(parts, key=str.casefold)
+    return below is not None and len(below) >= 2 and below[0].casefold() in {"records", "planning"}
 
 
 def _safe_regular_file(

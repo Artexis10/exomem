@@ -9,8 +9,6 @@ the files would see the old page.
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
@@ -31,10 +29,6 @@ from exomem import semantic_contract as sc
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
 from exomem.vault_store import rederive, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
 

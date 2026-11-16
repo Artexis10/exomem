@@ -53,7 +53,17 @@ from . import (
     view_lag,
 )
 from .held_fs import vault_name_key
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import (
+    is_managed_root_name,
+    managed_form,
+    managed_join,
+    managed_relative,
+    managed_respell,
+    managed_root,
+    managed_root_rel,
+    managed_split,
+    managed_split_parts,
+)
 from .log_events import log_event
 
 if TYPE_CHECKING:
@@ -436,7 +446,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     if (
         len(segments) >= 2
         and segments[1].startswith(".graph-reset-")
-        and segments[0] == kb_dirname()
+        and managed_split_parts(segments) is not None
         and is_graph_reset_runtime_dir_name(segments[1])
     ):
         return True
@@ -478,7 +488,7 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
     if not override:
         raise RuntimeError(
             f"{env_var} is not set. Point it at your vault root — the folder "
-            f"that contains '{kb_prefix()}'. For example:\n"
+            f"that contains '{managed_join('')}'. For example:\n"
             f'  macOS/Linux:  export {env_var}="/path/to/your/Obsidian"\n'
             f'  Windows:      setx {env_var} "C:/path/to/your/Obsidian"'
         )
@@ -486,7 +496,7 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
     if not _is_vault(path):
         raise RuntimeError(
             f"{env_var}={override!r} does not look like a vault "
-            f"(no schema contract in .exomem/schema/ or {kb_prefix()}_Schema/)"
+            f"(no schema contract in .exomem/schema/ or {managed_join('_Schema/')})"
         )
     return path
 
@@ -505,7 +515,7 @@ def shipped_schema_target(vault_root: Path) -> Path:
 
 def legacy_shipped_schema_root(vault_root: Path) -> Path:
     """The pre-#488 location, still read and still valid."""
-    return Path(vault_root) / kb_dirname() / "_Schema"
+    return managed_root(Path(vault_root)) / "_Schema"
 
 
 def shipped_schema_root(vault_root: Path) -> Path:
@@ -530,7 +540,7 @@ def _is_vault(path: Path) -> bool:
     one that has migrated, and one that never will.
     """
     if (
-        (path / kb_dirname() / "_Schema" / _SCHEMA_SENTINEL).exists()
+        (managed_root(path) / "_Schema" / _SCHEMA_SENTINEL).exists()
         or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
     ):
         return True
@@ -539,7 +549,7 @@ def _is_vault(path: Path) -> bool:
     from .vault_store import read
 
     try:
-        return read.page_exists(path, f"{kb_dirname()}/_Schema/{_SCHEMA_SENTINEL}")
+        return read.page_exists(path, managed_join(f"_Schema/{_SCHEMA_SENTINEL}"))
     except (ValueError, OSError, state_migration.StateMigrationManifestError):
         # Callers probe every ancestor of a path. One that holds its own state root (the filesystem
         # root, say) is refused placement, and a broken state root cannot prove a vault: both mean
@@ -548,7 +558,7 @@ def _is_vault(path: Path) -> bool:
 
 
 def kb_root(vault: Path) -> Path:
-    return vault / kb_dirname()
+    return managed_root(vault)
 
 
 def content_hash(content: str) -> str:
@@ -3285,7 +3295,8 @@ class _BatchWorkspace:
                     raise PathGuardError(
                         "PATH_GUARD_CHANGED", "batch rollback target changed"
                     )
-                inverse_recheck()
+                # No path recheck here: it reopens the leaf by name, which Windows refuses while this
+                # delete-capable handle is open. The identity above and the hash below prove the leaf.
                 if _descriptor_hash(descriptor, expected.identity) != expected.content_hash:
                     raise PathGuardError(
                         "PATH_GUARD_CONTENT", "batch rollback content changed"
@@ -3935,7 +3946,7 @@ def read_disk_bytes_without_pinning(path: Path) -> bytes:
 
 def _is_registered_internal_state_artifact(relative: str) -> bool:
     """Whether one full vault-relative entry is private Exomem state."""
-    return _classified_reserved(relative, kb_dirname(), id(reserved_paths._REGISTRY))
+    return _classified_reserved(relative, managed_root_rel(), id(reserved_paths._REGISTRY))
 
 
 @functools.lru_cache(maxsize=65_536)
@@ -6902,22 +6913,6 @@ class VaultPathError(Exception):
         super().__init__(reason)
 
 
-def _canonical_kb_segment(rel: str) -> str:
-    """Re-spell a leading KB segment to the literal ``kb_dirname()`` spelling.
-
-    On a case-insensitive filesystem the real on-disk casing of the governed
-    folder may differ from the configured name (`knowledge base` vs
-    `Knowledge Base`). The identity census keys segment 1 literally and every
-    `rel.startswith(kb_prefix())` check is byte-exact (e.g. memory_refs), so a
-    canonicalized rel-form must still lead with the configured spelling.
-    """
-    head, sep, tail = rel.partition("/")
-    kb = kb_dirname()
-    if head != kb and head.casefold() == kb.casefold():
-        return f"{kb}{sep}{tail}" if sep else kb
-    return rel
-
-
 def is_casing_only_rewrite(canonical: str, original: str) -> bool:
     """True when `canonical` differs from `original` in letter casing alone.
 
@@ -7045,7 +7040,7 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
         respelled = _respelled_against_disk(root, canonical)
         if respelled:
             canonical = respelled
-    canonical = _canonical_kb_segment(canonical)
+    canonical = managed_respell(canonical)
     if not is_casing_only_rewrite(canonical, cleaned):
         return rel
     return canonical
@@ -7285,7 +7280,7 @@ def admit_write_target(vault_root: Path, lexical: str, resolved: Path | None = N
                 resolve_under_vault(vault_root, lexical)[0] if read.serves(vault_root, lexical)
                 else (vault_root / lexical).resolve()
             )
-        forms.add(_canonical_kb_segment(resolved.relative_to(vault_root.resolve()).as_posix()))
+        forms.add(managed_respell(resolved.relative_to(vault_root.resolve()).as_posix()))
     except (ValueError, OSError, VaultPathError):
         pass
     try:
@@ -7355,8 +7350,8 @@ def resolve_under_vault(
         # prefixed paths resolve to the SAME governed location instead of a bare
         # path silently writing to a vault-root sibling of Knowledge Base/.
         first = rel.split("/", 1)[0]
-        if first.casefold() != kb_dirname().casefold() and first != "..":
-            rel = f"{kb_dirname()}/{rel}"
+        if not is_managed_root_name(first, key=str.casefold) and first != "..":
+            rel = managed_join(rel)
 
     normalized = posixpath.normpath(rel)
     if normalized == ".." or normalized.startswith("../"):
@@ -7392,7 +7387,7 @@ def resolve_under_vault(
         candidate = vault_root / rel
 
     if must_be_under_kb:
-        kb_resolved = (vault_root / kb_dirname()).resolve()
+        kb_resolved = managed_root(vault_root).resolve()
         try:
             resolved.relative_to(kb_resolved)
         except ValueError:
@@ -7449,7 +7444,7 @@ def resolve_under_vault(
         canonical = ""
     resolved_rel = rel
     if canonical and canonical != ".":
-        canonical = _canonical_kb_segment(canonical)
+        canonical = managed_respell(canonical)
         resolved_rel = canonical
         if is_casing_only_rewrite(canonical, rel):
             rel = canonical
@@ -7508,10 +7503,8 @@ def in_append_only_tree(rel_path: str) -> str | None:
     parts = rel_path.replace("\\", "/").split("/")
     if not parts:
         return None
-    if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
-        head = parts[1]
-    else:
-        head = parts[0]
+    below = managed_split_parts(parts, key=str.casefold)
+    head = below[0] if below else parts[0]
     # Case-insensitive match returning the CANONICAL name: on a case-insensitive
     # filesystem (Windows/macOS) an uppercase `SOURCES/` aliases the real
     # `Sources/` on disk, so a case-sensitive check would let raw Sources/Evidence
@@ -8520,8 +8513,8 @@ def evict_inbound_index(vault_root: Path) -> bool:
 def _inbound_target_forms(target_rel_path: str) -> tuple[str, str, str, str]:
     """`(target, full, stripped, basename)`: the forms a link to this page can take."""
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
-    full = target if target.startswith(kb_prefix()) else kb_prefix() + target
-    return target, full, full.removeprefix(kb_prefix()), target.rsplit("/", 1)[-1]
+    full = managed_form(target)
+    return target, full, managed_relative(full), target.rsplit("/", 1)[-1]
 
 
 def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _InboundIndexData:
@@ -9257,7 +9250,7 @@ class WikilinkResolver:
             )
         )
         self.full_paths.add(no_ext)
-        self.kb_stripped.add(no_ext.removeprefix(kb_prefix()))
+        self.kb_stripped.add(managed_relative(no_ext))
         _insert_into_bucket(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
         if title_lower:
             _insert_into_bucket(self.titles, title_lower, no_ext)
@@ -9275,10 +9268,10 @@ class WikilinkResolver:
         else:
             self.candidates_by_key.pop(no_ext, None)
             self.full_paths.discard(no_ext)
-            stripped = no_ext.removeprefix(kb_prefix())
+            stripped = managed_relative(no_ext)
             # Another page still strips to this key: the KB page itself, or the same path outside the KB.
-            still_held = kb_prefix() + stripped in self.full_paths or (
-                stripped in self.full_paths and not stripped.startswith(kb_prefix())
+            still_held = managed_join(stripped) in self.full_paths or (
+                stripped in self.full_paths and managed_split(stripped) is None
             )
             if not still_held:
                 self.kb_stripped.discard(stripped)
@@ -9427,8 +9420,8 @@ def obsidian_uses_kb_root(vault_root: Path) -> bool:
 
 def render_wikilink_target(target: str, vault_root: Path) -> str:
     """Render a canonical target for the detected Obsidian vault root."""
-    if obsidian_uses_kb_root(vault_root) and target.startswith(kb_prefix()):
-        return target.removeprefix(kb_prefix())
+    if obsidian_uses_kb_root(vault_root) and managed_split(target) is not None:
+        return managed_relative(target)
     return target
 
 
@@ -9540,7 +9533,7 @@ def _normalize_wikilink(
     # Folder-hub link (e.g. `[[Knowledge Base/Notes/Patterns/]]`): we never
     # canonicalize beyond ensuring the Knowledge Base/ prefix.
     if cleaned.endswith("/"):
-        canonical = cleaned if cleaned.startswith(kb_prefix()) else kb_prefix() + cleaned
+        canonical = managed_form(cleaned)
         return canonical + anchor, None, None
 
     # Explicit paths need namespace membership only; bare names need the full
@@ -9573,7 +9566,7 @@ def _normalize_wikilink(
         ), None
 
     # Full paths take precedence over Knowledge-Base-relative paths.
-    for key in (cleaned, kb_prefix() + cleaned):
+    for key in (cleaned, managed_join(cleaned)):
         if contains(key):
             if targeted:
                 return key + anchor, None, None
@@ -9615,12 +9608,12 @@ def _normalize_wikilink(
         raise UnresolvedWikilinkError(
             f"wikilink {target!r} does not resolve to any file in the vault"
         )
-    if cleaned.startswith(kb_prefix()):
+    if managed_split(cleaned) is not None:
         fallback = cleaned
     elif "/" in cleaned and _is_curated_top_level(vault_root, cleaned.split("/", 1)[0]):
         fallback = cleaned
     elif "/" in cleaned:
-        fallback = kb_prefix() + cleaned
+        fallback = managed_join(cleaned)
     else:
         fallback = cleaned
     return fallback + anchor, (f"wikilink {target!r} does not resolve to any file in the vault"), None
@@ -10126,9 +10119,7 @@ def prepend_log_entry(
     the existing add/edit/preserve log style); paths outside KB keep the
     full vault-relative form so curated-tree writes stay traceable.
     """
-    title = rel_path_no_ext
-    if title.startswith(kb_prefix()):
-        title = title[len(kb_prefix()) :]
+    title = managed_relative(rel_path_no_ext)
     newline = document_newline(log_text)
     body_image = None
     if _tracking is not None:
@@ -10262,7 +10253,7 @@ def _plan_log_content(
         newline = document_newline(log_text)
         archive_prefix = (
             f"# log.md archive segment ({token_hash}){newline}{newline}"
-            f"Rotated out of `{kb_prefix()}log.md` — {moved} entrie(s), newest "
+            f"Rotated out of `{managed_join('log.md')}` — {moved} entrie(s), newest "
             f"first, byte-exact.{newline}{separator}"
         )
         archive_text = archive_prefix + tail
@@ -10347,7 +10338,7 @@ def plan_log_entries(
         # plan neither reads the log nor reports a rotation that would not happen.
         return LogWritePlan(())
     if not store_read.holds_file(vault_root, relative_posix(log_file, vault_root)):
-        return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
+        return LogWritePlan((), warning=f"{managed_join('log.md')} missing; skipped log entry")
     if generated_producer is Ellipsis:
         from . import generated_output_plan
 
@@ -10438,7 +10429,7 @@ def _operation_log_paths(vault_root: Path) -> list[Path]:
             path for path in archives
             if ownership.classify(relative_posix(path, vault_root)) is not ownership.Ownership.PAGE
         }
-        prefix = f"{kb_prefix()}_archive/logs/"
+        prefix = managed_join("_archive/logs/")
         with store_read.snapshot(vault_root) as view:
             archives.update(
                 vault_root / meta.path for meta in view.pages(prefix)
@@ -10706,8 +10697,7 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
     title = rel_path_no_ext
     if title.endswith(".md"):
         title = title[: -len(".md")]
-    if title.startswith(kb_prefix()):
-        title = title[len(kb_prefix()) :]
+    title = managed_relative(title)
 
     log_file = kb_root(vault_root) / "log.md"
     if not store_read.page_exists(vault_root, relative_posix(log_file, vault_root)):

@@ -28,7 +28,7 @@ from . import (
     vault,
 )
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_root_rel, managed_split_parts
 from .memory_refs import ID_FIELD, new_id, normalize_id
 from .vault_store import availability as store_availability
 from .vault_store import targets as store_targets
@@ -669,8 +669,7 @@ def _normalize_destination(root: Path, path: object) -> tuple[Path, str]:
         posix.is_absolute()
         or any(part in {"", ".", ".."} for part in posix.parts)
         or posix.suffix.casefold() != ".md"
-        or not posix.parts
-        or posix.parts[0] != kb_dirname()
+        or managed_split_parts(posix.parts) is None
     ):
         raise RelationReviewError("INVALID_DRAFT_PATH", "draft path is not a managed Markdown path")
     try:
@@ -755,14 +754,11 @@ def draft_token_hash(value: object) -> str:
 
 def review_artifact_path(vault_root: Path, page_identity: str) -> Path:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
-    return Path(vault_root, kb_dirname(), *REVIEW_FOLDER) / f"{identity}.json"
+    return Path(managed_root(Path(vault_root)), *REVIEW_FOLDER) / f"{identity}.json"
 
 
 def _lifecycle_reference(page_identity: str, name: str) -> str:
-    return (
-        f"{'/'.join((kb_dirname(), *REVIEW_FOLDER))}/lifecycle/"
-        f"{page_identity}/{name}"
-    )
+    return managed_join(f"{'/'.join(REVIEW_FOLDER)}/lifecycle/{page_identity}/{name}")
 
 
 def _canonical_fingerprint(value: object) -> str:
@@ -1482,8 +1478,7 @@ def _safe_trash_original_path(value: object) -> bool:
         and posix.as_posix() == value
         and not posix.is_absolute()
         and not any(part in {"", ".", ".."} for part in posix.parts)
-        and posix.parts
-        and posix.parts[0] == kb_dirname()
+        and managed_split_parts(posix.parts) is not None
     )
 
 
@@ -1669,7 +1664,7 @@ def _capture_bounded_lifecycle_sidecar_guard(
 
 
 def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
-    start = f"{kb_dirname()}/_trash"
+    start = managed_join("_trash")
     pending = [start]
     files: set[str] = set()
     file_identities: dict[str, vault.PathIdentity] = {}
@@ -1885,7 +1880,7 @@ def _prepared_primary_binding(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not path.startswith(managed_join("_trash/"))
     )
     if len(owner_paths) == 1 and owner_paths[0] in corpus.pages:
         state = corpus.pages[owner_paths[0]]
@@ -1915,7 +1910,7 @@ def _trash_proof_for_prepared(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not path.startswith(managed_join("_trash/"))
     )
     target_guards: list[vault.PathGuard] = []
     parts = PurePosixPath(prepared.after_path).parts
@@ -2092,7 +2087,7 @@ def _live_identity_owner_paths(
     return tuple(
         path
         for path in census.paths_by_identity.get(page_identity, ())
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not path.startswith(managed_join("_trash/"))
     )
 
 
@@ -2746,9 +2741,9 @@ def _capture_review_directory(
     root: Path,
     nested: tuple[str, ...] = (),
 ) -> tuple[Path, tuple[vault.PathIdentity, ...] | None]:
-    directory = Path(root, kb_dirname(), *REVIEW_FOLDER, *nested)
+    directory = Path(managed_root(Path(root)), *REVIEW_FOLDER, *nested)
     current = root
-    components = (kb_dirname(), *REVIEW_FOLDER, *nested)
+    components = (managed_root_rel(), *REVIEW_FOLDER, *nested)
     identities: list[vault.PathIdentity] = []
     for component in (None, *components):
         if component is not None:
@@ -2992,8 +2987,7 @@ def _safe_record_path(value: str) -> bool:
         and posix.as_posix() == value
         and not posix.is_absolute()
         and not any(part in {"", ".", ".."} for part in posix.parts)
-        and posix.parts
-        and posix.parts[0] == kb_dirname()
+        and managed_split_parts(posix.parts) is not None
         and posix.suffix.casefold() == ".md"
     )
 
@@ -3145,7 +3139,7 @@ def _load_one(root: Path, identity: str) -> tuple[RelationReviewRecord | None, s
         return not access.refuse_if_excluded(root, path) and connector_boundary.permits(root, path, who)
 
     name = f"{identity}.json"
-    reference = f"{'/'.join((kb_dirname(), *REVIEW_FOLDER))}/{name}"
+    reference = managed_join(f"{'/'.join(REVIEW_FOLDER)}/{name}")
     # A receipt that the caller may not read goes to the listing below, which drops it.
     stored = _stored_artifact(root, reference, None) if admission(reference) else None
     if stored is not None:

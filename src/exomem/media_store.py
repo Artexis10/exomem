@@ -37,6 +37,7 @@ from . import (
     reserved_paths,
     trash_metadata,
 )
+from .kbdir import managed_root
 from .media_jobs import (
     OFFLOAD_MEDIA_TYPE,
     STATUS_JOB_LIMIT,
@@ -479,10 +480,9 @@ def managed_event(vault: Path, path: Path) -> str | None:
 def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[OriginalSnapshot]:
     """Discover sidecar bindings, including unsupported or physically absent originals."""
     from .backfill import iter_kb_files
-    from .kbdir import kb_dirname
     from .vault import parse_frontmatter
 
-    root = root if root is not None else vault / kb_dirname()
+    root = root if root is not None else managed_root(vault)
     if not root.is_dir():
         return
     from .vault_store import read as store_read
@@ -887,8 +887,24 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     with reserved_paths.open_generic_binary(vault, relative) as source:
         if source.stream.read() != rendered.encode("utf-8"):
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
-        os.fsync(source.stream.fileno())
+        try:
+            os.fsync(source.stream.fileno())
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+            # Windows flushes a handle opened for writing only, and this stream is read-only.
+            _flush_through_writer(vault, relative, source.version.identity)
     held_fs.flush_directory_path(snapshot.sidecar_path.parent).require()
+
+
+def _flush_through_writer(vault: Path, relative: str, expected: held_fs.StableIdentity) -> None:
+    """Flush the file at ``relative`` through a write handle, once it is the file that was read."""
+    with held_fs.acquire(vault).require() as filesystem:
+        with filesystem.parent(PurePosixPath(relative).parent.as_posix()).require() as parent:
+            with filesystem.file(parent, PurePosixPath(relative).name, access="write").require() as writable:
+                if (writable.identity.device, writable.identity.inode) != (expected.device, expected.inode):
+                    raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
+                os.fsync(writable.descriptor)
 
 
 def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:

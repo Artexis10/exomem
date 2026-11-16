@@ -43,7 +43,7 @@ from . import (
     vault,
 )
 from .governance.principal import OWNER_AUDIENCE, effective_principal
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 
 ENTRY_VERSION = 1
 #: The `operation` an episode revision's entry carries; the semantic writer names its own.
@@ -55,7 +55,7 @@ _DESCRIPTOR_ID = "compiled-history"  # The registry family of the history tree (
 
 def history_root() -> str:
     """The canonical reserved tree owned only by compiled history."""
-    return f"{kb_dirname()}/_Compiled/history"
+    return managed_join("_Compiled/history")
 
 
 def history_dir(parent_ref: str) -> str:

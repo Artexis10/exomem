@@ -26,6 +26,7 @@ from typing_extensions import TypedDict
 from . import record_formats, record_governance, state_paths, vault, writer_lease
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+from .kbdir import managed_join
 
 log = logging.getLogger(__name__)
 
@@ -1191,7 +1192,7 @@ def resolve_preserved_source(
         path, relative = vault.resolve_under_vault(
             root, reference, must_exist=True, must_be_file=True
         )
-        lanes = tuple(f"{vault.kb_prefix()}{lane}/" for lane in _BULK_SOURCE_LANES)
+        lanes = tuple(managed_join(f"{lane}/") for lane in _BULK_SOURCE_LANES)
         if relative == reference and relative.startswith(lanes) and released(relative, path):
             return path, relative
     except (vault.VaultPathError, vault.PathGuardError, OSError, ValueError, UnicodeDecodeError):
@@ -2434,7 +2435,7 @@ def _validate_collection_create_for_profile(
     _require_activity_log(root)
     if not all(
         record_governance.full_release_filter(root)(path)
-        for path in (manifest.path, manifest.storage.source, f"{vault.kb_prefix()}log.md")
+        for path in (manifest.path, manifest.storage.source, managed_join("log.md"))
     ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     if manifest.storage.strategy != collections.SQLITE_STORAGE:
@@ -3536,7 +3537,7 @@ def _inspect_audit_chain(
 
     try:
         history_guard = vault.DirectoryCensusGuard.capture(
-            root, f"{vault.kb_prefix()}_archive/logs", max_entries=_MAX_AUDIT_ARCHIVE_ENTRIES
+            root, managed_join("_archive/logs"), max_entries=_MAX_AUDIT_ARCHIVE_ENTRIES
         )
     except vault.PathGuardError:
         return _incomplete_audit_chain()
@@ -4078,8 +4079,8 @@ def _audit_events(
     the whole vault's. ``transition_ids`` names further transitions whose every occurrence the
     caller needs.
     """
-    live = f"{vault.kb_prefix()}log.md"
-    archive = f"{vault.kb_prefix()}_archive/logs"
+    live = managed_join("log.md")
+    archive = managed_join("_archive/logs")
     candidates = [live]
     archive_guard: vault.DirectoryCensusGuard | None = None
     try:
@@ -5784,7 +5785,7 @@ def _portable_absence_guards(root: Path, *targets: Path) -> tuple[vault.Director
 def _require_activity_log(root: Path) -> None:
     from .vault_store import read as store_read
 
-    if not store_read.holds_file(root, f"{vault.kb_prefix()}log.md"):
+    if not store_read.holds_file(root, managed_join("log.md")):
         raise collections.CollectionError(
             "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
         )

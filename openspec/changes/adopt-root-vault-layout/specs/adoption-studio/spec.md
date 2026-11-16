@@ -36,7 +36,7 @@
 
 #### Scenario: Plan recognizes an earlier import
 
-- **WHEN** a collection that an earlier run imported is staged again under a new location with the same `collection` label and one note changed
+- **WHEN** a collection that an earlier run imported is staged again under a new location with the same `collection` label and a single note changed
 - **THEN** every unchanged item records the `existing_ref` of its earlier Source
 - **AND** the changed note plans as a new item that names its earlier Source as `previous_import`
 

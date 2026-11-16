@@ -17,6 +17,7 @@ from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
 from . import indexes, memory_refs, note_types, source_taxonomy, vault
+from .kbdir import managed_join
 
 
 class SourceIdentity(TypedDict):
@@ -267,7 +268,7 @@ def raw_markdown_files(root: Path, *, subtrees: tuple[str, ...] = ()):
     def unavailable(error=None):
         raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical raw enumeration is incomplete") from error
 
-    roots = tuple((vault.kb_root(root) / lane).relative_to(root).as_posix() for lane in vault.APPEND_ONLY_KB_SUBPATHS)
+    roots = tuple(managed_join(lane) for lane in vault.APPEND_ONLY_KB_SUBPATHS)
     selected = set()
     for lane in roots:
         if not subtrees:
@@ -336,7 +337,7 @@ def canonical_pages(root: Path, *, join_request: bool = True) -> CanonicalCaptur
         if mode.store_mode_for_reads(root):
             with read.snapshot(root, join_request=join_request) as view:
                 for lane in vault.APPEND_ONLY_KB_SUBPATHS:
-                    prefix = (vault.kb_root(root) / lane).relative_to(root).as_posix() + "/"
+                    prefix = managed_join(f"{lane}/")
                     metadata = {item.path: item for item in view.pages(prefix) if Path(item.path).suffix.lower() == ".md"}
                     bodies = view.bodies(metadata)
                     if bodies.keys() != metadata.keys():

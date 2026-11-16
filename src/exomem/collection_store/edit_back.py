@@ -29,7 +29,7 @@ from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from itertools import chain
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from .. import held_fs, memory_refs, planning, record_formats, records, vault
@@ -713,7 +713,8 @@ def _dependency_paths(projection):
         for slot in range(3):
             leaf = (views.ASIDE_PREFIX + source["token"] + f"-{slot}" if slot < 2
                     else views.STAGE_PREFIX + source["token"])
-            yield str(Path(path).parent / leaf), source["token"], slot
+            # Held paths stay POSIX-style; `str(Path(...))` joins with backslashes on Windows.
+            yield PurePosixPath(path).parent.joinpath(leaf).as_posix(), source["token"], slot
 
 
 def _read_native(fs, file, bound, *, before=None):
@@ -736,7 +737,7 @@ def _open_view(fs, stack, parents, path):
     """The view's file as a context manager, or None when it or its directory is missing.
 
     ``parents`` keeps each directory opened on ``stack``, so a window opens it once."""
-    relative = str(Path(path).parent)
+    relative = held_fs.split_relative(path)[0]
     if relative not in parents:
         opened = fs.parent(relative)
         if not opened.ok and opened.error.code != "MISSING":

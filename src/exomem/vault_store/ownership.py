@@ -15,7 +15,7 @@ from pathlib import Path
 from .. import reserved_paths, vault
 from ..collection_store import ownership as collection_ownership
 from ..find_corpus import EntryKind, entry_kind, is_sync_conflict_copy
-from ..kbdir import kb_dirname
+from ..kbdir import is_managed_root_name, managed_root, managed_root_rel, managed_split
 
 
 class Ownership(StrEnum):
@@ -93,10 +93,10 @@ def classify(rel: str) -> Ownership:
     The store owns content that search hides: ``_trash``, ``_archive``, ``_attachments`` and ``_Adoption``
     are owned, although the Knowledge Base walk skips them.
     """
-    prefix = kb_dirname() + "/"
-    if not rel.startswith(prefix):
+    below = managed_split(rel)
+    if below is None:
         return Ownership.NONE
-    parts = rel[len(prefix):].split("/")
+    parts = below.split("/")
     if any(_is_dot_name(part) for part in parts) or is_sync_conflict_copy(parts[-1]):
         return Ownership.NONE
     claimed = _claimed(rel)
@@ -120,10 +120,10 @@ def owns_folder(rel: str) -> bool:
     A folder below the Knowledge Base folder (or that folder itself) that no dot-named component,
     collection layer or reserved family takes. It does no I/O.
     """
-    kb = kb_dirname()
-    if rel != kb and not rel.startswith(kb + "/"):
+    below = "" if is_managed_root_name(rel) else managed_split(rel)
+    if below is None:
         return False
-    if any(_is_dot_name(part) for part in rel[len(kb) + 1:].split("/")):
+    if any(_is_dot_name(part) for part in below.split("/")):
         return False
     return _claimed(rel) is not Ownership.NONE
 
@@ -141,8 +141,7 @@ def iter_owned(
     so a caller can tell a partial walk from a whole one. Without ``on_skip`` the walk stays silent.
     """
     report = on_skip or (lambda _skipped: None)
-    kb = kb_dirname()
-    yield from _walk(Path(vault_root) / kb, kb, report)
+    yield from _walk(managed_root(Path(vault_root)), managed_root_rel(), report)
 
 
 # Both enums are closed sets that code implements. A directory and a regular file never reach this map.

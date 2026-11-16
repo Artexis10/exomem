@@ -11,7 +11,7 @@ from typing import Any
 
 from . import find as find_module
 from . import memory_refs, note_types, source_corrections, vault
-from .kbdir import kb_prefix
+from .kbdir import managed_relative
 
 PUBLIC_UNRESOLVED_LIMIT = 8
 PUBLIC_SOURCE_VALUE_BYTES = 256
@@ -142,7 +142,7 @@ def _default_authorizer(root: Path) -> Callable[[str], bool]:
 
 
 def _eligible_path(path: str) -> bool:
-    relative = path.removeprefix(kb_prefix())
+    relative = managed_relative(path)
     return relative.startswith("Sources/") or relative.startswith("Evidence/")
 
 

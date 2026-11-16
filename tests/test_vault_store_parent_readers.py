@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import sys
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
@@ -22,10 +21,7 @@ from exomem import vault as vaults
 from exomem.governance.principal import request_scope
 from exomem.vault_store import read, write
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(900),
-]
+pytestmark = pytest.mark.timeout(900)
 
 
 @pytest.mark.parametrize("damage", ["deleted", "poisoned"])

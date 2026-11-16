@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import threading
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
@@ -44,6 +44,7 @@ from exomem import (
     epistemic_graph,
     find,
     graph_read_publication,
+    held_fs,
     lexstore,
     recover_from_trash,
     semantic_index,
@@ -55,10 +56,6 @@ from exomem.governance import egress, lifecycle
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 INSIGHTS = "Knowledge Base/Notes/Insights"
 CLAIM = f"{INSIGHTS}/Lantern Claim.md"
@@ -176,15 +173,26 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
 
     Keep the graph test and the registry surface test on the same instrument. Repair seams
     record intent without starting a background repair against deliberately damaged files.
-    """
-    # The POSIX backend imports `posix`, so a module-level import would stop collection on Windows.
-    from exomem import _held_fs_posix
 
+    A page read through the held filesystem is recorded where every backend passes it: the `file`,
+    `children` and `enumerate` calls of the class that the vault uses. On Linux the backend's own
+    native calls are watched as well, which also sees a stat by name. Windows has no such seam, so
+    a by-name check that its backend makes inside a single call is not measured there.
+    """
     events = {name: [] for name in (
         "page_io", "sidecars", "snapshots", "snapshot_threads", "request_threads", "machinery",
     )}
 
     bases = (Path(root), Path(root).resolve())
+    with held_fs.acquire(Path(root)).require() as filesystem:
+        filesystem_type = type(filesystem)
+    #: The vault-relative folder of each held directory, from the `parent` call that made it.
+    folders = {}
+
+    def page_owned(rel):
+        if page_paths is not None:
+            return rel in page_paths
+        return rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
 
     def relative(path, dir_fd=None):
         """The call's vault-relative target, also through a descriptor or a held directory's descriptor.
@@ -207,15 +215,40 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
     def watching(real, operation):
         def watched(path, *arguments, **keywords):
             rel = relative(path, keywords.get("dir_fd"))
-            page_owned = (
-                rel in page_paths if page_paths is not None
-                else rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
-            )
-            if page_owned:
+            if page_owned(rel):
                 events["page_io"].append((operation, rel))
             return real(path, *arguments, **keywords)
 
         return watched
+
+    def held_parent(real):
+        def parent(self, relative, *arguments, **keywords):
+            held = real(self, relative, *arguments, **keywords)
+            if held.ok:
+                folders[id(held.value)] = relative
+            return held
+
+        return parent
+
+    def held_file(real):
+        def file(self, parent, leaf, *arguments, **keywords):
+            rel = PurePosixPath(folders.get(id(parent), ""), leaf).as_posix()
+            if page_owned(rel):
+                events["page_io"].append(("file", rel))
+            return real(self, parent, leaf, *arguments, **keywords)
+
+        return file
+
+    def held_listing(operation, real):
+        def listing(self, parent, *arguments, **keywords):
+            held = real(self, parent, *arguments, **keywords)
+            for record in held.value if held.ok else ():
+                rel = PurePosixPath(folders.get(id(parent), ""), record.relative_path).as_posix()
+                if page_owned(rel):
+                    events["page_io"].append((operation, rel))
+            return held
+
+        return listing
 
     real_reader = connection.store_reader
     real_connect = sqlite3.connect
@@ -254,22 +287,34 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
                 owner_module, name,
                 lambda *a, _name=name, **k: events["machinery"].append(_name),
             )
-        for owner_module, name in (
+        watched_calls = [
             (os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
             (builtins, "open"), (io, "open"),
+        ]
+        if os.name != "nt":
+            # The POSIX backend imports `posix`, so a module-level import would stop collection on
+            # Windows.
+            from exomem import _held_fs_posix
+
             # The held filesystem binds its own native calls, so patching `os` does not reach them.
             # Its `_open` stays: the capability probe requires it in `os.supports_dir_fd`, and on
             # Linux a held open below the root goes through openat2, watched below.
-            (_held_fs_posix, "_stat"), (_held_fs_posix, "_scandir"),
-        ):
+            watched_calls += [(_held_fs_posix, "_stat"), (_held_fs_posix, "_scandir")]
+            real_openat2 = _held_fs_posix._linux_openat2
+            held_open = watching(
+                lambda name, parent, *rest, dir_fd: real_openat2(parent, name, *rest), "openat2"
+            )
+            patch.setattr(
+                _held_fs_posix, "_linux_openat2",
+                lambda parent, name, *rest: held_open(name, parent, *rest, dir_fd=parent),
+            )
+        for owner_module, name in watched_calls:
             patch.setattr(owner_module, name, watching(getattr(owner_module, name), name))
-        real_openat2 = _held_fs_posix._linux_openat2
-        held_open = watching(
-            lambda name, parent, *rest, dir_fd: real_openat2(parent, name, *rest), "openat2"
-        )
+        patch.setattr(filesystem_type, "parent", held_parent(filesystem_type.parent))
+        patch.setattr(filesystem_type, "file", held_file(filesystem_type.file))
+        patch.setattr(filesystem_type, "children", held_listing("children", filesystem_type.children))
         patch.setattr(
-            _held_fs_posix, "_linux_openat2",
-            lambda parent, name, *rest: held_open(name, parent, *rest, dir_fd=parent),
+            filesystem_type, "enumerate", held_listing("enumerate", filesystem_type.enumerate)
         )
         patch.setattr(connection, "store_reader", counting)
         patch.setattr(read, "request_snapshot", requesting)
@@ -1257,7 +1302,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
             elapsed = (time.perf_counter() - started) * 1000
             cpu = (time.process_time() - cpu_started) * 1000
     return {"ms": elapsed, "cpu_ms": cpu, "result_count": size, **counters,
-            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg(), "cpu_pressure_avg10": cpu_pressure()}
+            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg() if hasattr(os, "getloadavg") else None,
+            "cpu_pressure_avg10": cpu_pressure()}
 
 
 def fitted_slope(samples):

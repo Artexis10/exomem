@@ -1932,17 +1932,17 @@ def upsert_after_write(
     semantic_items = list(batch.admitted_paths)
     suppressed_items = list(batch.suppressed_paths)
     if watcher_mode:
-        from .kbdir import kb_prefix
+        from .kbdir import managed_splitter
 
         # The watcher publishes one vault-wide freshness generation. Lexstore
         # serves both the KB and vault scopes, so it must consume that complete
         # generation even though the heavier derived indexes remain KB-only.
         watcher_lexical_paths = [item.path for item in semantic_items]
         watcher_lexical_suppressed_rels = [item.rel_path for item in suppressed_items]
-        prefix = kb_prefix()
-        identity_items = [item for item in identity_items if item.rel_path.startswith(prefix)]
-        semantic_items = [item for item in semantic_items if item.rel_path.startswith(prefix)]
-        suppressed_items = [item for item in suppressed_items if item.rel_path.startswith(prefix)]
+        under = managed_splitter()
+        identity_items = [item for item in identity_items if under(item.rel_path) is not None]
+        semantic_items = [item for item in semantic_items if under(item.rel_path) is not None]
+        suppressed_items = [item for item in suppressed_items if under(item.rel_path) is not None]
     identity_paths = [item.path for item in identity_items]
     semantic_paths = [item.path for item in semantic_items]
     semantic_rels = [item.rel_path for item in semantic_items]

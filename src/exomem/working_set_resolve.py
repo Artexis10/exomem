@@ -26,6 +26,7 @@ from typing import Any, NamedTuple
 
 from . import activation_result, request_budget, working_set_anaphora
 from .chance_band import semantic_band
+from .kbdir import managed_split
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
@@ -2397,7 +2398,6 @@ def anchor_visible(row: AnchorFacts, visible: Callable[[str], bool]) -> bool:
     anchor identifiers are not page paths and must not be checked as pages.
     Resolution and recent-context reservation share this boundary.
     """
-    from .kbdir import kb_prefix
 
     if not row.path:
         return True
@@ -2407,7 +2407,7 @@ def anchor_visible(row: AnchorFacts, visible: Callable[[str], bool]) -> bool:
     return (
         row.kind != "plan"
         or ref == row.path
-        or not ref.startswith(kb_prefix())
+        or managed_split(ref) is None
         or bool(visible(ref))
     )
 

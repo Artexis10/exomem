@@ -38,6 +38,7 @@ from .governance import egress
 from .governance.policy import DISCLOSURE_MAX
 from .governance.principal import effective_principal
 from .governance.raw_protection import is_owner
+from .kbdir import managed_relative
 from .vocabulary import registry
 from .vocabulary_workflow import WorkItem, make_item
 
@@ -522,7 +523,7 @@ def evidence(vault_root: Path, identity: str) -> dict[str, Any]:
         match = candidate.match
         if candidate.kind == topic_carriers.KIND_FOLDER and rows:
             # The identity is casefolded; show the folder as the vault spells it.
-            match = "/".join(rows[0].path.removeprefix(context_catalogue.kb_prefix()).split("/")[: len(match.split("/"))])
+            match = "/".join(managed_relative(rows[0].path).split("/")[: len(match.split("/"))])
         carrier: dict[str, Any] = {"kind": candidate.kind, "match": match}
         if candidate.kind == topic_carriers.KIND_PROJECT:
             carrier["folder"] = projects.folder_for(candidate.match)

@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from .. import media_types, originals, reserved_paths, vault
-from ..kbdir import kb_dirname
+from ..kbdir import managed_join, managed_root_rel
 
 SEMANTIC_KEYS = ("projects", "tags", "types", "classes")
 CompanionReason = Literal[
@@ -338,7 +338,7 @@ def _dataset_cards(vault_root, artifact_path: str):
     try:
         # A card's file identity is bound below, and a stored page has none to bind.
         entries = reserved_paths.list_generic_tree(
-            vault_root, kb_dirname(), recursive=True, stored=False
+            vault_root, managed_root_rel(), recursive=True, stored=False
         )
     except reserved_paths.ReservedPathLeafError as error:
         raise CompanionClassificationError("companion_unsafe") from error
@@ -366,7 +366,7 @@ def _dataset_cards(vault_root, artifact_path: str):
         ):
             cards.append(
                 (
-                    f"{kb_dirname()}/{entry.relative_path}",
+                    managed_join(entry.relative_path),
                     frontmatter,
                     reserved_paths.GenericFileSnapshot(
                         entry.markdown,

@@ -299,6 +299,19 @@ def _leaf(name: str) -> bool:
     )
 
 
+#: 100 ns ticks from 1601-01-01 (the FILETIME epoch) to 1970-01-01 (the Unix epoch).
+_FILETIME_TO_UNIX_TICKS = 116444736000000000
+
+
+def _unix_ns(filetime: int) -> int:
+    """A FILETIME as nanoseconds since the Unix epoch, as ``os.stat`` and the POSIX backend report times.
+
+    The raw tick count times 100 passes ``2**63`` and no longer fits a SQLite INTEGER, which holds a
+    file's recorded time.
+    """
+    return (int(filetime) - _FILETIME_TO_UNIX_TICKS) * 100
+
+
 def _native(fd: int) -> int:
     import msvcrt
 
@@ -605,7 +618,7 @@ class WindowsHeldFile(HeldFile):
             raise OSError("FileBasicInfo is unavailable")
         # ChangeTime detects ordinary writes; a hostile host can explicitly alter these timestamps.
         return FileVersion(identity, os.fstat(self.descriptor).st_size if size is None else size,
-                           int(info.LastWriteTime) * 100, int(info.ChangeTime) * 100)
+                           _unix_ns(info.LastWriteTime), _unix_ns(info.ChangeTime))
 
     def retirement_state(self) -> HeldResult[FileRetirementState]:
         try:

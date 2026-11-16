@@ -16,7 +16,6 @@ from . import (
     capabilities,
     edit,
     find,
-    kbdir,
     note_types,
     origin_bindings,
     page_ids,
@@ -34,6 +33,7 @@ from . import (
 )
 from .cli_ops import OpError
 from .governance import egress
+from .kbdir import managed_form
 from .mutation_timings import MutationTimings, write_timings_enabled
 
 ObserveOperation = Literal["add", "update", "remove", "validate"]
@@ -237,7 +237,7 @@ def observe_memory(
                 # under Knowledge Base/, so re-root the given form the same
                 # way `kbdir.kb_page_relative_form` would.
                 rel_path = (
-                    given if given.startswith(kbdir.kb_prefix()) else kbdir.kb_prefix() + given
+                    managed_form(given)
                 )
             else:
                 # `_existing_page_outside_kb` never returns a hit for a given

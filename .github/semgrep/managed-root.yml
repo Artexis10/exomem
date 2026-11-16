@@ -1,0 +1,19 @@
+rules:
+  - id: managed-root-bare-name
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Reach the managed root through the managed_* helpers in src/exomem/kbdir.py (managed_join,
+      managed_split, managed_split_parts, managed_root, managed_root_rel, and the others), never through
+      kb_dirname() or kb_prefix(). A site that builds or compares the wrapper folder name itself
+      breaks when the managed root layout changes. If no helper fits, extend kbdir.py.
+    pattern-either:
+      - pattern: kb_dirname()
+      - pattern: kb_prefix()
+      - pattern: $MODULE.kb_dirname()
+      - pattern: $MODULE.kb_prefix()
+    paths:
+      include:
+        - src/exomem
+      exclude:
+        - src/exomem/kbdir.py

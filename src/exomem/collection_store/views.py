@@ -412,7 +412,7 @@ class PublicationBatch:
         return self.filesystem
 
     def _parent(self, path, *, create=False):
-        relative = str(Path(path).parent)
+        relative = held_fs.split_relative(path)[0]
         if relative not in self.parents:
             self.parents[relative] = self.stack.enter_context(
                 self._fs().parent(relative, create=create, access="mutate").require()

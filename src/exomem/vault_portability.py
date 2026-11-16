@@ -29,7 +29,7 @@ from . import __version__, reserved_paths, restore_journal, state_migration, sta
 from .governance import connector_boundary
 from .governance.principal import effective_principal
 from .held_fs import vault_name_key
-from .kbdir import kb_dirname
+from .kbdir import is_managed_root_name, managed_join, managed_root_rel, managed_split
 
 MANIFEST_NAME = "exomem-manifest.json"
 MANIFEST_SCHEMA_VERSION = 1
@@ -80,7 +80,7 @@ class _ClassificationRule:
 
 
 def _is_review_state(path: str, _parts: tuple[str, ...]) -> bool:
-    return path == "Knowledge Base/.review-state.json"
+    return path == managed_join(".review-state.json")
 
 
 def _is_graph_commit_receipt(path: str, _parts: tuple[str, ...]) -> bool:
@@ -90,7 +90,7 @@ def _is_graph_commit_receipt(path: str, _parts: tuple[str, ...]) -> bool:
     normal secret and unregistered-hidden-state fail-closed rules.
     """
     return re.fullmatch(
-        rf"{re.escape(kb_dirname())}/\.graph-commit-receipts/[0-9a-f]{{24}}\.json",
+        re.escape(managed_join(".graph-commit-receipts/")) + r"[0-9a-f]{24}\.json",
         path,
     ) is not None
 
@@ -154,7 +154,7 @@ def _is_generated_media_or_model(_path: str, parts: tuple[str, ...]) -> bool:
 
 
 def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
-    if not parts or parts[0].casefold() != kb_dirname().casefold():
+    if not parts or not is_managed_root_name(parts[0], key=str.casefold):
         return False
     classification = reserved_paths.classify_logical(path)
     if classification.descriptor_id == "compiled-history":
@@ -732,7 +732,7 @@ def iter_archive_members(vault_root: Path) -> Iterator[ArchiveMember]:
                 source = current_path / name
                 state_relative = source.relative_to(state_dir).as_posix()
                 logical = _normalized_relative_path(
-                    f"{kb_dirname()}/{state_relative}"
+                    managed_join(state_relative)
                 )
                 classification = classify_artifact(logical)
                 if classification.artifact_class is not ArtifactClass.PORTABLE_DERIVED:
@@ -952,7 +952,7 @@ def export_quiesced_vault(
     from .media_store import local_originals
 
     guard = mutation_guard if mutation_guard is not None else nullcontext()
-    with guard, local_originals(source_root, (kb_dirname(),)):
+    with guard, local_originals(source_root, (managed_root_rel(),)):
         armed_requirement = connector_boundary.read_requirement(source_root)
         if connector_boundary.snapshot(source_root) is not None:
             state_migration.require_vault_state_ready(source_root)
@@ -1037,7 +1037,7 @@ def stream_quiesced_vault(
     armed_requirement = prepare_quiesced_export(source_root)
     from .media_store import local_originals
 
-    with local_originals(source_root, (kb_dirname(),)):
+    with local_originals(source_root, (managed_root_rel(),)):
         snapshots = _enumerate_source(source_root, effective_limits)
         manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
         _write_export_archive(sink, snapshots, manifest)
@@ -1503,8 +1503,8 @@ def _verify_required_scaffold(records: Iterable[Mapping[str, Any]]) -> None:
     paths = {str(record["path"]) for record in records}
     # The schema is accepted at either location: `Knowledge Base/_Schema/` for an
     # archive taken before #488, `.exomem/schema/` for one taken after.
-    if not any(path.startswith("Knowledge Base/") for path in paths) or not any(
-        path.startswith("Knowledge Base/_Schema/") or path.startswith(".exomem/schema/")
+    if not any(managed_split(path) is not None for path in paths) or not any(
+        path.startswith(managed_join("_Schema/")) or path.startswith(".exomem/schema/")
         for path in paths
     ):
         _fail("INVALID_VAULT_STRUCTURE", "archive does not contain the required vault scaffold")

@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 
 from .held_fs import name_variants
-from .kbdir import kb_prefix
+from .kbdir import managed_join
 from .vault import (
     PathGuard,
     PlannedWrite,
@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 
 def registry_relpath() -> str:
     """The project registry's vault-relative path: the path a release decision names it by."""
-    return f"{kb_prefix()}_Schema/project-keys.yaml"
+    return managed_join("_Schema/project-keys.yaml")
 
 
 # Fallback used when project-keys.yaml is missing or malformed. A neutral

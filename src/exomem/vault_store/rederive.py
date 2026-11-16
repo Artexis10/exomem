@@ -25,7 +25,7 @@ from pathlib import Path
 from sqlite3 import Connection
 
 from .. import access, registry_history, vault
-from ..kbdir import kb_dirname
+from ..kbdir import managed_join
 from . import derive, mode
 
 #: The ``store_meta`` keys: the revision of the last commit that changed an overlay source, the
@@ -93,7 +93,7 @@ def is_overlay_source(
     """
     from ..governance import policy as governance_policy
 
-    schema_folder = f"{kb_dirname()}/{vault.SCHEMA_OVERLAY_DIRNAME}/"
+    schema_folder = managed_join(f"{vault.SCHEMA_OVERLAY_DIRNAME}/")
     history = f"{registry_history.history_dir(root, '').relative_to(root).as_posix()}/"
     access_policy = access.access_config_path(root).relative_to(root).as_posix()
     if rel == access_policy:

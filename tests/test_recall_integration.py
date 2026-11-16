@@ -47,7 +47,7 @@ import pytest
 from exomem import bm25, commands, find_corpus, semantic_writes
 from exomem import find as find_module
 from exomem.governance.principal import library_scope
-from exomem.vault import kb_dirname
+from exomem.kbdir import kb_dirname
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:

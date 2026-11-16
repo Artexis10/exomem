@@ -34,7 +34,7 @@ from . import review_state as review_state_module
 from . import vault as vault_module
 from .adoption_run import AdoptionRunStore
 from .entity_types import load_entity_types
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 from .source_coverage import CAPTURE_HEADING
 
 ADOPTION_REVIEW_PREFIX = "exomem://review/adoption/"
@@ -272,8 +272,8 @@ def _rehash_bindings(root: Path, bindings: dict) -> list[dict]:
 # --------------------------------------------------------------------------- #
 def _is_governed_source(path: str) -> bool:
     clean = _clean(path)
-    return f"/{kb_dirname()}/Sources/" in f"/{clean}" or clean.startswith(
-        f"{kb_dirname()}/Sources/"
+    return f"/{managed_join('Sources/')}" in f"/{clean}" or clean.startswith(
+        managed_join("Sources/")
     )
 
 

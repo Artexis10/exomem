@@ -54,7 +54,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import semantic_authoring
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root_rel
 
 
 def _module_available(name: str) -> bool:
@@ -1226,7 +1226,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--dry-run",
@@ -1288,21 +1288,21 @@ def _index_main(argv: list[str]) -> int:
         description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
         "skip files already up to date, embed new/changed ones in batches, prune "
         "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
-        f"it never wipes the sidecar first. Covers {kb_prefix()} by default, or "
-        f"the whole vault with --scope vault (so notes outside {kb_prefix()} "
+        f"it never wipes the sidecar first. Covers {managed_join('')} by default, or "
+        f"the whole vault with --scope vault (so notes outside {managed_join('')} "
         "become semantically searchable).",
     )
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--scope",
         choices=("kb", "vault"),
         default=None,
         help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
-        f"'vault' indexes the whole vault, not just {kb_prefix()}.",
+        f"'vault' indexes the whole vault, not just {managed_join('')}.",
     )
     parser.add_argument(
         "--batch-size",
@@ -1646,7 +1646,7 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
@@ -1726,7 +1726,7 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=None,
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--profile",
@@ -1803,7 +1803,7 @@ def _relations_main(argv: list[str]) -> int:
         "--vault",
         default=None,
         help=(
-            f"vault root containing '{kb_prefix()}'; reads its snapshot locally "
+            f"vault root containing '{managed_join('')}'; reads its snapshot locally "
             "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
         ),
     )
@@ -2097,7 +2097,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2130,7 +2130,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2159,7 +2159,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2491,7 +2491,7 @@ def _collections_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -2631,7 +2631,7 @@ def _store_mode_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -3237,7 +3237,7 @@ def _reclaim_schema_main(argv: list[str]) -> int:
         prog="exomem reclaim-schema",
         description=(
             f"Remove the superseded copy of the shipped schema from "
-            f"{kb_prefix()}_Schema/ once it has been redeployed to .exomem/schema/."
+            f"{managed_join('_Schema/')} once it has been redeployed to .exomem/schema/."
         ),
     )
     parser.add_argument(
@@ -3268,11 +3268,11 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     verb = "Removed" if report["applied"] else "Would remove"
     print(f"{verb} {len(report['removed'])} file(s), {report['reclaimed_kb']} KB:")
     for relative in report["removed"]:
-        print(f"  {kb_prefix()}_Schema/{relative}")
+        print(f"  {managed_join(f'_Schema/{relative}')}")
     if report["declined"]:
         print(f"Kept {len(report['declined'])} file(s):")
         for entry in report["declined"]:
-            print(f"  {kb_prefix()}_Schema/{entry['path']} — {entry['reason']}")
+            print(f"  {managed_join('_Schema/')}{entry['path']} — {entry['reason']}")
     if not report["applied"]:
         print("Re-run with --apply to delete.")
     return 0
@@ -3347,7 +3347,7 @@ def _cell_init_main(argv: list[str]) -> int:
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem init",
-        description=f"Bootstrap a fresh {kb_dirname()} scaffold into a vault.",
+        description=f"Bootstrap a fresh {managed_root_rel()} scaffold into a vault.",
     )
     parser.add_argument(
         "--vault",
@@ -3356,7 +3356,7 @@ def _init_main(argv: list[str]) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help=f"Overlay the scaffold even if {kb_prefix()} exists (existing files kept).",
+        help=f"Overlay the scaffold even if {managed_join('')} exists (existing files kept).",
     )
     args = parser.parse_args(argv)
 
@@ -3372,15 +3372,15 @@ def _init_main(argv: list[str]) -> int:
     except OpError as error:
         print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
-    print(f"Initialized {kb_dirname()} at {report['kb']}")
+    print(f"Initialized {managed_root_rel()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
-        f"  2. Install the Exomem {kb_dirname()} skill so Claude knows how to use it: "
+        f"  2. Install the Exomem {managed_root_rel()} skill so Claude knows how to use it: "
         "python -m exomem install-skill"
     )
-    print(f"  3. Adapt {kb_prefix()}_Schema/project-keys.yaml to your own projects.")
+    print(f"  3. Adapt {managed_join('_Schema/project-keys.yaml')} to your own projects.")
     print(
         "  4. For low-resource mode: exomem mode quiet; inspect with "
         "exomem status --resources --json."
@@ -4777,7 +4777,7 @@ def _print_adopt_human(result: dict) -> None:
         f"{totals.get('dirs', 0)} folders"
     )
     if governance.get("kb_present"):
-        print(f"  Governed layer: {governance.get('governed_path') or kb_prefix()}")
+        print(f"  Governed layer: {governance.get('governed_path') or managed_join('')}")
     else:
         print("  Governed layer: not initialized yet")
     print("  Originals: untouched; non-KB files stay read-only input.")
@@ -5044,7 +5044,7 @@ def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
                 print(f"Error [{err['code']}]: {err['message']}", file=sys.stderr)
             return 1
 
-    parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
+    parser = _CLIParser(prog="kb", description=f"Query and write the local {managed_root_rel()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
     for name in sorted(cmds):
         cmd = cmds[name]

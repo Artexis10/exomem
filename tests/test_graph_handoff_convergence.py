@@ -50,6 +50,7 @@ from exomem import (
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
+from exomem.kbdir import kb_dirname
 
 CREATED = f"{GENERATED}/created-after-publication.md"
 LINKER = f"{GENERATED}/linker.md"
@@ -299,7 +300,7 @@ def test_one_walk_reads_each_membership_under_its_own_walks_rules(vault: Path) -
     for rel, text in pages.items():
         (vault / rel).parent.mkdir(parents=True, exist_ok=True)
         (vault / rel).write_text(text, encoding="utf-8")
-    kb = vault / vault_module.kb_dirname()
+    kb = vault / kb_dirname()
     from exomem import find_corpus, recall_policy
 
     separate = (
@@ -325,7 +326,7 @@ def test_one_walk_still_lists_a_kb_folder_that_the_vault_walk_skips(
     from exomem import find_corpus
 
     monkeypatch.setenv("EXOMEM_KB_DIRNAME", "_archive")
-    kb = vault / vault_module.kb_dirname()
+    kb = vault / kb_dirname()
     (kb / "Notes").mkdir(parents=True, exist_ok=True)
     (kb / "Notes" / "page.md").write_text("body\n", encoding="utf-8")
 

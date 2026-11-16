@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import source_taxonomy
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 
 #: The shared folder relative to the knowledge base, with its trailing separator.
 SHARED_INNER = f"{source_taxonomy.SOURCES_ROOT}/{source_taxonomy.EPISODE_PATH_LABEL}/"
@@ -19,7 +19,7 @@ _PROBE_LEAF = "recap.md"
 
 def shared_folder() -> str:
     """The vault-relative folder that holds the owner's recaps."""
-    return f"{kb_dirname()}/{SHARED_INNER.rstrip('/')}"
+    return f"{managed_join('')}{SHARED_INNER.rstrip('/')}"
 
 
 def recap_folder(vault_root: Path) -> str:

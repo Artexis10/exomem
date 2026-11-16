@@ -13,6 +13,7 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from . import memory_refs, note_types, source_capture, vault
+from .kbdir import managed_join
 
 MAX_PAGE_SIZE = 200
 
@@ -41,8 +42,7 @@ class CaptureInput:
 
 def raw_path(root: Path, path: str) -> bool:
     # The two raw lanes and Markdown extension are fixed canonical storage contracts.
-    prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
-    return path.lower().endswith(".md") and any(path.startswith(prefix + lane + "/") for lane in vault.APPEND_ONLY_KB_SUBPATHS)
+    return path.lower().endswith(".md") and any(path.startswith(managed_join(f"{lane}/")) for lane in vault.APPEND_ONLY_KB_SUBPATHS)
 
 
 def input_from_bytes(root: Path, path: str, data: bytes) -> CaptureInput:
@@ -192,7 +192,7 @@ def collect(root: Path, inputs: dict[str, CaptureInput]) -> CaptureInventory:
             observed = store_identity(view.connection)
             identity = (observed["store_id"], observed["instance_id"], view.revision)
             for lane in vault.APPEND_ONLY_KB_SUBPATHS:
-                prefix = (vault.kb_root(root) / lane).relative_to(root).as_posix() + "/"
+                prefix = managed_join(f"{lane}/")
                 paths = [meta.path for meta in view.pages(prefix) if raw_path(root, meta.path) and meta.path not in inputs]
                 for start in range(0, len(paths), read.KEYS_PER_QUERY):
                     for path, data in view.bodies(paths[start:start + read.KEYS_PER_QUERY]).items():
@@ -373,7 +373,7 @@ def raw_event_path(root: Path, path: Path, *, directory: bool = False) -> str | 
         return relative
     if directory:
         for lane in vault.APPEND_ONLY_KB_SUBPATHS:
-            prefix = (vault.kb_root(root) / lane).relative_to(root).as_posix()
+            prefix = managed_join(lane)
             if relative == "." or prefix == relative or prefix.startswith(relative + "/") or relative.startswith(prefix + "/"):
                 return "" if relative == "." else relative
     return None

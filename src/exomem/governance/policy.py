@@ -41,7 +41,7 @@ from typing import Any
 import yaml
 
 from .. import held_fs, memory_refs, reserved_paths
-from ..kbdir import kb_dirname
+from ..kbdir import managed_join, managed_root, managed_split_parts
 from . import artifact_census
 from . import store as store_module
 
@@ -75,8 +75,12 @@ def is_workflow_state_path(rel_path: str) -> bool:
 
     parts = tuple(str(rel_path or "").split("/"))
     # These are canonical path components and fixed storage folders, not a vocabulary or a meaning classifier.
-    return len(parts) > 3 and not any(part in ("", ".", "..") for part in parts) and parts[0] == kb_dirname() and parts[1:3] in (
-        (GOVERNANCE_DIRNAME, _CURATION_DIRECTORY), relation_review.REVIEW_FOLDER,
+    below = managed_split_parts(parts)
+    return (
+        below is not None
+        and len(below) > 2
+        and not any(part in ("", ".", "..") for part in parts)
+        and below[:2] in ((GOVERNANCE_DIRNAME, _CURATION_DIRECTORY), relation_review.REVIEW_FOLDER)
     )
 
 
@@ -610,7 +614,7 @@ def mirror_authoring_workspace(
         return "diverged"
     notify = barrier if barrier is not None else lambda _phase, _relative: None
     root = Path(vault_root)
-    base = f"{kb_dirname()}/{GOVERNANCE_DIRNAME}"
+    base = managed_join(GOVERNANCE_DIRNAME)
     reviewed_directories = dict(reviewed.directory_identities)
     with reserved_paths._identity_coordination_scope(
         root,
@@ -976,7 +980,7 @@ _LAST_GOOD: dict[str, Policy] = {}
 
 
 def governance_root(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / GOVERNANCE_DIRNAME
+    return managed_root(Path(vault_root)) / GOVERNANCE_DIRNAME
 
 
 def _finding(code: str, path: str, detail: str, *, severity: str = "error") -> dict[str, str]:
@@ -1111,7 +1115,7 @@ def _authoring_snapshot_barrier(_phase: str, _path: str | None = None) -> None:
 
 
 def _probe_authoring_tree(vault_root: Path) -> _AuthoringTreeProbe | None:
-    base = f"{kb_dirname()}/{GOVERNANCE_DIRNAME}"
+    base = managed_join(GOVERNANCE_DIRNAME)
     acquired = held_fs.acquire(vault_root)
     if not acquired.ok:
         return None
@@ -1816,8 +1820,9 @@ def _valid_constraint(value: object) -> bool:
     if not text or len(text) > _CONSTRAINT_MAX_CHARS or "\n" in text or "\r" in text:
         return False
     folded = text.casefold()
-    forbidden = ("[[", "]]", "exomem://", "knowledge base/", ".md", "\\")
-    return not any(marker in folded for marker in forbidden)
+    forbidden = ("[[", "]]", "exomem://", ".md", "\\")
+    # A constraint must not carry a path under the managed root.
+    return not any(marker in folded for marker in forbidden) and managed_join("").casefold() not in folded
 
 
 def _valid_relative_path(value: object) -> bool:

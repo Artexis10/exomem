@@ -20,7 +20,7 @@ from typing import Any, Protocol
 import yaml
 
 from . import semantic_kinds, semantic_labels
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .semantic_labels import LabelDefinition, LabelRegistry
 from .vocabulary import registry as vocabulary_registry
 
@@ -682,7 +682,7 @@ def normalize_label(raw: str) -> str:
 
 
 def registry_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "semantic-language-registry.yaml"
+    return managed_root(Path(vault_root)) / "_Schema" / "semantic-language-registry.yaml"
 
 
 @lru_cache(maxsize=1)
