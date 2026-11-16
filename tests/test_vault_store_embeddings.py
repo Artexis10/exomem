@@ -33,7 +33,9 @@ from exomem import (
     embeddings,
     find,
     find_candidates,
+    freshness,
     index_paths,
+    lexstore,
     readiness,
     recall_space,
     semantic_drain,
@@ -666,6 +668,66 @@ def test_find_reports_the_chunk_lane_degraded_when_the_store_cannot_say_what_to_
     assert unproved.lane_statuses["vector"]["status"] == "unavailable"
     assert unproved.lane_statuses["vector"]["reason"] == "coverage_incomplete"
     assert degraded == ["embeddings"]
+
+
+def go_cold(root) -> None:
+    """The caches a freshly started process lacks: parsed pages, catalogue handles and the resident vector matrix."""
+    find.clear_cache()
+    freshness.clear()
+    lexstore.clear_stores()
+    embeddings.clear_embedding_indexes()
+
+
+def vector_answers(root, lane: str, *, settle: bool) -> tuple:
+    """What `find` answers on one lane: each hit's path, vector rank and score, and what it reports degraded.
+
+    A managed process answers a cold matrix with a degraded lane and loads it behind the request, so
+    ``settle`` asks again until the lane is whole.
+    """
+    for _ in range(400):
+        degraded: list[str] = []
+        found = find.find(
+            root, query="lighthouse keeper tide", limit=15, mode=lane, graph=False, rerank=False,
+            degraded_out=degraded,
+        )
+        if not settle or not degraded:
+            break
+        time.sleep(0.05)
+    return (
+        [(hit.path, hit.vector_rank, round(hit.vector_score or 0.0, 5)) for hit in found],
+        degraded,
+    )
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["one-shot", "managed-service"])
+def test_a_store_mode_vector_and_hybrid_find_return_file_modes_hits_cold_and_warm(vault, encoder, managed):
+    """A store-mode find that serves no vector hits, or other ones than file mode on the same pages,
+    cold (where a managed service defers the matrix load) or warm."""
+    if managed:
+        readiness.manage_runtime()  # the `encoder` fixture's teardown resets it
+
+    def lanes() -> dict:
+        answers = {}
+        for stage in ("cold", "warm"):
+            if stage == "cold":
+                go_cold(vault)
+            for lane in ("vector", "hybrid"):
+                answers[stage, lane] = vector_answers(vault, lane, settle=stage == "warm")
+        return answers
+
+    assert index_of(vault).rebuild_all() > 0
+    in_files = lanes()
+    assert in_files["warm", "vector"][0], "file mode answers the vector lane"
+    assert not in_files["warm", "vector"][1], "and reports it whole once warm"
+
+    assert migration.migrate_apply(vault) == 0
+    catch_up(vault)
+    # Only the store holds the pages now: a vector read of a projection answers differently.
+    for rel in (ALPHA, BETA):
+        (vault / rel).write_text(POISON)
+    in_the_store = lanes()
+
+    assert in_the_store == in_files
 
 
 def wait_until(condition, timeout: float = 20.0) -> None:
