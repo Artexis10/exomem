@@ -132,8 +132,8 @@ class LinkRewriter:
         self._resolver = resolver
         self._vault_root = vault_root
         self._moved = moved
-        self._post_index = post_index
         self._forms = obsidian_links.link_forms(post_index)
+        self._post_resolver = obsidian_links.IndexResolver(post_index)
         self._path_of_key = path_of_key
         self._targets: dict[str, Target] = {}
         self._checked: dict[tuple[str, str], bool] = {}
@@ -181,9 +181,7 @@ class LinkRewriter:
         key = (page, new_path)
         known = self._checked.get(key)
         if known is None:
-            known = self._checked[key] = (
-                obsidian_links.resolve_link(page, self._post_index).path == new_path
-            )
+            known = self._checked[key] = self._post_resolver.resolve(page).path == new_path
         return known
 
     def _entries(

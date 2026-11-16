@@ -28,15 +28,15 @@ def _attention(plan: RelayoutPlan) -> list[str]:
     counts = plan.counts()
     managed = kbdir.managed_root_rel()
     found: list[tuple[int, str]] = [
-        (counts["unmappable_files"], "files cannot get a new path"),
-        (counts["top_level_collisions"], "new top-level names collide with existing entries"),
-        (len(plan.links.failures), "planned links failed the self-check"),
-        (len(plan.pointers.failures), "pointer edits failed the self-check"),
-        (counts["outside_links_that_break"], f"links from outside {managed} would break"),
-        (counts["pointers_left"], "pointer fields name files that the plan cannot repoint"),
-        (len(plan.registry_findings), "registries could not be read in full"),
+        (counts["unmappable_files"], "files that cannot get a new path"),
+        (counts["top_level_collisions"], "new top-level names that collide with existing entries"),
+        (len(plan.links.failures), "planned links that failed the self-check"),
+        (len(plan.pointers.failures), "pointer edits that failed the self-check"),
+        (counts["outside_links_that_break"], f"links from outside {managed} that would break"),
+        (counts["pointers_left"], "pointer fields that name files the plan cannot repoint"),
+        (len(plan.registry_findings), "registries that could not be read in full"),
     ]
-    return [f"{count} {sentence}" for count, sentence in found if count]
+    return [f"{sentence}: {count}" for count, sentence in found if count]
 
 
 def outcome(plan: RelayoutPlan) -> str:

@@ -114,6 +114,22 @@ def test_forms_for_a_basename_group_of_twenty_thousand_files_arrive_in_seconds()
     assert elapsed < 10  # measured near 0.1 s; the margin absorbs a loaded host
 
 
+def test_a_resolver_answers_twenty_thousand_links_into_one_basename_group_in_seconds():
+    """A resolver that keyed the whole group for each link would take minutes at this size."""
+    paths = [f"Evidence/batch-{number}/Scan.md" for number in range(20_000)]
+    resolver = links.IndexResolver(links.build_index(paths))
+
+    started = time.perf_counter()
+    answers = [resolver.resolve(f"batch-{number}/Scan") for number in range(20_000)]
+    elapsed = time.perf_counter() - started
+
+    assert all(
+        answer.path == f"Evidence/batch-{number}/Scan.md" for number, answer in enumerate(answers)
+    )
+    assert resolver.resolve("Scan").outcome is Resolution.AMBIGUOUS
+    assert elapsed < 10  # measured near 0.1 s; the margin absorbs a loaded host
+
+
 def test_root_level_homonym_takes_its_full_path_and_still_resolves_to_itself():
     """`[[Name]]` names both files by the strict rule, but it is also the root file's full path: exact match wins."""
     index = links.build_index(["Name.md", "Sub/Name.md"])

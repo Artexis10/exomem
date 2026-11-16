@@ -9,7 +9,8 @@ functions encode that rule over an index, so a planner, a writer and a verifier 
 - the index maps `basename_key` of a file to the paths of every file with that basename
   (`build_index` builds it);
 - `resolve_link` applies the rule to a link text: the exact vault path first, then the
-  strict union of basename and trailing-path matches;
+  strict union of basename and trailing-path matches, and `IndexResolver` does so for many
+  link texts over a single index;
 - `link_form` returns the shortest link text that resolves to a given file, or its full
   vault path when no shorter text is unique, and `link_forms` does so for every file of an
   index in a single pass;
@@ -79,35 +80,65 @@ def visible(path: str) -> bool:
 def build_index(paths: Iterable[str]) -> dict[str, list[str]]:
     """The basename index of the files Obsidian would list among `paths`. A repeated path counts once."""
     index: dict[str, list[str]] = {}
+    seen: set[str] = set()
     for path in paths:
-        if not visible(path):
+        if path in seen or not visible(path):
             continue
-        group = index.setdefault(basename_key(path), [])
-        if path not in group:
-            group.append(path)
+        seen.add(path)
+        index.setdefault(basename_key(path), []).append(path)
     return index
 
 
-def resolve_link(page: str, index: Index) -> LinkMatch:
-    """Apply Obsidian's rule to the page part of a link text (no `#anchor`, no `|alias`).
+class IndexResolver:
+    """`resolve_link` over a single index, for a caller that resolves many link texts.
 
-    The exact vault path comes first: a text that, with `.md` implied, names a file's full
-    path resolves to that file. Without an exact match, the text names every file whose path
-    ends with it at a folder boundary; a bare name names every file with that basename. Both
-    compare under `vault_name_key`. A single file resolves; none is unresolved; several are
-    ambiguous, whichever file Obsidian itself would prefer, so a writer never relies on that.
+    The first query into a basename group keys that group once, so each later query is a
+    lookup. A group of n files that is queried n times costs n steps, where `resolve_link`
+    alone costs n squared.
     """
-    text = _without_suffix(page.strip())
-    group = index.get(basename_key(text), ()) if text else ()
-    key = vault_name_key(text)
-    keyed = [(path, vault_name_key(_without_suffix(path))) for path in group]
-    found = tuple(sorted({path for path, path_key in keyed if path_key == key}))
-    if not found:
-        tail = "/" + key
-        found = tuple(sorted({path for path, path_key in keyed if path_key.endswith(tail)}))
-    if not found:
-        return LinkMatch(Resolution.UNRESOLVED)
-    return LinkMatch(Resolution.RESOLVED if len(found) == 1 else Resolution.AMBIGUOUS, found)
+
+    def __init__(self, index: Index) -> None:
+        self._index = index
+        self._keyed: dict[str, tuple[dict[str, set[str]], dict[str, set[str]]]] = {}
+
+    def _group(self, key: str) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+        """The group's files by full path key, and by every shorter trailing path key at a folder boundary."""
+        found = self._keyed.get(key)
+        if found is None:
+            exact: dict[str, set[str]] = {}
+            tails: dict[str, set[str]] = {}
+            for path in self._index.get(key, ()):
+                parts = vault_name_key(_without_suffix(path)).split("/")
+                exact.setdefault("/".join(parts), set()).add(path)
+                for depth in range(1, len(parts)):
+                    tails.setdefault("/".join(parts[-depth:]), set()).add(path)
+            found = self._keyed[key] = (exact, tails)
+        return found
+
+    def resolve(self, page: str) -> LinkMatch:
+        """Apply Obsidian's rule to the page part of a link text (no `#anchor`, no `|alias`).
+
+        The exact vault path comes first: a text that, with `.md` implied, names a file's full
+        path resolves to that file. Without an exact match, the text names every file whose
+        path ends with it at a folder boundary; a bare name names every file with that
+        basename. Both compare under `vault_name_key`. A single file resolves; none is
+        unresolved; several are ambiguous, whichever file Obsidian itself would prefer, so a
+        writer never relies on that.
+        """
+        text = _without_suffix(page.strip())
+        if not text:
+            return LinkMatch(Resolution.UNRESOLVED)
+        exact, tails = self._group(basename_key(text))
+        key = vault_name_key(text)
+        found = tuple(sorted(exact.get(key) or tails.get(key) or ()))
+        if not found:
+            return LinkMatch(Resolution.UNRESOLVED)
+        return LinkMatch(Resolution.RESOLVED if len(found) == 1 else Resolution.AMBIGUOUS, found)
+
+
+def resolve_link(page: str, index: Index) -> LinkMatch:
+    """`IndexResolver.resolve` for a single link text; use `IndexResolver` to resolve many."""
+    return IndexResolver(index).resolve(page)
 
 
 @dataclass(frozen=True, slots=True)

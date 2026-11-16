@@ -164,11 +164,11 @@ def trailing_path_links(
     unresolved: Sequence[LinkNote], today_paths: Iterable[str]
 ) -> dict[str, object]:
     """Links that today's resolver leaves open but Obsidian's rule resolves over today's paths."""
-    index = obsidian_links.build_index(today_paths)
+    resolver = obsidian_links.IndexResolver(obsidian_links.build_index(today_paths))
     recovered = [
         {"page": note.page, "text": note.text}
         for note in unresolved
-        if obsidian_links.resolve_link(vault.split_wikilink_target(note.text)[0], index).outcome
+        if resolver.resolve(vault.split_wikilink_target(note.text)[0]).outcome
         is obsidian_links.Resolution.RESOLVED
     ]
     return {

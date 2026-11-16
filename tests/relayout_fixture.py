@@ -31,7 +31,9 @@ def _page(root: Path, rel: str, frontmatter: dict | None, body: str = "") -> Non
 
 def build_nested_vault(root: Path) -> None:
     """Write the fixture below `root`. Names are slugs that the relayout turns into titles."""
-    _write(root, f"{KB}/_Schema/SKILL.md", "")
+    # A vault that init already laid down has its own schema folder; a bare root gets the minimum.
+    if not (root / KB / "_Schema" / "SKILL.md").exists():
+        _write(root, f"{KB}/_Schema/SKILL.md", "")
     _write(root, f"{KB}/.obsidian/app.json", "{}")
 
     # Compiled pages in partition folders, homonyms and trouble titles.

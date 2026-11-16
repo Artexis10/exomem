@@ -298,6 +298,23 @@ def test_pages_whose_names_must_survive_keep_their_basename(registry):
         assert placed.stem + placed.extension == Path(path).name, path
 
 
+def test_a_part_page_keeps_its_name_and_holds_no_name_of_its_own(registry):
+    """A part page is found by its folder and its file name, so it never renames and never takes a source page's name."""
+    placed = _place(
+        registry,
+        f"{KB}/Sources/Articles/.2026-05-02-long-article.parts/part-02.md",
+        type_value="source",
+        title="Part 2 of 2: Long article",
+    )
+
+    assert (placed.name_class, placed.fixed_because) == (
+        NameClass.FIXED,
+        FixedBecause.EXTRACTION_PART,
+    )
+    assert placed.holds_name is False
+    assert placed.stem + placed.extension == "part-02.md"
+
+
 def test_trashed_and_non_markdown_files_hold_no_name_but_evidence_markdown_does(registry):
     """Name uniqueness counts owned Markdown outside the machinery folders, so a trashed page never holds a name."""
     assert _place(registry, f"{KB}/_trash/Notes/Insights/gone.md").holds_name is False
