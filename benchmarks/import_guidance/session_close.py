@@ -338,14 +338,15 @@ def hook_env(work: Path, engagement: str, inject: str = DEFAULT_HOOK_INJECT) -> 
         "EXOMEM_HOOK_CLIENT": "claude",
         "EXOMEM_RETRIEVE_INJECT": inject,
         "EXOMEM_CONFIG_PATH": str(work / "exomem-config.json"),
+        # Both modes fetch over REST (native mode for its session context), and the REST rung reads the user's
+        # `service.env` for a key and port; a file that does not exist keeps a live service out of the run.
+        "EXOMEM_SERVICE_ENV": str(work / "no-service.env"),
     } | (
-        # The hook's REST rung reads the user's `service.env` for a key and port; a file that does not exist leaves the
-        # CLI rung, run against the pinned vault, as the only transport and keeps a live service out of the run.
+        # With no REST rung, the CLI rung, run against the pinned vault, is working-set mode's only transport.
         # The length, control-prompt and cooldown gates run before any fetch and drop a short follow-up; mcp mode
         # zeroes the first two, so `working_set` does the same and the arms differ in the mode alone.
         {
             "EXOMEM_RETRIEVE_INJECT_CLI": "1",
-            "EXOMEM_SERVICE_ENV": str(work / "no-service.env"),
             "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS": "0",
             "EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS": "0",
             "EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC": "0",

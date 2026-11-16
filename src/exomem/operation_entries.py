@@ -689,7 +689,7 @@ _REMAINING = {
         _row("move", "change_files", ("old_path", "new_path", "update_wikilinks", "allow_curated", "promotion_reason"), ("old_path", "new_path"), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("delete", "change_files", ("path", "confirm", "recursive", "force_orphan", "force_superseded", "allow_curated", "expected_dead_inbound"), ("path",), destructive=True, verb="deleted"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("recover", "change_files", ("trash_path", "path", "restore_path"), (), verb="restored"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("reclassify", "change_files", ("path", "old_path", "source_kind", "domain", "reason"), ("reason",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("reclassify", "change_files", ("path", "old_path", "source_kind", "domain", "artifact_path", "reason"), ("reason",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("revert-reclassification", "change_files", ("path", "reason"), ("path",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "approve_procedure": ("action", (

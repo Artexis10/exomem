@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from .held_uploads import HOLD_MAX_COUNT
 from .query_compat import public_filter_annotation
 
 
@@ -664,6 +665,20 @@ class DownloadFiles(Wire):
     detail: Detail | None = _DETAIL
 
 
+class CancelUploads(Wire):
+    uploads: list[str] = Field(
+        min_length=1, max_length=HOLD_MAX_COUNT,
+        description="The exomem-held references of waiting uploads owned by this session.",
+    )
+    detail: Detail | None = _DETAIL
+
+
+def _cancel_uploads(wire: dict[str, Any], ctx: Context) -> Translated:
+    return "transfer_artifact", _given({
+        "operation": "cancel", "uploads": wire["uploads"], "response_detail": wire.get("detail"),
+    })
+
+
 def _download_leaf(wire: Mapping[str, Any]) -> dict[str, Any]:
     """The leaf fields of download_files, each None when the wire call leaves it out."""
     return {"operation": "download", "artifacts": wire.get("pages"), "response_detail": wire.get("detail")}
@@ -997,6 +1012,10 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           "Get the original files of pages back out of memory. The reply gives a link or a command that saves each.",
           DownloadFiles, "write", _download_files,
           [Route("transfer_artifact", when={"operation": "download"}, reverse=_spell_download)]),
+    _tool("cancel_uploads", "Cancel waiting uploads",
+          "Cancel this session's unclaimed uploads and release their held capacity. Each reference gets an ordered outcome.",
+          CancelUploads, "write", _cancel_uploads,
+          [Route("transfer_artifact", when={"operation": "cancel"}, inverse={"response_detail": "detail"})]),
     _tool("query_records", "Query records",
           "Read the person's Records. Without `collection`, list the collections and their fields; with one, filter and sort its rows.",
           QueryRecords, "read", _query_collection("record_memory", "query_records", None),

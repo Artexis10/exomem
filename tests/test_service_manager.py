@@ -2592,3 +2592,141 @@ def test_a_successful_handoff_reports_how_long_the_replacement_took(tmp_path):
         assert ready_after <= result["handoff"]["unavailable_ms"]
 
     asyncio.run(scenario())
+
+
+def test_old_operator_cannot_stop_worker_with_enrolled_upload_cleanup(tmp_path, monkeypatch):
+    """A separately installed old operator must not bypass downgrade preparation."""
+    module = _manager()
+    from exomem import state_migration
+
+    monkeypatch.setattr(module, "required_lifecycle_state_compatibility_ids", lambda: (
+        state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
+    ))
+    async def scenario():
+        manager, ingress, runtime, target = _supervisor(tmp_path)
+        result = await manager.upgrade(target)
+        assert not result["ok"]
+        assert "compatible managed upgrade operator" in result["error"]
+        assert runtime.pid == 100
+        assert runtime.events == ingress.events == []
+        assert manager.records.pending() is None
+    asyncio.run(scenario())
+
+
+def test_downgrade_prepares_with_active_runtime_and_reinspects_before_admission(tmp_path, monkeypatch):
+    """The old target cannot clean a format it refuses; current code must settle it first."""
+    module = _manager()
+    from exomem import state_migration
+
+    cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
+    monkeypatch.setattr(module, "required_lifecycle_state_compatibility_ids", lambda: (cancellation,))
+    async def scenario():
+        manager, ingress, runtime, target = _supervisor(tmp_path)
+        active = {"python": sys.executable, "version": "2.0.0"}
+        manager.records.accept(active)
+        cleaned = False
+        runtime.standby_capable = True
+
+        def cleanup_required(candidate):
+            assert candidate == target
+            return not cleaned
+
+        def migration_required(candidate):
+            if not cleaned:
+                raise ValueError("old target refuses pending cancellation state")
+            return False, "declared_none"
+
+        async def cleanup(source, timeout):
+            nonlocal cleaned
+            assert runtime.pid == 0
+            assert source == active
+            assert manager.records.pending()["phase"] == "preparing"
+            assert manager.records.active() == active
+            runtime.events.append("cleanup")
+            cleaned = True
+
+        runtime.cancellation_cleanup_required = cleanup_required
+        runtime.migration_required = migration_required
+        runtime.cleanup_cancellations = cleanup
+        result = await manager.upgrade(target, lifecycle_state_compatibility=[cancellation])
+        assert result["ok"], result
+        assert runtime.events == ["inspect", "stop", "cleanup", "inspect", "start"]
+        assert result["handoff"]["upload_cleanup"] == "complete"
+        assert manager.records.active() == target
+        assert manager.records.pending() is None
+        assert ingress.events[-1] == ("resume", "new-upstream")
+    asyncio.run(scenario())
+
+
+def test_failed_downgrade_cleanup_retains_active_recovery_interpreter(tmp_path, monkeypatch):
+    """A partial cleanup keeps compatible recovery and never starts the old target."""
+    module = _manager()
+    from exomem import state_migration
+
+    cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
+    monkeypatch.setattr(module, "required_lifecycle_state_compatibility_ids", lambda: (cancellation,))
+    async def scenario():
+        manager, ingress, runtime, target = _supervisor(tmp_path)
+        active = {"python": sys.executable, "version": "2.0.0"}
+        manager.records.accept(active)
+        runtime.cancellation_cleanup_required = lambda _: True
+
+        async def failed_cleanup(source, timeout):
+            assert source == active
+            assert runtime.pid == 0
+            raise OSError("directory flush failed")
+
+        runtime.cleanup_cancellations = failed_cleanup
+        result = await manager.upgrade(target, lifecycle_state_compatibility=[cancellation])
+        assert not result["ok"]
+        assert runtime.pid == 0
+        assert "start" not in runtime.events
+        assert manager.records.active() == active
+        assert manager.records.pending()["phase"] == "failed"
+        assert manager.phase == "recovery-required"
+        assert ingress.events[-1] == "unavailable"
+    asyncio.run(scenario())
+
+
+def test_cancellation_cleanup_does_not_relax_another_format_admission(tmp_path, monkeypatch, candidate_runtime):
+    """Temporary-upload cleanup cannot make a reader that lacks another recorded format compatible."""
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+    state_migration.record_collections_sqlite_only(vault, authority_check=lambda: True)
+    state_migration.record_held_upload_cancellation_compatibility(vault, authority_check=lambda: True, active=True)
+    runtime, actual = candidate_runtime
+    actual["supported_state_compatibility"] = [item for item in actual["supported_state_compatibility"]
+        if item not in {state_migration.COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
+                        state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID}]
+    target = asyncio.run(runtime.inspect({"python": sys.executable, "version": "1.2.3"}))
+    with pytest.raises(ValueError, match="other required state formats"):
+        runtime.cancellation_cleanup_required(target)
+    assert state_migration.COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_restarting_an_older_active_worker_omits_a_newer_targets_lifecycle_arguments(tmp_path, candidate_runtime):
+    """A refused upgrade must not leave a crashed older worker unable to parse its restart command."""
+    from exomem import state_migration
+
+    runtime, actual = candidate_runtime
+    cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
+    actual["version"] = "1.0.0"  # a release from before the lifecycle argument: its probe reports none
+    older = asyncio.run(runtime.inspect({"python": sys.executable, "version": "1.0.0"}))
+    actual.update(version="1.2.3", lifecycle_formats=[cancellation])
+    newer = asyncio.run(runtime.inspect({"python": sys.executable, "version": "1.2.3"}))
+    commands = []
+
+    async def spawn(command, **kwargs):
+        commands.append(command)
+        raise RuntimeError("spawn captured")
+
+    runtime._spawn = spawn
+    for target in (older, newer):
+        with pytest.raises(RuntimeError, match="spawn captured"):
+            asyncio.run(runtime.start(target, timeout=1))
+    assert "--lifecycle-state-compatibility" not in commands[0]
+    assert commands[1][commands[1].index("--lifecycle-state-compatibility") + 1] == cancellation

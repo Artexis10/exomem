@@ -491,6 +491,8 @@ class Supervisor:
             "last_transition": self.last_transition,
             # Read by the staging operator, which refuses before it stages a release this supervisor cannot run.
             "upgrade_blocker": upgrade_blocker(),
+            "lifecycle_state_compatibility": list(lifecycle_state_compatibility_ids()),
+            "required_lifecycle_state_compatibility": list(required_lifecycle_state_compatibility_ids()),
             "worker_restarts": {
                 "in_window": len(self._recent_restarts()),
                 "limit": self.restart_limit,
@@ -653,7 +655,8 @@ class Supervisor:
         return declared(target)
 
     async def upgrade(
-        self, target: dict[str, Any] | None, *, resume: bool = False
+        self, target: dict[str, Any] | None, *, resume: bool = False,
+        lifecycle_state_compatibility: Any = None,
     ) -> dict[str, Any]:
         if self.lock.locked():
             return {"ok": False, "error": "an upgrade is already in progress"}
@@ -684,9 +687,17 @@ class Supervisor:
                 target = pending["target"]
             if (blocker := upgrade_blocker()) is not None:
                 return {"ok": False, "error": blocker}
+            operator_support = lifecycle_state_compatibility
+            if not isinstance(operator_support, list) or not all(isinstance(item, str) for item in operator_support):
+                operator_support = []
+            if set(required_lifecycle_state_compatibility_ids()) - set(operator_support):
+                return {"ok": False, "error": "use a compatible managed upgrade operator for the active artifact formats"}
             try:
                 target = await self.runtime.inspect(target)
-                self._migration_declared(target)
+                prepare = getattr(self.runtime, "cancellation_cleanup_required", None)
+                cleanup = prepare is not None and prepare(target)
+                if not cleanup:
+                    self._migration_declared(target)
             except Exception as error:  # noqa: BLE001 - reject candidate failures before changing admission
                 log.warning("refusing managed upgrade target: %s", error)
                 return {
@@ -697,7 +708,10 @@ class Supervisor:
             # still serving. The transition is in progress from here, which is
             # what a polling operator has to be able to see.
             self.phase = "upgrading"
-            handoff, standby = await self._warm_standby(target, resume=resume)
+            if cleanup:
+                handoff, standby = {"standby": "unsupported", "reason": "current-runtime upload cleanup required"}, None
+            else:
+                handoff, standby = await self._warm_standby(target, resume=resume)
             if handoff.get("standby") in {"discarded", "discard_failed"}:
                 # A rejected candidate must not turn a serving worker into a cold start.
                 self.phase = "ready"
@@ -754,7 +768,11 @@ class Supervisor:
                     # own gate's to refuse, failing the upgrade past the stop
                     # instead of refusing it here.
                     try:
-                        migrate, reason = self._migration_declared(target)
+                        if cleanup:
+                            # Cleanup precedes target admission; all other incompatibilities were checked above.
+                            migrate, reason = False, "current-runtime upload cleanup required"
+                        else:
+                            migrate, reason = self._migration_declared(target)
                     except Exception:  # noqa: BLE001 - pre-stop refusal keeps the serving worker
                         compatibility_refused = True
                         raise
@@ -763,6 +781,16 @@ class Supervisor:
                     self.records.phase("stopping")
                     await self.runtime.stop(timeout=deadline.remaining(STOP_ALLOWANCE_SECONDS))
                     stopped_at = time.monotonic()
+                    if cleanup:
+                        self.records.phase("preparing", worker_pid=0)
+                        await self.runtime.cleanup_cancellations(
+                            self.records.active() or self.initial_target,
+                            timeout=deadline.remaining(MIGRATION_SECONDS),
+                        )
+                        # Inspection cached the refusal before cleanup changed the manifest.
+                        target = await self.runtime.inspect(target)
+                        migrate, reason = self._migration_declared(target)
+                        handoff["upload_cleanup"] = "complete"
                     # The migrator is the only writer between the two workers,
                     # and it runs only when the target declares a state
                     # migration or a collections step. A skipped step is
@@ -1195,6 +1223,25 @@ def vault_state_verdict(vault: Path | str) -> dict[str, str]:
         }
 
 
+def lifecycle_state_compatibility_ids() -> tuple[str, ...]:
+    """The lifecycle formats this launcher and its installed operator both implement."""
+    from .artifact_lifecycle import LIFECYCLE_IDS
+    from .service_upgrade import lifecycle_state_compatibility_ids as operator_ids
+
+    return tuple(sorted(set(LIFECYCLE_IDS) & set(operator_ids())))
+
+
+def required_lifecycle_state_compatibility_ids() -> tuple[str, ...]:
+    from . import state_migration
+    from .artifact_lifecycle import LIFECYCLE_IDS
+
+    vault = os.environ.get("EXOMEM_VAULT_PATH", "")
+    if not vault:
+        return ()
+    recorded = state_migration.recorded_descriptor_ids(Path(vault)) or ()
+    return tuple(sorted(set(recorded) & set(LIFECYCLE_IDS)))
+
+
 def upgrade_blocker() -> str | None:
     """Why this supervisor cannot run an upgrade on the vault's state, with the fix, or None.
 
@@ -1274,6 +1321,8 @@ class WorkerRuntime:
             f"{socket_path.stem}-standby{socket_path.suffix}"
         )
         self.standby_capable = False
+        #: Each inspected release's accepted lifecycle launch arguments, by (interpreter, version).
+        self._lifecycle_formats: dict[tuple[str, str], frozenset[str]] = {}
         # The exact verified candidate, its optional state support, its store schema ceiling,
         # the offline migrations its own migrator runs and its own state verdict.
         self._verified_state_compatibility: tuple[
@@ -1490,6 +1539,13 @@ class WorkerRuntime:
             "except Exception:\n"
             "    store_schema = None\n"
             + _STATE_DECLARATIONS_PROBE
+            # The lifecycle formats the target's worker accepts as launch arguments; a release
+            # before the argument accepts none, so its command must never carry one.
+            + "try:\n"
+            + "    from exomem.artifact_lifecycle import LIFECYCLE_IDS as _lifecycle_ids\n"
+            + "    lifecycle_formats = sorted(_lifecycle_ids)\n"
+            + "except ImportError:\n"
+            + "    lifecycle_formats = []\n"
             # The target's verdict on this vault's state, computed by the target's own
             # release: the supervisor never interprets format ids itself, so a launcher
             # that predates a recorded format still starts the worker that wrote it.
@@ -1503,7 +1559,8 @@ class WorkerRuntime:
             + 'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
             '"standby":standby,"state_descriptors":descriptors,'
             '"supported_state_compatibility":compatibility,"store_schema":store_schema,'
-            '"offline_migrations":migrations,"state_verdict":state_verdict}))'
+            '"offline_migrations":migrations,"state_verdict":state_verdict,'
+            '"lifecycle_formats":lifecycle_formats}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -1560,6 +1617,13 @@ class WorkerRuntime:
             # verdict, leaves the supervisor's own read as the fallback.
             verdict = None
         self.standby_capable = actual.get("standby") is True
+        formats = actual.get("lifecycle_formats")
+        # Kept per exact release: a restart of an older active worker must not inherit a newer target's.
+        self._lifecycle_formats[(interpreter, version)] = (
+            frozenset(formats)
+            if isinstance(formats, list) and all(isinstance(entry, str) and entry for entry in formats)
+            else frozenset()
+        )
         self._verified_state_compatibility = (
             (interpreter, version, tuple(descriptors)),
             frozenset(compatibility),
@@ -1630,6 +1694,47 @@ class WorkerRuntime:
             await self.client.aclose()
             self.client = None
         remove_stale_socket(self.socket_path)
+
+    def cancellation_cleanup_required(self, target: dict[str, Any]) -> bool:
+        """Permit current-runtime preparation only for the temporary cancellation format."""
+        from . import state_migration
+        from .collection_store.authority import required_state_compatibility_ids
+        from .governance import raw_protection
+
+        verified = self._verified_for(target)
+        vault = os.environ.get("EXOMEM_VAULT_PATH", "")
+        if verified is None or not vault:
+            return False
+        root = Path(vault)
+        recorded = state_migration.recorded_descriptor_ids(root) or ()
+        cancellation = state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID
+        _, optional = state_migration.partition_state_descriptor_ids(recorded)
+        # Only a recorded format the target lacks needs cleanup; every other upgrade skips the store reads.
+        if cancellation not in optional or cancellation in verified[1]:
+            return False
+        required = optional | required_state_compatibility_ids(root) | raw_protection.required_compatibility(root)
+        missing = required - verified[1]
+        if missing != {cancellation}:
+            raise ValueError("candidate lacks other required state formats")
+        _require_store_schema(root, verified[2])
+        return True
+
+    async def cleanup_cancellations(self, active: dict[str, Any], timeout: float) -> None:
+        """Run the active release's cleanup after owned-worker exit, before target admission."""
+        vault = os.environ.get("EXOMEM_VAULT_PATH", "")
+        if not vault or not Path(vault).is_absolute():
+            raise ValueError("managed service requires its installed absolute vault binding")
+        deadline = Deadline(timeout)
+        command = [
+            active["python"], "-I", "-m", "exomem", "maintain", "--vault", vault,
+            "--migrate-state", "--offline", "--cleanup-held-upload-cancellations",
+            "--deadline-monotonic", str(time.monotonic() + timeout), "--json",
+        ]
+        await self._spawn(command)
+        await asyncio.wait_for(self.child.wait(), deadline.remaining(timeout))
+        if self.child.returncode != 0:
+            raise RuntimeError("current-runtime held-upload cleanup remains incomplete")
+        await self.stop(timeout=deadline.remaining(STOP_ALLOWANCE_SECONDS))
 
     async def migrate(self, target: dict[str, Any], timeout: float) -> None:
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
@@ -1773,19 +1878,7 @@ class WorkerRuntime:
         self.replacement_waiting = "unreachable"
         remove_stale_socket(self.socket_path)
         await self._spawn(
-            [
-                target["python"],
-                "-I",
-                "-m",
-                "exomem.service_manager",
-                "worker",
-                "--socket",
-                str(self.socket_path),
-                "--host",
-                self.host,
-                "--port",
-                str(self.port),
-            ]
+            self._worker_command(target, self.socket_path, standby=False)
         )
         self.client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=str(self.socket_path), retries=0),
@@ -1832,6 +1925,9 @@ class WorkerRuntime:
         ]
         if standby:
             command.append("--standby")
+        accepted = self._lifecycle_formats.get((target["python"], target["version"]), frozenset())
+        for format_id in sorted(set(lifecycle_state_compatibility_ids()) & accepted):
+            command.extend(["--lifecycle-state-compatibility", format_id])
         return command
 
     async def _probe(self, client: Any, target: dict[str, Any]) -> dict[str, Any]:
@@ -2149,6 +2245,7 @@ async def control_server(path: Path, supervisor: Supervisor) -> asyncio.Server:
                         supervisor.upgrade(
                             request.get("target"),
                             resume=command == "resume",
+                            lifecycle_state_compatibility=request.get("lifecycle_state_compatibility"),
                         )
                     )
 
@@ -2334,6 +2431,7 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--socket", type=Path, required=True)
     worker.add_argument("--host", required=True)
     worker.add_argument("--port", type=int, required=True)
+    worker.add_argument("--lifecycle-state-compatibility", action="append", default=None)
     worker.add_argument(
         "--standby",
         action="store_true",
@@ -2347,6 +2445,9 @@ def main(argv: list[str] | None = None) -> int:
 
         # First, before anything can spawn a child that would inherit it.
         local_ingress.claim_proof_key()
+        from . import artifact_lifecycle
+
+        artifact_lifecycle.claim_launcher_support(args.lifecycle_state_compatibility)
         from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
         # Native pools keep their first-import limits, even after environment changes.

@@ -32,6 +32,16 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 - [ ] 4.1 Update this design for history-aware read resolution under the Decision 5 constraints, choose the history store, and obtain review before implementation.
 - [ ] 4.2 Archive this change with shipped evidence, or withdraw Phase 2 with the 3.1 count as its reason.
 
+## 5. Source pointer custody
+
+A move of raw bytes beside an unpaired card left the card and its referrers naming a missing path. This group makes a move rewrite prose path mentions, makes pointer drift auditable, and makes it repairable through the same reversible history. Decisions 1 to 3 stand: no append-only byte changes, and the history entry gains one closed key, `pointer`.
+
+- [x] 5.1 Rename the exact vault path in the body of each page that cites a moved file, found through the lexical catalogue; leave Source and Evidence pages as captured and report them; prove the move and the reclassification preview in `tests/test_source_pointer_custody.py` and `tests/test_reclassify_source.py`.
+- [x] 5.2 Add the `source_pointer_drift` audit category over `evidence_file`, `data_file` and the nested `artifact_path` pointers, from file metadata only, with a one-candidate proposal and a fix that succeeds; prove it in `tests/test_source_pointer_custody.py` and the restricted-caller twin in `tests/test_derived_identifier_egress.py`.
+- [x] 5.3 Add `artifact_path` to reclassification as a pointer repair that records and reverts the previous values, and refuses a missing or mismatching target; prove repair and revert in `tests/test_source_pointer_custody.py`.
+- [x] 5.4 Write the unclassified kind, not `other`, in the sidecar of a binary artifact; prove it in `tests/test_preserve.py`.
+- [ ] 5.5 After release, run the audit category against the owner's vault and repair each card that names a missing path; record the finding count before and after.
+
 ## Phase 1 released delivery evidence
 
 [PR #1632](https://github.com/Artexis10/exomem/pull/1632) merged as

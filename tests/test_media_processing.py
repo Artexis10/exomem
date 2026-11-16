@@ -387,7 +387,7 @@ def test_partial_pending_sidecar_is_canonically_repaired_with_prose(vault: Path)
     frontmatter, body = _frontmatter_and_body(sidecar)
     assert uuid.UUID(str(frontmatter["exomem_id"]))
     assert frontmatter["title"] == "Evidence: partial.m4a"
-    assert frontmatter["source_type"] == "other"
+    assert frontmatter["source_type"] == "unclassified"
     assert frontmatter["captured"]
     assert isinstance(frontmatter["tags"], list)
     assert frontmatter["ingested_into"] == []
@@ -1159,6 +1159,26 @@ def test_a_busy_refusal_does_not_move_the_cursor_past_the_only_media_file(
 
     assert calls == ["only.m4a", "only.m4a"]
     assert only.with_name(only.name + ".md").exists()
+
+
+def test_a_bulk_reconcile_that_meets_a_busy_vault_returns_the_transient_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bulk reconcile command, which asks for transient errors, met a store-mode vault
+    boundary held by another write and got a raw exception with no code or remediation."""
+    from exomem.vault_store.projector import BoundaryBusy
+
+    media_processing = _media_processing()
+    _drop_media(vault, "busy.m4a")
+
+    def busy(_binary: Path) -> None:
+        raise BoundaryBusy("vault_store_media_sidecar_commit: another holder has the boundary")
+
+    with pytest.raises(OpError) as refused:
+        media_processing.reconcile_all_media(
+            vault, limit=10, reconcile_one=busy, propagate_transient_errors=True
+        )
+    assert refused.value.code == "MUTATION_BUSY" and refused.value.remediation
 
 
 def test_the_rotation_reexamines_the_only_media_file_after_its_sidecar_is_lost(

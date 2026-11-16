@@ -798,10 +798,15 @@ def reconcile_all_media(
             attempted += 1
             try:
                 reconcile_one(binary)
-            except BoundaryBusy:
+            except BoundaryBusy as busy:
                 # Ordinary contention in a store-mode vault: the cursor stops before this file.
                 if propagate_transient_errors:
-                    raise
+                    raise OpError(
+                        "MUTATION_BUSY",
+                        f"another write holds the vault, so {binary.name} was not reconciled",
+                        "Run this command again once the current write finishes.",
+                        details={"committed": False},
+                    ) from busy
                 held = True
             except OpError as error:
                 if error.code in _TRANSIENT_COORDINATION_CODES:
@@ -958,9 +963,9 @@ def _capture_owned_shape_is_valid(frontmatter: dict[str, object]) -> bool:
     validity rather than for particular values.
 
     That distinction used to be absent. Both shape checks required
-    `source_type: other`, which is the Evidence sidecar's hard-coded value and
-    which no real Source has, so a media page captured as a Source failed every
-    check and was rebuilt from scratch — losing its title, kind, domain,
+    `source_type: other`, the value Evidence sidecars then hard-coded (they now
+    record the unclassified kind) and which no real Source has, so a media page
+    captured as a Source failed every check and was rebuilt from scratch — losing its title, kind, domain,
     projects and tags, and having its body demoted under `## Preserved notes`.
     A non-empty `tags` list was required for the same reason, and did the same
     to a capture that legitimately has none.

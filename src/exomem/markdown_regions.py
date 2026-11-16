@@ -237,10 +237,22 @@ class LocalLink:
     image: bool  # written `![...](...)`
 
 
-# One plain parser for link destinations. The region parser above is customised
-# to locate code at exact offsets and is not reused, so a link parse never pays
-# for that bookkeeping.
+# One plain parser for link destinations and code text. The region parser above is
+# customised to locate code at exact offsets and is not reused, so these parses never
+# pay for that bookkeeping.
 _LINK_PARSER = MarkdownIt("commonmark")
+
+
+def inline_code(text: str) -> tuple[str, ...]:
+    """The text of each inline code span in `text`, in source order, as CommonMark reads it."""
+    if "`" not in text:
+        return ()
+    return tuple(
+        child.content
+        for token in _LINK_PARSER.parse(text)
+        for child in token.children or ()
+        if child.type == "code_inline"
+    )
 
 
 def local_links(text: str) -> tuple[LocalLink, ...]:

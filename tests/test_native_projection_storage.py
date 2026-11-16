@@ -348,7 +348,7 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
         selected = dict.fromkeys(values, True)
         columns, decode = native_rows.prepare_dense_selection(conn, current, selected, max_bytes=budget,
                                                               check=lambda: None, semantic_fields={"when"})
-        row = conn.execute(f"SELECT {columns} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
+        row = conn.execute(f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
         actual = decode(row)
         assert set(actual) == set(values)
         assert actual["label"] == values["label"] and actual["other"] == values["other"]
@@ -356,7 +356,7 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
         conn.execute(f"UPDATE {plan.table_name} SET values_bytes=?", (budget - 1,))
         columns, decode = native_rows.prepare_dense_selection(conn, current, selected, max_bytes=budget - 1,
                                                               check=lambda: None, semantic_fields={"when"})
-        row = conn.execute(f"SELECT {columns} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
+        row = conn.execute(f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
         with pytest.raises(TypedStorageError, match="budget"):
             decode(row)
         # A compact frame must not use the larger caller budget to amplify a corrupt recorded extent.
@@ -370,7 +370,7 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
         for semantic in (frozenset(), {"when"}):
             columns, decode = native_rows.prepare_dense_selection(conn, current, {"when": True}, max_bytes=256 * 1024,
                                                                   check=lambda: None, semantic_fields=semantic)
-            row = conn.execute(f"SELECT {columns} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
+            row = conn.execute(f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
             with pytest.raises(TypedStorageError, match="budget"):
                 decode(row)
         with pytest.raises(TypedStorageError, match="budget"):
@@ -412,7 +412,7 @@ def test_a_warm_dense_scan_returns_and_refuses_exactly_what_the_shared_decoders_
         def scan():
             columns, decode = native_rows.prepare_dense_selection(conn, current, dict.fromkeys(fields, True), max_bytes=4096,
                                                                   check=lambda: None, semantic_fields={"when"})
-            return decode, f"SELECT {columns} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id WHERE i.row_id=?"
+            return decode, f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id WHERE i.row_id=?"
 
         def shared(row_id):
             return native_rows.decode_row(conn, current, conn.execute(stored, (row_id,)).fetchone())

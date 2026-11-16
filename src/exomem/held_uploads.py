@@ -26,6 +26,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -38,8 +39,9 @@ from pathlib import Path
 from typing import BinaryIO
 
 from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
-from . import local_ingress, private_state
+from . import private_state
 from .governance import principal
 
 #: The `download_url` scheme of a held handle. Never fetched.
@@ -60,6 +62,8 @@ _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _CHUNK = 1024 * 1024
 UNAVAILABLE_REASON = "no redeemable held upload for this handle"
 _now = time.time
+# This suffix is the closed private-store protocol for committed cancellation.
+_CANCELLING_SUFFIX = ".cancelling.json"
 
 
 class HeldUploadError(Exception):
@@ -107,6 +111,9 @@ def _bindings() -> tuple[str, ...]:
     bound = principal_binding(principal.effective_principal())
     if bound is not None:
         bindings.append(bound)
+    # Imported here: the tool schema reads this module's limits, and CLI prompt hooks must not load the MCP stack.
+    from . import local_ingress
+
     grant = local_ingress.current_grant()
     if grant is not None and grant.session_id:
         bindings.append(f"mcp-local:{grant.session_id}")
@@ -133,9 +140,37 @@ def _unavailable() -> HeldUploadError:
 _remove = private_state.remove
 
 
+def _finish_cancellation(store: Path, key: str, marker: Path) -> None:
+    """Keep the cleanup owner and quota charge until payload removal is durable."""
+    if (store / f"{key}.json").exists():
+        raise OSError("conflicting upload ownership")
+    private_state.sync_directory(store)
+    (store / f"{key}.bin").unlink(missing_ok=True)
+    private_state.sync_directory(store)
+    marker.unlink()
+    private_state.sync_directory(store)
+
+
+def marker_key(marker: Path) -> str | None:
+    """The storage key a cancellation marker names, or None for a file this store never wrote."""
+    key = marker.name.removesuffix(_CANCELLING_SUFFIX)
+    # Storage keys have the closed SHA-256 hex filename format; malformed state owns no other path.
+    if len(key) == 64 and all(character in "0123456789abcdef" for character in key):
+        return key
+    return None
+
+
 def _sweep(store: Path, now: float) -> None:
     """Drop expired holds and anything a crashed hold or claim left behind."""
     for meta_path in store.glob("*.json"):
+        if meta_path.name.endswith(_CANCELLING_SUFFIX):
+            key = marker_key(meta_path)
+            if key is not None:
+                try:
+                    _finish_cancellation(store, key, meta_path)
+                except OSError:
+                    pass  # Its surviving marker retains the quota charge, including after expiry.
+            continue
         try:
             expires = float(json.loads(meta_path.read_text(encoding="utf-8"))["expires"])
         except (OSError, ValueError, KeyError, TypeError):
@@ -223,6 +258,8 @@ def hold(
         if _SECRET.fullmatch(secret) is None:
             raise HeldUploadError("INVALID_UPLOAD", "a hold secret is 43 URL-safe characters")
         key = _key(secret)
+        if (store / f"{key}{_CANCELLING_SUFFIX}").exists():
+            raise _unavailable()  # A committed cancellation still owns this payload identity.
         fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
         part = Path(raw)
         digest = hashlib.sha256()
@@ -273,6 +310,98 @@ def hold(
             "file_name": name or f"held-{key[:16]}",
         },
     }
+
+
+def is_cancellable_reference(value: object) -> bool:
+    """Whether a value has the held-upload handle form; it proves no ownership."""
+    return is_held_reference(value) and _SECRET.fullmatch(value[len(HELD_SCHEME):]) is not None
+
+
+def cancel(vault_root: Path, reference: str) -> int:
+    """Cancel owned waiting bytes only after the launcher has settled older workers.
+
+    The format activates only once this session's ownership is proven, so unknown,
+    foreign and malformed handles never add a downgrade step.
+    """
+    from . import artifact_lifecycle, state_migration
+
+    bindings = _bindings()
+    if not bindings or not is_cancellable_reference(reference):
+        raise _unavailable()
+    key = _key(reference[len(HELD_SCHEME):])
+    try:
+        # A lock-free read: `_cancel` proves ownership again under the claim boundary.
+        _owned(_store(vault_root), key, bindings)
+    except OSError:
+        raise _unavailable() from None
+    try:
+        artifact_lifecycle.activate_cancellation(vault_root)
+    except TimeoutError:
+        raise HeldUploadError("HELD_UPLOAD_BUSY", "upload ownership is busy; retry this handle") from None
+    except state_migration.StateMigrationOfflineRequired:
+        raise HeldUploadError(
+            "HELD_UPLOAD_LIFECYCLE_REQUIRED",
+            "update the managed launcher offline before cancelling held uploads",
+        ) from None
+    except OSError:
+        raise HeldUploadError(
+            "HELD_UPLOAD_CANCELLATION_INCOMPLETE", "upload cleanup could not be made durable; retry this handle",
+        ) from None
+    return _cancel(vault_root, reference)
+
+
+def _owned(store: Path, key: str, bindings: tuple[str, ...]) -> tuple[Path, Path, int]:
+    """Return the owning metadata, its marker path and charge, or raise unavailable.
+
+    A surviving marker is owned work to finish; an active record must be unexpired with its payload.
+    """
+    active = store / f"{key}.json"
+    marker = store / f"{key}{_CANCELLING_SUFFIX}"
+    metadata = marker if marker.exists() else active
+    try:
+        record = json.loads(metadata.read_text(encoding="utf-8"))
+        bound = str(record["binding"]).encode("utf-8")
+        size = record["size"]
+        expires = float(record["expires"])
+    except (OSError, ValueError, KeyError, TypeError):
+        raise _unavailable() from None
+    if not any(hmac.compare_digest(bound, binding.encode("utf-8")) for binding in bindings):
+        raise _unavailable()
+    if type(size) is not int or size < 0 or not math.isfinite(expires) or expires <= 0:
+        raise _unavailable()
+    if metadata is active and (expires <= _now() or not (store / f"{key}.bin").is_file()):
+        raise _unavailable()
+    return metadata, marker, size
+
+
+def _cancel(vault_root: Path, reference: str) -> int:
+    """Cancel one owned unclaimed hold; the lifecycle-admitted leaf owns exposure.
+
+    Return only its confirmed quota charge. Never inspect unrelated uploads or
+    wait for the claim lock. Unavailable and failed operations claim no release.
+    """
+    bindings = _bindings()
+    if not bindings or not is_cancellable_reference(reference):
+        raise _unavailable()
+    key = _key(reference[len(HELD_SCHEME):])
+    try:
+        store = _store(vault_root)
+        with FileLock(store / ".lock", timeout=0):
+            metadata, marker, size = _owned(store, key, bindings)
+            if metadata != marker:
+                # Windows requires a writable handle to flush the record; its contents stay unchanged.
+                with metadata.open("r+b") as source:
+                    os.fsync(source.fileno())
+                os.rename(metadata, marker)
+            _finish_cancellation(store, key, marker)
+            return size
+    except FileLockTimeout:
+        raise HeldUploadError("HELD_UPLOAD_BUSY", "the upload claim is busy; retry shortly") from None
+    except OSError:
+        raise HeldUploadError(
+            "HELD_UPLOAD_CANCELLATION_INCOMPLETE",
+            "upload cancellation could not confirm cleanup; retry this handle",
+        ) from None
 
 
 def redeem(

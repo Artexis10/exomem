@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from . import call_spans, memory_refs, query_data, record_item_cache, vault
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+from .query_compat import DEFAULT_DATE_COLUMN
 
 _MARKER = re.compile(rb"<!--\s*exomem-record-id:\s*([0-9a-fA-F-]{36})\s*-->")
 _HEADING = re.compile(rb"^(#{1,6})\s+(.+?)\s*(?:\r?\n|$)")
@@ -2367,7 +2368,7 @@ def _field_is_link(spec: collections.FieldSpec) -> bool:
     return spec.type == "array" and spec.items is not None and spec.items.type == "link"
 
 
-def _staged_store_projection_safe(
+def _selection_roots(
     manifest: collections.CollectionManifest,
     *,
     filters: list[dict] | None,
@@ -2378,38 +2379,143 @@ def _staged_store_projection_safe(
     aggregate: str | None,
     expand_children: bool,
     expand_child: str | None,
-) -> bool:
-    """Select an optimization only; existing validation owns every public refusal."""
+) -> set[str] | None:
+    """The top-level columns a store query's selection reads, when link projection changes none of them.
+
+    None where it could: selection then needs the projected rows. This selects an optimization only;
+    existing validation owns every public refusal.
+    """
     system = _profile_system_fields(manifest)
     fields = manifest.schema.fields
-    if (aggregate is not None or expand_children or expand_child is not None
-            or manifest.child_tables or set(fields) & system):
-        return False
+    if expand_children or expand_child is not None or manifest.child_tables or set(fields) & system:
+        return None
     roots: set[str] = set()
-    for column in (sort_by, date_column):
+    columns = [sort_by, date_column]
+    if aggregate is not None:
+        if type(aggregate) is not str or aggregate.strip() == "profile":
+            return None  # a profile reads every column
+        columns.append(aggregate.split(":", 1)[1] if ":" in aggregate else None)
+    for column in columns:
         if column is not None:
-            if type(column) is not str or not column:
-                return False
-            roots.add(column.split(".", 1)[0])
-    if (date_from or date_to) and date_column is None:
-        roots.add("date")
+            if type(column) is not str or not column.strip():
+                return None
+            roots.add(column.strip().split(".", 1)[0])
+    if date_column is None and (date_from or date_to or (aggregate and DEFAULT_DATE_COLUMN in fields)):
+        roots.add(DEFAULT_DATE_COLUMN)  # it bounds dates and orders `latest`
     if filters is not None:
         if not isinstance(filters, list):
-            return False
+            return None
         for predicate in filters:
             if not isinstance(predicate, dict):
-                return False
+                return None
             column = predicate.get("column")
             if type(column) is not str or not column:
-                return False
+                return None
             op = predicate.get("op", query_data.DEFAULT_OP)
             if type(op) is not str or op not in query_data._OPS:
-                return False
+                return None
             roots.add(column.split(".", 1)[0])
     # Reuse the field schema's closed scalar types; arrays, objects and links can change selection.
     scalars = collections._PRESENTATION_SCALAR_TYPES - {"link"}
-    return all(name in system or (name in fields and fields[name].type in scalars)
-               for name in roots)
+    if all(name in system or (name in fields and fields[name].type in scalars) for name in roots):
+        return roots
+    return None
+
+
+def _continuation_offset(
+    continuation: str | None, manifest: collections.CollectionManifest, snapshot: str, cursor_query: dict,
+) -> int:
+    """The offset a continuation resumes at, refused unless it names this query at this snapshot."""
+    if not continuation:
+        return 0
+    token = _decode_continuation(continuation)
+    if token.get("collection_id") != manifest.collection_id:
+        raise collections.CollectionError(
+            "INVALID_RECORD_CONTINUATION", "continuation does not match query"
+        )
+    if token.get("snapshot") != snapshot:
+        raise collections.CollectionError("STALE_RECORD_SNAPSHOT", "canonical source changed")
+    if not _continuation_query_matches(token.get("query"), cursor_query):
+        raise collections.CollectionError(
+            "INVALID_RECORD_CONTINUATION", "continuation does not match query"
+        )
+    return token["offset"]
+
+
+def _selected_query(
+    adapter: Any,
+    manifest: collections.CollectionManifest,
+    *,
+    filters: list[dict] | None,
+    columns: list[str] | None,
+    sort_by: str | None,
+    descending: bool,
+    limit: int | None,
+    aggregate: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    date_column: str | None,
+    string_columns: frozenset[str],
+    continuation: str | None,
+    cursor_query: dict,
+    staged_projector: Callable[[Mapping[str, Any]], dict[str, Any]] | None,
+    item_id_property: str,
+) -> tuple[AdapterSnapshot, int, query_data.QueryDataResult] | None:
+    """Answer a store query by selecting its rows and rebuilding only the rows it returns.
+
+    The selection decides every filter, sort and aggregate with the evaluator's own primitives over
+    raw values, which `_selection_roots` proves projection leaves unchanged; the returned rows, the
+    default columns and a `latest` row are built by the code that builds them on the whole read. The
+    answer is therefore the whole read's. None where only the whole read can answer.
+    """
+    from .query_engine import legacy, runtime
+
+    def rows_of(row_ids):
+        # `_selection_roots` admits no child table, so presentation leaves these values as they are.
+        parsed = store.records(row_ids)
+        return parsed, _query_rows(parsed.records, False, selected_child=None,
+                                   include_item_version=adapter.mutable, item_id_property=item_id_property)
+
+    def inferred(row_ids):
+        # The default columns are the leading rows' keys after projection, as the whole read infers them.
+        return query_data._infer_columns(rows_of(row_ids)[1], staged_projector)
+
+    try:
+        with adapter.selecting() as store:
+            if store is None:
+                return None
+            offset = _continuation_offset(continuation, manifest, store.snapshot, cursor_query)
+            arguments = {"filters": filters, "sort_by": sort_by, "descending": descending, "limit": limit,
+                         "offset": offset, "aggregate": aggregate, "date_from": date_from, "date_to": date_to,
+                         "date_column": date_column, "string_columns": string_columns}
+            cols = None
+            if date_column is None and (date_from or date_to or aggregate) and DEFAULT_DATE_COLUMN in store.fields:
+                # The default date column applies only when the default columns hold it.
+                cols = inferred(store.select(legacy.normalize(columns_available=(), limit=1),
+                                             lead=query_data.INFERENCE_ROWS).leading_row_ids)
+            infer = cols is None and (bool(aggregate) or not columns)
+            selection = store.select(legacy.normalize(columns_available=cols or (), **arguments),
+                                     lead=query_data.INFERENCE_ROWS if infer else 0)
+            if infer:
+                cols = inferred(selection.leading_row_ids)
+            common = {"path": manifest.storage.source, "format": manifest.storage.strategy,
+                      "total_rows": selection.total_rows, "total_matched": selection.total_matched,
+                      "warnings": list(selection.warnings)}
+            if aggregate:
+                parsed, _ = rows_of(())
+                result = selection.aggregate
+                if selection.latest_row_id is not None:
+                    result = {**result, "row": rows_of((selection.latest_row_id,))[1][0]}
+                return parsed, offset, query_data.present_aggregate(result, columns=cols, **common)
+            parsed, rows = rows_of(selection.row_ids)
+            return parsed, offset, query_data.present_rows(
+                list(zip(selection.row_ids, rows, strict=True)), offset=offset, columns=columns,
+                available=cols or [], project_values=staged_projector, **common)
+    except runtime.QueryError as error:
+        if error.code in {"QUERY_TIMEOUT", "QUERY_CANCELLED"}:
+            raise runtime.records_refusal(error, adapter.deadline) from error
+        # Busy readers, a value past the decode cap, or a refusal the whole read reports in its own words.
+        return None
 
 
 def _late_link_projection_safe(
@@ -2463,7 +2569,7 @@ def _late_link_projection_safe(
     roots: set[str] = set()
     if sort_by:
         roots.add(sort_by.split(".", 1)[0])
-    effective_date_column = date_column or ("date" if (date_from or date_to) else None)
+    effective_date_column = date_column or (DEFAULT_DATE_COLUMN if (date_from or date_to) else None)
     if effective_date_column:
         roots.add(effective_date_column.split(".", 1)[0])
     return not any(
@@ -2648,31 +2754,20 @@ def query_collection(
         expand_children=expand_children,
         expand_child=expand_child,
     )
-    use_staged_projection = (
-        stage_store_projection and not late_link_projection and project_values is not None
-        and _staged_store_projection_safe(
+    roots = (
+        _selection_roots(
             manifest, filters=filters, sort_by=sort_by, date_column=date_column,
             date_from=date_from, date_to=date_to, aggregate=aggregate,
             expand_children=expand_children, expand_child=expand_child,
         )
+        if stage_store_projection and not late_link_projection and project_values is not None else None
     )
+    use_staged_projection = roots is not None and aggregate is None
     adapter = load_adapter(
         vault_root,
         manifest,
         authorize_path=authorize_path,
         project_values=None if use_late_projection or use_staged_projection else project_values,
-    )
-    parsed = adapter.read()
-    _enforce_selected_child_cap(parsed.records, selected_child, manifest)
-    parsed = replace(
-        parsed,
-        records=tuple(
-            replace(
-                record,
-                values=_safe_presentation_values(record.values, manifest, project_child_value),
-            )
-            for record in parsed.records
-        ),
     )
     query: dict[str, Any] = {
         "filters": filters or [],
@@ -2690,28 +2785,7 @@ def query_collection(
     cursor_query = (
         query if view_provenance is None else {**query, "limit": limit, "view": view_provenance}
     )
-    offset = 0
-    if continuation:
-        token = _decode_continuation(continuation)
-        if token.get("collection_id") != manifest.collection_id:
-            raise collections.CollectionError(
-                "INVALID_RECORD_CONTINUATION", "continuation does not match query"
-            )
-        if token.get("snapshot") != parsed.snapshot:
-            raise collections.CollectionError("STALE_RECORD_SNAPSHOT", "canonical source changed")
-        if not _continuation_query_matches(token.get("query"), cursor_query):
-            raise collections.CollectionError(
-                "INVALID_RECORD_CONTINUATION", "continuation does not match query"
-            )
-        offset = token["offset"]
     profile = profile_for(manifest.semantic_profile)
-    rows = _query_rows(
-        parsed.records,
-        expand_children,
-        selected_child=selected_child,
-        include_item_version=adapter.mutable,
-        item_id_property=profile.item_id_property,
-    )
     string_columns = frozenset(name for name, spec in manifest.schema.fields.items() if spec.type == "string")
     effective_columns = columns
     if columns:
@@ -2719,87 +2793,128 @@ def query_collection(
         if adapter.mutable:
             identity_columns.append("item_version")
         effective_columns = list(dict.fromkeys([*columns, *identity_columns]))
-    if use_late_projection and project_values is not None:
-        result = _late_projected_result(
-            rows,
-            path=manifest.storage.source,
-            format=manifest.storage.strategy,
-            sort_by=sort_by,
-            descending=descending,
-            limit=limit,
-            offset=offset,
-            date_from=date_from,
-            date_to=date_to,
-            date_column=date_column,
-            columns=effective_columns,
-            project_values=project_values,
-            string_columns=string_columns,
+    # Staged projection runs in the evaluator, outside raw materialization.
+    staged_projector = (call_spans.timed("store.stage_project_values")(project_values)
+                        if use_staged_projection else None)
+    if (begin_query := getattr(adapter, "begin_query", None)) is not None:
+        begin_query()  # a store read is bounded by one Records query deadline
+    selected = None
+    if roots is not None and not roots & _profile_system_fields(manifest) and hasattr(adapter, "selecting"):
+        selected = _selected_query(
+            adapter, manifest, filters=filters, columns=effective_columns, sort_by=sort_by,
+            descending=descending, limit=limit, aggregate=aggregate, date_from=date_from, date_to=date_to,
+            date_column=date_column, string_columns=string_columns, continuation=continuation,
+            cursor_query=cursor_query, staged_projector=staged_projector,
+            item_id_property=profile.item_id_property,
         )
+    if selected is not None:
+        parsed, offset, result = selected
     else:
-        # Staged projection runs in the evaluator, outside raw materialization.
-        staged_projector = (call_spans.timed("store.stage_project_values")(project_values)
-                            if use_staged_projection else None)
-        result = query_data.evaluate_rows(
-            rows,
-            path=manifest.storage.source,
-            format=manifest.storage.strategy,
-            filters=filters,
-            columns=effective_columns,
-            sort_by=sort_by,
-            descending=descending,
-            limit=limit,
-            offset=offset,
-            aggregate=aggregate,
-            date_from=date_from,
-            date_to=date_to,
-            date_column=date_column,
-            string_columns=string_columns,
-            project_values=staged_projector,
+        parsed = adapter.read()
+        _enforce_selected_child_cap(parsed.records, selected_child, manifest)
+        parsed = replace(
+            parsed,
+            records=tuple(
+                replace(
+                    record,
+                    values=_safe_presentation_values(record.values, manifest, project_child_value),
+                )
+                for record in parsed.records
+            ),
         )
+        offset = _continuation_offset(continuation, manifest, parsed.snapshot, cursor_query)
+        rows = _query_rows(
+            parsed.records,
+            expand_children,
+            selected_child=selected_child,
+            include_item_version=adapter.mutable,
+            item_id_property=profile.item_id_property,
+        )
+        if use_late_projection and project_values is not None:
+            result = _late_projected_result(
+                rows,
+                path=manifest.storage.source,
+                format=manifest.storage.strategy,
+                sort_by=sort_by,
+                descending=descending,
+                limit=limit,
+                offset=offset,
+                date_from=date_from,
+                date_to=date_to,
+                date_column=date_column,
+                columns=effective_columns,
+                project_values=project_values,
+                string_columns=string_columns,
+            )
+        else:
+            result = query_data.evaluate_rows(
+                rows,
+                path=manifest.storage.source,
+                format=manifest.storage.strategy,
+                filters=filters,
+                columns=effective_columns,
+                sort_by=sort_by,
+                descending=descending,
+                limit=limit,
+                offset=offset,
+                aggregate=aggregate,
+                date_from=date_from,
+                date_to=date_to,
+                date_column=date_column,
+                string_columns=string_columns,
+                project_values=staged_projector,
+            )
     if aggregate is None and result.truncated and result.returned == 0:
         raise collections.CollectionError(
             "RECORD_RESPONSE_TOO_LARGE", "first result row exceeds the response cap"
         )
-    next_offset = offset + result.returned
-    next_token = None
-    if result.truncated:
-        next_token = _encode_continuation(
-            {
-                "collection_id": manifest.collection_id,
-                "snapshot": parsed.snapshot,
-                "query": cursor_query,
-                "offset": next_offset,
-            }
+    kept = result.rows
+    while True:
+        # The rows bound already holds the rows alone; the envelope and source list render around them,
+        # so the rendered page is the one the cap counts, and a page that overflows shrinks to fit.
+        truncated = result.truncated or len(kept) < len(result.rows)
+        next_token = None
+        if truncated:
+            next_token = _encode_continuation(
+                {
+                    "collection_id": manifest.collection_id,
+                    "snapshot": parsed.snapshot,
+                    "query": cursor_query,
+                    "offset": offset + len(kept),
+                }
+            )
+        response = RecordQueryResult(
+            collection_id=manifest.collection_id,
+            snapshot=parsed.snapshot,
+            rows=kept,
+            returned=len(kept),
+            total_matched=result.total_matched,
+            truncated=truncated,
+            continuation=next_token,
+            derived=True,
+            rendered="",
+            aggregate=result.aggregate,
+            query=query,
+            # Only the returned rows' sources: a list of every source grows with the
+            # collection and passes the response cap; the snapshot names the whole read.
+            source_versions=_source_versions_for_returned_rows(
+                parsed,
+                manifest,
+                kept,
+                item_id_property=profile.item_id_property,
+            ),
+            columns=tuple(result.columns),
+            view=view_provenance,
         )
-    response = RecordQueryResult(
-        collection_id=manifest.collection_id,
-        snapshot=parsed.snapshot,
-        rows=result.rows,
-        returned=result.returned,
-        total_matched=result.total_matched,
-        truncated=result.truncated,
-        continuation=next_token,
-        derived=True,
-        rendered="",
-        aggregate=result.aggregate,
-        query=query,
-        # Only the returned rows' sources: a list of every source grows with the
-        # collection and passes the response cap; the snapshot names the whole read.
-        source_versions=_source_versions_for_returned_rows(
-            parsed,
-            manifest,
-            result.rows,
-            item_id_property=profile.item_id_property,
-        ),
-        columns=tuple(result.columns),
-        view=view_provenance,
-    )
-    rendered = render_query_result(response, output_format=output_format)
-    if len(rendered.encode("utf-8")) > query_data.MAX_RESPONSE_BYTES:
-        raise collections.CollectionError(
-            "RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap"
-        )
-    return replace(response, rendered=rendered)
+        rendered = render_query_result(response, output_format=output_format)
+        size = len(rendered.encode("utf-8"))
+        if size <= query_data.MAX_RESPONSE_BYTES:
+            return replace(response, rendered=rendered)
+        if aggregate is not None or len(kept) <= 1:
+            raise collections.CollectionError(
+                "RECORD_RESPONSE_TOO_LARGE", "rendered query exceeds the response cap"
+            )
+        kept = kept[: max(1, min(len(kept) - 1, len(kept) * query_data.MAX_RESPONSE_BYTES // size))]
 
 
 @dataclass(frozen=True, slots=True)

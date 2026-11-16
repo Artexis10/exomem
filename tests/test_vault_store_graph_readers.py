@@ -1133,6 +1133,25 @@ def test_a_repeated_restricted_hub_read_looks_up_names_and_held_pages_once(store
     assert lookups[40] == lookups[20], lookups
 
 
+def test_a_restricted_hub_read_after_a_commit_evaluates_only_the_pages_whose_facts_changed(stored, writer):  # noqa: F811
+    """Defect: every restricted request decodes and evaluates every endpoint's facts, so the read after a
+    one-page commit grows with the hub's degree."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    work = {}
+    for links in (20, 40):
+        commit_linked(writer, links)
+        admission_sample(stored, "few withheld", "participants")  # fills what the commit changed
+        path, body = linked_page(1)
+        # A tag that no selector names, new to this round: an earlier round's text is rightly still known.
+        write.commit(writer, put(path, body.replace(b"cohort-1]", f"cohort-1, round-{links}]".encode())))
+        sample = admission_sample(stored, "few withheld", "participants")
+        assert sample["result_count"] >= links * 9 // 10
+        assert sample["subject_decodes"] == 1, sample
+        work[links] = sample["subject_decodes"], sample["membership_evaluations"]
+    assert work[40] == work[20], work
+
+
 def cpu_pressure():
     """The host's CPU stall share over the last ten seconds, or None where the kernel does not report it."""
     try:

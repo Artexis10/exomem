@@ -1,6 +1,6 @@
 # Design
 
-This design selects a managed original pool. It authorizes no implementation, live conversion, or cleanup by itself.
+This design selects a managed original pool and explicit held-upload cancellation. The operator authorized implementation and release; it authorizes no live conversion or cleanup of an existing archive.
 
 ## Context
 
@@ -174,4 +174,4 @@ Compare before and after through the same instrument and fixture. Show no per-fi
 
 One author owns the coupled implementation. One independent adversarial review covers both capabilities and their security boundaries. Run the protected-dataset owner/ungranted-reader workflow, independent revocation, exact export and restore, publication interruption, concurrent reuse, and cancellation races. Use the existing latency contract and alert route. No model evaluation is needed unless agent-facing wording changes model behavior.
 
-All implementation tasks remain unchecked. Live conversion and cleanup remain outside the authorized design work.
+Task boxes record evidenced work only. Live conversion and cleanup of an existing archive remain outside the authorized work.

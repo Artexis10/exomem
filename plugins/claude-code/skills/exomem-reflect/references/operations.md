@@ -607,6 +607,24 @@ cannot be undone.
 - **`preserve`** is text-only; binaries always go via the channels above. Every
   write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
 
+### Cancel waiting uploads
+
+`cancel_uploads(uploads=["exomem-held:..."])` releases waiting bytes that this
+authenticated session owns. Supply the `download_url` from each held upload.
+The operation accepts the existing held-upload batch limit and returns one
+outcome per reference, in input order. It does not cancel a stored filing.
+
+A confirmed `cancelled` outcome reports released bytes. An `unavailable`
+outcome gives no ownership or expiry detail. A failed outcome names the repair
+or retry action and claims no released capacity. Retry the same references
+after a busy or incomplete result. A lost acknowledgement can make a later
+retry return `unavailable`.
+
+The local CLI uses the same transfer operation through the local listener.
+It needs the token file and port of the holding client. Another client's
+token, a static REST key, or a fresh CLI owner cannot resume that identity.
+An authorization session must also use its existing protected descriptor.
+
 ### Generated artifact adoption
 
 When to adopt is the rule in [engagement](engagement.md): every generated file
