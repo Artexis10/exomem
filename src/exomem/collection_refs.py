@@ -9,7 +9,7 @@ the current one, so the caller rereads nothing it does not need.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -78,12 +78,40 @@ def mark_rows(result: Any, *, profile: str) -> Any:
     return result
 
 
+def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | None) -> dict[str, str]:
+    """The binding `item_id` stands for among the readable rows that carry its head.
+
+    `matches` are `(item_key, item_version)` of the rows the caller may read, never of withheld
+    ones, so a withheld row answers as an absent one. `snapshot` is the container hash the
+    query of that read returned.
+    """
+    if not matches:
+        raise OpError(
+            "ITEM_NOT_FOUND",
+            f"id {item_id} names no row of this collection; query it again for the current ids.",
+        )
+    if len(matches) > 1 or snapshot is None:
+        raise OpError("AMBIGUOUS_ITEM", f"id {item_id} names more than one row of this collection.")
+    key, version = matches[0]
+    current = page_ids.part_id(key, version)
+    if current != item_id:
+        raise OpError(
+            "STALE_ITEM",
+            f"id {item_id} is stale: the row has changed and now has id {current}. "
+            "Query it again and retry with the current id.",
+            details={"current_id": current},
+        )
+    return {"item_key": key, "expected_item_version": version, "expected_container_hash": snapshot}
+
+
 def bind_item(
     query: Callable[..., Mapping[str, Any]], *, collection: str, item_id: str, profile: str
 ) -> dict[str, str]:
     """The `item_key`, `expected_item_version` and `expected_container_hash` that `item_id` stands for.
 
     `query` is the leaf's own query, so a file collection and a store collection answer alike.
+    A store collection binds by `collection_store.preview.bind_row` first and reaches this scan
+    only where that cannot answer.
     """
     column = collection_profiles.profile_for(profile).item_id_property
     head = item_id.partition(".")[0]
@@ -98,7 +126,8 @@ def bind_item(
         snapshot = snapshot or reply.get("snapshot")
         found += [
             row for row in reply.get("rows", ())
-            if isinstance(row.get(column), str) and page_ids.part_head(row[column]) == head
+            if isinstance(row.get(column), str) and isinstance(row.get("item_version"), str)
+            and page_ids.part_head(row[column]) == head
         ]
         continuation = reply.get("continuation")
         if not continuation:
@@ -108,23 +137,4 @@ def bind_item(
             "ITEM_SCAN_INCOMPLETE",
             "this collection is too large to find a row by its id; filter the query to the row and use its key.",
         )
-    if not found:
-        raise OpError(
-            "ITEM_NOT_FOUND",
-            f"id {item_id} names no row of this collection; query it again for the current ids.",
-        )
-    if len(found) > 1 or snapshot is None:
-        raise OpError("AMBIGUOUS_ITEM", f"id {item_id} names more than one row of this collection.")
-    row = found[0]
-    current = row_id(profile, row)
-    if current != item_id:
-        raise OpError(
-            "STALE_ITEM",
-            f"id {item_id} is stale: the row has changed and now has id {current}. "
-            "Query it again and retry with the current id.",
-            details={"current_id": current},
-        )
-    return {
-        "item_key": row[column], "expected_item_version": row["item_version"],
-        "expected_container_hash": snapshot,
-    }
+    return bound_row(item_id, [(row[column], row["item_version"]) for row in found], snapshot)

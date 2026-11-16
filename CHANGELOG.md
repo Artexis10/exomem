@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.182.0](https://github.com/Artexis10/exomem/compare/v0.181.0...v0.182.0) (2026-11-15)
+
+
+### Features
+
+* **skills:** serve vault skills as session context ([#2841](https://github.com/Artexis10/exomem/issues/2841)) ([8693c80](https://github.com/Artexis10/exomem/commit/8693c8049dd6ecd200d53b7754f6b4678981e7c7))
+* **stance:** serve stance on release-gated vaults and let a vault set its budget ([#2837](https://github.com/Artexis10/exomem/issues/2837)) ([fb205fe](https://github.com/Artexis10/exomem/commit/fb205fe4ea44fc1242468be0f034fcd5e4398208))
+
+
+### Bug Fixes
+
+* **media:** harden the media edge canary and the upgrade schema check ([#2839](https://github.com/Artexis10/exomem/issues/2839)) ([29a5fdc](https://github.com/Artexis10/exomem/commit/29a5fdcd8307b1caeab3b6ed5bc13fd3f8b17e42))
+
+
+### Performance
+
+* **vault-store:** decide a sweep's pages in one context, and keep review records out of the registry pass ([#2817](https://github.com/Artexis10/exomem/issues/2817)) ([46dffc4](https://github.com/Artexis10/exomem/commit/46dffc4b537ff9f38e67392ff52e6282ddc7bd92))
+
 ## [0.181.0](https://github.com/Artexis10/exomem/compare/v0.180.1...v0.181.0) (2026-11-15)
 
 

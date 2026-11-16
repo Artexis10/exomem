@@ -217,6 +217,16 @@ A failed check stops at `schema-check` before the upgrade changes anything. This
 The command's review line says which path ran. In the pod, the tag's code runs on the live image's libraries.
 An import error there means the tag needs a library that the running image lacks.
 In that case, run the check from a one-off pod on the tag's cellctl image, with the cellctl DSN Secret.
+Give that pod what lets the cellctl pod reach the control database:
+
+- the label `app.kubernetes.io/name: cellctl`. Namespace `exomem-cloud` denies egress by default, and the
+  `cellctl` NetworkPolicy opens port 5432 only for that label, and only to `cellctl.databaseEgressCidrs`;
+- the same `nodeSelector` as the cellctl Deployment (`cellctl.nodeSelector`, a control-plane node in production);
+- the DSN from key `dsn` of Secret `exomem-cellctl-database-dsn` (`cellctl.databaseDsnSecretName`), in `CELLCTL_DATABASE_DSN`.
+
+Namespace `exomem-cloud` enforces the Pod Security `restricted` profile, so the pod also needs
+`runAsNonRoot`, the `RuntimeDefault` seccomp profile, `allowPrivilegeEscalation: false` and all
+capabilities dropped. A plain `kubectl run` is refused, and the refusal names the missing fields.
 
 ```bash
 : "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"
@@ -532,7 +542,12 @@ The scheduler places it beside the serving pod with required pod affinity. Each 
 A running build includes image pull after the scheduler binds its pod. A pod waiting for node capacity does not defer an idle attempt.
 Build activity defers the idle stop before the final force minutes, which still default to 10.
 The canary and disabled-window rules remain unchanged; an immediate attempt may have no build opportunity.
-Build activity reduces attempts per window hour while attempts remain fleet-serial.
+Build activity reduces attempts per window hour; `config.upgrade_concurrency_per_node` limits attempts independently on each node.
+Before a serving stop or replacement, cellctl also cancels other cells' unfinished, unbound builds targeting that node.
+Each cancellation uses its own cell's window record. The stop waits until a later census shows no waiting builds on that node.
+Bound builds on other cells continue, including bound, terminating pods. A stopped cell uses its volume node when its serving pod is absent.
+Cells with desired state `running` or `read_only` reserve nodes only during holds or pending starts that stop or replace serving pods.
+Hourly snapshot backups and snapshot-backup holds do not reserve nodes against new builds. A fresh build gets one pass to bind before cancellation.
 
 Cellctl cancels unfinished builds on timeout, pause, target change, window closure or flag disable.
 Pending backups, imports, exports, row changes and digest changes take precedence over a build.

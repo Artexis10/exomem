@@ -1351,6 +1351,157 @@ def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(sto
     assert (counts["imported"], counts["duplicates"], counts["rejected"]) == (12, 1, 0)
 
 
+def test_job_totals_equal_the_sum_of_its_batch_receipts_whatever_the_batching(store, monkeypatch):
+    """Totals folded apart from the receipts, or a duplicate counted by where batches end, make the two disagree."""
+    mapping = {"fields": {"exercise_id": "id", "kind": "kind"}, "on_invalid": "skip",
+               "coverage": {name: {"classification": None} for name in ("id", "kind")}}
+    setup(store, ndjson({"id": f"r{i}", "kind": "first"} for i in range(2)))
+    start(store, mapping=mapping)
+    run(store)
+    batches = [
+        [{"id": "n0", "kind": "a"}, {"id": "n1", "kind": "a"}, {"id": "n1", "kind": "b"}, {"id": "n2", "kind": "a"}],
+        [{"id": "n3", "kind": "a"}, {"id": "r0", "kind": "first"}, {"id": "n0", "kind": "c"}, {"id": None, "kind": "a"}],
+        [{"id": "n4", "kind": "a"}, {"id": "n5", "kind": "a"}, {"id": "r1", "kind": "changed"}, {"id": "n6", "kind": "a"}],
+    ]
+    write_source(store.root, ndjson(row for batch in batches for row in batch))
+    small(monkeypatch, rows=4)
+    job = start(store, mapping=mapping)
+    run(store)
+    result = status(store, job)
+    receipts = [
+        json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+            "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+            (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+    ]
+    assert len(receipts) == result["batches"] == 3
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    assert {name: sum(receipt[name] for receipt in receipts) for name in names} == {name: result["rows"][name] for name in names}
+    assert {name: result["rows"][name] for name in names} == {
+        "inserted": 7, "updated": 1, "unchanged": 1, "rejected": 1, "collapsed_in_source": 2, "restated_existing": 2}
+    assert result["rows"]["duplicates"] == 4 and result["rows"]["imported"] == 9
+
+
+NULL_TAIL_FIELDS = (
+    "  natural_key: [list_id, position]\n  fields:\n"
+    "    list_id: {type: string, required: true}\n    position: {type: integer, required: true}\n"
+    "    title: {type: string}\n"
+)
+NULL_TAIL_MAPPING = {
+    "fields": {"list_id": "list", "position": "position", "title": "title"},
+    "on_invalid": "skip",
+    "coverage": {name: {"classification": None} for name in ("list", "position", "title")},
+}
+
+
+def null_tail_rows(valid_rows=25, null_rows=12, tail="unplaced"):
+    ordered = [{"list": "a", "position": index, "title": f"entry {index}"} for index in range(1, valid_rows + 1)]
+    return ordered + [{"list": "a", "position": None, "title": f"{tail} {index}"} for index in range(null_rows)]
+
+
+def test_a_null_required_key_part_rejects_each_row_and_never_collapses_the_tail(store, monkeypatch):
+    """A null position admitted into the key stores the whole tail as one row and counts the rest as duplicates."""
+    setup(store, ndjson(null_tail_rows()), fields=NULL_TAIL_FIELDS)
+    small(monkeypatch, rows=10)
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    result = status(store, job)
+    assert result["state"] == "complete"
+    assert (result["rows"]["imported"], result["rows"]["rejected"], result["rows"]["duplicates"]) == (25, 12, 0)
+    stored = [values for _, values in typed_storage.collection_values(store.connection, CID)]
+    assert sorted(values["position"] for values in stored) == list(range(1, 26))
+    assert [(entry["row"], entry["code"], entry["at"]) for entry in result["rejections"]] == [
+        (ordinal, "SCHEMA_REQUIRED_FIELD", "position") for ordinal in range(25, 37)
+    ]
+    # The default stop policy names the same field where it fails.
+    stopped = start(store, mapping={name: value for name, value in NULL_TAIL_MAPPING.items() if name != "on_invalid"})
+    run(store)
+    error = status(store, stopped)["error"]
+    assert (error["code"], error["at"], error["row"]) == ("SCHEMA_REQUIRED_FIELD", "position", 25)
+
+
+def test_job_totals_equal_its_receipts_plus_the_batches_that_committed_nothing(store, monkeypatch):
+    """A batch that commits no row writes no receipt, so totals folded from it would match no receipt."""
+    setup(store, ndjson(null_tail_rows()), fields=NULL_TAIL_FIELDS)
+    small(monkeypatch, rows=10)  # the fourth and last batch holds only rejected rows
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    first = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    # An identical start returns the first job, so the tail differs; every stored row restates unchanged.
+    write_source(store.root, ndjson(null_tail_rows(tail="pending")))
+    again = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+
+    for job, uncommitted in ((first, {"rejected": 7}), (again, {"unchanged": 25, "restated_existing": 25, "rejected": 12})):
+        result = status(store, job)
+        receipts = [
+            json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+                "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+                (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+        ]
+        assert result["uncommitted"] == {name: uncommitted.get(name, 0) for name in names}
+        assert {name: sum(receipt[name] for receipt in receipts) + result["uncommitted"][name] for name in names} == {
+            name: result["rows"][name] for name in names}
+
+
+def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):
+    return call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping,
+                **overrides)
+
+
+def test_preview_counts_the_whole_source_and_the_job_agrees(store, monkeypatch):
+    """A 100-row sample sees a clean source; the tail's rejections, a repeated key and a stored row must show before the job."""
+    setup(store, ndjson(null_tail_rows(valid_rows=3, null_rows=0)), fields=NULL_TAIL_FIELDS)
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    assert status(store, job)["rows"]["imported"] == 3
+    rows = null_tail_rows(valid_rows=130, null_rows=12)
+    rows.insert(130, {"list": "a", "position": 50, "title": "again"})  # repeats a key that comes earlier in the source
+    write_source(store.root, ndjson(rows))
+
+    preview = preview_of(store)
+
+    assert preview["rows"] == {"sampled": 100, "valid": 100, "invalid": 0, "complete": False}
+    assert (preview["coverage"], preview["rows_total"]) == ("full", 143)
+    assert (preview["would_insert"], preview["would_match_stored"]) == (127, 3)
+    assert preview["would_collapse"]["rows"] == 1 and len(preview["would_collapse"]["sample_keys"]) == 1
+    starts = [len(ndjson(rows[:ordinal])) for ordinal in range(len(rows))]
+    assert preview["would_reject"] == {"SCHEMA_REQUIRED_FIELD": {"rows": 12, "first": [
+        {"row": ordinal, "byte": starts[ordinal], "at": "position"} for ordinal in range(131, 143)]}}
+    assert preview["survey"]["on_invalid"] == "skip" and preview["survey"]["rows_read"] == 143
+
+    small(monkeypatch, rows=40)
+    again = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    done = status(store, again)["rows"]
+    assert done["inserted"] == preview["would_insert"] and done["rejected"] == 12
+    assert done["collapsed_in_source"] == preview["would_collapse"]["rows"]
+    assert done["restated_existing"] == preview["would_match_stored"]
+
+
+def test_preview_that_reaches_its_budget_is_partial_and_keeps_its_counts_apart(store, monkeypatch):
+    """Preview holds the store thread; past its budget it must stop, and the rows it read are not the source."""
+    setup(store, ndjson(null_tail_rows(valid_rows=130, null_rows=12)), fields=NULL_TAIL_FIELDS)
+    monkeypatch.setattr(importer(), "PREVIEW_HOLD_SECONDS", 0.0)  # spent before the survey reads its second row
+
+    preview = preview_of(store)
+
+    assert preview["coverage"] == "partial" and preview["survey"]["unread"] == "time_budget"
+    assert preview["survey"]["budget_seconds"] == 0.0 and preview["survey"]["rows_read"] == 1
+    assert [preview[name] for name in ("rows_total", "would_insert", "would_reject", "would_collapse")] == [None] * 4
+    assert preview["survey"]["partial_counts"]["would_insert"] == 1
+
+
+def test_preview_stopped_by_a_malformed_row_is_partial_and_names_where(store):
+    """A read that ends where the source has no row boundary must not read as a clean, complete count."""
+    setup(store, b'[{"list": "a", "position": 1}, {"list": "a", "position": 2} {"list": "a", "position": 3}]', fields=NULL_TAIL_FIELDS)
+
+    preview = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="json-array",
+                   mapping={**NULL_TAIL_MAPPING, "fields": {"list_id": "list", "position": "position"}})
+
+    assert preview["coverage"] == "partial" and preview["rows_total"] is None and preview["would_insert"] is None
+    assert preview["survey"]["stopped"]["code"] == "IMPORT_SOURCE_MALFORMED" and preview["survey"]["stopped"]["row"] == 2
+
+
 @pytest.mark.parametrize("change,before,after,refusal", [
     ("boolean", {"distance_m": 1}, {"distance_m": True}, "SCHEMA_FIELD_TYPE"),
     ("integer", {"distance_m": False}, {"distance_m": 0}, None),

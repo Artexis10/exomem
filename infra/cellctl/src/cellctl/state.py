@@ -331,6 +331,8 @@ class ClusterObservation:
     init_error_code: str | None = None
 
     catalogue_builds: tuple[BuildJob, ...] | None = ()
+    # Shared per-node census: owner cell ids map to their waiting builds; None means unknown.
+    catalogue_waiting_builds: dict[str, tuple[BuildJob, ...]] | None = field(default_factory=dict)
     catalogue_build_outcome: str | None = None
     catalogue_build_job: str | None = None
     catalogue_build_cancelled: str | None = None
