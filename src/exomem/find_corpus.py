@@ -22,29 +22,16 @@ from . import freshness, privacy_log, request_budget
 from .find_types import ParsedPage
 from .kbdir import managed_root, managed_split
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
-from .vault import relative_posix
+from .vault import CORPUS_EXCLUDED_DIR_NAMES, relative_posix
 
 if TYPE_CHECKING:
     from .vault_store.read import PageMeta, StoredPage
 
 log = logging.getLogger(__name__)
 
-# Operational state is not knowledge: `_Governance` (policy/receipts) and
-# `_Adoption` (durable run objects + run manifests) both name items whose own
-# disclosure decisions may be restrictive, so neither may enter the content
-# corpus or be reachable by recall.
-EXCLUDED_DIR_NAMES = frozenset(
-    {
-        ".graph-coordination",
-        ".trash",
-        "_Adoption",
-        "_Schema",
-        "_Governance",
-        "_attachments",
-        "_archive",
-        "_trash",
-    }
-)
+# The KB corpus walk skips the folders `vault.CORPUS_EXCLUDED_DIR_NAMES` names: operational state
+# and machinery, never knowledge. The vault-wide walk skips those and more (`vault.VAULT_SCAN_SKIP_DIRS`).
+EXCLUDED_DIR_NAMES = CORPUS_EXCLUDED_DIR_NAMES
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)

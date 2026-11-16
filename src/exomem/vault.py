@@ -288,37 +288,43 @@ _SCHEMA_SENTINEL = "SKILL.md"
 # The vault folder that holds staged imports, one `<import_id>` folder each.
 IMPORT_STAGE_DIRNAME = "_Imports"
 
-# When scanning the full vault for inbound wikilinks, skip these.
+# Machinery and operational-state folders that no content walk enters, in the vault or in the
+# Knowledge Base corpus.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
 # items whose own disclosure decisions may be restrictive, so surfacing them as
 # content would release by the back door what the release plane withholds at the
-# front. `find_corpus.EXCLUDED_DIR_NAMES` already excludes them from the KB
-# corpus; this set is the walker `find(scope="vault")` reaches through
-# (`bm25.py` -> `walk_vault_md`), and the two must not disagree — a name excluded
-# from one walk and indexed by the other is exactly the bypass the exclusion
+# front. `find_corpus.EXCLUDED_DIR_NAMES` (the KB corpus walk) is this set itself and
+# `VAULT_SCAN_SKIP_DIRS` (the walker `find(scope="vault")` reaches through, `bm25.py` ->
+# `walk_vault_md`) adds to it, so the two cannot disagree on a name they share — a name
+# excluded from the first walk and indexed by the second is exactly the bypass the exclusion
 # exists to prevent.
-VAULT_SCAN_SKIP_DIRS = frozenset(
+CORPUS_EXCLUDED_DIR_NAMES = frozenset(
     {
-        ".obsidian",
-        ".git",
         ".graph-coordination",
-        ".graph-commit-receipts",
         ".trash",
+        "_Adoption",
+        "_Schema",
+        "_Governance",
         "_attachments",
         "_archive",
         "_trash",
-        "_Schema",
-        # The shipped contract's new home (#488). It has to be skipped here for
-        # the same reason `_Schema` is: `find(scope="vault")` reaches through
-        # this walk, and moving 265 KB of product-owned markdown out of the note
-        # namespace would only relocate the pollution if exomem's own vault-wide
-        # search started indexing it at the new path.
-        SHIPPED_SCHEMA_DIRNAME,
-        "_Governance",
-        "_Adoption",
     }
 )
+# When scanning the full vault for inbound wikilinks, skip these.
+VAULT_SCAN_SKIP_DIRS = CORPUS_EXCLUDED_DIR_NAMES | {
+    # Kept at the vault root, outside the managed root that the corpus walk starts from.
+    ".obsidian",
+    ".git",
+    # The shipped contract's new home (#488). It has to be skipped here for
+    # the same reason `_Schema` is: `find(scope="vault")` reaches through
+    # this walk, and moving 265 KB of product-owned markdown out of the note
+    # namespace would only relocate the pollution if exomem's own vault-wide
+    # search started indexing it at the new path.
+    SHIPPED_SCHEMA_DIRNAME,
+    # Holds only JSON receipts, which the Markdown-only corpus walk never yields.
+    ".graph-commit-receipts",
+}
 VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
 
 
