@@ -1988,7 +1988,9 @@ real space, so free space that you check later can be larger than the sum of
 your filings. Cloud offload, which runs in the background, can also show
 allowance results after it reuses a stored copy that another filing owns.
 Both limits existed before shared storage, and this release does not change
-them.
+them. An upload can also take a different time when an identical original is
+already stored, because Exomem then checks the stored copy's bytes instead of
+writing a new one.
 
 ### New archives
 

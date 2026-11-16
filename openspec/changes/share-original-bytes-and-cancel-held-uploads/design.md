@@ -44,7 +44,7 @@ Cloud reference sharing remains the existing mechanism. Backups, staging, recove
 
 Reuse the durable publication techniques in `archive_members.py`, not its family ownership model. Stage and verify supplied bytes before publishing a new filing. Publish or verify the immutable object before committing its logical binding. A crash may leave an unreferenced object; it must never leave a committed filing without confirmed bytes.
 
-Keep byte transfer and hashing outside the canonical mutation lease. Retain the verified input and object pins through the final binding check and commit. The lease covers canonical existence, ownership, and publication decisions, not a vault-sized scan.
+Keep byte transfer and hashing outside the canonical mutation lease. A new filing stages inside the batch's in-process lock, as an ordinary filing's copy does, and a pool hit confirms the existing object there with one full hash. Retain the verified input and object pins through the final binding check and commit. The lease covers canonical existence, ownership, and publication decisions, not a vault-sized scan.
 
 Extend the existing media ledger and reader pins to the resolved object identity. Pins, active jobs, hydration reservations, and eviction checks must include every filing using that object. Index the derived object identity; do not inspect each filing during a request. Canonical bindings remain authoritative, so no independent reference-count database is added.
 
