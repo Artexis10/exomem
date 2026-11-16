@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from .. import media_types, reserved_paths, vault
-from ..kbdir import managed_split_parts
+from ..kbdir import Layout, managed_split_parts
 from . import companions
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -94,7 +94,7 @@ def _canonical_path(value: object) -> str:
         not normalized
         or normalized.startswith("/")
         or normalized != path.as_posix()
-        or managed_split_parts(path.parts) is None
+        or managed_split_parts(path.parts, layout=Layout.NESTED) is None
         or any(part in {"", ".", ".."} for part in path.parts)
     ):
         raise _invalid("path must be a canonical Knowledge Base relative path")

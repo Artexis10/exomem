@@ -54,15 +54,16 @@ from . import (
 from .held_fs import vault_name_key
 from .kbdir import (
     IMPORT_STAGE_DIRNAME,
+    Layout,
     is_managed_root_name,
     managed_form,
     managed_join,
     managed_relative,
     managed_respell,
     managed_root,
-    managed_root_rel,
     managed_split,
     managed_split_parts,
+    managed_state,
 )
 from .log_events import log_event
 
@@ -502,7 +503,9 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
         )
     from . import layout  # imported here: `layout` imports this module
 
-    layout.of(path)  # refuses a vault whose layout the record and folders cannot say; never while a record exists
+    # Refuses a vault whose layout the record and folders cannot say, never while a record exists.
+    # It also binds the layout as the managed root of this process, which serves a single vault (the last resolved wins).
+    layout.bind(path)
     return path
 
 
@@ -520,7 +523,8 @@ def shipped_schema_target(vault_root: Path) -> Path:
 
 def legacy_shipped_schema_root(vault_root: Path) -> Path:
     """The pre-#488 location, still read and still valid."""
-    return managed_root(Path(vault_root)) / "_Schema"
+    # The pre-#488 location sat inside the wrapper folder, so it is `nested` whatever the vault's layout.
+    return managed_root(Path(vault_root), layout=Layout.NESTED) / "_Schema"
 
 
 def shipped_schema_root(vault_root: Path) -> Path:
@@ -544,8 +548,9 @@ def _is_vault(path: Path) -> bool:
     at all, so a vault has to stay a vault across the move in both directions --
     one that has migrated, and one that never will.
     """
+    # Detection runs before the layout is known, on any directory, so the legacy sentinel is the wrapper's: `nested`.
     if (
-        (managed_root(path) / "_Schema" / _SCHEMA_SENTINEL).exists()
+        (managed_root(path, layout=Layout.NESTED) / "_Schema" / _SCHEMA_SENTINEL).exists()
         or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
     ):
         return True
@@ -554,7 +559,7 @@ def _is_vault(path: Path) -> bool:
     from .vault_store import read
 
     try:
-        return read.page_exists(path, managed_join(f"_Schema/{_SCHEMA_SENTINEL}"))
+        return read.page_exists(path, managed_join(f"_Schema/{_SCHEMA_SENTINEL}", layout=Layout.NESTED))
     except (ValueError, OSError, state_migration.StateMigrationManifestError):
         # Callers probe every ancestor of a path. One that holds its own state root (the filesystem
         # root, say) is refused placement, and a broken state root cannot prove a vault: both mean
@@ -3879,13 +3884,13 @@ def read_disk_bytes_without_pinning(path: Path) -> bytes:
 
 def _is_registered_internal_state_artifact(relative: str) -> bool:
     """Whether one full vault-relative entry is private Exomem state."""
-    return _classified_reserved(relative, managed_root_rel(), id(reserved_paths._REGISTRY))
+    return _classified_reserved(relative, managed_state(), id(reserved_paths._REGISTRY))
 
 
 @functools.lru_cache(maxsize=65_536)
-def _classified_reserved(relative: str, _kb: str, _registry_id: int) -> bool:
+def _classified_reserved(relative: str, _managed: tuple[str, tuple[str, ...]], _registry_id: int) -> bool:
     """Memoised on the whole input the classifier reads, so a changed registry or
-    knowledge-base directory name is a different key rather than a stale answer.
+    managed root (its name or its unmanaged entries) is a different key rather than a stale answer.
 
     Every directory census classifies every entry, and a census runs about twenty
     times per Records append; uncached that was 600k pattern matches at 1,000 items.

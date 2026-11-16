@@ -667,7 +667,6 @@ def test_projected_wire_hit_never_emits_the_full_search_body() -> None:
         hit,
         selection=selection,
         rank=1,
-        knowledge_base_name="Knowledge Base",
         keyword=False,
     )
 
@@ -689,7 +688,6 @@ def test_projected_default_scope_reserves_outside_kb_slots() -> None:
         ordered,
         scope="kb",
         page_size=5,
-        knowledge_base_name="Knowledge Base",
     ) == (
         "Knowledge Base/a.md",
         "Knowledge Base/b.md",
@@ -703,7 +701,6 @@ def test_projected_default_scope_reserves_outside_kb_slots() -> None:
         ordered,
         scope="vault",
         page_size=5,
-        knowledge_base_name="Knowledge Base",
     ) == ordered
 
 

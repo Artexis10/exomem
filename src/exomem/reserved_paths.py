@@ -30,7 +30,13 @@ from typing import IO, TYPE_CHECKING
 
 from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
-from .kbdir import managed_join, managed_root_rel, managed_split_parts
+from .kbdir import (
+    managed_join,
+    managed_root_parts,
+    managed_root_rel,
+    managed_split_parts,
+    managed_state,
+)
 
 if TYPE_CHECKING:
     from .vault_store import read
@@ -3070,14 +3076,16 @@ def classify_logical(value: object) -> PathClassification:
     """Classify one KB-relative or vault-prefixed spelling without touching disk."""
 
     if type(value) is str:
-        return _classify_logical_text(value, managed_root_rel(), id(_REGISTRY))
+        return _classify_logical_text(value, managed_state(), id(_REGISTRY))
     return _classify_logical(value)
 
 
 # A whole-vault walk classifies every entry, and the answer depends only on the
-# spelling, the KB folder name and the registry, which the key carries.
+# spelling, the managed root's name and unmanaged entries and the registry, which the key carries.
 @functools.lru_cache(maxsize=65_536)
-def _classify_logical_text(value: str, _kb: str, _registry_id: int) -> PathClassification:
+def _classify_logical_text(
+    value: str, _managed: tuple[str, tuple[str, ...]], _registry_id: int
+) -> PathClassification:
     return _classify_logical(value)
 
 
@@ -4687,7 +4695,7 @@ def classify_physical(
     physical_text = unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
     physical_parts = tuple(physical_text.split("/"))
     below = managed_split_parts(physical_parts, key=_fold)
-    physical_parts = (managed_root_rel(), *(physical_parts if below is None else below))
+    physical_parts = (*managed_root_parts(), *(physical_parts if below is None else below))
     candidate = root.joinpath(*physical_parts)
 
     try:

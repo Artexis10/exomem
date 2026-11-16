@@ -230,7 +230,7 @@ def _list_vault(root: Path, view: read.StoreSnapshot | None) -> Inventory:
     for entry in top:
         if entry.name.startswith("."):
             continue
-        if kbdir.is_managed_root_name(entry.name):
+        if kbdir.is_managed_root_name(entry.name, layout=kbdir.Layout.NESTED):
             for item in _walk_managed(Path(entry.path), entry.name, skipped, hidden):
                 # A store serves the files it owns, so the disk's copy of them is not the listing.
                 if view is None or not item.owned:
@@ -257,7 +257,7 @@ def _list_vault(root: Path, view: read.StoreSnapshot | None) -> Inventory:
         outside[entry.name] = record
     stored: dict[str, int] = {}
     if view is not None:
-        prefix = kbdir.managed_join("")
+        prefix = kbdir.managed_join("", layout=kbdir.Layout.NESTED)
         pages = {meta.path: meta.size for meta in view.pages(prefix)}
         for rel in sorted(pages):
             managed[rel] = ManagedFile(rel, ownership.is_markdown(rel), ownership.classify(rel))

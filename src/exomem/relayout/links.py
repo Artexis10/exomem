@@ -145,7 +145,7 @@ class LinkScan:
 def _names_collection_path(inner: str) -> bool:
     """Whether the link text names a path inside a collection layer, with or without the managed folder."""
     page = vault.split_wikilink_target(inner)[0]
-    below = kbdir.managed_split(page)
+    below = kbdir.managed_split(page, layout=kbdir.Layout.NESTED)
     return layout.in_collection_layer(page if below is None else below)
 
 
@@ -313,7 +313,7 @@ class LinkRewriter:
             scan.folder.append(note)
         elif target.path not in self._moved:
             # The page sits outside the managed root, or the plan gives it no new path.
-            if vault.managed_split(target.path or "") is None:
+            if vault.managed_split(target.path or "", layout=kbdir.Layout.NESTED) is None:
                 counts.to_outside += 1
             else:
                 counts.to_unmapped += 1

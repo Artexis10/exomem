@@ -83,7 +83,7 @@ def resolve_vault_for(op: str, kwargs: dict, vault_root: Path | str | None) -> P
     if vault_root is not None:
         root = Path(vault_root)
         if vault_module._is_vault(root):
-            layout.of(root)  # the same refusal as `resolve_vault`, for a root that a caller hands in
+            layout.bind(root)  # the same refusal and binding as `resolve_vault`, for a root that a caller hands in
             return root
         if allows_uninitialized_vault(op, kwargs) and root.is_dir():
             return root

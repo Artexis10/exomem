@@ -35,7 +35,7 @@ def _isolated_session(parent):
     if not state_paths.state_store_root().resolve().is_relative_to(parent):
         raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "state must be inside the isolated parent")
     root = Path(tempfile.mkdtemp(prefix="collection-create-", dir=parent))
-    managed_root(root).mkdir()
+    managed_root(root).mkdir(exist_ok=True)  # the temporary directory is the managed root of a `root` vault
     with _ProducerSession.open(root, production=False) as session:
         yield session
 

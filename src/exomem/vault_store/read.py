@@ -23,7 +23,7 @@ from typing import TypeVar
 
 from .. import find_corpus, reserved_paths, vault
 from ..collection_store import connection, runtime
-from ..kbdir import managed_root_rel
+from ..kbdir import managed_state
 from . import mode, ownership
 
 NOT_ACTIVE = "VAULT_STORE_NOT_ACTIVE"
@@ -830,15 +830,15 @@ def owned_as_pages(vault_root: Path, rels: Iterable[str]) -> Mapping[str, bool]:
     """Whether ownership makes each path of ``rels`` a page, by path.
 
     Inside this thread's store request each path is classified once for the whole request.
-    Ownership is a pure function of the path, the Knowledge Base folder name, the collection layers
-    and the reserved registry, none of which a request changes; the folder name is part of the key.
+    Ownership is a pure function of the path, the managed root (its name and unmanaged entries), the collection layers
+    and the reserved registry, none of which a request changes; the managed root is part of the key.
     """
     wanted = list(rels)
     memo = request_memo(vault_root)
     page = ownership.Ownership.PAGE
     if memo is None:
         return {rel: owner is page for rel, owner in ownership.classify_many(wanted).items()}
-    known = memo.setdefault((__name__, "page", managed_root_rel()), {})
+    known = memo.setdefault((__name__, "page", managed_state()), {})
     missing = [rel for rel in wanted if rel not in known]
     if missing:
         known.update((rel, owner is page) for rel, owner in ownership.classify_many(missing).items())

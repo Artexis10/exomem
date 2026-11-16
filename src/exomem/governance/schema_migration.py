@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import find_corpus, mutation_lock, reserved_paths, state_migration, writer_lease
-from ..kbdir import managed_root
+from ..kbdir import Layout, managed_root
 from ..vocabulary_admission import VocabularyAdmissionError
 from . import (
     authorization_custody,
@@ -284,7 +284,7 @@ def _catalog_items(
     compiled: policy.Policy,
     key: projections.ProjectionNamespaceKey,
 ) -> tuple[projection_store.ProjectionItemVariants, ...]:
-    kb = managed_root(vault_root)
+    kb = managed_root(vault_root, layout=Layout.NESTED)
     if not kb.is_dir():
         raise ForwardMigrationUnavailable
     from .. import extraction_parts

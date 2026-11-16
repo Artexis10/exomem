@@ -29,7 +29,7 @@ from . import (
     vault,
 )
 from .cli_ops import OpError
-from .kbdir import managed_join, managed_root, managed_root_rel, managed_split_parts
+from .kbdir import managed_join, managed_root, managed_root_parts, managed_split_parts
 from .memory_refs import ID_FIELD, new_id, normalize_id
 from .vault_store import availability as store_availability
 from .vault_store import targets as store_targets
@@ -2743,7 +2743,7 @@ def _capture_review_directory(
 ) -> tuple[Path, tuple[vault.PathIdentity, ...] | None]:
     directory = Path(managed_root(Path(root)), *REVIEW_FOLDER, *nested)
     current = root
-    components = (managed_root_rel(), *REVIEW_FOLDER, *nested)
+    components = (*managed_root_parts(), *REVIEW_FOLDER, *nested)
     identities: list[vault.PathIdentity] = []
     for component in (None, *components):
         if component is not None:

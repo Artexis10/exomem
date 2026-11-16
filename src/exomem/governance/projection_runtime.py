@@ -26,7 +26,7 @@ from .. import (
     ranking_config,
 )
 from ..find_types import GraphProvenance, Hit
-from ..kbdir import managed_root_rel
+from ..kbdir import is_in_managed_root
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -1109,7 +1109,6 @@ def _wire_hit(
     *,
     selection: projected_retrieval.ProjectionSelection,
     rank: int,
-    knowledge_base_name: str,
     keyword: bool,
     lane_ranks: dict[str, int] | None = None,
     lane_scores: dict[str, float] | None = None,
@@ -1130,8 +1129,7 @@ def _wire_hit(
         )
     fields = dict(hit.search_fields)
     path = hit.item_identity
-    path_parts = PurePosixPath(path).parts
-    inside_kb = bool(path_parts and path_parts[0] == knowledge_base_name)
+    inside_kb = is_in_managed_root(path)
     ranks = lane_ranks or {}
     scores = lane_scores or {}
     bm25_rank = ranks.get("bm25")
@@ -1209,7 +1207,6 @@ def _order_projected_scope(
     *,
     scope: str,
     page_size: int,
-    knowledge_base_name: str,
 ) -> tuple[str, ...]:
     """Apply the public KB-first reserve as one stable paginatable order."""
 
@@ -1218,8 +1215,7 @@ def _order_projected_scope(
     inside: list[str] = []
     outside: list[str] = []
     for identity in ordered_identities:
-        parts = PurePosixPath(identity).parts
-        target = inside if parts and parts[0] == knowledge_base_name else outside
+        target = inside if is_in_managed_root(identity) else outside
         target.append(identity)
     if not inside or not outside:
         return ordered_identities
@@ -1256,21 +1252,13 @@ def _retain_projected_scope_lane(
     scope: str,
     candidate_depth: int,
     outside_depth: int,
-    knowledge_base_name: str,
 ) -> tuple[projected_retrieval.ProjectedLexicalHit, ...]:
     """Keep a bounded outside-KB pool before per-lane truncation."""
 
     head = hits[:candidate_depth]
     if scope != "kb":
         return head
-    outside = tuple(
-        hit
-        for hit in hits
-        if not (
-            (parts := PurePosixPath(hit.item_identity).parts)
-            and parts[0] == knowledge_base_name
-        )
-    )[:outside_depth]
+    outside = tuple(hit for hit in hits if not is_in_managed_root(hit.item_identity))[:outside_depth]
     retained = {hit.item_identity for hit in (*head, *outside)}
     return tuple(hit for hit in hits if hit.item_identity in retained)
 
@@ -1749,14 +1737,12 @@ def _find_projected_hits_pinned(
             window=candidate_depth,
         )
 
-    knowledge_base_name = managed_root_rel()
     lane_hits = {
         lane: _retain_projected_scope_lane(
             hits,
             scope=scope,
             candidate_depth=candidate_depth,
             outside_depth=limit,
-            knowledge_base_name=knowledge_base_name,
         )
         for lane, hits in lane_hits.items()
     }
@@ -1874,7 +1860,6 @@ def _find_projected_hits_pinned(
                     scope=scope,
                     candidate_depth=candidate_depth,
                     outside_depth=limit,
-                    knowledge_base_name=knowledge_base_name,
                 )
                 for hit in lane_hits["graph"]:
                     target = hit.item_identity
@@ -2031,7 +2016,6 @@ def _find_projected_hits_pinned(
         ordered_identities,
         scope=scope,
         page_size=limit,
-        knowledge_base_name=knowledge_base_name,
     )
     visible_snapshot_digest: str | None = None
     if continuation_record is not None:
@@ -2113,7 +2097,6 @@ def _find_projected_hits_pinned(
                 source_hit,
                 selection=by_identity[identity],
                 rank=final_rank,
-                knowledge_base_name=knowledge_base_name,
                 keyword=mode == "keyword",
                 lane_ranks=lane_ranks,
                 lane_scores=lane_scores,

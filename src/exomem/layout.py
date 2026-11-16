@@ -38,7 +38,7 @@ from . import collection_profiles, extraction_parts, homes, kbdir, note_types, v
 from .cli_ops import OpError
 from .freshness import signature_from_stat
 from .held_fs import vault_name_key
-from .kbdir import Layout
+from .kbdir import Layout, Managed
 from .vault import corrected_title_name, fit_filename
 
 
@@ -67,8 +67,12 @@ class LayoutRecord:
 
 
 def _schema_folders() -> tuple[str, str]:
-    """The two places a schema folder can be, relative to the vault root: the vault root, then the managed root."""
-    return vault.SCHEMA_OVERLAY_DIRNAME, kbdir.managed_join(vault.SCHEMA_OVERLAY_DIRNAME)
+    """The two places a schema folder can be, relative to the vault root: the vault root, then the wrapper folder.
+
+    The wrapper is spelled `nested` on purpose: reading a layout record is what decides the layout,
+    so the places it can be read from cannot depend on the layout that the process has bound.
+    """
+    return vault.SCHEMA_OVERLAY_DIRNAME, kbdir.managed_join(vault.SCHEMA_OVERLAY_DIRNAME, layout=Layout.NESTED)
 
 
 def schema_folder(layout: Layout | str) -> str:
@@ -207,18 +211,6 @@ def resolve(vault_root: Path) -> Layout:
     return inspect(vault_root).layout
 
 
-@dataclass(frozen=True, slots=True)
-class Managed:
-    """What a reader of vault paths needs to find the managed root: the layout and the top-level entries outside it.
-
-    `unmanaged` is the layout record's list, empty in `nested` (the wrapper folder is the whole
-    boundary there). The `kbdir` helpers and the store's ownership rule take both as they are.
-    """
-
-    layout: Layout
-    unmanaged: tuple[str, ...] = ()
-
-
 #: What `managed_of` answered, by vault root and managed-root name, with the fingerprint it answered under.
 _ANSWERS: dict[tuple[str, str], tuple[tuple, Managed]] = {}
 _ANSWERS_LOCK = threading.Lock()
@@ -272,7 +264,7 @@ def managed_of(vault_root: Path) -> Managed:
     a restart. Raises what `inspect` raises.
     """
     root = Path(vault_root)
-    key = (os.fspath(root), kbdir.managed_root_rel())
+    key = (os.fspath(root), kbdir.managed_root_rel(layout=Layout.NESTED))  # the wrapper name, as `_schema_folders`
     fingerprint = _fingerprint(root)
     with _ANSWERS_LOCK:
         cached = _ANSWERS.get(key)
@@ -291,6 +283,19 @@ def managed_of(vault_root: Path) -> Managed:
 def of(vault_root: Path) -> Layout:
     """The layout of the vault at `vault_root`, from the cache that `managed_of` keeps."""
     return managed_of(vault_root).layout
+
+
+def bind(vault_root: Path) -> Managed:
+    """Resolve the layout of the vault at `vault_root` and bind it as the managed root of this process.
+
+    Vault resolution and service start call it, so the `kbdir` helpers that get no layout of their
+    own follow the vault that the process serves. `of` and `managed_of` bind nothing: a caller that
+    reads another vault's layout (an import, a planner) must not move the process's own.
+    Raises what `inspect` raises, and binds nothing then.
+    """
+    managed = managed_of(vault_root)
+    kbdir.bind(managed)
+    return managed
 
 
 # --------------------------------------------------------------------------- #
@@ -424,7 +429,7 @@ def translate_path(value: str, target: Layout | str, registry: Registry) -> str:
     """
     if Layout(target) is Layout.NESTED:
         return value
-    inside = kbdir.managed_split(value)
+    inside = kbdir.managed_split(value, layout=Layout.NESTED)  # a selector is authored against the wrapper
     rest = value if inside is None else inside
     head, separator, tail = rest.partition("/")
     area, _, _ = tail.partition("/")
@@ -546,7 +551,7 @@ def place(
     from . import semantic_contract
     from .vault_store import ownership
 
-    below = kbdir.managed_split(current_path)
+    below = kbdir.managed_split(current_path, layout=Layout.NESTED)  # the planner's source is a `nested` vault
     if not below:
         return None
     *folders, filename = below.split("/")

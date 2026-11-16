@@ -36,7 +36,13 @@ from types import MappingProxyType
 from urllib.parse import unquote
 
 from .. import held_fs, request_budget, vault
-from ..kbdir import managed_join, managed_root_rel, managed_split, managed_splitter
+from ..kbdir import (
+    managed_join,
+    managed_root_key,
+    managed_root_rel,
+    managed_split,
+    managed_splitter,
+)
 
 #: A literal alias starts and ends where the text does not continue a path.
 _NOT_PATH_CHARACTER = re.compile(r"[^\w./-]")
@@ -449,7 +455,7 @@ def vault_listing(vault_root: Path, directory: str | None = None) -> VaultListin
 
     `directory` is vault-relative with forward slashes; each directory walked keeps its own listings.
     """
-    directory = managed_root_rel() if directory is None else directory
+    directory = managed_root_key() if directory is None else directory
     key = (_vault_key(vault_root), directory)
     with _CENSUS_LOCK:
         previous = _LISTINGS.get(key, {})

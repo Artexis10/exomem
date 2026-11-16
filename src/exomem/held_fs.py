@@ -25,6 +25,8 @@ PUBLISH_TEMP_PREFIX = ".exomem-held-publish-"
 FILE_ACCESS_MODES = frozenset({"read", "write", "mutate", "identity"})
 # The name format that publish_temporary_name creates: the prefix and 32 hexadecimal digits.
 _PUBLISH_TEMP_RE = re.compile(rf"{re.escape(PUBLISH_TEMP_PREFIX)}[0-9a-f]{{32}}", re.ASCII)
+#: What `HeldFilesystem.parent` takes for the root anchor itself: both backends read exactly this name.
+ROOT_RELATIVE = "."
 _CAPABILITY_CACHE: dict[tuple[int, str, int, int], Capabilities] = {}
 _CAPABILITY_CACHE_LOCK = threading.Lock()
 

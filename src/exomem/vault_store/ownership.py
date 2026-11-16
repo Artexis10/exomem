@@ -11,15 +11,19 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from .. import reserved_paths, vault
 from ..collection_store import ownership as collection_ownership
 from ..find_corpus import EntryKind, entry_kind, is_sync_conflict_copy
-from ..kbdir import Layout, is_managed_root_name, managed_root, managed_root_rel, managed_split
-
-if TYPE_CHECKING:
-    from ..layout import Managed
+from ..kbdir import (
+    Layout,
+    Managed,
+    bound,
+    is_managed_root_name,
+    managed_root,
+    managed_root_rel,
+    managed_split,
+)
 
 
 class Ownership(StrEnum):
@@ -66,16 +70,20 @@ def _is_dot_name(name: str) -> bool:
     return name.startswith(".")
 
 
+def _of(managed: Managed | None) -> Managed:
+    """The layout that a call judges by: the layout given, else the managed root that the process is bound to."""
+    return bound() if managed is None else managed
+
+
 def _is_root(managed: Managed | None) -> bool:
-    """Whether `managed` describes a `root` vault. None is a `nested` vault, which is what a caller without a vault means."""
-    return managed is not None and managed.layout is Layout.ROOT
+    """Whether `managed` describes a `root` vault. None reads the bound managed root, which is `nested` until a vault is bound."""
+    return _of(managed).layout is Layout.ROOT
 
 
 def _split(rel: str, managed: Managed | None) -> str | None:
     """The path below the managed root, or None outside it: the wrapper folder in `nested`, the vault root in `root`."""
-    if _is_root(managed):
-        return managed_split(rel, layout=managed.layout, unmanaged=managed.unmanaged)
-    return managed_split(rel)
+    chosen = _of(managed)
+    return managed_split(rel, layout=chosen.layout, unmanaged=chosen.unmanaged)
 
 
 def _claimed(rel: str, managed: Managed | None = None) -> Ownership | None:
@@ -113,8 +121,8 @@ def classify(rel: str, managed: Managed | None = None) -> Ownership:
     7. Any other ``.md`` file, in any letter case, is PAGE.
     8. Everything else is BINARY.
 
-    The managed root is the Knowledge Base folder in a `nested` vault, which is what a call without
-    `managed` means. In a `root` vault it is the vault root, less the import staging folder and
+    The managed root is the Knowledge Base folder in a `nested` vault. A call without `managed` reads
+    the managed root that the process is bound to, which is `nested` until a vault is bound. In a `root` vault it is the vault root, less the import staging folder and
     the entries that the layout record lists as unmanaged (`layout.managed_of` returns both).
     The store owns content that search hides: ``_trash``, ``_archive``, ``_attachments`` and ``_Adoption``
     are owned, although the Knowledge Base walk skips them.
@@ -174,15 +182,17 @@ def iter_owned(
     It hands ``on_skip`` each owned-looking path it left out, and each folder it could not read,
     so a caller can tell a partial walk from a whole one. Without ``on_skip`` the walk stays silent.
     ``managed`` is the vault's layout and unmanaged entries, as for ``classify``; the walk and the rule
-    must read the same layout, so without it the walk reads a `nested` vault and does not look the layout up.
+    must read the same layout, so the walk reads it once, here, and without ``managed`` it reads the
+    bound managed root without looking the layout up.
     """
     report = on_skip or (lambda _skipped: None)
-    in_root = _is_root(managed)
+    chosen = _of(managed)
+    in_root = chosen.layout is Layout.ROOT
     yield from _walk(
-        managed_root(Path(vault_root), layout=managed.layout if in_root else None),
-        "" if in_root else managed_root_rel(),
+        managed_root(Path(vault_root), layout=chosen.layout),
+        "" if in_root else managed_root_rel(layout=chosen.layout),
         report,
-        managed,
+        chosen,
     )
 
 

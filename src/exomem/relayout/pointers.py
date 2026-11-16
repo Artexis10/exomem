@@ -107,7 +107,7 @@ def plan_pointers(
 
 
 def _below_managed_root(path: str) -> bool:
-    return kbdir.managed_split(path) is not None
+    return kbdir.managed_split(path, layout=kbdir.Layout.NESTED) is not None
 
 
 def _record(result: PointerPlan, page: str, field_name: str, old: str, new: str) -> None:

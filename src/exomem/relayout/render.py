@@ -27,7 +27,7 @@ def _resolve(value: object, *, full: bool) -> object:
 
 def _attention(plan: RelayoutPlan) -> list[str]:
     counts = plan.counts()
-    managed = kbdir.managed_root_rel()
+    managed = kbdir.managed_root_rel(layout=kbdir.Layout.NESTED)
     figures = plan.disclosure.figures() if plan.disclosure is not None else {}
     found: list[tuple[int, str]] = [
         (counts["unmappable_files"], "files that cannot get a new path"),
@@ -77,7 +77,7 @@ def _disclosure_sentence(plan: RelayoutPlan) -> str:
 def outcome(plan: RelayoutPlan) -> str:
     """The sentence that states the plan's result, for a person or an agent to repeat."""
     counts = plan.counts()
-    managed = kbdir.managed_root_rel()
+    managed = kbdir.managed_root_rel(layout=kbdir.Layout.NESTED)
     parts = [
         f"Relayout plan from {plan.current.value} to {plan.target.value}: the content of {managed} moves to the vault root.",
         f"{counts['moved_files']} of {counts['files']} files move and {counts['renamed_files']} get a new file name.",

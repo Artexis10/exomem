@@ -94,6 +94,25 @@ def initialize_vault_state_offline(vault_root: Path, *, source: str) -> None:
     state_migration.require_vault_state_ready(vault_root)
 
 
+def bind_root_vault(vault_root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make the folder `vault_root` a `root` vault and serve it, as the service does at start.
+
+    A `root` vault carries `_Schema/vault-layout.yaml` with `layout: root` at its root and the
+    shipped schema sentinel. Resolving the served vault is what binds the process's managed root.
+    """
+    record = vault_root / "_Schema" / "vault-layout.yaml"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("layout: root\n", encoding="utf-8")
+    sentinel = vault_root / ".exomem" / "schema" / "SKILL.md"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    if not sentinel.exists():
+        sentinel.write_text("---\nname: exomem\n---\n", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault_root))
+    from exomem import vault as vault_module
+
+    return vault_module.resolve_vault()
+
+
 # The benchmark package (benchmarks/membench) deliberately lives outside src/
 # and outside the wheel/sdist; tests reach it via this guarded path insert.
 _BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
@@ -521,6 +540,20 @@ def _stop_leaked_graph_drain():
     # A quiet window stamped under a faked clock must not outlive its test: a later
     # test compares against real `time.monotonic()`, which can read lower.
     graph_drain._last_debt = 0.0
+
+
+@pytest.fixture(autouse=True)
+def _unbind_managed_root():
+    """No test leaves the managed root that it bound for the next test.
+
+    Resolving a `root` vault binds the process's managed root, which is module state. A test
+    that resolved vault must not turn every later `nested` fixture vault into a `root` vault.
+    """
+    from exomem import kbdir
+
+    kbdir.unbind()
+    yield
+    kbdir.unbind()
 
 
 @pytest.fixture(autouse=True)

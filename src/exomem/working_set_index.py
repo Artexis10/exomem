@@ -49,7 +49,7 @@ from .collection_store.preview import (
     canonical_read,
     selected_writer,
 )
-from .kbdir import managed_root, managed_root_rel
+from .kbdir import managed_root, managed_root_parts, managed_split, managed_state
 from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
@@ -567,7 +567,9 @@ def subject_text(turn: str) -> str:
         cursor = end
     parts.append(text[cursor:])
     text = "".join(parts)
-    text = _vault_path(managed_root_rel()).sub(lambda match: _final_segment(match.group(0)), text)
+    # A `root` vault has no wrapper folder for a path in prose to start with.
+    for wrapper in managed_root_parts():
+        text = _vault_path(wrapper).sub(lambda match: _final_segment(match.group(0)), text)
     return _SLASH_RUN.sub(slash_run, _REFERENCE.sub(reference, text))
 
 
@@ -1181,8 +1183,14 @@ def _page_key(
     )
 
 
+def _below_managed_root(rel: str) -> str:
+    """`rel` read from the managed root; a path outside it keeps its spelling."""
+    below = managed_split(rel)
+    return rel if below is None else below
+
+
 def _page_entry(
-    path: Path, rel: str, page: Any, *, kb: str, conventions: Any, filler: frozenset[str]
+    path: Path, rel: str, page: Any, *, conventions: Any, filler: frozenset[str]
 ) -> _PageEntry:
     """Derive one walked page's `_PageEntry` from its parsed form."""
     from . import provenance
@@ -1202,7 +1210,7 @@ def _page_entry(
                 normalize(spelling)
                 for spelling in (
                     rel.removesuffix(".md"),
-                    rel.removesuffix(".md").removeprefix(f"{kb}/"),
+                    _below_managed_root(rel.removesuffix(".md")),
                     path.stem,
                     title,
                     *_strings(frontmatter.get("aliases")),
@@ -1222,11 +1230,11 @@ def _page_entry(
             if normalize(match)
         )
     )
-    head = rel.removeprefix(f"{kb}/").split("/", 1)[0]
+    head = _below_managed_root(rel).split("/", 1)[0]
     projects = (
         tuple(find_corpus.all_projects(frontmatter)) if head not in _RAW_MATERIAL_FOLDERS else ()
     )
-    kind = _page_anchor_kind(rel, frontmatter, kb=kb, conventions=conventions)
+    kind = _page_anchor_kind(rel, frontmatter, conventions=conventions)
     anchor: dict[str, Any] | None = None
     if kind is not None and not is_navigation_page(path):
         sections = _sections(page.body)
@@ -1337,11 +1345,10 @@ def _walk_page_entries(
     outbound: dict[str, tuple[str, ...]] = {}
     names: dict[str, list[str]] = {}
     project_members: dict[str, list[tuple[str, str, bool]]] = {}
-    kb = managed_root_rel()
-    kb_root = Path(vault_root) / kb
+    kb_root = managed_root(Path(vault_root))
     filler = activation_conventions.shipped_conventions().conventions.referential_filler
     # An entry is derived under these, so a walk under others reuses none.
-    context = (kb, conventions)
+    context = (managed_state(), conventions)
     vault_key = _vault_key(vault_root)
     previous: dict[str, tuple[tuple[Any, ...], _PageEntry]] = {}
     if reuse:
@@ -1359,8 +1366,10 @@ def _walk_page_entries(
         foreground_priority.check_cancelled()
         folder = folders.get(path.parent)
         if folder is None:
-            folder = folders[path.parent] = path.parent.relative_to(vault_root).as_posix()
-        rel = f"{folder}/{path.name}"
+            folder = path.parent.relative_to(vault_root).as_posix()
+            # A page at the vault root has no folder in front of its name.
+            folder = folders[path.parent] = "" if folder == "." else folder
+        rel = f"{folder}/{path.name}" if folder else path.name
         # Taken before the read: a change after it moves the key the next walk sees.
         key = _page_key(path, kb_root, directories, settled_before=settled_before)
         held_entry = previous.get(rel)
@@ -1372,7 +1381,7 @@ def _walk_page_entries(
             page = find_corpus.CACHE.get(path, Path(vault_root))
             if page is None:
                 continue
-            entry = _page_entry(path, rel, page, kb=kb, conventions=conventions, filler=filler)
+            entry = _page_entry(path, rel, page, conventions=conventions, filler=filler)
         if key is not None:
             current[rel] = (key, entry)
         for spelling in entry.spellings:
@@ -1534,7 +1543,7 @@ def _finalize_anchor_aliases(
 
 
 def _page_anchor_kind(
-    rel: str, frontmatter: Mapping[str, Any], *, kb: str, conventions: Any
+    rel: str, frontmatter: Mapping[str, Any], *, conventions: Any
 ) -> str | None:
     """Which anchor kind a walked page is, or None when it is not an anchor.
 
@@ -1551,7 +1560,7 @@ def _page_anchor_kind(
     """
     from . import activation_conventions, vault
 
-    inside = rel.removeprefix(f"{kb}/")
+    inside = _below_managed_root(rel)
     head = inside.split("/", 1)[0]
     if head == "Entities":
         return "entity" if normalize(frontmatter.get("type")) == "entity" else None

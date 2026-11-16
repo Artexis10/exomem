@@ -334,7 +334,10 @@ class _Publisher:
             raise _Retry("publication intent changed")
         for parent in (self.kb_parent, self.parent, self.workspace):
             if parent is not None:
-                self.filesystem.validate_directory(parent).require()
+                # The vault root of a `root` vault has no name in a parent to check.
+                self.filesystem.validate_directory(
+                    parent, require_name=bool(getattr(parent, "named", False))
+                ).require()
 
     def validate_head(self, value):
         if not isinstance(value, dict):

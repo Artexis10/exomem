@@ -513,7 +513,7 @@ def _bound(
     owner: str, value: str, registry: layout.Registry, today: _Tree, after: _Tree
 ) -> BoundValue:
     translated = layout.translate_path(value, layout.Layout.ROOT, registry)
-    files_today = today.holds(kbdir.managed_form(value))
+    files_today = today.holds(kbdir.managed_form(value, layout=kbdir.Layout.NESTED))
     files_after = after.holds(translated)
     if files_today == 0:
         state = HOLDS_NO_FILES

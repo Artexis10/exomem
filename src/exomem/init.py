@@ -18,7 +18,7 @@ from .entity_types import (
     extension_registry_path,
     load_entity_types,
 )
-from .kbdir import managed_join, managed_root
+from .kbdir import Layout, managed_join, managed_root
 from .vault import (
     PathGuard,
     PathGuardError,
@@ -435,7 +435,7 @@ def reclaim_legacy_shipped_schema(vault_root: Path, *, apply: bool = False) -> d
     vault_root = Path(vault_root)
     if _store_mode(vault_root):
         return _reclaim_in_store(vault_root, apply=apply)
-    legacy_root = managed_root(vault_root) / "_Schema"
+    legacy_root = managed_root(vault_root, layout=Layout.NESTED) / "_Schema"
     target_root = shipped_schema_target(vault_root)
     removed: list[str] = []
     declined: list[dict[str, str]] = []
@@ -495,7 +495,7 @@ def _reclaim_in_store(vault_root: Path, *, apply: bool) -> dict:
     """
     from .vault_store import read, write
 
-    legacy = managed_join("_Schema")
+    legacy = managed_join("_Schema", layout=Layout.NESTED)
     target_root = shipped_schema_target(vault_root)
     relatives = [
         source.relative_to(_SCAFFOLD).as_posix().split("/", 1)[1]

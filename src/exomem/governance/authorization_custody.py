@@ -2074,7 +2074,10 @@ def _governance_negative_scan(vault_root: Path) -> None:
                         raise AuthorizationCustodyUnavailable
                     if candidate.error is None or candidate.error.code != "MISSING":
                         raise AuthorizationCustodyUnavailable
-                if not filesystem.validate_directory(knowledge_base).ok:
+                # The vault root of a `root` vault has no name in a parent to check.
+                if not filesystem.validate_directory(
+                    knowledge_base, require_name=bool(getattr(knowledge_base, "named", False))
+                ).ok:
                     raise AuthorizationCustodyUnavailable
         # The compiled governance store is machine-local and lives under the
         # external per-vault state root now; a negative scan that ignored it

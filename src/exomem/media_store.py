@@ -1498,6 +1498,9 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
         if not target.is_absolute():
             target = root / target
         relative = target.relative_to(root).as_posix()
+        # The vault root itself (the managed root of a `root` vault) spells "."; every entry is below it.
+        if relative == ".":
+            relative = ""
         prefixes.append(relative)
         if originals.is_note_path(relative):
             prefixes.append(relative[:-3])
@@ -1510,7 +1513,7 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
                 continue
             seen.add(snapshot.path)
             relative = snapshot.path.relative_to(root).as_posix()
-            if not any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes):
+            if not any(not prefix or relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes):
                 continue
             ledger, token = stack.enter_context(_pin(root, snapshot.path, read=read))
             current = original_state(root, snapshot.path)
