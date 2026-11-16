@@ -8,13 +8,35 @@ would loop the resolver, and a block that would spend the turn's allowance or le
 
 from __future__ import annotations
 
+import base64
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
+import yaml
+from conftest import initialize_vault_state_offline
+from test_context_catalogue import _built, _page, _write
+from test_governance_egress import _external, _reset_caches
+from test_working_set_withheld_twins import _withhold
 
-from exomem import commands, note_types, source_taxonomy
+from exomem import (
+    activation_conventions,
+    commands,
+    context_catalogue,
+    domain_profiles,
+    lexstore,
+    note_types,
+    source_taxonomy,
+    stance,
+    working_set_runtime,
+)
+from exomem._hooks import exomem_retrieve_nudge as hook
+from exomem.governance import principal
+from exomem.writer_lease import invoke_command
 
 KB = "Knowledge Base"
+PROFILES = f"{KB}/Notes/Profiles"
 CONTENT = "- [rule] Prefer finished stories over endless series. ^story\n"
 
 
@@ -80,3 +102,323 @@ def test_ancestors_come_nearest_first(vault: Path) -> None:
     }})
 
     assert source_taxonomy.load_taxonomy(vault).domain_ancestors("mixing") == ("audio", "media")
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_an_unregistered_topic_is_reported_without_blocking_the_write(vault: Path) -> None:
+    preview = _remember_profile(vault, "Silent cinema", ["silent-cinema"], validate_only=True)
+
+    (finding,) = preview["contract_result"]["warnings"]
+    assert finding["code"] == "UNRESOLVED_PROFILE_TOPIC" and "silent-cinema" in finding["detail"]
+    assert not preview["contract_result"]["blocking_findings"]
+
+
+# --------------------------------------------------------------------------- #
+# What a turn receives
+# --------------------------------------------------------------------------- #
+
+TAXONOMY = (
+    "schema_version: 1\n"
+    "domains:\n"
+    "  media: {label: Media}\n"
+    "  games: {label: Games, parent: media}\n"
+    "  music: {label: Music, parent: media}\n"
+    "  cooking: {label: Cooking}\n"
+)
+# Each profile speaks its own words, so a turn about one domain retrieves that domain's page alone.
+RULE = {
+    "global": "Keep a source for each claim.",
+    "media": "Finished stories beat endless series.",
+    "games": "Tactical cooperative play only, never twitch shooters.",
+    "music": "Analogue warm albums only, never loudness masters.",
+    "cooking": "Slow braises only, never deep frying.",
+}
+GAMES_TURN = "Which tactical cooperative games suit tonight"
+BOTH_TURN = "Pick analogue warm albums and tactical cooperative games"
+GENERAL_TURN = "What is the boiling point of water at altitude"
+
+
+def _profile(root: Path, name: str, topics: list[str] | None, text: str, extra: str = "") -> str:
+    declared = "" if topics is None else f"topics: [{', '.join(topics)}]\n"
+    return _write(
+        root, f"{PROFILES}/{name}.md",
+        f"---\ntype: profile\nstatus: active\n{declared}{extra}---\n\n# {name}\n\n{text}",
+    )
+
+
+def _rule(name: str, text: str | None = None) -> str:
+    return f"- [rule] {text or RULE[name]} ^{name}\n"
+
+
+def _refresh(root: Path) -> None:
+    lexstore.ensure_fresh(root)
+    _built(root).close()
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+
+
+@pytest.fixture
+def profiles_vault(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _write(tmp_path, f"{KB}/_Schema/source-taxonomy.yaml", TAXONOMY)
+    _write(tmp_path, f"{KB}/_Schema/SKILL.md", "# Memory schema\n")
+    schema = Path(stance.__file__).parent / "_scaffold/_Schema/references"
+    for name in ("frontmatter.md", "page-types.md"):
+        _write(tmp_path, f"{KB}/_Schema/references/{name}", (schema / name).read_text(encoding="utf-8"))
+    _profile(tmp_path, "global", None, _rule("global"))
+    for domain in ("media", "games", "music", "cooking"):
+        _profile(tmp_path, domain, [domain], _rule(domain))
+    initialize_vault_state_offline(tmp_path, source="domain profiles fixture")
+    _refresh(tmp_path)
+    with principal.library_scope():
+        yield tmp_path
+
+
+def _activate(root: Path, turn: str, *, who=None, **arguments) -> dict:
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    arguments.setdefault("max_chars", 2000)
+    with principal.request_scope(who or principal.owner_principal(surface="library")):
+        return invoke_command(command, root, turn=turn, **arguments)
+
+
+def _served(packet: dict) -> dict[str, list[str]]:
+    """Each served domain's line texts, in served order."""
+    return {entry["domain"]: [line["text"] for line in entry["lines"]] for entry in packet["domain_profiles"]["profiles"]}
+
+
+def _cost(packet: dict, *domains: str) -> int:
+    """What the named domains' lines occupy in the block's budget, as the hook renders them."""
+    return sum(
+        len(domain_profiles.item_line(entry["label"], line)) + 1
+        for entry in packet["domain_profiles"]["profiles"] if entry["domain"] in domains for line in entry["lines"]
+    )
+
+
+def _set_budgets(root: Path, **budgets: int) -> None:
+    path = activation_conventions.override_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"schema_version": 1, "budgets": budgets}), encoding="utf-8")
+    activation_conventions.clear_cache()
+
+
+def test_a_gaming_turn_serves_games_then_its_ancestor_and_no_music(profiles_vault) -> None:
+    packet = _activate(profiles_vault, GAMES_TURN)
+
+    assert packet["domain_profiles"]["state"] == "ready" and packet["domain_profiles"]["omitted"] == []
+    assert _served(packet) == {"games": [RULE["games"]], "media": [RULE["media"]]}
+    assert list(_served(packet)) == ["games", "media"]
+
+
+def test_two_touched_domains_serve_their_shared_ancestor_once(profiles_vault) -> None:
+    packet = _activate(profiles_vault, BOTH_TURN)
+
+    domains = [entry["domain"] for entry in packet["domain_profiles"]["profiles"]]
+    assert sorted(domains) == ["games", "media", "music"]
+    assert domains[-1] != "games" and domains.count("media") == 1
+
+
+def test_a_general_turn_touches_no_profile(profiles_vault) -> None:
+    packet = _activate(profiles_vault, GENERAL_TURN)
+
+    assert packet["domain_profiles"] == {"state": "empty", "profiles": [], "omitted": []}
+
+
+def test_an_unresolved_topic_supplies_nothing_and_never_becomes_global(profiles_vault) -> None:
+    _profile(profiles_vault, "silent", ["silent-cinema"], _rule("silent", "Silent features only, never talkies."))
+    _refresh(profiles_vault)
+
+    packet = _activate(profiles_vault, "Which silent features suit tonight")
+
+    assert "silent" not in json.dumps(packet["domain_profiles"]) and "silent" not in json.dumps(packet["stance"])
+    assert [item["text"] for item in packet["stance"]["items"]] == [RULE["global"]]
+
+
+def test_over_budget_keeps_the_strongest_and_lists_the_rest_to_read_on_demand(profiles_vault) -> None:
+    roomy = _activate(profiles_vault, BOTH_TURN)
+    served = [entry["domain"] for entry in roomy["domain_profiles"]["profiles"]]
+    _set_budgets(profiles_vault, profiles_max_chars=_cost(roomy, *served[:2]))
+
+    tight = _activate(profiles_vault, BOTH_TURN)
+
+    assert list(_served(tight)) == served[:2]
+    assert tight["domain_profiles"]["omitted"] == [
+        {"domain": served[2], "label": served[2].title(), "ref": f"{PROFILES}/{served[2]}.md"},
+    ]
+
+
+def test_a_held_profile_is_unchanged_and_spends_no_budget(profiles_vault) -> None:
+    roomy = _activate(profiles_vault, GAMES_TURN)
+    _set_budgets(profiles_vault, profiles_max_chars=_cost(roomy, "games"))
+    first = _activate(profiles_vault, GAMES_TURN)
+
+    second = _activate(profiles_vault, GAMES_TURN, continuity=first["continuity"])
+
+    assert list(_served(first)) == ["games"] and [item["domain"] for item in first["domain_profiles"]["omitted"]] == ["media"]
+    held, sent = second["domain_profiles"]["profiles"]
+    assert (held["domain"], held["state"], held["lines"]) == ("games", "unchanged", [])
+    assert held["generation"] == first["domain_profiles"]["profiles"][0]["generation"]
+    assert (sent["domain"], sent["state"]) == ("media", "ready") and second["domain_profiles"]["omitted"] == []
+
+
+def test_an_edited_profile_is_sent_again_under_a_new_generation(profiles_vault) -> None:
+    first = _activate(profiles_vault, GAMES_TURN)
+    _profile(profiles_vault, "games", ["games"], _rule("games", "Tactical cooperative play, and tell me the player count."))
+    _refresh(profiles_vault)
+
+    second = _activate(profiles_vault, GAMES_TURN, continuity=first["continuity"])
+
+    before = {entry["domain"]: entry for entry in first["domain_profiles"]["profiles"]}
+    after = {entry["domain"]: entry for entry in second["domain_profiles"]["profiles"]}
+    assert after["games"]["state"] == "ready" and after["games"]["generation"] != before["games"]["generation"]
+    assert after["games"]["lines"][0]["text"].endswith("the player count.")
+    assert after["media"]["state"] == "unchanged"
+
+
+def test_profiles_leave_the_turns_allowance_whole(profiles_vault, monkeypatch) -> None:
+    on = _activate(profiles_vault, GAMES_TURN, max_chars=700)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PROFILES", "off")
+    working_set_runtime.reset_caches_for_tests()
+    off = _activate(profiles_vault, GAMES_TURN, max_chars=700)
+
+    assert on["domain_profiles"]["state"] == "ready" and "domain_profiles" not in off
+    assert on["budget"]["used_chars"] == off["budget"]["used_chars"] <= 700
+    assert on["map"] == off["map"] and on["turn_slice"] == off["turn_slice"]
+    assert on["task_context"]["candidates"] == off["task_context"]["candidates"]
+
+
+def test_a_profile_line_naming_a_hidden_page_is_withheld_without_a_trace(profiles_vault, monkeypatch) -> None:
+    # Task candidates are the selection evidence, and a governed vault reports none unless released-corpus tasks are on.
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
+    hidden = _page(profiles_vault, "hidden", body="- [rule] Secret instruction. ^secret\n")
+    _withhold(profiles_vault, hidden, ceiling=0)
+    _refresh(profiles_vault)
+    plain = _activate(profiles_vault, GAMES_TURN, who=_external())
+    _profile(profiles_vault, "games", ["games"], _rule("games") + f"- [rule] Follow [[{hidden.removesuffix('.md')}]]. ^link\n")
+    _refresh(profiles_vault)
+
+    linked = _activate(profiles_vault, GAMES_TURN, who=_external())
+
+    assert _served(plain) == {"games": [RULE["games"]], "media": [RULE["media"]]}
+    assert linked["domain_profiles"] == plain["domain_profiles"]
+    assert "hidden" not in json.dumps(linked["domain_profiles"])
+
+    _profile(profiles_vault, "games", ["games"], f"- [rule] Follow [[{hidden.removesuffix('.md')}]]. ^link\n")
+    _refresh(profiles_vault)
+    only_hidden = _activate(profiles_vault, GAMES_TURN, who=_external())["domain_profiles"]
+
+    assert [entry["domain"] for entry in only_hidden["profiles"]] == ["media"] and only_hidden["omitted"] == []
+
+
+def test_a_retyped_global_profile_serves_the_same_stance_lines(profiles_vault) -> None:
+    (profiles_vault / PROFILES / "global.md").unlink()
+    _page(profiles_vault, "global", "stance: true\n", body=_rule("global"))
+    _refresh(profiles_vault)
+    marked = _activate(profiles_vault, GENERAL_TURN)["stance"]
+    (profiles_vault / KB / "Notes" / "Insights" / "global.md").unlink()
+    _profile(profiles_vault, "global", None, _rule("global"))
+    _refresh(profiles_vault)
+
+    retyped = _activate(profiles_vault, GENERAL_TURN)["stance"]
+
+    assert [item["text"] for item in marked["items"]] == [RULE["global"]]
+    assert [item["text"] for item in retyped["items"]] == [item["text"] for item in marked["items"]]
+
+
+# --------------------------------------------------------------------------- #
+# The continuity token and the catalogue
+# --------------------------------------------------------------------------- #
+
+
+def _tampered(**fields: object) -> str:
+    token = working_set_runtime.encode_continuity(
+        identity="i", roles_hash="r", conventions_hash="c", generation=0, refs=[], roles=[],
+    )
+    payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+    packed = json.dumps({**payload, **fields}, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(packed).decode().rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    ["text", 7, ["games"], {"games": 3}, {"x" * 5000: "g"}],
+    ids=["string", "number", "list", "non-string generation", "oversized key"],
+)
+def test_a_malformed_profile_generation_map_reads_as_holding_nothing(malformed) -> None:
+    decoded = working_set_runtime.decode_continuity(_tampered(profile_generations=malformed))
+
+    assert decoded is not None and decoded["profile_generations"] == {}
+
+
+def test_sixteen_profile_generations_fit_the_token_and_more_are_cut() -> None:
+    longest = {f"{n:02d}-" + "d" * 61: "g" * 64 for n in range(working_set_runtime.CONTINUITY_MAX_PROFILES)}
+
+    token = working_set_runtime.encode_continuity(
+        identity="i", roles_hash="r", conventions_hash="c", generation=0, refs=[], roles=[],
+        profile_generations=longest,
+    )
+    flooded = working_set_runtime.decode_continuity(_tampered(profile_generations={f"d{n}": "g" for n in range(40)}))
+
+    assert len(token) <= working_set_runtime.CONTINUITY_MAX_CHARS
+    assert working_set_runtime.decode_continuity(token)["profile_generations"] == longest
+    assert len(flooded["profile_generations"]) == working_set_runtime.CONTINUITY_MAX_PROFILES
+
+
+def test_the_oldest_held_profiles_drop_first() -> None:
+    limit = working_set_runtime.CONTINUITY_MAX_PROFILES
+    held = {f"old-{n}": "g" for n in range(limit)}
+    served = {"profiles": [{"domain": "fresh", "generation": "h", "state": "ready"}]}
+
+    kept = working_set_runtime.held_profile_generations(served, held)
+
+    assert list(kept) == ["fresh", *list(held)[: limit - 1]]
+
+
+def test_a_catalogue_from_before_profiles_rebuilds_and_lists_them(profiles_vault) -> None:
+    catalogue = context_catalogue.ContextCatalogue(profiles_vault)
+    catalogue.close()
+    db = sqlite3.connect(catalogue.path)
+    db.execute("DROP INDEX entries_profile")
+    db.execute("ALTER TABLE entries DROP COLUMN profile")
+    db.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    db.commit()
+    db.close()
+
+    rebuilt = _built(profiles_vault)
+    try:
+        listed = {entry.path.rsplit("/", 1)[-1] for entry in rebuilt.entries_by_id(rebuilt.profile_ids())}
+    finally:
+        rebuilt.close()
+
+    assert listed == {"global.md", "media.md", "games.md", "music.md", "cooking.md"}
+
+
+# --------------------------------------------------------------------------- #
+# The hook and the budgets
+# --------------------------------------------------------------------------- #
+
+
+def test_the_hook_renders_each_served_profile_line_whole_beside_an_unchanged_working_set(profiles_vault, monkeypatch) -> None:
+    """A real packet: a profile that took the hook's room would cut the map or the slice, and a cut line is lost."""
+    on = _activate(profiles_vault, GAMES_TURN)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PROFILES", "off")
+    working_set_runtime.reset_caches_for_tests()
+    off = _activate(profiles_vault, GAMES_TURN)
+    # A ceiling the working set just fits: a profile charged to it would have to push the map or the slice out.
+    cap = len(hook._format_map_with_slice(off, 4000, "")[0])
+
+    on_text, on_complete, *_ = hook._format_map_with_slice(on, cap, "")
+    off_text, off_complete, *_ = hook._format_map_with_slice(off, cap, "")
+
+    on_lines = on_text.splitlines()
+    rendered = [line for line in on_lines if line.startswith("- profile ")]
+    assert rendered == [
+        domain_profiles.item_line(entry["label"], line)
+        for entry in on["domain_profiles"]["profiles"] for line in entry["lines"]
+    ] and len(rendered) == 2
+    assert [line for line in on_lines if not line.startswith("- profile")] == off_text.splitlines()
+    assert on_complete == off_complete
+
+
+def test_the_hook_bound_is_the_largest_one_a_vault_may_set() -> None:
+    """The hook cannot import the registry, so the largest vault bound is mirrored and pinned here."""
+    assert hook._PROFILES_MAX_CHARS == activation_conventions.BUDGET_BOUNDS["profiles_max_chars"][1]

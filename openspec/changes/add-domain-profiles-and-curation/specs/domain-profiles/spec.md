@@ -12,6 +12,7 @@ A live profile page with no `topics` SHALL be a global profile.
 A governed write SHALL reject a profile page with more than one topic. The error SHALL name the topics and say that each domain takes its own profile page.
 A profile page whose topics resolve to no registered domain SHALL supply no lines, and the response SHALL report a validation finding. Such a page SHALL NOT become a global profile.
 The product SHALL hold no list of domains or profiles in code.
+The product SHALL set no limit on how many profiles a vault holds or how many levels its domain hierarchy has.
 
 #### Scenario: A music profile lives beside the others
 
@@ -71,7 +72,7 @@ Budgets:
 Order and omission:
 
 - Profiles SHALL follow the order of the domains the turn touches, most strongly touched first, each followed by its ancestors.
-- A profile that does not fit SHALL be counted in `omitted`.
+- A profile that does not fit SHALL be listed in `omitted` with its `domain`, `label` and `ref`, so the agent can read it on demand.
 - Lines SHALL follow page path and unit order.
 - When several profile pages exist for one domain, their lines SHALL be joined in page path order.
 
@@ -100,7 +101,7 @@ Egress and state:
 #### Scenario: Over budget keeps the strongest domains
 
 - **WHEN** three touched domains each have a profile, and the total budget fits only two of them
-- **THEN** the response serves the two most strongly touched profiles whole and reports `omitted: 1`
+- **THEN** the response serves the two most strongly touched profiles whole and lists the third profile in `omitted` with its ref
 
 #### Scenario: A profile line cannot expose a hidden reference
 
@@ -116,7 +117,7 @@ Egress and state:
 
 A response SHALL send a profile's lines only when the caller's continuity token does not record that profile's current generation.
 Otherwise the profile entry SHALL be `unchanged`, with its generation and no lines, and it SHALL spend no profile budget.
-The continuity token SHALL carry at most eight profile generations. A malformed or oversized entry SHALL be ignored, and the token SHALL be decoded without error.
+The continuity token SHALL carry the generations of at most sixteen most recently served profiles; an older held profile is sent again when a later turn touches it. A malformed or oversized entry SHALL be ignored, and the token SHALL be decoded without error.
 
 #### Scenario: A later turn in the same domain repeats nothing
 

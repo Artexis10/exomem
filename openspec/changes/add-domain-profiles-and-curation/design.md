@@ -84,11 +84,11 @@ It has two budgets of its own, `domain_profile_max_chars` (1200) and `profiles_m
 
 ### D5. Continuity
 
-The token gains `profile_generations`, a map from domain key to generation, capped at eight entries.
+The token gains `profile_generations`, a map from domain key to generation, capped at the sixteen most recently served.
 
 - `decode_continuity` validates it and never raises.
 - An unknown field is ignored, so the token version stays the same.
-- The token's 8192-character cap is respected. Eight entries cost under 700 characters, and `method_versions` remains the only part that shrinks.
+- The token's 8192-character cap is respected. Sixteen entries cost about 1,400 characters, and `method_versions` remains the only part that shrinks.
 - The hook keeps held profiles through the token, as it does for skills, and needs no state file.
 
 ### D6. Selection

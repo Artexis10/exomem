@@ -435,6 +435,18 @@ def test_an_invalid_budget_keeps_the_shipped_value(vault: Path, bad_value: objec
     assert any(finding["code"] == "invalid_budget" for finding in registry.findings)
 
 
+def test_the_shipped_profile_budgets_hold_and_an_over_range_value_keeps_them(vault: Path) -> None:
+    shipped = ac.load_conventions(None)
+    assert (shipped.conventions.budget("domain_profile_max_chars"), shipped.conventions.budget("profiles_max_chars")) == (1200, 2400)
+
+    _override(vault, {"schema_version": 1, "budgets": {"domain_profile_max_chars": 8001, "profiles_max_chars": 8000}})
+    registry = ac.load_conventions(vault)
+
+    assert registry.conventions.budget("domain_profile_max_chars") == 1200
+    assert registry.conventions.budget("profiles_max_chars") == 8000
+    assert [finding["field"] for finding in registry.findings] == ["budgets.domain_profile_max_chars"]
+
+
 def test_an_unknown_budget_is_reported(vault: Path) -> None:
     _override(vault, {"schema_version": 1, "budgets": {"map_max_chars": 900}})
     registry = ac.load_conventions(vault)
