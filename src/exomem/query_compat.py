@@ -18,6 +18,8 @@ OPS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains",
                  "startswith", "in", "nin", "exists", "missing"})
 #: The operator a filter without `op` applies.
 DEFAULT_OP = "eq"
+#: The column that date bounds and `latest` read when a query names none and the columns hold it.
+DEFAULT_DATE_COLUMN = "date"
 
 
 def filter_items_schema() -> dict[str, Any]:

@@ -248,7 +248,7 @@ def observe_query_timeouts(log_path: Path):
             )
 
         def deadline_elapsed(session):
-            return (time.monotonic() - session._deadline + session.limits.timeout_ms / 1000) * 1000
+            return session._deadline.elapsed_ms()  # CPU milliseconds, which the deadline counts
 
         original_check = runtime.ReadSession.check
 

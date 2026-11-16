@@ -499,6 +499,8 @@ class CollectionWriter:
             )
             names = [column[0] for column in cursor.description]
             items = typed_storage.hydrate(self.connection, [dict(zip(names, item, strict=True)) for item in cursor])
+            if manifest.storage.strategy == "markdown-log":
+                items.sort(key=governance.input_order(manifest))
             return StoreAdapter(self, manifest, None)._snapshot(manifest, items, self._container(row))
 
     def _allows_item(self, selector, key):

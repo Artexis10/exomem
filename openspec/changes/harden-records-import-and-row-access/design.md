@@ -108,17 +108,25 @@ The cost is one indexed range read plus one short hash per row. On a generated s
 - A stored head column is a schema change for a cache.
 - Changing the row id format would break every agent that holds ids.
 
-### 5. Legacy queries on store collections run through the existing SQL legacy executor
+### 5. Legacy queries on store collections select rows through the legacy executor
 
-`add-collection-query-engine` Q1 already delivered `query_engine.sqlite.execute_legacy`, in PR #1563. It runs every legacy operator, sort and aggregate in SQL, over an admitted collection whose released identities are streamed into a private TEMP relation. Its parity suite compares it with the Python oracle row for row. No public route calls it yet, because Q1 tasks 1.7 to 1.9 (deadline, cancellation, temp cap and the gate) are open.
+`add-collection-query-engine` Q1 delivered `query_engine.sqlite.execute_legacy` in PR #1563. As delivered, it ran each row through Python callbacks inside SQLite: a value decode, a match, a sort collation and a TEMP copy. CPython re-takes the GIL at every callback and statement step. Beside one busy thread, that made it slower than the whole read, at 1 to 2 s for 154 rows. Its input order also differed from the Records order on summary collections.
 
-This change completes Q1 1.7 to 1.9 in that change and routes `query_records` on store collections through `execute_legacy`. Store-mode `_summary_rows` then serves only reads that need whole rows. There is still one query engine, and no second path.
+This change keeps `execute_legacy` as the one entry point and replaces its strategy:
+
+- It reads only the fields that the filters, sort, date bounds and aggregate decide on. It reads them in packed keyset chunks in row-id order, one statement step per chunk.
+- It decides each row with the `query_compat` primitives of the file evaluator, so the answers are equal by construction. It does not run each legacy operator in SQL.
+- It returns the row ids of the page, the totals and the aggregate. The Records surface rebuilds only the returned rows. When the request names no columns, it also rebuilds the leading rows in one read and infers the default columns from them, as the file evaluator does.
+- Summary rows keep their item key order. A converted row keeps its old item file path, so view path order would reorder them.
+- Its deadline counts the CPU time of the request's own thread, under a fixed `records` profile of 1 s with a 2 s wall-clock backstop (`add-collection-query-engine` design §9 and §12).
+
+The Records query keeps the whole read, under the same deadline, wherever a selected answer could differ from it: a caller limited to some fields, a derived collection, `typed-v1` rows, child tables, a profile aggregate, or a root that is a system or non-scalar field. Inside a Records query, the whole read also checks the deadline while it decodes rows, and it refuses with the same code, message and details as the selected read. Other whole summary reads bound only their fetch, as before. There is still one query engine.
 
 - The continuation keeps its legacy offset form.
-- The ownership proof is taken once per request.
+- The ownership proof is taken once per request. A routed store request hands its proof to the store thread, which proves nothing itself; only a call outside that route proves again.
 - The `rendered` copy counts once against the response cap.
 
-The Q1 phase gate's other conditions stay with that change: typed v1, declared indexes and the reader RSS envelope.
+The Q1 phase gate's other conditions stay with that change: the 1.8 memory probe, the 1.9 gate, typed v1, declared indexes and the reader RSS envelope.
 
 ### 6. An import batch is short in statements and in time
 
@@ -129,7 +137,7 @@ The Q1 phase gate's other conditions stay with that change: typed v1, declared i
 
 ### 7. Load target
 
-These bounds hold for a collection of up to 100,000 rows: the items-mode ceiling. They hold on one personal service with the interactive profile.
+These bounds hold for a collection of up to 100,000 rows: the items-mode ceiling. They hold on one personal service with the shipped query profiles.
 
 | Operation | Bound |
 |---|---|
