@@ -364,7 +364,23 @@ def _dispatch_main(raw: list[str]) -> int:
     return _serve_main(raw)
 
 
-def _load_cwd_dotenv() -> None:
+class _DotenvConflict(Exception):
+    """The working-directory `.env` would replace exported values; a credential write must not guess."""
+
+    def __init__(self, keys: list[str]) -> None:
+        super().__init__(", ".join(keys))
+        self.keys = keys
+
+
+def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
+    return (
+        f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        "to a different value than your environment, so the target store is ambiguous. "
+        "Unset those variables, or run from a directory without that .env."
+    )
+
+
+def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     """Load the operator's cwd `.env`, as the local CLI always has.
 
     Never in a cloud cell: its environment is the pod spec, and "no `.env`
@@ -373,6 +389,11 @@ def _load_cwd_dotenv() -> None:
     example to set `EXOMEM_OAUTH_STORAGE_URL`) must not become CLI
     configuration just because an operator ran a command from inside it --
     the same guard `server_runtime` applies to the service's own load.
+
+    The `.env` still wins over exported values. A command that writes
+    credentials or sessions passes `refuse_conflicts`: when the `.env` would
+    replace an exported value with a different one, it stops instead of
+    acting on a store the operator did not name. Other commands warn.
     """
     from . import cloud_cell
 
@@ -383,8 +404,21 @@ def _load_cwd_dotenv() -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
 
+    # Names only: the values may be secrets.
+    replaced = sorted(
+        key
+        for key, value in dotenv_values(dotenv_path).items()
+        if value is not None and key in os.environ and os.environ[key] != value
+    )
+    if replaced and refuse_conflicts:
+        raise _DotenvConflict(replaced)
+    if replaced:
+        print(
+            f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
+            file=sys.stderr,
+        )
     load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
@@ -395,7 +429,7 @@ def _build_auth_session_authority():
     issuer, audience, storage namespace, and local-vs-HA selection without
     importing server auth during unrelated CLI startup.
     """
-    _load_cwd_dotenv()
+    _load_cwd_dotenv(refuse_conflicts=True)
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -485,7 +519,11 @@ def _issue_local_main(args: argparse.Namespace) -> int:
     if output.exists() or output.is_symlink():
         print(f"issue-local: {output} already exists; choose a new path", file=sys.stderr)
         return 2
-    _load_cwd_dotenv()
+    try:
+        _load_cwd_dotenv(refuse_conflicts=True)
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message("issue-local", conflict), file=sys.stderr)
+        return 2
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -589,6 +627,9 @@ def _auth_main(argv: list[str]) -> int:
 
     try:
         authority = _build_auth_session_authority()
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message("auth", conflict), file=sys.stderr)
+        return 2
     except (SessionStoreUnavailable, OSError):
         print(
             "session authority unavailable; check storage configuration and connectivity",

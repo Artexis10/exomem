@@ -243,3 +243,79 @@ def test_preload_resource_policy_refuses_a_symlinked_env_file_into_the_vault(
     runtime_resources.preload_local_dotenv_policy()
 
     assert "EXOMEM_CPU_THREADS" not in os.environ
+
+
+# --------------------------------------------------------------------------- #
+# exported values the working-directory .env would replace
+# --------------------------------------------------------------------------- #
+
+
+def _plant_store(directory: Path) -> None:
+    (directory / ".env").write_text(
+        "EXOMEM_OAUTH_STORAGE_URL=sqlite:////dotenv-store/sessions.db\n", encoding="utf-8"
+    )
+
+
+def test_issue_local_refuses_to_mint_into_a_store_the_dotenv_swaps_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shell that exports one store, run from a folder whose .env names another,
+    must not get a token minted into the other store."""
+    from exomem import __main__ as cli
+    from exomem import server_auth
+
+    _plant_store(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "sqlite:////exported-store/sessions.db")
+    monkeypatch.setattr(
+        server_auth,
+        "build_local_session_authority",
+        lambda: pytest.fail("minted against an ambiguous store"),
+        raising=False,
+    )
+    output = tmp_path / "token"
+
+    assert cli.main(["auth", "issue-local", "--client", "home", "--output", str(output)]) == 2
+
+    error = capsys.readouterr().err
+    assert "EXOMEM_OAUTH_STORAGE_URL" in error
+    assert "dotenv-store" not in error and "exported-store" not in error
+    assert not output.exists()
+    assert os.environ["EXOMEM_OAUTH_STORAGE_URL"] == "sqlite:////exported-store/sessions.db"
+
+
+def test_session_controls_refuse_a_store_the_dotenv_swaps_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`auth revoke --all` against the .env's store would revoke the wrong sessions."""
+    from exomem import __main__ as cli
+    from exomem import server_auth
+
+    _plant_store(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "sqlite:////exported-store/sessions.db")
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com/")
+    monkeypatch.setattr(
+        server_auth,
+        "build_session_authority",
+        lambda **_kwargs: pytest.fail("revoked against an ambiguous store"),
+        raising=False,
+    )
+
+    assert cli.main(["auth", "revoke", "--all"]) == 2
+
+    assert "EXOMEM_OAUTH_STORAGE_URL" in capsys.readouterr().err
+
+
+def test_a_dotenv_that_agrees_with_the_environment_is_no_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import __main__ as cli
+
+    _plant_store(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "sqlite:////dotenv-store/sessions.db")
+
+    cli._load_cwd_dotenv(refuse_conflicts=True)
+
+    assert os.environ["EXOMEM_OAUTH_STORAGE_URL"] == "sqlite:////dotenv-store/sessions.db"
