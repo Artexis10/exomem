@@ -9,6 +9,7 @@ relation or a registry changes (openspec/changes/add-topic-brief, design D1 to D
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import json
 import re
@@ -18,7 +19,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from . import (
     call_spans,
     context_catalogue,
     context_views,
+    currency_boundary,
     epistemic_graph,
     lifecycle_statuses,
     markdown_regions,
@@ -46,7 +48,7 @@ from . import (
     working_set_currency,
 )
 from .context_views import INDEX_WARMING, READY, UNAVAILABLE
-from .governance import egress, principal
+from .governance import connector_boundary, egress, principal
 from .vocabulary import registry as vocabulary_registry
 
 #: The shipped traversal profile whose relation families the member walk follows.
@@ -161,10 +163,10 @@ class _Graph:
         found: dict[str, _Node] = {}
         for chunk in _chunks(list(paths)):
             marks = ",".join("?" for _ in chunk)
-            # Pinned to the path index: left alone, the planner scans every file node through the `kind` index per chunk.
+            # The unary plus keeps `kind` out of index choice: left alone, the planner scans every file node through the `kind` index per chunk.
             rows = self.conn.execute(
                 "SELECT path, exomem_id, title, page_type, lifecycle_status, updated_date, origin_date, source_hash "
-                f"FROM graph_nodes INDEXED BY idx_graph_nodes_path WHERE kind = 'file' AND path IN ({marks})",
+                f"FROM graph_nodes WHERE +kind = 'file' AND path IN ({marks})",
                 list(chunk),
             ).fetchall()
             for path, exomem_id, title, page_type, lifecycle, updated, captured, content_hash in rows:
@@ -173,6 +175,22 @@ class _Graph:
                     updated or "", captured or "", content_hash,
                 )
         return found
+
+    def departed(self, refs: Sequence[str]) -> list[str]:
+        """Of the refs of pages that left a brief, those a reader may be told left: the page is gone, or the caller sees it.
+
+        A page that is still in the graph but that the caller may not see now left no trace the caller can read, so a
+        withholding is neither a removal nor a change.
+        """
+        ids = {ref: memory_refs.parse_memory_ref(ref) or "" for ref in refs}
+        held: dict[str, list[str]] = {}
+        for chunk in _chunks(sorted(set(ids.values()))):
+            marks = ",".join("?" for _ in chunk)
+            for exomem_id, path in self.conn.execute(
+                f"SELECT exomem_id, path FROM graph_nodes WHERE +kind = 'file' AND exomem_id IN ({marks})", list(chunk),
+            ):
+                held.setdefault(exomem_id, []).append(path)
+        return [ref for ref in refs if ids[ref] not in held or any(self.sees(path) for path in held[ids[ref]])]
 
     def node_keys(self, paths: Sequence[str], *, units_only: bool = False) -> list[str]:
         """Every graph node of these pages: the page itself and each unit, which a relation can name."""
@@ -438,8 +456,8 @@ class _Compiled:
     items: tuple[dict[str, Any], ...]
     #: For each item, the wire of the unit it serves, else None.
     wires: tuple[dict[str, Any] | None, ...]
-    #: Served unit ref -> hash of its text, for `changed_since`.
-    units: dict[str, str]
+    #: The refs of the served units, for `changed_since`.
+    units: tuple[str, ...]
     #: A member page's bytes differ from what the index holds, so this compile is never kept.
     stale: bool
 
@@ -460,8 +478,8 @@ def _digest(value: Any) -> str:
 def _registry_digest(root: Path) -> str:
     """What the registries that shape a compile say: the profile, relations, note types, statuses and unit kinds.
 
-    The public instance's registries only: a page's own instance can reinterpret its units, and an edit of that
-    page changes the member's content hash and with it the key.
+    Every instance's relations and categories count, not the public instance's alone: a private instance can
+    reinterpret a member's units with no edit to the page, so the page's content hash does not name that change.
     """
     relations = relation_registry.load_registry(root)
     parts = [
@@ -470,6 +488,7 @@ def _registry_digest(root: Path) -> str:
         vocabulary_registry.load(note_types.SPEC, root).effective_digest,
         vocabulary_registry.load(lifecycle_statuses.SPEC, root).effective_digest,
         semantic_language_registry.load_registry(root).content_hash,
+        semantic_contract.page_definitions_dependency(root),
     ]
     return _digest(parts)
 
@@ -592,16 +611,12 @@ def _compile(
     )
     items: list[dict[str, Any]] = []
     unit_wires: list[dict[str, Any] | None] = []
-    units: dict[str, str] = {}
+    units: list[str] = []
     boundaries: list[date] = []
     conclusions: list[tuple[dict[str, Any], dict[str, Any]]] = []
     questions: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for entry, item in zip(kept, annotated, strict=True):
-        for field in ("until", "check_by"):  # Closed typed date fields; each changes currency the following day.
-            if value := item.provenance.get(field):
-                boundary = date.fromisoformat(value) + timedelta(days=1)
-                if boundary > today:
-                    boundaries.append(boundary)
+        boundaries += currency_boundary.boundaries(item.provenance, today=today)
         history, review_due = working_set_currency.state(item, today=today, status_basis=status_basis)
         omitted = headers[entry.node.path]["omitted"]
         if item.lifecycle == working_set_currency.SUPERSEDED:
@@ -620,7 +635,7 @@ def _compile(
             if review_due:
                 served["review_due"] = review_due
             (conclusions if entry.section == CONCLUSIONS else questions).append((served, working_set._served_unit(item)))  # noqa: SLF001
-            units[item.ref] = _digest(item.text)
+            units.append(item.ref)
     by_page: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for served, wire in conclusions:
         by_page.setdefault(served["path"], []).append((served, wire))
@@ -637,7 +652,7 @@ def _compile(
     for served, wire in questions:
         items.append(served)
         unit_wires.append(wire)
-    return _Compiled(tuple(items), tuple(unit_wires), units, stale), min(boundaries) if boundaries else None
+    return _Compiled(tuple(items), tuple(unit_wires), tuple(units), stale), min(boundaries) if boundaries else None
 
 
 def _compiled(
@@ -680,25 +695,47 @@ def _compiled(
 # --------------------------------------------------------------------------- #
 
 
+def _view_key(root: Path, caller: context_views.CallerView) -> str:
+    """What a watermark was read through: the audience, the declared purpose and the connector ceiling.
+
+    The ceiling is its denied scopes, not the client or the login, so a returning client keeps its watermark and two
+    clients that see alike share one. A login's own grants reach the diff only through the view filter.
+    """
+    who = principal.effective_principal()
+    return _digest([who.audience_id, caller.purpose, connector_boundary.ceiling_identity(root, who)])
+
+
 def _changed_since(
-    root: Path, audience: str, seed: _Node, walk: _Walk, compiled: _Compiled,
-) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
-    """`changed_since` against this principal's watermark, with the member and unit maps that advance it."""
+    graph: _Graph, root: Path, view: str, seed: _Node, walk: _Walk, compiled: _Compiled,
+) -> tuple[dict[str, Any], Callable[[], bool] | None]:
+    """`changed_since` against this view's watermark, and the call that advances it once the brief is served.
+
+    Everything compared is what the caller sees now: the members and units come from the caller's walk, and a
+    stored member that the caller may no longer see is left out of `removed`. No call is returned when the
+    watermark could not be read, since the next read would then call a changed brief a first one.
+    """
     members = {node.ref: node.content_hash for node, _distance in walk.notes}
     members.update({node.ref: node.content_hash for node in walk.sources})
     where = {node.ref: node for node, _distance in walk.notes}
     where.update({node.ref: node for node in walk.sources})
+    advance = functools.partial(brief_watermarks.write, root, view, seed.id or "", members, compiled.units)
     try:
-        mark = brief_watermarks.read(root, audience, seed.id or "")
+        mark = brief_watermarks.read(root, view, seed.id or "")
     except brief_watermarks.WatermarkUnavailable:
-        return {"state": UNAVAILABLE}, members, compiled.units
+        return {"state": UNAVAILABLE}, None
     if mark is None:
-        return {"state": "first_read"}, members, compiled.units
+        return {"state": "first_read"}, advance
     new = [ref for ref in members if ref not in mark.members]
-    changed = [ref for ref in members if ref in mark.members and mark.members[ref] != members[ref]]
-    removed = [ref for ref in mark.members if ref not in members]
-    new_units = [ref for ref in compiled.units if ref not in mark.units]
-    report = {
+    changed = [
+        ref for ref in members
+        if ref in mark.members and mark.members[ref] != brief_watermarks.member_digest(members[ref])
+    ]
+    removed = graph.departed([ref for ref in mark.members if ref not in members])
+    # A row cut at its unit bound cannot say which units were new, and says so instead of listing the rest as new.
+    new_units = (
+        [ref for ref in compiled.units if brief_watermarks.unit_digest(ref) not in mark.units] if mark.units_exact else []
+    )
+    report: dict[str, Any] = {
         "state": "changed" if new or changed or removed or new_units else "unchanged",
         "new": [{"ref": ref, "path": where[ref].path, "title": _unlinked(where[ref].title)} for ref in new],
         "changed": [
@@ -708,7 +745,9 @@ def _changed_since(
         "removed": removed,
         "new_units": new_units,
     }
-    return report, members, compiled.units
+    if not mark.units_exact:
+        report["new_units_exact"] = False
+    return report, advance
 
 
 # --------------------------------------------------------------------------- #
@@ -720,10 +759,14 @@ def _pin_key(root: Path, response: Mapping[str, Any], caller: context_views.Call
     return ("brief", str(root), response.get("ref"), caller.binding, response.get("generation"), response.get("continuation"))
 
 
-def _pin(root: Path, caller: context_views.CallerView, response: dict[str, Any], wires: list[dict[str, Any]]) -> None:
+def _pin(
+    root: Path, caller: context_views.CallerView, response: dict[str, Any], wires: list[dict[str, Any]],
+    advance: Callable[[], bool] | None = None,
+) -> None:
+    """Keep what this invocation compiled for the terminal guard, with the watermark write that a served brief owes."""
     held = principal.invocation_served()
     if held is not None:
-        held[_pin_key(root, response, caller)] = (copy.deepcopy(response), copy.deepcopy(wires))
+        held[_pin_key(root, response, caller)] = (copy.deepcopy(response), copy.deepcopy(wires), advance)
 
 
 def unavailable(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -759,13 +802,16 @@ def guard_response(
     pinned = None if held is None else held.get(_pin_key(root, response, caller))
     if pinned is None:
         return unavailable(response)
-    body, wires = pinned
+    body, wires, advance = pinned
     if any(not caller.sees(path) for path in _paths({field: body.get(field) for field in _PINNED})):
         return unavailable(response)
     if any(verdict != egress.UNIT_KEPT for verdict in egress.classify_units(
         root, copy.deepcopy(wires), purpose=caller.purpose,
     )):
         return unavailable(response)
+    if advance is not None:
+        # The guard has passed this page: the last page of a brief moves the watermark only now that it is served.
+        advance()
     return {**response, **{field: copy.deepcopy(body[field]) for field in _PINNED if field in body}}
 
 
@@ -839,8 +885,8 @@ def _serve(root: Path, subject: str, continuation: str | None, purpose: str | No
             compiled = _compiled(root, caller, walk, closing, registries)
         except working_set_currency.CurrencyUnavailable:
             return _abstain(root, caller, ref, UNAVAILABLE)
-    audience = principal.effective_principal().audience_id
-    changed, members, units = _changed_since(root, audience, seed, walk, compiled)
+        # Inside the graph's snapshot: a stored member that left the brief is looked up in it, and decided for the caller.
+        changed, advance = _changed_since(graph, root, _view_key(root, caller), seed, walk, compiled)
     shown = {
         "seed": {"ref": seed.ref, "path": seed.path, "title": _unlinked(seed.title)},
         # A copy: the walk is shared across reads, and a response is the caller's to change.
@@ -875,10 +921,9 @@ def _serve(root: Path, subject: str, continuation: str | None, purpose: str | No
             {"title": _unlinked(node.title), "ref": node.ref, "path": node.path}
             for node in related if node.id is not None and node.path not in in_brief
         ][:RELATED_CAP]
-    if token is None and changed["state"] != UNAVAILABLE:
-        # The watermark advances only when the last page is served, so a read stopped half way is read again in full.
-        brief_watermarks.write(root, audience, seed.id, members, units)
-    _pin(root, caller, response, wires)
+    # Only the last page owes the watermark its advance, and the terminal guard makes it once that page is served: a read
+    # stopped half way, or a response the guard withholds, is read again in full.
+    _pin(root, caller, response, wires, advance if token is None else None)
     return response
 
 

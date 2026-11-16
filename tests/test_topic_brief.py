@@ -19,8 +19,10 @@ from typing import Any
 import pytest
 from conftest import initialize_vault_state_offline
 from test_activate_context_surface import _surface_server
-from test_governance_egress import _external, _reset_caches
+from test_connector_boundary import configured_boundary as configured_boundary
+from test_governance_egress import _external, _reset_caches, write_rule
 from test_graph_deferred_queue import _seed_live_freshness
+from test_private_vocabulary_instances import private_instances as private_instances
 from test_working_set_withheld_twins import _withhold
 
 from exomem import commands, epistemic_graph, index_sync, lexstore, topic_brief
@@ -408,6 +410,121 @@ def test_changed_since_names_what_this_principal_has_not_read(tmp_path, monkeypa
     # A watermark belongs to its principal: a second principal still has the whole brief to read.
     assert _read(vault, hub, PARTNER)["changed_since"] == {"state": "first_read"}
     assert _read(vault, hub)["changed_since"]["state"] == "unchanged"
+
+
+def test_a_purpose_that_withholds_a_member_leaves_the_watermark_of_a_read_without_one(tmp_path, monkeypatch) -> None:
+    """One audience reads under two views; neither read moves what the other last saw."""
+    vault = _vault(tmp_path, monkeypatch)
+    _hub_world(vault)
+    hub = f"{NOTES}/hub.md"
+    _withhold(vault, f"{NOTES}/sister-one.md", ceiling=0)
+    write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+    _reset_caches()
+    plain, narrowed = _external(), _external("marketing")
+    unchanged = {"state": "unchanged", "new": [], "changed": [], "removed": [], "new_units": []}
+
+    assert "harbour master" in json.dumps(_read(vault, hub, plain))
+    without_member = _read(vault, hub, narrowed)
+    assert "harbour master" not in json.dumps(without_member)  # the control: the purpose withholds the member
+    assert without_member["changed_since"] == {"state": "first_read"}
+    assert _read(vault, hub, plain)["changed_since"] == unchanged
+    assert _read(vault, hub, narrowed)["changed_since"] == unchanged
+
+
+def test_two_clients_of_one_owner_with_different_ceilings_keep_separate_watermarks(
+    vault: Path, configured_boundary, monkeypatch
+) -> None:
+    """A client that reads less than another is not told that the other's pages left the brief."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    _, authenticate = configured_boundary
+    limited, full = authenticate("limited"), authenticate("full")
+    _note(vault, "public-hub", "See [[private-sister]].\n\n## Claim\n- id: hub-claim\n\nThe hub is open.\n", head="project: public-project\n")
+    _note(vault, "private-sister", "## Claim\n- id: secret-claim\n\nThe sister is private.\n", head="project: private-project\n")
+    _index(vault)
+    hub = f"{NOTES}/public-hub.md"
+    unchanged = {"state": "unchanged", "new": [], "changed": [], "removed": [], "new_units": []}
+
+    assert "The sister is private." in json.dumps(_read(vault, hub, full))  # the control: only the limited client lacks it
+    cut = _read(vault, hub, limited)
+    assert "The sister is private." not in json.dumps(cut) and cut["changed_since"] == {"state": "first_read"}
+    assert _read(vault, hub, full)["changed_since"] == unchanged
+    assert _read(vault, hub, limited)["changed_since"] == unchanged
+
+
+def test_a_brief_the_terminal_guard_withholds_does_not_advance_the_watermark(tmp_path, monkeypatch) -> None:
+    """The watermark moves when the brief is served, not when it is compiled."""
+    vault = _vault(tmp_path, monkeypatch)
+    _hub_world(vault)
+    hub = f"{NOTES}/hub.md"
+
+    with principal.request_scope(_external()), principal.invocation_scope():
+        compiled = commands.op_read_memory(vault, path=hub, brief=True)
+        _withhold(vault, f"{NOTES}/sister-one.md", ceiling=0)
+        _reset_caches()
+        guarded = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": hub, "brief": True})
+    assert guarded["state"] == "unavailable"  # the control: the guard served nothing
+
+    assert _read(vault, hub, _external())["changed_since"] == {"state": "first_read"}
+
+
+def test_a_watermark_cut_at_its_unit_bound_says_so_instead_of_listing_the_rest_as_new(tmp_path, monkeypatch) -> None:
+    from exomem import brief_watermarks
+
+    monkeypatch.setattr(brief_watermarks, "MAX_UNITS", 2)
+    vault = _vault(tmp_path, monkeypatch)
+    _hub_world(vault)
+    hub = f"{NOTES}/hub.md"
+
+    first = _read(vault, hub)
+    assert len([item for item in first["items"] if item["ref"] != _ref("hub") and "#" in item["ref"]]) > 2  # the control: more units than the row keeps
+
+    assert _read(vault, hub)["changed_since"] == {
+        "state": "unchanged", "new": [], "changed": [], "removed": [], "new_units": [], "new_units_exact": False,
+    }
+
+
+def test_a_private_registry_change_with_no_page_edit_ends_the_cached_brief(
+    vault: Path, private_instances, monkeypatch
+) -> None:
+    """A page's own instance can reinterpret its units, so the cache key names the instances' registries too."""
+    from exomem.vocabulary import instances, registry_spec
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    full = private_instances("full")
+    _note(
+        vault, "private-interpretation", "## Container\n\n### Protocol\n- id: local-protocol\n\nPrivate procedure with a stable address.\n",
+        head="project: private-project\n",
+    )
+    _index(vault)
+    path = f"{NOTES}/private-interpretation.md"
+    with principal.request_scope(full):
+        overlay = instances.select(vault, registry_spec("categories"), "01ARZ3NDEKTSV4RRFFQ69G5FAV").overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        before = _read(vault, path, full)
+        assert "Private procedure with a stable address." not in json.dumps(before)  # the control: no assertion trait yet
+
+        overlay.write_text(
+            "schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n    traits: [assertion]\n"
+        )
+        after = _read(vault, path, full)
+
+    assert "Private procedure with a stable address." in {item.get("text") for item in after["items"]}
+
+
+def test_a_unit_dated_to_the_last_day_of_the_calendar_still_serves_its_brief(tmp_path, monkeypatch) -> None:
+    """`9999-12-31` has no following day to expire on; the brief serves the unit as current, with no error."""
+    vault = _vault(tmp_path, monkeypatch)
+    _note(
+        vault, "hub",
+        "## Claim\n- id: forever\n- until: 9999-12-31\n\nThe quay has a harbour master.\n\n"
+        "## Claim\n- id: recheck\n- check_by: 9999-12-31\n\nThe quay lights are on a timer.\n",
+    )
+    _index(vault)
+
+    brief = _read(vault, f"{NOTES}/hub.md")
+
+    assert {"The quay has a harbour master.", "The quay lights are on a timer."} <= {item.get("text") for item in brief["items"]}
 
 
 def test_a_cut_brief_counts_what_it_left_out(tmp_path, monkeypatch) -> None:
