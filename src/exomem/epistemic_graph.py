@@ -11567,21 +11567,26 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
 #: `cache_token` while another reader's cold proof of the sidecar is running.
 UNPROVEN_TOKEN = ("unproven",)
 
-#: The `graph_meta` rows that name the graph's content: a closed set that the sidecar's own schema fixes.
-_CACHE_TOKEN_KEYS = ("schema_version", "extension_registry_hash", "generation", "instance")  # nosemgrep: ep-word-set -- graph_meta key names.
+#: The `graph_meta` rows that name the graph's content: a closed set that the sidecar's own
+#: schema fixes.
+_CACHE_TOKEN_KEYS = (  # nosemgrep: ep-word-set -- graph_meta key names.
+    "schema_version", "extension_registry_hash", "generation", "instance",
+)
 
 
 def snapshot_cache_token(conn: sqlite3.Connection) -> tuple[str | None, ...] | None:
-    """`cache_token`'s values as the open read transaction `conn` sees them, or None when it names no generation.
+    """`cache_token`'s values as the read transaction `conn` sees them, None without a generation.
 
-    Every write of graph rows bumps `generation` in its own transaction (`_bump_generation`), so a reader that
-    keeps a result of its transaction under this token reads again after any write, however small. A store lend
-    reports the store revision as `generation`.
+    Every write of graph rows bumps `generation` in its own transaction (`_bump_generation`),
+    so a reader that keeps a result of its transaction under this token reads again after any
+    write, however small. A store lend reports the store revision as `generation`.
     """
     from .vault_store import read as store_read
 
     values = store_read.snapshot_identity(conn, _CACHE_TOKEN_KEYS)
-    return tuple(values.get(key) for key in _CACHE_TOKEN_KEYS) if values.get("generation") is not None else None
+    if values.get("generation") is None:
+        return None
+    return tuple(values.get(key) for key in _CACHE_TOKEN_KEYS)
 
 
 def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
@@ -11617,10 +11622,10 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     if conn is None:
         return UNPROVEN_TOKEN if outcome else None
     try:
+        marks = ", ".join("?" for _ in _CACHE_TOKEN_KEYS)
         values = dict(
             conn.execute(
-                f"SELECT key, value FROM graph_meta WHERE key IN ({', '.join('?' for _ in _CACHE_TOKEN_KEYS)})",
-                _CACHE_TOKEN_KEYS,
+                f"SELECT key, value FROM graph_meta WHERE key IN ({marks})", _CACHE_TOKEN_KEYS
             ).fetchall()
         )
     except sqlite3.Error:
