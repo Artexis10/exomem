@@ -918,3 +918,57 @@ def test_planning_preparation_keeps_generated_custody_unchanged(vault, attempts,
             after = generated_output_plan.read_before(producer.store, producer.native, path=before.path,
                 text=before.path.read_bytes().decode(), guard=before.guard)
             assert after == before
+
+
+def test_lost_acknowledgement_phase_keeps_the_capture_and_the_next_write_settles_its_slots(
+    vault, attempts, registered_custody, monkeypatch,
+):
+    """Catalogue work after native bytes is one deferred phase; losing it must not strand published output."""
+    from exomem import generated_fragment_store, generated_output_plan
+
+    manager, call = attempts
+    store_type = generated_fragment_store.GeneratedFragmentStore
+    commit = store_type._commit
+    lost = []
+
+    def lose_the_phase_that_settles_slots(self, operation, values):
+        if not lost and operation == "unit" and any(
+                item.kind == "slot" and value.pending is None and value.current_copy_id is not None
+                for item, value in values):
+            lost.extend(item for item, _ in values)
+            raise RuntimeError("process lost before its acknowledgements became durable")
+        return commit(self, operation, values)
+
+    args = authored()
+    ticket = reserve(call, args)
+    with monkeypatch.context() as crashing:
+        crashing.setattr(store_type, "_commit", lose_the_phase_that_settles_slots)
+        captured = call("capture_source", **args, capture_reservation=ticket)
+    reference = call("settle_source_capture", reservation=ticket)["owned_targets"][0]["source_ref"]
+    assert lost and captured["capture_outcome"] == "created"
+    assert (vault / captured["source"]["path"]).exists()
+    log = vault / "Knowledge Base/log.md"
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        store = store_type(vault)
+        try:
+            copies = [store.copy_record(item.object_id).value for item in lost if item.kind == "copy"]
+            assert copies and all(copy.outcome == "reserved" for copy in copies)
+        finally:
+            store.close()
+        with generated_output_plan.producer(vault) as producer:
+            assert producer.before(log).binding.slot.pending is not None
+
+    later = {**authored(), "title": "Later survey", "content": "A later observation.",
+             "source_identity": {"system": "archive", "record_id": "later", "revision": "one"}}
+    assert call("capture_source", **later, capture_reservation=reserve(call, later))["capture_outcome"] == "created"
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with generated_output_plan.producer(vault) as producer:
+            settled = producer.before(log)
+            assert settled.current is not None and settled.binding.slot.pending is None
+            assert reference in {fragment.source_ref for fragment in settled.mapping.after.fragments}
+            census = producer.store.census(limit=64)
+            for _ in range(64):
+                if census.state != "pending":
+                    break
+                census = producer.store.census(limit=64)
+            assert census.state == "ready"

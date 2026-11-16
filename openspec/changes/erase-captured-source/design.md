@@ -169,6 +169,20 @@ Warm lookup batches the target's image and copy obligations with an indexed unce
 Work grows with returned obligations, rather than unrelated Sources or one SQL request per fragment.
 Trusted producers reserve new copies from directly verified canonical image evidence; collection and historical lookup still require a qualified index.
 
+Commit a capture's catalogue work in durability phases, not as one canonical change for each operation.
+Inside one writer boundary, a unit stages image, page, copy-reservation and Slot-preparation work.
+The first native allocation is a barrier: it commits the staged work as one change before any byte can survive.
+Batch preparation reserves the stage and publication-temporary copies ahead, so they join that first change.
+Settlement and copy acknowledgements record facts that native custody already holds, so they wait for the unit's end.
+They become one closing change. A crash between the two changes leaves reserved copies and a pending Slot.
+That is the earlier honest outstanding state; the next writer settles the Slot from the native installation witness.
+Takeover, birth, uncertainty and collection stay immediate, and each one first commits the work staged before it.
+A phase change holds at most `MAX_STEP` objects; a larger phase commits as consecutive changes.
+The Source result journal forgets a closed publication only after its closing change is durable.
+Each commit deletes at most two change records below the retained window, instead of rewriting the head twice for each operation.
+A capture therefore makes a fixed number of canonical commits, whatever the vault size or catalogue age.
+This keeps a service caller's capture inside its 30-second request timeout.
+
 A freshly allocated Source can receive `generated_birth={catalogue_id,birth_epoch}` only before any generated output can survive.
 Issuance requires participation by every relevant managed producer and native-copy hook; configuration alone is insufficient.
 Replay or legacy adoption cannot manufacture a fresh birth witness.

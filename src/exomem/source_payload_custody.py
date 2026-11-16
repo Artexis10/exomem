@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -19,6 +20,8 @@ from . import (
     vocabulary_auxiliaries,
 )
 from .cli_ops import OpError
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -82,13 +85,21 @@ class _CaptureCopies:
                 image = self.store.begin_whole_image(
                     whole_source_ref=reference, image_sha256=binding.sha256, image_size=binding.size,
                 )
+                # The workspace stage, the publication and its temporary each allocate one copy.
+                self.copies.reserve_ahead(image, logical_path=write.path, count=3)
                 self.payloads[write.path] = _Payload(image, write.path)
         except BaseException:
-            self.store.close()
+            self.close()
             raise
 
     def close(self) -> None:
-        self.store.close()
+        try:
+            # A batch that never reached settlement still closes the copies it reserved ahead.
+            self.copies.release_ahead()
+        except (ValueError, sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable) as error:
+            log.warning("Source payload reservations remain outstanding (%s)", type(error).__name__)
+        finally:
+            self.store.close()
 
     def _check(self) -> None:
         source_custody.require_publishable(self.root, self.reference)
@@ -131,6 +142,7 @@ class _CaptureCopies:
 
     def finished(self) -> None:
         try:
+            self.copies.release_ahead()
             for publication in self.publications:
                 self.copies.unstarted(publication)
         except (ValueError, sqlite3.Error, OSError, held_fs.HeldFsError, source_native_custody.NativeCustodyUnavailable):
@@ -150,8 +162,9 @@ def capture(root: Path, *, reference: str, primary: vault.PlannedWrite,
     if availability.page_writer(root) is not None:
         yield None
         return
-    owner = _CaptureCopies(root, reference, payloads, writes)
-    try:
-        yield vault._BatchPayloadCustody(owner.stage, owner.publication, owner.removed, owner.finished)
-    finally:
-        owner.close()
+    with generated_fragment_store.unit(root):
+        owner = _CaptureCopies(root, reference, payloads, writes)
+        try:
+            yield vault._BatchPayloadCustody(owner.stage, owner.publication, owner.removed, owner.finished)
+        finally:
+            owner.close()

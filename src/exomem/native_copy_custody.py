@@ -47,6 +47,7 @@ class NativeCopyCustody:
         self.root, self.store, self.native = root, store, native
         self.ledger_id, self.physical_scope = native.ledger_id, native.physical_scope
         self._seal = object()
+        self._ahead: dict[tuple[str, Path], list[PreparedCopy]] = {}
 
     def _check_allocation(self, copy: CopyAllocation) -> None:
         if (copy.canonical.owner.owner != source_native_custody.OWNER
@@ -58,6 +59,9 @@ class NativeCopyCustody:
 
     def prepare(self, image: generated_fragment_store.ImageHeader, *, logical_path: Path) -> PreparedCopy:
         """Reserve the expected copy before its private native name is available."""
+        ahead = self._ahead.get((image.image_id, logical_path))
+        if ahead:
+            return ahead.pop()
         binding_id = uuid.uuid4().hex
         owner = source_custody.OwnerLocator(
             owner=source_native_custody.OWNER,
@@ -70,6 +74,19 @@ class NativeCopyCustody:
         )
         return PreparedCopy(canonical, image, logical_path, self._seal)
 
+    def reserve_ahead(self, image: generated_fragment_store.ImageHeader, *, logical_path: Path, count: int) -> None:
+        """Reserve the copies a publication will allocate, so one catalogue phase holds them all."""
+        prepared = [self.prepare(image, logical_path=logical_path) for _ in range(count)]
+        self._ahead.setdefault((image.image_id, logical_path), []).extend(prepared)
+
+    def release_ahead(self) -> None:
+        """Close every reservation made ahead that no native allocation used."""
+        while self._ahead:
+            _, prepared = self._ahead.popitem()
+            while prepared:
+                copy = prepared.pop().canonical
+                self.store.ack_copy(copy.copy_id, owner=copy.owner, outcome="no_effect")
+
     def allocate(self, prepared: PreparedCopy, *, relative_path: str,
                  destination: str | None = None, removable: bool = True,
                  publication_id: str | None = None) -> CopyAllocation:
@@ -77,6 +94,8 @@ class NativeCopyCustody:
         if not isinstance(prepared, PreparedCopy) or prepared._seal is not self._seal:
             raise ValueError("prepared copy belongs to another producer")
         canonical, image = prepared.canonical, prepared.image
+        # Native bytes follow this allocation, so the staged reservation must be durable first.
+        self.store.barrier()
         observed = self.store.copy_record(canonical.copy_id)
         current = self.store.image_header(image.image_id)
         locator = generated_fragment_store.file_locator(image.catalogue_id, prepared.logical_path.relative_to(self.root).as_posix())

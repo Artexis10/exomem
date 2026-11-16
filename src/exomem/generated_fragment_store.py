@@ -12,7 +12,8 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -31,6 +32,8 @@ INDEX_DESCRIPTOR_ID = "generated-fragments-index"
 MAX_RECORD_BYTES = 64 * 1024
 CHANGE_WINDOW = 4096
 MAX_STEP = 128
+# Each commit removes at most this many retired change records, so the window keeps up at no extra head write.
+TRIM_STEP = 2
 
 
 def _opaque(value: str) -> str:
@@ -87,8 +90,10 @@ class Change(_Record):
     unit_id: _Id
     # Operations describe this owner's fixed metadata protocol.
     operation: Literal["image_begin", "image_page", "image_seal", "copy_reserve", "copy_ack",
-                       "uncertainty", "birth", "collect", "no_effect", "slot_prepare", "slot_takeover", "slot_settle", "slot_remove"]
-    objects: Annotated[tuple[ObjectChange, ...], Field(max_length=3)] = ()
+                       "uncertainty", "birth", "collect", "no_effect", "slot_prepare", "slot_takeover", "slot_settle",
+                       "slot_remove", "unit"]
+    # A unit change carries one durability phase of staged objects, bounded by the caller step.
+    objects: Annotated[tuple[ObjectChange, ...], Field(max_length=MAX_STEP)] = ()
 
 
 class ImageHeader(_Record):
@@ -157,7 +162,7 @@ class Uncertainty(_Record):
     catalogue_id: _Id
     unknown_through_epoch: _Epoch
     image_id: _Id | None = None
-    object_keys: Annotated[tuple[str, ...], Field(max_length=3)] = ()
+    object_keys: Annotated[tuple[str, ...], Field(max_length=MAX_STEP)] = ()
     revision: _Id
 
 
@@ -178,6 +183,47 @@ class Slot(_Record):
 _OBJECT_MODELS = {"image": ImageHeader, "page": ImagePage, "copy": Copy, "uncertainty": Uncertainty, "slot": Slot}
 
 _SLOT_SEAL = object()
+
+
+@dataclass
+class _Unit:
+    """One root's staged objects in first-touch order, waiting for their durability phase."""
+
+    root: Path
+    staged: dict[Path, tuple[ObjectChange, BaseModel]] = field(default_factory=dict)
+    before_bytes: bool = False
+
+
+_UNITS: ContextVar[tuple[_Unit, ...]] = ContextVar("generated_catalogue_units", default=())
+
+
+def _active_unit(root: Path) -> _Unit | None:
+    return next((item for item in _UNITS.get() if item.root == root), None)
+
+
+@contextmanager
+def unit(root: Path) -> Iterator[None]:
+    """Commit this context's catalogue operations for one root as phase changes, not one change each.
+
+    Operations that native bytes depend on become durable at the next ``barrier``; acknowledgements,
+    and anything else still staged, at exit. A nested unit shares the outer overlay and flushes at its exit.
+    """
+    root = Path(root).absolute()
+    current = _active_unit(root)
+    token = None
+    if current is None:
+        current = _Unit(root)
+        token = _UNITS.set((*_UNITS.get(), current))
+    try:
+        yield
+    finally:
+        try:
+            GeneratedFragmentStore(root)._flush(current)
+        except Exception as error:  # noqa: BLE001 - like a failed acknowledgement, its obligations stay outstanding
+            log.warning("generated catalogue unit left staged changes outstanding (%s)", type(error).__name__)
+        finally:
+            if token is not None:
+                _UNITS.reset(token)
 
 
 @dataclass(frozen=True)
@@ -375,6 +421,14 @@ class GeneratedFragmentStore:
         return self.path / "copies" / copy_id[:2] / f"{copy_id}.json"
 
     def _read(self, path: Path, model):
+        """Read one object as this context's unit sees it; the guard always witnesses the durable file."""
+        value, guard = self._read_disk(path, model)
+        staged = _active_unit(self.root)
+        if staged is not None and path in staged.staged:
+            return staged.staged[path][1], guard
+        return value, guard
+
+    def _read_disk(self, path: Path, model):
         with reserved_paths._subsystem_authority_scope(OWNER):
             relative = path.relative_to(self.root).as_posix()
             try:
@@ -667,41 +721,95 @@ class GeneratedFragmentStore:
             self._object_path(item)
         return value
 
-    def _run(self, operation: str, values: Sequence[tuple[ObjectChange, BaseModel | None]]) -> Head:
+    def _run(self, operation: str, values: Sequence[tuple[ObjectChange, BaseModel | None]], *,
+             stage: Literal["before_bytes", "after_bytes"] | None = None) -> Head:
+        """Commit one operation, or stage it in this context's unit.
+
+        ``before_bytes`` work becomes durable at the unit's next barrier, before native bytes depend on it.
+        ``after_bytes`` work records facts native custody already holds, so it may wait for the unit's end:
+        a crash first leaves the earlier, honest outstanding state.
+        """
         _boundary(self.root)
+        staged = _active_unit(self.root)
+        if staged is not None and stage is not None:
+            self._recover()
+            for item, value in values:
+                path = self._object_path(item)
+                if value is None:
+                    raise ValueError("generated_staged_removal_invalid")
+                current, _ = self._read(path, _OBJECT_MODELS[item.kind])
+                self._check_object(path, item, value, current)
+                first = staged.staged.get(path)
+                # The merged object keeps its durable before-revision and first-touch position.
+                merged = item if first is None else first[0].model_copy(update={"after_revision": item.after_revision})
+                staged.staged[path] = (merged, value)
+            staged.before_bytes |= stage == "before_bytes"
+            if len(staged.staged) >= MAX_STEP:
+                self._flush(staged)
+            return self.head()
+        # Immediate work keeps its place after everything staged before it.
+        self._flush(staged)
+        return self._commit(operation, values)
+
+    def barrier(self) -> None:
+        """Make staged work that native bytes depend on durable; acknowledgements may still wait."""
+        staged = _active_unit(self.root)
+        if staged is not None and staged.before_bytes:
+            self._flush(staged)
+
+    def flush(self) -> None:
+        """Make all staged work durable, before a caller discards evidence that a staged fact replaces."""
+        self._flush(_active_unit(self.root))
+
+    def _flush(self, staged: _Unit | None) -> None:
+        if staged is None or not staged.staged:
+            return
+        _boundary(self.root)
+        # A failed phase leaves later reads on durable state: unflushed before-bytes work never reached native bytes,
+        # and lost acknowledgements stay outstanding reservations and Slot rights that the next writer settles.
+        values, staged.staged, staged.before_bytes = list(staged.staged.values()), {}, False
+        for start in range(0, len(values), MAX_STEP):
+            self._commit("unit", values[start:start + MAX_STEP])
+
+    def _check_object(self, path: Path, item: ObjectChange, value: BaseModel | None, current) -> None:
+        if getattr(current, "revision", None) != item.expected_revision:
+            raise ValueError("generated_object_revision_changed")
+        if value is None:
+            if not item.remove:
+                raise ValueError("generated_remove_not_declared")
+            return
+        self._validate_payload(path, encode(value).decode())
+        if item.image_id != getattr(value, "image_id", None):
+            raise ValueError("generated_record_image_binding_invalid")
+        if item.after_revision != value.revision:
+            raise ValueError("generated_after_revision_changed")
+
+    def _commit(self, operation: str, values: Sequence[tuple[ObjectChange, BaseModel | None]]) -> Head:
         self._recover()
-        self._trim_changes(limit=2)
         head = self.head()
         epoch, unit_id = head.epoch + 1, _id()
         objects, writes, deletes = [], [], []
         for item, value in values:
             path = self._object_path(item)
-            model = _OBJECT_MODELS[item.kind]
-            current, guard = self._read(path, model)
-            if getattr(current, "revision", None) != item.expected_revision:
-                raise ValueError("generated_object_revision_changed")
+            current, guard = self._read_disk(path, _OBJECT_MODELS[item.kind])
+            self._check_object(path, item, value, current)
             if value is None:
-                if not item.remove:
-                    raise ValueError("generated_remove_not_declared")
                 deletes.append((path, guard))
             else:
-                self._validate_payload(path, encode(value).decode())
-                if item.image_id != getattr(value, "image_id", None):
-                    raise ValueError("generated_record_image_binding_invalid")
-                if item.after_revision != value.revision:
-                    raise ValueError("generated_after_revision_changed")
                 writes.append(self._write(path, value, guard))
             objects.append(item)
         change = Change(catalogue_id=head.catalogue_id, epoch=epoch, unit_id=unit_id,
                         operation=operation, objects=tuple(objects))
         change_path = self.path / "changes" / f"{epoch}.json"
-        previous, guard = self._read(change_path, Change)
+        previous, guard = self._read_disk(change_path, Change)
         if previous is not None:
             raise RuntimeError("generated orphan epochs require bounded reconciliation")
         self._install((self._write(change_path, change, guard),))
-        pending = self._set_head(head, head.model_copy(update={"epoch": epoch, "pending": Pending(
-            unit_id=unit_id, change_epoch=epoch, change_record_hash=hashlib.sha256(encode(change)).hexdigest(),
-        )}))
+        pending = self._set_head(head, head.model_copy(update={
+            "epoch": epoch, "change_floor": max(head.change_floor, epoch - CHANGE_WINDOW + 1),
+            "pending": Pending(unit_id=unit_id, change_epoch=epoch,
+                               change_record_hash=hashlib.sha256(encode(change)).hexdigest()),
+        }))
         # This readback is a separate durability seam: no affected metadata is staged before it.
         if self.head() != pending:
             raise RuntimeError("generated pending head changed before staging")
@@ -710,10 +818,11 @@ class GeneratedFragmentStore:
         if writes:
             self._install(writes)
         self._observe(change)
+        collected = self._collect_changes(pending)
         summary = self._summarize(pending, change)
-        settled = self._set_head(pending, summary.model_copy(update={"pending": None}))
+        settled = self._set_head(pending, summary.model_copy(update={"pending": None,
+                                                                     "collected_through": collected}))
         self._refresh(change, settled)
-        self._trim_changes(limit=1)
         return self.head()
 
     def _uncertain_record(self, change: Change | None, head: Head) -> Uncertainty:
@@ -895,7 +1004,7 @@ class GeneratedFragmentStore:
                              expected_last_page_hash=expected_last_page_hash,
                              whole_source_ref=whole_source_ref, opaque_source_refs=opaque_source_refs, revision=_id())
         item = ObjectChange(kind="image", object_id=image_id, image_id=image_id, after_revision=header.revision)
-        self._run("image_begin", ((item, header),))
+        self._run("image_begin", ((item, header),), stage="before_bytes")
         return header
 
     def begin_whole_image(self, *, whole_source_ref: str, image_sha256: str,
@@ -957,7 +1066,7 @@ class GeneratedFragmentStore:
         values.append((ObjectChange(kind="image", object_id=page.image_id, image_id=page.image_id,
                           expected_revision=current.revision, after_revision=updated.revision), updated),
         )
-        self._run("image_page", values)
+        self._run("image_page", values, stage="before_bytes")
         return updated
 
     def seal_image(self, image_id: str) -> ImageHeader:
@@ -971,7 +1080,8 @@ class GeneratedFragmentStore:
             raise ValueError("generated image page chain is incomplete")
         updated = current.model_copy(update={"state": "ready", "revision": _id()})
         self._run("image_seal", ((ObjectChange(kind="image", object_id=image_id, image_id=image_id,
-                   expected_revision=current.revision, after_revision=updated.revision), updated),))
+                   expected_revision=current.revision, after_revision=updated.revision), updated),),
+                  stage="before_bytes")
         return updated
 
     def reserve_copy(self, image_id: str, *, owner: OwnerLocator, origin_ledger: str,
@@ -986,7 +1096,7 @@ class GeneratedFragmentStore:
             raise ValueError("generated verified image binding changed")
         value = Copy(copy_id=_id(), image_id=image_id, owner=owner, origin_ledger=origin_ledger, revision=_id())
         self._run("copy_reserve", ((ObjectChange(kind="copy", object_id=value.copy_id, image_id=image_id,
-                   after_revision=value.revision), value),))
+                   after_revision=value.revision), value),), stage="before_bytes")
         return value
 
     def _slot_id(self, owner: str, locator: str, physical_scope: str, catalogue_id: str) -> str:
@@ -1081,7 +1191,8 @@ class GeneratedFragmentStore:
                      current_copy_id=expected_current_copy_id,
                      pending=SlotPending(publication_id=publication_id, candidate_copy_id=candidate.copy_id), revision=_id())
         self._run("slot_prepare", ((ObjectChange(kind="slot", object_id=identity,
-                   expected_revision=expected_revision, after_revision=value.revision), value),))
+                   expected_revision=expected_revision, after_revision=value.revision), value),),
+                  stage="before_bytes")
         return SlotPublication(self.root, owner, locator, physical_scope, identity, value.revision,
                                publication_id, expected_current_copy_id, candidate.copy_id, _SLOT_SEAL)
 
@@ -1182,7 +1293,8 @@ class GeneratedFragmentStore:
         value = binding.slot.model_copy(update={"current_copy_id": selected.copy_id if selected else None,
                                                 "pending": None, "revision": _id()})
         self._run("slot_settle", ((ObjectChange(kind="slot", object_id=value.slot_id,
-                   expected_revision=publication.revision, after_revision=value.revision), value),))
+                   expected_revision=publication.revision, after_revision=value.revision), value),),
+                  stage="after_bytes")
         return self.read_slot(owner=publication.owner, locator=publication.locator,
                               physical_scope=publication.physical_scope)
 
@@ -1225,11 +1337,14 @@ class GeneratedFragmentStore:
             return current
         value = Copy.model_validate({**current.model_dump(), "outcome": outcome, "revision": _id()})
         self._run("copy_ack", ((ObjectChange(kind="copy", object_id=copy_id, image_id=value.image_id,
-                   expected_revision=current.revision, after_revision=value.revision), value),))
+                   expected_revision=current.revision, after_revision=value.revision), value),),
+                  stage="after_bytes")
         return value
 
     def mark_uncertain(self, image_id: str | None = None, *, unit_id: str | None = None) -> Uncertainty:
         _boundary(self.root)
+        # Its horizon names the next durable epoch, so earlier staged work commits first.
+        self._flush(_active_unit(self.root))
         self._recover()
         head = self.head()
         if image_id is not None:
@@ -1751,12 +1866,10 @@ class GeneratedFragmentStore:
             return Progress("missing", self.head().epoch, processed + 1)
         return Progress("pending", self.head().epoch, processed)
 
-    def _trim_changes(self, *, limit: int) -> None:
-        head = self.head()
-        floor = max(head.change_floor, head.epoch - CHANGE_WINDOW + 1)
-        if floor != head.change_floor:
-            head = self._set_head(head, head.model_copy(update={"change_floor": floor}))
-        for epoch in range(head.collected_through + 1, min(floor, head.collected_through + limit + 1)):
+    def _collect_changes(self, head: Head) -> int:
+        """Remove a bounded prefix of retired change records; the settled head records how far it got."""
+        collected = head.collected_through
+        for epoch in range(head.collected_through + 1, min(head.change_floor, head.collected_through + TRIM_STEP + 1)):
             path = self.path / "changes" / f"{epoch}.json"
             with reserved_paths._subsystem_authority_scope(OWNER):
                 try:
@@ -1764,4 +1877,5 @@ class GeneratedFragmentStore:
                 except vault.PathGuardError:
                     guard = vault.PathGuard.capture(self.root, path.relative_to(self.root).as_posix(), leaf_policy="stable")
             self._remove(path, guard)
-            head = self._set_head(head, head.model_copy(update={"collected_through": epoch}))
+            collected = epoch
+        return collected

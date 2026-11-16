@@ -5787,8 +5787,12 @@ def batch_atomic_write(
             )
         caller_writes = list(writes)
         _require_distinct_destinations(caller_writes)
-        from . import generated_output_custody
+        from . import generated_fragment_store, generated_output_custody
 
+        if vault_root is not None and (_payload_custody is not None
+                                       or any(write.generated_image is not None for write in caller_writes)):
+            # Pre-byte catalogue work commits as one phase; acknowledgements share one closing change.
+            custody_stack.enter_context(generated_fragment_store.unit(vault_root))
         if _prepare is None:
             _payload_custody = generated_output_custody.batch(vault_root, caller_writes, _payload_custody, lifetime=custody_stack)
         if _prepare is not None:

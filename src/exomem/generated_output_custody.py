@@ -43,6 +43,7 @@ class _GeneratedCopies:
         self.copies = native_copy_custody.NativeCopyCustody(self.root, store=self.store, native=self.native)
         self.outputs: dict[Path, _Output] = {}
         self.settlement_attempted = False
+        self.publishable: set[str] = set()
         try:
             self.store.recover()
             head = self.store.head()
@@ -89,6 +90,8 @@ class _GeneratedCopies:
                 self.outputs[write.path] = output
                 # All first publication rights precede the batch's first surviving byte stage.
                 output.ready = self._prepare(output, restoring=False)
+                # The workspace stage and the publication temporary each allocate one more copy.
+                self.copies.reserve_ahead(self._image(after.image_id), logical_path=write.path, count=2)
         except BaseException:
             try:
                 try:
@@ -149,8 +152,11 @@ class _GeneratedCopies:
 
     def _check_sources(self, output: _Output) -> None:
         # The sealed map supplies identities; deduplication avoids a manifest read per fragment.
+        # Retirement needs the writer boundary this batch holds, so a Source checked once stays publishable here.
         for reference in dict.fromkeys(fragment.source_ref for fragment in output.write.generated_image.after.after.fragments):
-            source_custody.require_publishable(self.root, reference)
+            if reference not in self.publishable:
+                source_custody.require_publishable(self.root, reference)
+                self.publishable.add(reference)
 
     def _prepare(self, output: _Output, *, restoring: bool) -> _Attempt:
         binding = self._resolve(output.write.path)
@@ -217,6 +223,7 @@ class _GeneratedCopies:
     def finished(self) -> None:
         self.settlement_attempted = True
         try:
+            self.copies.release_ahead()
             for output in self.outputs.values():
                 for attempt in output.attempts:
                     self.copies.unstarted(attempt.publisher)

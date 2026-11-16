@@ -237,40 +237,45 @@ class ResultCustody:
             source_custody.require_publishable(self.root, reference)
         payload = encode(value)
         digest = hashlib.sha256(_bytes(payload)).hexdigest()
-        prepared = self.journal.prepare(pointer, boundary_id=self.boundary_id,
-                                        prior_publication_id=prior_publication_id)
-        copy = None
-        try:
-            head = self.catalogue.initialize()
-            self.catalogue.recover()
-            for reference in recipe.sources:
-                manifest, _ = source_custody.read_manifest(self.root, reference)
-                if manifest is not None:
-                    source_custody.register_owner(self.root, reference, source_custody.OwnerLocator(
-                        owner=generated.OWNER, locator=head.catalogue_id, version=str(head.version)))
-            image = self.catalogue.begin_opaque_image(source_refs=recipe.sources, image_sha256=digest,
-                image_size=len(_bytes(payload)), unknown_through_epoch=head.epoch if recipe.unknown else 0)
-            copy = self.catalogue.reserve_copy(image.image_id, owner=self._owner(prepared),
-                origin_ledger=self.journal.ledger_id, expected_header=image, expected_root=self.root)
-            selected = prepared.model_copy(update={"state": "selected", "image_id": image.image_id,
-                "copy_id": copy.copy_id, "payload_sha256": digest, "recipe": recipe, "encoding": encoding})
-            displaced = self.journal.publish(selected, lambda conn: write(conn, payload))
-        except BaseException:
+        # One phase commits the image and its reservation; one closing change holds the acknowledgements.
+        with generated.unit(self.root):
+            prepared = self.journal.prepare(pointer, boundary_id=self.boundary_id,
+                                            prior_publication_id=prior_publication_id)
+            copy = None
             try:
-                closed = self.journal.close_prepared(prepared.publication_id)
-                if copy is not None and closed is not None and closed.closure == "no_effect":
-                    self.catalogue.ack_copy(copy.copy_id, owner=copy.owner, outcome="no_effect")
-                    self.journal.forget_closed(closed)
-            except Exception as error:  # noqa: BLE001 - cleanup cannot replace the original publication failure
-                log.warning("Source result no-effect acknowledgment remains unknown (%s)", type(error).__name__)
-            raise
-        self.after_sql_publication(selected)
-        self._try_acknowledge(copy)
-        if displaced is not None and displaced.copy_id is not None:
-            observed = self.catalogue.copy_record(displaced.copy_id)
-            if observed.state == "observed":
-                self._try_acknowledge(observed.value)
-        return Published(value, selected, copy)
+                head = self.catalogue.initialize()
+                self.catalogue.recover()
+                for reference in recipe.sources:
+                    manifest, _ = source_custody.read_manifest(self.root, reference)
+                    if manifest is not None:
+                        source_custody.register_owner(self.root, reference, source_custody.OwnerLocator(
+                            owner=generated.OWNER, locator=head.catalogue_id, version=str(head.version)))
+                image = self.catalogue.begin_opaque_image(source_refs=recipe.sources, image_sha256=digest,
+                    image_size=len(_bytes(payload)), unknown_through_epoch=head.epoch if recipe.unknown else 0)
+                copy = self.catalogue.reserve_copy(image.image_id, owner=self._owner(prepared),
+                    origin_ledger=self.journal.ledger_id, expected_header=image, expected_root=self.root)
+                selected = prepared.model_copy(update={"state": "selected", "image_id": image.image_id,
+                    "copy_id": copy.copy_id, "payload_sha256": digest, "recipe": recipe, "encoding": encoding})
+                # The image and copy reservation must be durable before the row selection names them.
+                self.catalogue.barrier()
+                displaced = self.journal.publish(selected, lambda conn: write(conn, payload))
+            except BaseException:
+                try:
+                    closed = self.journal.close_prepared(prepared.publication_id)
+                    if copy is not None and closed is not None and closed.closure == "no_effect":
+                        self.catalogue.ack_copy(copy.copy_id, owner=copy.owner, outcome="no_effect")
+                        self.catalogue.flush()
+                        self.journal.forget_closed(closed)
+                except Exception as error:  # noqa: BLE001 - cleanup cannot replace the original publication failure
+                    log.warning("Source result no-effect acknowledgment remains unknown (%s)", type(error).__name__)
+                raise
+            self.after_sql_publication(selected)
+            self._try_acknowledge(copy)
+            if displaced is not None and displaced.copy_id is not None:
+                observed = self.catalogue.copy_record(displaced.copy_id)
+                if observed.state == "observed":
+                    self._try_acknowledge(observed.value)
+            return Published(value, selected, copy)
 
     def _try_acknowledge(self, copy: generated.Copy) -> None:
         try:
@@ -323,6 +328,8 @@ class ResultCustody:
         # No SQLite connection spans canonical filesystem metadata publication.
         self.catalogue.ack_copy(copy.copy_id, owner=copy.owner, outcome=outcome)
         if binding.state == "closed":
+            # The journal forgets its closure only after the canonical acknowledgement is durable.
+            self.catalogue.flush()
             self.journal.forget_closed(binding)
         return outcome
 
