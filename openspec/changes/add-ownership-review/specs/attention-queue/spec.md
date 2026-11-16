@@ -56,7 +56,7 @@ The distances SHALL be computed off the write path, in a bulk refresh that reads
 
 The due-state projection SHALL maintain `ownership_review`, and a page write SHALL settle the written page's item in full. Open items SHALL sort after every dated obligation and before `note_cohesion`. Their counts SHALL be exact and never capped.
 
-The default review listing SHALL include `ownership_review`, ranked after the dated queues and the other default queues. `note_cohesion` SHALL stay outside the default listing and stay selectable by name. The rotation bounds the intake at `rotation_daily` items a day, so a vault that already holds many pages never receives them all at once; that bound is why this family is in the default listing and `note_cohesion` is not.
+The default review listing SHALL include `ownership_review` as one more queue in its reciprocal-rank fusion, last in the tie-break order of the default queues. The listing does not place every ownership item after every dated item: an item that ranks first in its own queue can outscore a dated item that ranks second in its queue. The strict dated-first order holds in the served top rows, which sort every backlog after every dated obligation. `note_cohesion` SHALL stay outside the default listing and stay selectable by name. The rotation bounds the intake at `rotation_daily` items a day, so a vault that already holds many pages never receives them all at once; that bound is why this family is in the default listing and `note_cohesion` is not.
 
 #### Scenario: A backlog never displaces a due obligation
 
@@ -96,3 +96,84 @@ The served guidance SHALL direct the agent to apply the ownership test to the pa
 
 - **WHEN** an agent judges that a page belongs to a new project
 - **THEN** the page changes home only through a curation plan that the user confirms by its exact plan id and fingerprint
+
+### Requirement: Dedup By Anchor Keeps Partitioned Findings On Their Own Rows
+
+The system SHALL dedup items by anchor path into one item per path carrying a `reasons`
+list (one reason per contributing finding), and a path flagged by more than one queue
+SHALL receive the sum of its per-queue RRF votes so it ranks above any item flagged by
+only one queue at the same per-queue rank. A `corpus_contradictions` pair SHALL surface
+under its anchor path with the other endpoint preserved in the reason's `related_paths`;
+the second endpoint SHALL NOT become its own item unless independently flagged.
+
+A partitioned queue SHALL refine that anchor and SHALL NOT merge into it. A finding that
+carries a review partition SHALL compose its own item, with its own review identity and
+fingerprint, in every listing. The same path's unpartitioned findings SHALL compose their
+own item on the path's bare identity. A path that carries partitioned findings SHALL
+therefore list one item per partition plus one item for its page-level findings. An item
+SHALL carry only the reasons of findings that share its anchor. A ref that a listing hands
+out for a finding SHALL resolve, in the default listing and in that finding's own queue, to
+the item that carries it, and a decision on an item SHALL settle only the findings that
+item carries.
+
+A decision recorded against a partitioned item before this change SHALL stay bound to it.
+That record holds the partitioned finding's own fingerprint, which is the fingerprint the
+item now has.
+
+#### Scenario: A doubly-flagged note rises and keeps both reasons
+
+- **WHEN** note `N` appears in both `stale_review` and as a `corpus_contradictions`
+  anchor
+- **THEN** `N` is a single item whose `categories` lists both, whose `reasons` holds both
+  findings, and whose score equals the sum of the two RRF votes
+- **AND** `N` ranks above an otherwise-equivalent item flagged by only one queue
+
+#### Scenario: A partitioned queue co-flagging with a page-level queue takes its own row
+
+- **WHEN** note `N` carries one due prediction and is also flagged by `stale_review`
+- **THEN** `N` composes two items with distinct review identities: one whose `categories`
+  lists `prediction_window` alone, and one whose `categories` lists `stale_review` alone
+- **AND** each item's score is its own queue's RRF vote
+
+#### Scenario: Several partitions and the page-level findings each take their own row
+
+- **WHEN** note `N` carries two due predictions and is also flagged by `relation_debt`
+- **THEN** `N` composes three items with distinct review identities: one per prediction
+  and one for `relation_debt`
+- **AND** no item carries a reason from a queue that does not share its anchor
+
+#### Scenario: A ref from a queue's own listing resolves in the default listing
+
+- **WHEN** note `N` has an open `ownership_review` item and relation debt, and a client
+  takes the `relation_debt` ref from the `relation_debt` listing
+- **THEN** the ref resolves to the item the default listing shows for `relation_debt`
+- **AND** dismissing it leaves the ownership item open, and dismissing the ownership item
+  leaves the relation debt open
+
+#### Scenario: An earlier decision stays bound to its partitioned item
+
+- **WHEN** a client dismissed a partitioned item before this change, and that item then
+  also carried the page's page-level reasons
+- **THEN** the item is still dismissed after this change
+- **AND** the page's page-level findings show as their own open item
+
+#### Scenario: Contradiction pair preserved under its anchor
+
+- **WHEN** a contradiction finding has `path=A` and `paths=[A,B]`
+- **THEN** the item's path is `A` and its contradiction reason carries
+  `related_paths=[A,B]`
+- **AND** `B` is not surfaced as its own item unless `B` is independently flagged
+
+## REMOVED Requirements
+
+### Requirement: Multi-Signal Additivity With Dedup By Anchor
+
+**Reason**: The requirement folded a path's page-level findings into every partitioned
+item of that path. The merged row's review identity matched no queue's own ref, so a ref
+from one listing could resolve to nothing in another, and one decision settled signals the
+person never saw. The replacement requirement keeps the dedup, the vote sum and the
+contradiction-pair rule, and gives each partitioned finding its own row.
+
+**Migration**: A decision recorded against a merged row stays bound to the partitioned item
+it names, because the store keeps the partitioned finding's own fingerprint beside the
+merged one. The page's page-level findings list as their own open item.

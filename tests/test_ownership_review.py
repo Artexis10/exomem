@@ -16,8 +16,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import audit as audit_module
 from exomem import (
+    attention,
     capabilities,
     commands,
     curation,
@@ -31,6 +31,7 @@ from exomem import (
     semantic_authoring,
     writer_lease,
 )
+from exomem import audit as audit_module
 from exomem.cli_ops import OpError
 from exomem.governance.principal import request_scope
 from exomem.vault import parse_frontmatter
@@ -430,37 +431,65 @@ def test_an_open_page_asks_again_on_each_write_and_an_answered_page_writes_quiet
     assert _suggestion(_grow(vault, PAGE, 4)) is None
 
 
-def test_an_earlier_relation_debt_dismissal_leaves_the_question_open(vault: Path) -> None:
-    """Without its own partition the item shares the page's bare review id, so a decision
-    on relation debt for the page would silently settle this question. The debt is dismissed
-    first: once the page is asked, the default listing folds the debt into the ownership row,
-    and the debt queue's own ref no longer resolves."""
+def test_dismissing_another_family_on_the_page_leaves_the_question_open(vault: Path) -> None:
+    """The ownership item has its own id, so a decision on the page's relation debt settles
+    the debt and leaves this question open."""
     _put(vault, PAGE, _text())
-    relation_debt = [
-        item
-        for item in commands.op_attention(vault, categories=["relation_debt"])["items"]
-        if item.get("path") == PAGE
-    ]
-    assert relation_debt, "the fixture page must also carry relation debt"
+    _ask(vault, PAGE)
+    asked = _suggestion(_grow(vault, PAGE, 2))
+    relation_debt = _rows(vault, "relation_debt")
+
     commands.op_triage_memory(
         vault, ref=relation_debt[0]["ref"], action="dismiss", why="intentional: no links needed"
     )
 
+    still = _suggestion(_grow(vault, PAGE, 3))
+    assert still is not None
+    assert (still["ref"], still["fingerprint"]) == (asked["ref"], asked["fingerprint"])
+
+
+def _rows(vault: Path, *categories: str, state: str = "open") -> list[dict]:
+    """The review rows of PAGE in the listing for these categories, or in the default listing."""
+    listing = commands.op_attention(
+        vault, categories=list(categories) or None, state=state, limit=0
+    )
+    return [item for item in listing["items"] if item["path"] == PAGE]
+
+
+def test_a_page_with_ownership_and_relation_debt_lists_two_rows_whose_refs_resolve(
+    vault: Path,
+) -> None:
+    """The ref a queue hands out must resolve to the row that carries its finding, in the
+    default listing and in the queue's own listing. A merged row left the bare relation-debt
+    ref resolving to nothing."""
+    _put(vault, PAGE, _text())
     _ask(vault, PAGE)
 
-    asked = _suggestion(_grow(vault, PAGE, 2))
-    assert asked is not None and asked["kind"] == "ownership"
+    rows = {tuple(row["categories"]): row for row in _rows(vault)}
+
+    assert set(rows) == {("ownership_review",), ("relation_debt",)}
+    assert rows[("ownership_review",)]["ref"] != rows[("relation_debt",)]["ref"]
+    for category in ("ownership_review", "relation_debt"):
+        row = rows[(category,)]
+        by_ref = attention.item_by_ref(vault, row["ref"])
+        assert (by_ref.ref, by_ref.fingerprint, by_ref.categories) == (
+            row["ref"],
+            row["fingerprint"],
+            [category],
+        )
+        own_queue = _rows(vault, category)
+        assert [(r["ref"], r["fingerprint"]) for r in own_queue] == [
+            (row["ref"], row["fingerprint"])
+        ]
 
 
 def test_keeping_the_page_from_the_default_listing_leaves_its_relation_debt_open(
     vault: Path,
 ) -> None:
-    """The default listing folds the page's relation debt into its ownership row. Answering
-    that row settles the question and nothing else: the debt stays open in its own queue."""
+    """Answering the ownership row settles the question and nothing else."""
     _put(vault, PAGE, _text())
     _ask(vault, PAGE)
-    [row] = [item for item in commands.op_attention(vault)["items"] if item["path"] == PAGE]
-    assert {"ownership_review", "relation_debt"} <= set(row["categories"])
+    [row] = [r for r in _rows(vault) if r["categories"] == ["ownership_review"]]
 
     commands.op_triage_memory(
         vault,
@@ -469,12 +498,61 @@ def test_keeping_the_page_from_the_default_listing_leaves_its_relation_debt_open
         why="intentional: this page serves the fare-scouting goal of the travel project",
     )
 
-    debt = [
-        item
-        for item in commands.op_attention(vault, categories=["relation_debt"])["items"]
-        if item["path"] == PAGE
-    ]
-    assert [item["state"] for item in debt] == ["open"]
+    assert [r["categories"] for r in _rows(vault)] == [["relation_debt"]]
+    assert [r["state"] for r in _rows(vault, "relation_debt")] == ["open"]
+    assert _suggestion(_grow(vault, PAGE, 2)) is None
+
+
+def test_a_relation_debt_dismissal_made_through_its_own_queue_holds_in_the_default_listing(
+    vault: Path,
+) -> None:
+    _put(vault, PAGE, _text())
+    _ask(vault, PAGE)
+    [debt] = _rows(vault, "relation_debt")
+
+    commands.op_triage_memory(
+        vault, ref=debt["ref"], action="dismiss", why="intentional: no links needed"
+    )
+
+    assert [r["categories"] for r in _rows(vault)] == [["ownership_review"]]
+    assert [r["state"] for r in _rows(vault, "relation_debt", state="all")] == ["dismissed"]
+
+
+def test_a_dismissal_recorded_against_the_merged_row_still_binds_the_ownership_item(
+    vault: Path,
+) -> None:
+    """Before the rows were separate, answering the page's one row recorded the decision
+    under the ownership id, against the merged signals' fingerprint and against each signal's
+    own. Those records are in users' stores, and the ownership row's fingerprint must still
+    be one of them."""
+    _put(vault, PAGE, _text())
+    _ask(vault, PAGE)
+    [ownership] = [r for r in _rows(vault) if r["categories"] == ["ownership_review"]]
+    [debt] = _rows(vault, "relation_debt")
+    asked_item = attention.item_by_ref(vault, ownership["ref"])
+    debt_item = attention.item_by_ref(vault, debt["ref"])
+    merged = attention.AttentionItem(
+        path=PAGE,
+        score=0.0,
+        severity="info",
+        categories=sorted(["ownership_review", "relation_debt"]),
+        reasons=asked_item.reasons + debt_item.reasons,
+        proposed_fix="",
+        item_id=asked_item.item_id,
+        target_ref=asked_item.target_ref,
+    )
+    merged.fingerprint = review_state.fingerprint(
+        target_ref=asked_item.target_ref,
+        categories=merged.categories,
+        reasons=merged.reasons,
+        related_refs=[],
+    )
+    assert merged.fingerprint not in {ownership["fingerprint"], debt["fingerprint"]}
+
+    review_state.apply_for_item(vault, merged, action="dismiss", why="intentional: kept")
+
+    assert [r["state"] for r in _rows(vault, "ownership_review", state="all")] == ["dismissed"]
+    assert [r["state"] for r in _rows(vault, "relation_debt", state="all")] == ["open"]
     assert _suggestion(_grow(vault, PAGE, 2)) is None
 
 
@@ -729,8 +807,11 @@ def test_an_ownership_items_ref_opens_a_curation_work_item_on_its_page(
     _put(vault, PAGE, _text())
     _ask(vault, PAGE)
     mcp = _build(monkeypatch)
-    [item] = [i for i in _tool(mcp, "list_review_items", {})["items"] if i["path"] == PAGE]
-    assert "ownership_review" in {reason["category"] for reason in item["reasons"]}
+    [item] = [
+        i
+        for i in _tool(mcp, "list_review_items", {})["items"]
+        if i["path"] == PAGE and i["categories"] == ["ownership_review"]
+    ]
 
     work = _call(
         mcp,
