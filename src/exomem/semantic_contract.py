@@ -986,9 +986,9 @@ def _route_name(path: str, basis: note_types.Basis | None = None) -> str | None:
     - `<Name>/<file>` routes unless a source, evidence or entity area or a collection layer holds
       `<Name>`. A `nested` vault refuses a compiled page outside `Notes/` because every folder
       there belongs to another role. The root layout has the same owners and no marker, and a
-      home or a new folder is as free as one below `Notes/`.
+      home or a new folder is as free as a folder below `Notes/`.
     - `Notes/<X>/<file>` keeps today's meaning, because a leftover folder of that name is unregistered
-      and left as it is, and one that names a registered area reads as that area (design L9).
+      and left as it is, and a folder that names a registered area reads as that area (design L9).
     """
     if _path_excluded_from_compiled_destination(path):
         return None

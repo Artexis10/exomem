@@ -53,7 +53,7 @@ def registry_relpath(vault_root: Path | None = None) -> str:
 
 
 def project_folder_parent(vault_root: Path) -> Path | None:
-    """The folder that holds one folder per project, or None in a `root` vault.
+    """The folder that holds a folder for each project, or None in a `root` vault.
 
     A `root` vault files every page flat in its area, so no project has a folder there and a
     project key creates none.
