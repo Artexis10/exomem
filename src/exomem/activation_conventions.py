@@ -106,6 +106,8 @@ BUDGET_BOUNDS: Mapping[str, tuple[int, int]] = {
     "stance_max_chars": (0, 8000),
     "skills_max_chars": (0, 8000),
     "skill_summary_max_chars": (40, 1000),
+    "domain_profile_max_chars": (0, 8000),
+    "profiles_max_chars": (0, 8000),
 }
 
 
