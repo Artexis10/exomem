@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def _min_vault(root: Path, kb: str) -> Path:
     (root / kb / "_Schema").mkdir(parents=True)
@@ -31,6 +33,17 @@ def test_kb_dirname_override(monkeypatch) -> None:
 
     assert kbdir.kb_dirname() == "Brain"
     assert kbdir.kb_prefix() == "Brain/"
+
+
+def test_a_nested_kb_dirname_is_refused_with_the_variable_named(monkeypatch) -> None:
+    # A nested value never matched the root as a path's first component, so it half-worked. A
+    # backslash separates folders on native Windows.
+    from exomem import kbdir
+
+    for nested in ("Brain/Notes", "Brain\\Notes"):
+        monkeypatch.setenv("EXOMEM_KB_DIRNAME", nested)
+        with pytest.raises(ValueError, match="EXOMEM_KB_DIRNAME.*single folder name"):
+            kbdir.kb_dirname()
 
 
 def test_init_creates_custom_dir(monkeypatch, tmp_path: Path) -> None:
@@ -178,3 +191,17 @@ def test_managed_root_helpers_follow_the_configured_name(monkeypatch, tmp_path: 
     monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
     assert kbdir.managed_root(tmp_path) == tmp_path / "Brain"
     assert kbdir.managed_root_rel() == "Brain"
+
+
+def test_the_trash_rule_follows_the_configured_root_and_folds_case_only_on_request(monkeypatch) -> None:
+    from exomem.trash_metadata import is_inside_trash
+
+    for root in ("Knowledge Base", "Brain"):
+        monkeypatch.setenv("EXOMEM_KB_DIRNAME", root)
+        assert is_inside_trash(f"{root}/_trash/2026-01-01/x.md")
+        assert not is_inside_trash(f"{root}/_trash")
+        assert not is_inside_trash(f"{root}/Notes/_trash/x.md")
+        assert not is_inside_trash(f"{root}/_TRASH/x.md")
+        assert is_inside_trash(f"{root.lower()}/_Trash/x.md", key=str.casefold)
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
+    assert not is_inside_trash("Knowledge Base/_trash/x.md")

@@ -17,3 +17,29 @@ rules:
         - src/exomem
       exclude:
         - src/exomem/kbdir.py
+
+  - id: managed-root-default-name-literal
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Do not spell the default managed-root folder name in code. Build a managed-root path with
+      managed_join, and compare a path with managed_split, managed_split_parts, is_managed_root_name or
+      is_in_managed_root (src/exomem/kbdir.py). A literal breaks when the managed root layout changes.
+      A string that only describes the folder to a person, never joins or compares a path, keeps
+      `# nosemgrep: managed-root-default-name-literal -- <reason>`.
+    # A line that only uses a constant spelled elsewhere in the file is not a new spelling.
+    options:
+      constant_propagation: false
+    patterns:
+      - pattern: '"$STR"'
+      # Matches the folder as a path component anywhere in the string, so prose that says "the Knowledge
+      # Base" stays clear. The regex is anchored at the start of the string, hence the leading `.*/`. The
+      # name is kbdir._DEFAULT: change both together.
+      - metavariable-regex:
+          metavariable: $STR
+          regex: '^(.*/)?Knowledge Base(/|$)'
+    paths:
+      include:
+        - src/exomem
+      exclude:
+        - src/exomem/kbdir.py

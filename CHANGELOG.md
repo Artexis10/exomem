@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.184.0](https://github.com/Artexis10/exomem/compare/v0.183.0...v0.184.0) (2026-11-16)
+
+
+### Features
+
+* **cloud:** rehearse the catalogue pre-warm and clear a patched upgrade hold ([#2857](https://github.com/Artexis10/exomem/issues/2857)) ([6458f65](https://github.com/Artexis10/exomem/commit/6458f65fd777f956a0632150595276bf07fba50c))
+* **context:** send the stance once per conversation until it changes ([#2863](https://github.com/Artexis10/exomem/issues/2863)) ([2947313](https://github.com/Artexis10/exomem/commit/2947313c34347ce82c42b16e2c1ea949354c90b9))
+* **upload:** cancel waiting held uploads ([#2854](https://github.com/Artexis10/exomem/issues/2854)) ([0be21e4](https://github.com/Artexis10/exomem/commit/0be21e4a9930c4e438f533fed55faa3a436a8da0))
+
+
+### Bug Fixes
+
+* **context:** explain a held stance to clients and keep the held-block rule in one place ([#2866](https://github.com/Artexis10/exomem/issues/2866)) ([e3ffb7a](https://github.com/Artexis10/exomem/commit/e3ffb7ad0115885b13a49b6b5c4af7b5e700d787))
+* **context:** give the stance its own bound and scope per-subject recall ([#2862](https://github.com/Artexis10/exomem/issues/2862)) ([cd42207](https://github.com/Artexis10/exomem/commit/cd422072eb65f43df26f8a33d4d979f7ecb06fb1))
+* **records:** keep import status honest about unknown and unread counts ([#2867](https://github.com/Artexis10/exomem/issues/2867)) ([1737f6b](https://github.com/Artexis10/exomem/commit/1737f6b21153e54fc616ea400099c99b7628dc39))
+* **sources:** keep a Source card's pointer to its bytes true, or make the drift visible ([#2851](https://github.com/Artexis10/exomem/issues/2851)) ([9c4151e](https://github.com/Artexis10/exomem/commit/9c4151ecbcbe3f8f6f3d82cba2d0064261639109))
+
+
+### Performance
+
+* **egress:** walk only the placement layers in the owner's aggregate check ([#2855](https://github.com/Artexis10/exomem/issues/2855)) ([22492a4](https://github.com/Artexis10/exomem/commit/22492a4918651129bac09ea9866fd74ea47661b0))
+* **records:** bound import batch steps and answer import status beside the store thread ([#2865](https://github.com/Artexis10/exomem/issues/2865)) ([3b6ebee](https://github.com/Artexis10/exomem/commit/3b6ebee79fdbdb2bcfc56d50013cfbeb6b02b624))
+* **records:** select store query rows in SQL under a CPU deadline ([#2859](https://github.com/Artexis10/exomem/issues/2859)) ([cdf68c9](https://github.com/Artexis10/exomem/commit/cdf68c9b3707906cb50decb7bd781a3f21df2052))
+
 ## [0.183.0](https://github.com/Artexis10/exomem/compare/v0.182.0...v0.183.0) (2026-11-15)
 
 

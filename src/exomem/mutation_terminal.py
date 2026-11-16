@@ -309,7 +309,7 @@ def _warning_count(result: Any) -> int:
     artifact_receipt = _artifact_receipt_projection(result)
     if artifact_receipt:
         return sum(
-            len(item.get("warnings", []))
+            len(item.get("warnings", [])) + item.get("warnings_omitted", 0)
             for item in artifact_receipt["files"]
             if item["outcome"] == "stored"
         )
@@ -374,14 +374,19 @@ def _warning_texts(result: Any, *, has_artifact_receipt: bool) -> list[str]:
             candidates = [source_warnings]
         else:
             return []
-    out = [
-        (warning if isinstance(warning, str) else str(warning))[:_MAX_WARNING_CHARS]
-        for warning in candidates[:_MAX_WARNINGS]
-    ]
+    out = _bounded_warnings(candidates)
     owner = result if result.get("warnings") else result.get("source")
     if isinstance(owner, Mapping):
         source_result_attribution.carry(owner, out, moves={("warnings",): ()})
     return out
+
+
+def _bounded_warnings(candidates: Sequence[Any]) -> list[str]:
+    """The first `_MAX_WARNINGS` warnings, each cut to `_MAX_WARNING_CHARS`."""
+    return [
+        (warning if isinstance(warning, str) else str(warning))[:_MAX_WARNING_CHARS]
+        for warning in candidates[:_MAX_WARNINGS]
+    ]
 
 
 def _path_projection(result: Any) -> dict[str, Any]:
@@ -393,7 +398,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
         # Only what this call stored. A duplicate names a path an earlier call
         # committed; reporting it here would claim this mutation wrote it.
         stored = [(index, item) for index, item in enumerate(artifact_receipt["files"])
-                  if _artifact_state(item) == "stored"]
+                  if _artifact_state(item) == "stored" and "stored_path" in item]
         paths = [item["stored_path"] for _index, item in stored]
         if len(paths) == 1:
             return source_result_attribution.carry(artifact_receipt, {"path": paths[0]}, moves={
@@ -881,43 +886,39 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
             projected.append(invalid_row(item, index))
             continue
-        # `outcome` mirrors `state` for one release, so `already_stored` arrives
-        # as `stored`; the state itself has to survive the projection or a
-        # compact client cannot tell a fresh commit from a duplicate.
-        if "state" in item and item["state"] not in _ARTIFACT_STATES:
+        outcome = item.get("outcome")
+        if outcome not in {"stored", "replayed"} and "state" in item and item["state"] not in _ARTIFACT_STATES:
             projected.append(invalid_row(item, index))
             continue
-        outcome = item.get("outcome")
         if outcome in {"stored", "replayed"}:
-            if not (
-                string(item.get("stored_path"), limit=2048)
-                and nonnegative_int(item.get("size"))
-                and sha256(item.get("hash"))
-                and item.get("hash_algorithm") == "sha256"
-                and string(item.get("content_type"), limit=255, allow_none=True)
-                and string(item.get("media_id"), limit=512, allow_none=True)
-                and isinstance(item.get("warnings"), list)
-                and len(item["warnings"]) <= 8
-                and all(string(warning, limit=300) for warning in item["warnings"])
+            # This call or an earlier one committed the bytes, so no unreadable field turns the row into
+            # a failure. A field that does not read is left out and named in `unverified_fields`. The row
+            # keeps its own state (stored, already_stored, replayed): what happened to the file and how
+            # much of its receipt reads are two facts, and one `state` value would have to blur them.
+            unverified: list[str] = []
+            row = {"file_id": item["file_id"], "outcome": outcome}
+            # The receipt's own fields (a closed set the artifact receipt contract fixes), each with the check it must
+            # pass. `outcome` mirrors `state` for one release, so `already_stored` arrives as `stored`; the
+            # state has to survive the projection or a compact client cannot tell a fresh commit from a duplicate.
+            for field, readable in (
+                ("state", "state" not in item or item["state"] in _ARTIFACT_STATES),
+                ("stored_path", string(item.get("stored_path"), limit=2048)),
+                ("size", nonnegative_int(item.get("size"))),
+                ("hash", sha256(item.get("hash"))),
+                ("hash_algorithm", item.get("hash_algorithm") == "sha256"),
+                ("content_type", string(item.get("content_type"), limit=255, allow_none=True)),
+                ("media_id", string(item.get("media_id"), limit=512, allow_none=True)),
             ):
-                projected.append(invalid_row(item, index))
-                continue
-            row = {
-                key: item[key]
-                for key in (
-                    "file_id",
-                    "outcome",
-                    "state",
-                    "stored_path",
-                    "size",
-                    "hash",
-                    "hash_algorithm",
-                    "media_id",
-                    "content_type",
-                    "warnings",
-                )
-                if key in item
-            }
+                if not readable:
+                    unverified.append(field)
+                elif field in item:
+                    row[field] = item[field]
+            if "warnings" in item:
+                # Advisory, like a structure suggestion: trimmed to the bound, never a reason to drop the row.
+                listed = item["warnings"] if isinstance(item["warnings"], list) else []
+                row["warnings"] = _bounded_warnings(listed)
+                if len(listed) > _MAX_WARNINGS:
+                    row["warnings_omitted"] = len(listed) - _MAX_WARNINGS
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
@@ -935,30 +936,29 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 }
             earlier_copy = _duplicate_outcome_projection(item)
             if earlier_copy is None:
-                projected.append(invalid_row(item, index))
-                continue
-            row.update(earlier_copy)
+                # Names the pointer; its families and `fields_not_applied` travel with it.
+                unverified.append("duplicate_of")
+            else:
+                row.update(earlier_copy)
             if "archive" in item:
-                archive = archive_receipt(item["archive"])
-                if archive is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["archive"] = archive
+                if (archive := archive_receipt(item["archive"])) is None:
+                    unverified.append("archive")
+                else:
+                    row["archive"] = archive
             if "transcription" in item:
-                recorded = transcription(item["transcription"])
-                if recorded is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["transcription"] = recorded
+                if (recorded := transcription(item["transcription"])) is None:
+                    unverified.append("transcription")
+                else:
+                    row["transcription"] = recorded
             if "adoption" in item:
-                receipt = adoption_receipt(item["adoption"], item)
-                if receipt is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["adoption"] = receipt
+                if (receipt := adoption_receipt(item["adoption"], item)) is None:
+                    unverified.append("adoption")
+                else:
+                    row["adoption"] = receipt
             elif outcome == "replayed":
-                projected.append(invalid_row(item, index))
-                continue
+                unverified.append("adoption")
+            if unverified:
+                row["unverified_fields"] = unverified
         elif outcome == "unselected":
             row = {"file_id": item["file_id"], "outcome": "unselected"}
         elif (
@@ -2201,7 +2201,8 @@ def _batch_rows(
         state = _artifact_state(item)
         state = "already_stored" if state == "replayed" else state
         if state in _ARTIFACT_STATES:
-            rows.append((state, item.get("stored_path", "")))
+            # A row whose path did not read still names the file by the id the caller gave it.
+            rows.append((state, item.get("stored_path") or item.get("file_id", "")))
     for item in media.get("media_results", ()):
         rows.append(("failed" if item["outcome"] == "failed" else "stored", item["path"]))
     if (
@@ -2340,6 +2341,12 @@ def project_terminal(
     # value goes to `diagnostics.operational`.
     leaf_owned: frozenset[str] = frozenset()
     artifact_receipt = _artifact_receipt_projection(leaf)
+    for item in artifact_receipt.get("files", ()):
+        if item.get("unverified_fields"):
+            log.warning(
+                "artifact receipt row is stored but its fields did not read: file_id=%s fields=%s",
+                item["file_id"], ",".join(item["unverified_fields"]),
+            )
     media_projection = _media_result_projection(leaf)
     # A media batch whose rows did not project gives no per-file states, and its `paths`
     # include failed files, so no sentence is safer than one that claims them all.

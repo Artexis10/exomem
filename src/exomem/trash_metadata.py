@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from . import held_fs, originals, reserved_paths
-from .kbdir import managed_split_parts
+from .kbdir import managed_split, managed_split_parts
 
 if TYPE_CHECKING:
     from .graph_sync import GraphLifecycleTransition
@@ -21,6 +21,21 @@ METADATA_SUFFIX = ".meta.json"
 def is_trash_path(path: str) -> bool:
     below = managed_split_parts(PurePosixPath(path).parts)
     return below is not None and below[:1] == (TRASH_SUBPATH,)
+
+
+def is_inside_trash(path: str, *, key: Callable[[str], str] | None = None) -> bool:
+    """Whether the vault-relative ``path`` lies below the managed root's trash folder.
+
+    The folder's own path is not below it, whereas ``is_trash_path`` accepts that path too. A ``key``
+    (such as ``str.casefold``) compares the managed root's name and the trash folder's name
+    through it, as ``managed_split`` does, for callers whose own rule is looser than byte equality.
+    """
+    below = managed_split(path, key=key)
+    if below is None:
+        return False
+    if key is None:
+        return below.startswith(TRASH_SUBPATH + "/")
+    return key(below).startswith(key(TRASH_SUBPATH) + "/")
 
 
 def destination_paths(target: Path) -> tuple[Path, Path, Path]:

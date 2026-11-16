@@ -9854,6 +9854,10 @@ def op_transfer_artifact(
             "artifacts": handoffs,
             "failed": sum("error" in h for h in handoffs),
         }
+    if operation == "upload" and expected_sha256 is not None and artifact is None:
+        # The digest binds a held upload and nothing else takes one with a digest, so it implies the hold
+        # the way lane `import` does, instead of falling into download recovery's INVALID_MODE.
+        hold = True
     if cloud_cell.cloud_mode_enabled() and not hold:
         # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
         if operation != "download" or not artifact:
