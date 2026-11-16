@@ -32,6 +32,15 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 
 Evidence: PR A implements these tasks in the homes and placement commits; `tests/test_vault_homes.py` passes in the combined integration scope. Carrier checks and the privacy scan pass. The scope-boundary task remains open for independent review; delivery evidence belongs on PR A.
 
+## 2B. Area names for the root layout (reopened 2026-11-16 by `adopt-root-vault-layout` task 4.8)
+
+The spec, the `semantic-write-contract` delta and the design now say that `folder` names an area and that the layout supplies its parent. The code still reads `Notes/<Name>`. `adopt-root-vault-layout` builds these tasks in its tasks 4.1 and 4.2, and checks each off here with that evidence.
+
+- [ ] 2B.1 Read a type's `folder` as an area name in `note_types.py` and `homes.py`. Accept a bare name or a value that starts with `Notes/`, read the second as the `nested` parent plus the area name, compare area names for the compiled uniqueness and router-exempt refusals, and rewrite no saved value. Check: `Playbooks` and `Notes/Playbooks` count as a single folder, so the second save refuses with `NOTE_TYPE_FOLDER_TAKEN`; `Data` and `Notes/Data` both refuse with `NOTE_TYPE_FOLDER_RESERVED`; an existing overlay entry keeps its bytes.
+- [ ] 2B.2 Let a `source`, `evidence` or `entity` type declare `folder`. Replace the rule that a type declares a folder exactly when its role is `compiled` with the rule that only a compiled type must, and keep `folder` immutable on an existing entry. Check: a save gives a `source` type an area and is accepted; a change of that `folder` is refused; the shipped classification is unchanged.
+- [ ] 2B.3 Make the shipped pack's `folder` values bare area names, and read each area through `layout.area_folder`, so the destination resolver and the typed writer take the parent from the layout. Check: the six shipped compiled types resolve to the same `Notes/<Area>` paths in a `nested` vault and to `<Area>` in a `root` vault.
+- [ ] 2B.4 Make the Notes-root rules of the `semantic-write-contract` delta layout-aware: type-folder acceptance, home acceptance and the refusal of a compiled type outside the Notes root. Task 4.2 of `adopt-root-vault-layout` decides what the write gate means in `root`. Check: the delta states that decision, and `openspec validate --all --strict` passes.
+
 ## 2. S4b: write side and promotion
 
 - [x] 2.1 Record the S4b decisions for partition kinds, stem kinds, the `fields` shape, typed-field declaration and index entries in `design.md`. Verify `openspec validate --strict`.

@@ -14,7 +14,8 @@ that choice and on no other state:
 
 No area or folder name is spelled here. Areas come from the note-type and home registries,
 the collection profiles and the managed-root helpers in `kbdir`. Nothing in the read or write
-paths calls this module yet.
+paths calls this module yet: only the read-only relayout plan and `layout_report`, which feeds
+status and doctor, do.
 """
 
 from __future__ import annotations
