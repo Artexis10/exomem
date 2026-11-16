@@ -537,7 +537,7 @@ Release the cell image with the narrow builder and boot adoption before enabling
 When enabled, cellctl starts a build Job from the target image when a running candidate's upgrade window opens.
 The scheduler places it beside the serving pod with required pod affinity. Each cell gets one extra quota slot; each node admits one build at a time.
 `cellctl.catalogueBuildResources` and `cellctl.catalogueBuildTimeoutSeconds` hold the build's resource profile and timeout; `values.yaml` gives the defaults and the measurements behind them.
-Memory pressure evicts a build that uses more than its memory request first; the upgrade then rebuilds the catalogue cold.
+Under memory pressure the kubelet evicts pods above their memory requests before pods within them; among those, it evicts the pod furthest above its request first. An evicted build ends in a cold rebuild at the upgrade.
 
 A running build includes image pull after the scheduler binds its pod. A pod waiting for node capacity does not defer an idle attempt.
 Build activity defers the idle stop before the final force minutes, which still default to 10.
