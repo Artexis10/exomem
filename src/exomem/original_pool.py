@@ -333,11 +333,15 @@ def open_object(vault: Path, digest: str, size: int | None) -> Iterator[reserved
 
     A `size` of None opens an object of any size, for a reader that hashes every byte to judge it.
     """
-    with reserved_paths._subsystem_authority_scope(OWNER):
-        with reserved_paths._open_owner_binary(vault, object_path(vault, digest), DESCRIPTOR_ID) as source:
-            if size is not None and source.version.size != size:
-                raise ObjectMismatch("the shared original differs from its canonical binding")
-            yield source
+    with ExitStack() as held:
+        # The authority covers the open alone. The source keeps its own for later checks, and a request may enter
+        # this in a worker thread and leave it on the event loop, where a scope held across the yield cannot reset.
+        with reserved_paths._subsystem_authority_scope(OWNER):
+            source = held.enter_context(
+                reserved_paths._open_owner_binary(vault, object_path(vault, digest), DESCRIPTOR_ID))
+        if size is not None and source.version.size != size:
+            raise ObjectMismatch("the shared original differs from its canonical binding")
+        yield source
 
 
 def locally_present(vault: Path, digest: str, size: int) -> bool:
