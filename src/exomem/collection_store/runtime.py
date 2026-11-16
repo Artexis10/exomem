@@ -1381,7 +1381,7 @@ class StoreServer:
             raise request.error
         return request.result
 
-    def read_beside(self, work, *, initial):
+    def read_beside(self, work, *, initial, collection=None):
         """Run a read-only ``work`` on the caller's thread, over a pooled reader of the store's last commit.
 
         For import status, which must answer while a batch keeps the store thread busy. The
@@ -1390,11 +1390,12 @@ class StoreServer:
         under the views of placement, policy and ownership a store-thread read runs under
         (``_serve``), with a writer over a ``connection.SnapshotHandle``, which refuses every write.
         Where this process holds no admitted writer, the request queues on the store thread as
-        before (``call``), whose checkout opens one.
+        before (``call``), whose checkout opens one. ``collection`` is the request's selector: a
+        collection the store keeps in full needs no read of the derived file.
         """
         from ..cli_ops import OpError
         from ..governance import policy
-        from . import capability, ownership
+        from . import capability, derived_rows, ownership
         from .preview import preview_store
 
         manager, runtime = self.manager, self.runtime
@@ -1404,6 +1405,8 @@ class StoreServer:
             if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):
                 capability.require_not_disabled(self.root)
                 scope.enter_context(manager._collection_store_checkout())
+                # A rollback between the first check and borrowing must also refuse this read, as in ``checkout``.
+                capability.require_not_disabled(self.root)
                 with manager._lock:
                     token = manager._fencing_token
                 handle = runtime._handle
@@ -1420,10 +1423,13 @@ class StoreServer:
                 scope.close()
                 return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
             reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
+            entry = None if initial is None or collection is None else initial.selected(self.root, collection)
+            # Read before the snapshot begins; a selection this proof cannot name reads the derived file.
+            derived = entry is None or derived_rows.is_derived(reader, entry["collection_id"])
             production = runtime._session is not None and runtime._session.production
             scope.enter_context(state_paths.resolution_scope())
             scope.enter_context(policy.request_policy_snapshot())
-            snapshot = connection.SnapshotHandle(runtime.path, reader, handle)
+            snapshot = connection.SnapshotHandle(runtime.path, reader, handle, derived=derived)
             scope.enter_context(preview_store(self.root, snapshot, production=production))
             if initial is not None:
                 scope.enter_context(ownership.read_scope(self.root, initial=initial))

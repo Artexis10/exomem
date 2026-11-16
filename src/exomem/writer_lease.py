@@ -8664,7 +8664,8 @@ def _collection_store_thread(func):
                 if server is not None and import_status and read_only:
                     # Status answers while a batch keeps the store thread busy: it reads the store's
                     # last commit on this thread, under the proof that routed it.
-                    return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof)
+                    return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof,
+                                              collection=kwargs.get("collection"))
                 if server is not None:
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
