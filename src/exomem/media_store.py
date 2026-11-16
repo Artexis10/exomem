@@ -1796,15 +1796,19 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
         return
     from . import original_pool
 
+    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    bound = originals.BinaryBinding(relative, snapshot.binary_sha256, snapshot.binary_size)
+
     def require_binding() -> None:
+        # The bound path, digest and size name the bytes; the companion's other fields, such as the
+        # extraction text that a pinned job writes, may change while the bytes are held.
         current = originals.bound_companion(vault, relative)
         if (current is None or vault / current[0] != snapshot.sidecar_path
-                or hashlib.sha256(current[2]).hexdigest() != snapshot.sidecar_hash):
+                or originals.binary_binding(current[1]) != bound):
             raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
 
     try:
         require_binding()
-        assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
         with original_pool.open_object(vault, snapshot.binary_sha256, snapshot.binary_size) as source:
             def require_current() -> None:
                 source.require_current()

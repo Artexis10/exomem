@@ -654,8 +654,11 @@ class MediaWorker:
             # The read pin spans all processing, including child result capture.
             # Re-embedding reads only the sidecar and needs no original bytes.
             if job.do_ocr or job.do_clip:
+                # A shared original is pinned too: its pool object outlives any one filing only while held.
+                pinned = (originals.binding_for(self._vault_root) is not None
+                          or originals.pooled(self._vault_root, job.binary_path) is not None)
                 original = (media_store.open_original(self._vault_root, job.binary_path, job=job)
-                            if originals.binding_for(self._vault_root) is not None else contextlib.nullcontext())
+                            if pinned else contextlib.nullcontext())
                 with contextlib.ExitStack() as held:
                     try:
                         held.enter_context(original)

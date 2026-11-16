@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import sqlite3
 from pathlib import Path
 
+import pytest
+from test_media_store import selected_store as selected_store
 from test_shared_originals import _pooled_capture
 
 from exomem import media_jobs, media_processing, media_worker
@@ -17,6 +21,8 @@ def _drain(vault: Path) -> list[str]:
     while (job := store.claim_next()) is not None:
         outcome = worker._process(job)
         states.append(outcome.state)
+        if job.do_offload:  # an inline worker has no ledger of its own to acknowledge a finished offload
+            store.complete_offload(job)
         store.complete(job)
     return states
 
@@ -33,6 +39,36 @@ def test_a_pooled_original_is_reconciled_queued_and_extracted_from_its_pool_obje
     fields = parse_frontmatter((vault / (added.artifact_path + ".md")).read_text())[0]
     assert fields["extracted_by"] != "pending"
     assert "quarterly meeting" in (vault / (added.artifact_path + ".md")).read_text()
+    assert not (vault / added.artifact_path).exists()
+
+
+@pytest.mark.parametrize("store_bound", [False, True], ids=["pool-only", "store-bound"])
+def test_a_pooled_original_keeps_its_whole_job_pin_while_the_worker_rewrites_its_companion(
+        vault, tmp_path, monkeypatch, request, store_bound):
+    """The pin checked the companion's bytes, so the stored reference or extraction text that a job writes into the
+    companion while it holds the original failed every job of a pooled original with IDENTITY_CHANGED; and a vault
+    with no media store took no whole-job pin, so the shared object was unheld while the job captured its result."""
+    if store_bound:
+        request.getfixturevalue("selected_store")
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"the minutes of the quarterly meeting")
+    pins: list[int] = []
+    process = media_worker.MediaWorker._process_original
+
+    def counting_pins(worker, job):
+        outcome = process(worker, job)
+        with contextlib.closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+            pins.append(ledger.execute("SELECT COUNT(*) FROM media_access WHERE binary_rel = ?",
+                                       (added.artifact_path,)).fetchone()[0])
+        return outcome
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_process_original", counting_pins)
+    media_processing.reconcile_media(vault, added.artifact_path)
+
+    # A store-bound vault offloads the original first, writing its stored reference into the companion.
+    assert _drain(vault) == [media_worker._COMPLETE] * (2 if store_bound else 1)
+    assert pins == [1]  # still pinned after the companion took the extraction text
+    fields = parse_frontmatter((vault / (added.artifact_path + ".md")).read_text())[0]
+    assert fields["extracted_by"] == "text" and bool(fields.get("stored_object")) == store_bound
     assert not (vault / added.artifact_path).exists()
 
 
