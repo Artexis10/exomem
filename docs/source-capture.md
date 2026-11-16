@@ -138,8 +138,9 @@ The [passage reference](../benchmarks/passage-evidence/README.md) records the me
 
 ## Cell discovery
 
-A Cloud cell exposes `GET /.well-known/exomem-cell` without requiring a credential or tenant content.
-Clients can compare its configured `cell_id` before sending credentials or content to that destination.
+A Cloud cell exposes `GET /.well-known/exomem-cell` on its own listener without requiring a credential or tenant content.
+A client that reaches that listener can compare its configured `cell_id` before sending credentials or content to that destination.
+The hosting ingress and gateway do not forward this path yet, so a client outside the cell cannot call it until a gateway release and an ingress route add it.
 The response lists implemented operations and their effective limits from the composed command registry.
 It identifies package files observed during server composition and the opaque published recall-space identity.
 An unavailable recall space remains explicit; discovery does not load an encoder.

@@ -609,7 +609,7 @@ class GeneratedFragmentStore:
             return
         _boundary(self.root)
         # A failed phase leaves later reads on durable state: unflushed before-bytes work never reached native bytes,
-        # and lost acknowledgements stay outstanding reservations that the next writer settles.
+        # and lost acknowledgements stay outstanding reservations that read as pending, never absent.
         values, staged.staged, staged.before_bytes = list(staged.staged.values()), {}, False
         for start in range(0, len(values), MAX_STEP):
             self._commit("unit", values[start:start + MAX_STEP])

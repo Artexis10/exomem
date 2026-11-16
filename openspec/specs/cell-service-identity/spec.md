@@ -7,14 +7,15 @@ Let a service verify a cell's identity, software, operations and limits before i
 
 ### Requirement: Content-free cell discovery
 
-A Cloud cell SHALL expose `GET /.well-known/exomem-cell` without requiring a credential or tenant content.
+A Cloud cell SHALL expose `GET /.well-known/exomem-cell` on its own listener without requiring a credential or tenant content.
+This change adds no route that reaches that path from outside the cell. The hosting ingress and gateway route only the MCP path and the transfer, health and protected-resource paths. A client outside the cell can call discovery without a credential only after a gateway release and an ingress route forward this path.
 The response SHALL name the configured cell, composed software identity, implemented operations and their effective limits.
 Discovery MUST NOT read canonical content, load a model, inspect captured identities or change a registration.
 It MUST NOT expose credentials, paths, hostnames, principal identifiers or captured metadata.
 
 #### Scenario: Verify a destination before sending a credential
 
-- **WHEN** a client requests discovery without authentication
+- **WHEN** a client that reaches the cell's listener requests discovery without authentication
 - **THEN** the cell returns its configured identity and implemented service contract
 - **AND** the client can compare that identity before sending a credential or content
 
