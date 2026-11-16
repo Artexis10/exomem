@@ -235,14 +235,14 @@ def _check_attributes(entry: registry.Entry) -> None:
         raise registry.RegistryError(
             f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} sources must be required or optional"
         )
-    # Only a compiled type must name its area. A source, evidence or entity type may name one, and a
-    # type with no role has no area that anything reads.
+    # Only a compiled type must name its area. A source, evidence or entity type may name an area,
+    # and a type with no role has no area that anything reads.
     if (role == "compiled" and "folder" not in attributes) or (
         role is None and "folder" in attributes
     ):
         raise registry.RegistryError(
             f"INVALID_NOTE_TYPE_FOLDER: {entry.key} must declare a folder when its note-type role "
-            "is compiled, and may declare one only with a note-type role"
+            "is compiled, and may declare a folder only with a note-type role"
         )
 
 

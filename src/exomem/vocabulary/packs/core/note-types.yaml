@@ -5,7 +5,7 @@
 # `role` is the note-type role: compiled, entity, source or evidence. A type
 # without a role matches no role predicate. `folder` names the type's area: a single
 # folder name whose parent the vault's layout supplies. A compiled type declares its
-# area, and a source, evidence or entity type may declare one. A vault's overlay may
+# area, and a source, evidence or entity type may declare an area. A vault's overlay may
 # spell a compiled area `Notes/<Name>` too; both spellings read as the same area.
 # `time_bounded` marks a compiled type whose pages
 # record one bounded period; `sources: required` marks a type whose pages

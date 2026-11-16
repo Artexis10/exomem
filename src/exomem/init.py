@@ -50,7 +50,7 @@ def _area_folders() -> tuple[str, ...]:
 
 
 def _entity_area() -> str:
-    """The folder that holds one group folder per entity type."""
+    """The folder that holds a group folder for each entity type."""
     for note_type in note_types.shipped(note_types.entity):
         area = layout.area_folder(note_type, layout.Layout.NESTED)
         if area is not None:
