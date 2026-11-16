@@ -36,12 +36,14 @@ def test_kb_dirname_override(monkeypatch) -> None:
 
 
 def test_a_nested_kb_dirname_is_refused_with_the_variable_named(monkeypatch) -> None:
-    # A nested value never matched the root as a path's first component, so it half-worked.
-    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain/Notes")
+    # A nested value never matched the root as a path's first component, so it half-worked. A
+    # backslash separates folders on native Windows.
     from exomem import kbdir
 
-    with pytest.raises(ValueError, match="EXOMEM_KB_DIRNAME.*single folder name"):
-        kbdir.kb_dirname()
+    for nested in ("Brain/Notes", "Brain\\Notes"):
+        monkeypatch.setenv("EXOMEM_KB_DIRNAME", nested)
+        with pytest.raises(ValueError, match="EXOMEM_KB_DIRNAME.*single folder name"):
+            kbdir.kb_dirname()
 
 
 def test_init_creates_custom_dir(monkeypatch, tmp_path: Path) -> None:
