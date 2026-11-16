@@ -155,10 +155,11 @@ _MCP_ACTIVATION_HEAD = (
     "[Exomem native MCP activation] Reuse current already-held or injected Exomem "
     "context; never duplicate a recall for a subject it covers. If the live operating "
     "contract is absent, call `read_instructions` through the admitted Exomem native MCP. "
-    "When this turn opens a subject that held or injected context does not cover, call "
-    "`recall_context` through that same native MCP before answering, with `turn` equal "
-    "to the raw user turn verbatim on the first call, then use the returned context. "
-    "Advice on the user's own case needs that recall. "
+    "When this turn opens a subject of the user's own (their work, projects, records or life) "
+    "that held or injected context does not cover, call `recall_context` through that same "
+    "native MCP before answering, with `turn` equal to the raw user turn verbatim on the first "
+    "call, then use the returned context. A general question that needs nothing of theirs "
+    "needs no recall. Advice on the user's own case needs that recall. "
 )
 # light: clear relevance or advice on the user's own case (as in the server
 # instructions), so `light` omits this sentence.

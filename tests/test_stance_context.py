@@ -424,11 +424,11 @@ def test_method_reset_stance_and_move_fit_the_minimum_public_cap(stance_vault, m
     assert [item["text"] for item in first["stance"]["items"]] == [statement]
     assert first["next_action"]["state"] == "method_reset"
     assert first["budget"]["used_chars"] == context_views.packet_chars(
-        first["map"], first.get("turn_slice"), first["task_context"], first["stance"], first["next_action"],
+        first["map"], first.get("turn_slice"), first["task_context"], first["next_action"],
     ) <= 500
     from exomem import context_task
 
-    reserve = int((500 - read_next_action.MAX_CHARS - stance.chars(first["stance"])) * context_views.TURN_SLICE_SHARE)
+    reserve = int((500 - read_next_action.MAX_CHARS) * context_views.TURN_SLICE_SHARE)
     assert context_task.packet_chars(first["task_context"]) <= reserve
     row = served_context.read(stance_vault, served_context_id=first["served_context_id"])["record"]
     assert row["task_context"]["methods"]["reset"] is True
@@ -564,3 +564,23 @@ def test_a_renamed_stance_page_is_decided_at_its_new_path(stance_vault):
     renamed = _stance(stance_vault, who=_external())
     assert renamed["state"] == "ready"
     assert [item["text"] for item in renamed["items"]] == ["Keep a source for each claim."]
+
+
+def test_a_ready_stance_takes_nothing_from_the_turn_allowance(stance_vault, monkeypatch):
+    """The stance rides on every packet. Charged to `max_chars`, it once cut the turn's leads on every call."""
+    from exomem import commands, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    working_set_runtime.reset_caches_for_tests()
+    with_stance = invoke_command(command, stance_vault, turn="Keep a source", max_chars=600)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_STANCE", "off")
+    working_set_runtime.reset_caches_for_tests()
+    without = invoke_command(command, stance_vault, turn="Keep a source", max_chars=600)
+
+    assert with_stance["stance"]["state"] == "ready"
+    assert with_stance["budget"]["used_chars"] == without["budget"]["used_chars"] <= 600
+    assert with_stance["map"] == without["map"]
+    assert with_stance["turn_slice"] == without["turn_slice"]
+    assert with_stance["task_context"]["candidates"] == without["task_context"]["candidates"]
