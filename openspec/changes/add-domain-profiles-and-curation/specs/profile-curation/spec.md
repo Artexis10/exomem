@@ -8,16 +8,23 @@ Keep profiles accurate without asking the person to maintain them by hand.
 
 The background upkeep pass SHALL raise one `upkeep_profile_curation` item for a domain profile when either condition holds:
 
-- live units exist on pages of the profile's domain or its descendant domains, dated after the profile page's last update, whose categories belong to the registry roles `preferences` or `constraints`;
+- live units exist on an evidence page, dated after the profile page's last update, whose categories belong to the registry roles `preferences` or `constraints`;
 - a profile line is superseded, is contradicted by a typed relation, has expired, or is past its `check_by` date.
 
-For a global profile, only the second condition SHALL apply.
+The evidence pages of a domain profile SHALL be the pages in its domain or a descendant domain, together with the pages that the profile page links to.
+The evidence pages of a global profile SHALL be the pages that it links to.
+Links SHALL be resolved through the product's link resolution and followed one step only.
 Detection SHALL resolve roles to categories through the context-role registry. It SHALL use registered domains and typed relations only, SHALL run no model, and SHALL write nothing to the vault.
 The product SHALL hold no list of categories, roles or domains in code.
 
 #### Scenario: A new gaming preference raises curation
 
 - **WHEN** a note in the games domain gains a unit of a preference category after the games profile was last updated
+- **THEN** the upkeep pass raises one `upkeep_profile_curation` item for the games profile that names the new unit
+
+#### Scenario: A new preference on the linked detail note raises curation
+
+- **WHEN** the games profile links its long detail note, the note is not a member of the games domain, and the note gains a unit of a preference category after the profile was last updated
 - **THEN** the upkeep pass raises one `upkeep_profile_curation` item for the games profile that names the new unit
 
 #### Scenario: A vault's own preference category is detected

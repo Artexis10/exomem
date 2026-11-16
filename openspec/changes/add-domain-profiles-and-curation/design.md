@@ -131,7 +131,7 @@ The new family is `upkeep_profile_curation`, with kind `profile.curation`. The n
 
 - **Template.** It follows the subject-family template of the episode fold: one proposal per profile page, counting structural evidence newer than the page's own update.
 - **Evidence.** The family reads two kinds:
-  - live units whose categories belong to the registry roles `preferences` and `constraints`, resolved through `context_roles`, on pages of the profile's domain and its descendants;
+  - live units whose categories belong to the registry roles `preferences` and `constraints`, resolved through `context_roles`. They come from pages of the profile's domain and its descendants, and from pages the profile links to. On a real vault copy, almost no note carried its domain in `topics`, so domain membership alone found nothing. The link a profile already makes to its detail note is the reliable scope. A global profile reads only its links;
   - profile lines whose currency state shows supersession, contradiction, expiry or a passed `check_by`.
 - **Dismissal.** The signal digest over the sorted evidence references is the review-state fingerprint. A dismissal therefore holds until the evidence changes.
 - **Surfacing.** Items reach the agent through `upkeep.for_packet`, within its existing caps. Their route is the governed `edit_note` preview.
