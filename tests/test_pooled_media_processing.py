@@ -128,6 +128,31 @@ def test_the_media_sweep_finds_a_pooled_original(vault, tmp_path, monkeypatch):
     assert vault / added.artifact_path in seen
 
 
+def test_the_offload_scan_of_a_pooled_archive_reads_only_the_filings_that_still_need_an_offload(
+        vault, tmp_path, monkeypatch, selected_store):
+    """Each sweep's offload scan read every companion; with 100,000 filings one scan outran the sweep interval.
+    A current projection names the filings that hold no recovery reference, and the scan reads only those."""
+    from exomem import media_bindings, media_store, reserved_paths
+
+    offloaded = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"the minutes of the quarterly meeting")
+    assert media_store.offload(vault, vault / offloaded.artifact_path) is not None
+    waiting = _pooled_capture(vault, tmp_path, monkeypatch, "agenda.txt", b"the agenda of the quarterly meeting")
+    store = media_jobs.MediaJobStore(vault)
+    path = vault.resolve() / waiting.artifact_path
+    assert store.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
+    assert media_bindings.rebuild(vault)
+    reads: list[str] = []
+    read = reserved_paths.read_generic_bytes
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes",
+                        lambda root, rel, *args, **kwargs: (reads.append(rel), read(root, rel, *args, **kwargs))[1])
+
+    assert media_store.enqueue_offloads(vault) == 1
+
+    queued = store.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE)
+    assert queued is not None and queued.do_offload
+    assert offloaded.artifact_path + ".md" not in reads
+
+
 def test_a_failed_job_of_a_pooled_original_can_be_retried(vault, tmp_path, monkeypatch):
     """An explicit retry must find the pooled bytes the failed job named, not report the file as missing."""
     added = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"the minutes of the quarterly meeting")

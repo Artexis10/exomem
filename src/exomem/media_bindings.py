@@ -706,6 +706,36 @@ def _retire_census(vault: Path, conn: sqlite3.Connection, placements: trash_meta
     conn.execute("DELETE FROM binding_census WHERE binary_rel IN (SELECT binary_rel FROM retired_census)")
 
 
+def unreferenced(vault: Path, *, batch: int = 1024) -> Iterator[tuple[str, str]] | None:
+    """The (logical path, companion path) of each binding without a recovery reference in the selected store.
+
+    These are the bindings that an offload may still need. None when the projection is not current, because only a
+    complete census proves that it misses no binding. A row names what the last census or delta saw; a caller
+    resolves each one before it acts on it.
+    """
+    ledger = _ledger(vault, create=False)
+    if not ledger.path.exists():
+        return None
+    with closing(ledger._connect(readonly=True)) as conn:
+        if not current(vault, conn):
+            return None
+
+    def rows() -> Iterator[tuple[str, str]]:
+        after = ""
+        while True:
+            # Keyset pages bound each read; a connection is held only while one page is read.
+            with closing(ledger._connect(readonly=True)) as conn:
+                page = conn.execute("SELECT binary_rel, companion_rel FROM media_bindings "
+                                    "WHERE binary_rel > ? AND reference IS NULL ORDER BY binary_rel LIMIT ?",
+                                    (after, batch)).fetchall()
+            yield from ((row[0], row[1]) for row in page)
+            if len(page) < batch:
+                return
+            after = page[-1][0]
+
+    return rows()
+
+
 def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
     """Aggregate one object's bindings and captured pins with indexed ledger reads."""
     state = checkpoint(conn)

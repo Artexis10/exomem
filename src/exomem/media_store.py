@@ -755,8 +755,44 @@ def enqueue_offloads(vault: Path) -> int:
             f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
             media_allowance.ALLOWANCE_REFUSAL_CODES)
         usage = media_allowance.reference_usage(vault) if rows else None
-        return sum(_enqueue_offload(vault, item.path, usage=usage)
-                   for item in bound_originals(vault, unconfirmed=skip_unknown_original))
+        return sum(_enqueue_offload(vault, path, usage=usage) for path in _offload_candidates(vault))
+
+
+def _offload_candidates(vault: Path) -> Iterator[Path]:
+    """Each bound original that the offload scan checks.
+
+    A shared archive resolves only the bindings of its current projection that hold no recovery reference, so a
+    scan of an offloaded archive reads no companion. Any other archive, and a projection that its census could not
+    make current, walks every companion. A projected binding resolves as the walk resolves the companion it meets.
+    """
+    from . import media_bindings, original_pool
+    from .vault import VAULT_SCAN_SKIP_DIRS
+    from .vault_store import read as store_read
+
+    root = Path(vault).resolve()
+    rows = media_bindings.unreferenced(root) if original_pool.enabled(root) else None
+    if rows is None:
+        yield from (item.path for item in bound_originals(vault, unconfirmed=skip_unknown_original))
+        return
+    managed = managed_root(root)
+    for binary_rel, companion_rel in rows:
+        binary = root / binary_rel
+        # The walk meets only a companion beside its original, under the managed root, below no folder it prunes.
+        if (companion_rel not in originals.companion_paths(binary_rel) or not binary.is_relative_to(managed)
+                or any(part in VAULT_SCAN_SKIP_DIRS for part in binary.parent.relative_to(managed).parts)):
+            continue
+        try:
+            snapshot = _bound_file(root, binary_rel)
+        except originals.RetirementUnconfirmed as error:
+            skip_unknown_original(error)
+            continue
+        except reserved_paths.ReservedPathLeafError as error:
+            # A companion that the store moved or deleted binds at its new path.
+            if error.code == "MISSING" and store_read.serves(root, companion_rel):
+                continue
+            raise
+        if snapshot is not None:
+            yield snapshot.path
 
 
 def skip_unknown_original(error: originals.RetirementUnconfirmed) -> None:
