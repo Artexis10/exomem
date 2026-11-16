@@ -176,6 +176,7 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "collection-replica",
     "consolidation-tree",
     "governance-tree",
+    "original-pool",
     "procedure-approvals",
     "source-corrections",
 }
