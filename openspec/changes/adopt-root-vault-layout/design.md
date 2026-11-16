@@ -69,17 +69,17 @@ Each refusal names the remedy, and the record that fits depends on the refusal:
 - `_Schema/` only at the vault root means the vault was laid out as `root`. Write a `root` record in that folder.
 - `_Schema/` in both places with no record means an interrupted relayout or a stray folder. Write the record for the layout that the pages are in, which is `nested` when the pages sit under the wrapper. A wrong record hides every page.
 
-The delivered refusal text names both records and when each applies (`root` when the vault root is the managed root, `nested` when it is not). Task 4.6 makes each refusal name the record that fits it.
+The delivered refusal text names both records and when each applies (`root` when the vault root is the managed root, `nested` when it is not). Task 4.6b makes each refusal name the record that fits it.
 
-While a record exists, a leftover second `_Schema/` is reported and never refused. `layout.inspect` reports it, the plan carries it in its diagnostics, and task 4.6 adds status and doctor. Both folders exist during the relayout's projection window, and a refusal would leave a crashed relayout unresolvable.
+While a record exists, a leftover second `_Schema/` is reported and never refused. `layout.inspect` reports it, the plan carries it in its diagnostics, and status and doctor report it (task 4.6a). Both folders exist during the relayout's projection window, and a refusal would leave a crashed relayout unresolvable.
 
-`EXOMEM_KB_DIRNAME` stays as a test override. An upgrade moves no file and changes no layout. The first delivery calls the resolution from the read-only plan only. Vault resolution and service start call it from the root layout step (task 4.6), so no existing code path changes behaviour before then. Before that wiring reaches service start, the plan or doctor reports an unrelated vault-root `_Schema/`, so that no host meets case 5 first at service start.
+`EXOMEM_KB_DIRNAME` stays as a test override. An upgrade moves no file and changes no layout. The first delivery calls the resolution from the read-only plan only. Status and doctor then report its result without refusing (task 4.6a). Vault resolution and service start call it from the root layout step (task 4.6b), so no existing code path changes behaviour before then. Before that wiring reaches service start, doctor reports an unrelated vault-root `_Schema/`, so that no host meets the refusal first at service start. The report reads `layout.inspect` and turns each `LayoutError` into a finding with its code and remedy, so the remedy text lives once, in the error.
 
 ### L2. Managed-root helpers
 
 The managed-root helpers and their repository gate have landed. Code reaches the managed root through the `managed_*` helpers in `kbdir.py`. `kb_dirname()` and `kb_prefix()` remain only inside that module, and the semgrep rule in the repository's quality configuration refuses a new call elsewhere. In `nested` the helpers return today's strings exactly. The helpers do not rewrite the literal `Knowledge Base` text that remains in user-facing errors, docstrings, examples and the demo (308 lines in 101 Python files, plain text count, 2026-11-16). Task 4.9 makes that text layout-neutral.
 
-What remains is the layout argument (task 4.6). `managed_join` and `managed_split` take an optional layout. The process default suits the service and the cells. The planner, Cloud import and tests pass a layout explicitly. A requirement or tool text that says `Knowledge Base/<rest>` means `<managed root>/<rest>`, except that in `root` the path `Knowledge Base/Notes/<Area>/<rest>` means `<Area>/<rest>` for a compiled area, because the `Notes/` level drops.
+What remains is the layout argument (task 4.6b). `managed_join` and `managed_split` take an optional layout. The process default suits the service and the cells. The planner, Cloud import and tests pass a layout explicitly. A requirement or tool text that says `Knowledge Base/<rest>` means `<managed root>/<rest>`, except that in `root` the path `Knowledge Base/Notes/<Area>/<rest>` means `<Area>/<rest>` for a compiled area, because the `Notes/` level drops.
 
 ### L3. A single layout translation for every path reader (disclosure)
 

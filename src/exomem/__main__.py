@@ -1651,7 +1651,7 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
-    from . import resource_status, state_migration
+    from . import layout_report, resource_status, state_migration
 
     vault_root = Path(args.vault).expanduser() if args.vault else None
     if vault_root is not None:
@@ -1662,6 +1662,8 @@ def _status_main(argv: list[str]) -> int:
 
         # The records' own answer: it opens the store only when the manifest says store mode.
         status["vault_store"] = store_mode.status(vault_root)
+        # A layout that cannot be read is a state in the report, so status never refuses on it.
+        status["layout"] = layout_report.report(vault_root)
     if args.json:
         print(json.dumps(status))
     else:
@@ -1674,6 +1676,10 @@ def _status_main(argv: list[str]) -> int:
         print(f"  cuda: {status['cuda']}")
         if "vault_store" in status:
             print(f"  vault_store: {status['vault_store']}")
+        if "layout" in status:
+            print(f"  layout: {status['layout']['outcome']}")
+            if status["layout"]["remedy"]:
+                print(f"    fix: {status['layout']['remedy']}")
     return 0
 
 
