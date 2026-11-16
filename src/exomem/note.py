@@ -70,7 +70,7 @@ from . import (
 )
 from . import project_keys as project_keys_module
 from .governance.membership import MembershipUnresolved
-from .kbdir import managed_join, managed_relative, managed_root
+from .kbdir import managed_join, managed_relative, managed_root, managed_split_parts
 from .vault import (
     MISSING_CONTENT_HASH,
     InvalidSlugError,
@@ -129,7 +129,7 @@ def _plan_project_registrations(
     registry = _load_keys(vault_root)
     folders = dict(registry.project_to_folder)
     categories = dict(registry.project_to_category)
-    registry_path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    registry_path = Path(vault_root) / project_keys_module.registry_relpath(vault_root)
     if registry_path.exists():
         original = registry_path.read_bytes().decode("utf-8")
         text = original
@@ -159,10 +159,9 @@ def _plan_project_registrations(
         close = project_keys_module._closest_existing_key(candidate, list(folders))
         if close is not None:
             raise project_keys_module.ProjectKeyTypoError(candidate, close[0], close[1])
-        research_dir = kb_root(vault_root) / "Notes" / "Research"
-        folder = project_keys_module._title_case_slug(
-            candidate, [*folders.values(), *project_keys_module.child_folder_names(research_dir)]
-        )
+        parent = project_keys_module.project_folder_parent(vault_root)
+        on_disk = [] if parent is None else project_keys_module.child_folder_names(parent)
+        folder = project_keys_module._title_case_slug(candidate, [*folders.values(), *on_disk])
         if not text.endswith("\n"):
             text += "\n"
         text += (
@@ -173,7 +172,8 @@ def _plan_project_registrations(
         )
         folders[candidate] = folder
         categories[candidate] = category
-        required_project_dirs.append(kb_root(vault_root) / "Notes" / "Research" / folder)
+        if parent is not None:
+            required_project_dirs.append(parent / folder)
         changed = True
         warnings.append(
             f"Auto-registered project key {candidate!r} (folder: {folder!r}"
@@ -1260,7 +1260,11 @@ def _type_default(
     definition = _definition(vault_root, note_type)
     lay = layout.of(vault_root)
     folder = managed_root(vault_root, layout=lay) / str(layout.area_folder(definition, lay))
-    if definition.partition == "project":
+    if lay is layout.Layout.ROOT:
+        # `root` files every page flat in its area: a project, a domain or a medium is
+        # frontmatter there, so a reclassification never moves a file (decision O1).
+        pass
+    elif definition.partition == "project":
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
         registry = project_registry or _load_keys(vault_root)
@@ -1287,6 +1291,15 @@ def _home_containing(
     vault_root: Path, folder: Path, home_set: homes_module.HomeSet
 ) -> homes_module.Home | None:
     """The active home whose folder holds `folder`, if any."""
+    managed = layout.managed_of(vault_root)
+    if managed.layout is layout.Layout.ROOT:
+        # A home folder is a vault-root folder in `root`; a leftover `Notes/<X>` folder is no home.
+        try:
+            parts = folder.relative_to(vault_root).parts
+        except ValueError:
+            return None
+        below = managed_split_parts(parts, layout=managed.layout, unmanaged=managed.unmanaged)
+        return None if below is None else home_set.containing(below)
     try:
         below_kb = folder.relative_to(kb_root(vault_root)).parts
     except ValueError:
@@ -1713,8 +1726,10 @@ def _resolve_source_path(vault_root: Path, kb_relative: str) -> Path | None:
     Returns the first candidate that exists, else the historical candidate so a
     genuinely missing source still reports the path a caller would expect.
     """
-    rel = managed_relative(kb_relative)
-    base = kb_root(vault_root) / rel
+    lay = layout.of(vault_root)
+    # A citation is relative to the managed root; only `nested` spells that root as a folder to drop.
+    rel = kb_relative if lay is layout.Layout.ROOT else managed_relative(kb_relative)
+    base = managed_root(vault_root, layout=lay) / rel
     if base.suffix.lower() == ".md":
         candidates = [base.with_name(f"{base.name[:-3]}-notes.md"), base]
     else:

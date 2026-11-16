@@ -287,7 +287,7 @@ class CallerView:
         binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, declared]))
         # The project registry is a vault file like any other: a restricted caller reads it only at full release.
         projects_admitted = visible is None or egress.release_level_for_path_only(
-            root, project_keys.registry_relpath(), principal=principal, purpose=declared
+            root, project_keys.registry_relpath(root), principal=principal, purpose=declared
         ) >= egress.LEVEL_FULL
         return cls(
             visible, declared, binding, _registry_admitted(root, principal, purpose, source_taxonomy.DOMAIN_SPEC),

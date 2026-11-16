@@ -293,7 +293,7 @@ class _Adapter(registry.FixedPackAdapter):
             "hand_declared": [
                 {"kind": KIND_PROJECT, "match": key, "topics": list(keys.domains_for(key)),
                  "origin": {topic: ORIGIN_REVIEWED for topic in keys.domains_for(key)},
-                 "source": project_keys.registry_relpath()}
+                 "source": project_keys.registry_relpath(vault_root)}
                 for key in keys.project_to_domains
             ]
         }

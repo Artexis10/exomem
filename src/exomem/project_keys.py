@@ -39,9 +39,30 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 
-def registry_relpath() -> str:
-    """The project registry's vault-relative path: the path a release decision names it by."""
-    return managed_join("_Schema/project-keys.yaml")
+def registry_relpath(vault_root: Path | None = None) -> str:
+    """The project registry's vault-relative path: the path a release decision names it by.
+
+    `vault_root` names the vault whose layout keeps the schema folder; a call without it reads
+    the `nested` path, for a caller that holds no vault.
+    """
+    if vault_root is None:
+        return managed_join("_Schema/project-keys.yaml")
+    from . import layout  # imported here: `layout` imports the registries that import this module
+
+    return layout.schema_relpath(vault_root, "project-keys.yaml")
+
+
+def project_folder_parent(vault_root: Path) -> Path | None:
+    """The folder that holds one folder per project, or None in a `root` vault.
+
+    A `root` vault files every page flat in its area, so no project has a folder there and a
+    project key creates none.
+    """
+    from . import layout  # imported here: `layout` imports the registries that import this module
+
+    if layout.of(vault_root) is layout.Layout.ROOT:
+        return None
+    return kb_root(vault_root) / "Notes" / "Research"
 
 
 # Fallback used when project-keys.yaml is missing or malformed. A neutral
@@ -129,7 +150,7 @@ def load_project_registry(vault_root: Path) -> ProjectRegistry:
     Returns a fallback registry on any read/parse failure, with a warning
     logged so service-log readers can see the misconfiguration.
     """
-    path = Path(vault_root) / registry_relpath()
+    path = Path(vault_root) / registry_relpath(vault_root)
     try:
         # A store-mode vault keeps this registry in its store; the file is only a projection.
         text = read_bytes_without_pinning(path, vault_root).decode("utf-8")
@@ -167,7 +188,7 @@ def filename_style(vault_root: Path) -> str | None:
     unrecognised value is refused there with the source named rather than
     silently becoming the default.
     """
-    path = Path(vault_root) / registry_relpath()
+    path = Path(vault_root) / registry_relpath(vault_root)
     try:
         data = yaml.safe_load(read_bytes_without_pinning(path, vault_root).decode("utf-8")) or {}
     except (OSError, yaml.YAMLError):
@@ -378,7 +399,7 @@ def plan_project_keys(
     if type(keys) not in {list, tuple} or len(keys) > 64:
         raise ValueError("project key plan must contain at most 64 keys")
     root = Path(vault_root)
-    path = root / registry_relpath()
+    path = root / registry_relpath(root)
     try:
         text, guard = read_guarded_text(root, path)
         path_exists = True
@@ -399,7 +420,10 @@ def plan_project_keys(
     introductions: list[ProjectKeyIntroduction] = []
     replay_by_key = {item.key: item for item in replay_introductions}
     seen: set[str] = set()
-    known_folders = sorted(set(proposed_folders.values()) | set(child_folder_names(kb_root(root) / "Notes" / "Research")))
+    parent = project_folder_parent(root)
+    known_folders = sorted(
+        set(proposed_folders.values()) | (set() if parent is None else set(child_folder_names(parent)))
+    )
     for raw in keys:
         if type(raw) is not str or not _SLUG_RE.fullmatch(raw):
             raise ValueError(
@@ -454,9 +478,10 @@ def plan_project_keys(
             f"    folder: {item.folder}\n"
             f"    category: {item.category}\n"
         )
-    project_directories = tuple(
-        kb_root(root) / "Notes" / "Research" / item.folder
-        for item in introductions
+    project_directories = (
+        ()
+        if parent is None
+        else tuple(parent / item.folder for item in introductions)
     )
     write = PlannedWrite(
         path,
@@ -500,6 +525,7 @@ def register_project_key(
         return key, plan.registry.folder_for(key) or folder or _title_case_slug(key), False
     batch_atomic_write(plan.writes, vault_root=vault_root)
     introduction = plan.introductions[0]
-    folder_path = kb_root(vault_root) / "Notes" / "Research" / introduction.folder
-    folder_path.mkdir(parents=True, exist_ok=True)
+    parent = project_folder_parent(vault_root)
+    if parent is not None:
+        (parent / introduction.folder).mkdir(parents=True, exist_ok=True)
     return key, introduction.folder, True
