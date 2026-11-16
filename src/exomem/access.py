@@ -163,6 +163,21 @@ def _degraded_state(key: str) -> tuple[str, dict[str, list[str]], bool]:
     return UNAVAILABLE_POLICY_FINGERPRINT, _empty_policy(), True
 
 
+def parse_config(raw: bytes) -> dict[str, list[str]]:
+    """The tiers that the bytes of `_access.yaml` declare.
+
+    Bytes that are not UTF-8 or not YAML raise `UnicodeError` or `yaml.YAMLError`; a document
+    that is not a mapping declares no tier.
+    """
+    data = yaml.safe_load(raw.decode("utf-8")) or {}
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "readonly": [str(x) for x in (data.get("readonly") or [])],
+        "excluded": [str(x) for x in (data.get("excluded") or [])],
+    }
+
+
 def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
     """Return ``(fingerprint, config, fail_closed)`` for the access policy.
 
@@ -209,16 +224,10 @@ def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
         _CACHE[key] = (signature, fingerprint, cached[2])
         return fingerprint, cached[2], False
     try:
-        data = yaml.safe_load(raw.decode("utf-8")) or {}
-        if not isinstance(data, dict):
-            data = {}
+        cfg = parse_config(raw)
     except (UnicodeError, yaml.YAMLError) as error:
         log.warning("could not parse %s (%s); treating as no access policy", path.name, error)
-        data = {}
-    cfg = {
-        "readonly": [str(x) for x in (data.get("readonly") or [])],
-        "excluded": [str(x) for x in (data.get("excluded") or [])],
-    }
+        cfg = _empty_policy()
     _CACHE[key] = (signature, fingerprint, cfg)
     return fingerprint, cfg, False
 
@@ -254,7 +263,14 @@ def access_tier(vault_root: Path, rel_path: str) -> str:
     append-only (Sources/Evidence) → read-write.
     """
     _fingerprint, cfg, fail_closed = _policy_state(vault_root)
-    if _excluded_under(cfg, fail_closed, rel_path):
+    if fail_closed:
+        return TIER_EXCLUDED
+    return tier_in(cfg, rel_path)
+
+
+def tier_in(cfg: dict[str, list[str]], rel_path: str) -> str:
+    """The tier that the parsed config `cfg` gives `rel_path`, for a caller that holds a config of its own."""
+    if _excluded_under(cfg, False, rel_path):
         return TIER_EXCLUDED
     kb_rel = _kb_relative(rel_path)
     if _matches(cfg["readonly"], kb_rel):
