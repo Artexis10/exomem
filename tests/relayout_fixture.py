@@ -353,3 +353,25 @@ def add_renamed_video(root: Path) -> None:
                 "frame_ts": index * 4.5,
             },
         )
+
+
+RATE_ORIGINAL = f"{KB}/Evidence/Pricing/a/rate-notes.md"
+RATE_PAGE = f"{RATE_ORIGINAL}.md"
+RATE_LINKER = f"{KB}/Notes/Insights/rate-linker.md"
+
+
+def add_markdown_original_with_links(root: Path) -> None:
+    """Add a Markdown original kept as evidence, the page that describes it, and a page that links to both.
+
+    The page's file name is the original's name plus `.md`, so it ends in `.md.md`. The plan
+    leaves it untitled, so it keeps that name and moves with its folder. Obsidian reads `[[rate-notes.md]]`
+    as the original and needs `[[rate-notes.md.md]]` for the page.
+    """
+    _write(root, RATE_ORIGINAL, "Rates agreed in the call.\n")
+    _page(root, RATE_PAGE, {"type": "evidence"})
+    _page(
+        root,
+        RATE_LINKER,
+        {"type": "insight", "title": "Rate linker"},
+        f"[[{RATE_ORIGINAL}]] and [[{RATE_PAGE}]] and [[rate-notes.md.md]] and [[Evidence/Pricing/a/rate-notes]].\n",
+    )

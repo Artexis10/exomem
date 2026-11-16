@@ -29,7 +29,7 @@ import posixpath
 import time
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .. import extraction_parts, layout, obsidian_links, vault
@@ -418,9 +418,7 @@ def plan(vault_root: Path, target: layout.Layout | str = layout.Layout.ROOT) -> 
         }
         timings["total"] = round(time.monotonic() - started, 3)
         result.diagnostics = {
-            "link_self_check_failures": [
-                {"page": note.page, "text": note.text} for note in scan.failures
-            ],
+            "link_self_check_failures": [asdict(miss) for miss in scan.failures],
             "pointer_failures": [
                 {"page": note.page, "field": note.field, "value": note.value, "reason": note.reason}
                 for note in pointers.failures

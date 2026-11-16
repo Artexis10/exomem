@@ -15,7 +15,12 @@ functions encode that rule over an index, so a planner, a writer and a verifier 
 - `link_form` returns the shortest link text that resolves to a given file, or its full
   vault path when no shorter text is unique, and `link_forms` does so for every file of an
   index in a single pass;
-- `link_text` puts that page text back into a link, keeping its anchor and alias.
+- `page_text` is the text that a link uses for a file, and `link_text` puts a page text back
+  into a link, keeping its anchor and alias.
+
+A link text that ends in `.md` carries the Markdown extension, which Obsidian reads as implied:
+`[[notes.md]]` and `[[notes]]` name the same file. A file whose own name is `notes.md.md` is
+therefore named by `notes.md.md` and by no shorter text.
 
 Nothing here reads a file or the vault. Paths are relative to Obsidian's vault root and
 use `/`.
@@ -60,6 +65,17 @@ class LinkMatch:
 
 def _without_suffix(text: str) -> str:
     return text[: -len(MARKDOWN_SUFFIX)] if text.lower().endswith(MARKDOWN_SUFFIX) else text
+
+
+def page_text(path: str) -> str:
+    """The text that names the Markdown file at `path`: its path without `.md`.
+
+    A file whose stem itself ends in `.md` keeps its extension in the text, because a link text
+    loses a single trailing `.md` before it is read, and the text without it would name another file.
+    A file that is not Markdown keeps its full name.
+    """
+    stem = _without_suffix(path)
+    return path if stem.lower().endswith(MARKDOWN_SUFFIX) else stem
 
 
 def basename_key(path: str) -> str:
@@ -160,7 +176,8 @@ class IndexResolver:
         text = _without_suffix(page.strip())
         if not text:
             return LinkMatch(Resolution.UNRESOLVED)
-        exact, tails = self._group(basename_key(text))
+        # `text` has already lost its single `.md`; a stem that still ends in `.md` is part of the file name.
+        exact, tails = self._group(vault_name_key(text.rsplit("/", 1)[-1]))
         key = vault_name_key(text)
         found = tuple(sorted(exact.get(key) or tails.get(key) or ()))
         if not found:
@@ -191,7 +208,7 @@ def _group_forms(group: Iterable[str]) -> dict[str, LinkForm]:
     )
     forms: dict[str, LinkForm] = {}
     for path in paths:
-        segments = _without_suffix(path).split("/")
+        segments = page_text(path).split("/")
         unique = next(
             (
                 "/".join(segments[-depth:])
