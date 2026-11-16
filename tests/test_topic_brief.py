@@ -634,6 +634,27 @@ def test_a_hub_that_cites_many_sources_still_serves_every_sister_note(tmp_path, 
         assert cut == {"role": "source", "reason": "cap", "count": None, "exact": False}
 
 
+def test_a_long_hub_still_serves_every_sister_note(tmp_path, monkeypatch) -> None:
+    """Rows that stay on the hub, such as each unit's own block, cannot yield a member, so they cannot crowd a linked note out."""
+    monkeypatch.setattr(topic_brief, "STEP_ROWS", 16, raising=False)
+    monkeypatch.setattr(topic_brief, "PAGE_ROWS_FLOOR", 16, raising=False)
+    sisters = [f"sister-{n}" for n in range(8)]
+    vault = _vault(tmp_path, monkeypatch)
+    for name in sisters:
+        _note(vault, name, f"## Claim\n\n{name} is a short one.\n")
+    claims = "".join(f"## Claim\n\nThe hub's point {n} holds.\n\n" for n in range(20))  # more units than the share
+    _note(vault, "hub", f"Sisters: {' '.join(f'[[{name}]]' for name in sisters)}\n\n{claims}")
+    _withhold(vault, _note(vault, "classified", "Classified.\n"), ceiling=0)
+    _index(vault)
+    _reset_caches()
+
+    for caller in (None, _external()):
+        brief = _read(vault, f"{NOTES}/hub.md", caller)
+
+        served = {item["path"] for item in brief["items"] if item["kind"] == "note"}
+        assert served == {f"{NOTES}/{name}.md" for name in ["hub", *sisters]}
+
+
 def test_a_cut_source_list_counts_what_it_left_out(tmp_path, monkeypatch) -> None:
     vault = _vault(tmp_path, monkeypatch)
     monkeypatch.setattr(topic_brief, "SOURCE_CAP", 2)

@@ -248,11 +248,13 @@ class _Graph:
     def _edges(
         self, groups: Iterable[Sequence[str]], accept: Callable[[dict[str, Any]], bool], *, row_limit: int | None = None,
         end_types: frozenset[str] = frozenset(),
+        beyond: frozenset[str] = frozenset(),
     ) -> tuple[list[dict[str, Any]], bool]:
         """The live edges that `accept` takes at each group of node keys, and whether a bound cut the read.
 
         Each group is read on its own, so a hub in one group cannot spend the rows of the others; without a `row_limit`
-        the read keeps the graph's own bounds. With `end_types` a bounded read counts only rows whose far page is of one.
+        the read keeps the graph's own bounds. With `end_types` a bounded read counts only rows whose far page is of one
+        and is none of the pages in `beyond`.
         """
         edges: dict[str, dict[str, Any]] = {}
         overflow = False
@@ -260,7 +262,7 @@ class _Graph:
             for chunk in _chunks(list(keys)):
                 found, over = self.view.neighbor_edges(
                     set(chunk), limit=EDGE_LIMIT if row_limit is None else row_limit, accept=accept, row_limit=row_limit,
-                    end_types=end_types,
+                    end_types=end_types, beyond=beyond,
                 )
                 overflow = overflow or over
                 edges.update({str(edge["edge_key"]): edge for edge in found})
@@ -293,7 +295,9 @@ class _Graph:
                     end_types = frozenset() if role is None else frozenset(self.types.keys(_ROLES[role]))
                     if role is not None and not end_types:
                         continue
-                    found, overflow = self._edges([chunk], self._walkable, row_limit=share, end_types=end_types)
+                    found, overflow = self._edges(
+                        [chunk], self._walkable, row_limit=share, end_types=end_types, beyond=frozenset(frontier),
+                    )
                     if overflow and role is not None:
                         cut.add(role)
                     edges.update({str(edge["edge_key"]): edge for edge in found})
