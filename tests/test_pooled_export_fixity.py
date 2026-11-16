@@ -12,7 +12,9 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import sqlite3
+import subprocess
 import uuid
 import zipfile
 from pathlib import Path
@@ -500,6 +502,53 @@ def test_a_compatibility_export_invalidates_a_trash_retirement_and_keeps_its_pag
                                                       if key != "original_retirement"}
         assert {page: archive.read(page) for page in pages} == pages
     assert json.loads((vault / metadata).read_bytes()) == placement
+
+
+# The release before shared storage calls this module `hosted_portability`; the restore is its own documented flow.
+_OLDER_RESTORE = """
+import hashlib, json, sys
+from pathlib import Path
+from exomem.hosted_portability import PortabilityContext, prepare_restore, publish_prepared_restore
+archive, work = Path(sys.argv[1]), Path(sys.argv[2])
+context = PortabilityContext(cell_id="cell-alpha-7f3c", vault_id="vault-alpha-91d2", operation_id="operation-restore-001",
+    created_at=sys.argv[3], operator_authorized=True, lifecycle_state="restore-staging", routing_stopped=True,
+    active_mutations=0, background_writers_stopped=True, reads_allowed=True)
+prepared = prepare_restore(archive, work / "staging", context=context)
+root = publish_prepared_restore(prepared, work / "restored", rebuild_derived=lambda _root: None).live_root
+print(json.dumps({path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in sorted(root.rglob("*")) if path.is_file()}))
+"""
+
+
+def test_a_release_without_shared_storage_restores_a_compatibility_export_exactly(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches a compatibility export that the release before shared storage cannot restore, or restores with a page or
+    original changed, which is the only route back for an archive that ran on shared storage."""
+    older = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
+    if not older:
+        pytest.skip("requires the earlier release that CI installs")
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    ordinary, ordinary_page = _file(vault, "receipts", "receipt.png", RECEIPT)
+    protected, protected_page = _file(vault, "contracts", "receipt-private.png", RECEIPT, protected=True)
+    preview = _convert(vault)
+    _convert(vault, dry_run=False, plan_id=preview["plan_id"])
+    assert len(list(original_pool.pool_root(vault).rglob("*.blob"))) == 1  # One object holds both filings.
+    assert not (vault / ordinary).exists() and not (vault / protected).exists()
+    expected = {ordinary: RECEIPT, protected: RECEIPT, ordinary_page: (vault / ordinary_page).read_bytes(),
+                protected_page: (vault / protected_page).read_bytes()}
+    context = _context()
+
+    exported = vault_portability.export_compatible_vault(vault, tmp_path / "exports", context=context)
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    environment["EXOMEM_STATE_ROOT"] = str(tmp_path / "older-state")
+    result = subprocess.run([older, "-c", _OLDER_RESTORE, str(exported.archive_path), str(tmp_path / "older"),
+                             context.created_at], env=environment, capture_output=True, text=True, timeout=300)
+
+    assert result.returncode == 0, result.stderr
+    restored = json.loads(result.stdout.splitlines()[-1])
+    assert {path: restored.get(path) for path in expected} == {
+        path: hashlib.sha256(data).hexdigest() for path, data in expected.items()}
+    assert not [path for path in restored if original_pool.pool_root(vault).name in path]
 
 
 def _restore(archive: Path, tmp_path: Path) -> vault_portability.PublishedRestore:
