@@ -265,9 +265,9 @@ Scenario 3's build never runs, so its peaks read "no build container ran".
 The stage's `deviations` list each place where the rehearsal differs from a production upgrade.
 
 Set the workflow input `catalogue_prewarm_notes` to change the vault size, from 1 to 30,000 notes.
-The default of 12,000 notes of about 4 KiB aims at a build of 120 to 330 s; runs on GitHub runners measured 129 to 149 s.
+The default of 12,000 notes of about 4 KiB aims at a build of 120 to 330 s. The measured build, stop and run times are in task 3.1's evidence in `openspec/changes/warm-cell-catalogue/tasks.md`.
 The completed-build scenario records the build time as an observation. It fails when the build ends before the cell has been idle long enough to show the deferral.
-Two runs on GitHub runners took 53 and 105 minutes, including the image builds; the wait for a forced boundary below accounts for most of the spread. The unfinished-build scenario waits for a forced boundary between :30 and :59 of a UTC hour.
+The unfinished-build scenario waits for a forced boundary between :30 and :59 of a UTC hour.
 cellctl re-dates the window annotations at 00:00 UTC, so a scenario that would cross that time waits until 00:05 UTC. Each wait counts against the 140-minute step limit.
 The stage never gates the node. Until a real run passes all three scenarios, task 3.1 stays open.
 
