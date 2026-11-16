@@ -2041,6 +2041,10 @@ def commit_media_sidecar_writes(
             ),
             operation="vault_store_media_sidecar_commit",
         )
+    from . import trash_metadata
+
+    # The catalog binds the page bytes before the batch, so a Trash backlink that the batch ends goes first.
+    writes = trash_metadata.withdraw_ended_backlinks(vault_root, writes)
     intent_count = len(publication_intents_out) if publication_intents_out is not None else 0
 
     def graph_replacement_provider():

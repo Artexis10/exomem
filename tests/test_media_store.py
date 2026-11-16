@@ -4398,6 +4398,7 @@ def test_retirement_follows_canonical_edits_and_never_hides_an_identical_new_ori
         PlannedWrite,
         PreparedBinaryContent,
         batch_atomic_write,
+        parse_frontmatter,
     )
 
     path = vault / "Knowledge Base/Notes/Media/reused.txt"
@@ -4427,7 +4428,9 @@ def test_retirement_follows_canonical_edits_and_never_hides_an_identical_new_ori
             PlannedWrite(companion, retired),
         ], vault_root=vault)
         assert "original_retirement" not in json.loads(metadata.read_bytes())
-        assert companion.read_text(encoding="utf-8") == retired and path.read_bytes() == data
+        # The new original's page names no Trash entry, so emptying that entry later cannot read it as deleted.
+        assert "original_retirement_meta" not in parse_frontmatter(companion.read_text(encoding="utf-8"))[0]
+        assert path.read_bytes() == data
         path.unlink()  # An unexpected later loss must remain visible despite byte-identical historical metadata.
         with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
             media_store.drain_census(vault)

@@ -675,6 +675,8 @@ def _recover_from_trash_local(
         warnings.append("recovered bytes; retained the changed or unreadable Trash companion and its placement metadata")
     else:
         warnings.extend(_settle_sidecar(vault_root, sidecar, sidecar_guard, sidecar_identity))
+    if trash_kind == "file" and not trash_rel.lower().endswith(".md"):
+        warnings.extend(_withdraw_retirement(vault_root, meta, trash_rel, restore_rel))
 
     index_feedback: dict | None = None
     restored_markdown = (
@@ -1150,6 +1152,27 @@ def _settle_sidecar(
     return []
 
 
+def _withdraw_retirement(vault_root: Path, meta: dict, trash_rel: str, restore_rel: str) -> list[str]:
+    """Withdraw a recovered original's Trash backlink from its page, or warn that the page still names the entry."""
+    from . import preserve
+
+    page = "its page"
+    try:
+        write = trash_metadata.withdrawal(vault_root, meta, trash_rel, restore_rel)
+        if write is None:
+            return []
+        page = write.path.relative_to(vault_root).as_posix()
+        with trash_metadata.ending_retirement(trash_rel + METADATA_SUFFIX):
+            preserve.commit_media_sidecar_writes(vault_root, (write,))
+    except Exception:  # noqa: BLE001 - the recovery has committed: the page is reported, the recovery not undone
+        log.warning("recovery left the Trash backlink on %s", page, exc_info=True)
+        return [
+            f"recovered the original, but {page} still names its Trash entry: remove the page's "
+            "original_retirement_meta field"
+        ]
+    return []
+
+
 def _recover_in_store(
     vault_root: Path,
     *,
@@ -1535,6 +1558,9 @@ def _recover_in_store(
     elif not drop_sidecar:
         # A sidecar that the store does not record is a file of its own; file mode's step removes it.
         warnings.extend(_settle_sidecar(root, sidecar, sidecar_guard, _identity))
+    if trash_kind == "file" and not trash_rel.lower().endswith(".md"):
+        # Before the derive, so the page that it writes names no Trash entry.
+        warnings.extend(_withdraw_retirement(root, meta, trash_rel, restore_rel))
     store_media.derive(root, destinations)
     index = governed.settle(
         root, recovery, store_batch.row_report("upsert", [*moves.values(), *destinations]), warnings

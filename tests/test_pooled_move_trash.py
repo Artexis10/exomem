@@ -241,6 +241,46 @@ def test_a_companion_retired_to_trash_is_no_filing_of_the_bytes_another_filing_p
     assert media_store.read_original_bytes(vault, other).data == ORIGINAL_BYTES
 
 
+def test_a_trashed_filing_stays_unreadable_after_its_trash_entry_is_emptied_while_another_filing_pools_its_bytes(
+        vault, selected_store, monkeypatch):
+    """Catches an emptied Trash entry turning the companion left at a deleted original's path back into a live
+    filing, which then serves the bytes that another filing pools."""
+    from test_vault_store_media import ORIGINAL_BYTES
+
+    from exomem import get_page, reserved_paths
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+    other, _page = _filing(vault, "other.bin", ORIGINAL_BYTES)
+    _pool(vault, monkeypatch, other, ORIGINAL_BYTES)
+    (vault / f"{trashed.trash_path}.md").unlink()
+    (vault / f"{trashed.trash_path}.meta.json").unlink()
+
+    state = originals.original_state(vault, LOOSE)
+    assert state.state == "missing" and state.local_path is None
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
+        media_store.read_original_bytes(vault, LOOSE)
+    assert refused.value.code == "MISSING"
+    with pytest.raises(get_page.GetError) as missing:
+        get_page.get_page(vault, path=LOOSE)
+    assert missing.value.code == "NOT_FOUND"
+
+
+def test_a_filing_recovered_from_trash_reads_its_shared_bytes_once_pooled_and_its_page_names_no_trash_entry(
+        vault, selected_store, monkeypatch):
+    """Catches a recovery that leaves its page naming the Trash entry, which reads the recovered filing as deleted
+    once its bytes pool."""
+    from test_vault_store_media import ORIGINAL_BYTES
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+    recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path)
+    _pool(vault, monkeypatch, LOOSE, ORIGINAL_BYTES)
+
+    fields, _body, _block = vault_module.parse_frontmatter((vault / f"{LOOSE}.md").read_text(encoding="utf-8"))
+    assert "original_retirement_meta" not in fields
+    assert originals.original_state(vault, LOOSE).local_path is not None
+    assert media_store.read_original_bytes(vault, LOOSE).data == ORIGINAL_BYTES
+
+
 def _unconfirmed_retirement(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A companion at `LOOSE` whose Trash entry was partly emptied after another filing pooled the same bytes."""
     from test_vault_store_media import ORIGINAL_BYTES

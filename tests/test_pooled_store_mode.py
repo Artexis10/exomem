@@ -149,6 +149,28 @@ def test_a_trashed_pooled_filing_in_store_mode_lists_as_one_original_and_recover
     assert complete and rows == {(page, rel)}
 
 
+def test_a_recovered_original_names_no_trash_entry_on_its_page_in_store_mode(
+    vault, selected_store, monkeypatch  # noqa: F811 - the store-mode suite's fixtures
+):
+    """Catches a store-mode recovery that leaves the page naming the Trash entry its commit removed, so the
+    recovered original reads as deleted."""
+    rel = f"{NOTES}/Media/returned.txt"
+    offloaded(vault, rel)
+    page = f"{rel}.md"
+    trashed = delete_file.delete_file(vault, path=rel, confirm=True)
+    enter_store_mode(vault)
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    try:
+        on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path))
+        restored = read.owned_bytes(vault, page)
+    finally:
+        thread.close()
+
+    assert "original_retirement_meta" not in vault_module.parse_frontmatter(restored.decode("utf-8"))[0]
+    assert originals.original_state(vault, rel).state == "local"
+
+
 def test_an_original_evicted_in_trash_before_pooling_recovers_by_its_trash_path_in_store_mode(
     vault, selected_store, monkeypatch  # noqa: F811 - the store-mode suite's fixtures
 ):

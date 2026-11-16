@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 TRASH_SUBPATH = "_trash"
 METADATA_SUFFIX = ".meta.json"
 _completing: ContextVar[tuple[str, str, str] | None] = ContextVar("trash_retirement_completion", default=None)
+_ending: ContextVar[str | None] = ContextVar("trash_retirement_ending", default=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,49 @@ def completing_retirement(publication: ReferencePublication):
         yield
     finally:
         _completing.reset(token)
+
+
+@contextmanager
+def ending_retirement(metadata: str):
+    """Mark the placement metadata that a recovery settles, so a batch leaves it alone while the page loses its backlink."""
+    token = _ending.set(metadata)
+    try:
+        yield
+    finally:
+        _ending.reset(token)
+
+
+def withdrawal(vault: Path, placement: dict[str, object], trash: str, restored: str) -> PlannedWrite | None:
+    """The page write that ends a recovered original's retirement, or None when the recovery leaves none to end.
+
+    Recovery removes the placement metadata, so a backlink left on the page would name nothing and read as an emptied
+    entry. The page loses only the backlink, and keeps no stored-copy reference, as recovery has always left it.
+    """
+    from .vault import (
+        PlannedWrite,
+        content_hash,
+        parse_frontmatter,
+        read_guarded_text,
+        render_frontmatter_document,
+        serialize_frontmatter,
+    )
+
+    if "original_retirement" not in placement:
+        return None
+    proof = _retirement(placement["original_retirement"], root=trash, origin=placement.get("original_path"))
+    if proof.source.path != restored:
+        return None  # The original went elsewhere, so the page still names a deleted original at its source path.
+    page = vault / proof.companion
+    try:
+        text, guard = read_guarded_text(vault, page)
+    except FileNotFoundError:
+        return None
+    fields, body, _marker = parse_frontmatter(text, custody=True)
+    if _backlink(fields) != trash + METADATA_SUFFIX:
+        return None
+    fields.pop("original_retirement_meta")
+    rendered = render_frontmatter_document(serialize_frontmatter(fields), body)
+    return PlannedWrite(page, rendered, guard=guard, expected_hash=content_hash(text))
 
 
 def _retirement(value: object, *, root: str, origin: object) -> Retirement:
@@ -151,8 +195,46 @@ def _matches_retirement_fields(fields: dict[str, object], metadata: str, digest:
 def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list[PlannedWrite]:
     """Carry exact retirement edits, or invalidate before a new original can reuse its source path.
 
-    The reciprocal companion backlink makes lookup bounded and independent of derived state.
+    The reciprocal companion backlink makes lookup bounded and independent of derived state. A page write whose
+    backlink the batch ends goes without it (`withdraw_ended_backlinks`).
     """
+    writes = list(writes)
+    updates, ended = _binding_changes(vault, writes)
+    return [*updates.values(), *_without_backlinks(vault, writes, ended)]  # New-original invalidation lands first.
+
+
+def withdraw_ended_backlinks(vault: Path, writes: Iterable[PlannedWrite]) -> tuple[PlannedWrite, ...]:
+    """The batch's writes, each page without a backlink that the batch ends, for a caller that binds page bytes first.
+
+    A backlink is the one record of a deletion that survives an emptied Trash entry, so a page keeps it only while
+    its metadata is gone or holds a witness that the batch keeps. The batch withdraws the same backlinks itself, so
+    a caller that publishes a catalogue of the page bytes takes them from here first and the two agree.
+    """
+    writes = list(writes)
+    if not any(_backlink(_companion_fields(write.content)) for write in writes
+               if isinstance(write.content, str) and write.path.suffix.lower() == ".md"):
+        return tuple(writes)  # Only a page write that carries a backlink can lose one.
+    _updates, ended = _binding_changes(vault, writes)
+    return tuple(_without_backlinks(vault, writes, ended))
+
+
+def _without_backlinks(vault: Path, writes: list[PlannedWrite], ended: set[str]) -> list[PlannedWrite]:
+    import dataclasses
+
+    from .vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    kept = []
+    for write in writes:
+        if write.path.is_relative_to(vault) and write.path.relative_to(vault).as_posix() in ended:
+            fields, body, _marker = parse_frontmatter(write.content, custody=True)
+            fields.pop("original_retirement_meta")
+            write = dataclasses.replace(write, content=render_frontmatter_document(serialize_frontmatter(fields), body))
+        kept.append(write)
+    return kept
+
+
+def _binding_changes(vault: Path, writes: list[PlannedWrite]) -> tuple[dict[str, PlannedWrite], set[str]]:
+    """The metadata writes that carry or invalidate each witness, and the incoming pages whose backlink ends."""
     import json
     import os
     import unicodedata
@@ -161,7 +243,6 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
     from .vault import MALFORMED_FRONTMATTER_ERRORS, PlannedWrite, content_hash, read_guarded_bytes
     from .vault_store import read as store_read
 
-    writes = list(writes)
     incoming = {write.path.relative_to(vault).as_posix(): write for write in writes if write.path.is_relative_to(vault)}
     relevant = {path for path in incoming if managed_split(path) is not None
                 and not reserved_paths.classify_logical(path).blocked}
@@ -171,9 +252,10 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
             companions.update(originals.companion_paths(path))
     # A backlink names only Trash placement metadata, read at its NFKC spelling, so with no Trash folder there is no
     # witness to carry or invalidate, and the batch reads nothing.
-    if not os.path.lexists(vault / unicodedata.normalize("NFKC", managed_join(TRASH_SUBPATH))):
-        return writes
     updates: dict[str, PlannedWrite] = {}
+    ended: set[str] = set()
+    if not os.path.lexists(vault / unicodedata.normalize("NFKC", managed_join(TRASH_SUBPATH))):
+        return updates, ended
     # One store snapshot reads every prior companion in a few queries, so a batch's cost does not grow per page.
     with store_read.request_snapshot(vault):
         store_read.prefetch_pages(vault, companions)
@@ -192,15 +274,19 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
                 after = None
             before_fields, after_fields = _companion_fields(before), _companion_fields(after)
             for metadata in dict.fromkeys(link for image in (before_fields, after_fields) if (link := _backlink(image)) is not None):
+                if _ending.get() == metadata:
+                    continue  # The recovery that settles this metadata withdraws the backlink itself.
                 try:
                     fields, text, _version = _document(vault, metadata)
                 except reserved_paths.ReservedPathLeafError as error:
                     if error.code != "MISSING":
                         raise
-                    continue  # An emptied Trash entry leaves no witness to carry or invalidate.
+                    continue  # An emptied Trash entry leaves no witness, and its backlink keeps the page deleted.
                 value = fields.get("original_retirement")
                 if value is None:
-                    continue  # A retired proof remains invalid even if its backlink survives.
+                    if path in incoming and _backlink(after_fields) == metadata:
+                        ended.add(path)  # An invalidated witness left this backlink, which an emptied entry would revive.
+                    continue
                 proof = _retirement(value, root=metadata[:-len(METADATA_SUFFIX)], origin=fields.get("original_path"))
                 if path != proof.companion:
                     continue  # A forged locator never supplies mutation authority over another filing.
@@ -226,10 +312,12 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
                     value["after"] = content_hash(after)
                 else:
                     fields.pop("original_retirement")
+                    if path in incoming and _backlink(after_fields) == metadata:
+                        ended.add(path)
                 if metadata in incoming or metadata in updates:
                     raise ValueError("one batch contains conflicting Trash placement changes")
                 updates[metadata] = PlannedWrite(vault / metadata, json.dumps(fields, indent=2), expected_hash=content_hash(text))
-    return [*updates.values(), *writes]  # New-original invalidation lands before any new binary bytes.
+    return updates, ended
 
 
 def without_retirement(vault: Path, path: str) -> bytes | None:
@@ -401,15 +489,20 @@ def retired_companion(vault: Path, companion: str, fields: dict[str, object], di
     """Whether a companion was retired to Trash, as the reciprocal witness in canonical Trash metadata confirms.
 
     ``digest`` is the companion's content hash. The read is bounded: the placement metadata that the backlink
-    names, then that entry's reference companion. False when no witness names this companion: deletion wrote
-    none, or a new original at its path withdrew it. Raises `originals.RetirementUnconfirmed` when a witness
-    names it but the metadata, the companion or the Trash entry no longer confirms it.
+    names, then that entry's reference companion. True as well when that metadata is gone: the owner emptied the
+    entry. False when no witness names this companion: deletion wrote none, or a new original at its path withdrew
+    it. Raises `originals.RetirementUnconfirmed` when a witness names it but the metadata, the companion or the
+    Trash entry no longer confirms it.
     """
     metadata = _backlink(fields)
     if metadata is None:
         return False
     census = PlacementCensus(vault)
     try:
+        if census._placement(metadata[:-len(METADATA_SUFFIX)]) is None:
+            # Recovery and a new original withdraw the backlink, so one that names missing metadata is a deleted
+            # original whose Trash entry was emptied: it stays deleted, and equal bytes elsewhere are not its own.
+            return True
         proof = census.retirement(metadata[:-len(METADATA_SUFFIX)])
         if proof is None or proof.companion != companion:
             return False
