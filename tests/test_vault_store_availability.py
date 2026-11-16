@@ -347,6 +347,7 @@ def test_a_subcommand_that_touches_pages_refuses_a_store_mode_vault_as_the_regis
     _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
     if name == "warm":
         monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)  # `warm` skips the vault it has no model for
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "cell-check")  # a cell job's pod always sets it
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     argv = _entry_arguments(name, store_mode_vault, scratch)

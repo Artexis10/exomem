@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 
 import pytest
+from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, vault  # noqa: F401
 from test_vault_store_read_write import stored  # noqa: F401
 from test_vault_store_served import call, service  # noqa: F401
