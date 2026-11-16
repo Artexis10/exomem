@@ -8,24 +8,49 @@ moved into the shared pool keeps its record but has no file at its logical path.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 from test_pooled_export_fixity import _pool
+from test_pooled_move_trash import _rows
+from test_vault_store_importer import StoreThread
 from test_vault_store_media import (  # noqa: F401 - fixtures
+    ORIGINAL_BYTES,
     coordinator_url,
+    enter_store_mode,
     media_state,
+    offloaded,
+    on_store_thread,
     original_thread,
     selected_store,
+    serve_through,
     stored,
     stored_original,
     vault,
 )
+from test_vault_store_projector import NOTES
 
-from exomem import media_store, originals
-from exomem.vault_store import importer
+from exomem import (
+    delete_file,
+    list_trash,
+    media_bindings,
+    media_store,
+    original_pool,
+    originals,
+    recover_from_trash,
+)
+from exomem import vault as vault_module
+from exomem.vault_store import importer, projector, read
 from exomem.vault_store import media as store_media
+from exomem.vault_store import targets as store_targets
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only")
+
+
+def _bound(root, page: str) -> str | None:
+    """The original that a page binds, as the store holds the page."""
+    fields, _body, _block = vault_module.parse_frontmatter(read.owned_bytes(root, page).decode("utf-8"))
+    return originals.bound_path(fields)
 
 
 def test_a_pooled_filing_is_no_outside_delete_and_keeps_its_binary_record(
@@ -65,3 +90,55 @@ def test_a_pooled_filing_is_no_outside_delete_when_no_media_store_is_configured(
     assert store_media.managed(vault, rel) == media_store.SUPPRESS
     assert swept.removed == [] and named.removed == []
     assert media_state(vault, rel)["binary"] == before["binary"]
+
+
+@pytest.fixture
+def pooled_note(vault, selected_store, monkeypatch):  # noqa: F811 - the store-mode suite's fixtures
+    """An offloaded original outside the append-only trees, whose bytes then moved into the pool of a store-mode
+    vault, with a thread that owns the store's writer."""
+    rel = f"{NOTES}/Media/loose.txt"
+    offloaded(vault, rel)
+    enter_store_mode(vault)
+    shared = original_pool.object_path(vault, _pool(vault, monkeypatch, vault / rel))
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    importer.Importer(vault, run=thread.run).sweep()
+    yield rel, shared, thread
+    thread.close()
+
+
+@pytest.mark.parametrize("named", ["page", "binary"])
+def test_a_trashed_pooled_filing_in_store_mode_lists_as_one_original_and_recovers_to_its_path(
+    vault, pooled_note, named  # noqa: F811 - the store-mode suite's fixtures
+):
+    """A store-mode Trash that refuses a pooled filing, or that moves bytes the archive keeps only in the pool,
+    leaves the owner no way to trash it; a recovery that cannot find its page strands it in Trash."""
+    rel, shared, thread = pooled_note
+    page = originals.sidecar_path(Path(rel)).as_posix()
+    assert media_bindings.rebuild(vault)
+
+    trashed = on_store_thread(thread, lambda: delete_file.delete_file(
+        vault, path=page if named == "page" else rel, confirm=True))
+
+    assert not store_targets.holds(vault, page) and not (vault / trashed.trash_path).exists()
+    listed = list_trash.list_trash(vault)
+    assert [(entry.trash_path, entry.original_path, entry.kind) for entry in listed.entries] == [
+        (trashed.trash_path, rel, "file")]
+    assert listed.orphan_files == [] and listed.orphan_sidecars == []
+    assert media_bindings.follow_store(vault)
+    complete, rows = _rows(vault)
+    assert complete and rows == {(f"{trashed.trash_path}.md", trashed.trash_path)}
+
+    recovered = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+        vault, trash_path=trashed.trash_path))
+
+    assert recovered.restored_path == rel and _bound(vault, page) == rel
+    assert not store_targets.holds(vault, f"{trashed.trash_path}.md")
+    projector.Projector(vault, run=thread.run).run_pass()
+    assert list_trash.list_trash(vault).as_dict() == {
+        "entries": [], "count": 0, "orphan_sidecars": [], "orphan_files": []}
+    assert shared.read_bytes() == ORIGINAL_BYTES
+    assert media_store.read_original_bytes(vault, rel).data == ORIGINAL_BYTES
+    assert media_bindings.follow_store(vault)
+    complete, rows = _rows(vault)
+    assert complete and rows == {(page, rel)}

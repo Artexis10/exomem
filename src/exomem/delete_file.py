@@ -130,7 +130,8 @@ def _digest_addressed_filing(
     if named_original is not None:
         return originals.digest_addressed(vault_root, rel_path, snapshot=named_original)
     if not rel_path.lower().endswith(".md"):
-        return None
+        # A page store resolves an original by its record, which a converted filing keeps.
+        return originals.digest_addressed(vault_root, rel_path)
     filing = originals.digest_addressed(vault_root, rel_path[:-3])
     if filing is None or filing.sidecar_path != Path(vault_root).resolve() / rel_path:
         return None
@@ -218,13 +219,9 @@ def _delete_file_local(
     # A digest-addressed original's filing is its companion page. Trashing either half moves only that
     # page, under the original's Trash identity: a page trashed alone would strand its shared bytes.
     filing = _digest_addressed_filing(vault_root, rel_path, evicted_original)
-    if filing is not None and store_writer is not None:
-        # The page store's Trash move has no form yet that leaves the original's bytes in place.
-        raise DeleteFileError(
-            "DELETE_UNSUPPORTED",
-            f"{rel_path} is a shared original, which this archive's page store cannot trash yet. "
-            "Keep it, or move it with move_file.",
-        )
+    if filing is not None and evicted_original is None and not rel_path.lower().endswith(".md"):
+        # A filing named by its original is bound by its binding's digest, as an evicted one is.
+        evicted_original = filing
     binary_rel = rel_path if filing is None else Path(filing.path).relative_to(Path(vault_root).resolve()).as_posix()
     source_rel = rel_path if filing is None else (
         Path(filing.sidecar_path).relative_to(Path(vault_root).resolve()).as_posix())
@@ -496,7 +493,7 @@ def _delete_file_local(
     store_log: LogWritePlan | None = None
     catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
     if store_writer is not None:
-        store_targets.refuse_kind_change("delete_file", rel_path, trash_rel)
+        store_targets.refuse_kind_change("delete_file", source_rel, moved_trash_rel)
         # Before validation returns, so a plan that validates is a plan that commits. The log entry
         # commits with the trash, so the catalog names the same writes that file mode's does.
         store_log = plan_log_entry(
@@ -552,12 +549,14 @@ def _delete_file_local(
             # Immediately before the move: the retained copy must still hold identical bytes.
             _fold.verify()
         return _trash_in_store(
-            store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
+            store_writer, vault_root, rel_path=source_rel, trash_rel=moved_trash_rel, meta_rel=meta_rel,
             metadata_bytes=metadata_bytes, judged_hash=catalog_before_hash or source_hash,
             linked_from=stored_check.bound,
             prior_markdown=prior_markdown, stored_original=stored_original,
             log_plan=store_log, catalog_target=catalog_target, inbound=len(inbound),
             inbound_ignored=len(inbound_ignored), warnings=warnings,
+            filing=None if filing is None else _StoreFiling(
+                rel_path, binary_rel, trash_rel, stored_checks[binary_rel].bound),
         )
     log_plan = plan_log_entry(
         vault_root,
@@ -901,6 +900,16 @@ def _trash_metadata_bytes(
     return json.dumps(meta, indent=2, default=str).encode("utf-8")
 
 
+@dataclass(frozen=True, slots=True)
+class _StoreFiling:
+    """A digest-addressed filing that a store-mode Trash moves by its page alone."""
+
+    named: str  # The path the caller named: the original's or its page's.
+    original: str  # The original's logical path, which a converted filing's store record may still hold.
+    entry: str  # The original's Trash identity; its page lands in that identity's companion slot.
+    linked_from: frozenset[str]  # The pages that may link to the original's path.
+
+
 def _trash_in_store(
     writer,
     vault_root: Path,
@@ -918,6 +927,7 @@ def _trash_in_store(
     inbound: int,
     inbound_ignored: int,
     warnings: list[str],
+    filing: _StoreFiling | None = None,
 ) -> DeleteFileResult:
     """Move one stored page, or one binary, to the trash in a single store transaction.
 
@@ -933,6 +943,10 @@ def _trash_in_store(
     its tombstone and receipt around the commit (``vault_store.governed``). The log entry commits
     with the trash, and an active catalog publication, prepared before validation returned,
     publishes after the commit.
+
+    A digest-addressed ``filing`` moves its page alone and leaves its shared bytes in place. The
+    store record that a converted filing keeps at its original's path goes in the same commit, as
+    a new filing has none: the page that the Trash placement maps is the whole entry.
     """
     from . import extraction_parts
     from .vault import CreateOnlyConflict, PathGuardError
@@ -940,7 +954,7 @@ def _trash_in_store(
     from .vault_store import binaries, governed
     from .vault_store import media as store_media
     from .vault_store import read as store_read
-    from .vault_store.write import Expect, PageMove, StoreConflict
+    from .vault_store.write import BinaryDelete, Expect, PageMove, StoreConflict
 
     root = Path(vault_root)
     page = store_ownership.classify(rel_path) is store_ownership.Ownership.PAGE
@@ -952,7 +966,13 @@ def _trash_in_store(
     moves: list[PageMove] = []
     expect: dict[str, Expect] = {}
     entries: list[binaries.Entry] = []
+    binary_deletes: list[BinaryDelete] = []
     with store_read.snapshot(root) as view:
+        if filing is not None and (record := view.binary(filing.original)) is not None:
+            binary_deletes.append(BinaryDelete(filing.original, on_disk=True))
+            expect[filing.original] = Expect(
+                revision=record.revision, sha256=record.sha256, linked_from=filing.linked_from
+            )
         if page:
             # A schema overlay page that is not Markdown has no judged bytes unless a preview
             # hashed it: it is bound as this read finds it.
@@ -998,12 +1018,13 @@ def _trash_in_store(
                 vault_root=root,
                 lifecycle=store_batch.Lifecycle(
                     moves=tuple(moves),
+                    binary_deletes=tuple(binary_deletes),
                     binary_moves=moved.binary_moves,
                     expect=expect,
                 ),
             )
     except StoreConflict as conflict:
-        if conflict.path == rel_path:
+        if conflict.path == rel_path or (filing is not None and conflict.path == filing.original):
             raise DeleteFileError(
                 "STALE_DELETE", f"delete source changed since it was read ({conflict.reason})"
             ) from conflict
@@ -1023,6 +1044,10 @@ def _trash_in_store(
         # Explicit deletion retires the binding; cache eviction never calls here.
         forget_original(root, rel_path, prepared=retirement)
         store_media.after_removal(root, [rel_path])
+    elif filing is not None:
+        # A trashed filing's binding stays in its Trash page, which still pins its shared bytes for
+        # recovery; only what derives from its original's path goes.
+        store_media.after_removal(root, [filing.original])
     if prior_markdown is not None:
         from . import due_state
 
@@ -1036,8 +1061,8 @@ def _trash_in_store(
     if log_plan.warning:
         warnings.append(log_plan.warning)
     return DeleteFileResult(
-        path=rel_path,
-        trash_path=trash_rel,
+        path=rel_path if filing is None else filing.named,
+        trash_path=trash_rel if filing is None else filing.entry,
         trash_meta_path=meta_rel,
         inbound_link_count=inbound,
         inbound_ignored_count=inbound_ignored,

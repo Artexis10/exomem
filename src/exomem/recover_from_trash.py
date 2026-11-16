@@ -817,8 +817,6 @@ def _recover_from_trash_local(
 
 def _addressed_entry(vault_root: Path, trash_path: str) -> tuple[str, str] | None:
     """A trashed digest-addressed original as its entry path and the page that moves for it."""
-    from .vault_store import availability as store_availability
-
     try:
         _abs, entry_rel = resolve_under_vault(vault_root, trash_path)
     except VaultPathError:
@@ -827,12 +825,6 @@ def _addressed_entry(vault_root: Path, trash_path: str) -> tuple[str, str] | Non
     # A withheld entry answers as an absent one, as an evicted original's does.
     if addressed is None or not originals.caller_may_see(vault_root, entry_rel):
         return None
-    if store_availability.page_writer(Path(vault_root)) is not None:
-        # The page store's recovery has no form yet that leaves the original's bytes in place.
-        raise RecoverError(
-            "RECOVER_UNSUPPORTED",
-            f"{entry_rel} is a shared original, which this archive's page store cannot recover yet",
-        )
     return entry_rel, addressed[0]
 
 
@@ -1197,6 +1189,9 @@ def _recover_in_store(
 
     root = Path(vault_root)
     writer = store_availability.page_writer(root)
+    # A trashed digest-addressed original: its Trash identity, and the path its page returns to bind.
+    entry_rel: str | None = None
+    restored_original: str | None = None
     with ExitStack() as reading:
         # The read phase sees one revision; the commit's expectations recheck all that it read.
         reading.enter_context(store_read.request_snapshot(root))
@@ -1227,15 +1222,21 @@ def _recover_in_store(
             try:
                 trash_abs, trash_rel = store_targets.resolve_existing(root, trash_path)
             except VaultPathError as e:
+                # A trashed digest-addressed original moves by its page, as in file mode.
+                addressed = _addressed_entry(root, trash_path) if e.code == "NOT_FOUND" else None
                 # An evicted original that the store has no record for, as file mode accepts it.
                 evicted = (
                     originals.evicted_visible_original(root, trash_path)
-                    if e.code == "NOT_FOUND"
+                    if e.code == "NOT_FOUND" and addressed is None
                     else None
                 )
-                if evicted is None:
+                if addressed is not None:
+                    entry_rel, trash_rel = addressed
+                    trash_abs = root / trash_rel
+                elif evicted is not None:
+                    trash_abs, trash_rel, _stored = evicted
+                else:
                     raise RecoverError(code=e.code, reason=e.reason) from e
-                trash_abs, trash_rel, _stored = evicted
             trash_kind = "file"
             data = store_read.owned_bytes(root, trash_rel) if store_read.serves(root, trash_rel) else None
             stored = {} if data is None else {trash_rel: data}
@@ -1243,7 +1244,7 @@ def _recover_in_store(
                 _refuse_reference_companion(data)
 
         sidecar, meta, sidecar_guard, sidecar_proof_guard, sidecar_source, _identity = (
-            _read_sidecar(root, trash_abs)
+            _read_sidecar(root, trash_abs if entry_rel is None else root / entry_rel)
         )
         sidecar_rel = sidecar.relative_to(root).as_posix()
         restore_abs, restore_rel, curated = _restore_destination(
@@ -1254,6 +1255,10 @@ def _recover_in_store(
             allow_curated=allow_curated,
             fold=fold,
         )
+        if entry_rel is not None:
+            restored_original, restore_rel = _addressed_restore(root, meta, entry_rel, restore_rel)
+            if store_targets.holds(root, restored_original):
+                raise _destination_exists(restored_original)
         if trash_kind == "file":
             _admit_publication(root, restore_rel, stored.get(trash_rel))
         if not validate_only:
@@ -1371,7 +1376,10 @@ def _recover_in_store(
             date_iso=(today or dt.date.today()).isoformat(),
             op="recover_from_trash",
             rel_path_no_ext=restore_rel.removesuffix(".md"),
-            body=_log_body(trash_rel, restore_rel, trash_kind, curated if allow_curated else None),
+            body=_log_body(
+                entry_rel or trash_rel, restored_original or restore_rel, trash_kind,
+                curated if allow_curated else None,
+            ),
         )
 
         recovery_entries: list[semantic_writes.RecoveryEntry] = []
@@ -1384,7 +1392,7 @@ def _recover_in_store(
                 semantic_writes.RecoveryEntry(
                     source,
                     trash_original_path(
-                        meta, trash_root=trash_rel, current_path=source, fallback_root=restore_rel
+                        meta, trash_root=entry_rel or trash_rel, current_path=source, fallback_root=restore_rel
                     ),
                     moves[source],
                     text,
@@ -1434,8 +1442,8 @@ def _recover_in_store(
         )
         if validate_only:
             return RecoverResult(
-                trash_path=trash_rel,
-                restored_path=restore_rel,
+                trash_path=entry_rel or trash_rel,
+                restored_path=restored_original or restore_rel,
                 kind=trash_kind,
                 warnings=[],
                 semantic=None if preflight is None else preflight.as_dict(),
@@ -1447,13 +1455,14 @@ def _recover_in_store(
     )
     expect.update({source: Expect(sha256=digest) for source, digest in parts_hashes.items()})
     expect.update(
-        {destination: Expect(absent=True) for destination in (*moves.values(), *parts_moves.values())}
+        {destination: Expect(absent=True) for destination in (
+            *moves.values(), *parts_moves.values(), *((restored_original,) if restored_original else ()))}
     )
     expect.update(relocation.expect())
     if companion is not None:
         expect[companion[0]] = Expect(sha256=companion[1])
     sources = {*moves, *parts_moves, *relocation.recorded, trash_rel}
-    taken_paths = {*moves.values(), *parts_moves.values(), *destinations, restore_rel}
+    taken_paths = {*moves.values(), *parts_moves.values(), *destinations, restore_rel, restored_original}
     failed = "trash recovery could not be published"
     left: list[str] = []
 
@@ -1536,8 +1545,8 @@ def _recover_in_store(
     if log_plan.warning:
         warnings.append(log_plan.warning)
     return RecoverResult(
-        trash_path=trash_rel,
-        restored_path=restore_rel,
+        trash_path=entry_rel or trash_rel,
+        restored_path=restored_original or restore_rel,
         kind=trash_kind,
         warnings=warnings,
         semantic=semantic,
