@@ -95,7 +95,9 @@ def clean_families():
             frame(one, "scene-000-005.000", 5.0, "2026-03-04"),  # newer than its parent
             frame(one, "scene-001-010.000", 10.0, "2026-02-01"),  # older than its parent
             video(two, "2026-03-03"),
-            frame(two, "scene-000-001.000", 1.0, "2026-03-04", tags=["secret"], body=SECRET_FRAME_TEXT),
+            frame(
+                two, "scene-000-001.000", 1.0, "2026-03-04", tags=["secret"], body=SECRET_FRAME_TEXT
+            ),
             frame(two, "scene-001-002.000", 2.0, "2026-02-15"),
             # The child matches no type that the parent does, so only the parent's columns admit it.
             video(six, "2026-03-01"),
@@ -113,9 +115,21 @@ def hostile_families():
     return dict(
         [
             video(outside, "2026-03-03"),
-            frame(f"{NOTES}/Clip-Three.mp4", "scene-000-003.000", 3.0, "2026-03-02", parent_media=outside),
+            frame(
+                f"{NOTES}/Clip-Three.mp4",
+                "scene-000-003.000",
+                3.0,
+                "2026-03-02",
+                parent_media=outside,
+            ),
             video(archived, "2026-03-03"),
-            frame(f"{NOTES}/Clip-Five.mp4", "scene-000-004.000", 4.0, "2026-03-02", parent_media=archived),
+            frame(
+                f"{NOTES}/Clip-Five.mp4",
+                "scene-000-004.000",
+                4.0,
+                "2026-03-02",
+                parent_media=archived,
+            ),
         ]
     )
 
@@ -166,7 +180,14 @@ def file_view(answer):
     if isinstance(answer, tuple):
         return answer
     return [
-        (hit["path"], hit["title"], hit["updated"], hit["excerpt"], hit["scene_frame"], hit["scene_frame_ts"])
+        (
+            hit["path"],
+            hit["title"],
+            hit["updated"],
+            hit["excerpt"],
+            hit["scene_frame"],
+            hit["scene_frame_ts"],
+        )
         for hit in answer
     ]
 
@@ -290,7 +311,11 @@ def test_the_window_runs_only_where_the_store_can_answer_it_whole(stored, monkey
 
     def window(**changes):
         arguments = dict(
-            plan=None, query_norm="", pending=none, dimension_lookups=None, timings=None,
+            plan=None,
+            query_norm="",
+            pending=none,
+            dimension_lookups=None,
+            timings=None,
             resolve_plan=None,
         )
         return find_module._browse_window(stored, **{**arguments, **changes})
@@ -315,8 +340,13 @@ def test_the_window_runs_only_where_the_store_can_answer_it_whole(stored, monkey
 def test_a_file_mode_vault_takes_no_window(vault, routes):  # noqa: F811
     """A window over a vault whose rows are a sidecar's: file mode keeps its own browse."""
     window = find_module._browse_window(
-        vault, plan=None, query_norm="", pending=SimpleNamespace(empty=True),
-        dimension_lookups=None, timings=None, resolve_plan=None,
+        vault,
+        plan=None,
+        query_norm="",
+        pending=SimpleNamespace(empty=True),
+        dimension_lookups=None,
+        timings=None,
+        resolve_plan=None,
     )
     assert window is None
 
@@ -368,7 +398,10 @@ def test_a_browse_reads_what_its_limit_needs_whatever_the_vault_holds(stored, wr
     source = str(Path(__file__).resolve().parents[1] / "src")
     done = subprocess.run(
         [sys.executable, "-c", PROBE, str(stored), json.dumps(DRILL_CELLS), source],
-        check=True, capture_output=True, text=True, timeout=600,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=600,
         env={**os.environ, "PYTHONPATH": source},
     )
     figures = json.loads(done.stdout.splitlines()[-1])
