@@ -64,6 +64,7 @@ from .shell import run, wait_for
 from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
+    from .catalogue_prewarm import CataloguePlan
     from .large_import import LargeImportPlan
     from .original_fixity import FixityPlan
     from .raw_import import RawImportPlan
@@ -158,6 +159,8 @@ class Context:
     raw_import: RawImportPlan | None = None
     # The original-fixity mode (original_fixity.py): what to seed after provisioning.
     original_fixity: FixityPlan | None = None
+    # The catalogue-prewarm mode (catalogue_prewarm.py): the scenarios to run after provisioning.
+    catalogue_prewarm: CataloguePlan | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -1307,6 +1310,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the original-fixity mode needs the provisioned cell, and step 2 did not pass")
                 await run_original_fixity(ctx, ctx.original_fixity)
+        if number == 2 and ctx.catalogue_prewarm is not None:
+            from .catalogue_prewarm import run_catalogue_prewarm
+
+            with stage(ctx.report, "catalogue_prewarm"):
+                if record.status != PASSED:
+                    raise StepFailure("the catalogue-prewarm mode needs the provisioned cell, and step 2 did not pass")
+                await run_catalogue_prewarm(ctx, ctx.catalogue_prewarm)
     if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
         with stage(ctx.report, "operator_restore_abort"):
             raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
@@ -1322,6 +1332,9 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.original_fixity is not None and "original_fixity" not in ctx.report.stages:
         with stage(ctx.report, "original_fixity"):
             raise StepFailure("the requested original-fixity stage requires provisioning at step 2")
+    if ctx.catalogue_prewarm is not None and "catalogue_prewarm" not in ctx.report.stages:
+        with stage(ctx.report, "catalogue_prewarm"):
+            raise StepFailure("the requested catalogue-prewarm stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:

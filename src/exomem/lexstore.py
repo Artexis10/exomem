@@ -1260,6 +1260,35 @@ def _log_repair_finished(
     log_event(log, logging.INFO, "lexical_repair_finished", fields=fields)
 
 
+def _log_catalogue_materialized(
+    route: str, basis: str, counts: tuple[int, int, int, int], started: float
+) -> None:
+    """Name how one catalogue build got its pages, in a hosted-safe structured event.
+
+    `route` is `reconciled` when the build started from a copy of the live
+    catalogue and re-parsed only what moved, else `rebuilt` (every page parsed).
+    `basis` is the closed token that says why: `current` for a reused copy, the
+    reason the live copy could not be reused, `not_requested` for a detached
+    build, or `in_place` for a rebuild of the live catalogue itself. Counts and
+    milliseconds only, so a hosted cell keeps the line.
+    """
+    reparsed, removed, inserted, unchanged = counts
+    log_event(
+        log,
+        logging.INFO,
+        "lexical_catalogue_materialized",
+        fields={
+            "route": route,
+            "basis": basis,
+            "reparsed": reparsed,
+            "removed": removed,
+            "inserted": inserted,
+            "unchanged": unchanged,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
+
+
 #: Why each pending request was made, until the worker names them in its pass line.
 _REPAIR_CAUSES: dict[Path, set[RepairCause]] = {}
 _REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
@@ -7301,6 +7330,7 @@ class LexicalStore:
             scope: freshness_module.recall_checkpoint(self.vault_root, scope)
             for scope in ("kb", "vault")
         }
+        started = time.monotonic()
         members, signatures = self._walk_entries()
         log.info(
             "lexical sync: rebuilding %s from %d markdown file(s)",
@@ -7319,6 +7349,7 @@ class LexicalStore:
             conn.execute("DELETE FROM unit_revisions")
             self._insert_members(conn, members, signatures)
             self._stamp_whole_build(conn)
+        _log_catalogue_materialized("rebuilt", "in_place", (0, 0, len(members), 0), started)
         self._witnessed.clear()
         self._term_frequency_cache = None
         self._filtered_term_frequency_cache = None
@@ -8959,19 +8990,11 @@ class LexicalStore:
                             raise _DetachedBuildCancelled
                         self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
                 self._stamp_whole_build(conn)
-            reparsed, removed, inserted, unchanged = (
-                counts if counts is not None else (0, 0, len(members), 0)
-            )
-            log.info(
-                "lexical catalogue pages materialized route=%s basis=%s reparsed=%d "
-                "removed=%d inserted=%d unchanged=%d elapsed_ms=%d",
+            _log_catalogue_materialized(
                 "reconciled" if counts is not None else "rebuilt",
                 basis,
-                reparsed,
-                removed,
-                inserted,
-                unchanged,
-                int((time.monotonic() - started) * 1000),
+                counts if counts is not None else (0, 0, len(members), 0),
+                started,
             )
             with conn:
                 for _scope, (kind, delta, _cp, _tr) in scope_targets.items():

@@ -67,6 +67,7 @@ from .manifests import (
     SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
     UPGRADE_PHASE_ANNOTATION,
+    UPGRADE_START_ANNOTATION_KEYS,
     UPGRADE_TARGET_ANNOTATION,
     UPGRADE_WINDOW_ANNOTATION,
     UPGRADE_WINDOW_AT_ANNOTATION,
@@ -394,9 +395,11 @@ class ClusterClient:
         return asyncio.run(_read_pages(urls, timeout=READINESS_TIMEOUT, max_bytes=READINESS_MAX_BYTES))
 
     def patch_statefulset_annotations(self, namespace: str, annotations: dict[str, str | None]) -> None:
-        """D4: set or remove (None) the window and candidate-since annotations on a
-        cell's StatefulSet metadata with a merge patch. It touches no pod template, so
-        no pod restarts, and a None removes the key whichever manager wrote it."""
+        """D4: set or remove (None) annotations on a cell's StatefulSet metadata. The
+        client sends a dict body as a strategic merge patch, which on this string map
+        sets or removes each key. It touches no pod template, so no pod restarts, and a
+        None removes the key whichever manager wrote it. A key whose value it changes
+        is owned by cellctl's Update entry, so a server-side apply that omits it keeps it."""
 
         self._apps.patch_namespaced_stateful_set(
             "cell", namespace, {"metadata": {"annotations": annotations}}, field_manager=FIELD_MANAGER
@@ -785,6 +788,7 @@ class ClusterClient:
         backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = grow_storage_gib = None
         upgrade_target = upgrade_phase = upgrade_window = upgrade_window_at = candidate_since = None
         started_raw = None
+        patched_hold: frozenset[str] = frozenset()
         if statefulset is not None:
             containers = statefulset.spec.template.spec.containers
             statefulset_image = containers[0].image if containers else None
@@ -824,6 +828,7 @@ class ClusterClient:
             upgrade_window = annotations.get(UPGRADE_WINDOW_ANNOTATION) or None
             upgrade_window_at = annotations.get(UPGRADE_WINDOW_AT_ANNOTATION) or None
             candidate_since = _parse_timestamp(annotations.get(CANDIDATE_SINCE_ANNOTATION))
+            patched_hold = _patch_owned_annotations(statefulset.metadata) & UPGRADE_START_ANNOTATION_KEYS
 
         pod_exists = len(pods) > 0
         live_pods = [pod for pod in pods if pod.metadata.deletion_timestamp is None]
@@ -944,6 +949,7 @@ class ClusterClient:
             statefulset_upgrade_window=upgrade_window,
             statefulset_upgrade_window_at=upgrade_window_at,
             statefulset_candidate_since=candidate_since,
+            statefulset_patched_hold=patched_hold,
             pod_exists=pod_exists,
             pod_ready=pod_ready,
             pod_terminating=pod_terminating,
@@ -1404,6 +1410,20 @@ def _node_selector_matches_node(selector, node, *, unknown_matches: bool = False
                and all((unknown_matches and expression.key != "metadata.name")
                        or matches(expression, {"metadata.name": node.metadata.name}) for expression in term.match_fields or [])
                for term in selector.node_selector_terms or [])
+
+
+def _patch_owned_annotations(metadata) -> frozenset[str]:
+    """The annotation keys that cellctl's own patches own on an object, read from
+    managedFields. "Update" is the API's operation for a patch ("Apply" is a
+    server-side apply), and fieldsV1 names each annotation as "f:<key>"."""
+
+    owned: set[str] = set()
+    for entry in getattr(metadata, "managed_fields", None) or ():
+        if entry.manager != FIELD_MANAGER or entry.operation != "Update":
+            continue
+        annotations = ((entry.fields_v1 or {}).get("f:metadata") or {}).get("f:annotations") or {}
+        owned.update(key.removeprefix("f:") for key in annotations if key.startswith("f:"))
+    return frozenset(owned)
 
 
 def _pod_ready(pod) -> bool:

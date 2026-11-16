@@ -8661,6 +8661,10 @@ def _collection_store_thread(func):
                     command.name, injected[0], kwargs, write=not (read_only or import_status)
                 )
                 server = routing.server
+                if server is not None and import_status and read_only:
+                    # Status answers while a batch keeps the store thread busy: it reads the store's
+                    # last commit on this thread, under the proof that routed it.
+                    return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof)
                 if server is not None:
                     return server.call(
                         lambda: func(command, *injected, **kwargs),

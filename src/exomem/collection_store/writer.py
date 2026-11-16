@@ -20,8 +20,6 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import bindparam, select
-
 from .. import (
     call_spans,
     held_fs,
@@ -54,6 +52,7 @@ from . import (
     governance,
     index_migrations,
     log_view,
+    multirow,
     reference_declarations,
     reference_index,
     references,
@@ -69,6 +68,8 @@ from . import (
 from .reader import row_source
 
 BULK_UPSERT_MAX_ROWS = 500
+#: Keys per lookup statement of a batch; far under SQLite's variable limit.
+_LOOKUP_KEYS = 500
 #: The parent's items-mode row ceiling; summary mode is bounded by the store instead.
 ITEMS_MODE_MAX_ROWS = 100_000
 
@@ -2534,19 +2535,65 @@ class CollectionWriter:
 
     def _twins(self, cid, key, natural_key):
         if natural_key is not None:
-            twins = [
+            self._refuse_twins([
                 row[0]
                 for row in self.connection.execute(
                     "SELECT item_key FROM items WHERE collection_id = ? AND natural_key = ? AND item_key != ? ORDER BY item_key",
                     (cid, natural_key, key),
                 )
-            ]
-            if twins:
-                raise collections.CollectionError(
-                    "RECORD_NATURAL_KEY_CONFLICT",
-                    "an existing item already holds this natural key under another identity",
-                    {"item_keys": twins},
-                )
+            ])
+
+    @staticmethod
+    def _refuse_twins(twins):
+        if twins:
+            raise collections.CollectionError(
+                "RECORD_NATURAL_KEY_CONFLICT",
+                "an existing item already holds this natural key under another identity",
+                {"item_keys": twins},
+            )
+
+    def _bulk_lookup(self, manifest, candidates):
+        """The stored rows and natural-key holders that a batch's candidates meet, one read per 500 keys.
+
+        Returns ``(rows by item key, holder item keys by natural key)``. A batch of new rows meets none,
+        so its lookups return no rows and cost a step each however many rows it holds.
+        """
+        cid = manifest.collection_id
+        keys = list(dict.fromkeys(candidate[6] for candidate in candidates))
+        natural = list(dict.fromkeys(candidate[7] for candidate in candidates if candidate[7] is not None))
+        stored, holders = {}, {}
+        for start in range(0, len(keys), _LOOKUP_KEYS):
+            part = keys[start:start + _LOOKUP_KEYS]
+            cursor = self.connection.execute(
+                f"SELECT * FROM items WHERE collection_id = ? AND item_key IN ({','.join('?' * len(part))})",  # noqa: S608
+                (cid, *part))
+            names = [column[0] for column in cursor.description]
+            rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+            stored.update((row["item_key"], row) for row in typed_storage.hydrate(self.connection, rows))
+        for start in range(0, len(natural), _LOOKUP_KEYS):
+            part = natural[start:start + _LOOKUP_KEYS]
+            for natural_key, item_key in self.connection.execute(
+                    "SELECT natural_key, item_key FROM items WHERE collection_id = ? "  # noqa: S608
+                    f"AND natural_key IN ({','.join('?' * len(part))})", (cid, *part)):
+                holders.setdefault(natural_key, []).append(item_key)
+        return stored, holders
+
+    def _row_ids(self, collection_id, item_keys):
+        """Row ids of stored items by item key, one single-row read per 500 keys.
+
+        A JSON aggregate returns one row for the whole chunk: each fetched row is a step that
+        releases the GIL, so N rows would cost N steps. Item keys are text and row ids integers,
+        so the JSON round trip is exact.
+        """
+        row_ids = {}
+        for start in range(0, len(item_keys), _LOOKUP_KEYS):
+            part = item_keys[start:start + _LOOKUP_KEYS]
+            (pairs,) = self.connection.execute(
+                "SELECT json_group_array(json_array(item_key, row_id)) FROM items "  # noqa: S608
+                f"WHERE collection_id = ? AND item_key IN ({','.join('?' * len(part))})", (collection_id, *part)
+            ).fetchone()
+            row_ids.update(json.loads(pairs))
+        return row_ids
 
     def _sources(self, sources: Sequence[str]):
         validated, guards = [], []
@@ -2742,21 +2789,20 @@ class CollectionWriter:
                                        f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}")
         return tokens.item_version(manifest.collection_id, key, version, payload)
 
+    def _insert_rows(self, table, rows):
+        """Insert a batch's rows of one table as multi-row statements, with the writer's change accounting."""
+        multirow.insert_rows(self._execute, self.connection, table, rows)
+
     def _write_new_items(self, manifest, plans, txn, *, scope=None):
         """Apply admitted new summary rows together inside the existing mutation transaction."""
         manifest_metadata, encoding, layout = self._item_write_context(manifest)
         self._history_reselection(manifest.collection_id, new_row=True)
         parameters = [self._item_parameters(manifest, key, values, body, path, txn, None, manifest_metadata, encoding)
                       for key, values, body, path, _, _ in plans]
-        self._execute(tables.INSERT_ITEM, parameters)
-        statement = select(tables.items.c.item_key, tables.items.c.row_id).where(
-            tables.items.c.collection_id == bindparam("collection_id"),
-            tables.items.c.item_key.in_(bindparam("item_keys", expanding=True)),
-        )
-        row_ids = dict(self._execute(statement, {"collection_id": manifest.collection_id,
-                                               "item_keys": [row["item_key"] for row in parameters]}).fetchall())
+        self._insert_rows("items", parameters)
+        row_ids = self._row_ids(manifest.collection_id, [row["item_key"] for row in parameters])
         if encoding == typed_storage.JSON_V1:
-            self._execute(tables.INSERT_VERSION, [{"row_id": row_ids[row["item_key"]], "row_version": 1,
+            self._insert_rows("item_versions", [{"row_id": row_ids[row["item_key"]], "row_version": 1,
                 "values_json": row["values_json"], "body": row["body"], "payload_hash": row["payload_hash"],
                 "txn_id": txn["txn_id"]} for row in parameters])
         else:
@@ -2769,9 +2815,9 @@ class CollectionWriter:
         reference_index.maintain_many(index_migrations.AccountedWriter(self.connection, self._execute),
             manifest, [(row_ids[key], values) for key, values, _, _, _, _ in plans])
         # Immediate source FKs require every payload identity to exist before sources attach.
-        self._execute(tables.INSERT_SOURCE, [{"row_id": row_ids[key], "row_version": 1,
+        self._insert_rows("item_sources", [{"row_id": row_ids[key], "row_version": 1,
             "ordinal": 0, "source_ref": source} for key, _, _, _, _, source in plans])
-        self._execute(tables.INSERT_EFFECT, [self._item_effect(manifest, key, txn, None, None, ordinal,
+        self._insert_rows("audit_effects", [self._item_effect(manifest, key, txn, None, None, ordinal,
             row_ids[key], 1, row["payload_hash"])
             for ordinal, ((key, _, _, _, _, _), row) in enumerate(zip(plans, parameters, strict=True))])
         item_type = types.type_for_manifest(manifest).item_type
@@ -2823,7 +2869,7 @@ class CollectionWriter:
             has_sources = records._bulk_sources_field(manifest)
             is_log = manifest.storage.strategy == "markdown-log"
             cache, source_guards, seen = {}, {}, {}
-            outcomes, plans = [], []
+            outcomes, plans, candidates = [], [], []
             # Only a filename recipe consults occupied keys; fetching them streams every row subject.
             occupied = (ChainMap({}, self.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
                         if manifest.item_filename else {})
@@ -2868,18 +2914,23 @@ class CollectionWriter:
                     continue
                 derived = collections.derived_item_key(manifest, values)
                 key = records._validate_item_key(derived or str(uuid.uuid4()))
+                outcomes.append(None)  # settled below, once the batch's stored rows are known
+                candidates.append((index, body, values, source_rel, guard, derived, key, _natural_key(manifest, values)))
+            # One read of the stored rows and natural-key holders for the whole batch, not one per row.
+            stored, holders = self._bulk_lookup(manifest, candidates)
+            for index, body, values, source_rel, guard, derived, key, natural_key in candidates:
                 base = dict(item_key=key, identity="natural-key" if derived else "generated", source=source_rel)
                 if derived is not None and key in seen:
-                    outcomes.append(records._bulk_reject(index, "DUPLICATE_ROW_KEY",
+                    outcomes[index] = records._bulk_reject(index, "DUPLICATE_ROW_KEY",
                                     "an earlier row in this request already holds this natural key",
-                                    duplicate_of=seen[key], **base))
+                                    duplicate_of=seen[key], **base)
                     continue
                 try:
-                    self._twins(manifest.collection_id, key, _natural_key(manifest, values))
+                    self._refuse_twins(sorted(holder for holder in holders.get(natural_key, ()) if holder != key))
                 except collections.CollectionError as error:
-                    outcomes.append(records._bulk_reject(index, error.code, error.reason, **error.details, **base))
+                    outcomes[index] = records._bulk_reject(index, error.code, error.reason, **error.details, **base)
                     continue
-                before = self._item(manifest.collection_id, key)
+                before = stored.get(key)
                 effective_body = body if body is not None else before["body"] if before else ""
                 try:
                     effective_body, origin_inputs = records._normalize_item_origin(  # noqa: SLF001
@@ -2888,19 +2939,19 @@ class CollectionWriter:
                         render=lambda value: value, _canonical_owner=True,
                     )
                 except collections.CollectionError as error:
-                    outcomes.append(records._bulk_error_row(index, error))  # noqa: SLF001
+                    outcomes[index] = records._bulk_error_row(index, error)  # noqa: SLF001
                     continue
                 if before and before["payload_hash"] == tokens.payload_hash(manifest.schema.version, key, values, effective_body):
                     if derived is not None:
                         seen[key] = index
-                    outcomes.append({"index": index, **base, "outcome": "unchanged"})
+                    outcomes[index] = {"index": index, **base, "outcome": "unchanged"}
                     continue
                 rationale = f"{why} | bulk {batch_id} {index + 1}/{len(rows)}" + (
                     "" if has_sources else f" src {source_rel}"
                 )
                 if len(rationale.encode()) > records._MAX_WHY_BYTES or "\n" in rationale:
-                    outcomes.append(records._bulk_reject(index, "AUDIT_RATIONALE_TOO_LONG",
-                                    "the audit rationale for this row exceeds its bound", **base))
+                    outcomes[index] = records._bulk_reject(index, "AUDIT_RATIONALE_TOO_LONG",
+                                    "the audit rationale for this row exceeds its bound", **base)
                     continue
                 if derived is not None:
                     seen[key] = index
@@ -2918,7 +2969,7 @@ class CollectionWriter:
                 plans.append((key, values, effective_body, path, before, source_rel))
                 if origin_inputs is not None:
                     preparation.setdefault("_origin_inputs", []).append(origin_inputs)
-                outcomes.append({"index": index, **base, "outcome": "updated" if before else "inserted"})
+                outcomes[index] = {"index": index, **base, "outcome": "updated" if before else "inserted"}
             counts = {name: sum(outcome["outcome"] == name for outcome in outcomes)
                       for name in ("inserted", "updated", "unchanged", "rejected")}
             result = dict(operation="bulk_upsert", collection_id=manifest.collection_id,
