@@ -1223,9 +1223,11 @@ async def _unfinished_build(run: Run, shared: dict[str, Any]) -> None:
         raise StepFailure("scenario unfinished_build sizes its forced boundary from the build time that scenario "
                           "completed_build measures, and that scenario measured none")
     await _begin(run, 1)
-    # The build starts within about 45 s of the window opening and takes `seconds`, so a boundary between
-    # 75 s and 70 percent of that falls while it runs.
-    lead = min(max(seconds * 0.5, 75.0), seconds * 0.7)
+    # The build pod runs about 6-12 s after the window opens. cellctl's attempt follows the boundary within one
+    # idle pass (30 s), and a build that ignores SIGTERM can run on through its 30 s grace period. A 35 s lead
+    # puts the boundary about 25 s into the build, so even that worst case ends before the fastest observed
+    # build (about 97 s); a later boundary let a cancelled build publish its complete copy first.
+    lead = 35.0
     window = plan_force_window(dt.datetime.now(dt.UTC), lead)
     run.record["force"] = {"lead_seconds": round(lead), "force_minutes": window.force_minutes,
                            "boundary_at": _iso(window.boundary_at), "opens_at": _iso(window.start_at),
@@ -1274,8 +1276,13 @@ def _cold_fallback(run: Run) -> None:
     run.check("cancelled_job_recorded", named, blocking=False, said=f"the cancellation record read {run.cancelled_seen}")
     after = _after_restart(run)
     log = run.catalogue_log()
-    run.check("cold_rebuild_after_cancellation", bool(log["adoption"]) and "adopted" not in log["adoption"] and bool(log["rebuilt"]),
-              said=f"adoption events {log['adoption']}, full catalogue builds {len(log['rebuilt'])}")
+    # The build publishes its staged copy in one move once complete, so an adoption here means the cancelled build
+    # finished first: correct product behaviour, but this run then never reached the cold path it exists to prove.
+    raced = "adopted" in log["adoption"]
+    run.check("cold_rebuild_after_cancellation", bool(log["adoption"]) and not raced and bool(log["rebuilt"]),
+              said=("the cancelled build published a complete staged copy before it ended, and the cell adopted it; "
+                    "the boundary fell too late in the build to reach the cold path" if raced else
+                    f"adoption events {log['adoption']}, full catalogue builds {len(log['rebuilt'])}"))
     run.check("live_catalogue_holds_the_new_identity", after["live_matches"])
 
 
