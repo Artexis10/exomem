@@ -4459,6 +4459,24 @@ def test_a_page_stays_editable_after_its_deleted_originals_trash_entry_is_remove
     assert "second note" in (vault / page).read_text(encoding="utf-8")
 
 
+def test_an_archive_that_has_trashed_a_page_takes_writes_while_its_reserved_identity_catalogue_is_unavailable(
+        vault: Path, monkeypatch):
+    """Catches every write in an archive with a Trash folder refusing while the reserved identity catalogue cannot
+    acquire the vault (descriptor exhaustion, say), as writes did not before deleted originals left a witness."""
+    from exomem import delete_file, reserved_paths, traversal_profiles
+
+    (vault / "Knowledge Base/Notes/discarded.md").write_text("# Discarded\n", encoding="utf-8")
+    delete_file.delete_file(vault, path="Knowledge Base/Notes/discarded.md", confirm=True)
+
+    def unavailable(_vault):
+        raise RuntimeError("reserved identity catalogue could not acquire the vault")
+
+    monkeypatch.setattr(reserved_paths, "_baseline_identity_catalogue", unavailable)
+    saved = traversal_profiles.save_profiles(vault, {"schema_version": 1, "profiles": {}})
+
+    assert saved["created"] is True
+
+
 def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vault: Path, selected_store, monkeypatch):
     """Pins the band rule: no hydration, and no eviction, while the evicted bytes leave less than the margin of room.
     The status names the bytes that keep the store from draining, never 0 while it cannot drain."""

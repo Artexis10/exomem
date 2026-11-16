@@ -154,8 +154,11 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
     The reciprocal companion backlink makes lookup bounded and independent of derived state.
     """
     import json
+    import os
+    import unicodedata
 
-    from .vault import PlannedWrite, content_hash
+    from .kbdir import managed_join
+    from .vault import PlannedWrite, content_hash, read_guarded_bytes
     from .vault_store import read as store_read
 
     writes = list(writes)
@@ -166,16 +169,20 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
     for path in relevant:
         if not path.lower().endswith(".md") and not is_trash_path(path):
             companions.update(originals.companion_paths(path))
+    # A backlink names only Trash placement metadata, read at its NFKC spelling, so with no Trash folder there is no
+    # witness to carry or invalidate, and the batch reads nothing.
+    if not os.path.lexists(vault / unicodedata.normalize("NFKC", managed_join(TRASH_SUBPATH))):
+        return writes
     updates: dict[str, PlannedWrite] = {}
     # One store snapshot reads every prior companion in a few queries, so a batch's cost does not grow per page.
     with store_read.request_snapshot(vault):
         store_read.prefetch_pages(vault, companions)
         for path in sorted(companions):
             try:
-                before = reserved_paths.read_generic_bytes(vault, path).data.decode("utf-8")
-            except reserved_paths.ReservedPathLeafError as error:
-                if error.code != "MISSING":
-                    raise
+                # The batch's own guarded reader needs no reserved identity catalogue, which only a witness that a
+                # backlink names requires: a vault that the catalogue cannot acquire still takes every other write.
+                before = read_guarded_bytes(vault, vault / path)[0].decode("utf-8")
+            except FileNotFoundError:
                 before = None
             except UnicodeError:
                 before = None  # A malformed prior companion cannot prove retirement.
