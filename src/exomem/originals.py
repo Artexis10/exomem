@@ -301,6 +301,30 @@ def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
     return snapshot if snapshot.local_path is not None else None
 
 
+def digest_addressed(vault: Path, path: str | Path, *, snapshot: OriginalSnapshot | None = None) -> OriginalSnapshot | None:
+    """The filing, in a pooled archive, of an original that no ordinary file holds at its logical path.
+
+    Its bytes are addressed by digest: a shared pool object, or a stored version once evicted. Moving or
+    trashing it moves only its companion and repoints the binding; nothing renames or downloads bytes.
+    A caller that already resolved the path passes its `snapshot`. Any other path, a missing or unsafe
+    one included, is None.
+    """
+    from . import original_pool, reserved_paths
+
+    target = Path(path) if Path(path).is_absolute() else Path(vault) / path
+    if is_note_path(target.as_posix()) or not original_pool.enabled(vault):
+        return None
+    if snapshot is None:
+        if target.is_file():
+            return None
+        try:
+            snapshot = original_state(vault, target)
+        except (ValueError, reserved_paths.ReservedPathLeafError):
+            return None
+    # `local_path` is set only when no ordinary file exists; an evicted original has no local bytes at all.
+    return snapshot if snapshot.local_path is not None or snapshot.state == "evicted" else None
+
+
 def evicted(vault: Path, path: str | Path) -> bool:
     """Whether a path names an evicted original; an unbound vault and a note never do."""
     if binding_for(vault) is None:
@@ -445,7 +469,6 @@ def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, Origina
     if binding_for(vault) is None:
         return None
     from . import reserved_paths
-    from .governance import egress
     from .vault import VaultPathError, resolve_under_vault
 
     try:
@@ -453,9 +476,20 @@ def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, Origina
         stored = original_state(vault, abs_path)
     except (VaultPathError, reserved_paths.ReservedPathLeafError):
         return None
-    # A bound store filters the owner's walk too (it leaves out the trash); a door withholds nothing
-    # from the owner, as `egress.write_target_withheld` decides.
-    visible = egress.restricted_release_filter(vault) if egress.caller_restricted(vault) else None
-    if stored.state != "evicted" or (visible is not None and not visible(rel_path)):
+    if stored.state != "evicted" or not caller_may_see(vault, rel_path):
         return None
     return abs_path, rel_path, stored
+
+
+def caller_may_see(vault: Path, relative: str) -> bool:
+    """Whether a door that moves an original with no file at its path may show it to this caller.
+
+    A bound store filters the owner's walk too (it leaves out the trash); a door withholds nothing
+    from the owner, as `egress.write_target_withheld` decides.
+    """
+    from .governance import egress
+
+    if not egress.caller_restricted(vault):
+        return True
+    visible = egress.restricted_release_filter(vault)
+    return visible is None or visible(relative)

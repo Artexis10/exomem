@@ -10,9 +10,10 @@ import hashlib
 import json
 import logging
 import sqlite3
-from collections.abc import Iterable, Mapping
-from contextlib import closing
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import media_capacity, original_pool, originals, reserved_paths, trash_metadata
@@ -297,8 +298,58 @@ class FileChange:
     inverse: PreparedDelta
 
 
+@dataclass(slots=True)
+class _Operation:
+    vault: Path
+    before: Checkpoint
+    paths: set[str] = field(default_factory=set)
+
+
+_operation: ContextVar[_Operation | None] = ContextVar("media_binding_operation", default=None)
+
+
+@contextmanager
+def operation(vault: Path, paths: Iterable[str]) -> Iterator[None]:
+    """Withdraw completeness once around a compound file-mode change, then apply one exact delta.
+
+    A move or Trash transition renames files before its own batch runs. The batch alone would repair only
+    its paths and leave the renamed source's row behind. Inside this scope a nested batch adds its paths
+    instead of withdrawing again. Success applies one delta over every path; any exception leaves the
+    projection incomplete for the background census. Store mode has its own boundary (`follow_store`).
+    """
+    vault = Path(vault).resolve()
+    active = _operation.get()
+    if active is not None and active.vault == vault:
+        active.paths.update(paths)
+        yield
+        return
+    ledger = _ledger(vault, create=False)
+    from .vault_store import mode
+
+    before = (withdraw(vault) if ledger.path.exists() and original_pool.enabled(vault)
+              and not mode.store_mode_for_reads(vault) else None)
+    if before is None:
+        yield
+        return
+    scope = _Operation(vault, before, set(paths))
+    token = _operation.set(scope)
+    try:
+        yield
+    finally:
+        _operation.reset(token)
+    try:
+        delta = prepare_delta(vault, scope.paths)
+        apply_delta(vault, delta.paths, delta.bindings, expected=before)
+    except Exception:  # noqa: BLE001 - derived failure cannot undo an acknowledged canonical outcome
+        log.warning("physical binding update remains incomplete; background recovery will retry", exc_info=True)
+
+
 def begin_file_change(vault: Path, images: Mapping[str, bytes], installed: Iterable[str]) -> FileChange | None:
     """Prepare exact facts, then withdraw completeness before the first ordinary-file install."""
+    active = _operation.get()
+    if active is not None and active.vault == Path(vault).resolve():
+        active.paths.update(installed)
+        return None  # The enclosing operation already withdrew completeness and applies one delta.
     ledger = _ledger(vault, create=False)
     if not ledger.path.exists() or not original_pool.enabled(vault):
         return None
@@ -471,6 +522,10 @@ def external_change(vault: Path) -> None:
 
 def repair_paths(vault: Path, paths: Iterable[str]) -> None:
     """Repair exact receipt paths; an incomplete inventory still needs its background census."""
+    active = _operation.get()
+    if active is not None and active.vault == Path(vault).resolve():
+        active.paths.update(paths)
+        return  # The operation's own index receipts join its one delta instead of withdrawing again.
     ledger = _ledger(vault, create=False)
     if not ledger.path.exists() or not original_pool.enabled(vault):
         return

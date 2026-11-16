@@ -32,6 +32,7 @@ from pathlib import Path
 from . import (
     graph_sync,
     held_fs,
+    media_bindings,
     originals,
     relation_review,
     reserved_paths,
@@ -107,8 +108,8 @@ def recover_from_trash(
     _fold: bool = False,
 ) -> RecoverResult:
     # The pins of the originals that a commit fetches hold until the recovery returns.
-    with ExitStack() as originals_context:
-        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews, _fold=_fold, originals_context=originals_context)
+    with ExitStack() as originals_context, ExitStack() as binding_scope:
+        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews, _fold=_fold, originals_context=originals_context, binding_scope=binding_scope)
 
 
 def _recover_from_trash_local(
@@ -122,6 +123,7 @@ def _recover_from_trash_local(
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
     _fold: bool = False,
     originals_context: ExitStack,
+    binding_scope: ExitStack | None = None,
 ) -> RecoverResult:
     if store_targets.owns_any(vault_root, files=(trash_path,)):
         return _recover_in_store(
@@ -138,21 +140,30 @@ def _recover_from_trash_local(
     # A recovery is a move out of the trash, so its source is admitted as a move's is: before any
     # existence check, and a withheld entry answers as an absent one.
     stored_original = None
+    # A trashed digest-addressed original has no payload: its page goes back and its bytes stay put.
+    entry_rel: str | None = None
+    restored_original: str | None = None
     try:
         trash_abs, trash_rel = resolve_under_vault(
             vault_root, trash_path, must_exist=True, refuse_withheld=True
         )
     except VaultPathError as e:
-        # An evicted original is not on the volume: one that the caller may see is accepted without
-        # a fetch, as `move_file` accepts it, and a withheld one answers as an absent one.
+        # A trashed digest-addressed original moves by its page. An evicted original is not on the
+        # volume: one that the caller may see is accepted without a fetch, as `move_file` accepts it,
+        # and a withheld one answers as an absent one.
+        addressed = _addressed_entry(vault_root, trash_path) if e.code == "NOT_FOUND" else None
         evicted = (
             originals.evicted_visible_original(vault_root, trash_path)
-            if e.code == "NOT_FOUND"
+            if e.code == "NOT_FOUND" and addressed is None
             else None
         )
-        if evicted is None:
+        if addressed is not None:
+            entry_rel, trash_rel = addressed
+            trash_abs = vault_root / trash_rel
+        elif evicted is not None:
+            trash_abs, trash_rel, stored_original = evicted
+        else:
             raise RecoverError(code=e.code, reason=e.reason) from e
-        trash_abs, trash_rel, stored_original = evicted
 
     _refuse_outside_trash(trash_rel)
 
@@ -182,7 +193,7 @@ def _recover_from_trash_local(
         _refuse_reference_companion(trash_file_snapshot.data)
 
     sidecar, meta, sidecar_guard, sidecar_proof_guard, sidecar_source, sidecar_identity = (
-        _read_sidecar(vault_root, trash_abs)
+        _read_sidecar(vault_root, trash_abs if entry_rel is None else vault_root / entry_rel)
     )
     restore_abs, restore_rel, curated = _restore_destination(
         vault_root,
@@ -192,6 +203,9 @@ def _recover_from_trash_local(
         allow_curated=allow_curated,
         fold=_fold,
     )
+    if entry_rel is not None:
+        restored_original, restore_rel = _addressed_restore(vault_root, meta, entry_rel, restore_rel)
+        restore_abs = vault_root / restore_rel
     # A file entry's commit fetches its original once every other check has passed, so a refused
     # recovery reads nothing from the store. A folder fetches before its census guards, which must see
     # the fetched files, so its census and semantic checks are the ones that come after its fetch.
@@ -215,8 +229,21 @@ def _recover_from_trash_local(
 
     # Decided before the existence check below, so it cannot tell a withheld view from none.
     collection_authority.refuse_view_paths(
-        vault_root, (restore_rel, *(path for path, _digest in restored)), RecoverError
+        vault_root,
+        (restore_rel, *(path for path, _digest in restored), *((restored_original,) if restored_original else ())),
+        RecoverError,
     )
+    # The renames run before any batch; one projection delta covers every path that they change.
+    binding_paths = tuple(dict.fromkeys((
+        trash_rel, restore_rel, originals.sidecar_path(Path(trash_rel)).as_posix(),
+        *(path for path, _digest in restored),
+        *(f"{trash_rel.rstrip('/')}/{item.relative_path}" for item in trash_tree),
+        *((entry_rel, restored_original) if entry_rel is not None and restored_original is not None else ()),
+    )))
+
+    def withdraw_bindings() -> None:
+        if binding_scope is not None:
+            binding_scope.enter_context(media_bindings.operation(vault_root, binding_paths))
 
     try:
         reserved_paths.inspect_generic_path(vault_root, restore_rel)
@@ -259,7 +286,9 @@ def _recover_from_trash_local(
     today = today or dt.date.today()
     date_iso = today.isoformat()
     restore_no_ext = restore_rel.removesuffix(".md")
-    log_body = _log_body(trash_rel, restore_rel, trash_kind, curated if allow_curated else None)
+    log_body = _log_body(
+        entry_rel or trash_rel, restored_original or restore_rel, trash_kind, curated if allow_curated else None
+    )
     log_plan = plan_log_entry(
         vault_root,
         date_iso=date_iso,
@@ -325,7 +354,9 @@ def _recover_from_trash_local(
             recovery_entries.append(
                 semantic_writes.RecoveryEntry(
                     trash_rel,
-                    trash_original_path(meta, trash_root=trash_rel, current_path=trash_rel, fallback_root=restore_rel),
+                    trash_original_path(
+                        meta, trash_root=entry_rel or trash_rel, current_path=trash_rel, fallback_root=restore_rel
+                    ),
                     restore_rel,
                     source,
                     source_guard,
@@ -410,8 +441,8 @@ def _recover_from_trash_local(
             }
             if validate_only:
                 return RecoverResult(
-                    trash_path=trash_rel,
-                    restored_path=restore_rel,
+                    trash_path=entry_rel or trash_rel,
+                    restored_path=restored_original or restore_rel,
                     kind=trash_kind,
                     warnings=[],
                     semantic=preflight.as_dict(),
@@ -419,6 +450,7 @@ def _recover_from_trash_local(
             if trash_kind == "file":
                 fetch_file()
 
+            withdraw_bindings()
             try:
                 graph_transition = graph_sync.begin_recovery_transition(
                     vault_root,
@@ -516,8 +548,8 @@ def _recover_from_trash_local(
             )
         if validate_only:
             return RecoverResult(
-                trash_path=trash_rel,
-                restored_path=restore_rel,
+                trash_path=entry_rel or trash_rel,
+                restored_path=restored_original or restore_rel,
                 kind=trash_kind,
                 warnings=[],
             )
@@ -539,6 +571,7 @@ def _recover_from_trash_local(
                 ) from error
         if trash_kind == "file":
             fetch_file()
+        withdraw_bindings()
         try:
             graph_transition = graph_sync.begin_recovery_transition(
                 vault_root,
@@ -773,13 +806,55 @@ def _recover_from_trash_local(
                 warnings.append("recovery log graph publication failed; run reconcile")
 
     return RecoverResult(
-        trash_path=trash_rel,
-        restored_path=restore_rel,
+        trash_path=entry_rel or trash_rel,
+        restored_path=restored_original or restore_rel,
         kind=trash_kind,
         warnings=warnings,
         semantic=semantic,
         index=index_feedback,
     )
+
+
+def _addressed_entry(vault_root: Path, trash_path: str) -> tuple[str, str] | None:
+    """A trashed digest-addressed original as its entry path and the page that moves for it."""
+    from .vault_store import availability as store_availability
+
+    try:
+        _abs, entry_rel = resolve_under_vault(vault_root, trash_path)
+    except VaultPathError:
+        return None
+    addressed = trash_metadata.addressed_original(vault_root, entry_rel)
+    # A withheld entry answers as an absent one, as an evicted original's does.
+    if addressed is None or not originals.caller_may_see(vault_root, entry_rel):
+        return None
+    if store_availability.page_writer(Path(vault_root)) is not None:
+        # The page store's recovery has no form yet that leaves the original's bytes in place.
+        raise RecoverError(
+            "RECOVER_UNSUPPORTED",
+            f"{entry_rel} is a shared original, which this archive's page store cannot recover yet",
+        )
+    return entry_rel, addressed[0]
+
+
+def _addressed_restore(vault_root: Path, meta: dict, entry_rel: str, restore_rel: str) -> tuple[str, str]:
+    """The original path a trashed digest-addressed original returns to, and its page's path there.
+
+    Its page still names that path, so it returns there only; a move afterwards relocates it.
+    """
+    try:
+        original = trash_original_path(meta, trash_root=entry_rel, current_path=entry_rel)
+    except ValueError as error:
+        raise RecoverError("TRASH_SIDECAR_INVALID", "trash sidecar has no valid original path") from error
+    page = originals.sidecar_path(Path(original)).as_posix()
+    if restore_rel not in (original, page):
+        raise RecoverError(
+            "RESTORE_PATH_UNSUPPORTED",
+            f"{entry_rel} is a shared original, which returns only to {original!r}. "
+            "Recover it there without `restore_path`, then move it with move_file.",
+        )
+    if (vault_root / original).exists() or originals.available(vault_root, original):
+        raise _destination_exists(original)
+    return original, page
 
 
 def _refuse_outside_trash(trash_rel: str) -> None:

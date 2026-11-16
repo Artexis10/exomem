@@ -384,6 +384,40 @@ def reference_companion(vault: Path, binary_path: str) -> tuple[str, reserved_pa
     return path, snapshot
 
 
+def addressed_original(
+    vault: Path, binary_path: str
+) -> tuple[str, reserved_paths.GenericFileSnapshot, originals.BinaryBinding] | None:
+    """The page of a trashed digest-addressed original that has no payload at ``binary_path``.
+
+    Its bytes stay addressed by digest. Its page keeps naming the original path, as a trashed folder's
+    pages do, and this placement maps that name to ``binary_path``. Any other path is None.
+    """
+    from . import original_pool
+    from .vault import parse_frontmatter
+
+    if not is_trash_path(binary_path) or originals.is_note_path(binary_path) or not original_pool.enabled(vault):
+        return None
+    try:
+        reserved_paths.inspect_generic_path(vault, binary_path)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            return None
+    else:
+        return None
+    page = originals.sidecar_path(Path(binary_path)).as_posix()
+    try:
+        snapshot = reserved_paths.read_generic_bytes(vault, page)
+        fields, _body, marker = parse_frontmatter(snapshot.data.decode("utf-8"), custody=True)
+        census = PlacementCensus(vault)
+        binding = census.resolve(page, fields) if marker is not None else None
+        census.require_current()
+    except (UnicodeError, ValueError, reserved_paths.ReservedPathLeafError):
+        return None
+    if binding is None or binding.path != binary_path:
+        return None
+    return page, snapshot, binding
+
+
 def remove_unchanged(
     vault: Path, path: str, identity: held_fs.StableIdentity | None, data: bytes
 ) -> None:

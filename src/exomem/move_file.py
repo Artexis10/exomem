@@ -29,6 +29,8 @@ from typing import Any
 from . import (
     call_spans,
     graph_sync,
+    media_bindings,
+    original_pool,
     originals,
     path_mentions,
     recap_folder,
@@ -254,8 +256,11 @@ def _paired_artifact(
         binary_rel = rel[:-3]
         if not binary_rel or binary_rel.lower().endswith(".md"):
             return None
-        present = (vault_root / binary_rel).is_file() or (
-            originals.evicted_visible_original(vault_root, binary_rel) is not None
+        # A pooled filing has no file at its logical path: its bytes are a shared object.
+        present = (
+            (vault_root / binary_rel).is_file()
+            or originals.pooled(vault_root, binary_rel) is not None
+            or originals.evicted_visible_original(vault_root, binary_rel) is not None
         )
         return (rel, binary_rel) if present else None
     page_rel = f"{rel}.md"
@@ -472,6 +477,28 @@ def move_file(
         return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context)
 
 
+def _evicted_source(
+    vault_root: Path, old_path: str, *, addressed_only: bool = False
+) -> tuple[Path, str, originals.OriginalSnapshot] | None:
+    """An original with no file at its path that the caller may see; any other absent path stays NOT_FOUND.
+
+    It is evicted (`originals.evicted_visible_original`), or, in a pooled archive, addressed by digest.
+    A store-mode caller asks only for the second: the store keeps a record of every evicted original it moves.
+    """
+    if not addressed_only and (evicted := originals.evicted_visible_original(vault_root, old_path)) is not None:
+        return evicted
+    if not original_pool.enabled(vault_root):
+        return None
+    try:
+        abs_path, rel_path = resolve_under_vault(vault_root, old_path, must_be_file=True)
+    except VaultPathError:
+        return None
+    stored = originals.digest_addressed(vault_root, abs_path)
+    if stored is None or not originals.caller_may_see(vault_root, rel_path):
+        return None
+    return abs_path, rel_path, stored
+
+
 def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: str) -> None:
     """Hydrate an evicted original only once the move is about to rename it."""
     from .media_store import moved_originals
@@ -480,13 +507,11 @@ def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: 
 
 
 def _refuse_taken_destination(vault_root: Path, new_rel: str) -> None:
-    """Refuse a file-mode destination that a file or folder holds, or that is reserved."""
+    """Refuse a file-mode destination that a file, a folder or an original holds, or that is reserved."""
     try:
         reserved_paths.inspect_generic_path(vault_root, new_rel)
     except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "MISSING":
-            pass
-        elif error.code in {
+        if error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",
             "RESERVED_PATH",
@@ -496,18 +521,20 @@ def _refuse_taken_destination(vault_root: Path, new_rel: str) -> None:
                 "RESERVED_PATH",
                 "destination is reserved for its owning subsystem",
             ) from None
-        else:
+        if error.code != "MISSING":
             raise MoveFileError(
                 "MOVE_FAILED", "held destination acquisition was refused"
             ) from None
-    else:
-        raise MoveFileError(
-            code="DEST_EXISTS",
-            reason=(
-                f"destination already exists: {new_rel}. "
-                f"This op refuses to overwrite — pick a different name."
-            ),
-        )
+        # A pooled or evicted original holds its logical path with no file there.
+        if originals.is_note_path(new_rel) or not originals.available(vault_root, new_rel):
+            return
+    raise MoveFileError(
+        code="DEST_EXISTS",
+        reason=(
+            f"destination already exists: {new_rel}. "
+            f"This op refuses to overwrite — pick a different name."
+        ),
+    )
 
 
 def _resolve_source_on_files(
@@ -527,7 +554,7 @@ def _resolve_source_on_files(
         canonical_source, logical_rel = resolve_under_vault(vault_root, old_path)
         if canonical_source.exists():
             raise MoveFileError(code=e.code, reason=e.reason) from e
-        evicted_source = originals.evicted_visible_original(vault_root, old_path)
+        evicted_source = _evicted_source(vault_root, old_path)
         if evicted_source is not None:
             old_abs, old_rel, stored_original = evicted_source
         else:
@@ -652,8 +679,15 @@ def _move_file_local(
         try:
             old_abs, old_rel = store_targets.resolve_existing(vault_root, old_path)
         except VaultPathError as e:
-            raise MoveFileError(code=e.code, reason=e.reason) from e
-        stored_original = store_targets.evicted_original(vault_root, old_rel)
+            # The store records no binary for a digest-addressed original: its companion page is the filing.
+            addressed = (
+                _evicted_source(vault_root, old_path, addressed_only=True) if e.code == "NOT_FOUND" else None
+            )
+            if addressed is None:
+                raise MoveFileError(code=e.code, reason=e.reason) from e
+            old_abs, old_rel, stored_original = addressed
+        else:
+            stored_original = store_targets.evicted_original(vault_root, old_rel)
     from .collection_store import authority as collection_authority
 
     collection_authority.refuse_view_paths(vault_root, (old_rel,), MoveFileError)
@@ -697,6 +731,8 @@ def _move_file_local(
     # the semantic write machinery below is written for — and the bytes are
     # renamed alongside it inside the same transaction.
     paired_binary: tuple[str, str] | None = None
+    # A digest-addressed original moves by repointing its companion; no bytes are renamed or fetched.
+    addressed_binary = False
     paired_parts: tuple[str, str] | None = None
     # A raw-marked page's part pages that the store holds, with their hashes.
     stored_parts: dict[str, str] = {}
@@ -737,7 +773,7 @@ def _move_file_local(
         )
         if (
             (vault_root / paired_binary[1]).exists()
-            or originals.evicted(vault_root, paired_binary[1])
+            or originals.available(vault_root, paired_binary[1])
             or (store_writer is not None and store_targets.holds(vault_root, paired_binary[1]))
         ):
             raise MoveFileError(
@@ -749,6 +785,10 @@ def _move_file_local(
             )
         content_transform = _compose_transforms(
             content_transform, _repoint_artifact(*paired_binary)
+        )
+        # A store record that an older eviction left still moves with its bytes, as before.
+        addressed_binary = originals.digest_addressed(vault_root, paired_binary[0]) is not None and not (
+            store_writer is not None and store_targets.holds(vault_root, paired_binary[0])
         )
     if not recovering_from_trash and old_rel.lower().endswith(".md"):
         # The hidden pages that hold the rest of a long extraction move with their page, paired
@@ -1281,6 +1321,15 @@ def _move_file_local(
                 required_guards,
                 bound_destination: PathGuard,
             ) -> None:
+                # The renames run before the batch, so one projection delta covers both.
+                with media_bindings.operation(vault_root, (old_rel, new_rel, *(paired_binary or ()))):
+                    _mutate_files(lifecycle_writes, required_guards, bound_destination)
+
+            def _mutate_files(
+                lifecycle_writes: tuple[PlannedWrite, ...],
+                required_guards,
+                bound_destination: PathGuard,
+            ) -> None:
                 nonlocal catalog_target
                 bound_destination.recheck(vault_root)
                 catalog_target = prepared_catalog(lifecycle_writes)
@@ -1306,7 +1355,8 @@ def _move_file_local(
                 # path; the link rewrites around it earn nothing (review F1).
                 if _validate_prepared_bindings is not None:
                     _validate_prepared_bindings()
-                _materialize_originals(vault_root, originals_context, old_rel)
+                if not addressed_binary:
+                    _materialize_originals(vault_root, originals_context, old_rel)
                 heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
                 try:
                     move_epoch = graph_sync.prepare_rename_epoch(
@@ -1321,7 +1371,7 @@ def _move_file_local(
                     # The bytes follow the page inside the same transaction.
                     # A rollback below undoes both, so a failure can never
                     # leave an artifact split across two trees.
-                    if paired_binary is not None:
+                    if paired_binary is not None and not addressed_binary:
                         try:
                             _held_rename(vault_root, *paired_binary)
                         except MoveFileError:
@@ -1331,7 +1381,7 @@ def _move_file_local(
                         try:
                             _held_rename(vault_root, *paired_parts, kind="directory")
                         except MoveFileError:
-                            if paired_binary is not None:
+                            if paired_binary is not None and not addressed_binary:
                                 _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                             _held_rename(vault_root, new_rel, old_rel, rollback=True)
                             raise
@@ -1378,7 +1428,7 @@ def _move_file_local(
                     try:
                         if paired_parts is not None:
                             _held_rename(vault_root, paired_parts[1], paired_parts[0], rollback=True, kind="directory")
-                        if paired_binary is not None:
+                        if paired_binary is not None and not addressed_binary:
                             _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                         _held_rename(vault_root, new_rel, old_rel, rollback=True)
                     except MoveFileError as rollback_error:
@@ -1432,7 +1482,8 @@ def _move_file_local(
                 bound_destination.recheck(vault_root)
                 catalog_target = prepared_catalog(lifecycle_writes)
                 entries: list[binaries.Entry] = []
-                if paired_binary is not None:
+                # A digest-addressed original has no store record: the page move carries its repointed binding.
+                if paired_binary is not None and not addressed_binary:
                     entries.append(binaries.Entry(*paired_binary))
                     _materialize_originals(vault_root, originals_context, paired_binary[0])
                 if paired_parts is not None and not stored_parts:
