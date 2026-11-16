@@ -285,14 +285,23 @@ def stage(
                 )
                 path, metadata = _resolve(root, selected)
                 stack.enter_context(media_store.local_originals(root, (path,), read=True))
-                held = stack.enter_context(
-                    media_store.hold_original(
-                        root,
-                        path,
-                        recorded_sha256=lambda version: media_store.cached_sha256(root, path, version),
-                        deadline=deadline,
+
+                def recorded(version):
+                    return media_store.cached_sha256(root, path, version)
+
+                try:
+                    # The hold hashes an ordinary file under the deadline, and `_descriptor` refuses bytes
+                    # that differ from the binding. The local pin above has already fetched an evicted file.
+                    held = stack.enter_context(
+                        reserved_paths.hold_generic_file(root, path, recorded_sha256=recorded, deadline=deadline)
                     )
-                )
+                except reserved_paths.ReservedPathLeafError as error:
+                    if error.code != "MISSING":
+                        raise
+                    # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
+                    held = stack.enter_context(
+                        media_store.hold_original(root, path, recorded_sha256=recorded, deadline=deadline)
+                    )
                 descriptor = _descriptor(path, metadata, held)
                 if (
                     expected_sha256 is not None
