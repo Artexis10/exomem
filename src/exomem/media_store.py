@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, BinaryIO, Protocol
 
@@ -570,6 +571,12 @@ def managed_event(vault: Path, path: Path) -> str | None:
     return None
 
 
+# A note or an original that is not a plain file (a symlink, a hard link or a reserved name) is not a binding to
+# trust. These are the leaf boundary's structural refusal codes; any other one, such as a transient I/O refusal,
+# reaches the caller, which must not miss a binding.
+_UNTRUSTED_LEAF = frozenset({"UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"})
+
+
 def bound_originals(
     vault: Path, *, root: Path | None = None, selects: Callable[[str], bool] | None = None,
     unconfirmed: Callable[[originals.RetirementUnconfirmed], None] | None = None,
@@ -614,10 +621,7 @@ def bound_originals(
         except (UnicodeError, ValueError):
             continue
         except reserved_paths.ReservedPathLeafError as error:
-            # A note or an original that is not a plain file (a symlink, a hard link or a reserved name) is
-            # not a binding to trust. These are the leaf boundary's structural refusal codes; any other one,
-            # such as a transient I/O refusal, reaches the caller, which must not miss a binding.
-            if error.code in ("UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"):
+            if error.code in _UNTRUSTED_LEAF:
                 continue
             # A store-mode file whose page the store moved or deleted is a projection the projector
             # has not settled yet: it binds nothing, and the page binds at its new path.
@@ -1748,6 +1752,21 @@ def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
             yield chunk
 
 
+def _bound_file(vault: Path, relative: str) -> OriginalSnapshot | None:
+    """The binding of one original path, as `bound_originals` would yield it, read from its own companions only."""
+    try:
+        snapshot = original_state(vault, relative)
+    except originals.RetirementUnconfirmed:
+        raise  # Its original is unknown; an operation that left it out would read as complete.
+    except (UnicodeError, ValueError):
+        return None
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code in _UNTRUSTED_LEAF:
+            return None
+        raise
+    return snapshot if snapshot.binary_sha256 is not None else None
+
+
 def _retired(vault: Path, snapshot: OriginalSnapshot) -> bool:
     """Whether canonical Trash metadata retired the companion that binds a missing original.
 
@@ -1780,16 +1799,19 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
         prefixes.append(relative)
         if originals.is_note_path(relative):
             prefixes.append(relative[:-3])
-    scan_roots = {target if target.is_dir() else target.parent
-                  for prefix in prefixes for target in (root / prefix,)}
+    folders = {prefix for prefix in prefixes if (root / prefix).is_dir()}
     def selected(relative: str) -> bool:
         return any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes)
 
     seen: set[Path] = set()
     with ExitStack() as stack:
         # Only the selected bindings are resolved, so a sibling's unknown original never refuses this operation.
-        for snapshot in (item for scan_root in scan_roots
-                         for item in bound_originals(root, root=scan_root, selects=selected)):
+        # A file's companions lie beside it (`originals.companion_paths`), so it resolves alone; a folder walks.
+        for snapshot in chain(
+                (item for folder in sorted(folders)
+                 for item in bound_originals(root, root=root / folder, selects=selected)),
+                (item for prefix in prefixes
+                 if prefix not in folders and (item := _bound_file(root, prefix)) is not None)):
             if snapshot.path in seen:
                 continue
             seen.add(snapshot.path)

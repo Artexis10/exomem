@@ -4695,3 +4695,27 @@ def test_the_meters_say_unknown_with_a_reason_when_their_readings_fail(vault: Pa
 
     assert "bytes" not in status["vault_storage"] and "locked" in status["vault_storage"]["unknown"]
     assert "used_bytes" not in status["media_storage"] and status["media_storage"]["unknown"]
+
+
+def test_a_download_pins_its_original_without_reading_the_companions_beside_it(vault: Path, selected_store, monkeypatch):
+    """Resolving one file walked its whole folder, so one download read every companion in a Source folder:
+    tens of thousands of reads per request in a large archive."""
+    from contextlib import closing
+
+    from exomem import media_jobs, media_store, preserve
+
+    with library_scope():
+        first = preserve.preserve(vault, scope="Test", category="samples", filename="first.txt", content="first")
+        second = preserve.preserve(vault, scope="Test", category="samples", filename="second.txt", content="second")
+    assert Path(first.path).parent == Path(second.path).parent
+    reads: list[str] = []
+    read = reserved_paths.read_generic_bytes
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes",
+                        lambda root, rel, *args, **kwargs: (reads.append(rel), read(root, rel, *args, **kwargs))[1])
+
+    with media_store.local_originals(vault, (first.path,), read=True):
+        with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+            pinned = ledger.execute("SELECT binary_rel FROM media_access").fetchall()
+
+    assert pinned == [(first.path,)]
+    assert second.sidecar_path not in reads
