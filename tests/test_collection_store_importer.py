@@ -1443,6 +1443,25 @@ def test_job_totals_equal_its_receipts_plus_the_batches_that_committed_nothing(s
             name: result["rows"][name] for name in names}
 
 
+def test_activity_of_a_job_this_process_did_not_run_is_unknown_never_zero(store, monkeypatch):
+    """Activity is the running process's own timing; after a restart or an upgrade a zero would read as a stall."""
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=2)
+    timed = status(store, job)
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = status(store, job, handle=handle)
+    activity = timed["activity"]
+    assert (activity["timed_batches"], activity["last_batch"]["batch"], activity["last_batch"]["rows"]) == (2, 1, 40)
+    assert activity["rows_per_second"] > 0 and activity["eta_seconds"] > 0 and activity["phase"] is None
+    assert set(restarted["activity"].values()) == {None}
+    assert (restarted["state"], restarted["rows"]["imported"]) == ("running", timed["rows"]["imported"])
+    assert (restarted["resumable"], restarted["cancellable"]) == (False, True)
+
+
 def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):
     return call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping,
                 **overrides)

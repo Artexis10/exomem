@@ -1460,6 +1460,53 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
     _until(lambda: page.exists() and "1004 committed rows" in page.read_text())
 
 
+def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thread(service, monkeypatch):
+    """Defect: status queued behind a running batch on the one store thread, so a long batch made every
+    poll wait out its queue budget and refuse COLLECTION_STORE_BUSY."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    root = service.root
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 5)
+    write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(40)), SOURCE)
+    in_batch, release = threading.Event(), threading.Event()
+    upsert, batches = CollectionWriter.bulk_upsert_records, []
+
+    def third_batch_waits(self, *args, **kwargs):
+        batches.append(kwargs.get("request_id"))
+        if len(batches) == 3:
+            in_batch.set()
+            assert release.wait(30), "the test did not release the batch"
+        return upsert(self, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "bulk_upsert_records", third_batch_waits)
+    queued = []
+    serve_call = runtime.StoreServer._call
+    monkeypatch.setattr(runtime.StoreServer, "_call", lambda server, work, **kw: (
+        queued.append(threading.get_ident()), serve_call(server, work, **kw))[1])
+    job = imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+    try:
+        assert in_batch.wait(30)
+        queued.clear()
+        status = imported(root, mode="status", continuation=job["continuation"])
+        assert queued == []  # it never entered the store thread's queue, which the held batch keeps
+        assert (status["state"], status["rows"]["imported"], status["resumable"], status["cancellable"]) == (
+            "running", 10, False, True)
+        activity = status["activity"]
+        assert (activity["phase"], activity["batch"], activity["timed_batches"]) == ("writing", 2, 2)
+        assert activity["phase_ms"] >= 0 and activity["since"] is not None
+        last = activity["last_batch"]
+        assert (last["batch"], last["rows"]) == (1, 5) and last["wait_ms"] >= 0 and last["hold_ms"] >= 0
+        assert activity["longest_hold"]["hold_ms"] >= last["hold_ms"]
+        assert set(activity["timings_ms"]) == {"read", "wait", "hold"}
+        assert activity["rows_per_second"] > 0 and activity["eta_seconds"] > 0
+    finally:
+        release.set()
+    _until(lambda: imported(root, mode="status", continuation=job["continuation"])["state"] == "complete")
+    done = imported(root, mode="status", continuation=job["continuation"])
+    # The job no longer runs here, so nothing this host timed describes it.
+    assert set(done["activity"].values()) == {None} and (done["resumable"], done["cancellable"]) == (False, False)
+
+
 def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):
     """Public reads or governance that fall through to physical C bytes outside an explicit preview binding."""
     import yaml

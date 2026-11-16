@@ -1381,6 +1381,60 @@ class StoreServer:
             raise request.error
         return request.result
 
+    def read_beside(self, work, *, initial):
+        """Run a read-only ``work`` on the caller's thread, over a pooled reader of the store's last commit.
+
+        For import status, which must answer while a batch keeps the store thread busy. The
+        caller borrows the store as a checkout does, so the writer handle and its readers stay
+        open, and passes the same admission (``CollectionStoreRuntime.checkout``). The work runs
+        under the views of placement, policy and ownership a store-thread read runs under
+        (``_serve``), with a writer over a ``connection.SnapshotHandle``, which refuses every write.
+        Where this process holds no admitted writer, the request queues on the store thread as
+        before (``call``), whose checkout opens one.
+        """
+        from ..cli_ops import OpError
+        from ..governance import policy
+        from . import capability, ownership
+        from .preview import preview_store
+
+        manager, runtime = self.manager, self.runtime
+        with call_spans.span("store.read_beside"), ExitStack() as scope:
+            handle = None
+            # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.
+            if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):
+                capability.require_not_disabled(self.root)
+                scope.enter_context(manager._collection_store_checkout())
+                with manager._lock:
+                    token = manager._fencing_token
+                handle = runtime._handle
+                if token is None or handle is None or handle._closed or runtime._writer_token != token:
+                    handle = None
+                else:
+                    try:
+                        runtime._admit(token, reads=True)
+                    except OpError as error:
+                        if error.code != "WRITER_FENCED":
+                            raise
+                        handle = None  # the store thread's checkout reacquires, as it does for any read
+            if handle is None:
+                scope.close()
+                return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
+            reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
+            production = runtime._session is not None and runtime._session.production
+            scope.enter_context(state_paths.resolution_scope())
+            scope.enter_context(policy.request_policy_snapshot())
+            snapshot = connection.SnapshotHandle(runtime.path, reader, handle)
+            scope.enter_context(preview_store(self.root, snapshot, production=production))
+            if initial is not None:
+                scope.enter_context(ownership.read_scope(self.root, initial=initial))
+            # One read transaction, so the job row and every check of it read the same commit.
+            reader.execute("BEGIN")
+            try:
+                return work()
+            finally:
+                if reader.in_transaction:
+                    reader.execute("ROLLBACK")
+
     def _busy_refusal(self, message):
         """The retryable refusal for a request this store thread did not serve in time."""
         error = connection.busy(message)

@@ -58,6 +58,7 @@ from . import (
     summary,
     typed_storage,
 )
+from .connection import SnapshotHandle
 from .native_projections import NativeProjectionPlan
 from .query_indexes import ProjectionPlan
 
@@ -675,6 +676,34 @@ def _cursor(main: sqlite3.Connection, collection_id: str, seq: int) -> dict[str,
     before = main.execute("SELECT row_count_after FROM import_members WHERE collection_id=? AND seq=?",
                           (collection_id, seq - 1)).fetchone()
     return {"seq": seq, "member_row": 0, "fold": None, "tally": None, "rows": 0 if before is None else before[0]}
+
+
+def progress_records(store_path: Path) -> dict[str, dict[str, Any]]:
+    """Each open member's progress record in the derived file, by collection, from a plain read; none without one."""
+    found = path(store_path)
+    if not found.is_file():
+        return {}
+    try:
+        with closing(sqlite3.connect(f"{found.resolve().as_uri()}?mode=ro", uri=True)) as reader:
+            return {collection_id: json.loads(record) for collection_id, record in
+                    reader.execute("SELECT collection_id,record_json FROM derived_progress")}
+    except sqlite3.DatabaseError:
+        return {}  # an unreadable file is the writer's to replace; status then counts the job row alone
+
+
+def member_progress(writer, collection_id: str) -> dict[str, Any] | None:
+    """The progress record of the collection's open member that ``writer`` reads, if its job still holds it.
+
+    Off the store thread, a ``connection.SnapshotHandle`` read the records before its first
+    store read. A record the store snapshot has checkpointed past (``_holds``) is then
+    already in the job's counters, so it is dropped rather than counted twice.
+    """
+    handle = writer.handle
+    if isinstance(handle, SnapshotHandle):
+        record = handle.derived_progress.get(collection_id)
+    else:
+        record = open_store(writer).progress(collection_id)
+    return record if record is not None and _holds(writer.connection, record) else None
 
 
 def open_store(writer) -> Store:
