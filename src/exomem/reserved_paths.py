@@ -453,6 +453,10 @@ _REGISTRY = (
         exact=_sqlite_family(".served-context.sqlite"),
     ),
     InternalStateDescriptor(
+        "brief-watermarks", "brief_watermarks", StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".brief-watermarks.sqlite"),
+    ),
+    InternalStateDescriptor(
         "source-corrections", "source_corrections", StatePlacement.VAULT_CANONICAL,
         trees=("_sources/corrections",),
     ),

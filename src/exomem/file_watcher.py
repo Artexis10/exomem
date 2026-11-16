@@ -2608,9 +2608,10 @@ class FileWatcher:
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
             try:
-                from . import served_context
+                from . import brief_watermarks, served_context
 
                 served_context.sweep(self._vault_root)
+                brief_watermarks.sweep(self._vault_root)
             except Exception:  # noqa: BLE001 - private-record retention never stops watcher convergence
                 log.debug("served context retention unavailable")
 

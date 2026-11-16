@@ -218,7 +218,7 @@ class SearchMemory(Wire):
         default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
     options: dict[str, Any] | None = Field(
-        default=None, description="Rare knobs: result_level=passage, mode, rerank, scope, relations, categories, kinds."
+        default=None, description="Rare knobs: mode, rerank, scope, relations, categories, kinds."
     )
     deep: bool | None = Field(default=None, description="Return a packed context for reasoning.")
     limit: int | None = None
@@ -244,7 +244,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class ReadPage(Wire):
     page: Page
-    part: Literal["text", "history", "units"] | None = Field(default=None, description="text (default), history, or units: observations with their ids.")
+    part: Literal["text", "history", "units", "brief"] | None = Field(default=None, description="text (default), history, units: observations with ids, or brief: a topic's brief.")
     more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(
         default=None, description="Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
@@ -257,6 +257,7 @@ def _read_page_leaf(wire: Mapping[str, Any]) -> dict[str, Any]:
         "path": wire.get("page"), "continuation": wire.get("more"),
         "include_history": True if wire.get("part") == "history" else None,
         "units": True if wire.get("part") == "units" else None,
+        "brief": True if wire.get("part") == "brief" else None,
     }
 
 
@@ -268,6 +269,8 @@ def _spell_read(arguments: Mapping[str, Any]) -> dict[str, Any]:
         wire["part"] = "history"
     elif arguments.get("units"):
         wire["part"] = "units"
+    elif arguments.get("brief"):
+        wire["part"] = "brief"
     rest = {key: value for key, value in arguments.items() if key not in handled and value is not None}
     return {**wire, **({"options": rest} if rest else {})}
 
@@ -589,7 +592,7 @@ class SaveSource(Wire):
     projects: list[str] | None = None
     tags: list[str] | None = None
     why: str | None = None
-    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: passages=[{key,text}], raw_protection, source_identity, expected_sha256, correction.")
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction.")
     detail: Detail | None = _DETAIL
 
 

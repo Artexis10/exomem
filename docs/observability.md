@@ -573,6 +573,13 @@ disables the snapshotter thread) so counts survive a restart. Key metrics:
 
 - `exomem_tool_calls_total{tool,outcome}`, `exomem_tool_failures_total{tool,code}`,
   `exomem_tool_duration_ms{tool}` — per-tool call outcomes and latency.
+- `exomem_brief_reads_total{outcome}`, `exomem_brief_failures_total{code}`,
+  `exomem_brief_read_duration_ms` — topic-brief reads (`read_page` with
+  `part="brief"`, and `exomem://brief/...` refs). Each brief read is also one
+  `read_page` call in the `exomem_tool_*` series, so a sum over `tool` counts it
+  once. The brief series hold the brief reads alone, for their own latency
+  budget. The duration covers the walk, the compile and the response, not the
+  terminal guard that runs after it.
 - `exomem_mutation_busy_total{code}`, `exomem_boundary_wait_ms`,
   `exomem_boundary_hold_ms`, `exomem_boundary_overdue_total` — mutation
   contention: busy refusals by code, acquire-wait and hold histograms, and

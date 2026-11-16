@@ -1038,10 +1038,11 @@
           "enum": [
             "text",
             "history",
-            "units"
+            "units",
+            "brief"
           ],
           "type": "string",
-          "description": "text (default), history, or units: observations with their ids."
+          "description": "text (default), history, units: observations with ids, or brief: a topic's brief."
         },
         "more": {
           "type": "string",
@@ -1376,7 +1377,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: passages=[{key,text}], raw_protection, source_identity, expected_sha256, correction."
+          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction."
         },
         "detail": {
           "enum": [
@@ -1424,7 +1425,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: result_level=passage, mode, rerank, scope, relations, categories, kinds."
+          "description": "Rare knobs: mode, rerank, scope, relations, categories, kinds."
         },
         "deep": {
           "type": "boolean",

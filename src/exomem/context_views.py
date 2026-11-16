@@ -75,6 +75,7 @@ MAP_REF = "exomem://map"
 UNFILED_REF = "exomem://map/unfiled"
 TOPIC_REF_PREFIX = "exomem://map/topic/"
 PROFILE_REF_PREFIX = "exomem://profile/"
+BRIEF_REF_PREFIX = "exomem://brief/"
 ANCHOR_PROFILE_PREFIX = PROFILE_REF_PREFIX + "anchor/"
 TOPIC_PROFILE_PREFIX = PROFILE_REF_PREFIX + "topic/"
 # Profile sections are the existing packet sections fixed by the read contract.
@@ -90,6 +91,7 @@ PROFILE_TOPIC = "topic_profile"
 VIEW_MAP = "map"
 VIEW_TOPIC = "topic"
 VIEW_UNFILED = "unfiled"
+VIEW_BRIEF = "brief"
 
 #: The row kind of a topic. The other row kinds are the catalogue's entry kinds.
 KIND_TOPIC = "topic"
@@ -181,7 +183,7 @@ class ViewTarget:
 
 def in_view_namespace(ref: str) -> bool:
     """Whether `ref` belongs to the views. A ref that does but names no view is NOT_FOUND."""
-    return ref == MAP_REF or ref.startswith((MAP_REF + "/", PROFILE_REF_PREFIX))
+    return ref == MAP_REF or ref.startswith((MAP_REF + "/", PROFILE_REF_PREFIX, BRIEF_REF_PREFIX))
 
 
 def parse_view_ref(ref: str) -> ViewTarget | None:
@@ -196,6 +198,10 @@ def parse_view_ref(ref: str) -> ViewTarget | None:
         key = ref[len(prefix):]
         if key and len(key) <= TOPIC_KEY_MAX_CHARS and "/" not in key:
             return ViewTarget(kind, key)
+    if ref.startswith(BRIEF_REF_PREFIX):
+        key = ref[len(BRIEF_REF_PREFIX):]
+        if key and len(key) <= TOPIC_KEY_MAX_CHARS and "/" not in key:
+            return ViewTarget(VIEW_BRIEF, key)
     if ref.startswith(ANCHOR_PROFILE_PREFIX):
         encoded = ref[len(ANCHOR_PROFILE_PREFIX):]
         if encoded and len(encoded) <= ANCHOR_REF_MAX_CHARS and "/" not in encoded:
@@ -1823,6 +1829,12 @@ def read_view(
 
 
 def _read_view(root: Path, path: str, continuation: str | None, purpose: str | None) -> dict[str, Any]:
+    target = parse_view_ref(path)
+    if target is not None and target.kind == VIEW_BRIEF:
+        # A brief is compiled from the graph and the pages, not the catalogue: it has its own reader.
+        from . import topic_brief
+
+        return topic_brief.read_in_scope(root, path, continuation=continuation, purpose=purpose)
     prepared = _prepare(root, path, None, purpose)
     abstained = _usable(prepared)
     if abstained is not None:

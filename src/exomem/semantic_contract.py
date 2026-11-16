@@ -1413,6 +1413,15 @@ def build_page_state(
 _PAGE_DEFINITION_SUBJECTS = ("relations", "categories")
 
 
+def page_definitions_dependency(root: Path) -> tuple:
+    """What interpreting a page's units reads besides the page: the relations and categories of every instance.
+
+    A result kept per page must be dropped when this changes, since a private instance can reinterpret a page
+    that no edit touched.
+    """
+    return instances.definitions_dependency(root, _PAGE_DEFINITION_SUBJECTS)
+
+
 def enrich_page_state(
     root: Path,
     state: SemanticPageState,

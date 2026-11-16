@@ -56,7 +56,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "save_episode": 1100,
     "save_evidence": 1200,
     "save_source": 1300,
-    "search_memory": 1100,  # The options knob names result_level=passage: 1,055 B.
+    "search_memory": 1050,
     "supersede_note": 1300,
     "upload_files": 800,
 }
