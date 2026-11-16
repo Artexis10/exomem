@@ -16,3 +16,6 @@ profiles:
     add_families: [causality, dependency, mitigation, blocking, resolution]
   decision:
     add_families: [evidence, derivation, dependency, implementation, use, mitigation, resolution]
+  # A topic brief reads one subject's neighbourhood: plain links, then the provenance a note cites.
+  brief:
+    add_families: [link, derivation, evidence, citation, observation]

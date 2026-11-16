@@ -330,6 +330,7 @@ def test_a_descriptor_field_that_the_prefilter_has_no_condition_for_lets_every_p
 
 def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> None:
     from exomem import (
+        brief_watermarks,
         claims,
         compiled_history,
         deferred_index,
@@ -353,6 +354,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     expected = {
         "authorization-projections",
         "batch-workspace",
+        "brief-watermarks",
         "claims-store",
         "clip-store",
         "collection-archive",
@@ -440,6 +442,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         ),
         (review_state.state_path(root), "review-state"),
         (served_context.sidecar_path(root), "served-context"),
+        (brief_watermarks.sidecar_path(root), "brief-watermarks"),
         (
             review_state.state_path(root).with_name(
                 f".{review_state.STATE_FILENAME}.abc123_4.tmp"

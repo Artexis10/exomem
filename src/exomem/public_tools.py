@@ -237,7 +237,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class ReadPage(Wire):
     page: Page
-    part: Literal["text", "history", "units"] | None = Field(default=None, description="text (default), history, or units: observations with their ids.")
+    part: Literal["text", "history", "units", "brief"] | None = Field(default=None, description="text (default), history, units: observations with ids, or brief: a topic's brief.")
     more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(
         default=None, description="Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
@@ -250,6 +250,7 @@ def _read_page_leaf(wire: Mapping[str, Any]) -> dict[str, Any]:
         "path": wire.get("page"), "continuation": wire.get("more"),
         "include_history": True if wire.get("part") == "history" else None,
         "units": True if wire.get("part") == "units" else None,
+        "brief": True if wire.get("part") == "brief" else None,
     }
 
 
@@ -261,6 +262,8 @@ def _spell_read(arguments: Mapping[str, Any]) -> dict[str, Any]:
         wire["part"] = "history"
     elif arguments.get("units"):
         wire["part"] = "units"
+    elif arguments.get("brief"):
+        wire["part"] = "brief"
     rest = {key: value for key, value in arguments.items() if key not in handled and value is not None}
     return {**wire, **({"options": rest} if rest else {})}
 

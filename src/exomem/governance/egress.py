@@ -5038,13 +5038,22 @@ def guard_view_response(
     vault_root = Path(vault_root)
     policy, release_gate_active = gate_state(vault_root)
     who = principal if principal is not None else effective_principal()
+    target = context_views.parse_view_ref(str(response.get("ref") or ""))
+    brief = target is not None and target.kind == context_views.VIEW_BRIEF
     if policy.blocked or (not policy.empty and not who.resolved):
         _record_blocked_outcome(who.audience_id)
+        if brief:
+            from .. import topic_brief
+
+            return topic_brief.unavailable(response)
         return {**response, "items": [], "continuation": None}
     guarded = copy.deepcopy(dict(response))
     # The caller's view the compile built: the same principal argument, so the same binding.
     caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
-    target = context_views.parse_view_ref(str(guarded.get("ref") or ""))
+    if brief:
+        from .. import topic_brief
+
+        return topic_brief.guard_response(vault_root, caller, guarded)
     if target is not None and target.profile:
         guarded["items"] = context_views.pinned_items(vault_root, guarded, caller)
         packet = {

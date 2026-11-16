@@ -139,6 +139,24 @@ context, pass that reference or category/kind filters to
 `inspect_memory(operation="connections.graph_context")`. Compact categories do not imply
 typed edges: traversal follows authored relations only.
 
+## Topic brief (`read_page(part="brief")`)
+
+Use when the user wants the whole compiled body of one subject: what its notes conclude,
+which Sources they cite and what stays open. Pass a page of the subject, or free text, as
+`page`. A page fixes the subject. Free text resolves to the best compiled-note hit and lists
+other hits as `related`; read one of them to switch subject.
+
+The brief walks up to two hops from the subject page, in both directions, through compiled
+notes only. It serves three sections: `conclusions`, `sources` and `open_questions`. Each
+item carries its `ref`, `path` and `updated`. A cut shows in `missing` with a count and the
+reason `cap`; it is never silent. A superseded or closed unit is left out and counted on its
+note under `omitted`.
+
+`changed_since` compares the brief with the last one you read to its end: `first_read`,
+`new`, `changed`, `removed` and `new_units`. A brief that spans several pages moves that
+mark only when its last page is served. Write the prose from the brief yourself; the server
+makes no summary. A brief takes no `part="units"`, `options`, or unit reference.
+
 ## Context activation packets (`recall_context`)
 
 Use for initial context when the live engagement policy from `read_instructions` warrants

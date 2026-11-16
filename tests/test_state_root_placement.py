@@ -34,6 +34,7 @@ def _constructor_map():
     store's constructor pins the scratch location too.
     """
     from exomem import (
+        brief_watermarks,
         claims,
         deferred_index,
         due_state,
@@ -95,6 +96,7 @@ def _constructor_map():
         "governance-store": (index_paths.governance_sidecar_path,),
         "due-state": (due_state.state_path,),
         "review-state": (review_state.state_path,),
+        "brief-watermarks": (brief_watermarks.sidecar_path,),
         "served-context": (served_context.sidecar_path,),
         "voice-profile-store": (voice_profiles.voice_profiles_path,),
         "authorization-projections": (
@@ -155,6 +157,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "review-state",
     "served-context",
     "voice-profile-store",
+    "brief-watermarks",
 }
 
 _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {

@@ -10,7 +10,7 @@ commands.
 
 | Simple action | User intent | Product route |
 |---|---|---|
-| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis |
+| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis, or `read_page(part="brief")` for the whole compiled body of one subject ([recall](recall.md)) |
 | `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `save_source` (`content` for text, `files` for attachments). Proof-bearing -> `save_evidence` for text, `save_evidence` for attachments, `upload_files` when the client has no file handles |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `query_plan_items` or `add_plan_item` for a configured Planning collection |

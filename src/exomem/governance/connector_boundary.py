@@ -267,6 +267,19 @@ def cache_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | 
             current.revision if current is not None else None)
 
 
+def ceiling_identity(root: Path, who: RequestPrincipal) -> tuple[str, ...] | None:
+    """The scopes the host ceiling denies `who`, sorted; None when the ceiling cannot be read.
+
+    Callers denied the same scopes see the same pages through the ceiling, whichever client or login they come by,
+    so a value kept per reader that must follow what the reader sees can key on this and outlive a login.
+    """
+    try:
+        current = snapshot(root)
+    except BoundaryUnavailable:
+        return None
+    return () if current is None else tuple(sorted(current.denied_scopes(who)))
+
+
 def admission_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | None = None) -> tuple:
     """Name the denied scopes, configuration revision and registry assignment.
 
