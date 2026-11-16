@@ -1323,7 +1323,9 @@ def _promote_owned(
     from . import original_pool
 
     # Launcher support counts only now that this worker is no standby, and the
-    # supervisor admits no request until promotion returns.
+    # supervisor admits no request until promotion returns. Its one refusal, a
+    # shared-storage archive this launcher cannot record, fails the promotion,
+    # so the supervisor never routes a request here.
     original_pool.activate_at_start(Path(vault_root))
     # Everything this process owes the handoff is settled above. `release()`
     # starts the promoted worker's own warm, which reads `_carried` on its way

@@ -1,9 +1,12 @@
-"""A new archive records that it starts in shared original storage; launcher support decides when."""
+"""New archives start in shared original storage, and arrived ones keep its format recorded, where launcher support
+is proven."""
 
 from __future__ import annotations
 
 import datetime as dt
 import logging
+import shutil
+import uuid
 from pathlib import Path
 
 import pytest
@@ -11,6 +14,7 @@ import pytest
 from exomem import (
     artifact_lifecycle,
     cell_init,
+    cloud_import_job,
     init,
     original_pool,
     originals,
@@ -141,6 +145,49 @@ def test_an_activation_interrupted_after_its_compatibility_record_completes_at_t
     assert original_pool.enabled(vault)
     assert not state_migration.shared_originals_intent(vault)
     assert _objects(vault) == [originals.pooled(vault, filed.path).local_path]
+
+
+def _bare_copy(pooled: Path, tmp_path: Path) -> Path:
+    copy = tmp_path / "copied"
+    shutil.copytree(pooled, copy, symlinks=True)
+    return copy
+
+
+def _cloud_import(pooled: Path, tmp_path: Path) -> Path:
+    cell = tmp_path / "volume" / "vault"
+    cell_init.run_cell_init(cell)
+    staging = tmp_path / "staging"
+    shutil.copytree(pooled, staging, symlinks=True)
+    request = cloud_import_job.CloudImportRequest(
+        import_id=str(uuid.uuid4()), cell_id="cell-a", kind="restore", ciphertext_sha256="0" * 64,
+        ciphertext_bytes=1, declared_bytes=0, declared_files=0)
+    cloud_import_job._restore(cell, staging, request)
+    return cell
+
+
+@pytest.mark.parametrize("arrive", [_bare_copy, _cloud_import], ids=["bare-copy", "cloud-import"])
+def test_a_pooled_archive_that_arrives_without_its_format_is_refused_until_a_capable_start_records_it(
+        tmp_path, monkeypatch, unproven, arrive) -> None:
+    """Catches a service that serves pooled originals with no format recorded, which an older release then reads as
+    missing; and one that records the format where the launcher has not proven support for it."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    source = tmp_path / "source"
+    init.init_vault(source)
+    filed = _upload(source)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    vault = arrive(source, tmp_path)
+    state_migration.require_vault_state_ready(vault)  # The startup admission bootstraps state for the arrival.
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+
+    with pytest.raises(original_pool.LauncherUpdateRequired, match="managed-service-upgrades"):
+        original_pool.activate_at_start(vault)
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.activate_at_start(vault)
+
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(vault)
+    assert originals.pooled(vault, filed.path).local_path.read_bytes() == PHOTO
 
 
 def test_a_new_archive_starts_in_shared_storage_and_files_an_upload_as_one_object(tmp_path, monkeypatch) -> None:

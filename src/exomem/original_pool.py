@@ -112,16 +112,37 @@ _START_LOCK_SECONDS = state_migration._BOOTSTRAP_LOCK_TIMEOUT_SECONDS
 _held: dict[str, str] | None = None
 
 
+class LauncherUpdateRequired(state_migration.StateMigrationOfflineRequired):
+    """A shared-storage archive whose state lacks the format, in a process that may not record it."""
+
+    code = "SHARED_ORIGINALS_LAUNCHER_UPDATE_REQUIRED"
+
+    def __init__(self) -> None:
+        RuntimeError.__init__(
+            self,
+            f"{self.code}: this archive keeps its originals in shared storage, but its state does not record "
+            "that format and the managed launcher has not proven support for it. Update the managed launcher "
+            "offline, as docs/managed-service-upgrades.md describes, then restart the service.",
+        )
+
+
 def activate_at_start(vault: Path) -> None:
-    """Activate a new archive's recorded shared storage before the service admits writes.
+    """Make the vault's original storage servable, and activate a new archive's shared storage, before writes.
 
     The service calls this once it owns the vault, after the launcher or standalone claim: at its start, or at a
-    standby's promotion, since a standby proves no support. Without launcher support, or when activation fails,
-    the archive keeps ordinary storage and its intent for the next start, and the startup log and readiness name
-    the action; startup never fails over it. Originals filed before activation keep their ordinary storage.
+    standby's promotion, since a standby proves no support.
+
+    A shared-storage archive that arrived without its format recorded, as a bare copy or a Cloud import does, has
+    the format recorded first. Without launcher support that raises `LauncherUpdateRequired` and the service
+    refuses to start, as cancelling a held upload refuses: an older release would read its originals as missing.
+
+    A new archive's recorded intent then activates. Without launcher support, or when activation fails, the
+    archive keeps ordinary storage and its intent for the next start, and the startup log and readiness name the
+    action; startup never fails over it. Originals filed before activation keep their ordinary storage.
     """
     global _held
     _held = None
+    _record_arrived_format(vault)
     if not state_migration.shared_originals_intent(vault):
         return
     try:
@@ -138,6 +159,22 @@ def activate_at_start(vault: Path) -> None:
 
     # A ready answer proved before the hold, as during a promotion, must not be served without it.
     runtime_readiness.invalidate_cached_readiness()
+
+
+def _record_arrived_format(vault: Path) -> None:
+    required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID
+    if required in (state_migration.recorded_descriptor_ids(vault) or ()):
+        return
+    # A plain stat first: an archive with no marker, every ordinary one, never waits on the identity gate here,
+    # which a promotion must survive while it is busy.
+    if not (pool_root(vault) / _MARKER_NAME).exists() or not enabled(vault):
+        return
+    if not artifact_lifecycle.supports(required):
+        log.error("refusing to serve a shared-storage archive whose state does not record that format")
+        raise LauncherUpdateRequired()
+    state_migration.record_shared_originals_compatibility(
+        vault, authority_check=lambda: artifact_lifecycle.supports(required), lock_timeout=_START_LOCK_SECONDS)
+    log.warning("recorded the shared original storage format of an archive that arrived without it")
 
 
 def held_activation() -> dict[str, str] | None:
