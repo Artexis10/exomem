@@ -191,6 +191,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "transient_state_review",
     "collection_view_corrections",
     "original_fixity",
+    "source_pointer_drift",
 )
 # The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
 DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
@@ -838,6 +839,9 @@ def audit(
             findings.extend(fixity_findings)
             if fixity_coverage is not None:
                 metadata.setdefault("coverage", {})["original_fixity"] = fixity_coverage
+    with stage('source_pointer_drift') as run:
+        if run:
+            findings.extend(_check_source_pointers(vault_root, pages))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     with stage(semantic_categories) as run:
         if run:
@@ -906,6 +910,86 @@ def _check_original_fixity(vault_root: Path) -> tuple[list[AuditFinding], str | 
     from . import original_fixity
 
     return original_fixity.attention_findings(vault_root)
+
+
+@call_spans.timed("audit.source_pointer_drift")
+def _check_source_pointers(
+    vault_root: Path, pages: list[find_module.ParsedPage]
+) -> list[AuditFinding]:
+    """A Source or Evidence card whose recorded pointer no longer names its bytes."""
+    from . import source_pointers
+
+    inspector = source_pointers.Inspector(vault_root)
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if page.page_type != "source" or in_append_only_tree(page.rel_path) is None:
+            continue
+        request_budget.checkpoint()
+        card = str(page.rel_path)
+        for drift in inspector.inspect_card(page.frontmatter, page.body):
+            candidate = (
+                inspector.candidate(drift.recorded_path)
+                if drift.problem == source_pointers.MISSING
+                else None
+            )
+            findings.append(
+                AuditFinding(
+                    category="source_pointer_drift",
+                    severity="warn",
+                    path=card,
+                    detail=(
+                        f"{drift.field} names {drift.recorded_path}: "
+                        f"{source_pointers.PROBLEM_TEXT[drift.problem]}"
+                    ),
+                    proposed_fix=_source_pointer_fix(
+                        card, drift.field, drift.recorded_path, drift.problem, candidate
+                    ),
+                    paths=[drift.recorded_path, *([candidate] if candidate else [])],
+                    meta={
+                        "field": drift.field,
+                        "recorded_path": drift.recorded_path,
+                        "problem": drift.problem,
+                        "candidate_path": candidate,
+                    },
+                )
+            )
+    return findings
+
+
+def _source_pointer_fix(
+    card: str, field: str, recorded: str, problem: str, candidate: str | None
+) -> str:
+    """The one step that repairs a drifted pointer, spelled as the serving surface calls it.
+
+    Only a Source that does not follow its file by name can be repointed (reclassify refuses an
+    Evidence card and a bound one); for any other card the file moves back to the recorded path.
+    """
+    from . import source_pointers
+
+    repointable = in_append_only_tree(card) == source_taxonomy.SOURCES_ROOT and not (
+        source_pointers.bound(card, field, recorded)
+    )
+    if candidate is not None and not repointable:
+        return capabilities.active_call_text(
+            "manage_memory_file", {"operation": "move", "old_path": candidate, "new_path": recorded}
+        )
+    repoint = capabilities.active_call_text(
+        "manage_memory_file",
+        {
+            "operation": "reclassify",
+            "path": card,
+            "artifact_path": candidate or "<where the card's bytes are now>",
+            "reason": "<why the pointer changes>",
+        },
+    )
+    if candidate is not None:
+        return repoint
+    if problem == source_pointers.OUTSIDE_VAULT:
+        if repointable:
+            return f"Point the card at where its bytes are now with {repoint}."
+        return "No governed step repoints this card, and its pointer leaves the vault."
+    restore = f"Put the card's own bytes back as a plain file at {recorded!r}"
+    return f"{restore}, or point the card at where its bytes are now with {repoint}." if repointable else f"{restore}."
 
 
 @call_spans.timed("audit.bridge_review")

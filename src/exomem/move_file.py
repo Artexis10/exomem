@@ -19,7 +19,7 @@ import datetime as dt
 import hashlib
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import partial
@@ -30,6 +30,7 @@ from . import (
     call_spans,
     graph_sync,
     originals,
+    path_mentions,
     recap_folder,
     reserved_paths,
     semantic_index,
@@ -82,12 +83,15 @@ class MoveFileResult:
     warnings: list[str]
     semantic: dict | None = None
     index: dict | None = None
+    #: Prose mentions of the old path in page bodies that the move renamed.
+    path_mentions_updated: int = 0
 
     def as_dict(self) -> dict:
         return {
             "old_path": self.old_path,
             "new_path": self.new_path,
             "wikilinks_updated": self.wikilinks_updated,
+            "path_mentions_updated": self.path_mentions_updated,
             "files_touched": self.files_touched,
             "warnings": self.warnings,
             "semantic": self.semantic,
@@ -258,6 +262,14 @@ def _paired_artifact(
     return (page_rel, rel) if held else None
 
 
+def paired_move(vault_root: Path, old_page: str, new_page: str) -> tuple[str, str] | None:
+    """The (old, new) binary path that moves with the page `old_page`, or None."""
+    pair = _paired_artifact(vault_root, old_page)
+    if pair is None or pair[0] != old_page:
+        return None
+    return pair[1], new_page.removesuffix(".md")
+
+
 def _repoint_artifact(old_binary: str, new_binary: str):
     """A content transform that repoints a moved page at its moved bytes.
 
@@ -272,21 +284,21 @@ def _repoint_artifact(old_binary: str, new_binary: str):
         if block is None:
             return text
         changes: dict[str, Any] = {}
-        # These two pointer fields belong to the Source/Evidence companion schema.
-        for field in ("evidence_file", "data_file"):
+        for field in originals.SCALAR_POINTERS:
             if frontmatter.get(field) == old_binary:
                 changes[field] = new_binary
-        descriptor = frontmatter.get("governance_companion")
-        if isinstance(descriptor, dict) and descriptor.get("artifact_path") == old_binary:
-            moved_descriptor = {**descriptor, "artifact_path": new_binary}
+        path_key = originals.NESTED_PATH_KEY
+        descriptor = frontmatter.get(originals.GOVERNANCE_COMPANION)
+        if isinstance(descriptor, dict) and descriptor.get(path_key) == old_binary:
+            moved_descriptor = {**descriptor, path_key: new_binary}
             if "original_filename" in descriptor:
                 moved_descriptor["original_filename"] = Path(new_binary).name
-            changes["governance_companion"] = moved_descriptor
+            changes[originals.GOVERNANCE_COMPANION] = moved_descriptor
         if frontmatter.get("original_filename") == Path(old_binary).name:
             changes["original_filename"] = Path(new_binary).name
-        protection = frontmatter.get("raw_protection")
-        if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
-            changes["raw_protection"] = {**protection, "artifact_path": new_binary}
+        protection = frontmatter.get(originals.RAW_PROTECTION)
+        if isinstance(protection, dict) and protection.get(path_key) == old_binary:
+            changes[originals.RAW_PROTECTION] = {**protection, path_key: new_binary}
         if not changes:
             return text
         try:
@@ -329,18 +341,34 @@ class InboundRewrite:
     changes: int
     content: str
     guard: PathGuard
+    #: Prose mentions of the moved path that `content` renames; the page is written when any change.
+    mentions: int = 0
+    #: Mentions a page with an immutable body keeps, as captured.
+    left_mentions: int = 0
 
 
 def plan_inbound_rewrites(
-    vault_root: Path, old_rel: str, new_rel: str, inbound: list[InboundLink]
+    vault_root: Path,
+    old_rel: str,
+    new_rel: str,
+    inbound: list[InboundLink],
+    *,
+    named_in: Sequence[str] = (),
+    paired: tuple[str, str] | None = None,
 ) -> list[InboundRewrite]:
-    """Rewrite each page `inbound` names, in path order, without writing it.
+    """Rewrite each page `inbound` or `named_in` names, in path order, without writing it.
 
     The move and its preview both read their referrer outcomes from here. A
     page that cannot be read is skipped, and each guard binds the bytes read.
+    `named_in` are pages that may cite the moved paths in prose, and `paired` is the
+    moved file's binary when the page moves with one; the mention rewrite covers both.
     """
     plans: list[InboundRewrite] = []
-    for rel in sorted({hit.path for hit in inbound}):
+    pages = sorted({hit.path for hit in inbound} | set(named_in))
+    moves = path_mentions.renames(
+        vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
+    ) if pages else ()
+    for rel in pages:
         if rel == old_rel:
             continue
         try:
@@ -359,14 +387,25 @@ def plan_inbound_rewrites(
         # Rule 2 protects the material, and refusing to repoint an index
         # at a file this op just moved would leave the index dangling —
         # the opposite of what the guard is for.
-        if rel.rsplit("/", 1)[-1] == "index.md":
+        generated_index = rel.rsplit("/", 1)[-1] == "index.md"
+        body_immutable = append_tree is not None and not generated_index
+        if generated_index:
             append_tree = None
         # Only Evidence takes this exception; a Sources page keeps the refusal.
         elif append_tree == "Evidence" and n_changed:
             repointed = _repoint_back_references(text, old_rel, new_rel, n_changed)
             if repointed is not None:
                 new_text, append_tree = repointed, None
-        plans.append(InboundRewrite(rel, abs_file, append_tree, n_changed, new_text, guard))
+        # A prose mention in an immutable body can never be rewritten, by this move or any
+        # other, so refusing would block every later move of the file; it is left and reported.
+        new_text, n_mentions = path_mentions.rewrite(new_text, moves, apply=not body_immutable)
+        left = n_mentions if body_immutable else 0
+        plans.append(
+            InboundRewrite(
+                rel, abs_file, append_tree, n_changed, new_text, guard,
+                mentions=0 if body_immutable else n_mentions, left_mentions=left,
+            )
+        )
     return plans
 
 
@@ -903,8 +942,23 @@ def _move_file_local(
         )
     if limited_mover:
         inbound = [hit for hit in inbound if visible(hit.path)]
+    # Pages that cite the moved paths in prose come from the catalogue, never from a walk.
+    mention_lookup = (
+        path_mentions.find_pages(
+            vault_root, [old_rel, *([paired_binary[0]] if paired_binary is not None else [])]
+        )
+        if update_wikilinks
+        else None
+    )
+    named_in = [
+        rel
+        for rel in (mention_lookup.pages if mention_lookup is not None else ())
+        if not limited_mover or visible(rel)
+    ]
 
     warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
+    if mention_lookup is not None and not mention_lookup.complete:
+        warnings.append(path_mentions.NOT_CHECKED)
     if (
         stored_check is not None
         and stored_check.unimported
@@ -929,6 +983,10 @@ def _move_file_local(
     # `update_wikilinks=false`; the owner's audit reports it. Its change count
     # is kept here so the full figures drop it too.
     hidden_changes: dict[str, int] = {}
+    hidden_mentions: dict[str, int] = {}
+    mentions_updated = 0
+    reported_mentions = 0
+    kept_mentions = 0
 
     # Stage inbound-link rewrites. The file itself moves with one filesystem
     # rename so bytes of any type are preserved without a copy/unlink window.
@@ -937,9 +995,13 @@ def _move_file_local(
     batch_fanout_paths: list[Path] = []
     left_unchanged: list[str] = []
     writable_page = connector_boundary.effect_admission(vault_root)
-    if update_wikilinks and inbound:
-        for item in plan_inbound_rewrites(vault_root, old_rel, new_rel, inbound):
-            if not item.changes:
+    if update_wikilinks and (inbound or named_in):
+        for item in plan_inbound_rewrites(
+            vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired_binary
+        ):
+            if item.left_mentions and (visible is None or visible(item.path)):
+                kept_mentions += 1
+            if not (item.changes or item.mentions):
                 continue
             rel = item.path
             if not writable_page(rel):
@@ -952,6 +1014,7 @@ def _move_file_local(
                 if item.append_only:
                     continue
                 hidden_changes[rel] = item.changes
+                hidden_mentions[rel] = item.mentions
             if item.append_only:
                 raise MoveFileError(
                     code="APPEND_ONLY",
@@ -967,10 +1030,18 @@ def _move_file_local(
             )
             files_touched.append(rel)
             wikilinks_updated += item.changes
+            mentions_updated += item.mentions
             if visible is None or visible(rel):
                 reported_touched.append(rel)
                 reported_updated += item.changes
+                reported_mentions += item.mentions
 
+    if kept_mentions:
+        # Captured pages cannot change; the page count carries no path, so a restricted caller keeps it.
+        warnings.append(
+            f"{kept_mentions} append-only page(s) cite the old path in prose and keep it; "
+            "a Source's own pointer is repaired with reclassify_source and artifact_path"
+        )
     if left_unchanged:
         # No path in the sentence: a restricted caller's response drops a warning that embeds one.
         warnings.append(f"{len(left_unchanged)} visible linking page(s) outside your write scope keep their link to the old path")
@@ -999,6 +1070,7 @@ def _move_file_local(
                 wikilinks_updated=reported_updated,
                 files_touched=list(reported_touched),
                 warnings=list(warnings),
+                path_mentions_updated=reported_mentions,
             ),
             tuple(before),
             tuple(after),
@@ -1026,11 +1098,14 @@ def _move_file_local(
             if restricted
             else (wikilinks_updated, len(files_touched))
         )
+        logged_mentions = reported_mentions if restricted else mentions_updated
         body = (
             f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
             f"wikilinks_updated={logged_updated} across "
             f"{logged_files} file(s)."
         )
+        if logged_mentions:
+            body += f" path_mentions_updated={logged_mentions}."
         if src_curated or dst_curated:
             body += f" allow_curated=true (tree: {src_curated or dst_curated})."
         if promotion:
@@ -1123,6 +1198,7 @@ def _move_file_local(
                 for rel in refused:
                     files_touched.remove(rel)
                     wikilinks_updated -= hidden_changes.pop(rel)
+                    mentions_updated -= hidden_mentions.pop(rel, 0)
                 log_rel_no_ext, log_body, log_plan = plan_activity_log()
                 preflight = run_preflight()
             semantic_states = {
@@ -1563,6 +1639,7 @@ def _move_file_local(
             old_path=old_rel,
             new_path=new_rel,
             wikilinks_updated=reported_updated,
+            path_mentions_updated=reported_mentions,
             files_touched=reported_touched,
             warnings=warnings,
             semantic=semantic,
@@ -1699,6 +1776,7 @@ def _move_file_local(
         old_path=old_rel,
         new_path=new_rel,
         wikilinks_updated=reported_updated,
+        path_mentions_updated=reported_mentions,
         files_touched=reported_touched,
         warnings=warnings,
         semantic=semantic,

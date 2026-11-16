@@ -963,9 +963,9 @@ def _capture_owned_shape_is_valid(frontmatter: dict[str, object]) -> bool:
     validity rather than for particular values.
 
     That distinction used to be absent. Both shape checks required
-    `source_type: other`, which is the Evidence sidecar's hard-coded value and
-    which no real Source has, so a media page captured as a Source failed every
-    check and was rebuilt from scratch — losing its title, kind, domain,
+    `source_type: other`, the value Evidence sidecars then hard-coded (they now
+    record the unclassified kind) and which no real Source has, so a media page
+    captured as a Source failed every check and was rebuilt from scratch — losing its title, kind, domain,
     projects and tags, and having its body demoted under `## Preserved notes`.
     A non-empty `tags` list was required for the same reason, and did the same
     to a capture that legitimately has none.
