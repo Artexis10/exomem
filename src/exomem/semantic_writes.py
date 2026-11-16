@@ -42,12 +42,13 @@ from . import (
     semantic_language_registry,
     source_closure,
     temporal,
+    trash_metadata,
     vault,
 )
 from . import (
     find as find_module,
 )
-from .kbdir import managed_form, managed_join, managed_relative, managed_split
+from .kbdir import managed_form, managed_relative, managed_split
 from .mutation_timings import MutationTimings, mutation_timing_span
 from .vault_store import read
 
@@ -4349,7 +4350,7 @@ def _plan_recovery_lifecycle(
                     for path in preflight.before_corpus.identity_census.paths_by_identity.get(
                         item.after.identity, ()
                     )
-                    if not path.startswith(managed_join("_trash/"))
+                    if not trash_metadata.is_inside_trash(path)
                 )
                 trash_proof = relation_review.LifecycleTrashProof(
                     page_identity=item.after.identity,
