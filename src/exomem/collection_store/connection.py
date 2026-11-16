@@ -446,9 +446,11 @@ class SnapshotHandle:
     A ``CollectionWriter`` over it reads the store's last commit under the same governance
     checks as over the writer, without the store thread (``runtime.StoreServer.read_beside``).
     It shows the live writer handle's host-local import facts read-only, and refuses every write.
+    ``derived`` False, for a request on a collection the store keeps in full, skips the derived file.
     """
 
-    def __init__(self, path: Path, conn: sqlite3.Connection, live: WriterConnection) -> None:
+    def __init__(self, path: Path, conn: sqlite3.Connection, live: WriterConnection, *,
+                 derived: bool = True) -> None:
         from types import MappingProxyType
 
         from . import derived_rows
@@ -464,7 +466,9 @@ class SnapshotHandle:
         self.import_telemetry = MappingProxyType(live.import_telemetry)
         # Read before this reader's first store read, so a record either names a member the store
         # snapshot has not checkpointed past or is dropped (``derived_rows.member_progress``).
-        self.derived_progress = MappingProxyType(derived_rows.progress_records(path))
+        # None, unread or unreadable, is a status's unknown, never an absent member.
+        records = derived_rows.progress_records(path) if derived else None
+        self.derived_progress = None if records is None else MappingProxyType(records)
 
     @property
     def release_cache(self):
@@ -483,6 +487,13 @@ class SnapshotHandle:
 
     def require_write_authority(self, *, allow_diverged: bool = False) -> None:
         raise CollectionStoreError("COLLECTION_STORE_SNAPSHOT_READ_ONLY", "a store snapshot cannot write")
+
+    # The writer's two write entry points (``WriterConnection``), so a write refuses as designed.
+    def transaction(self, *, resolve_divergence: bool = False) -> None:
+        self.require_write_authority()
+
+    def execute(self, statement, parameters=None) -> None:
+        self.require_write_authority()
 
 
 def open_writer(

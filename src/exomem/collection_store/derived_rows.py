@@ -678,8 +678,15 @@ def _cursor(main: sqlite3.Connection, collection_id: str, seq: int) -> dict[str,
     return {"seq": seq, "member_row": 0, "fold": None, "tally": None, "rows": 0 if before is None else before[0]}
 
 
-def progress_records(store_path: Path) -> dict[str, dict[str, Any]]:
-    """Each open member's progress record in the derived file, by collection, from a plain read; none without one."""
+class ProgressUnknown(Exception):
+    """An open member's progress that status could not read, so status reports its counts as unknown."""
+
+
+def progress_records(store_path: Path) -> dict[str, dict[str, Any]] | None:
+    """Each open member's progress record in the derived file, by collection, from a plain read.
+
+    Empty without a derived file; None where the file could not be read, which is the writer's to replace.
+    """
     found = path(store_path)
     if not found.is_file():
         return {}
@@ -688,7 +695,7 @@ def progress_records(store_path: Path) -> dict[str, dict[str, Any]]:
             return {collection_id: json.loads(record) for collection_id, record in
                     reader.execute("SELECT collection_id,record_json FROM derived_progress")}
     except sqlite3.DatabaseError:
-        return {}  # an unreadable file is the writer's to replace; status then counts the job row alone
+        return None
 
 
 def member_progress(writer, collection_id: str) -> dict[str, Any] | None:
@@ -696,10 +703,14 @@ def member_progress(writer, collection_id: str) -> dict[str, Any] | None:
 
     Off the store thread, a ``connection.SnapshotHandle`` read the records before its first
     store read. A record the store snapshot has checkpointed past (``_holds``) is then
-    already in the job's counters, so it is dropped rather than counted twice.
+    already in the job's counters, so it is dropped rather than counted twice. Raises
+    ``ProgressUnknown`` where the snapshot holds no readable records.
     """
     handle = writer.handle
     if isinstance(handle, SnapshotHandle):
+        if handle.derived_progress is None:
+            raise ProgressUnknown(
+                "the open member's progress could not be read, so the counts that include it are null")
         record = handle.derived_progress.get(collection_id)
     else:
         record = open_store(writer).progress(collection_id)

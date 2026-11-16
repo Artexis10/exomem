@@ -1482,6 +1482,23 @@ def test_activity_of_a_job_this_process_did_not_run_is_unknown_never_zero(store,
     assert (restarted["resumable"], restarted["cancellable"]) == (False, True)
 
 
+def test_a_batch_whose_boundary_hold_is_unknown_makes_the_summed_wait_and_hold_unknown(store, monkeypatch):
+    """A sum that counts an unknown hold as zero reports less boundary time than the job spent."""
+    from exomem import mutation_lock
+
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    monkeypatch.setattr(mutation_lock, "last_mutation_timing", lambda coordinator=None: None)
+    run(store, max_batches=1)
+    activity = status(store, job)["activity"]
+    assert activity["timed_batches"] == 2
+    assert (activity["last_batch"]["wait_ms"], activity["last_batch"]["hold_ms"]) == (None, None)
+    assert (activity["timings_ms"]["wait"], activity["timings_ms"]["hold"]) == (None, None)
+    assert activity["timings_ms"]["read"] >= 0
+
+
 def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):
     return call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping,
                 **overrides)
