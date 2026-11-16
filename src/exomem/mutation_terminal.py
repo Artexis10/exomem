@@ -2248,9 +2248,10 @@ def _user_summary(
         names = []
     # A stored row whose path did not read is in the batch rows, named by its `file_id`, but not in `paths`.
     # The sentence counts the files the rows say were stored, so it never reads as fewer than `summary.stored`.
+    # Readable paths lead whatever the row order, and the ids of the unnamed files follow them.
     stored_rows = [name for state, name in batch if state == "stored"]
     if len(stored_rows) > len(names):
-        names = stored_rows
+        names = [*names, *(name for name in stored_rows if name not in names)]
     if not names:
         return head
     if verb == "moved" and len(names) == 2:
