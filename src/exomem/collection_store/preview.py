@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import memory_refs, published_admission, request_budget, state_paths
 from .. import structured_collections as collections
-from .connection import CollectionStoreError, WriterConnection
+from .connection import CollectionStoreError, SnapshotHandle, WriterConnection
 
 if TYPE_CHECKING:
     from .writer import CollectionWriter
@@ -137,13 +137,18 @@ QUERY_RECEIPT_BOUNDARY = "record_query"
 
 
 @contextmanager
-def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
-    """Bind a dark writer for this call context; ownership remains with the caller."""
+def preview_store(
+    vault_root: Path, handle: WriterConnection | SnapshotHandle, *, production: bool = False
+) -> Iterator[CollectionWriter]:
+    """Bind a dark writer for this call context; ownership remains with the caller.
+
+    A runtime says itself whether a production session serves it; a handle takes ``production``
+    from its trusted caller, as a read beside the store thread does (``runtime.StoreServer.read_beside``).
+    """
     from ..writer_lease import _ACTIVE_LEASE_MANAGER, active_manager
     from .runtime import CollectionStoreRuntime, borrowed_writer
 
     root = Path(vault_root).resolve()
-    production = False
     if isinstance(handle, CollectionStoreRuntime):
         if root != handle.root:
             raise CollectionStoreError("COLLECTION_STORE_VAULT_MISMATCH", "foreign preview runtime")

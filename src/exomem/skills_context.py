@@ -18,13 +18,6 @@ from . import activation_conventions, context_catalogue, vault_skills, working_s
 from .governance import egress, principal
 
 
-def held_generation(block: Mapping[str, Any] | None) -> str | None:
-    """The generation a caller holds once it has been served `block`; an empty or unavailable block is owed again."""
-    if isinstance(block, Mapping) and block.get("state") in ("ready", "unchanged"):
-        return block.get("generation")
-    return None
-
-
 def _empty(state: str = "empty") -> dict[str, Any]:
     unknown = state == "unavailable"
     return {"state": state, "generation": None if unknown else "", "items": [], "omitted": None if unknown else 0}

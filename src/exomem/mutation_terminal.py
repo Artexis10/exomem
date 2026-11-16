@@ -2349,6 +2349,9 @@ def project_terminal(
         and leaf.get("results") is not None
         and not media_projection
     )
+    if outcome_verb == "moved" and isinstance(leaf, Mapping) and leaf.get("relocated") is False:
+        # A reclassification that keeps the source where it is (a pointer repair) corrected it in place.
+        outcome_verb = "updated"
     user_summary = (
         None
         if unread_media_batch

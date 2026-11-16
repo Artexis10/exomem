@@ -748,6 +748,27 @@ before the upgrade, as "A release that changes the collection store's schema" in
 
 ### A supervisor older than the vault's state
 
+Held-upload cancellation also requires lifecycle support from the launcher
+and the upgrade operator. A new worker alone cannot activate this format. The
+worker accepts support only through its launch arguments; an inherited
+environment setting cannot supply it. Update an older launcher through the
+offline maintenance procedure before cancelling held uploads.
+
+An upgrade that removes cancellation support first stops the serving worker
+and its descendants. The current interpreter then finishes cancellation
+markers within the maintenance budget. The supervisor inspects the target
+again before admission. Interrupted cleanup retains the format requirement
+and the compatible interpreter for recovery.
+
+Cancellation cleanup retires only its temporary-upload requirement. It cannot
+remove any other recorded format requirement.
+
+A standalone server, including a Cloud cell, is its own launcher, so it can
+cancel held uploads without this update. An older release refuses a vault that
+recorded the cancellation format. Before you start an older release on that
+vault, stop the server, then run
+`exomem maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations`.
+
 A worker records each optional state format that it uses in the vault's state
 manifest, for example the schema of a migrated collection store. The supervisor
 runs from the launcher venv, which a seamless upgrade does not replace. A

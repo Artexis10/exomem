@@ -19,8 +19,6 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import bindparam, select
-
 from .. import (
     call_spans,
     held_fs,
@@ -54,6 +52,7 @@ from . import (
     held_sources,
     index_migrations,
     log_view,
+    multirow,
     record_inputs,
     reference_declarations,
     reference_index,
@@ -72,6 +71,8 @@ from . import (
 from .reader import row_source
 
 BULK_UPSERT_MAX_ROWS = 500
+#: Keys per lookup statement of a batch; far under SQLite's variable limit.
+_LOOKUP_KEYS = 500
 #: The parent's items-mode row ceiling; summary mode is bounded by the store instead.
 ITEMS_MODE_MAX_ROWS = 100_000
 
@@ -509,6 +510,8 @@ class CollectionWriter:
             )
             names = [column[0] for column in cursor.description]
             items = typed_storage.hydrate(self.connection, [dict(zip(names, item, strict=True)) for item in cursor])
+            if manifest.storage.strategy == "markdown-log":
+                items.sort(key=governance.input_order(manifest))
             return StoreAdapter(self, manifest, None)._snapshot(manifest, items, self._container(row))
 
     def _allows_item(self, selector, key):
@@ -2642,19 +2645,39 @@ class CollectionWriter:
 
     def _twins(self, cid, key, natural_key):
         if natural_key is not None:
-            twins = [
+            self._refuse_twins([
                 row[0]
                 for row in self.connection.execute(
                     "SELECT item_key FROM items WHERE collection_id = ? AND natural_key = ? AND item_key != ? ORDER BY item_key",
                     (cid, natural_key, key),
                 )
-            ]
-            if twins:
-                raise collections.CollectionError(
-                    "RECORD_NATURAL_KEY_CONFLICT",
-                    "an existing item already holds this natural key under another identity",
-                    {"item_keys": twins},
-                )
+            ])
+
+    @staticmethod
+    def _refuse_twins(twins):
+        if twins:
+            raise collections.CollectionError(
+                "RECORD_NATURAL_KEY_CONFLICT",
+                "an existing item already holds this natural key under another identity",
+                {"item_keys": twins},
+            )
+
+    def _row_ids(self, collection_id, item_keys):
+        """Row ids of stored items by item key, one single-row read per 500 keys.
+
+        A JSON aggregate returns one row for the whole chunk: each fetched row is a step that
+        releases the GIL, so N rows would cost N steps. Item keys are text and row ids integers,
+        so the JSON round trip is exact.
+        """
+        row_ids = {}
+        for start in range(0, len(item_keys), _LOOKUP_KEYS):
+            part = item_keys[start:start + _LOOKUP_KEYS]
+            (pairs,) = self.connection.execute(
+                "SELECT json_group_array(json_array(item_key, row_id)) FROM items "  # noqa: S608
+                f"WHERE collection_id = ? AND item_key IN ({','.join('?' * len(part))})", (collection_id, *part)
+            ).fetchone()
+            row_ids.update(json.loads(pairs))
+        return row_ids
 
     def _sources(self, sources: Sequence[str]):
         plan = self._dependency_plan
@@ -2860,21 +2883,20 @@ class CollectionWriter:
                                        f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}")
         return tokens.item_version(manifest.collection_id, key, version, payload)
 
+    def _insert_rows(self, table, rows):
+        """Insert a batch's rows of one table as multi-row statements, with the writer's change accounting."""
+        multirow.insert_rows(self._execute, self.connection, table, rows)
+
     def _write_new_items(self, manifest, plans, txn, *, scope=None):
         """Apply admitted new summary rows together inside the existing mutation transaction."""
         manifest_metadata, encoding, layout = self._item_write_context(manifest)
         self._history_reselection(manifest.collection_id, new_row=True)
         parameters = [self._item_parameters(manifest, key, values, body, path, txn, None, manifest_metadata, encoding)
                       for key, values, body, path, _, _ in plans]
-        self._execute(tables.INSERT_ITEM, parameters)
-        statement = select(tables.items.c.item_key, tables.items.c.row_id).where(
-            tables.items.c.collection_id == bindparam("collection_id"),
-            tables.items.c.item_key.in_(bindparam("item_keys", expanding=True)),
-        )
-        row_ids = dict(self._execute(statement, {"collection_id": manifest.collection_id,
-                                               "item_keys": [row["item_key"] for row in parameters]}).fetchall())
+        self._insert_rows("items", parameters)
+        row_ids = self._row_ids(manifest.collection_id, [row["item_key"] for row in parameters])
         if encoding == typed_storage.JSON_V1:
-            self._execute(tables.INSERT_VERSION, [{"row_id": row_ids[row["item_key"]], "row_version": 1,
+            self._insert_rows("item_versions", [{"row_id": row_ids[row["item_key"]], "row_version": 1,
                 "values_json": row["values_json"], "body": row["body"], "payload_hash": row["payload_hash"],
                 "txn_id": txn["txn_id"]} for row in parameters])
         else:
@@ -2887,9 +2909,9 @@ class CollectionWriter:
         reference_index.maintain_many(index_migrations.AccountedWriter(self.connection, self._execute),
             manifest, [(row_ids[key], values) for key, values, _, _, _, _ in plans])
         # Immediate source FKs require every payload identity to exist before sources attach.
-        self._execute(tables.INSERT_SOURCE, [{"row_id": row_ids[key], "row_version": 1,
+        self._insert_rows("item_sources", [{"row_id": row_ids[key], "row_version": 1,
             "ordinal": 0, "source_ref": source} for key, _, _, _, _, source in plans])
-        self._execute(tables.INSERT_EFFECT, [self._item_effect(manifest, key, txn, None, None, ordinal,
+        self._insert_rows("audit_effects", [self._item_effect(manifest, key, txn, None, None, ordinal,
             row_ids[key], 1, row["payload_hash"])
             for ordinal, ((key, _, _, _, _, _), row) in enumerate(zip(plans, parameters, strict=True))])
         item_type = types.type_for_manifest(manifest).item_type

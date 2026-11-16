@@ -108,7 +108,9 @@ for name in ('status', 'full_status', 'graph_status'):
         counts[name] = None
 print(json.dumps(counts))
 """
-SAMPLE_SCRIPT = """import json, os
+# One reading of the cgroup the container sees (memory, CPU time on its monotonic clock), the volume and
+# readiness; catalogue_prewarm runs it in the build container too. A counter it cannot read is None.
+SAMPLE_SCRIPT = """import json, os, time
 def read(path):
     try:
         with open(path) as handle:
@@ -127,6 +129,14 @@ for line in (read(cg + 'memory.stat') or '').splitlines():
 if current is None:
     current, peak, limit = (number(read(cg + 'memory/' + name)) for name in
                             ('memory.usage_in_bytes', 'memory.max_usage_in_bytes', 'memory.limit_in_bytes'))
+cpu = None
+for line in (read(cg + 'cpu.stat') or '').splitlines():
+    key, _, value = line.partition(' ')
+    if key == 'usage_usec':
+        cpu = int(value)
+if cpu is None:
+    legacy = number(read(cg + 'cpuacct/cpuacct.usage'))
+    cpu = None if legacy is None else legacy // 1000
 total = used = None
 try:
     fs = os.statvfs('/data')
@@ -149,6 +159,7 @@ try:
 except Exception:  # a stopped or starting server leaves the sample without readiness, never without memory
     pass
 print(json.dumps({'memory_current': current, 'memory_anon': anon, 'memory_peak': peak, 'memory_limit': limit,
+                  'cpu_usage_usec': cpu, 'mono': time.monotonic(),
                   'volume_total': total, 'volume_used': used, 'ready': ready}))
 """
 # The last bytes of each file in the cell's log folder (EXOMEM_LOG_DIR, set by the cell's manifest), compressed

@@ -3,7 +3,7 @@
 - [ ] 1.1 Add a Records import scenario to the existing latency harness (`scripts/measure-records-append-latency.py`) or a sibling that shares its isolation setup. It covers:
   - a generated source of 58 lists and about 4,800 nested rows, with a 734-row `null`-position tail;
   - a contender option that runs CPU-bound threads in the process;
-  - recorded per-batch wall time, CPU time, statement count, and boundary wait and hold.
+  - recorded per-batch wall time, CPU time, step count (`execute` calls, `executemany` parameter sets and fetched rows), and boundary wait and hold.
 - [ ] 1.2 Record the baseline on `main`: the clean store, then 1 and 2 contenders, 3 repeats each. Keep the run files.
 
 ## 2. Validation and honest counts (delivery 1)
@@ -19,16 +19,35 @@
 - [x] 3.1 Bind a row id with one key-and-version read, cached per collection generation, behind the caller's read decision on each row.
   - Test edit by id on a store collection of 1,000 rows or more, at the production response cap.
   - Test the withheld-row twin.
-- [ ] 3.2 With the owner of `add-collection-query-engine`, complete its Q1 tasks 1.7 to 1.9 and route `query_records` on store collections through `query_engine.sqlite.execute_legacy`. Test a filtered and sorted query over 5,000 rows at the production 200 ms profile (opting out of the suite-wide relaxation), plus the 154-row case beside a CPU-bound thread.
-- [ ] 3.3 Count the `rendered` copy once against the response cap. Take the ownership proof once per request.
+- [x] 3.2 With the owner of `add-collection-query-engine`, complete its Q1 deadline and fetch work (1.7, and 1.8 apart from its memory probe) and route `query_records` on store collections through `query_engine.sqlite.execute_legacy`, as Decision 5 states. Test a filtered and sorted query over 5,000 rows at the shipped `records` profile, plus the 154-row case beside CPU-bound threads.
+  - `tests/test_record_query_selection.py`: routed answers equal the whole read's for filters, sorts, pages, date bounds, default columns, every aggregate and a continuation, on typed and JSON summary collections. A 5,000-row filtered page rebuilds its 10 rows and the 500 leading rows that name its default columns. Default columns over 400 leading rows take a few statements, where the base took one or more per row. A 154-row query answers when every clock reading on its thread advances 0.5 s without CPU, as a wait for the GIL does; it fails on the base commit. A stopped query refuses alike on both routes, converted summary rows keep their item key order, and a 5,000-row whole read outside a query answers under the shipped profile. A withheld row and a restricted caller keep the whole read, and a declined whole read stops decoding at its deadline.
+  - `scripts/measure-records-query.py` on invented data, 2026-11-15, with the base commit and this change run in turn at each size, 3 runs each:
+    - Without busy threads, the 5,000-row filtered page took 44 to 48 ms in 141 statements, against 158 to 225 ms in 5,086 before.
+    - Beside one busy thread, every query at 4,062 and 5,000 rows answered in 0.65 to 1.03 s, where every run refused before. At 154 rows, 9 of 9 runs answered, against 8 of 9 before.
+    - Beside two busy threads, every query at 154, 4,062 and 5,000 rows answered in 1.8 to 3.8 s, where every run refused before. A routed query still makes 120 to 142 statements, and its session setup and rendering run outside the deadline, so its wall time can pass the 2 s backstop.
+    - At 100,000 rows without busy threads, the filtered page answered in 0.38 to 0.48 s, the date sort in 0.48 to 0.57 s and the grouped aggregate in 0.89 to 1.0 s. Before, the date sort and the aggregate refused, and the filtered page answered in 3.9 s in 2 of 3 runs. Beside one busy thread, the filtered page and the date sort answered in 1.9 to 2.2 s and the aggregate refused; beside two, every 100,000-row query refused on the backstop.
+    - The base's busy-thread outcome depends on the host's load: an earlier run under heavier load answered 7 of 9 154-row runs beside one busy thread and 1 of 9 beside two.
+- [x] 3.3 Count the `rendered` copy once against the response cap. Take the ownership proof once per request.
   - [x] A query page renders once and shrinks to the rows that fit the cap, then continues from the last kept row.
-  - [ ] A routed read already hands its routing proof to the store thread and proves nothing itself; a call outside that route proves four times, about 0.3 ms each. Decide with the 3.2 routing.
+  - [x] A routed read already hands its routing proof to the store thread and proves nothing itself; a call outside that route proves four times, about 0.3 ms each. Decide with the 3.2 routing.
+    No change: every production store request is routed. `writer_lease._collection_store_thread` calls `route_with_proof`, which passes the proof to `server.call(initial=..., read_only=True)`; `_serve` enters `ownership.read_scope(initial=...)`, and every inner proof reuses it. Only tests and in-process binders call outside that route.
 
 ## 4. Import holds and status (delivery 2)
 
-- [ ] 4.1 Replace per-row store reads in a batch with set-based reads for existing rows, twins, versions and event effects. Read per-collection layout and epoch once per batch. Show the batch's statement count bounded by tables, not rows, in the benchmark.
+- [x] 4.1 Replace per-row store reads in a batch with set-based reads for existing rows, twins, versions and event effects. Read per-collection layout and epoch once per batch. Show the batch's statement count bounded by tables, not rows, in the benchmark.
+  - Built for a batch of new rows in a summary collection: 500 rows take 197 `execute` calls, no parameter-set steps and 664 fetched rows (861 steps), from 4,685, 3,000 and 4,660 (12,345 steps) on `main`. Fetched rows still grow by one per row, through the effect check's payload read.
+  - Not built: a batch that updates or restates existing rows still writes per row, and a collection with references still maintains its reference index per row.
+  - Evidence: the benchmark on the generated 58-list fixture, 3 repeats at 0, 1 and 2 contenders, from the change that delivered this task.
 - [ ] 4.2 Close a batch at the hold budget as well as at 500 rows or 4 MiB. Test an unrelated interactive write during an import beside two CPU-bound threads: it commits with no `MUTATION_BUSY`, and no hold exceeds the budget.
-- [ ] 4.3 Serve import status from a read snapshot off the store-thread queue, with phase, timings, wait and hold, throughput, ETA and resumable or cancellable. Test status while a batch runs.
+  - Built: a batch on a store collection also closes when reading its rows has taken 250 ms (`importer.BATCH_SECONDS`), before it takes the vault boundary. A derived collection keeps `derived_rows.Store.batch_rows`. `test_a_batch_closed_by_its_time_budget_commits_fewer_rows_and_totals_still_match` checks that such a batch commits fewer rows and that the job totals equal the receipts plus `uncommitted`.
+  - Not met, so this task stays open: holds stay above the budget beside busy threads. Beside two CPU-bound threads, 500 rows read in under 250 ms, so every batch kept 500 rows. Holds took 1.1 to 4.8 s, against 0.8 to 4.2 s at the base commit and 1.4 to 30 s on `main`. A one-row batch still held the boundary for 0.78 to 0.97 s (design Decision 6).
+  - Not met: an unrelated note during an import. A note save alone takes 25.5 s beside two busy threads, against 0.25 s without. In probe runs beside two busy threads, 1 of 5 note saves during an import was refused `MUTATION_BUSY` after 10.2 s. In 3 of 4 runs the import paused. The one run that recorded the reason paused at `store_unavailable` during a note save, a pause that resumes on its own. No suite test is written, because its result would follow the host's load.
+  - Evidence: `scripts/measure-records-import.py` on the generated 58-list fixture, 2026-11-16, with `main`, the base commit and this change, 3 repeats at 0, 1 and 2 contenders. Imports took 0.76 to 0.78 s, 12 to 21 s and 33 to 36 s, against 0.98 to 1.05 s, 50 to 70 s and 192 to 221 s on `main`. Against the base commit no difference is detected: at 1 contender, interleaved runs differ by +1.0 s on average (95% CI -0.3 to +2.3 s).
+- [x] 4.3 Serve import status from a read snapshot off the store-thread queue, with phase, timings, wait and hold, throughput, ETA and resumable or cancellable. Test status while a batch runs.
+  - Built: status reads the job row on the caller's thread over a pooled reader, in one read transaction (`StoreServer.read_beside`). It passes the same admission, ownership proof and authorization check as a store-thread read. It reports `activity` (phase, batch, timings, last and longest batch, rate and ETA), `resumable` and `cancellable`. A job that this process did not run reports every `activity` value as `null`.
+  - `test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thread` holds the store thread inside a batch's write; status queues nothing on it and reports the running batch. `test_activity_of_a_job_this_process_did_not_run_is_unknown_never_zero` checks the `null` values after the writer reopens.
+  - Evidence: a status probe every 0.2 s during the 4,795-row import, 3 runs each at 0, 1 and 2 busy threads, 2026-11-16. This change answered every call; without busy threads its median was 28 to 35 ms (p95 at most 0.11 s). On `main`, 1 to 6 of 10 to 16 calls per run were refused `COLLECTION_STORE_BUSY` beside one or two busy threads.
+  - Not met: the 250 ms status bound beside busy threads. Status answered in a median of 0.74 to 1.0 s beside one busy thread and 2.1 to 2.6 s beside two, at most 7.2 s. It waits for no boundary; its 43 statements each wait for a busy thread (design Decision 6).
 
 ## 5. Closure
 

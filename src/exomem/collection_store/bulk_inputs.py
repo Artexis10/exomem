@@ -89,10 +89,10 @@ def acquire(root, prepared, *, why, on_reject, lifetime):
             outcomes.append(records._bulk_reject(index, "DUPLICATE_ROW_KEY",
                 "an earlier row in this request already holds this natural key", duplicate_of=seen[key], **base))
             continue
-        if candidate.conflict is not None:
+        if candidate.conflict:
             outcomes.append(records._bulk_reject(index, "RECORD_NATURAL_KEY_CONFLICT",
                 "an existing item already holds this natural key under another identity",
-                item_keys=[candidate.conflict], **base))
+                item_keys=candidate.conflict, **base))
             continue
         effective = body if body is not None else before["body"] if before else ""
         try:
@@ -160,7 +160,7 @@ class Candidate:
     natural_key: str | None = None
     derived: bool = False
     before: dict | None = None
-    conflict: str | None = None
+    conflict: list[str] | None = None
 
     @property
     def base(self):
@@ -237,11 +237,12 @@ def _current(writer, cid, candidates):
         cursor.close()
     current = typed_storage.hydrate(writer.connection, rows)
     by_key = {row["item_key"]: row for row in current}
-    by_natural = {row["natural_key"]: row["item_key"] for row in current if row["natural_key"] is not None}
+    holders = {}
+    for row in current:
+        if row["natural_key"] is not None:
+            holders.setdefault(row["natural_key"], []).append(row["item_key"])
     for candidate in candidates:
         if candidate.error is not None:
             continue
         candidate.before = by_key.get(candidate.key)
-        twin = by_natural.get(candidate.natural_key)
-        if twin is not None and twin != candidate.key:
-            candidate.conflict = twin
+        candidate.conflict = sorted(holder for holder in holders.get(candidate.natural_key, ()) if holder != candidate.key)

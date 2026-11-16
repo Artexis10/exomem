@@ -72,7 +72,7 @@ A row withheld from the caller SHALL be reported exactly as an absent row. A sta
 - **THEN** the refusal is identical to the refusal for an id that names no row
 
 ### Requirement: Filtered and sorted Records queries are bounded by the page
-`query_records` with filters, a sort or an aggregate on a store collection SHALL evaluate them in the store, within the interactive query profile, over released rows only. Its cost SHALL depend on the rows that the filter and page touch, not on decoding every row of the collection. Its rows, order, totals, continuation and aggregates SHALL equal the legacy evaluation of the same request.
+`query_records` with filters, a sort or an aggregate on a store collection SHALL decide them in the store service, within the `records` query profile, over released rows only. It SHALL read only the values that its filters, sort, date bounds and aggregate decide on, and SHALL rebuild only the rows it returns and, when the request names no columns, the leading rows that name the default columns. Its rows, order, totals, continuation and aggregates SHALL equal the legacy evaluation of the same request. Where a selected answer could differ from the whole read, the query SHALL keep the whole read under the same deadline.
 
 #### Scenario: A filter on a small collection does not time out
 - **WHEN** a caller filters a 154-row store collection by `startswith` on a string field while background passes run
@@ -83,7 +83,7 @@ A row withheld from the caller SHALL be reported exactly as an absent row. A sta
 - **THEN** the page returns at p95 within 300 ms, and its rows equal the legacy evaluation of the same request
 
 ### Requirement: Import work holds the write boundary briefly and status stays available
-An import batch SHALL issue a number of store statements bounded by the tables it writes, not by its rows. It SHALL close when its elapsed time reaches the documented hold budget, as well as at its row and byte limits. Between batches it SHALL end its hold for a waiting interactive writer.
+An import batch of new rows SHALL take a number of store `execute` calls bounded by the tables it writes, not by its rows. Its fetched rows SHALL be a fixed number plus at most one per row written. A batch that updates or restates existing rows is outside this bound. An import batch SHALL close when its elapsed time reaches the documented hold budget, as well as at its row and byte limits. Between batches it SHALL end its hold for a waiting interactive writer.
 
 Import `status` SHALL answer from a read snapshot without waiting for the collection store thread. It SHALL report:
 
@@ -94,6 +94,10 @@ Import `status` SHALL answer from a read snapshot without waiting for the collec
 - an ETA once two batches give a rate;
 - whether the job can be resumed and cancelled.
 
+#### Scenario: A batch of new rows
+- **WHEN** an import commits a batch of 500 new rows into a summary collection that declares no references
+- **THEN** the batch takes fewer `execute` calls than it has rows, and its fetched rows are at most the rows written plus a fixed number, as the benchmark records in `executes` and `rows_fetched`
+
 #### Scenario: An unrelated write during an import
 - **WHEN** a 4,795-row import runs while background passes keep the process busy, and the agent saves an unrelated note
 - **THEN** the note commits without `MUTATION_BUSY`, and no import batch holds the boundary longer than the hold budget
@@ -103,7 +107,7 @@ Import `status` SHALL answer from a read snapshot without waiting for the collec
 - **THEN** status answers within 250 ms with the job's phase, counts and timings, and is never refused `COLLECTION_STORE_BUSY`
 
 ### Requirement: Records records its load target
-The Records bounds SHALL hold for a store collection of up to 100,000 rows on one personal service under the interactive profile:
+The Records bounds SHALL hold for a store collection of up to 100,000 rows on one personal service under the shipped query profiles:
 
 | Operation | Bound |
 |---|---|

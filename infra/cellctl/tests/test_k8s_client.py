@@ -479,6 +479,27 @@ def test_observe_reads_the_render_digest_applied_at_annotation() -> None:
     assert observed == datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
 
 
+def test_observe_reads_the_hold_keys_that_cellctls_patch_owns() -> None:
+    """Defect: the reconcile tests take patch ownership from their fake, so a misread managedFields
+    entry would keep a patched upgrade hold on a live cell while every one of those tests passed."""
+    from kubernetes import client as k8s
+
+    from cellctl.manifests import UPGRADE_WINDOW_ANNOTATION
+
+    def owns(*keys: str) -> dict:
+        return {"f:metadata": {"f:annotations": {".": {}, **{f"f:{key}": {} for key in keys}}}}
+
+    client = _client(hold_started_at=EARLIER_HOLD, jobs={}, pods=[])
+    client._apps._statefulset.metadata.managed_fields = [
+        k8s.V1ManagedFieldsEntry(manager="cellctl", operation="Apply", fields_v1=owns(HOLD_ANNOTATION)),
+        k8s.V1ManagedFieldsEntry(manager="cellctl", operation="Update",
+                                 fields_v1=owns(HOLD_STARTED_ANNOTATION, UPGRADE_WINDOW_ANNOTATION)),
+        k8s.V1ManagedFieldsEntry(manager="kubectl-edit", operation="Update", fields_v1=owns(HOLD_ANNOTATION)),
+    ]
+
+    assert client.observe(CELL_ID, NAMESPACE).statefulset_patched_hold == {HOLD_STARTED_ANNOTATION}
+
+
 def test_delete_job_propagates_to_its_pods_and_tolerates_an_absent_job() -> None:
     calls: list[tuple] = []
 

@@ -159,6 +159,11 @@ def import_txns(conn):
     return count(conn, "SELECT COUNT(*) FROM txns WHERE request_id LIKE 'import:%'", ())
 
 
+def _inserts(statement, per_row, table):
+    """The single-row statement, or a bulk batch's multi-row INSERT into ``table``."""
+    return statement is per_row or (isinstance(statement, str) and statement.startswith(f"INSERT INTO {table} "))
+
+
 def small(monkeypatch, rows=40):
     monkeypatch.setattr(importer(), "MAX_BATCH_ROWS", rows)
 
@@ -524,7 +529,7 @@ def test_source_release_revoked_during_commit_rolls_back_the_batch(store, monkey
 
     def revoke_mid_batch(self, statement, *args, **kwargs):
         result = execute(self, statement, *args, **kwargs)
-        if statement is tables.INSERT_SOURCE:
+        if _inserts(statement, tables.INSERT_SOURCE, "item_sources"):
             write_scope(store.root, paths="Evidence/**")
             write_rule(store.root, ceiling=0)
         return result
@@ -1229,7 +1234,7 @@ def test_crash_inside_a_batch_leaves_it_absent_and_resumes_once(store, monkeypat
 
     def crash(self, statement, *args, **kwargs):
         result = execute(self, statement, *args, **kwargs)
-        if statement is tables.INSERT_EFFECT:
+        if _inserts(statement, tables.INSERT_EFFECT, "audit_effects"):
             raise _Crash
         return result
 
@@ -1436,6 +1441,62 @@ def test_job_totals_equal_its_receipts_plus_the_batches_that_committed_nothing(s
         assert result["uncommitted"] == {name: uncommitted.get(name, 0) for name in names}
         assert {name: sum(receipt[name] for receipt in receipts) + result["uncommitted"][name] for name in names} == {
             name: result["rows"][name] for name in names}
+
+
+def test_a_batch_closed_by_its_time_budget_commits_fewer_rows_and_totals_still_match(store, monkeypatch):
+    """A batch sized only by rows takes all 500 however slowly they come; one closed early must count each row once."""
+    setup(store, ndjson(null_tail_rows(valid_rows=6, null_rows=2)), fields=NULL_TAIL_FIELDS)
+    monkeypatch.setattr(importer(), "BATCH_SECONDS", 0.0)  # spent before each batch reads its second row
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    result = status(store, job)
+    receipts = [
+        json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+            "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+            (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+    ]
+    assert (result["state"], result["rows"]["imported"], result["rows"]["rejected"]) == ("complete", 6, 2)
+    assert [receipt["inserted"] for receipt in receipts] == [1] * 6  # one row per batch, each in its own receipt
+    assert result["uncommitted"] == {name: 2 if name == "rejected" else 0 for name in names}
+    assert {name: sum(receipt[name] for receipt in receipts) + result["uncommitted"][name] for name in names} == {
+        name: result["rows"][name] for name in names}
+
+
+def test_activity_of_a_job_this_process_did_not_run_is_unknown_never_zero(store, monkeypatch):
+    """Activity is the running process's own timing; after a restart or an upgrade a zero would read as a stall."""
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=2)
+    timed = status(store, job)
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = status(store, job, handle=handle)
+    activity = timed["activity"]
+    assert (activity["timed_batches"], activity["last_batch"]["batch"], activity["last_batch"]["rows"]) == (2, 1, 40)
+    assert activity["rows_per_second"] > 0 and activity["eta_seconds"] > 0 and activity["phase"] is None
+    assert set(restarted["activity"].values()) == {None}
+    assert (restarted["state"], restarted["rows"]["imported"]) == ("running", timed["rows"]["imported"])
+    assert (restarted["resumable"], restarted["cancellable"]) == (False, True)
+
+
+def test_a_batch_whose_boundary_hold_is_unknown_makes_the_summed_wait_and_hold_unknown(store, monkeypatch):
+    """A sum that counts an unknown hold as zero reports less boundary time than the job spent."""
+    from exomem import mutation_lock
+
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    monkeypatch.setattr(mutation_lock, "last_mutation_timing", lambda coordinator=None: None)
+    run(store, max_batches=1)
+    activity = status(store, job)["activity"]
+    assert activity["timed_batches"] == 2
+    assert (activity["last_batch"]["wait_ms"], activity["last_batch"]["hold_ms"]) == (None, None)
+    assert (activity["timings_ms"]["wait"], activity["timings_ms"]["hold"]) == (None, None)
+    assert activity["timings_ms"]["read"] >= 0
 
 
 def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):

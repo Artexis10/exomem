@@ -4056,7 +4056,7 @@ def guard_working_set(
 
                 guarded["skills"] = skills_context.guard_block(vault_root, caller, guarded["skills"])
             guarded["budget"]["used_chars"] = context_views.packet_chars(
-                map_block, slice_block, guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
+                map_block, slice_block, guarded.get("task_context"), guarded.get("next_action"),
             )
 
     ctx = _packet_release(

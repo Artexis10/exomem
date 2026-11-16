@@ -410,6 +410,16 @@ def identity_for(vault_root: Path) -> str:
         conn.close()
 
 
+def held_session_generation(block: Mapping[str, Any] | None) -> str | None:
+    """The generation a caller holds once it has been served a session block (stance or skills).
+
+    A `ready` or `unchanged` block names what the caller now holds; an empty or unavailable block is owed again.
+    """
+    if isinstance(block, Mapping) and block.get("state") in ("ready", "unchanged"):
+        return block.get("generation")
+    return None
+
+
 def encode_continuity(
     *,
     identity: str,
@@ -425,6 +435,7 @@ def encode_continuity(
     map_generation: str | None = None,
     method_versions: Sequence[Mapping[str, str]] = (),
     skills_generation: str | None = None,
+    stance_generation: str | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
@@ -469,6 +480,8 @@ def encode_continuity(
         payload["method_versions"] = [dict(item) for item in method_versions]
     if skills_generation:
         payload["skills_generation"] = str(skills_generation)
+    if stance_generation:
+        payload["stance_generation"] = str(stance_generation)
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
     if thread:
@@ -599,6 +612,9 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     # Optional: a token minted before the skills block rode the packet holds none, and its holder is sent the catalogue.
     if isinstance(payload.get("skills_generation"), str):
         decoded["skills_generation"] = payload["skills_generation"]
+    # Optional: a token minted before the stance was generation-gated holds none, and its holder is sent the stance.
+    if isinstance(payload.get("stance_generation"), str):
+        decoded["stance_generation"] = payload["stance_generation"]
     # Optional: a token minted before the capture policy rode the packet names none.
     if isinstance(payload.get("capture_policy"), str):
         decoded["capture_policy"] = payload["capture_policy"]

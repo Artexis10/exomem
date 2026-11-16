@@ -19,13 +19,17 @@
 
 - [x] 3.1 From the 1.1 results, choose the start-of-turn delivery for the hook and the server instructions; add the `retrieve-inject-hook` delta before code.
 - [ ] 3.2 Implement and prove it on follow-up turns with real models, including a provider outage and a Codex case.
-  - Implementation landed: the native-mode hook fetches the changed session context with one empty-turn call, and the nudge and server instructions ask for recall per new subject. Hook tests cover its transport. The real-model proof (follow-up turns, a provider outage, a Codex case) is still open.
+  - Implementation landed: the native-mode hook fetches the changed session context with one empty-turn call, and the nudge and server instructions ask for recall per new subject. Hook tests cover its transport.
+  - Follow-up turns, proved with a GPT actor on each arm's own server and real hook output, 3 repeats. Before scoping, the per-subject nudge made the agent recall on 7 of 7 general first turns. With the nudge scoped to the user's work or life, it recalled on 0 of 6. Personal follow-up turns recalled 6 of 6, and subject switches recalled on the switching turn.
+  - Provider outage, proved with the same actor against a server whose every call fails. The agent made at most 3 tool calls a turn and did not loop. It said memory was unavailable and asked for the missing facts. It answered general turns with no memory call.
+  - Still open: the Codex case, which needs a Codex client run.
 
 - [ ] 3.3 Evaluate pick-by-problem routing tables (a note whose rows map a problem to the method or source to use) as a method carrier beside skills; specify before code.
 
 ## 4. Verify and deliver
 
-- [ ] 4.1 Run real-model cases: a skill-shaped task in a client without native skills loads the vault skill before acting; an unrelated task loads none.
+- [x] 4.1 Run real-model cases: a skill-shaped task in a client without native skills loads the vault skill before acting; an unrelated task loads none.
+  - GPT actor, client without native skills. The skill-shaped task read the vault skill before drafting in 5 of 5 runs. The unrelated task and the near-miss task loaded no skill in 0 of 8 runs. On the three-page fixture, the arm before the skills block also found the skill, so these cases prove the behaviour but do not separate the arms.
 - [ ] 4.2 Run the full corpus, independent review, CI, merge and the ordinary release.
 - [ ] 4.3 Verify on the installed service: a new conversation receives the catalogue and a matching turn loads the skill.
 - [ ] 4.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.

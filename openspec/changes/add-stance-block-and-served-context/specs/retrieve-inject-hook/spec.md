@@ -2,7 +2,7 @@
 
 ### Requirement: Working-set injection renders stance and central moves
 
-In working-set mode, an admitted ready stance block SHALL render under the existing data header with whole lines and refs. Mark a passed review date as `review due` and show nonzero overflow. Render a stance generation once per session, then one pointer line until its generation changes. All output SHALL obey the existing render ceiling and failure fallback.
+In working-set mode, an admitted ready stance block SHALL render under the existing data header with whole lines and refs. Mark a passed review date as `review due` and show nonzero overflow. Render a stance generation once per session, then one pointer line until its generation changes. The stance SHALL have its own bound beside the render ceiling, as the skills block does: the service bounds it to the vault's `budgets.stance_max_chars`, and the hook caps a malformed block at the most a vault may set. All other output SHALL obey the existing render ceiling, and all output SHALL obey the failure fallback.
 
 When `next_action` exists, render its `say` once after the data block. Otherwise preserve supported older-service recovery through the generated fallback from read-next-action. The hook SHALL keep no independently authored per-state text. A supplied move and its fallback SHALL never both render.
 

@@ -108,28 +108,50 @@ The cost is one indexed range read plus one short hash per row. On a generated s
 - A stored head column is a schema change for a cache.
 - Changing the row id format would break every agent that holds ids.
 
-### 5. Legacy queries on store collections run through the existing SQL legacy executor
+### 5. Legacy queries on store collections select rows through the legacy executor
 
-`add-collection-query-engine` Q1 already delivered `query_engine.sqlite.execute_legacy`, in PR #1563. It runs every legacy operator, sort and aggregate in SQL, over an admitted collection whose released identities are streamed into a private TEMP relation. Its parity suite compares it with the Python oracle row for row. No public route calls it yet, because Q1 tasks 1.7 to 1.9 (deadline, cancellation, temp cap and the gate) are open.
+`add-collection-query-engine` Q1 delivered `query_engine.sqlite.execute_legacy` in PR #1563. As delivered, it ran each row through Python callbacks inside SQLite: a value decode, a match, a sort collation and a TEMP copy. CPython re-takes the GIL at every callback and statement step. Beside one busy thread, that made it slower than the whole read, at 1 to 2 s for 154 rows. Its input order also differed from the Records order on summary collections.
 
-This change completes Q1 1.7 to 1.9 in that change and routes `query_records` on store collections through `execute_legacy`. Store-mode `_summary_rows` then serves only reads that need whole rows. There is still one query engine, and no second path.
+This change keeps `execute_legacy` as the one entry point and replaces its strategy:
+
+- It reads only the fields that the filters, sort, date bounds and aggregate decide on. It reads them in packed keyset chunks in row-id order, one statement step per chunk.
+- It decides each row with the `query_compat` primitives of the file evaluator, so the answers are equal by construction. It does not run each legacy operator in SQL.
+- It returns the row ids of the page, the totals and the aggregate. The Records surface rebuilds only the returned rows. When the request names no columns, it also rebuilds the leading rows in one read and infers the default columns from them, as the file evaluator does.
+- Summary rows keep their item key order. A converted row keeps its old item file path, so view path order would reorder them.
+- Its deadline counts the CPU time of the request's own thread, under a fixed `records` profile of 1 s with a 2 s wall-clock backstop (`add-collection-query-engine` design §9 and §12).
+
+The Records query keeps the whole read, under the same deadline, wherever a selected answer could differ from it: a caller limited to some fields, a derived collection, `typed-v1` rows, child tables, a profile aggregate, or a root that is a system or non-scalar field. Inside a Records query, the whole read also checks the deadline while it decodes rows, and it refuses with the same code, message and details as the selected read. Other whole summary reads bound only their fetch, as before. There is still one query engine.
 
 - The continuation keeps its legacy offset form.
-- The ownership proof is taken once per request.
+- The ownership proof is taken once per request. A routed store request hands its proof to the store thread, which proves nothing itself; only a call outside that route proves again.
 - The `rendered` copy counts once against the response cap.
 
-The Q1 phase gate's other conditions stay with that change: typed v1, declared indexes and the reader RSS envelope.
+The Q1 phase gate's other conditions stay with that change: the 1.8 memory probe, the 1.9 gate, typed v1, declared indexes and the reader RSS envelope.
 
 ### 6. An import batch is short in statements and in time
 
-- **Statements.** One batch runs set-based reads for existing rows and natural-key twins, one `executemany` per table written, and one effects check for the event. Per-collection layout and epoch are read once per batch. This bounds GIL hand-offs by the number of tables, not the number of rows.
-- **Time.** A batch closes at 500 rows, at 4 MiB, or when its elapsed time reaches 250 ms. The time is measured between rows before the commit, so a contended process commits smaller batches.
-- **Interactive waiters.** The existing interactive-waiter yield still ends the tick between batches.
-- **Status.** Status reads the job row through the store's read snapshot on the caller's own connection, not through the store-thread queue, so it answers while a batch runs.
+- **Statements.** Python's sqlite3 releases the GIL at every step: an `execute` call, a parameter set of `executemany`, and a fetched row. A batch's cost under contention is its step count. The count excludes trigger programs, which run inside one step.
+  - A batch of new summary rows takes a number of `execute` calls that does not grow with its rows. It reads the stored rows and natural-key holders that its rows meet with one `IN` query per 500 keys. It writes each table with chunked multi-row `INSERT` statements and reads the new row ids back with one JSON aggregate per 500 keys. It checks the event's effects with one binding query and one payload read per payload layout. Its reads of layout and field epochs run a fixed number of times, not once per row.
+  - The effect check keeps its deep proof: it decodes each stored payload and recomputes its hash. That read returns one row per effect, so a batch of N new rows still takes about N fetch steps. Returning them as one row would need a lossless text form for blob and real cells, which this change does not build.
+  - A batch that updates or restates existing rows still writes them one row at a time, with their per-row reads. A collection that declares references still maintains its reference index row by row. Neither is bounded by this decision.
+  - The benchmark counts steps per batch on the store connection and reports `executes`, `parameter_sets`, `rows_fetched` and `steps`. It does not count through a SQLite trace callback, which also fires for trigger programs and slows the batch it counts.
+- **Time.** A batch on a store collection closes at 500 rows, at 4 MiB, or when reading its rows has taken 250 ms, after at least one row. The time is measured between rows, before the batch takes the vault mutation boundary, so a process that reads rows slowly commits smaller batches. A derived collection keeps its own adaptive sizing (`derived_rows.Store.batch_rows`).
+  - The budget does not time the write. Under CPU-bound threads, the write slows far more than the reading: each of its GIL-releasing steps waits for a busy thread. In the benchmark beside two such threads, 500 rows read in under 250 ms, so every batch kept 500 rows.
+  - Each transaction also pays a fixed cost: a one-row batch takes 362 steps (197 `execute` calls and 165 fetched rows), and a 500-row batch takes 861. Beside two CPU-bound threads, the fixed cost alone holds the boundary for 0.78 to 0.97 s. Sizing a batch by its hold time would shrink every batch toward one row and multiply the import time, and still not bring a hold under 250 ms. A hold within the budget under contention needs that fixed cost cut first.
+- **Interactive waiters.** An import tick ends after its step budget (`derived_rows.STEP_SECONDS`), at a batch boundary. While a request waits, the store thread holds the next tick until that tick starves (`StoreServer._starved`).
+- **Status.** Status reads the job row through a read snapshot on the caller's own thread, over one of the store's pooled readers, inside one read transaction. It does not use the store-thread queue, so it answers while a batch runs.
+  - It passes the same admission and ownership proof as a store-thread read (`StoreServer.read_beside`). A `SnapshotHandle` stands in for the writer handle and refuses every write.
+  - A derived collection's open member progress is read before the snapshot, and kept only while the snapshot has not checkpointed past it.
+  - Without an admitted writer in the process, or while a takeover is unresolved, status queues on the store thread as before.
+  - Phase, timings, waits, holds, rate and ETA are what this process saw of the job's batches (`activity`). A job that this process did not run reports each of them as `null`.
+- **Busy threads.** Beside CPU-bound threads in the process, each step that releases the GIL waits for one of them. Time then follows the step count, not the CPU work.
+  - Beside two such threads, an off-thread status runs 43 statements and waits for no boundary, yet answers in a median of 2.1 to 2.6 s. A note save alone takes 25.5 s, against 0.25 s without busy threads.
+  - One run each at a 0.5 ms GIL switch interval (`sys.setswitchinterval`; the default is 5 ms) took 6.5 s for the import, with a median hold of 0.6 s and a longest of 0.75 s. Status answered in a median of 0.30 s, and the note save took 3.2 s.
+  - The hold and status bounds under contention need fewer steps per operation, a shorter switch interval, or the CPU-bound passes moved out of the process. This change builds none of them.
 
 ### 7. Load target
 
-These bounds hold for a collection of up to 100,000 rows: the items-mode ceiling. They hold on one personal service with the interactive profile.
+These bounds hold for a collection of up to 100,000 rows: the items-mode ceiling. They hold on one personal service with the shipped query profiles.
 
 | Operation | Bound |
 |---|---|

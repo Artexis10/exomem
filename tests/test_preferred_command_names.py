@@ -56,8 +56,8 @@ def test_mcp_lists_the_public_tools_and_each_reaches_guarded_execution(vault, mo
         async with Client(mcp) as client:
             discovered = {tool.name for tool in await client.list_tools()}
             if cloud:
-                # The cell has no upload bridge here, so both file transfers stay withheld.
-                assert discovered == (_LISTED - {"upload_files", "download_files"}) | _CLOUD_TRANSFERS
+                # The cell has no upload bridge here, so the three file-transfer tools stay withheld.
+                assert discovered == (_LISTED - {"upload_files", "download_files", "cancel_uploads"}) | _CLOUD_TRANSFERS
             else:
                 assert discovered == _LISTED
             for command in commands.product_commands_for("mcp", cloud=cloud):

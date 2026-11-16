@@ -30,7 +30,6 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import threading
 import time
 from collections import OrderedDict
@@ -1259,7 +1258,7 @@ def activation_packet(
     packet_limit: int | None = None,
     task_context: Callable[..., dict[str, Any]] | None = None,
     spent_after: int = 0,
-    native_skills: Collection[str] = (), known_skills: str | None = None,
+    native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1277,19 +1276,19 @@ def activation_packet(
 
     `native_skills` names the skills the caller loads itself; the skills block omits them. `known_skills` is the
     skills generation the caller holds: the block repeats no item when it is still current. The block has its own
-    bound and takes nothing from `max_chars`.
+    bound and takes nothing from `max_chars`. `known_stance` does the same for the stance block.
     """
     if purpose is not None:
         with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
             return _activation_packet(
                 vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
                 packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
-                native_skills=native_skills, known_skills=known_skills,
+                native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
             )
     return _activation_packet(
         vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
         packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
-        native_skills=native_skills, known_skills=known_skills,
+        native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
     )
 
 
@@ -1300,7 +1299,7 @@ def _activation_packet(
     packet_limit: int | None = None,
     task_context: Callable[..., dict[str, Any]] | None = None,
     spent_after: int = 0,
-    native_skills: Collection[str] = (), known_skills: str | None = None,
+    native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1327,17 +1326,16 @@ def _activation_packet(
         }
         view = _usable(prepared)
         description = _map_description()
-        # Mandatory map framing must still fit after the fixed shared reserve is taken.
-        minimum_map = len(description) + 1
-        if task_context is not None:
-            minimum_map = math.ceil(minimum_map / (1 - TURN_SLICE_SHARE))
         with find_types.timing_span(timings, "working_set.stance"):
             try:
-                stance_block = stance.compile_block(root, caller, max(0, max_chars - minimum_map), catalogue=catalogue) if stance.enabled() else None
+                # The stance has its own bound, the vault's `stance_max_chars`, as the skills block has: it rides on
+                # every packet, so taking it from `max_chars` would cut the turn's leads on every call.
+                stance_block = stance.compile_block(
+                    root, caller, catalogue=catalogue, known_generation=known_stance,
+                ) if stance.enabled() else None
             except Exception:  # noqa: BLE001 - optional stance must leave the map available
                 stance_block = stance._empty("unavailable") if stance.enabled() else None  # noqa: SLF001
-        stance_chars = stance.chars(stance_block) if stance_block is not None else 0
-        available_chars = max_chars - stance_chars
+        available_chars = max_chars
         # Task invalidation keeps its fixed share even when no complete slice line fits.
         reserve = (int((available_chars + spent_after) * TURN_SLICE_SHARE) if task_context is not None
                    else (0 if turn_leads is None else _slice_reserve(available_chars + spent_after)))
@@ -1392,7 +1390,7 @@ def _activation_packet(
                 except Exception:  # noqa: BLE001 - optional skills must leave the map, stance and turn context available
                     log.warning("skills unavailable", exc_info=True)
                     packet["skills"] = skills_context._empty("unavailable")  # noqa: SLF001
-        packet["budget"]["used_chars"] = map_packet_chars(block) + stance_chars
+        packet["budget"]["used_chars"] = map_packet_chars(block)
         cached_leads = None
 
         def leads_once(caller):
@@ -1563,15 +1561,13 @@ def slice_packet_chars(block: Mapping[str, Any]) -> int:
 
 def packet_chars(
     map_block: Mapping[str, Any], slice_block: Mapping[str, Any] | None,
-    task_block: Mapping[str, Any] | None = None,
-    stance_block: Mapping[str, Any] | None = None, next_action: Mapping[str, Any] | None = None,
+    task_block: Mapping[str, Any] | None = None, next_action: Mapping[str, Any] | None = None,
 ) -> int:
-    """Charge all admitted maps-packet prose through the same accounting path."""
-    from . import context_task, stance
+    """Charge the maps-packet prose that `max_chars` bounds; the stance and skills blocks have their own bounds."""
+    from . import context_task
 
     return (map_packet_chars(map_block) + (0 if slice_block is None else slice_packet_chars(slice_block))
             + (0 if task_block is None else context_task.packet_chars(task_block))
-            + (0 if stance_block is None else stance.chars(stance_block))
             + len((next_action or {}).get("say", "")))
 
 

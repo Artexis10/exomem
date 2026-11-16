@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
+from . import indexes, memory_refs, privacy_log, semantic_contract, source_taxonomy, temporal
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .kbdir import kb_prefix
 from .ocr_facts import OcrFacts
@@ -1211,9 +1211,10 @@ def _render_sidecar(
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
-    Uses `type: source` (with `source_type: other`) since the page-type
-    taxonomy doesn't have a dedicated `evidence` type. Tags surface the
-    evidence + scope context.
+    Uses `type: source` since the page-type taxonomy doesn't have a dedicated
+    `evidence` type. A dataset card carries `dataset-export`; every other sidecar
+    carries the unclassified kind, because no agent chose one for the artifact.
+    Tags surface the evidence + scope context.
 
     `description` is a short human caption; `text` is the full extracted/OCR'd
     content of the artifact. Either or both may be present (the caller only
@@ -1243,7 +1244,11 @@ def _render_sidecar(
     label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
     display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
-    lines.append("source_type: dataset-export" if dataset_format else "source_type: other")
+    lines.append(
+        "source_type: dataset-export"
+        if dataset_format
+        else f"source_type: {source_taxonomy.UNCLASSIFIED_KIND}"
+    )
     lines.append(f"captured: {date_iso}")
     if inspection is not None:
         lines.append(f"inspection_status: {inspection.status}")

@@ -260,15 +260,24 @@ def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple
     With ``with_row_id`` every variant selects ``i.row_id`` first and its
     decoder returns ``(row_id, values)``; the raw item key stays at ``row[1]``.
     """
+    columns, source, decode = scan_parts(session, collection_id, layout, fields, semantic_fields=semantic_fields)
+    head = "i.row_id," if with_row_id else ""
+    skip = 1 + with_row_id
+    sql = (f"SELECT {head}i.item_key,{','.join(columns)} FROM {source} "  # noqa: S608 - internal membership predicate
+           f"WHERE i.collection_id=? AND {predicate}")
+    if with_row_id:
+        return sql, lambda row: (row[0], decode(row[skip:]))
+    return sql, lambda row: decode(row[skip:])
+
+
+def scan_parts(session, collection_id: str, layout, fields: tuple[str, ...], *, semantic_fields=frozenset()):
+    """The columns that read released ``fields`` of ``items i``, their source relation, and a decoder of those cells.
+
+    The decoder takes the selected cells in order and returns the row's values of ``fields``.
+    """
     from ..collection_store.field_admission import WHOLE_SUBTREE
 
     selection = session._selected_fields(collection_id, fields)
-    head = "i.row_id," if with_row_id else ""
-
-    def identified(decode):
-        if not with_row_id:
-            return decode
-        return lambda row: (row[0], decode(row))
 
     if layout is not None and layout.encoding == typed_storage.TYPED_V2:
         from ..collection_store.native_rows import prepare_dense_selection
@@ -278,30 +287,27 @@ def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple
         if prepared is not None:
             columns, decode_dense = prepared
 
-            def decode_native(row):
-                physical = row[2:] if with_row_id else row[1:]
-                values = decode_dense(physical)
+            def decode_native(cells):
+                values = decode_dense(cells)
                 return values if values is not None else session.selected_values(
-                    physical[0], layout, fields, max_bytes=_MAX_DECODE_BYTES, check=session.check)
+                    cells[0], layout, fields, max_bytes=_MAX_DECODE_BYTES, check=session.check)
 
-            return (f"SELECT {head}i.item_key,{columns} FROM {layout.items} i "
-                    f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id "
-                    f"WHERE i.collection_id=? AND {predicate}"), identified(decode_native)
+            return (list(columns), f"{layout.items} i LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id",
+                    decode_native)
 
     if layout is not None and layout.encoding == typed_storage.TYPED_V1 and all(name in layout.fields and (selection.get(name) is True
                                  or selection.get(name) is WHOLE_SUBTREE) for name in fields):
         # Dense admitted scalars share one scan; residuals still need the bounded field-tree reader.
         columns = [(name, layout.fields.index(name)) for name in fields]
-        selected = "".join(f",t.t{ordinal},t.v{ordinal},t.k{ordinal}" for _, ordinal in columns)
-        base = 1 + with_row_id
-        # Row positions of each field's tag; whole scalars must not hold a JSON tree.
-        slots = tuple((name, 3 * index + base - 1) for index, (name, _) in enumerate(columns, start=1))
+        selected = [f"t.{kind}{ordinal}" for _, ordinal in columns for kind in "tvk"]
+        # Cell positions of each field's tag, after both row versions; whole scalars must not hold a JSON tree.
+        slots = tuple((name, 3 * index - 1) for index, (name, _) in enumerate(columns, start=1))
         scalars_only = tuple(at for name, at in slots if selection[name] is True)
         missing, json_tag = typed_storage.MISSING, typed_storage.JSON
         string, int64, decode_value = typed_storage.STRING, typed_storage.INT64, typed_storage.decode_value
 
         def decode_typed(row):
-            if row[base] != row[base + 1]:
+            if row[0] != row[1]:
                 raise QueryError("QUERY_UNAVAILABLE")
             for at in scalars_only:
                 if row[at] == json_tag:
@@ -318,17 +324,14 @@ def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple
                         values[name] = decode_value(tag, value, row[at + 2])
             return values
 
-        return (f"SELECT {head}i.item_key,i.row_version,t.row_version{selected} FROM {layout.items} i "
-                f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id "
-                f"WHERE i.collection_id=? AND {predicate}"), identified(decode_typed)
+        return (["i.row_version", "t.row_version", *selected],
+                f"{layout.items} i LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id", decode_typed)
 
-    def decode(row):
-        return session.selected_values(row[1 + with_row_id], layout, fields,
-                                       max_bytes=_MAX_DECODE_BYTES, check=session.check)
+    def decode(cells):
+        return session.selected_values(cells[0], layout, fields, max_bytes=_MAX_DECODE_BYTES, check=session.check)
 
     items = "items" if layout is None else layout.items  # a derived collection's rows are in its file
-    return (f"SELECT {head}i.item_key,i.row_id FROM {items} i "  # noqa: S608 - internal membership predicate
-            f"WHERE i.collection_id=? AND {predicate}"), identified(decode)
+    return ["i.row_id"], f"{items} i", decode
 
 
 def _iter_rows(session, collection_id: str, shape: _Shape, layout, predicate: str):

@@ -3066,7 +3066,11 @@ def test_a_whole_stance_is_held_when_vocabulary_forces_the_map_to_be_cut(
     assert "Keep the source for each claim." not in second
     assert "already held" in second
     assert "map unchanged" not in second
-    assert max(len(first), len(second)) <= 1100
+    # The stance has its own bound; everything else obeys the render ceiling.
+    working_set = [
+        "\n".join(line for line in text.splitlines() if not line.startswith("- stance:")) for text in (first, second)
+    ]
+    assert max(len(text) for text in working_set) <= 1100
 
 
 def test_an_undelivered_method_reset_does_not_advance_hook_continuity(

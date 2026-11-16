@@ -152,7 +152,6 @@ from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
-from . import skills_context as skills_context_module
 from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
@@ -6351,18 +6350,22 @@ def op_move_file(
     When `update_wikilinks=true` (default), scans the full vault for
     `[[<old>]]`, `[[<old.md>]]`, and `[[<old_basename>]]` (only when the
     basename is unique vault-wide) and rewrites them to point at the
-    new location. Preserves full-form vs stripped-form per link.
+    new location. Preserves full-form vs stripped-form per link. It also
+    renames the exact old vault path where a page body cites it in prose,
+    and leaves a Source or Evidence page that cites it as captured (a
+    warning counts those).
 
     Args:
         old_path: Vault-relative source.
         new_path: Vault-relative destination (must not exist).
-        update_wikilinks: Default true.
+        update_wikilinks: Default true; also covers prose path mentions.
         allow_curated: Required if either end is in a curated tree.
         promotion_reason: Required only for a Sources/ -> Evidence/ promotion;
             recorded in the activity log as the audit trail for the
             reclassification.
 
-    Returns: {old_path, new_path, wikilinks_updated, files_touched, warnings}.
+    Returns: {old_path, new_path, wikilinks_updated, path_mentions_updated,
+    files_touched, warnings}.
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
             CURATED_PROTECTED; PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH
             (either end is a store collection's view path).
@@ -8069,6 +8072,7 @@ def _op_activate_context_body(
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                     known_generation=(held_map or {}).get("map_generation"),
                     native_skills=native_skills, known_skills=(held_map or {}).get("skills_generation"),
+                    known_stance=(held_map or {}).get("stance_generation"),
                     task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                     spent_after=reserved_chars,
@@ -8103,7 +8107,8 @@ def _op_activate_context_body(
                 identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
-                skills_generation=skills_context_module.held_generation(packet.get("skills")),
+                skills_generation=working_set_runtime_module.held_session_generation(packet.get("skills")),
+                stance_generation=working_set_runtime_module.held_session_generation(packet.get("stance")),
             )
             packet["task_context"] = context_task.pin(
                 vault_root, context_views_module.CallerView.current(vault_root, purpose=purpose),
@@ -9769,11 +9774,13 @@ def op_transfer_artifact(
     vault_root: Path, operation: str = "upload", lane: str = "evidence",
     artifact: str | None = None, expected_sha256: str | None = None,
     hold: bool = False, artifacts: list[str] | None = None,
+    uploads: list[str] | None = None,
 ) -> dict:
-    """Prepare an upload or download; a handoff does not prove custody.
+    """Prepare a file transfer or cancel owned waiting uploads.
 
     Upload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.
     Capture its handle. Download: supply artifact or artifacts; use MCP or HTTPS delivery.
+    Cancel: supply uploads, with each held reference from the same authenticated session.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
@@ -9783,10 +9790,48 @@ def op_transfer_artifact(
         hold: One-use upload bound to this session; requires expected_sha256.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
+        uploads: Cancellation only: held-upload references owned by this authenticated session.
     """
     from . import cloud_cell
     from .cli_ops import OpError
 
+    if operation == "cancel":
+        from . import held_uploads
+
+        if (artifact is not None or artifacts is not None or expected_sha256 is not None or hold
+                or not isinstance(uploads, list) or not 1 <= len(uploads) <= held_uploads.HOLD_MAX_COUNT
+                or any(not isinstance(reference, str) for reference in uploads)):
+            raise ValueError(
+                f"INVALID_MODE: cancellation takes 1 to {held_uploads.HOLD_MAX_COUNT} held-upload references only"
+            )
+        malformed = [index for index, reference in enumerate(uploads)
+                     if not held_uploads.is_cancellable_reference(reference)]
+        if malformed:
+            # Checked before any cancellation, so a rejected batch changes nothing and fetches nothing.
+            raise ValueError(
+                f"INVALID_MODE: uploads[{malformed[0]}] is not a held-upload handle; submit the "
+                f"{held_uploads.HELD_SCHEME} reference that the held upload returned, not a URL or file id"
+            )
+        outcomes = []
+        for index, reference in enumerate(uploads):
+            try:
+                released = held_uploads.cancel(vault_root, reference)
+                outcomes.append({"index": index, "state": "cancelled", "released_bytes": released})
+            except held_uploads.HeldUploadError as error:
+                if error.code == "HELD_UPLOAD_UNAVAILABLE":
+                    outcomes.append({"index": index, "state": "unavailable"})
+                else:
+                    outcomes.append({"index": index, "state": "failed",
+                                     "error": {"code": error.code, "message": error.reason}})
+        cancelled = sum(outcome["state"] == "cancelled" for outcome in outcomes)
+        unavailable = sum(outcome["state"] == "unavailable" for outcome in outcomes)
+        failed = sum(outcome["state"] == "failed" for outcome in outcomes)
+        return {
+            "user_summary": f"Cancelled {cancelled} waiting uploads; {unavailable} unavailable and {failed} failed.",
+            "cancelled": cancelled, "unavailable": unavailable, "failed": failed, "uploads": outcomes,
+        }
+    if uploads is not None:
+        raise ValueError("INVALID_MODE: uploads requires cancellation")
     if artifacts is not None:
         if operation != "download" or artifact is not None or hold or expected_sha256 is not None:
             raise ValueError("INVALID_MODE: artifacts needs download, with no artifact, hold or expected_sha256")
@@ -13960,6 +14005,7 @@ def op_reclassify_source(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    artifact_path: str | None = None,
     reason: str | None = None,
 ) -> dict:
     """Correct a captured source's classification and relocate it to match.
@@ -13981,6 +14027,11 @@ def op_reclassify_source(
 
     Both vocabularies are open, exactly as at capture: name the kind and domain
     you actually mean rather than the closest familiar label.
+
+    `artifact_path` repairs the source's pointer to its raw file, for a source whose
+    file moved. It names an existing file under Sources/ or Evidence/ that fits the
+    size and SHA-256 the source records. Alone it leaves the source where it is; revert
+    restores the earlier pointer.
     """
     from . import reclassify_source as reclassify_module
 
@@ -13990,6 +14041,7 @@ def op_reclassify_source(
             path=path,
             source_kind=source_kind,
             domain=domain,
+            artifact_path=artifact_path,
             reason=reason,
         )
     except reclassify_module.ReclassifyError as error:
@@ -14068,6 +14120,7 @@ def op_manage_memory_file(
     new_path: str | None = None,
     source_kind: str | None = None,
     domain: str | None = None,
+    artifact_path: str | None = None,
     reason: str | None = None,
     update_wikilinks: bool = True,
     confirm: bool = False,
@@ -14099,6 +14152,7 @@ def op_manage_memory_file(
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
+        artifact_path: reclassify only: the existing file the source's pointer must name.
         reason: Required for reclassify and revert-reclassification.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
@@ -14214,6 +14268,7 @@ def op_manage_memory_file(
             path=target,
             source_kind=source_kind,
             domain=domain,
+            artifact_path=artifact_path,
             reason=reason,
         )
     if operation == "trash-list":
@@ -14634,6 +14689,14 @@ def writes_through_superseded_maintenance_leaf(command: Command, kwargs: dict[st
     return _resolved_invocation_selector(command, kwargs, "dry_run") is not True
 
 
+def invocation_writes_outside_writer(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Whether a write skips canonical writer custody because it changes only session-private bytes.
+
+    The lease treats it as a read; read-only cells and the call ledger still treat it as a write.
+    """
+    return command.name == "transfer_artifact" and kwargs.get("operation") == "cancel"
+
+
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """Classify one resolved product-command invocation for lease gating.
 
@@ -14642,6 +14705,8 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     Python signature defaults applied only when the selector was truly omitted.
     """
     if command.read_only:
+        return True
+    if invocation_writes_outside_writer(command, kwargs):
         return True
     if command.name == "maintain_memory" and kwargs.get("mode") == "curation":
         from . import curation as curation_module
@@ -15263,7 +15328,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("transfer_token",),
-        {"public_title": "Prepare a file transfer", "surface": "primary", "actions": ("prove",), "first_run_safe": True},
+        {"public_title": "Transfer files or cancel waiting uploads", "surface": "primary", "actions": ("prove",), "first_run_safe": True},
     ),
     (
         "process_media",

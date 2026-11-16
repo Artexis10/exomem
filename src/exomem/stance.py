@@ -52,8 +52,15 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
 
 
-def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None = None, catalogue: Any = None) -> dict[str, Any]:
-    """Compile only admitted inputs; a hidden line changes no generation, count or expiry."""
+def compile_block(
+    root: Path, caller: Any, max_chars: int | None = None, *, today: date | None = None, catalogue: Any = None,
+    known_generation: str | None = None,
+) -> dict[str, Any]:
+    """Compile only admitted inputs; a hidden line changes no generation, count or expiry.
+
+    The block's own bound is the vault's `budgets.stance_max_chars`; `max_chars` only tightens it.
+    `known_generation` is the stance generation the caller holds: a block still at it repeats no line.
+    """
     today = today or date.today()
     own_catalogue = catalogue is None
     catalogue = catalogue or context_catalogue.ContextCatalogue(root)
@@ -100,7 +107,9 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
     vault.recheck_path_guards(root, (guards[path] for path in {item.path for item in admitted}))
     admitted = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
     configured = activation_conventions.load_conventions(root).conventions.budget("stance_max_chars")
-    limit = max(0, max_chars if configured is None else min(configured, max_chars))
+    bounds = [value for value in (configured, max_chars) if value is not None]
+    # The shipped conventions file always sets the budget; the range's top only caps a broken install.
+    limit = max(0, min(bounds) if bounds else activation_conventions.BUDGET_BOUNDS["stance_max_chars"][1])
     # The source path and anchor join the key: terminal egress re-decides the page they name, so a
     # rename must not leave a cached entry pointing at whatever page now holds the old path.
     inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance), item.path, item.anchor) for item in admitted]
@@ -109,8 +118,8 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
         cached = _CACHE.get(key)
         if cached is not None and (cached[0] is None or today < cached[0]):
             _CACHE.move_to_end(key)
-            block = copy.deepcopy(cached[1])
-            _pin(root, caller, block, cached[2])
+            block, served = _as_held(copy.deepcopy(cached[1]), copy.deepcopy(cached[2]), known_generation)
+            _pin(root, caller, block, served)
             return block
     block = _empty()
     # Terminal egress re-decides the unit shape compile admitted, path included, not the bare served line.
@@ -149,20 +158,35 @@ def compile_block(root: Path, caller: Any, max_chars: int, *, today: date | None
         _CACHE.move_to_end(key)
         while len(_CACHE) > CACHE_SIZE:
             _CACHE.popitem(last=False)
+    block, served = _as_held(block, served, known_generation)
     _pin(root, caller, block, served)
     return block
+
+
+def _as_held(
+    block: dict[str, Any], served: list[dict[str, Any]], known_generation: str | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The block as this caller is owed it: a caller that holds exactly these lines is sent none of them again."""
+    if block["state"] == "ready" and known_generation and known_generation == block["generation"]:
+        block.update(state="unchanged", items=[])
+        return block, []
+    return block, served
 
 
 def _pin(root: Path, caller: Any, block: dict[str, Any], served: list[dict[str, Any]]) -> None:
     held = principal.invocation_served()
     if held is not None:
-        held[("stance", str(root), caller.binding, block["generation"])] = (copy.deepcopy(block), copy.deepcopy(served))
+        held[("stance", str(root), caller.binding, block["generation"], block["state"])] = (
+            copy.deepcopy(block), copy.deepcopy(served),
+        )
 
 
 def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any]:
     """Restore this invocation's block and decide its complete unit prose at terminal egress."""
     held = principal.invocation_served()
-    pinned = None if held is None else held.get(("stance", str(root), caller.binding, block.get("generation")))
+    pinned = None if held is None else held.get(
+        ("stance", str(root), caller.binding, block.get("generation"), block.get("state")),
+    )
     if pinned is None:
         return _empty("unavailable")
     block, served = pinned

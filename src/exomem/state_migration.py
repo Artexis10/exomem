@@ -52,11 +52,13 @@ COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID = "collections-sqlite-only-v1"
 #: A vault whose pages the collection store holds (OpenSpec make-vault-store-canonical). It is also the
 #: release capability's name (``collection_store.capability.VAULT_STORE_V1``), so one string serves both.
 VAULT_STORE_COMPATIBILITY_ID = "vault-store-v1"
+# This ID names the closed private-upload cancellation format.
+HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID = "held-upload-cancellation-v1"
 # With the store schema IDs, the closed catalog this release recognizes; an earlier release
 # reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
     "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-    VAULT_STORE_COMPATIBILITY_ID,
+    VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
 })
 
 
@@ -267,7 +269,8 @@ def supported_state_compatibility_ids() -> tuple[str, ...]:
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
         CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-        VAULT_STORE_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
+        VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
+        *store_schema.compatibility_ids(),
     )
 
 
@@ -355,13 +358,15 @@ def _require_collection_store_recovery(session, token) -> None:
 
 
 @contextmanager
-def _collection_store_manifest(vault_root: Path, authority_check: Callable[[], bool], action: str):
+def _collection_store_manifest(
+    vault_root: Path, authority_check: Callable[[], bool], action: str, *, lock_timeout: float | None = None,
+):
     """Yield the complete state manifest under the migration lock, checking the caller's authority first."""
 
     if not callable(authority_check):
         raise StateMigrationOfflineRequired("collection-store authority is absent")
     state_dir = state_paths.vault_state_dir(vault_root)
-    with _migration_lock(state_dir):
+    with _migration_lock(state_dir, timeout_seconds=lock_timeout):
         if authority_check() is not True:
             raise StateMigrationOfflineRequired("collection-store authority is absent")
         manifest = _load_manifest(state_dir, vault_root=vault_root)
@@ -436,11 +441,29 @@ def record_vault_store_compatibility(
                      drop=frozenset() if active else ids)
 
 
+def record_held_upload_cancellation_compatibility(
+    vault_root: Path, *, authority_check: Callable[[], bool], active: bool,
+    lock_timeout: float | None = None,
+) -> None:
+    """Enroll before cancellation, or retire after offline marker cleanup.
+
+    The caller excludes old workers and settles ticket consumption before enrollment.
+    Retirement owns only the temporary-upload format, never another recorded format.
+    A serving caller passes `lock_timeout` and gets `TimeoutError` under contention.
+    """
+    ids = frozenset({HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID})
+    _record_optional(vault_root, authority_check, add=ids if active else frozenset(),
+                     drop=frozenset() if active else ids, lock_timeout=lock_timeout)
+
+
 def _record_optional(vault_root: Path, authority_check: Callable[[], bool], *,
-                     add: frozenset[str], drop: frozenset[str] = frozenset()) -> None:
+                     add: frozenset[str], drop: frozenset[str] = frozenset(),
+                     lock_timeout: float | None = None) -> None:
     if not (add or drop):
         return  # A store schema without an ID has nothing to record and needs no manifest.
-    with _collection_store_manifest(vault_root, authority_check, "enrollment") as (state_dir, manifest):
+    with _collection_store_manifest(
+        vault_root, authority_check, "enrollment", lock_timeout=lock_timeout,
+    ) as (state_dir, manifest):
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
         if (
             physical != set(_descriptor_ids())

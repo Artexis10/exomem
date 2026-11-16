@@ -8821,6 +8821,11 @@ def _collection_store_thread(func):
                     command.name, injected[0], kwargs, write=not (read_only or import_status)
                 )
                 server = routing.server
+                if server is not None and import_status and read_only:
+                    # Status answers while a batch keeps the store thread busy: it reads the store's
+                    # last commit on this thread, under the proof that routed it.
+                    return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof,
+                                              collection=kwargs.get("collection"))
                 if server is not None:
                     if needs_acquisition_request(command.name, kwargs):
                         return server.call_record_request(
@@ -8885,6 +8890,7 @@ def invoke_command(
     from .commands import (
         invocation_is_audit,
         invocation_is_read_only,
+        invocation_writes_outside_writer,
         validate_process_media_operation,
         writes_through_superseded_maintenance_leaf,
     )
@@ -8925,7 +8931,7 @@ def invoke_command(
         selector_error = error
         read_only = False
 
-    if not read_only:
+    if not read_only or invocation_writes_outside_writer(command, kwargs):
         from . import cloud_cell
 
         if cloud_cell.cloud_read_only_enabled():

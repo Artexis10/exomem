@@ -169,6 +169,33 @@
       "type": "object"
     }
   },
+  "cancel_uploads": {
+    "description": "Cancel this session's unclaimed uploads and release their held capacity. Each reference gets an ordered outcome.",
+    "inputSchema": {
+      "properties": {
+        "uploads": {
+          "description": "The exomem-held references of waiting uploads owned by this session.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "detail": {
+          "enum": [
+            "compact",
+            "full"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "uploads"
+      ],
+      "type": "object"
+    }
+  },
   "create_note": {
     "description": "Save a conclusion. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
     "inputSchema": {

@@ -21,7 +21,7 @@ from exomem import server as server_module
 LISTED = {
     "recall_context", "search_memory", "read_page", "read_instructions", "create_note", "add_observation",
     "edit_note", "supersede_note", "save_source", "save_evidence", "save_episode", "upload_files",
-    "download_files", "query_records", "add_record", "edit_record", "query_plan_items", "add_plan_item",
+    "download_files", "cancel_uploads", "query_records", "add_record", "edit_record", "query_plan_items", "add_plan_item",
     "edit_plan_item", "list_review_items", "decide_review_item", "inspect_memory", "manage_memory",
 }
 

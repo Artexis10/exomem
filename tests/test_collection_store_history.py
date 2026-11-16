@@ -117,6 +117,10 @@ def test_control_history_keeps_business_predecessor_and_verifies_after_reopen(st
     ("txns", "UPDATE txns SET why='changed outside the writer' WHERE operation='append'", "event hash differs"),
     ("audit_effects", "UPDATE audit_effects SET hash_before='" + "0" * 64 + "' WHERE version_before IS NOT NULL",
      "effect predecessor payload differs"),
+    ("audit_effects", "UPDATE audit_effects SET hash_after='" + "0" * 64 + "' WHERE version_before IS NOT NULL",
+     "effect version binding differs"),
+    ("audit_effects", "UPDATE audit_effects SET version_after=version_after+1 WHERE version_before IS NULL",
+     "effect version binding differs"),
 ])
 def test_native_corruption_is_an_integrity_error_even_for_cached_inspection(store, table, statement, reason):
     create(store)
@@ -128,6 +132,19 @@ def test_native_corruption_is_an_integrity_error_even_for_cached_inspection(stor
     store.connection.execute(f'DROP TRIGGER "{trigger}"')
     store.connection.execute(statement)
     with pytest.raises(chain.StoreChainError, match=reason):
+        store.inspect_collection(CID)
+
+
+def test_a_json_payload_that_no_longer_hashes_to_its_effect_is_an_integrity_error(store):
+    create(store)
+    _append(store)
+    _correct(store, 2)
+    store.inspect_collection(CID)
+    for (trigger,) in store.connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
+                                               "AND tbl_name='item_versions' AND sql LIKE '%BEFORE UPDATE%'").fetchall():
+        store.connection.execute(f'DROP TRIGGER "{trigger}"')
+    store.connection.execute("UPDATE item_versions SET body='altered outside the writer' WHERE row_version=1")
+    with pytest.raises(chain.StoreChainError, match="immutable version differs from its audit effect"):
         store.inspect_collection(CID)
 
 

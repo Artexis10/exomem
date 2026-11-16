@@ -1369,6 +1369,47 @@ def test_a_write_door_answers_a_withheld_target_as_an_absent_one(
     assert {rel: page_bytes(vaults["A"], rel) for rel in withheld} == before
 
 
+_OPEN_CARD = f"{KB}/Sources/open-card.md"
+_WITHHELD_BYTES = f"{KB}/Sources/Withheld/secret.json"
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_withheld_raw_file_reads_as_absent_to_the_pointer_audit_and_repair(
+    tmp_path: Path, audience: str
+) -> None:
+    """A visible card's pointer must not reveal a withheld file: not as a repair target, a size
+    mismatch or an audit candidate, and never by writing its path into the visible card."""
+    from exomem import audit as audit_module
+
+    stale = f"{KB}/Sources/Other/secret.json"
+    base = {_OPEN_CARD: _page("Open Card", "Raw text.", type="source", data_file=stale)}
+    withheld = {_WITHHELD_BYTES: '{"withheld": true}'}
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience, scope=_WRITE_SCOPE),
+        "A": _materialize(
+            tmp_path / "A" / "vault", {**base, **withheld}, audience, scope=_WRITE_SCOPE
+        ),
+    }
+    card_before = page_bytes(vaults["A"], _OPEN_CARD)
+
+    def audited(vault: Path) -> str:
+        _reset()
+        with request_scope(_writer(audience)):
+            report = audit_module.audit(vault, categories=["source_pointer_drift"])
+        return _text([finding.as_dict() for finding in report.findings])
+
+    def repaired(vault: Path) -> str:
+        return _text(_call(
+            vault, _writer(audience), "manage_memory_file", operation="reclassify",
+            path=_OPEN_CARD, artifact_path=_WITHHELD_BYTES, reason="the file moved",
+        ))
+
+    assert audited(vaults["A"]) == audited(vaults["B"]) != "[]"
+    assert repaired(vaults["A"]) == repaired(vaults["B"])
+    assert page_bytes(vaults["A"], _OPEN_CARD) == card_before
+
+
 _OCCUPANT = "occupied.md"
 _CREATION_DOORS: dict[str, tuple[str, dict[str, Any]]] = {
     "create": (

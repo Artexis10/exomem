@@ -69,6 +69,8 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "recall_canary_failed": EventSpec(),
     "lexical_repair_started": EventSpec(),
     "lexical_repair_finished": EventSpec(),
+    "lexical_catalogue_materialized": EventSpec(),
+    "staged_catalogue_adoption": EventSpec(),
     "cloud_request_credential": EventSpec(),
     "cloud_operation_check": EventSpec(),
 }
