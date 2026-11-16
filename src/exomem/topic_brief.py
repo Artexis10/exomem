@@ -34,6 +34,7 @@ from . import (
     metrics,
     note_types,
     page_names,
+    recall_policy,
     relation_registry,
     semantic_contract,
     semantic_language_registry,
@@ -75,6 +76,9 @@ OPEN_QUESTIONS = "open_questions"
 _PINNED = ("state", "seed", "items", "missing", "related", "changed_since")  # nosemgrep: ep-word-set -- the response schema's own field names.
 
 _CACHE: OrderedDict[tuple[Any, ...], tuple[date | None, _Compiled]] = OrderedDict()
+#: A seed's walk and its closing edges, kept per graph snapshot so a warm read of an unchanged graph reads no edge.
+#: Bounded like `_CACHE`: a process serves a few dozen topics, and a value holds at most NOTE_CAP + SOURCE_CAP pages.
+_WALKS: OrderedDict[tuple[Any, ...], tuple[_Walk, tuple[tuple[str, str, str], ...]]] = OrderedDict()
 _LOCK = threading.Lock()
 
 
@@ -118,6 +122,10 @@ class _Graph:
         self.profile = traversal_profiles.load_profiles(root, registry=relations).resolve(PROFILE)
         self.types = note_types.Basis(root)
         self._seen: dict[str, bool] = {}
+
+    def token(self) -> tuple[str | None, ...] | None:
+        """What names this snapshot's rows, read in the walk's own transaction; None when it names no generation."""
+        return epistemic_graph.snapshot_cache_token(self.conn)
 
     def sees(self, path: str) -> bool:
         """Whether the caller may see the page, decided once per read: the snapshot and the caller do not change under it."""
@@ -388,6 +396,36 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
     return _Walk(seed, tuple((node, distance[node.path]) for node in ranked), tuple(sources), tuple(missing))
 
 
+def _members(
+    root: Path, caller: context_views.CallerView, graph: _Graph, seed: _Node, registries: str,
+) -> tuple[_Walk, tuple[tuple[str, str, str], ...]]:
+    """The seed's walk and closing edges: from the memo when the graph snapshot and the policy are the ones that made it.
+
+    Only an owner's walk is kept. A restricted caller's release decision reads the governance policy, the tombstones
+    and its authorization live, and no graph token names them, so that walk is made afresh on every read. For the
+    owner the walk reads the graph's rows and the recall policy, both of which the key names.
+    """
+    token = None if caller.restricted else graph.token()
+    key = None if token is None else (
+        str(root), caller.binding, seed.path, token, recall_policy.recall_policy_identity(root), registries,
+    )
+    if key is not None:
+        with _LOCK:
+            held = _WALKS.get(key)
+            if held is not None:
+                _WALKS.move_to_end(key)
+                return held
+    walk = _walk(graph, seed)
+    made = (walk, graph.closing([node.path for node, _distance in walk.notes]))
+    if key is not None:
+        with _LOCK:
+            _WALKS[key] = made
+            _WALKS.move_to_end(key)
+            while len(_WALKS) > CACHE_SIZE:
+                _WALKS.popitem(last=False)
+    return made
+
+
 # --------------------------------------------------------------------------- #
 # Compile
 # --------------------------------------------------------------------------- #
@@ -419,7 +457,7 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
-def _registry_digest(root: Path, graph: _Graph) -> str:
+def _registry_digest(root: Path) -> str:
     """What the registries that shape a compile say: the profile, relations, note types, statuses and unit kinds.
 
     The public instance's registries only: a page's own instance can reinterpret its units, and an edit of that
@@ -603,7 +641,7 @@ def _compile(
 
 
 def _compiled(
-    root: Path, caller: context_views.CallerView, graph: _Graph, walk: _Walk, closing: Sequence[tuple[str, str, str]],
+    root: Path, caller: context_views.CallerView, walk: _Walk, closing: Sequence[tuple[str, str, str]], registries: str,
 ) -> _Compiled:
     """The compiled brief for these members: from the cache when its key still holds, else compiled and kept."""
     today = date.today()
@@ -611,8 +649,7 @@ def _compiled(
     sources = [(node.id, node.content_hash, node.lifecycle, node.path) for node in walk.sources]
     key = (
         str(root), caller.binding,
-        _digest([walk.seed.path, members, sources, list(closing), _registry_digest(root, graph),
-                 [PROFILE, MAX_HOPS, NOTE_CAP, SOURCE_CAP]]),
+        _digest([walk.seed.path, members, sources, list(closing), registries, [PROFILE, MAX_HOPS, NOTE_CAP, SOURCE_CAP]]),
     )
     with _LOCK:
         held = _CACHE.get(key)
@@ -796,17 +833,18 @@ def _serve(root: Path, subject: str, continuation: str | None, purpose: str | No
         if seed.id is None:
             raise ValueError("BRIEF_SEED_UNAVAILABLE: this page has no stable id to name its brief by")
         ref = context_views.BRIEF_REF_PREFIX + seed.id
-        walk = _walk(graph, seed)
-        closing = graph.closing([node.path for node, _distance in walk.notes])
+        registries = _registry_digest(root)
+        walk, closing = _members(root, caller, graph, seed, registries)
         try:
-            compiled = _compiled(root, caller, graph, walk, closing)
+            compiled = _compiled(root, caller, walk, closing, registries)
         except working_set_currency.CurrencyUnavailable:
             return _abstain(root, caller, ref, UNAVAILABLE)
     audience = principal.effective_principal().audience_id
     changed, members, units = _changed_since(root, audience, seed, walk, compiled)
     shown = {
         "seed": {"ref": seed.ref, "path": seed.path, "title": _unlinked(seed.title)},
-        "missing": list(walk.missing),
+        # A copy: the walk is shared across reads, and a response is the caller's to change.
+        "missing": [dict(entry) for entry in walk.missing],
     }
     generation = _digest([list(compiled.items), shown])
     offset = 0

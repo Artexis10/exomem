@@ -20,9 +20,10 @@ import pytest
 from conftest import initialize_vault_state_offline
 from test_activate_context_surface import _surface_server
 from test_governance_egress import _external, _reset_caches
+from test_graph_deferred_queue import _seed_live_freshness
 from test_working_set_withheld_twins import _withhold
 
-from exomem import commands, epistemic_graph, lexstore, topic_brief
+from exomem import commands, epistemic_graph, index_sync, lexstore, topic_brief
 from exomem import find as find_module
 from exomem.governance import egress, principal
 
@@ -294,6 +295,86 @@ def test_a_warm_read_reads_no_page_and_an_edit_makes_a_new_generation(tmp_path, 
 
     assert len(reads) > pages_read and edited["generation"] != cold["generation"]
     assert "The deputy keeps the key now." in {item.get("text") for item in edited["items"]}
+
+
+def test_a_warm_read_of_an_unchanged_graph_reads_no_edge(tmp_path, monkeypatch) -> None:
+    vault = _vault(tmp_path, monkeypatch)
+    _hub_world(vault)
+    edge_reads: list[int] = []
+    real = epistemic_graph.GraphView.neighbor_edges
+    monkeypatch.setattr(
+        epistemic_graph.GraphView, "neighbor_edges", lambda *args, **kwargs: edge_reads.append(1) or real(*args, **kwargs)
+    )
+
+    cold = _read(vault, f"{NOTES}/hub.md")
+    walked = len(edge_reads)
+    warm = _read(vault, f"{NOTES}/hub.md")
+
+    assert walked > 0 and len(edge_reads) == walked  # the warm read read no edge
+    assert warm["items"] == cold["items"] and warm["missing"] == cold["missing"]
+
+
+def test_an_edit_through_the_write_path_moves_the_graph_token_and_the_next_read_shows_it(tmp_path, monkeypatch) -> None:
+    """The memo is keyed on the graph's token: a governed write drained incrementally, not rebuilt, must move it."""
+    vault = _vault(tmp_path, monkeypatch)
+    _hub_world(vault)
+    _seed_live_freshness(vault)
+    hub, sister = f"{NOTES}/hub.md", f"{NOTES}/sister-one.md"
+    before = _read(vault, hub)
+    assert "The harbour master keeps the key." in {item.get("text") for item in before["items"]}
+    token = epistemic_graph.cache_token(vault)
+
+    page = commands.op_read_memory(vault, path=sister)
+    operation = {
+        "kind": "replace_string", "old_string": "The harbour master keeps the key.",
+        "new_string": "The deputy keeps the key.", "expected_hash": page["content_hash"],
+    }
+    preview = commands.op_edit_memory(vault, path=sister, why="The key changed hands.", operation=operation, validate_only=True)
+    commands.op_edit_memory(
+        vault, path=sister, why="The key changed hands.",
+        operation={**operation, "transition_token": preview["semantic"]["transition_token"]},
+    )
+    _seed_live_freshness(vault)  # the watcher's part: the registry now holds the edited bytes
+    index_sync.drain_deferred_work(vault)
+
+    moved = epistemic_graph.cache_token(vault)
+    texts = {item.get("text") for item in _read(vault, hub)["items"]}
+    assert moved is not None and token is not None
+    assert moved[3] == token[3] and int(moved[2]) > int(token[2])  # one file, written in place: the drain, not a rebuild
+    assert "The deputy keeps the key." in texts and "The harbour master keeps the key." not in texts
+
+
+def test_an_access_policy_that_withholds_a_member_is_not_served_from_the_memo(tmp_path, monkeypatch) -> None:
+    """The owner's memo is keyed on the recall policy and the graph snapshot: a withheld page never rides a kept walk."""
+    vault = _vault(tmp_path, monkeypatch)
+    _hub_world(vault)
+    hub = f"{NOTES}/hub.md"
+    assert "The harbour master keeps the key." in {item.get("text") for item in _read(vault, hub)["items"]}
+
+    (vault / "Knowledge Base" / "_access.yaml").write_text("excluded:\n  - Notes/Insights/sister-one.md\n", encoding="utf-8")
+    # The graph still holds the page and has not republished under the new policy: the read abstains rather than serve it.
+    unpublished = _read(vault, hub)
+    assert unpublished["state"] == "index_warming" and unpublished["items"] == []
+
+    _reindex(vault)
+    republished = _read(vault, hub)
+    assert republished["state"] == "ready" and "harbour master" not in json.dumps(republished)
+    assert "Berths close at nightfall." in {item.get("text") for item in republished["items"]}
+
+
+def test_a_restricted_caller_walks_afresh_after_a_policy_withholds_a_member(tmp_path, monkeypatch) -> None:
+    """A restricted caller's release decision is not in the graph token, so its walk is never kept."""
+    vault = _vault(tmp_path, monkeypatch)
+    _hub_world(vault)
+    hub = f"{NOTES}/hub.md"
+    assert "The harbour master keeps the key." in {item.get("text") for item in _read(vault, hub, _external())["items"]}
+
+    _withhold(vault, f"{NOTES}/sister-one.md", ceiling=0)
+    _reset_caches()
+    after = _read(vault, hub, _external())
+
+    assert after["state"] == "ready" and "harbour master" not in json.dumps(after)
+    assert "Berths close at nightfall." in {item.get("text") for item in after["items"]}
 
 
 def test_changed_since_names_what_this_principal_has_not_read(tmp_path, monkeypatch) -> None:

@@ -55,6 +55,8 @@ The brief cache is an in-memory LRU of 128 entries under a lock. Its key holds:
 
 The member walk reads content hashes from the index, so a cache hit reads no page.
 
+The walk itself is kept for the owner, in a second LRU of 128 entries that holds the walk and its closing edges. Its key is the root, the caller binding, the seed path, the graph snapshot's token, the recall policy identity and the registry digest. The token is `(schema_version, extension_registry_hash, generation, instance)`, read in the walk's own read transaction. Every write of graph rows bumps `generation` in the transaction that writes them, and a full rebuild replaces `instance`, so any edit, however small, ends the entry. An owner's warm read of an unchanged graph reads no edge. A restricted caller's release decision reads governance policy, tombstones and authorization that no graph token names, so its walk is made again on every read.
+
 A recorded precedent declined a build cache for topic profiles, because no key could cover every input that the build reads. The brief's inputs are closed:
 - The member texts are covered by their hashes.
 - The closure of an open question can come from a page outside the member set, so its closing relations are in the key.
@@ -72,7 +74,7 @@ A sqlite sidecar in the state root, modelled on `served_context`, holds one row 
 
 The product load target is 20,000 pages, about 100,000 units, 120,000 edges and a 10,000-link hub (from the `make-vault-store-canonical` design). At that size, brief reads at the member caps have these budgets:
 - **Cold compile** (a cache miss: up to 80 member reads and unit parses): p95 under 1000 ms, the activation bar.
-- **Warm read** (walk, digest, cache hit, watermark diff): p95 under 250 ms.
+- **Warm read** (walk or memo hit, digest, cache hit, watermark diff): p95 under 250 ms. A restricted caller's warm read still makes its walk.
 - **Topic text** adds one hybrid search.
 
 Per-request work is bounded by the member caps and the page size. The walk passes only through compiled notes, so a 10,000-link hub cannot widen it. Proof: cold and warm timings on a generated store at the load target, plus a read-count test showing that a warm read reads zero pages. Production latency and errors are recorded under the route label `read_page:brief`.

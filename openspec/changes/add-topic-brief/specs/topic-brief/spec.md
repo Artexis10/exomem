@@ -65,6 +65,17 @@ The server SHALL cache a compiled brief under a key of the store root, the calle
 - **WHEN** a caller reads the same brief twice with no change to the store
 - **THEN** the second read performs no page reads and returns the same generation
 
+### Requirement: An owner's member walk is kept under the graph snapshot's token
+The server SHALL keep the member walk and closing edges of an owner's read under a key of the store root, the caller binding, the seed path, the graph snapshot's token read in the walk's own read transaction, the recall policy identity and the registry digest. The token SHALL change on every write of graph rows, including an incremental refresh of one page. A restricted caller's walk SHALL NOT be kept.
+
+#### Scenario: A warm owner read reads no edge
+- **WHEN** an owner reads the same brief twice with no change to the graph
+- **THEN** the second read performs no graph edge read
+
+#### Scenario: An edit ends the kept walk
+- **WHEN** a member page is edited through a governed write and the graph catches up incrementally
+- **THEN** the graph token differs and the next read serves the edited text
+
 ### Requirement: A brief filters by the caller's view first
 Every candidate SHALL be filtered by what the caller may see before it is ordered, counted, capped, hashed, cached under a key or compared with a watermark. A page the caller cannot see SHALL move no byte of the response, including `missing` counts, `related` and `changed_since`. The compile SHALL record its served items, and the terminal egress guard SHALL re-decide them for the `brief` view kind.
 
