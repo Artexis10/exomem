@@ -940,6 +940,23 @@ def test_watcher_can_read_an_existing_ledger_before_the_media_schema_upgrade(vau
     assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).do_offload
 
 
+def test_a_media_event_that_the_store_cannot_judge_still_reaches_the_debounce(vault: Path, tmp_path: Path, selected_store):
+    """A media event whose original the store cannot resolve, such as a link in the Knowledge Base, raised out of the
+    watchdog handler and stopped the watcher from seeing any later change."""
+    from exomem import file_watcher
+
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"bytes kept outside the vault")
+    link = vault / "Knowledge Base" / "Notes" / "linked.txt"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(link, deleted=False)
+
+    assert link in watcher._pending_media
+
+
 def test_placement_before_cache_row_crash_recovers_without_provenance_rewrite(vault: Path, selected_store, monkeypatch):
     from exomem import media_jobs, media_processing, media_store
 

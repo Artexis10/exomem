@@ -1337,7 +1337,11 @@ class FileWatcher:
         if self._importer is None and path.suffix.lower() != ".md" and self._is_kb(path):
             from . import media_store
 
-            disposition = media_store.managed_event(self._vault_root, path)
+            try:
+                disposition = media_store.managed_event(self._vault_root, path)
+            except Exception:  # noqa: BLE001 - an unjudged event is recorded as an ordinary change, which the debounce re-reads
+                log.warning("a media event could not be matched to the media store", exc_info=True)
+                disposition = None
             if disposition == media_store.DEFER:
                 with self._lock:
                     self._managed_media_events[path] = deleted
