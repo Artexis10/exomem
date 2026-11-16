@@ -885,6 +885,26 @@ def restore_connector_boundary_offline(vault_root: Path, *, authority: object, r
     ))
 
 
+def restore_shared_originals_offline(vault_root: Path, *, authority: object) -> None:
+    """Re-enrol a restored archive whose canonical pool marker the caller has read, before anything serves it.
+
+    The archive carries the marker but not the state manifest, so without this an earlier release would open
+    the restored archive and find its pooled originals absent.
+    """
+    _require_offline_authority(authority)
+    root = Path(vault_root)
+    state_dir = state_paths.vault_state_dir(root)
+    with _migration_lock(state_dir):
+        manifest = _load_manifest(state_dir, vault_root=root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("restored shared originals require complete state")
+        if SHARED_ORIGINALS_COMPATIBILITY_ID not in manifest["descriptors"]:
+            manifest["descriptors"] = sorted([*manifest["descriptors"], SHARED_ORIGINALS_COMPATIBILITY_ID])
+            _write_manifest(state_dir, manifest)
+        with _RESOLUTION_LOCK:
+            _RESOLUTION_CACHE.pop(_cache_key(root, state_dir), None)
+
+
 def migrate_vault_state_offline(
     vault_root: Path,
     *,

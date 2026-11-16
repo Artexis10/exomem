@@ -500,3 +500,69 @@ def test_a_compatibility_export_invalidates_a_trash_retirement_and_keeps_its_pag
         assert {page: archive.read(page) for page in pages} == pages
     assert json.loads((vault / metadata).read_bytes()) == placement
 
+
+def _restore(archive: Path, tmp_path: Path) -> vault_portability.PublishedRestore:
+    prepared = vault_portability.prepare_restore(archive, tmp_path / "staging",
+                                                 context=_context(lifecycle_state="restore-staging"))
+    return vault_portability.publish_prepared_restore(prepared, tmp_path / "restored")
+
+
+def test_a_capable_restore_brings_back_the_pool_bindings_format_and_cloud_reference(
+        vault: Path, selected_store, tmp_path: Path, monkeypatch) -> None:  # noqa: F811
+    """Catches a restore that serves a pooled archive without its format requirement, so an older runtime that starts
+    on it finds pages that name nothing; or one that drops a shared object, a binding or a retained Cloud reference."""
+    cached = _stored(vault, "cached", 300)
+    cached_bytes = cached.read_bytes()
+    _pool(vault, monkeypatch, cached)
+    stored = cached.relative_to(vault).as_posix()
+    originals_bytes, pages = _converted_filings(vault, monkeypatch)
+    originals_bytes[stored] = cached_bytes
+    pages[f"{stored}.md"] = (vault / f"{stored}.md").read_bytes()
+    reference = originals.original_state(vault, stored).reference
+    objects = sorted(path.relative_to(vault) for path in original_pool.pool_root(vault).rglob("*.blob"))
+    exported = vault_portability.export_quiesced_vault(vault, tmp_path / "exports", context=_context())
+
+    published = _restore(exported.archive_path, tmp_path)
+
+    restored = published.live_root
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): values, str(restored): values}}))
+    assert published.derived_state == "pending"
+    assert state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(restored)
+    state_migration.require_vault_state_ready(restored)
+    assert sorted(path.relative_to(restored) for path in original_pool.pool_root(restored).rglob("*.blob")) == objects
+    with library_scope():
+        assert {path: media_store.read_original_bytes(restored, path).data for path in originals_bytes} == originals_bytes
+    assert not any((restored / path).exists() for path in originals_bytes)
+    assert {page: (restored / page).read_bytes() for page in pages} == pages
+    assert reference is not None and originals.original_state(restored, stored).reference == reference
+
+
+def test_a_grant_on_one_restored_filing_does_not_reveal_another_that_shares_its_object(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches a restore that resolves access through the shared object, so a reader granted one protected filing
+    reads every filing that shares its bytes. The destination owns governance, so the owner grants after restore."""
+    from exomem import commands
+    from exomem.governance import raw_protection
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+    from exomem.writer_lease import invoke_command
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    granted, _page = _file(vault, "contracts", "first.pdf", INVOICE, protected=True)
+    other, _page = _file(vault, "contracts", "second.pdf", INVOICE, protected=True)
+    _convert(vault, dry_run=False)
+    assert len(list(original_pool.pool_root(vault).rglob("*.blob"))) == 1
+    exported = vault_portability.export_quiesced_vault(vault, tmp_path / "exports", context=_context())
+    restored = _restore(exported.archive_path, tmp_path).live_root
+    govern = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
+    reader = RequestPrincipal("external", surface="mcp", issuer_family="test-issuer")
+
+    with request_scope(owner_principal(surface="library")):
+        assert invoke_command(govern, restored, operation="grant", scope="standing",
+                              grant_id="01ARZ3NDEKTSV4RRFFQ69G5FB0", path=granted, audience=reader.audience_id,
+                              raw_release={"version": 1, "surface": reader.surface, "issuer_family": reader.issuer_family,
+                                           "purpose": None, "includes_location": True},
+                              )["diagnostics"]["operational"]["ok"]
+
+    assert raw_protection.permits(restored, granted, reader) is True
+    assert raw_protection.permits(restored, other, reader) is False

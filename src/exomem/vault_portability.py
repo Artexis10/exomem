@@ -2230,6 +2230,7 @@ def _publish_prepared_restore(
         _verify_staged_files(physical, prepared.manifest, recovery=recovery)
     live.parent.mkdir(parents=True, exist_ok=True)
     publisher = publish or os.replace
+    relocated = False
     try:
         if not resumed_live:
             publisher(staging, live)
@@ -2237,11 +2238,19 @@ def _publish_prepared_restore(
             _fail("PUBLICATION_FAILED", "publication did not produce a live vault")
         if not resumed_live:
             _verify_staged_files(live, prepared.manifest, recovery=recovery)
-        if prepared.manifest["schema_version"] == ARMED_MANIFEST_SCHEMA_VERSION:
+        from . import original_pool
+
+        # The archive carries the canonical pool marker but no state manifest; the format is recorded before
+        # anything serves the restored archive.
+        pooled = original_pool.enabled(live)
+        if prepared.manifest["schema_version"] == ARMED_MANIFEST_SCHEMA_VERSION or pooled:
             authority = state_migration.assert_offline_migration_authority(
                 source="validated stopped portability restore",
             )
             state_migration.migrate_vault_state_offline(live, authority=authority, protection_recovery=recovery)
+            if pooled:
+                state_migration.restore_shared_originals_offline(live, authority=authority)
+            relocated = True
             _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
         if os.path.lexists(staging):
             _remove_tree(staging)
@@ -2261,7 +2270,7 @@ def _publish_prepared_restore(
     except Exception:  # noqa: BLE001 - optional rebuild failures degrade after integrity checks
         rebuild_failed = True
     try:
-        if recovery is not None:
+        if relocated:
             _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
         else:
             _verify_staged_files(live, prepared.manifest, allow_derived_extras=True)
@@ -2270,7 +2279,8 @@ def _publish_prepared_restore(
             # Destination protection and custody own these bytes; archive repair cannot replace them.
             _fail("CANONICAL_INTEGRITY_VIOLATION", "derived rebuild changed protected restore bytes; evidence was retained")
         try:
-            _repair_canonical_from_archive(prepared, live)
+            _repair_canonical_from_archive(
+                prepared, live, portable_state_root=state_paths.vault_state_dir(live) if relocated else None)
         except Exception as repair_error:
             raise PortabilityError(
                 "CANONICAL_INTEGRITY_VIOLATION",
