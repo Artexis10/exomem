@@ -635,12 +635,7 @@ def _compile(
                     role="", level="unit", ref=unit.unit_ref, path=node.path, title=page.title,
                     text=working_set.bounded_text(_unlinked(unit.content)), lifecycle=page.status or "",
                     updated=unit.as_of or "", anchor=node.path,
-                    provenance={
-                        **{key: getattr(unit, key) for key in ("as_of", "until", "check_by") if getattr(unit, key)},
-                        "supersedes_targets": working_set_currency.relation_targets(
-                            [relation.to_dict() for relation in unit.relations], registry=relations,
-                        ),
-                    },
+                    provenance=currency_boundary.unit_provenance(unit, registry=relations),
                 ),
                 node, section, unit.kind, unit.category if unit.form == "compact" else "", closed,
             ))
