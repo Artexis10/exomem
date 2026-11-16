@@ -267,11 +267,12 @@ def test_issue_local_refuses_to_mint_into_a_store_the_dotenv_swaps_in(
     _plant_store(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "sqlite:////exported-store/sessions.db")
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "12345")
+    monkeypatch.setenv("EXOMEM_GITHUB_USERNAME", "owner")
     monkeypatch.setattr(
         server_auth,
         "build_local_session_authority",
         lambda: pytest.fail("minted against an ambiguous store"),
-        raising=False,
     )
     output = tmp_path / "token"
 
@@ -299,7 +300,6 @@ def test_session_controls_refuse_a_store_the_dotenv_swaps_in(
         server_auth,
         "build_session_authority",
         lambda **_kwargs: pytest.fail("revoked against an ambiguous store"),
-        raising=False,
     )
 
     assert cli.main(["auth", "revoke", "--all"]) == 2
@@ -310,12 +310,22 @@ def test_session_controls_refuse_a_store_the_dotenv_swaps_in(
 def test_a_dotenv_that_agrees_with_the_environment_is_no_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Refusing every key the shell and the .env share would block a correct setup."""
     from exomem import __main__ as cli
+    from exomem import server_auth
+
+    class _Reached(Exception):
+        pass
 
     _plant_store(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "sqlite:////dotenv-store/sessions.db")
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com/")
 
-    cli._load_cwd_dotenv(refuse_conflicts=True)
+    def reached(**_kwargs):
+        raise _Reached
 
-    assert os.environ["EXOMEM_OAUTH_STORAGE_URL"] == "sqlite:////dotenv-store/sessions.db"
+    monkeypatch.setattr(server_auth, "build_session_authority", reached)
+
+    with pytest.raises(_Reached):
+        cli.main(["auth", "revoke", "--all"])

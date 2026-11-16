@@ -375,8 +375,9 @@ class _DotenvConflict(Exception):
 def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
     return (
         f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
-        "to a different value than your environment, so the target store is ambiguous. "
-        "Unset those variables, or run from a directory without that .env."
+        "to a different value than this process's environment, so it is unclear which "
+        "deployment to act on. Unset those variables, remove them from the .env, or run "
+        "from a directory without that .env."
     )
 
 
@@ -522,7 +523,7 @@ def _issue_local_main(args: argparse.Namespace) -> int:
     try:
         _load_cwd_dotenv(refuse_conflicts=True)
     except _DotenvConflict as conflict:
-        print(_dotenv_conflict_message("issue-local", conflict), file=sys.stderr)
+        print(_dotenv_conflict_message("auth issue-local", conflict), file=sys.stderr)
         return 2
     from . import env_compat
 
@@ -628,7 +629,7 @@ def _auth_main(argv: list[str]) -> int:
     try:
         authority = _build_auth_session_authority()
     except _DotenvConflict as conflict:
-        print(_dotenv_conflict_message("auth", conflict), file=sys.stderr)
+        print(_dotenv_conflict_message(f"auth {args.command}", conflict), file=sys.stderr)
         return 2
     except (SessionStoreUnavailable, OSError):
         print(
