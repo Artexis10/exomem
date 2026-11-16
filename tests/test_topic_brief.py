@@ -561,6 +561,53 @@ def test_a_hub_wider_than_the_inspection_bound_reports_a_lower_bound(tmp_path, m
     assert (cut["role"], cut["reason"], cut["count"], cut["exact"]) == ("compiled_note", "cap", 2, False)
 
 
+def test_a_hub_wider_than_a_step_reads_its_share_of_rows_and_says_the_count_is_a_lower_bound(tmp_path, monkeypatch) -> None:
+    """A compiled note that links thousands of pages costs a step its share of edge rows, not its degree."""
+    vault = _vault(tmp_path, monkeypatch)
+    # `raising=False` lets this test run against a build without the bound: there it fails on the assertions below.
+    monkeypatch.setattr(topic_brief, "STEP_ROWS", 4, raising=False)
+    monkeypatch.setattr(topic_brief, "PAGE_ROWS_FLOOR", 1, raising=False)
+    links = " ".join(f"[[spoke-{n}]]" for n in range(12))
+    _note(vault, "hub", f"Spokes: {links}\n\n## Claim\n\nThe hub has twelve spokes.\n")
+    for n in range(12):
+        _note(vault, f"spoke-{n}", f"## Claim\n\nSpoke {n} is a short one.\n", updated=f"2026-09-{n + 1:02d}")
+    _index(vault)
+
+    brief = _read(vault, f"{NOTES}/hub.md")
+
+    spokes = [item for item in brief["items"] if item["kind"] == "note" and item["path"] != f"{NOTES}/hub.md"]
+    assert 0 < len(spokes) <= topic_brief.STEP_ROWS
+    (cut,) = [entry for entry in brief["missing"] if entry["role"] == "compiled_note"]
+    assert (cut["reason"], cut["exact"]) == ("cap", False)
+
+
+def test_a_withheld_spoke_leaves_the_row_bound_where_a_vault_without_it_would(tmp_path, monkeypatch) -> None:
+    """Rows that end on a withheld page are decided before they count, so they cannot crowd the visible spokes out."""
+    monkeypatch.setattr(topic_brief, "STEP_ROWS", 6, raising=False)
+    monkeypatch.setattr(topic_brief, "PAGE_ROWS_FLOOR", 1, raising=False)
+
+    def world(name: str, *, with_withheld: bool) -> Path:
+        vault = _vault(tmp_path, monkeypatch, name)
+        links = " ".join(f"[[spoke-{n}]] [[classified-{n}]]" for n in range(5))
+        _note(vault, "hub", f"Spokes: {links}\n")
+        for n in range(5):
+            _note(vault, f"spoke-{n}", f"Spoke {n} is a short one.\n", updated=f"2026-09-{n + 1:02d}")
+            if with_withheld:
+                _note(vault, f"classified-{n}", f"Classified {n} is a hidden one.\n")
+        _withhold(vault, *[f"{NOTES}/classified-{n}.md" for n in range(5)], ceiling=0)
+        _index(vault)
+        _reset_caches()
+        return vault
+
+    with_pages, without_pages = world("with", with_withheld=True), world("without", with_withheld=False)
+
+    served = _read(with_pages, f"{NOTES}/hub.md", _external())
+
+    assert served == _read(without_pages, f"{NOTES}/hub.md", _external())
+    assert len([item for item in served["items"] if item["kind"] == "note"]) == 6  # the hub and its five visible spokes
+    assert served["missing"] == []
+
+
 def test_a_cut_source_list_counts_what_it_left_out(tmp_path, monkeypatch) -> None:
     vault = _vault(tmp_path, monkeypatch)
     monkeypatch.setattr(topic_brief, "SOURCE_CAP", 2)
@@ -577,7 +624,8 @@ def test_a_cut_source_list_counts_what_it_left_out(tmp_path, monkeypatch) -> Non
     assert (cut["role"], cut["reason"], cut["count"]) == ("source", "cap", 3)
 
 
-def test_brief_reads_and_refusals_are_counted_under_their_own_route_label(tmp_path, monkeypatch) -> None:
+def test_brief_reads_and_refusals_are_counted_in_series_of_their_own(tmp_path, monkeypatch) -> None:
+    """A brief read is also a `read_page` call, so its series must stay off `exomem_tool_*`, where a sum would count it twice."""
     from exomem import metrics
 
     vault = _vault(tmp_path, monkeypatch)
@@ -588,15 +636,15 @@ def test_brief_reads_and_refusals_are_counted_under_their_own_route_label(tmp_pa
     with pytest.raises(ValueError):
         _read(vault, "a subject no page mentions")
 
+    snapshot = metrics.snapshot()
     counters = {
-        (counter["name"], tuple(sorted(counter["labels"].items()))): counter["value"]
-        for counter in metrics.snapshot()["counters"]
+        (counter["name"], tuple(sorted(counter["labels"].items()))): counter["value"] for counter in snapshot["counters"]
     }
-    assert counters[("exomem_tool_calls_total", (("outcome", "success"), ("tool", "read_page:brief")))] == 1
-    assert counters[("exomem_tool_calls_total", (("outcome", "failure"), ("tool", "read_page:brief")))] == 1
-    assert any(
-        name == "exomem_tool_failures_total" and ("tool", "read_page:brief") in labels for name, labels in counters
-    )
+    assert counters[(topic_brief.READS, (("outcome", "success"),))] == 1
+    assert counters[(topic_brief.READS, (("outcome", "failure"),))] == 1
+    assert any(name == topic_brief.FAILURES for name, _labels in counters)
+    assert any(histogram["name"] == topic_brief.DURATION for histogram in snapshot["histograms"])
+    assert not any(name.startswith("exomem_tool_") for name, _labels in counters)
     metrics.reset()
 
 

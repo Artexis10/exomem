@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -53,16 +53,25 @@ from .vocabulary import registry as vocabulary_registry
 
 #: The shipped traversal profile whose relation families the member walk follows.
 PROFILE = "brief"
-#: The label the brief's latency and failures carry in the tool metrics, beside the surrounding read's own.
-ROUTE = "read_page:brief"
+#: The brief's own metric series. A brief read is also a `read_page` call that `exomem_tool_*` already counts, so a series
+#: of its own, not a second `tool` label on that one, keeps a sum over `tool` equal to the calls served.
+READS = "exomem_brief_reads_total"
+FAILURES = "exomem_brief_failures_total"
+DURATION = "exomem_brief_read_duration_ms"
 
 #: Resource bounds of the brief contract (spec: "Brief members are bounded"), not vault vocabulary.
 MAX_HOPS = 2
 NOTE_CAP = 40
 SOURCE_CAP = 40
 RELATED_CAP = 10
-#: Edge rows one walk step inspects before it reports an inexact count; a bound on work, never a count served.
+#: Edge rows a closing read inspects before it stops; a bound on work, never a count served.
 EDGE_LIMIT = 20_000
+#: Edge rows one walk step reads in all, shared evenly among the pages it expands and never fewer than `PAGE_ROWS_FLOOR` each,
+#: so a hub that links thousands of pages costs a step its share, not its degree. A cut is reported as an inexact count.
+#: A restricted reader decides each row's other end, about 0.6 ms each: on a generated store with a 10,000-link hub a step
+#: of 4,000 rows cost such a read about 4 s and a step of 500 rows under 1 s (tasks.md 3.2), so the bound is the budget.
+STEP_ROWS = 500
+PAGE_ROWS_FLOOR = 50
 #: Candidates past a cap that the walk checks for visibility before it reports a lower bound: a bound on work, never a count served.
 COUNT_BOUND = 40
 #: Bound parameters per statement, well under SQLite's variable limit.
@@ -78,6 +87,10 @@ OPEN_QUESTIONS = "open_questions"
 _PINNED = ("state", "seed", "items", "missing", "related", "changed_since")  # nosemgrep: ep-word-set -- the response schema's own field names.
 
 _CACHE: OrderedDict[tuple[Any, ...], tuple[date | None, _Compiled]] = OrderedDict()
+#: A page's external links by the content hash of its text. Reading the links is the dearest step of a compile (a body of
+#: ten thousand list items takes over a second), and a hub that many briefs share needs it once per version of its text.
+LINKS_CACHE_SIZE = 512
+_LINKS: OrderedDict[str, tuple[markdown_regions.ExternalLink, ...]] = OrderedDict()
 #: A seed's walk and its closing edges, kept per graph snapshot so a warm read of an unchanged graph reads no edge.
 #: Bounded like `_CACHE`: a process serves a few dozen topics, and a value holds at most NOTE_CAP + SOURCE_CAP pages.
 _WALKS: OrderedDict[tuple[Any, ...], tuple[_Walk, tuple[tuple[str, str, str], ...]]] = OrderedDict()
@@ -136,18 +149,30 @@ class _Graph:
             seen = self._seen[path] = self.caller.sees(path) and self.view.allowed(path)
         return seen
 
+    def _decide(self, paths: Iterable[str]) -> None:
+        """Decide the visibility of the pages not yet decided as one set, so a restricted caller costs one release context per batch."""
+        unknown = [path for path in dict.fromkeys(paths) if path not in self._seen]
+        if not unknown:
+            return
+        kept = None if self.caller.visible is None else egress.admitted(self.caller.visible, unknown)
+        self.view.parents.admit(unknown)
+        for path in unknown:
+            self._seen[path] = (kept is None or path in kept) and self.view.allowed(path)
+
     def admit(self, ordered: Sequence[_Node], room: int) -> tuple[list[_Node], int, int, bool]:
         """The first `room` candidates that the caller sees and that have an id, with what lay behind them.
 
-        Visibility is decided in order and stops once `room + COUNT_BOUND` visible candidates are inspected, so a hub
-        of thousands of pages costs what its first pages cost. Returns the taken pages, the visible named pages
-        inspected past `room`, the visible pages with no id, and whether every candidate was inspected. A withheld
-        page moves none of these: it is skipped before anything counts it.
+        Visibility is decided in order, a batch at a time, and stops once `room + COUNT_BOUND` visible candidates are
+        inspected, so a hub of thousands of pages costs what its first pages cost. Returns the taken pages, the
+        visible named pages inspected past `room`, the visible pages with no id, and whether every candidate was
+        inspected. A withheld page moves none of these: it is skipped before anything counts it.
         """
         taken: list[_Node] = []
         cut = unnamed = 0
-        for node in ordered:
-            if not self.sees(node.path):
+        for index, node in enumerate(ordered):
+            if node.path not in self._seen:
+                self._decide(candidate.path for candidate in ordered[index : index + room + COUNT_BOUND])
+            if not self._seen[node.path]:
                 continue
             if node.id is None:
                 unnamed += 1
@@ -190,17 +215,19 @@ class _Graph:
                 f"SELECT exomem_id, path FROM graph_nodes WHERE +kind = 'file' AND exomem_id IN ({marks})", list(chunk),
             ):
                 held.setdefault(exomem_id, []).append(path)
+        self._decide(path for paths in held.values() for path in paths)
         return [ref for ref in refs if ids[ref] not in held or any(self.sees(path) for path in held[ids[ref]])]
 
-    def node_keys(self, paths: Sequence[str], *, units_only: bool = False) -> list[str]:
-        """Every graph node of these pages: the page itself and each unit, which a relation can name."""
-        keys: list[str] = []
+    def node_keys(self, paths: Sequence[str], *, units_only: bool = False) -> dict[str, list[str]]:
+        """Every graph node of these pages, by page: the page itself and each unit, which a relation can name."""
+        keys: dict[str, list[str]] = {path: [] for path in paths}
         for chunk in _chunks(list(paths)):
             marks = ",".join("?" for _ in chunk)
             where = "kind != 'file' AND " if units_only else ""
-            keys += [row[0] for row in self.conn.execute(
-                f"SELECT node_key FROM graph_nodes WHERE {where}path IN ({marks})", list(chunk),
-            )]
+            for path, node_key in self.conn.execute(
+                f"SELECT path, node_key FROM graph_nodes WHERE {where}path IN ({marks})", list(chunk),
+            ):
+                keys[path].append(node_key)
         return keys
 
     def _paths_of(self, keys: set[str]) -> dict[str, str]:
@@ -212,13 +239,23 @@ class _Graph:
             ).fetchall())
         return found
 
-    def _edges(self, keys: Sequence[str], accept: Callable[[dict[str, Any]], bool]) -> tuple[list[dict[str, Any]], bool]:
+    def _edges(
+        self, groups: Iterable[Sequence[str]], accept: Callable[[dict[str, Any]], bool], *, row_limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """The live edges that `accept` takes at each group of node keys, and whether a bound cut the read.
+
+        Each group is read on its own, so a hub in one group cannot spend the rows of the others; without a `row_limit`
+        the read keeps the graph's own bounds.
+        """
         edges: dict[str, dict[str, Any]] = {}
         overflow = False
-        for chunk in _chunks(list(keys)):
-            found, over = self.view.neighbor_edges(set(chunk), limit=EDGE_LIMIT, accept=accept)
-            overflow = overflow or over
-            edges.update({str(edge["edge_key"]): edge for edge in found})
+        for keys in groups:
+            for chunk in _chunks(list(keys)):
+                found, over = self.view.neighbor_edges(
+                    set(chunk), limit=EDGE_LIMIT if row_limit is None else row_limit, accept=accept, row_limit=row_limit,
+                )
+                overflow = overflow or over
+                edges.update({str(edge["edge_key"]): edge for edge in found})
         return [edges[key] for key in sorted(edges)], overflow
 
     def _walkable(self, edge: dict[str, Any]) -> bool:
@@ -232,7 +269,9 @@ class _Graph:
 
         Returns each such page with the frontier pages it touches, and whether the edge bound cut the read.
         """
-        edges, overflow = self._edges(self.node_keys(frontier), self._walkable)
+        # One read per page, each with an even share of the step's rows: the frontier's order is fixed, so the cut is too.
+        share = max(PAGE_ROWS_FLOOR, STEP_ROWS // max(1, len(frontier)))
+        edges, overflow = self._edges(self.node_keys(frontier).values(), self._walkable, row_limit=share)
         ends = self._paths_of({key for edge in edges for key in (edge["src_key"], edge["dst_key"])})
         near = set(frontier)
         touches: dict[str, set[str]] = {}
@@ -251,17 +290,19 @@ class _Graph:
 
         A relation that names a unit by its fragment lands on that unit's node, so the unit it closes is the edge's end.
         """
-        keys = self.node_keys(paths, units_only=True)
+        keys = [key for unit_keys in self.node_keys(paths, units_only=True).values() for key in unit_keys]
         unit_keys = set(keys)
 
         def closes(edge: dict[str, Any]) -> bool:
             return self.view.has(edge, "settles") or self.view.has(edge, "bears_on")
 
-        edges, _overflow = self._edges(keys, closes)
+        edges, _overflow = self._edges([keys], closes)
+        closers = [edge for edge in edges if edge["dst_key"] in unit_keys]
+        self._decide(str(edge["source_path"]) for edge in closers)
         return tuple(sorted(
             (str(edge["edge_key"]), str(edge["relation_type"]), str(edge["dst_key"]))
-            for edge in edges
-            if edge["dst_key"] in unit_keys and self.sees(str(edge["source_path"]))
+            for edge in closers
+            if self.sees(str(edge["source_path"]))
         ))
 
 
@@ -470,6 +511,21 @@ def _read_page(root: Path, path: str) -> tuple[str, Any]:
     return vault.read_guarded_text(root, root / path)
 
 
+def _external_links(content_hash: str, body: str) -> tuple[markdown_regions.ExternalLink, ...]:
+    """The external links of a page body, kept under the hash of the text it came from."""
+    with _LOCK:
+        held = _LINKS.get(content_hash)
+        if held is not None:
+            _LINKS.move_to_end(content_hash)
+            return held
+    found = markdown_regions.external_links(body)
+    with _LOCK:
+        _LINKS[content_hash] = found
+        while len(_LINKS) > LINKS_CACHE_SIZE:
+            _LINKS.popitem(last=False)
+    return found
+
+
 def _digest(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
@@ -530,7 +586,8 @@ def _compile(
             stale = True
             continue
         guards[node.path] = guard
-        stale = stale or vault.content_hash(source) != node.content_hash
+        text_hash = vault.content_hash(source)
+        stale = stale or text_hash != node.content_hash
         page = semantic_contract.build_page_state(root, node.path, source)
         language = (
             page.definitions.snapshots["categories"].typed if page.definitions is not None
@@ -546,7 +603,7 @@ def _compile(
             "title": _unlinked(page.title), "text": _unlinked(str(summary)), "distance": distance,
             "omitted": {"superseded": 0, "closed": 0, "expired": 0},
         }
-        for link in markdown_regions.external_links(page.body):
+        for link in _external_links(text_hash, page.body):
             if link.url not in seen_links:
                 seen_links.add(link.url)
                 links.append({
@@ -824,15 +881,15 @@ def _abstain(root: Path, caller: context_views.CallerView, ref: str | None, stat
 
 
 def _record(started: float, error: BaseException | None) -> None:
-    """Count one brief read and time it, as a series of its own beside the surrounding read's (spec: own route label)."""
+    """Count one brief read and time it, as series of the brief's own (spec: latency and errors of brief reads)."""
     try:
-        metrics.inc_counter("exomem_tool_calls_total", {"tool": ROUTE, "outcome": "success" if error is None else "failure"})
-        metrics.observe_duration_ms("exomem_tool_duration_ms", (time.perf_counter() - started) * 1000, {"tool": ROUTE})
+        metrics.inc_counter(READS, {"outcome": "success" if error is None else "failure"})
+        metrics.observe_duration_ms(DURATION, (time.perf_counter() - started) * 1000)
         if error is not None:
             prefix = str(error).partition(":")[0]
             # A refusal opens with its upper-case code; anything else is named by its class, so the label stays bounded.
             code = prefix if re.fullmatch(r"[A-Z][A-Z_]+", prefix) else type(error).__name__
-            metrics.inc_counter("exomem_tool_failures_total", {"tool": ROUTE, "code": code})
+            metrics.inc_counter(FAILURES, {"code": code})
     except Exception:  # noqa: BLE001 - observability must never break a read
         pass
 

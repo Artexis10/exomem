@@ -14060,6 +14060,7 @@ def _neighbor_edges(
     relation_filter: set[str],
     *,
     limit: int,
+    after: str | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     if not frontier:
         return [], False
@@ -14077,6 +14078,9 @@ def _neighbor_edges(
         relation_placeholders = ",".join("?" for _ in relations)
         where += f" AND relation_type IN ({relation_placeholders})"
         params.extend(relations)
+    if after is not None:
+        where += " AND edge_key > ?"
+        params.append(after)
     rows = conn.execute(
         select + where + " ORDER BY edge_key LIMIT ?",
         (*params, limit + 1),
@@ -14813,7 +14817,12 @@ class GraphView:
             candidates = sorted(_link_candidates(self._shared_resolver(), raw_target))
             from .vault_store import read as store_read
 
-            if store_read.request_memo(self.vault_root) is not None:
+            if not self.reads_placeholders and len(candidates) < 2:
+                # Fewer than two candidates leave no count of seen ones strictly between none and
+                # all, so a reader of pages only needs no decision: the link resolves as it does
+                # over the whole vault.
+                changed = False
+            elif store_read.request_memo(self.vault_root) is not None:
                 verdicts = self._kept_many(candidates)
                 seen_count = sum(verdicts.values())
                 changed = (
@@ -15087,17 +15096,86 @@ class GraphView:
             if source != rel_path and self.target_changes(raw_target) and self.keep(source)
         }
 
+    def _visible_rows(
+        self, frontier: set[str], row_limit: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Rows touching `frontier`, in edge-key order, whose other end the reader may see.
+
+        Takes at most `row_limit` rows. A frontier with no more rows than that gives all of them.
+        Otherwise the rows come in batches and each batch's other ends are decided as one set before
+        its rows count, so the read stops after `row_limit` visible rows and costs what they cost,
+        not the frontier's degree. A link to a placeholder is no page, and a reader
+        that drops placeholders does not count it.
+        """
+        rows: list[dict[str, Any]] = []
+        after = None
+        while True:
+            # Ask for the rows still needed and one more, so the reader is decided for few more
+            # rows than the bound takes; the one more shows whether the bound cuts. A floor keeps
+            # a long run of withheld rows from costing one query each.
+            want = max(row_limit - len(rows) + 1, _VIEW_ROW_FLOOR)
+            batch, more = _neighbor_edges(
+                self.conn, frontier, set(), limit=min(_VIEW_ROW_BATCH, want), after=after
+            )
+            if after is None and not more and len(batch) <= row_limit:
+                # Within the bound whoever the reader may see: no row is cut, so no decision is
+                # needed to count them. Later steps drop what the reader may not see.
+                return batch, False
+            ends = sorted({
+                key for row in batch for key in (row["src_key"], row["dst_key"])
+                if key not in frontier and key not in self._node_paths
+            })
+            for start in range(0, len(ends), _VIEW_ROW_BATCH):
+                keys = ends[start : start + _VIEW_ROW_BATCH]
+                marks = ",".join("?" for _ in keys)
+                found = dict(self.conn.execute(
+                    f"SELECT node_key, path FROM graph_nodes WHERE node_key IN ({marks})", keys
+                ))
+                self._node_paths.update({key: found.get(key) for key in keys})
+            self.parents.admit(
+                path for key in ends if (path := self._node_paths[key]) is not None
+            )
+            for row in batch:
+                other = row["dst_key"] if row["src_key"] in frontier else row["src_key"]
+                if other not in frontier:
+                    path = self._node_paths[other]
+                    if (path is None and not self.reads_placeholders) or (
+                        path is not None and not self.parents.allowed(path)
+                    ):
+                        continue
+                if len(rows) == row_limit:
+                    return rows, True
+                rows.append(row)
+            if not more:
+                return rows, False
+            after = str(batch[-1]["edge_key"])
+
     def neighbor_edges(
         self, frontier: set[str], *, limit: int,
         accept: Callable[[dict[str, Any]], bool] | None = None,
+        row_limit: int | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Live edges touching `frontier`, interpreted before the inspection cap.
 
         SQL rows are transport; a candidate that is no fact in its page's
         selected interpretation spends no inspection slot. Optional exact-unit
         admission also precedes this cap, so withheld units cannot crowd it.
+
+        `row_limit` bounds the rows read before interpretation, for a reader whose frontier can
+        be a hub: the rows past it are never interpreted and the read reports the cut as overflow.
+        For a reader other than the owner a row counts only when its other end is a page the
+        reader may see, so a withheld page leaves the bound where a vault without it would. A
+        bounded read also decides the admission of its rows' source pages as one set, so a hub's
+        rows cost one store request per batch of pages, not one per page.
         """
-        rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
+        if row_limit is None:
+            rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
+        else:
+            row_limit = min(row_limit, _VIEW_ROW_LIMIT)
+            if self.keep is None:
+                rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=row_limit)
+            else:
+                rows, overflow = self._visible_rows(frontier, row_limit)
         if self.keep is not None:
             pages = {
                 path
@@ -15125,6 +15203,13 @@ class GraphView:
                         if edge["src_key"] in frontier or edge["dst_key"] in frontier:
                             by_key.setdefault(str(edge["edge_key"]), edge)
                 rows = [by_key[key] for key in sorted(by_key)]
+        if row_limit is not None:
+            # A page re-derived for the reader adds rows to the stored ones; the bound covers both.
+            if len(rows) > row_limit:
+                rows, overflow = rows[:row_limit], True
+            self.parents.prefetch(
+                str(row["source_path"]) for row in rows if row.get("source_path")
+            )
         live: list[dict[str, Any]] = []
         for row in rows:
             served = self.edge(row)
@@ -15138,6 +15223,11 @@ class GraphView:
 
 #: Rows a reader's view reads before re-applying the caller's inspection cap.
 _VIEW_ROW_LIMIT = 100_000
+#: Rows (and node keys) per statement of a reader's bounded read, under SQLite's variable limit.
+_VIEW_ROW_BATCH = 500
+#: Fewest rows one batch of a reader's bounded read asks for, so a run of withheld rows does not
+#: cost a query each.
+_VIEW_ROW_FLOOR = 64
 
 
 def _neighbor_rows(
