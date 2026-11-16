@@ -85,6 +85,16 @@ def test_a_project_partitioned_type_stays_in_its_project_folder_in_a_nested_vaul
     assert created["path"] == f"{KB}/Notes/Research/Alpha/pump-notes.md"
 
 
+def test_a_domain_partitioned_type_is_flat_in_a_root_vault_and_creates_no_wrapper(root_vault: Path) -> None:
+    """The domain binding watched the wrapper's `Notes/Experiments`, so a root vault was guarded on a folder it does not have."""
+    created = _remember(
+        root_vault, title="Cold plunge trial", note_type="experiment", started="2026-11-01", duration="30 days", domain="health"
+    )
+
+    assert created["path"] == "Experiments/2026-11-cold-plunge-trial.md"
+    assert not (root_vault / KB).exists()
+
+
 def test_an_overlay_type_lands_in_its_own_top_level_area(root_vault: Path) -> None:
     """The overlay was read from the wrapper's schema folder, so a root vault's own type was never found."""
     _write(

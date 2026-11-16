@@ -18,10 +18,9 @@ from typing import Any
 import yaml
 from yaml.resolver import BaseResolver
 
-from . import layout, source_taxonomy, vault
+from . import layout, note_types, source_taxonomy, vault
 from .kbdir import managed_root
 from .text_scripts import comparison_words
-from .vault import kb_root
 
 #: Families whose resolution a public receipt may carry. Each family keeps its
 #: own registry and authority; only the bounded identity record is shared.
@@ -148,7 +147,7 @@ def resolve_notes_domain(
             "a vocabulary decision is only valid for a nearby domain preparation",
         )
 
-    parent = kb_root(root) / "Notes" / "Experiments"
+    parent = _experiments_parent(root)
     parent_guard = vault.DirectoryCensusGuard.capture(
         root, parent.relative_to(root).as_posix(), max_entries=256
     )
@@ -163,6 +162,17 @@ def resolve_notes_domain(
         registry_guard=registry_guard,
         parent_guard=parent_guard,
     )
+
+
+def _experiments_parent(root: Path) -> Path:
+    """The area folder of the shipped `experiment` type under the vault's layout.
+
+    The census guard watches the folder that the domain projection lives in, so it must follow the
+    layout: `Notes/Experiments` below the wrapper in `nested`, a top-level folder in `root`.
+    """
+    lay = layout.of(root)
+    area = layout.area_folder(note_types.Basis(root).resolve("experiment").require(), lay)
+    return managed_root(root, layout=lay) / str(area)
 
 
 @dataclass(frozen=True)
@@ -324,7 +334,7 @@ def _resolve_bound_notes_domain(
             canonical, match_kind = decision["canonical"], "decision-reuse"
         else:
             raise VocabularyResolutionError("STALE_VOCABULARY_BINDING", "domain decision requires fresh validation")
-    parent = kb_root(root) / "Notes" / "Experiments"
+    parent = _experiments_parent(root)
     parent_guard = vault.DirectoryCensusGuard.capture(root, parent.relative_to(root).as_posix(), max_entries=256)
     folder = _projection_folder(taxonomy, canonical, parent)
     parent_guard.recheck(root)
