@@ -430,6 +430,44 @@ def test_a_graph_read_borrows_the_request_snapshot_and_hands_it_back_unchanged(
     assert read.current_revision(stored) == before + 1
 
 
+def test_a_nested_reader_with_its_own_deadline_gives_the_outer_readers_back_when_it_closes(
+    stored, writer  # noqa: F811
+):
+    """An inner reader that sets its own deadline replaces the outer reader's until the last lend
+    of the snapshot closes, so the outer reader runs under a deadline that is not its own."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    index = epistemic_graph.EpistemicGraphIndex(stored)
+    work = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 100) SELECT SUM(x) FROM c"
+    with read.request_snapshot(stored):
+        outer = index._open_read_snapshot()
+        outer.set_progress_handler(lambda: 1, 1)  # the outer reader's deadline has passed
+        inner = index._open_read_snapshot()
+        inner.set_progress_handler(lambda: 0, 1)  # the inner reader has time left
+        assert inner.execute(work).fetchone()[0] == 5050
+        inner.close()
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            outer.execute(work).fetchall()
+        outer.close()
+
+
+def test_a_nested_readers_deadline_ends_with_its_lend_when_the_outer_reader_has_none(
+    stored, writer  # noqa: F811
+):
+    """An outer reader with no deadline must not be interrupted by an inner reader's one."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    index = epistemic_graph.EpistemicGraphIndex(stored)
+    work = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 100) SELECT SUM(x) FROM c"
+    with read.request_snapshot(stored):
+        outer = index._open_read_snapshot()
+        inner = index._open_read_snapshot()
+        inner.set_progress_handler(lambda: 1, 1)  # the inner reader's deadline has passed
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            inner.execute(work).fetchall()
+        inner.close()
+        assert outer.execute(work).fetchone()[0] == 5050
+        outer.close()
+
+
 @pytest.mark.timeout(300)
 def test_a_graph_and_link_read_serves_and_says_so_while_a_schema_change_is_applied(
     stored, writer  # noqa: F811
