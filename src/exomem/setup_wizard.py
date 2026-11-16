@@ -37,7 +37,7 @@ from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
 from .governance.principal import library_scope
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root_rel
 
 _SKILL_NAME_MARKER = "name: exomem"
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
@@ -759,7 +759,7 @@ def run_setup(
     if junk_total:
         print_fn(f"    {junk_total} junk candidate(s) — zero-byte or sync-conflict copies.")
     kb_state = "already present" if scan["kb"]["present"] else "not present yet"
-    print_fn(f"    {kb_prefix()}: {kb_state}")
+    print_fn(f"    {managed_join('')}: {kb_state}")
     packs = adoption.get("pack_suggestions") or []
     if packs:
         print_fn(f"    Likely packs: {_format_pack_suggestions(packs)}")
@@ -772,7 +772,7 @@ def run_setup(
     # 3. init — never forced from the wizard
     try:
         init_module.init_vault(vault_path)
-        report("init", f"[done] {kb_prefix()} scaffold created")
+        report("init", f"[done] {managed_join('')} scaffold created")
     except FileExistsError:
         # The vault already has a Knowledge Base, so init is skipped — but the
         # governance docs inside it are product-owned and were last written by
@@ -783,14 +783,14 @@ def run_setup(
         try:
             refreshed = init_module.refresh_shipped_schema(vault_path)
         except OSError as exc:
-            report("init", f"[skipped: {kb_prefix()} already exists] (refresh failed: {exc})")
+            report("init", f"[skipped: {managed_join('')} already exists] (refresh failed: {exc})")
         else:
             suffix = (
                 f"; refreshed {len(refreshed)} shipped schema file(s)"
                 if refreshed
                 else "; shipped schema already current"
             )
-            report("init", f"[skipped: {kb_prefix()} already exists]{suffix}")
+            report("init", f"[skipped: {managed_join('')} already exists]{suffix}")
 
     # 3b. packs — product guidance for fresh vaults and suggested routes for existing vaults
     try:
@@ -1107,10 +1107,10 @@ def setup_main(argv: list[str]) -> int:
         prog="exomem setup",
         description=(
             "Guided local setup: scan the vault, init the "
-            f"{kb_dirname()}, pick a "
+            f"{managed_root_rel()}, pick a "
             "search profile, run doctor, register with Claude Code, and install "
             "the skill — one idempotent command. Existing vault content is never "
-            f"touched; exomem writes only under {kb_prefix()}. For remote "
+            f"touched; exomem writes only under {managed_join('')}. For remote "
             "connector setup (claude.ai / iOS), use `exomem setup --remote`."
         ),
     )

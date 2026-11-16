@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .. import held_fs
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root, managed_root_rel
 from . import receipts, schema_v4, store
 
 _DESTINATION_LEAF = ".governance.sqlite"
@@ -26,7 +26,7 @@ class LegacyV3PublicationUnavailable(RuntimeError):
 def legacy_v3_path(vault_root: Path) -> Path:
     """The exact historical v0.57 database location, never caller-selected."""
 
-    return Path(vault_root) / kb_dirname() / _DESTINATION_LEAF
+    return managed_root(Path(vault_root)) / _DESTINATION_LEAF
 
 
 def rollback_stage_leaf(event_id: str) -> str:
@@ -130,7 +130,7 @@ def _retained_legacy_binding(vault_root: Path, *, mutate: bool):
     acquired = held_fs.acquire(Path(vault_root))
     with _require(acquired) as filesystem:  # type: ignore[union-attr]
         parent = filesystem.parent(
-            kb_dirname(),
+            managed_root_rel(),
             access="mutate" if mutate else "read",
         )
         with _require(parent) as retained_parent:  # type: ignore[union-attr]
@@ -287,7 +287,7 @@ def publish_exact_v3_snapshot(
     snapshot_bytes = _external_snapshot_bytes(root, expected)
     acquired = held_fs.acquire(root)
     with _require(acquired) as filesystem:  # type: ignore[union-attr]
-        parent = filesystem.parent(kb_dirname(), create=True, access="mutate")
+        parent = filesystem.parent(managed_root_rel(), create=True, access="mutate")
         with _require(parent) as retained_parent:  # type: ignore[union-attr]
             return publish_exact_v3_bytes(
                 filesystem,

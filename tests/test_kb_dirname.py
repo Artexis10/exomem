@@ -86,3 +86,95 @@ def test_normalize_wikilink_custom_prefix(monkeypatch, tmp_path: Path) -> None:
     # A target already carrying the custom prefix is preserved.
     canonical2, _warn2 = vault_module.normalize_wikilink("Brain/Notes/Insights/foo", tmp_path, strict=False)
     assert canonical2 == "Brain/Notes/Insights/foo"
+
+
+# The managed_* helpers are the only code that knows how a managed-root-relative path
+# becomes a vault-relative path and back. Each test names the call-site failure it guards.
+
+
+def test_managed_join_and_split_round_trip(monkeypatch) -> None:
+    from exomem import kbdir
+
+    for name in (None, "Brain"):
+        if name is None:
+            monkeypatch.delenv("EXOMEM_KB_DIRNAME", raising=False)
+        else:
+            monkeypatch.setenv("EXOMEM_KB_DIRNAME", name)
+        for rel in ("", "Sources/x.md", "Sources/", "a b/Knowledge Base/y.md"):
+            joined = kbdir.managed_join(rel)
+            assert joined == kbdir.kb_prefix() + rel
+            assert kbdir.managed_split(joined) == rel
+            assert kbdir.managed_splitter()(joined) == rel
+
+
+def test_managed_split_is_none_outside_the_managed_root(monkeypatch) -> None:
+    from exomem import kbdir
+
+    monkeypatch.delenv("EXOMEM_KB_DIRNAME", raising=False)
+    for outside in ("Reference/x.md", "Knowledge Base", "Knowledge Basement/x.md", "knowledge base/x.md", ""):
+        assert kbdir.managed_split(outside) is None
+        assert kbdir.managed_splitter()(outside) is None
+
+
+def test_managed_split_with_a_key_compares_the_name_loosely(monkeypatch) -> None:
+    from exomem import kbdir
+
+    monkeypatch.delenv("EXOMEM_KB_DIRNAME", raising=False)
+    assert kbdir.managed_split("KNOWLEDGE base/Sources/X.md", key=str.casefold) == "Sources/X.md"
+    # The key reads the first segment only: the bare name has no remainder, and a longer name differs.
+    assert kbdir.managed_split("knowledge base", key=str.casefold) is None
+    assert kbdir.managed_split("knowledge basement/x.md", key=str.casefold) is None
+
+
+def test_managed_split_parts_returns_the_components_below_the_root(monkeypatch) -> None:
+    from exomem import kbdir
+
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
+    assert kbdir.managed_split_parts(("Brain", "Records", "x.md")) == ("Records", "x.md")
+    assert kbdir.managed_split_parts(("Brain",)) == ()
+    assert kbdir.managed_split_parts(("brain", "x.md")) is None
+    assert kbdir.managed_split_parts(("brain", "x.md"), key=str.casefold) == ("x.md",)
+    assert kbdir.managed_split_parts(()) is None
+    assert kbdir.is_managed_root_name("Brain") and not kbdir.is_managed_root_name("brain")
+    assert kbdir.is_managed_root_name("brain", key=str.casefold)
+
+
+def test_managed_form_and_relative_only_touch_the_leading_root(monkeypatch) -> None:
+    from exomem import kbdir
+
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
+    assert kbdir.managed_form("Sources/x.md") == "Brain/Sources/x.md"
+    assert kbdir.managed_form("Brain/Sources/x.md") == "Brain/Sources/x.md"
+    assert kbdir.managed_form("Brainy/x.md") == "Brain/Brainy/x.md"
+    assert kbdir.managed_relative("Brain/Sources/x.md") == "Sources/x.md"
+    assert kbdir.managed_relative("Sources/Brain/x.md") == "Sources/Brain/x.md"
+    assert kbdir.is_in_managed_root("Brain") and kbdir.is_in_managed_root("Brain/x.md")
+    assert not kbdir.is_in_managed_root("Brainy/x.md")
+
+
+def test_kb_relative_form_normalises_separators_before_adding_the_root(monkeypatch) -> None:
+    """The hosted guard and the executors both call this, so it must give a single answer."""
+    from exomem import kbdir
+
+    monkeypatch.delenv("EXOMEM_KB_DIRNAME", raising=False)
+    assert kbdir.kb_relative_form("  \\Sources\\x.md ") == "Knowledge Base/Sources/x.md"
+    assert kbdir.kb_relative_form("/Knowledge Base/Sources/x.md") == "Knowledge Base/Sources/x.md"
+    assert kbdir.kb_relative_form("knowledge base/x.md") == "Knowledge Base/knowledge base/x.md"
+
+
+def test_managed_respell_restores_only_a_case_difference(monkeypatch) -> None:
+    from exomem import kbdir
+
+    monkeypatch.delenv("EXOMEM_KB_DIRNAME", raising=False)
+    assert kbdir.managed_respell("knowledge base/Sources/x.md") == "Knowledge Base/Sources/x.md"
+    assert kbdir.managed_respell("KNOWLEDGE BASE") == "Knowledge Base"
+    assert kbdir.managed_respell("Knowledge Base/x.md") == "Knowledge Base/x.md"
+    assert kbdir.managed_respell("Reference/knowledge base/x.md") == "Reference/knowledge base/x.md"
+
+
+def test_managed_root_helpers_follow_the_configured_name(monkeypatch, tmp_path: Path) -> None:
+    from exomem import kbdir
+
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
+    assert kbdir.managed_root(tmp_path) == tmp_path / "Brain"
+    assert kbdir.managed_root_rel() == "Brain"

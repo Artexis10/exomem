@@ -27,6 +27,7 @@ from . import (
 )
 from . import artifact_role_review as sensor
 from .find_types import ParsedPage
+from .kbdir import managed_relative
 
 log = logging.getLogger(__name__)
 MAX_EDGES = sensor.MAX_UNITS * sensor.MAX_EVIDENCE
@@ -111,13 +112,12 @@ class _PageKinds:
 
 
 def _aliases(path: str, title: str, identity: str) -> tuple[str, ...]:
-    from .kbdir import kb_prefix
 
     return tuple(
         dict.fromkeys(
             (
                 path.removesuffix(".md"),
-                path.removeprefix(kb_prefix()).removesuffix(".md"),
+                managed_relative(path).removesuffix(".md"),
                 Path(path).stem,
                 title.casefold(),
                 identity,

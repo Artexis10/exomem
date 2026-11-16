@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import held_fs, reserved_paths, state_paths
 from ..cli_ops import OpError
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root, managed_root_rel
 from . import authority, connection, legacy_originals, schema, snapshot, tokens
 
 _OWNER = "collection_store.replica"
@@ -42,7 +42,7 @@ class PublicationResult:
 
 def replica_path(vault_root: Path) -> Path:
     """The fixed vault-side replica; the live store remains external."""
-    return Path(vault_root) / kb_dirname() / "_Collections" / connection.STORE_FILENAME
+    return managed_root(Path(vault_root)) / "_Collections" / connection.STORE_FILENAME
 
 
 class _Retry(Exception):
@@ -787,7 +787,7 @@ class _Publisher:
             reserved_paths._subsystem_authority_scope(_OWNER),
             ExitStack() as coordination,
             held_fs.acquire(self.root).require() as filesystem,
-            filesystem.parent(kb_dirname(), access="flush").require() as kb_parent,
+            filesystem.parent(managed_root_rel(), access="flush").require() as kb_parent,
         ):
             if self.steps is None:
                 coordination.enter_context(reserved_paths._identity_coordination_scope(

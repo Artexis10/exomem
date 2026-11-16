@@ -47,7 +47,7 @@ from . import (
 from . import (
     find as find_module,
 )
-from .kbdir import kb_prefix
+from .kbdir import managed_form, managed_join, managed_relative, managed_split
 from .mutation_timings import MutationTimings, mutation_timing_span
 from .vault_store import read
 
@@ -126,11 +126,10 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
     """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
-    prefix = kb_prefix()
-    old_full = old_no_ext if old_no_ext.startswith(prefix) else prefix + old_no_ext
-    new_full = new_no_ext if new_no_ext.startswith(prefix) else prefix + new_no_ext
-    old_stripped = old_full.removeprefix(prefix)
-    new_stripped = new_full.removeprefix(prefix)
+    old_full = managed_form(old_no_ext)
+    new_full = managed_form(new_no_ext)
+    old_stripped = managed_relative(old_full)
+    new_stripped = managed_relative(new_full)
     old_basename = old_no_ext.rsplit("/", 1)[-1]
     new_basename = new_no_ext.rsplit("/", 1)[-1]
     changed = 0
@@ -148,7 +147,7 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
         target_path = target_path.rstrip()
         target_no_ext = target_path.removesuffix(".md")
         if target_no_ext in {old_full, old_stripped}:
-            replacement = new_full if target_path.startswith(prefix) else new_stripped
+            replacement = new_full if managed_split(target_path) is not None else new_stripped
         elif (
             "/" not in target_no_ext
             and target_no_ext == old_basename
@@ -4350,7 +4349,7 @@ def _plan_recovery_lifecycle(
                     for path in preflight.before_corpus.identity_census.paths_by_identity.get(
                         item.after.identity, ()
                     )
-                    if not path.startswith(f"{kb_prefix()}_trash/")
+                    if not path.startswith(managed_join("_trash/"))
                 )
                 trash_proof = relation_review.LifecycleTrashProof(
                     page_identity=item.after.identity,

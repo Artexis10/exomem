@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from . import sensing, sensing_ledger
+from .kbdir import managed_split
 from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
@@ -348,9 +349,8 @@ class PageFacts:
 def _link_key(raw: str) -> str:
     key = str(raw or "").strip().casefold().split("#", 1)[0].split("|", 1)[0].strip()
     key = key.removesuffix(".md")
-    for prefix in ("knowledge base/",):
-        key = key.removeprefix(prefix)
-    return key
+    below = managed_split(key, key=str.casefold)
+    return key if below is None else below
 
 
 def _replaces(view: Any, edge: dict[str, Any]) -> bool:

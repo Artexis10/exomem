@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from . import relation_registry, vault
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .vocabulary import registry as vocabulary_registry
 
 SCHEMA_VERSION = 1
@@ -189,7 +189,7 @@ def _shipped_profiles() -> dict[str, TraversalProfile]:
 
 
 def profile_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "traversal-profiles.yaml"
+    return managed_root(Path(vault_root)) / "_Schema" / "traversal-profiles.yaml"
 
 
 _CACHE: dict[Path, tuple[str, ProfileRegistry]] = {}

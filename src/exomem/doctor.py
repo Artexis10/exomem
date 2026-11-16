@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Literal
 from . import __version__, cuda_containment, install_info, process_memory
 from .cli_ops import OpError
 from .collection_store.ownership import reader as ownership_reader
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root, managed_root_rel
 
 if TYPE_CHECKING:
     from .writer_lease import LeaseConfig
@@ -470,8 +470,8 @@ def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
             "vault.path",
             "fail",
             f"{path} contains no exomem schema contract "
-            f"(looked in .exomem/schema/ and {kb_prefix()}_Schema/).",
-            f"Pass the vault root, not the {kb_dirname()} folder. For a new vault, run "
+            f"(looked in .exomem/schema/ and {managed_join('_Schema/')}).",
+            f"Pass the vault root, not the {managed_root_rel()} folder. For a new vault, run "
             "`uv run python -m exomem init --vault <path>`.",
         )
     return path, _check("vault.path", "pass", f"Vault found at {path}.")
@@ -589,12 +589,12 @@ def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
         return []
     from .vault import shipped_schema_root
 
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     checks: list[DoctorCheck] = []
     required = [
         ("vault.schema", shipped_schema_root(vault_root) / "SKILL.md", "schema contract"),
-        ("vault.index", kb / "index.md", f"{kb_prefix()}index.md"),
-        ("vault.log", kb / "log.md", f"{kb_prefix()}log.md"),
+        ("vault.index", kb / "index.md", managed_join("index.md")),
+        ("vault.log", kb / "log.md", managed_join("log.md")),
         (
             "vault.project_keys",
             kb / "_Schema" / "project-keys.yaml",
@@ -1255,7 +1255,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "adopt or delete either state authority while the scan is unavailable.",
             details={
                 "state_root": str(state_dir),
-                "in_vault_state_root": str(Path(vault_root) / kb_dirname()),
+                "in_vault_state_root": str(managed_root(Path(vault_root))),
                 "in_vault_scan": "unavailable",
             },
         )
@@ -1335,7 +1335,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                 "fail",
                 (
                     "Machine-local state exists both under the vault "
-                    f"({Path(vault_root) / kb_dirname()}: {leftover_names}) and in "
+                    f"({managed_root(Path(vault_root))}: {leftover_names}) and in "
                     f"the external state root ({state_dir})."
                 ),
                 "Stop every writer, then run `exomem maintain --migrate-state "
@@ -1442,7 +1442,7 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     # external state root now; the KB is still scanned for pre-relocation
     # leftovers.
     scan_roots = (
-        Path(vault_root) / kb_dirname(),
+        managed_root(Path(vault_root)),
         state_paths.vault_state_dir(vault_root),
     )
     graph_orphans: list[Path] = []

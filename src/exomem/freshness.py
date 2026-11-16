@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, overload
 
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 
 log = logging.getLogger(__name__)
 
@@ -1371,7 +1371,7 @@ def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
 
     in_kb = False
     try:
-        kb_parts = path.relative_to(vault_root / kb_dirname()).parts
+        kb_parts = path.relative_to(managed_root(vault_root)).parts
         in_kb = not any(d in EXCLUDED_DIR_NAMES for d in kb_parts[:-1])
     except ValueError:
         in_kb = False
@@ -2096,7 +2096,7 @@ def rebaseline(vault_root: Path) -> dict[str, bool]:
     for scope in SCOPES:
         try:
             if scope == "kb":
-                root = vault_root / kb_dirname()
+                root = managed_root(vault_root)
                 paths = find_module._walk_md(root) if root.is_dir() else ()
             else:
                 paths = walk_vault_md(vault_root)

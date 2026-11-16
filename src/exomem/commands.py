@@ -196,7 +196,7 @@ from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
 from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
-from .kbdir import kb_dirname, kb_page_target
+from .kbdir import is_in_managed_root, kb_page_target, managed_join, managed_root, managed_root_rel
 from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
@@ -1695,7 +1695,7 @@ def op_bootstrap(
         "server": {
             "name": "exomem",
             "version": package_version,
-            "kb_dir": kb_dirname(),
+            "kb_dir": managed_root_rel(),
             "pure_substrate": True,
             "content_included": False,
             "published_mcp_tool_surface_sha256": tool_surface_module.sha256(),
@@ -9009,10 +9009,10 @@ def op_observe_memory(
     except memory_refs_module.ReferenceError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
     if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (
-        resolved_path == kb_dirname() or resolved_path.startswith(f"{kb_dirname()}/")
+        is_in_managed_root(resolved_path)
     ):
         raise ValueError(
-            f"INVALID_PATH: observe_memory parent reference resolves outside {kb_dirname()}/"
+            f"INVALID_PATH: observe_memory parent reference resolves outside {managed_join('')}"
         )
     try:
         result = observe_memory_module.observe_memory(
@@ -10115,11 +10115,11 @@ def _process_media(
         binary = vault_root / binary
     binary = Path(os.path.abspath(binary))
     try:
-        binary.relative_to(vault_root / kb_dirname())
+        binary.relative_to(managed_root(vault_root))
     except ValueError as exc:
         raise OpError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must be inside {kb_dirname()}: {path}",
+            f"media path must be inside {managed_root_rel()}: {path}",
         ) from exc
     from . import document_containers
 
@@ -10193,7 +10193,7 @@ def _selected_media_paths(
     values = paths
 
     root = Path(vault_root).resolve()
-    kb_root = root / kb_dirname()
+    kb_root = managed_root(root)
     selected: list[tuple[Path, str]] = []
     seen: set[str] = set()
     for value in values:
@@ -10209,7 +10209,7 @@ def _selected_media_paths(
         except ValueError as error:
             raise OpError(
                 "MEDIA_PATH_OUTSIDE_KB",
-                f"media path must be inside {kb_dirname()}: {value}",
+                f"media path must be inside {managed_root_rel()}: {value}",
             ) from error
         relative = canonical_vault_rel(root, relative)
         if relative in seen:

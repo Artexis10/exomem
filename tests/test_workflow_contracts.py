@@ -297,8 +297,8 @@ def test_contract_storage_uses_configured_kb_name_and_rejects_casefolded_filenam
     from exomem import workflow_contracts
     from exomem.init import init_vault
 
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Brain")
     init_vault(tmp_path)
-    monkeypatch.setattr(workflow_contracts, "kb_dirname", lambda: "Brain")
     first = workflow_contracts.parse_proposal(
         _proposal(
             contract_id="123e4567-e89b-12d3-a456-426614174001",

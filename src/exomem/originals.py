@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from .kbdir import managed_join
+
 CONFIG_ENV = "EXOMEM_MEDIA_STORE_CONFIG"
 
 # The custody pointer fields of the Source and Evidence card schemas, named once here because
@@ -231,14 +233,13 @@ def evicted(vault: Path, path: str | Path) -> bool:
 def companion_paths(relative: str) -> tuple[str, ...]:
     """Every path a companion of this original may have; preserve owns the layout, legacy Source forms included."""
     from .governance.raw_protection import marked
-    from .kbdir import kb_dirname
     from .preserve import _sidecar_paths
 
     target = Path(relative)
     return tuple(
         candidate.as_posix()
         for candidate in _sidecar_paths(
-            target, protected=marked(relative), source=target.is_relative_to(Path(kb_dirname()) / "Sources"),
+            target, protected=marked(relative), source=target.is_relative_to(Path(managed_join("Sources"))),
         )
     )
 

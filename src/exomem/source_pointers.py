@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 
 from . import markdown_regions, originals, reserved_paths
 from .backfill import iter_kb_files
-from .kbdir import kb_prefix
+from .kbdir import managed_join
 from .vault import APPEND_ONLY_KB_SUBPATHS, in_append_only_tree, kb_root
 
 #: The card field that stands for a body citation in a finding.
@@ -106,8 +106,7 @@ def body_citations(body: str) -> list[str]:
     page name in a code span is a reference to a place, and the check cannot tell it from a
     missing file.
     """
-    prefix = kb_prefix()
-    heads = tuple(f"{prefix}{tree}/" for tree in APPEND_ONLY_KB_SUBPATHS)
+    heads = tuple(managed_join(f"{tree}/") for tree in APPEND_ONLY_KB_SUBPATHS)
     cited: list[str] = []
     for span in markdown_regions.inline_code(body):
         candidate = span.strip()

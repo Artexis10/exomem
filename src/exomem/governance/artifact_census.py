@@ -36,7 +36,7 @@ from types import MappingProxyType
 from urllib.parse import unquote
 
 from .. import held_fs, request_budget, vault
-from ..kbdir import kb_dirname
+from ..kbdir import managed_join, managed_root_rel, managed_split, managed_splitter
 
 #: A literal alias starts and ends where the text does not continue a path.
 _NOT_PATH_CHARACTER = re.compile(r"[^\w./-]")
@@ -297,7 +297,7 @@ class _Tables:
     """The alias tables of a census as they are built, file by file."""
 
     def __init__(self) -> None:
-        self.kb_prefix = f"{kb_dirname()}/"
+        self.under = managed_splitter()
         self.by_path: dict[str, list[str]] = {}
         self.by_name: dict[str, list[str]] = {}
         self.by_stem: dict[str, list[str]] = {}
@@ -306,8 +306,9 @@ class _Tables:
     def add_file(self, rel: str) -> None:
         name = rel.rpartition("/")[2]
         aliases = {rel, unquote(rel)}
-        if rel.startswith(self.kb_prefix):
-            aliases.add(rel[len(self.kb_prefix) :])
+        below = self.under(rel)
+        if below is not None:
+            aliases.add(below)
         # The posix spelling throughout: an alias with backslash separators
         # never matches the forward-slash token `resolve` normalises to, so a
         # reference to a withheld page would survive redaction on Windows.
@@ -362,7 +363,7 @@ def _resolved_root(root: str) -> str:
 def _vault_key(vault_root: Path | str) -> tuple[str, str]:
     # One spelling per vault: the writers, the file watcher and the gate each
     # hold the root as their caller spelled it.
-    return (_resolved_root(os.fspath(vault_root)), kb_dirname())
+    return (_resolved_root(os.fspath(vault_root)), managed_root_rel())
 
 
 def _walk_census(
@@ -448,7 +449,7 @@ def vault_listing(vault_root: Path, directory: str | None = None) -> VaultListin
 
     `directory` is vault-relative with forward slashes; each directory walked keeps its own listings.
     """
-    directory = kb_dirname() if directory is None else directory
+    directory = managed_root_rel() if directory is None else directory
     key = (_vault_key(vault_root), directory)
     with _CENSUS_LOCK:
         previous = _LISTINGS.get(key, {})
@@ -748,7 +749,7 @@ def direct_paths(vault_root: Path, token: str) -> tuple[str, ...]:
     present, because a gate that misses a withheld name leaks it. A file that
     the check finds joins the overlay, so the next request resolves it.
     """
-    candidates = tuple(dict.fromkeys((token, f"{kb_dirname()}/{token}")))
+    candidates = tuple(dict.fromkeys((token, managed_join(token))))
     outcomes = {relative: _probe(vault_root, relative) for relative in candidates}
     present = tuple(relative for relative, outcome in outcomes.items() if outcome != "absent")
     note_created(
@@ -768,7 +769,7 @@ def with_path_spans(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, 
     """
     candidates: list[tuple[int, int]] = []
     key = _case_key(text)
-    prefix = _case_key(f"{kb_dirname()}/")
+    prefix = _case_key(managed_join(""))
     at = key.find(prefix)
     while at != -1:
         if at == 0 or _NOT_PATH_CHARACTER.match(text, at - 1):
@@ -802,9 +803,10 @@ def tombstone_aliases(
 
     The lifecycle returns the same set until its state changes, so a request
     builds these once per generation. `kb_name` is part of the cache key
-    because the knowledge base folder name changes the aliases.
+    because the knowledge base folder name changes the aliases; the body reads it again
+    through `managed_split`.
     """
-    kb_prefix = f"{kb_name}/"
+    del kb_name
     table: dict[str, list[str]] = {}
     literal_aliases: set[str] = set()
     for rel in tombstones:
@@ -812,8 +814,9 @@ def tombstone_aliases(
             continue
         path = PurePosixPath(rel)
         aliases = {rel, unquote(rel), path.name, path.stem}
-        if rel.startswith(kb_prefix):
-            aliases.add(rel[len(kb_prefix) :])
+        below = managed_split(rel)
+        if below is not None:
+            aliases.add(below)
         for alias in aliases:
             add_alias(table, alias, rel)
             if len(alias) >= 3:

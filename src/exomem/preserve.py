@@ -41,7 +41,7 @@ from typing import IO, TYPE_CHECKING, BinaryIO
 
 from . import indexes, memory_refs, privacy_log, semantic_contract, source_taxonomy, temporal
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .ocr_facts import OcrFacts
 from .source_inspection import Inspection, inspect_source
 from .vault import (
@@ -813,7 +813,7 @@ def preserve(
                       "writes": [write for write in planned if write.path in core_paths]})
 
         # Index + log updates.
-        rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
+        rel_artifact_for_summary = managed_relative(rel_artifact)
         activity_summary = (
             f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
             f"mobile via exomem)"
@@ -858,7 +858,7 @@ def preserve(
             )
             writes.extend(sub_writes)
         elif not raw_protection and not top_index.exists():
-            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
         if log_file.exists() and not raw_protection and effect_admitted(log_file):
@@ -877,7 +877,7 @@ def preserve(
                 )
             )
         elif not raw_protection and not log_file.exists():
-            warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+            warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer
 

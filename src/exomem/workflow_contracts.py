@@ -17,7 +17,7 @@ from uuid import UUID
 import yaml
 from yaml.constructor import ConstructorError
 
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .vault import (
     PathGuard,
     PathGuardError,
@@ -343,11 +343,11 @@ def _builtin_decision_projection() -> dict[str, Any]:
 
 
 def contract_directory(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "contracts" / FAMILY
+    return managed_root(Path(vault_root)) / "_Schema" / "contracts" / FAMILY
 
 
 def migration_marker_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "workflow-contract-migration.yaml"
+    return managed_root(Path(vault_root)) / "_Schema" / "workflow-contract-migration.yaml"
 
 
 def ensure_migration_marker(vault_root: Path, *, review_required: bool = False) -> dict[str, Any]:
@@ -418,7 +418,7 @@ def _marker_text(review_required: bool) -> str:
 def _managed_scaffold_sentinel_exists(vault_root: Path) -> bool:
     root = Path(vault_root)
     sentinels = (
-        root / kb_dirname() / "_Schema" / "SKILL.md",
+        managed_root(root) / "_Schema" / "SKILL.md",
         shipped_schema_target(root) / "SKILL.md",
     )
     for sentinel in sentinels:

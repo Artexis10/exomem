@@ -19,7 +19,7 @@ from . import (
     vault,
     vocabulary_effects,
 )
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 from .vocabulary import instances
 from .vocabulary_authority import AuthorityScope, VocabularyAuthorityUnavailable
 from .vocabulary_workflow import _hash
@@ -220,7 +220,7 @@ def classify(
         )
         # A project scope is proven only by the two existing canonical endpoints
         # and the actual registered project key, never proposed entity metadata.
-        project_path = f"{kb_dirname()}/_Schema/project-keys.yaml"
+        project_path = managed_join("_Schema/project-keys.yaml")
         try:
             project_text, guard = vault.read_guarded_text(root, root / project_path)
             project_data = yaml.safe_load(project_text)

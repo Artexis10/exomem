@@ -37,6 +37,7 @@ from . import (
     reserved_paths,
     trash_metadata,
 )
+from .kbdir import managed_root
 from .media_jobs import (
     OFFLOAD_MEDIA_TYPE,
     STATUS_JOB_LIMIT,
@@ -476,10 +477,9 @@ def managed_event(vault: Path, path: Path) -> str | None:
 def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[OriginalSnapshot]:
     """Discover sidecar bindings, including unsupported or physically absent originals."""
     from .backfill import iter_kb_files
-    from .kbdir import kb_dirname
     from .vault import parse_frontmatter
 
-    root = root if root is not None else vault / kb_dirname()
+    root = root if root is not None else managed_root(vault)
     if not root.is_dir():
         return
     from .vault_store import read as store_read

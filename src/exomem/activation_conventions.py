@@ -46,7 +46,7 @@ from typing import Any
 import yaml
 
 from . import registry_history, vault
-from .kbdir import kb_dirname
+from .kbdir import is_managed_root_name, managed_root
 
 log = logging.getLogger(__name__)
 
@@ -299,7 +299,7 @@ def shipped_conventions_text() -> str:
 
 def override_path(vault_root: Path) -> Path:
     """Where a vault's own registry lives, if the owner authored one."""
-    return Path(vault_root) / kb_dirname() / "_Schema" / REGISTRY_FILENAME
+    return managed_root(Path(vault_root)) / "_Schema" / REGISTRY_FILENAME
 
 
 def clear_cache() -> None:
@@ -581,7 +581,7 @@ def _validate_folder_rule(raw: str) -> tuple[str | None, str | None]:
     if any(segment.startswith(".") or segment.startswith("_") for segment in segments):
         return None, "rule_hidden_segment"
     head = segments[0]
-    if head.casefold() == kb_dirname().casefold():
+    if is_managed_root_name(head, key=str.casefold):
         return None, "rule_kb_prefixed"
     if head.casefold() == "entities":
         return None, "rule_entity_folder"

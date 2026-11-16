@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from .. import activation_manifest, find_corpus, reserved_paths, state_migration, state_paths
 from .. import structured_collections as collections
-from ..kbdir import kb_dirname
+from ..kbdir import managed_join
 from . import companions, membership, policy
 from .decisions import Decision, decide
 from .principal import OWNER_AUDIENCE, ClientBinding, RequestPrincipal
@@ -625,7 +625,7 @@ def capture_folders(root: Path, *, tree: str | None = None) -> tuple[str, ...]:
 
 def _in_tree(path: str, tree: str) -> bool:
     """Whether `path` lies under `<knowledge base>/<tree>/`, under any portable spelling."""
-    return collections._portable_path_key(path).startswith(collections._portable_path_key(f"{kb_dirname()}/{tree}/"))
+    return collections._portable_path_key(path).startswith(collections._portable_path_key(managed_join(f"{tree}/")))
 
 
 def inbox_destination(root: Path, folder: str, leaf: str) -> str | None:
@@ -806,7 +806,7 @@ def require_write(
 
 
 def requirement_relative_path() -> str:
-    return f"{kb_dirname()}/{reserved_paths.CONNECTOR_BOUNDARY_REQUIREMENT_NAME}"
+    return managed_join(reserved_paths.CONNECTOR_BOUNDARY_REQUIREMENT_NAME)
 
 
 def parse_requirement(raw: bytes) -> dict:

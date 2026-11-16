@@ -69,7 +69,7 @@ from . import (
 )
 from . import project_keys as project_keys_module
 from .governance.membership import MembershipUnresolved
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .vault import (
     MISSING_CONTENT_HASH,
     InvalidSlugError,
@@ -374,7 +374,7 @@ def _plan_navigation(root: Path, entries: Sequence[_NavigationEntry]) -> _Naviga
     warnings: list[str] = []
     top_index = kb_root(root) / "index.md"
     if not store_read.holds_file(root, top_index.relative_to(root).as_posix()):
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
     elif connector_boundary.effect_admission(root)(top_index):
         top_text, top_guard = read_guarded_text(root, top_index)
         new_top = top_text
@@ -971,7 +971,7 @@ def _legacy_note(
         writes.append(PlannedWrite(path=top_index, content=new_top))
         writes.extend(sub_writes)
     else:
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
     if log_file.exists():
         full_body = log_body + (f"\n\n{trim_note}" if (top_index.exists() and trim_note) else "")
@@ -984,7 +984,7 @@ def _legacy_note(
         )
         writes.append(PlannedWrite(path=log_file, content=new_log))
     else:
-        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+        warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
 
     if _planned_writes is None:
         try:
@@ -1695,7 +1695,7 @@ def _resolve_source_path(vault_root: Path, kb_relative: str) -> Path | None:
     Returns the first candidate that exists, else the historical candidate so a
     genuinely missing source still reports the path a caller would expect.
     """
-    rel = kb_relative.removeprefix(kb_prefix())
+    rel = managed_relative(kb_relative)
     base = kb_root(vault_root) / rel
     if base.suffix.lower() == ".md":
         candidates = [base.with_name(f"{base.name[:-3]}-notes.md"), base]
@@ -1723,7 +1723,7 @@ def _resolve_source_path(vault_root: Path, kb_relative: str) -> Path | None:
 def _prepend_log_entry(text: str, *, date_iso: str, verb: str, rel_path: str, body: str) -> str:
     """Insert `## [<date>] <verb> | <kb-relative-path>` entry just after the
     log's `---` separator (newest entries at top)."""
-    title = rel_path.replace(kb_prefix(), "", 1)
+    title = managed_relative(rel_path)
     new_entry = f"## [{date_iso}] {verb} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     if new_entry in text:
         return text
@@ -1747,7 +1747,7 @@ def _activity_summary(
     medium: str | None = None,
     status: str | None = None,
 ) -> str:
-    path_part = rel_note_no_ext.replace(kb_prefix(), "")
+    path_part = managed_relative(rel_note_no_ext)
     modifier_parts: list[str] = []
     if note_type == "research-note" and project:
         modifier_parts.append(project)

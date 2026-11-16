@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import reserved_paths, sidecar_store
-from .kbdir import kb_dirname
+from .kbdir import managed_split_parts
 
 _SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
 _MIXED_DRAIN_TURN_KEY = "mixed_drain_turn:v1"
@@ -1002,7 +1002,7 @@ def _safe_markdown_rel_path(
         or any(part in {"", ".", ".."} for part in path.parts)
         or not normalized.lower().endswith(".md")
         or not path.parts
-        or (knowledge_base_only and path.parts[0] != kb_dirname())
+        or (knowledge_base_only and managed_split_parts(path.parts) is None)
     ):
         return None
     return path.as_posix()

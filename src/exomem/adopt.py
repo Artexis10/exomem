@@ -33,7 +33,7 @@ from . import (
 )
 from . import compile_proposal as compile_proposal_module
 from . import overview as overview_module
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_relative, managed_root, managed_split
 from .source_coverage import CAPTURE_HEADING, fence_for, fenced_capture
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -131,7 +131,7 @@ def _safe_next_actions(kb_present: bool, carrier_review: dict | None = None) -> 
                     "action": "save-manifest",
                     "status": "available",
                     "description": (
-                        f"Save this adoption report under {kb_dirname()}/{ADOPTION_DIR}/ "
+                        f"Save this adoption report under {managed_join(f'{ADOPTION_DIR}/')} "
                         "without touching sibling folders."
                     ),
                 },
@@ -140,7 +140,7 @@ def _safe_next_actions(kb_present: bool, carrier_review: dict | None = None) -> 
                     "status": "available",
                     "description": (
                         f"Copy explicitly selected legacy text files into governed "
-                        f"{kb_dirname()}/Sources/{IMPORTED_SOURCE_FOLDER}/ with original "
+                        f"{managed_join(f'Sources/{IMPORTED_SOURCE_FOLDER}/')} with original "
                         "path/hash provenance. Originals remain unchanged."
                     ),
                 },
@@ -161,7 +161,7 @@ def _safe_next_actions(kb_present: bool, carrier_review: dict | None = None) -> 
                 "action": "initialize-kb",
                 "status": "available",
                 "description": (
-                    f"Run setup/init to create {kb_dirname()}/ beside existing files "
+                    f"Run setup/init to create {managed_join('')} beside existing files "
                     "before saving manifests or compiled knowledge."
                 ),
             }
@@ -186,10 +186,10 @@ def _governance(scan: dict) -> dict:
 
 
 def _require_kb(root: Path) -> None:
-    if not (root / kb_dirname()).is_dir():
+    if not managed_root(root).is_dir():
         raise AdoptError(
             "KB_NOT_INITIALIZED",
-            f"{kb_dirname()}/ is required for this adopt mode; run setup/init first",
+            f"{managed_join('')} is required for this adopt mode; run setup/init first",
         )
 
 
@@ -201,15 +201,15 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
     raw = (manifest_path or "").strip().replace("\\", "/")
     defaulted = not raw
     if defaulted:
-        raw = f"{kb_prefix()}{ADOPTION_DIR}/{today.isoformat()}-adoption-manifest.md"
+        raw = managed_join(f"{ADOPTION_DIR}/{today.isoformat()}-adoption-manifest.md")
     elif "/" not in raw:
-        raw = f"{kb_prefix()}{ADOPTION_DIR}/{raw}"
+        raw = managed_join(f"{ADOPTION_DIR}/{raw}")
     if raw.endswith("/"):
         raise AdoptError("INVALID_MANIFEST_PATH", "manifest_path must name a markdown file")
-    if not raw.startswith(kb_prefix()):
+    if managed_split(raw) is None:
         raise AdoptError(
             "INVALID_MANIFEST_PATH",
-            f"manifest_path must be under {kb_dirname()}/",
+            f"manifest_path must be under {managed_join('')}",
         )
     if not raw.lower().endswith(".md"):
         raw += ".md"
@@ -217,10 +217,10 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
         target, rel = resolve_under_vault(root, raw)
     except VaultPathError as e:
         raise AdoptError(e.code, e.reason) from e
-    if not rel.startswith(kb_prefix()):
+    if managed_split(rel) is None:
         raise AdoptError(
             "INVALID_MANIFEST_PATH",
-            f"manifest_path must be under {kb_dirname()}/",
+            f"manifest_path must be under {managed_join('')}",
         )
     from .governance import connector_boundary
 
@@ -307,7 +307,7 @@ def _add_manifest_index_writes(
         top_text, _trim = indexes._prepend_recent_activity(
             top_index.read_text(encoding="utf-8"),
             date_iso=today.isoformat(),
-            summary=f"`{rel_no_ext.removeprefix(kb_prefix())}` (adoption manifest) — saved scan-first existing-vault report",
+            summary=f"`{managed_relative(rel_no_ext)}` (adoption manifest) — saved scan-first existing-vault report",
         )
         sub_writes, top_text = indexes.compute_subindex_writes(
             root,
@@ -316,7 +316,7 @@ def _add_manifest_index_writes(
         writes.append(PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8")))
         writes.extend(sub_writes)
     else:
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
     log_file = kb / "log.md"
     if log_file.exists():
         writes.append(
@@ -332,7 +332,7 @@ def _add_manifest_index_writes(
             )
         )
     else:
-        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+        warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
     return warnings
 
 
@@ -698,11 +698,11 @@ def _resolve_selected_text_file(root: Path, raw: str) -> tuple[Path, str] | dict
         abs_path, rel = resolve_under_vault(root, raw, must_exist=True, must_be_file=True)
     except VaultPathError as e:
         return {"path": raw, "code": e.code, "reason": e.reason}
-    if rel.startswith(kb_prefix()):
+    if managed_split(rel) is not None:
         return {
             "path": rel,
             "code": "ALREADY_GOVERNED",
-            "reason": f"copy-as-sources expects legacy files outside {kb_dirname()}/",
+            "reason": f"copy-as-sources expects legacy files outside {managed_join('')}",
             "ref": context_refs.vault_ref(rel),
         }
     if abs_path.suffix.lower() not in _TEXT_IMPORT_SUFFIXES:
@@ -867,7 +867,7 @@ def plan_import_items(
 
 def _top_folder(rel: str) -> str:
     """The Sources folder a page is counted under: its first segment below `Sources/`."""
-    return Path(rel).relative_to(Path(kb_dirname()) / "Sources").parts[0]
+    return Path(rel).relative_to(managed_join("Sources")).parts[0]
 
 
 def commit_import_items(
@@ -997,7 +997,7 @@ def commit_import_items(
                 )
             derived.append(("index", PlannedWrite(path=sources_index, content=sources_text, guard=sources_guard)))
         else:
-            warnings.append(f"{kb_prefix()}Sources/index.md missing; skipped Sources index update")
+            warnings.append(f"{managed_join('Sources/index.md')} missing; skipped Sources index update")
 
         where = ", ".join(f"Sources/{folder}/" for folder in folders)
         top_index = kb / "index.md"
@@ -1026,7 +1026,7 @@ def commit_import_items(
             if trim_note:
                 warnings.append(trim_note)
         else:
-            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
         body_lines = [
             f"Copied {len(copied)} selected file(s) into {where}. Originals remain unchanged.",
@@ -1046,7 +1046,7 @@ def commit_import_items(
         if reconcile and operation_token:
             history = read_operation_log(root)
             # A missing optional live log never blocked import; an unreadable existing log cannot prove deduplication.
-            missing_live_log = not os.path.lexists(root / kb_prefix() / "log.md")
+            missing_live_log = not os.path.lexists(root / managed_join("log.md"))
             if history["files_unreadable"] > int(missing_live_log):
                 raise AdoptError("IMPORT_RECOVERY_UNRESOLVED", "the import log cannot establish the chunk's publication state")
             logged = any(entry.get("op") == "adopt-copy" and
@@ -1055,7 +1055,7 @@ def commit_import_items(
         if not logged:
             log_plan = plan_log_entries(
                 root,
-                [LogEntry(date_iso, "adopt-copy", f"{kb_prefix()}Sources", "\n".join(body_lines), token, provenance)],
+                [LogEntry(date_iso, "adopt-copy", managed_join("Sources"), "\n".join(body_lines), token, provenance)],
                 operation_token=token,
             )
             derived.extend(("operation-log", write) for write in log_plan.writes)
@@ -1206,7 +1206,7 @@ def run_manifest_writes(
     stateless ``save-manifest`` mode. Returns ``(writes, rel_path, warnings)``;
     the caller folds these into (or commits alongside) its own batch.
     """
-    rel = f"{kb_prefix()}{ADOPTION_DIR}/{today.isoformat()}-adoption-run-{run_id}.md"
+    rel = managed_join(f"{ADOPTION_DIR}/{today.isoformat()}-adoption-run-{run_id}.md")
     target = root / rel
     writes: list[PlannedWrite] = [
         PlannedWrite(
@@ -1228,8 +1228,8 @@ def _resolve_compile_selection(root: Path, raw: str) -> dict:
     except VaultPathError as e:
         return {"kind": "skip", "path": raw, "code": e.code, "reason": e.reason}
 
-    if rel.startswith(kb_prefix()):
-        if rel.startswith(f"{kb_prefix()}Sources/") and rel.lower().endswith(".md"):
+    if managed_split(rel) is not None:
+        if rel.startswith(managed_join("Sources/")) and rel.lower().endswith(".md"):
             return {"kind": "governed_source", "abs_path": abs_path, "rel": rel}
         return {
             "kind": "skip",

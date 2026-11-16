@@ -68,7 +68,7 @@ from ..collection_store.preview import (
     projection_decision,
 )
 from ..find_types import Hit, SemanticUnitHit
-from ..kbdir import kb_dirname
+from ..kbdir import managed_form, managed_root_rel, managed_split
 from ..published_admission import (
     Admission,
     AdmittedPredicate,
@@ -1298,8 +1298,8 @@ def _canonical_reference(
 
 def _kb_stripped(key: str) -> str:
     """The same key without a leading Knowledge-Base directory component."""
-    prefix = f"{kb_dirname().casefold()}/"
-    return key[len(prefix) :] if key.startswith(prefix) else key
+    below = managed_split(key, key=str.casefold)
+    return key if below is None else below
 
 
 @functools.lru_cache(maxsize=256)
@@ -5893,13 +5893,12 @@ def _resolve_reference_targets(vault_root: Path, targets: Iterable[str]) -> set[
     set of things that must be decided.
     """
     out: set[str] = set()
-    kb_prefix = f"{kb_dirname()}/"
     for token in targets:
         candidate = token if token.lower().endswith(".md") else f"{token}.md"
         if (vault_root / candidate).is_file():
             out.add(candidate)
             continue
-        prefixed = candidate if candidate.startswith(kb_prefix) else kb_prefix + candidate
+        prefixed = managed_form(candidate)
         out.add(prefixed if (vault_root / prefixed).is_file() else candidate)
     return out
 
@@ -7472,7 +7471,7 @@ class _ArtifactReferenceGate:
         self._index_entered = True
         self.census = artifact_census.request_census(self.vault_root)
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
-            self.tombstones, kb_dirname()
+            self.tombstones, managed_root_rel()
         )
 
     def _paths_for(self, alias: str) -> tuple[str, ...]:
@@ -8033,7 +8032,7 @@ def owner_only_aggregate(
                     checkpoint()
                 path = authority._knowledge_base_spelling(vault_root, entry.relative_path)
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
-                if entry.kind != "file" or not path.startswith(f"{kb_dirname()}/"):
+                if entry.kind != "file" or managed_split(path) is None:
                     continue
                 canonical = operation.projection_decision(path)
                 if canonical is None:

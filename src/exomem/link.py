@@ -42,7 +42,7 @@ from .entity_types import (
     EntityTypeRegistry,
     load_entity_types,
 )
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .vault import (
     InvalidSlugError,
     PlannedWrite,
@@ -619,7 +619,7 @@ def _activity_summary(
     domain: str | None,
     project: str | None,
 ) -> str:
-    path_part = rel_entity_no_ext.replace(kb_prefix(), "")
+    path_part = managed_relative(rel_entity_no_ext)
     modifier_parts: list[str] = [entity_type]
     if entity_type == "concept" and domain:
         modifier_parts.append(domain)
@@ -663,7 +663,7 @@ def _prepend_log_entry(
     text: str, *, date_iso: str, rel_path: str, body: str
 ) -> str:
     """Insert `## [<date>] link | <kb-relative-path>` after the `---` separator."""
-    title = rel_path.replace(kb_prefix(), "", 1)
+    title = managed_relative(rel_path)
     new_entry = f"## [{date_iso}] link | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     if new_entry in text:
         return text
@@ -1034,7 +1034,7 @@ def link(
     )
     top_index = kb / "index.md"
     if not top_index.is_file():
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
     elif connector_boundary.effect_admission(vault_root)(top_index):
         top_text, top_guard = read_guarded_text(vault_root, top_index)
         new_top, _ = indexes._prepend_recent_activity(

@@ -91,7 +91,7 @@ from . import (
     state_paths,
 )
 from .find_types import ParsedPage, RankingPage
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_root_rel, managed_split_parts
 from .log_events import log_event
 from .published_admission import Admission, admission_of, deciding
 
@@ -3999,7 +3999,7 @@ def _excluded_rows_clause(
         from . import working_set_index
 
         prefixes = sorted(
-            f"{kb_dirname()}/{folder}/"
+            managed_join(f"{folder}/")
             for folder in working_set_index._RAW_MATERIAL_FOLDERS
         )
         clause += " AND NOT (" + " OR ".join(
@@ -5390,11 +5390,8 @@ def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
     in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage(
         "/".join(dirs)
     )
-    in_kb = (
-        len(rel_parts) > 1
-        and rel_parts[0] == kb_dirname()
-        and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
-    )
+    below = managed_split_parts(rel_parts)
+    in_kb = bool(below) and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
     return in_kb, in_vault
 
 
@@ -7263,7 +7260,7 @@ class LexicalStore:
         from . import recall_policy
         from .vault import walk_vault_md
 
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         members: dict[Path, list[bool]] = {}  # abs path -> [in_kb, in_vault]
         def check() -> None:
             if cancel is not None and cancel.is_set():
@@ -10800,7 +10797,7 @@ class LexicalStore:
             # bytes and path (see `_page_identity`); they key every identity, so a change of either reads as
             # every page changed.
             context = hashlib.blake2b(
-                f"{dict(generation[1:]).get('catalog_identity')}\0{kb_dirname()}".encode(), digest_size=16
+                f"{dict(generation[1:]).get('catalog_identity')}\0{managed_root_rel()}".encode(), digest_size=16
             ).digest()
             digests = {
                 path: _page_identity(context, content_hash, rows.get(path))

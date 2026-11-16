@@ -30,7 +30,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 from .vault import _FM_PATTERN, parse_frontmatter, walk_vault_md
 
 PRESERVED_HEADING = "## Preserved notes"
@@ -206,7 +206,7 @@ def iter_media_sidecars(vault_root: Path):
     root = Path(vault_root)
     from . import find_corpus
 
-    evidence_prefix = f"{kb_dirname()}/Evidence/"
+    evidence_prefix = managed_join("Evidence/")
     for entry in find_corpus.corpus_paths(
         root, "vault", lambda **walk: walk_vault_md(root, **walk)
     ):

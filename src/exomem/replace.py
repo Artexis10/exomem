@@ -38,7 +38,14 @@ from . import (
     vocabulary_resolution,
 )
 from . import note as note_module
-from .kbdir import kb_page_target, kb_prefix, resolve_stored_page_target
+from .kbdir import (
+    kb_page_target,
+    managed_form,
+    managed_join,
+    managed_relative,
+    managed_root,
+    resolve_stored_page_target,
+)
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     ContentHashMismatchError,
@@ -208,8 +215,7 @@ def _legacy_replace(
     )
     new_path_str = new_result.path  # vault-relative, with .md
     rel_new_no_ext = new_path_str.removesuffix(".md")
-    if not rel_new_no_ext.startswith(kb_prefix()):
-        rel_new_no_ext = kb_prefix() + rel_new_no_ext
+    rel_new_no_ext = managed_form(rel_new_no_ext)
     new_resolved = vault_root / new_path_str
 
     warnings: list[str] = list(new_result.warnings)
@@ -259,7 +265,7 @@ def _legacy_replace(
     elif log_file.exists():
         warnings.append("note write plan omitted log.md; skipped replace log entry")
     else:
-        warnings.append(f"{kb_prefix()}log.md missing; skipped replace log entry")
+        warnings.append(f"{managed_join('log.md')} missing; skipped replace log entry")
 
     writes = note_writes + [
         PlannedWrite(
@@ -360,7 +366,7 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
         raise ReplaceError(
             code="INVALID_PATH",
             missing=["old_path"],
-            reason=f"path escapes {kb_prefix()}: {e}",
+            reason=f"path escapes {managed_join('')}: {e}",
         ) from None
     from .governance import egress
 
@@ -453,7 +459,7 @@ def _mark_superseded(text: str, rel_new_no_ext: str, date_iso: str) -> str:
 def _prepend_replace_log_entry(
     text: str, *, date_iso: str, rel_new_no_ext: str, body: str
 ) -> str:
-    title = rel_new_no_ext.replace(kb_prefix(), "", 1)
+    title = managed_relative(rel_new_no_ext)
     new_entry = f"## [{date_iso}] replace | {title}\n\n{body}\n"
     if new_entry in text:
         return text
@@ -676,11 +682,11 @@ def replace(
         return prepared.preflight
 
     auxiliary = list(prepared.auxiliary_writes)
-    log_file = root / "Knowledge Base" / "log.md"
+    log_file = managed_root(root) / "log.md"
     replacement_body = f"Supersedes `{rel_old_no_ext}` via exomem."
     if reason and reason.strip():
         replacement_body += " " + reason.strip()
-    log_archive_dir = root / "Knowledge Base" / "_archive" / "logs"
+    log_archive_dir = managed_root(root) / "_archive" / "logs"
     auxiliary = [
         write
         for write in auxiliary

@@ -59,7 +59,14 @@ from . import find as find_module
 from . import vault as vault_module
 from .cli_ops import OpError
 from .find_types import ParsedPage
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import (
+    managed_form,
+    managed_join,
+    managed_relative,
+    managed_root,
+    managed_split,
+    managed_splitter,
+)
 
 log = logging.getLogger(__name__)
 
@@ -2203,10 +2210,10 @@ def _dependency_lookup_keys(raw_target: str) -> set[str]:
     if not target:
         return set()
     keys = {target.casefold()}
-    if target.startswith(kb_prefix()):
-        keys.add(target.removeprefix(kb_prefix()).casefold())
+    if managed_split(target) is not None:
+        keys.add(managed_relative(target).casefold())
     else:
-        keys.add((kb_prefix() + target).casefold())
+        keys.add(managed_join(target).casefold())
     if "/" not in target:
         keys.add(target.casefold())
     return keys
@@ -4389,12 +4396,12 @@ class EpistemicGraphIndex:
             for rel, entry in rows.items()
             if entry != self._live_resolver_entry(resolver, rel)
         }
-        kb = self.vault_root / kb_dirname()
-        prefix = kb_prefix()
+        kb = managed_root(self.vault_root)
+        under = managed_splitter()
         listings: dict[Path, frozenset[str] | None] = {}
         for no_ext in resolver.full_paths:
             rel = f"{no_ext}.md"
-            if rel in rows or not rel.startswith(prefix):
+            if rel in rows or under(rel) is None:
                 continue
             if find_corpus.walk_md_admits(kb, self.vault_root / rel, listings):
                 differing.add(rel)
@@ -5874,11 +5881,11 @@ class EpistemicGraphIndex:
             str(path)
             for (path,) in conn.execute("SELECT path FROM graph_nodes WHERE kind = 'file'")
         }
-        prefix = kb_prefix()
+        under = managed_splitter()
         vanished = [
             rel
             for no_ext in resolver.full_paths
-            if (rel := f"{no_ext}.md").startswith(prefix)
+            if under(rel := f"{no_ext}.md") is not None
             and rel not in rows
             and not os.path.lexists(self.vault_root / rel)
         ]
@@ -5984,7 +5991,7 @@ class EpistemicGraphIndex:
     ) -> int:
         """Index every Knowledge Base page into ``conn`` without committing; return the count."""
         indexed = 0
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         type_basis = producer_type_basis(self.vault_root)
         registry_stamps = graph_registry_stamps(self.vault_root)
         if kb.is_dir():
@@ -6466,7 +6473,7 @@ class EpistemicGraphIndex:
 
         def candidates() -> Iterator[Path]:
             for path, in_vault, in_kb in vault_module.walk_vault_md_with_subtree(
-                self.vault_root, self.vault_root / kb_dirname()
+                self.vault_root, managed_root(self.vault_root)
             ):
                 walked[path] = (in_vault, in_kb)
                 yield path
@@ -6829,7 +6836,7 @@ class EpistemicGraphIndex:
         entries: dict[str, tuple[bool, str | None]] = {}
         for raw_path in delta.changed:
             rel = _vault_rel(self.vault_root, Path(raw_path))
-            if rel is None or not rel.startswith(kb_prefix()):
+            if rel is None or managed_split(rel) is None:
                 log.info(
                     "graph stored resolver proof declined reason=changed_path_outside_kb "
                     "changed_count=%d",
@@ -7959,7 +7966,7 @@ class EpistemicGraphIndex:
         conn = self._open_read_snapshot(require_current_projection=False)
         if conn is None:
             return None
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         listings: dict[Path, frozenset[str] | None] = {}
         current: list[str] = []
         stale: list[str] = []
@@ -7985,7 +7992,7 @@ class EpistemicGraphIndex:
                 ).fetchone()
                 indexed = (
                     admitted
-                    and rel.startswith(kb_prefix())
+                    and managed_split(rel) is not None
                     and find_corpus.walk_md_admits(kb, path, listings)
                 )
                 if indexed:
@@ -8101,7 +8108,7 @@ class EpistemicGraphIndex:
             # A changed non-KB target that has no persisted file row cannot
             # supply its prior title. It may have removed an ambiguity, so the
             # graph cannot safely claim bounded topology recovery.
-            if not rel.startswith(kb_prefix()) and not indexed:
+            if managed_split(rel) is None and not indexed:
                 if opened_snapshot:
                     conn.rollback()
                 return None
@@ -10266,7 +10273,7 @@ class EpistemicGraphIndex:
                 canonical = canonical_refs.get(rel)
                 if canonical is not None:
                     return canonical
-                if rel.startswith(f"{kb_dirname()}/Sources/"):
+                if rel.startswith(managed_join("Sources/")):
                     return context_refs.source_ref(rel)
                 return context_refs.vault_ref(rel)
             info = source_info.get(rel)
@@ -10281,7 +10288,7 @@ class EpistemicGraphIndex:
                     return memory_refs.memory_ref(str(exomem_id))
                 except ValueError:
                     pass
-            if rel.startswith(f"{kb_dirname()}/Sources/"):
+            if rel.startswith(managed_join("Sources/")):
                 return context_refs.source_ref(rel)
             return context_refs.vault_ref(rel)
 
@@ -12718,7 +12725,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
             code = "unproven"
         else:
             code = "not_current"
-        return [{"path": kb_prefix(), "refusal": code, "reason": _DRIFT_REFUSAL_REASONS[code]}]
+        return [{"path": managed_join(""), "refusal": code, "reason": _DRIFT_REFUSAL_REASONS[code]}]
     try:
         by_path = {
             node["path"]: node for node in idx._nodes_from_snapshot(conn) if node["kind"] == "file"
@@ -12728,7 +12735,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     from . import find_corpus
 
     drift: list[dict[str, Any]] = []
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     if not kb.is_dir() and not find_corpus.store_serves(vault_root):
         return drift
     disk_paths: set[str] = set()
@@ -13322,7 +13329,7 @@ def _body_wikilink_observations(
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         target_path = _page_rel(canonical)
-        if warning or not target_path.startswith(kb_prefix()) or target_path in seen:
+        if warning or managed_split(target_path) is None or target_path in seen:
             continue
         seen.add(target_path)
         out.append(
@@ -13485,8 +13492,8 @@ def _page_rel(path: str) -> str:
     cleaned = str(path).strip().strip("/")
     if not cleaned:
         return cleaned
-    if not cleaned.startswith(kb_prefix()) and "/" in cleaned:
-        cleaned = kb_prefix() + cleaned.removeprefix(kb_dirname() + "/")
+    if "/" in cleaned:
+        cleaned = managed_form(cleaned)
     return cleaned if cleaned.lower().endswith(".md") else cleaned + ".md"
 
 
@@ -14122,7 +14129,7 @@ def _homonym_paths(
     maps drops it, so a kept entry describes exactly these maps. A resolver without a token is
     read again.
     """
-    key, publication, prefix = Path(vault_root), resolver.publication, kb_prefix()
+    key, publication, prefix = Path(vault_root), resolver.publication, managed_join("")
     cached = _HOMONYM_PATHS.get(key)
     if publication is not None and cached is not None and (
         cached.publication, cached.prefix
@@ -14156,7 +14163,7 @@ def homonyms_across_patch(
     under one of those title keys. Every other name keeps its group. Without a kept entry for this
     publication the body runs alone, and the next reader groups the whole resolver.
     """
-    key, prefix = Path(vault_root), kb_prefix()
+    key, prefix = Path(vault_root), managed_join("")
     memo = _HOMONYM_PATHS.get(key)
     if memo is None or resolver.publication is None or (memo.publication, memo.prefix) != (
         resolver.publication, prefix,
@@ -14169,9 +14176,9 @@ def homonyms_across_patch(
     if memo.names_by_title is None:
         memo.names_by_title = _names_by_title(resolver)
     by_title = memo.names_by_title
-    names, titles = _names_a_patch_reaches(resolver, rels, prefix)
+    names, titles = _names_a_patch_reaches(resolver, rels)
     yield
-    after_names, after_titles = _names_a_patch_reaches(resolver, rels, prefix)
+    after_names, after_titles = _names_a_patch_reaches(resolver, rels)
     titles |= after_titles
     names |= after_names | titles
     for title in titles:
@@ -14224,7 +14231,7 @@ def _file_name(
 
 
 def _names_a_patch_reaches(
-    resolver: vault_module.WikilinkResolver, rels: list[str], prefix: str,
+    resolver: vault_module.WikilinkResolver, rels: list[str],
 ) -> tuple[set[str], set[str]]:
     """The names that a patch of ``rels`` reaches through the path maps and the stems, and the
     title keys of the touched keys' candidates, in ``resolver``'s maps."""
@@ -14232,7 +14239,7 @@ def _names_a_patch_reaches(
     titles: set[str] = set()
     for rel in rels:
         path_key = vault_module._wikilink_path_key(str(rel).replace("\\", "/").lstrip("/"))
-        names.update((path_key, path_key.removeprefix(prefix), path_key.rsplit("/", 1)[-1]))
+        names.update((path_key, managed_relative(path_key), path_key.rsplit("/", 1)[-1]))
         titles.update(
             candidate.title_key
             for candidate in resolver.candidates_by_key.get(path_key, ())
@@ -14247,7 +14254,7 @@ def _link_candidates_for_key(resolver: vault_module.WikilinkResolver, cleaned: s
         return set()
     found = {
         candidate
-        for candidate in (cleaned, kb_prefix() + cleaned)
+        for candidate in (cleaned, managed_join(cleaned))
         if candidate in resolver.full_paths
     }
     if "/" not in cleaned:

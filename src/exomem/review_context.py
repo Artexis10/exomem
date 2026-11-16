@@ -19,6 +19,7 @@ from . import (
 )
 from . import find as find_module
 from .governance import egress
+from .kbdir import managed_join
 
 _SAFE_FRONTMATTER = frozenset(
     {
@@ -59,7 +60,7 @@ class _ReferenceResolver:
         if ref is None:
             ref = (
                 context_refs.source_ref(path)
-                if path.startswith("Knowledge Base/Sources/")
+                if path.startswith(managed_join("Sources/"))
                 else context_refs.vault_ref(path)
             )
         self._cache[path] = ref
