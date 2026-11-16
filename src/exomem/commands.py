@@ -153,6 +153,7 @@ from . import set_take as set_take_module
 from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
+from . import topic_brief as topic_brief_module
 from . import traversal_profiles as traversal_profiles_module
 from . import vault_skills as vault_skills_module
 from . import vocabulary_delta as vocabulary_delta_module
@@ -8406,6 +8407,19 @@ def _refuse_unused_offset(result: dict, offset: int | None) -> dict:
     return result
 
 
+def _with_registry_lag(vault_root: Path, view: dict) -> dict:
+    """A derived view that says so when a store-mode registry pass may still re-derive its rows.
+
+    A view that would read ready and current is marked stale, in the words every store-mode reader uses.
+    """
+    registry_lag = _store_registry_lag(vault_root)
+    if registry_lag is not None:
+        view = {**view, **registry_lag}
+        if view.get("state") == context_views_module.READY:
+            view["stale"] = True
+    return view
+
+
 def read_memory_stored(
     vault_root: Path,
     path: str,
@@ -8421,8 +8435,9 @@ def read_memory_stored(
     follow_corrections: bool = True,
     offset: int | None = None,
     units: bool = False,
+    brief: bool = False,
 ) -> dict:
-    """Read a page, exact unit, or exomem://map view.
+    """Read a page, exact unit, exomem://map view, or topic brief.
 
     Missing/stale units report status; never substituted.
     Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
@@ -8442,7 +8457,18 @@ def read_memory_stored(
         follow_corrections: False reads the historical Source; unit reads stay exact.
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
         units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
+        brief: Read `path` as a topic (a page or free text) and serve its brief: conclusions, sources, open questions, and changes since this principal's last read.
     """
+    if brief:
+        # A brief is a derived view over one subject, never a page: it takes none of a page's read options.
+        if unit_ref is not None or frontmatter_only or include_history or links or include_raw or units or offset is not None:
+            raise ValueError(
+                "INVALID_VIEW_READ_OPTIONS: a brief read cannot be combined with "
+                "unit_ref, frontmatter_only, include_history, links, include_raw, units, or offset"
+            )
+        return _with_registry_lag(vault_root, topic_brief_module.read(
+            vault_root, path, continuation=continuation, purpose=purpose
+        ))
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
     if context_views_module.in_view_namespace(path):
@@ -8451,17 +8477,9 @@ def read_memory_stored(
                 "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
                 "unit_ref, frontmatter_only, include_history, links, include_raw, or offset"
             )
-        view = context_views_module.read_view(
+        return _with_registry_lag(vault_root, context_views_module.read_view(
             vault_root, path, continuation=continuation, purpose=purpose
-        )
-        # A store-mode view is compiled over rows that a registry pass may still re-derive: a view
-        # that would read ready and current says so, in the words every store-mode reader uses.
-        registry_lag = _store_registry_lag(vault_root)
-        if registry_lag is not None:
-            view = {**view, **registry_lag}
-            if view.get("state") == context_views_module.READY:
-                view["stale"] = True
-        return view
+        ))
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
     # (which has no `purpose` parameter of its own) see the declared purpose.

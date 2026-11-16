@@ -66,6 +66,17 @@ def test_unique_basename_links_by_name_alone():
     )
 
 
+def test_a_file_whose_name_ends_in_md_is_named_by_its_extension_as_well():
+    """A Markdown original and the page that describes it: `.md` is implied once, so each needs its own text."""
+    original, page = "Evidence/rate-notes.md", "Evidence/rate-notes.md.md"
+    index = links.build_index([original, page])
+
+    assert links.link_form(page, index).text == "rate-notes.md.md"
+    assert links.link_form(original, index).text == "rate-notes"
+    assert links.resolve_link("rate-notes.md.md", index).path == page
+    assert links.resolve_link("rate-notes.md", index).path == original
+
+
 def test_link_form_takes_the_shortest_unique_trailing_path():
     index = links.build_index(SCANS)
 

@@ -322,3 +322,57 @@ def add_container_member_and_companion(root: Path) -> None:
         f"{MEMO}.md",
         {"type": "evidence", "title": "Memo", "governance_companion": {"artifact_path": MEMO}},
     )
+
+
+REEL = f"{KB}/Sources/Media/reel.mp4"
+REEL_FRAMES = tuple(f"scene-{index:03d}-t{ms}ms.jpg" for index, ms in enumerate((0, 4500)))
+
+
+def add_video_with_titled_pages(root: Path) -> None:
+    """Add a video and two scene frames, each with a page that carries a title and a note type.
+
+    A page named `<file name>.md` beside its file is bound to that file by its name: the frame sits
+    in `<video file name>.frames/` and names the video file in `parent_media`, and the access
+    kernel reads the frame's video page as that value plus `.md`. The titles are those that the
+    sidecar writer produces, so a title rule would rename every page if the plan let it.
+    """
+    _write(root, REEL, b"video")
+    _page(
+        root,
+        f"{REEL}.md",
+        {"type": "source", "title": "Reel highlights", "tags": ["media-restricted"]},
+    )
+    for index, name in enumerate(REEL_FRAMES):
+        _write(root, f"{REEL}.frames/{name}", b"jpg")
+        _page(
+            root,
+            f"{REEL}.frames/{name}.md",
+            {
+                "type": "source",
+                "title": f"Evidence: {name}",
+                "parent_media": REEL,
+                "frame_ts": index * 4.5,
+            },
+        )
+
+
+RATE_ORIGINAL = f"{KB}/Evidence/Pricing/a/rate-notes.md"
+RATE_PAGE = f"{RATE_ORIGINAL}.md"
+RATE_LINKER = f"{KB}/Notes/Insights/rate-linker.md"
+
+
+def add_markdown_original_with_links(root: Path) -> None:
+    """Add a Markdown original kept as evidence, the page that describes it, and a page that links to both.
+
+    The page's file name is the original's name plus `.md`, so it ends in `.md.md`, and the plan keeps
+    that name because the page is named after the file beside it. Obsidian reads `[[rate-notes.md]]`
+    as the original and needs `[[rate-notes.md.md]]` for the page.
+    """
+    _write(root, RATE_ORIGINAL, "Rates agreed in the call.\n")
+    _page(root, RATE_PAGE, {"type": "evidence", "title": "Rate notes"})
+    _page(
+        root,
+        RATE_LINKER,
+        {"type": "insight", "title": "Rate linker"},
+        f"[[{RATE_ORIGINAL}]] and [[{RATE_PAGE}]] and [[rate-notes.md.md]] and [[Evidence/Pricing/a/rate-notes]].\n",
+    )

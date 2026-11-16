@@ -51,7 +51,7 @@ from . import (
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
-from .kbdir import managed_split, managed_splitter
+from .kbdir import managed_split
 from .state_paths import vault_state_dir
 from .working_set_runtime import READY
 
@@ -805,9 +805,15 @@ class _Fold:
 
         self.root = vault_root
         self.prove = prove
-        self.under = managed_splitter()
         self.registry = activation_conventions.load_conventions(vault_root)
         self.skip_folders = self.registry.conventions.skip_folders
+        self.in_walk = working_set_index._kb_walk_member(self.skip_folders)  # noqa: SLF001 - the one KB walk's rule
+        # Whether the store holds the pages: the fold then keys a stored page on the store's
+        # signature, as its file may lag, or be absent.
+        self.store = find_corpus.store_serves(vault_root)
+        #: A stored page's signature as this fold read it, listed or asked of the store; None for
+        #: a page that a file answers for.
+        self.signatures: dict[str, freshness.FileSignature | None] = {}
         self.basis = lifecycle_statuses.Basis(vault_root)
         index = working_set_index.WorkingSetIndex(vault_root)
         self.activation_token = index.token()
@@ -859,10 +865,15 @@ class _Fold:
         )
         walked: dict[str, Path] | None = None
         if self.full or changed is None:
-            walked = {
-                self._relative(path): path
-                for path in working_set_index._walk_kb(self.root, skip_folders=self.skip_folders)  # noqa: SLF001 - the one KB walk
-            }
+            # The activation index's listing: the store's pages in store mode, as that index lists them.
+            corpus = find_corpus.corpus_paths(
+                self.root,
+                "kb",
+                lambda **walk: working_set_index._walk_kb(self.root, skip_folders=self.skip_folders, **walk),  # noqa: SLF001 - the one KB walk
+                member=self.in_walk,
+            )
+            self.signatures.update(find_corpus.stored_signatures(corpus))
+            walked = {self._relative(path): path for path in corpus}
         gone = {self._relative(path) for path in deleted}
         if self.full:
             candidates = set(walked or ()) | set(self.collections)
@@ -987,19 +998,20 @@ class _Fold:
         """The candidates that are entries; a candidate that is not one loses any row it had."""
         wanted: set[str] = set()
         for rel in candidates:
-            reachable = (rel in walked) if walked is not None else self._in_walk(rel)
-            if (reachable or rel in self.collections) and self._kind(rel) is not None and (self.root / rel).is_file():
+            reachable = (rel in walked) if walked is not None else self.in_walk(rel)
+            if (reachable or rel in self.collections) and self._kind(rel) is not None and self._holds(rel):
                 wanted.add(rel)
             elif rel in self.stored:
                 self.removed.add(rel)
         return wanted
 
-    def _in_walk(self, rel: str) -> bool:
-        """Whether the KB walk would reach `rel`: the per-path twin of `working_set_index._walk_kb`'s skip rule."""
-        below = self.under(rel)
-        if below is None or not rel.lower().endswith(".md"):
-            return False
-        return not any(part.startswith(".") or part in self.skip_folders for part in below.split("/"))
+    def _holds(self, rel: str) -> bool:
+        """Whether the page exists: for a page the fold listed, its listing; else the store's answer, or the file's."""
+        if not self.store:
+            return (self.root / rel).is_file()
+        from .vault_store import read
+
+        return self.signatures.get(rel) is not None or read.holds_file(self.root, rel)
 
     def _kind_of(self, rel: str) -> tuple[str, str] | None:
         """`(kind, anchor_kind)` a page is, or None when it is not an entry. Anchor, collection, thread, then note."""
@@ -1022,9 +1034,24 @@ class _Fold:
             return None
         return KIND_NOTE, ""
 
+    def _stored_signature(self, rel: str) -> freshness.FileSignature | None:
+        """The store's signature for a page it serves, None for a page a file answers for.
+
+        A page the store serves but lacks raises `FileNotFoundError`, as a stat of a missing file does.
+        """
+        if not self.store:
+            return None
+        if rel not in self.signatures:
+            self.signatures[rel] = find_corpus.stored_page_signature(self.root / rel, self.root)
+        return self.signatures[rel]
+
     def _signature(self, rel: str) -> str:
         """The page's signature, joined with its manifest's when it is a collection manifest."""
-        file_signature = working_set_index._source_signature(self.root / rel)  # noqa: SLF001 - the activation index's own page signature
+        try:
+            stored = self._stored_signature(rel)
+        except OSError:
+            stored = None  # the page is gone: the file's stat gives the empty signature
+        file_signature = working_set_index._source_signature(self.root / rel, stored)  # noqa: SLF001 - the activation index's own page signature
         manifest = self.collections.get(rel)
         return file_signature if manifest is None or not manifest[1] else f"{manifest[1]}|{file_signature}"
 
@@ -1033,7 +1060,8 @@ class _Fold:
     def _fold_path(self, rel: str) -> None:
         absolute = self.root / rel
         try:
-            before = freshness.stat_signature(absolute)
+            stored = self._stored_signature(rel)
+            before = freshness.stat_signature(absolute) if stored is None else stored
         except OSError:
             self.removed.add(rel)
             return
@@ -1047,10 +1075,15 @@ class _Fold:
             return
         signature = self._signature(rel)
         page = _read_page(absolute, self.root)
-        try:
-            unchanged = freshness.stat_signature(absolute) == before
-        except OSError:
-            unchanged = False
+        if stored is not None:
+            # The read takes its own store snapshot. A read that lands on a newer revision leaves
+            # this fold's signature behind the next listing's, so the next fold folds the page again.
+            unchanged = True
+        else:
+            try:
+                unchanged = freshness.stat_signature(absolute) == before
+            except OSError:
+                unchanged = False
         if not unchanged:
             # Publishing the parse would present bytes the file no longer has as current.
             self.pending[rel] = PENDING_CHANGED
