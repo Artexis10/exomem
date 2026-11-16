@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from test_pooled_export_fixity import _pool
 from test_pooled_move_trash import _rows
+from test_shared_originals import _pooled_capture
 from test_vault_store_importer import StoreThread
 from test_vault_store_media import (  # noqa: F401 - fixtures
     ORIGINAL_BYTES,
@@ -231,3 +232,37 @@ def test_a_refused_record_retirement_is_reported_and_a_rerun_completes_it(
     assert (refused["converted"], refused["skipped_changed"]) == (0, [rel])
     assert rerun["converted"] == 1
     assert media_state(vault, rel)["binary"] == []
+
+
+def test_a_fresh_pooled_capture_in_store_mode_records_no_binary_and_is_no_outside_delete(
+    vault, tmp_path, monkeypatch  # noqa: F811 - the store-mode suite's fixtures
+):
+    """Catches a store binary record made for a pooled filing, which the importer then reads as an outside delete
+    of a file that was never there (it drops the record and the page's binding); or a capture that writes the
+    bytes into the store or at the logical path, beside the one pool object that should hold them."""
+    data = b"Speaker A: one recording, filed twice in a store-mode vault."
+    digest = hashlib.sha256(data).hexdigest()
+    enter_store_mode(vault)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    try:
+        first = on_store_thread(thread, lambda: _pooled_capture(vault, tmp_path, monkeypatch, "briefing-a.txt", data))
+        second = on_store_thread(thread, lambda: _pooled_capture(vault, tmp_path, monkeypatch, "briefing-b.txt", data))
+        settling = importer.Importer(vault, run=thread.run)
+        swept = settling.sweep()
+        named = settling.import_paths([first.artifact_path, second.artifact_path])
+    finally:
+        thread.close()
+
+    [shared] = (original_pool.pool_root(vault) / "sha256").rglob("*.blob")
+    assert shared == original_pool.object_path(vault, digest)
+    assert first.artifact_path != second.artifact_path
+    for added in (first, second):
+        assert store_targets.holds(vault, added.path)
+        assert not (vault / added.artifact_path).exists()
+        state = media_state(vault, added.artifact_path)
+        assert state["binary"] == [] and len(state["sidecar"]) == 1
+        assert media_store.read_original_bytes(vault, added.artifact_path).data == data
+    assert swept.removed == [] and named.removed == []
