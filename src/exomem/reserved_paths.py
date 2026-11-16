@@ -4877,7 +4877,12 @@ def _remove_owner_file(
     with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
         acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:
-            acquired.require()
+            if expected is not None:
+                acquired.require()  # A removal that names the file it expects must prove that file gone.
+            # Any other removal keeps its tolerance: a state root not yet created holds nothing to remove.
+            if missing_ok:
+                return False
+            raise OSError("private remove cannot acquire the vault")
         with acquired.require() as filesystem:
             parent_text = route.held_relative.parent.as_posix()
             parent_access = "flush"
