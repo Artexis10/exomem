@@ -105,7 +105,6 @@ def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
         and count == len(keys) == len(texts)
     ):
         offset = len(head) + len(marker)
-        title = page.title.strip()
         for ordinal, (key, text) in enumerate(zip(keys, texts, strict=True), 1):
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             cuts = [0]
@@ -123,10 +122,9 @@ def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
                 )
             cuts.append(len(text))
             for start, end in zip(cuts[:-1], cuts[1:], strict=True):
-                piece = text[start:end]
-                indexed = f"{title}\n\n{piece}" if title else piece
+                # A declared passage is embedded exactly as the caller sent it; the title adds no signal.
                 chunks.append(
-                    PassageChunk(key, ordinal, digest, offset + start, end - start, indexed)
+                    PassageChunk(key, ordinal, digest, offset + start, end - start, text[start:end])
                 )
             offset += len(text) + 2
     result = tuple(chunks)

@@ -218,7 +218,7 @@ def test_long_passage_splits_into_adjacent_exact_spans(vault, passage_tools):
     stored, _mtime = embeddings.get_embedding_index(vault).stored_chunks_for(
         memory_refs.resolve_identifier_read_only(vault, hits[0]["ref"])
     )
-    assert [chunk.removeprefix("Long record\n\n") for chunk in stored] == parts
+    assert stored == parts
 
 
 def test_keys_have_no_indexed_text_vector_or_score_signal(vault, passage_tools):
@@ -273,6 +273,47 @@ def test_keys_have_no_indexed_text_vector_or_score_signal(vault, passage_tools):
         assert "opaque:" not in text
     lexical = call("search_memory", {"query": "opaque:first", "options": {"mode": "keyword"}})
     assert lexical["hits"] == []
+
+
+def test_declared_passages_embed_exactly_their_text_whatever_the_title(vault, passage_tools):
+    """A title in the embedding input would make a caller's scores depend on what it names the Source."""
+    call, _encoder = passage_tools
+    text = "The lantern burns oil every night."
+    for title in ("Harbour log", "Survey of the northern lights"):
+        saved = call(
+            "save_source",
+            {
+                "title": title,
+                "source_kind": "session",
+                "options": {"passages": [{"key": "record/1", "text": text}]},
+            },
+        )
+        assert "error" not in saved, saved
+    ordinary = call(
+        "save_source", {"title": "Agent note", "source_kind": "session", "content": text}
+    )
+    assert "error" not in ordinary, ordinary
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    reply = call(
+        "search_memory",
+        {"query": "lantern oil", "limit": 2, "options": {"result_level": "passage"}},
+    )
+    assert "error" not in reply, reply
+    [first, second] = reply["hits"]
+    assert first["ref"] != second["ref"]
+    assert first["score"] == second["score"]
+    index = embeddings.get_embedding_index(vault)
+    vectors = []
+    for hit in (first, second):
+        path = memory_refs.resolve_identifier_read_only(vault, hit["ref"])
+        assert index.stored_chunks_for(path)[0] == [text]
+        vectors.append(index.stored_text_vectors(path)[0][text])
+    assert np.array_equal(vectors[0], vectors[1])
+    # A Source saved without declared passages keeps its title in the embedded text.
+    [ordinary_page] = (vault / "Knowledge Base/Sources").rglob("*agent-note.md")
+    ordinary_path = ordinary_page.relative_to(vault).as_posix()
+    assert index.stored_chunks_for(ordinary_path)[0][0].startswith("Agent note\n\n")
 
 
 def test_stale_published_chunk_is_withheld_and_counted(vault, passage_tools):

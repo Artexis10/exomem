@@ -102,6 +102,7 @@ Exomem preserves the text exactly. Keys and text participate in identity reconci
 The canonical Source body holds a JSON key block before its Capture section. Frontmatter holds only the passage count.
 File mode and store mode use those same canonical bytes. Keys never contribute to lexical text, vectors or scores.
 Each passage supplies its own chunks. A long passage splits at the existing chunk cap and retains one key and ordinal.
+The cell embeds each passage exactly as declared and adds no title. Put any context the embedding needs in the passage text.
 
 ## Passage search
 
