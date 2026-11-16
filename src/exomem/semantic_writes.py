@@ -978,9 +978,15 @@ class CreationPreflight:
     #: call: the review hash it would copy from the validate result is the server's.
     draft_bound: bool = True
 
+    #: A profile page's creation needs no relation review while it is a draft, so its preview names the
+    #: exact source it would write instead of a review draft; see `require_profile_preview`.
+    profile_source_hash: str | None = None
+
     @property
     def draft_hash(self) -> str | None:
-        return self.creation_validation.draft_hash if self.creation_validation is not None else None
+        if self.creation_validation is not None:
+            return self.creation_validation.draft_hash
+        return self.profile_source_hash
 
     @property
     def relation_candidates(self) -> tuple[relation_review.RelationCandidate, ...]:
@@ -1821,6 +1827,32 @@ def _existing_applicability(
     return "structural"
 
 
+PROFILE_PREVIEW_REQUIRED = "PROFILE_PREVIEW_REQUIRED"
+
+
+def _is_profile(vault_root: Path, *page_types: object) -> bool:
+    types = note_types.Basis(vault_root).reading()
+    return any(types.selects(semantic_contract.normalized_compiled_type(value), note_types.profile) for value in page_types)
+
+
+def require_profile_preview(vault_root: Path, *page_types: object, previewed: bool) -> None:
+    """Refuse a commit that creates or changes a profile page without the proof of its preview.
+
+    `previewed` is whether the write carries what its own preview returned: the transition token
+    for an in-place change (bound to the exact before and after bytes), the draft hash for a
+    creation or a supersession. Every governed write path calls this one check.
+    """
+    # A one-call profile rewrite the owner never saw is what this stops; a wrong firing costs the agent one preview call.
+    if not previewed and _is_profile(vault_root, *page_types):
+        raise SemanticWriteError(
+            PROFILE_PREVIEW_REQUIRED,
+            "a profile page changes only from a reviewed preview: preview this exact change first "
+            "(preview=true), show the owner the resulting lines, then send the same call with `review` "
+            "set to the preview's transition_token, or to its draft_id, draft_hash and draft_token when "
+            "creating or superseding a page. To remove a line, preview an edit_note change that deletes it.",
+        )
+
+
 # Which attempt an `exomem_write_*` sample belongs to. A stale validity stamp
 # re-runs the WHOLE preflight through the public `preflight_existing` (kept
 # public deliberately: tests monkeypatch that name as a race seam), so without
@@ -2121,6 +2153,8 @@ def _preflight_existing(
             origin_inputs = _prepare_origin_inputs(
                 root, path, after_source, before_source=before_source
             )
+    if not validate_only:
+        require_profile_preview(root, before.page_type, after.page_type, previewed=transition_token is not None)
     before_contracts = memory_schema.resolve_contracts(
         loaded_contracts,
         projects=before.projects,
@@ -4945,6 +4979,7 @@ def _preflight_creation(
         ) if vocabulary_binding is not None else (),
         origin_inputs,
         review_fields=relation_review.check_review_fields(supplied_review_fields, False),
+        profile_source_hash=vault.content_hash(source) if _is_profile(root, state.page_type) else None,
     )
 
 

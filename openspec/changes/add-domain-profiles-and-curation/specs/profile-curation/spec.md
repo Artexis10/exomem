@@ -62,9 +62,11 @@ A profile edit SHALL commit only with the owner's confirmation of those exact li
 
 ### Requirement: Profile writes need a reviewed preview
 
-A governed write that creates a profile page, or changes the content of one, SHALL commit only with the review hash returned by a preview of the same resulting content.
-A preview SHALL return that hash beside the resulting lines.
-A commit with no hash, or with a hash that does not match the content it would write, SHALL be refused and change nothing. The refusal SHALL name the preview as the remedy.
+A governed write that creates a profile page, replaces one, or changes the content of one, SHALL commit only with the proof returned by a preview of the same resulting content.
+The proof of an in-place change is the preview's `transition_token`. The proof of a creation or a replacement is the preview's `draft_id`, `draft_hash` and `draft_token`.
+A preview SHALL return that proof beside the resulting lines. The typed tools `create_note`, `edit_note`, `add_observation` and `supersede_note` SHALL take it in an optional `review` field.
+A commit with no proof, or with a proof that does not match the content it would write, SHALL be refused and change nothing. The refusal for missing proof SHALL carry the code `PROFILE_PREVIEW_REQUIRED` and name the preview as the remedy.
+A removal of a profile line has no preview of its own, so it SHALL be refused with the same code and name the `edit_note` preview as the route.
 Writes to other page types SHALL be unaffected.
 Editing a profile file directly in the vault SHALL need no preview. The next activation serves the edited lines.
 
@@ -75,10 +77,10 @@ Editing a profile file directly in the vault SHALL need no preview. The next act
 
 #### Scenario: A reviewed profile edit commits
 
-- **WHEN** an agent previews a change to the games profile, shows the resulting lines, and commits with the returned review hash after the owner confirms
+- **WHEN** an agent previews a change to the games profile, shows the resulting lines, and commits with the returned proof after the owner confirms
 - **THEN** the page holds exactly the previewed lines
 
 #### Scenario: A stale review is refused
 
-- **WHEN** an agent previews one change to the games profile and commits different content with that preview's hash
+- **WHEN** an agent previews one change to the games profile and commits different content with that preview's proof
 - **THEN** the write is refused and the page is unchanged

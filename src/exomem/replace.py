@@ -588,6 +588,14 @@ def replace(
             )
 
     old_link_target = render_wikilink_target(rel_old_no_ext, root)
+    if not validate_only:
+        # The successor's own type is checked in `note`; this covers a profile replaced by another type.
+        try:
+            semantic_writes.require_profile_preview(
+                root, old_parsed.frontmatter.get("type"), previewed=draft_hash is not None
+            )
+        except semantic_writes.SemanticWriteError as error:
+            raise ReplaceError(error.code, ["old_path"], error.reason) from error
     try:
         prepared = note_module.note(
             root,

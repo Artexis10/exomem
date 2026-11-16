@@ -48,9 +48,13 @@ CONTENT = "- [rule] Prefer finished stories over endless series. ^story\n"
 
 
 def _remember_profile(vault: Path, title: str, topics: list[str] | None, **options: object) -> dict:
-    return commands.op_remember(
-        vault, content=CONTENT, title=title, note_type="profile", status="draft", topics=topics, **options,
-    )
+    """Preview the profile and, unless the caller wants only the preview, commit with that preview's hash."""
+    page = {"content": CONTENT, "title": title, "note_type": "profile", "status": "draft", "topics": topics}
+    preview = commands.op_remember(vault, **page, **{**options, "validate_only": True})
+    if options.get("validate_only"):
+        return preview
+    reviewed = {"draft_id": preview["draft_id"], "draft_hash": preview["draft_hash"], "draft_token": preview["draft_token"]}
+    return commands.op_remember(vault, **page, **options, **reviewed)
 
 
 def _save_domains(vault: Path, proposal: dict) -> dict:
