@@ -24,13 +24,10 @@ from .collection_store import (
     schema,
     snapshot,
 )
-from .kbdir import managed_root_rel
 
 
 def archive_members(vault: Path) -> list[Path]:
-    from .media_store import local_originals
-
-    with local_originals(vault, (managed_root_rel(),)):
+    with vault_portability.exported_originals(vault):
         return _archive_members_local(vault)
 
 

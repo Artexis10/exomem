@@ -300,6 +300,99 @@ def test_a_folder_delete_refuses_a_member_whose_trash_retirement_is_unconfirmed(
     assert (vault / f"{LOOSE}.md").exists()
 
 
+def test_a_delete_beside_an_original_whose_trash_retirement_is_unconfirmed_goes_ahead(
+        vault, selected_store, monkeypatch):
+    """Catches one damaged Trash entry refusing every delete, move and download of the other files in its folder."""
+    _unconfirmed_retirement(vault, monkeypatch)
+    sibling, page = _filing(vault, "sibling.bin", folder=LOOSE.rsplit("/", 1)[0])
+
+    trashed = delete_file.delete_file(vault, path=sibling, confirm=True)
+
+    assert not (vault / sibling).exists() and (vault / trashed.trash_path).read_bytes() == DATA
+    assert (vault / page).exists() and (vault / f"{LOOSE}.md").exists()
+
+
+def test_a_folder_whose_page_names_a_path_now_holding_an_unconfirmed_retirement_recovers(
+        vault, selected_store, monkeypatch):
+    """Catches a recovery that a trashed page's stale binding refuses with a raw error: the page names its old path,
+    where a later original's damaged Trash entry leaves a companion of its own, which binds nothing in the folder."""
+    from test_vault_store_media import offloaded
+
+    folder = LOOSE.rsplit("/", 1)[0]
+    offloaded(vault, LOOSE)
+    trashed = delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True)
+    _unconfirmed_retirement(vault, monkeypatch)
+    restored = "Knowledge Base/Notes/Restored"
+
+    recovered = recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path, restore_path=restored)
+
+    assert recovered.restored_path == restored
+    assert (vault / restored / "loose.txt.md").exists() and (vault / f"{LOOSE}.md").exists()
+
+
+def test_a_download_of_a_page_whose_original_retirement_is_unconfirmed_names_what_to_fix(
+        vault, selected_store, monkeypatch):
+    """Catches the download route answering a raw server error, which tells the owner nothing to change."""
+    from test_upload_endpoint import _client
+
+    from exomem import upload_tokens
+
+    _unconfirmed_retirement(vault, monkeypatch)
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+
+    response = client.get("/download", params={"path": f"{LOOSE}.md"},
+                          headers={"Authorization": f"Bearer {upload_tokens.mint_bound('sekret', audience='owner')}"})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "ORIGINAL_RETIREMENT_UNCONFIRMED"
+    assert "empty or restore that Trash entry" in response.json()["reason"]
+
+
+def test_a_background_sweep_skips_an_original_whose_trash_retirement_is_unconfirmed_and_goes_on(
+        vault, selected_store, monkeypatch, caplog):
+    """Catches one damaged Trash entry stopping every background offload and media scan of the archive."""
+    import logging
+
+    from exomem import media_processing
+
+    _unconfirmed_retirement(vault, monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="exomem.media_store"):
+        media_processing.reconcile_all_media(vault)
+        swept = [item.path.relative_to(vault.resolve()).as_posix()
+                 for item in media_processing.unplaced_originals(vault)]
+
+    assert swept == [f"{FOLDER}/other.bin"]
+    assert f"{LOOSE}.md" in caplog.text and "unknown" in caplog.text
+
+
+@pytest.mark.parametrize("surface", ["export", "stream", "operator"])
+def test_an_export_that_meets_an_unconfirmed_retirement_fails_and_names_the_member(
+        vault, selected_store, monkeypatch, tmp_path, surface):
+    """Catches an export that dies with a raw error carrying a private path, or that reads as complete without the
+    original whose state is unknown."""
+    import io
+
+    from test_vault_portability import _context
+
+    from exomem import cloud_operator_portability, vault_portability
+
+    _unconfirmed_retirement(vault, monkeypatch)
+    artifacts, sink = tmp_path / "artifacts", io.BytesIO()
+
+    with pytest.raises(vault_portability.PortabilityError) as refused:
+        if surface == "export":
+            vault_portability.export_quiesced_vault(vault, artifacts, context=_context())
+        elif surface == "stream":
+            vault_portability.stream_quiesced_vault(vault, sink, context=_context())
+        else:
+            cloud_operator_portability.archive_members(vault)
+
+    assert refused.value.code == "ORIGINAL_RETIREMENT_UNCONFIRMED" and refused.value.member == f"{LOOSE}.md"
+    assert LOOSE not in str(refused.value) and refused.value.__cause__ is None
+    assert not artifacts.exists() and sink.getvalue() == b""
+
+
 def test_an_archive_without_shared_storage_still_moves_its_ordinary_bytes(vault):
     """Catches the shared-storage path leaking into an unconverted archive, whose bytes must move with the page."""
     binary, page = _filing(vault)

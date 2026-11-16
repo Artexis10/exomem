@@ -47,12 +47,14 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 class PortabilityError(RuntimeError):
     """Stable, content-free portability failure. On RESOURCE_LIMIT_EXCEEDED,
-    `limit` names the PortabilityLimits field that was exceeded."""
+    `limit` names the PortabilityLimits field that was exceeded. `member` names, for an in-process
+    caller only, the vault-relative member that left the export incomplete; it never enters the message."""
 
-    def __init__(self, code: str, reason: str, *, limit: str | None = None) -> None:
+    def __init__(self, code: str, reason: str, *, limit: str | None = None, member: str | None = None) -> None:
         self.code = code
         self.reason = reason
         self.limit = limit
+        self.member = member
         super().__init__(f"{code}: {reason}")
 
 
@@ -460,6 +462,24 @@ class _SourceSnapshot:
 
 def _fail(code: str, reason: str, *, limit: str | None = None) -> None:
     raise PortabilityError(code, reason, limit=limit)
+
+
+@contextmanager
+def exported_originals(vault: Path) -> Iterator[None]:
+    """Fetch and pin every original that a whole-vault export reads, until the export returns.
+
+    An original whose state is unknown fails the export with the page that names it as `member`.
+    """
+    from . import originals
+    from .media_store import local_originals
+
+    try:
+        with local_originals(vault, (managed_root_rel(),)):
+            yield
+    except originals.RetirementUnconfirmed as error:
+        raise PortabilityError(
+            error.code, "an original's Trash retirement could not be confirmed, so the export is incomplete; "
+            "empty or restore the Trash entry of the page that `member` names", member=error.companion) from None
 
 
 def _validate_identifier(value: str, field: str) -> None:
@@ -953,10 +973,8 @@ def export_quiesced_vault(
             _fail("UNSAFE_ARTIFACT_ROOT", "artifact root must be a regular directory")
 
     _flush_collection_replica(source_root)
-    from .media_store import local_originals
-
     guard = mutation_guard if mutation_guard is not None else nullcontext()
-    with guard, local_originals(source_root, (managed_root_rel(),)):
+    with guard, exported_originals(source_root):
         armed_requirement = connector_boundary.read_requirement(source_root)
         if connector_boundary.snapshot(source_root) is not None:
             state_migration.require_vault_state_ready(source_root)
@@ -1039,9 +1057,7 @@ def stream_quiesced_vault(
     _validate_limits(effective_limits)
     source_root = Path(vault_root).absolute()
     armed_requirement = prepare_quiesced_export(source_root)
-    from .media_store import local_originals
-
-    with local_originals(source_root, (managed_root_rel(),)):
+    with exported_originals(source_root):
         snapshots = _enumerate_source(source_root, effective_limits)
         manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
         _write_export_archive(sink, snapshots, manifest)

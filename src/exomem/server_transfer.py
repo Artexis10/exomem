@@ -1543,6 +1543,13 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                         snapshot = media_store.read_original_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
+            except originals.RetirementUnconfirmed as error:
+                # Named by the request's spelling, as NOT_FOUND is: the release gate passed only this path.
+                return JSONResponse(
+                    {"code": error.code, "reason": f"the Trash retirement of the original that {requested} names "
+                     "could not be confirmed; empty or restore that Trash entry first"},
+                    status_code=409,
+                )
             except media_store.MediaStoreError as error:
                 return _hydration_too_large(error) or JSONResponse(
                     {"code": "ORIGINAL_UNAVAILABLE", "reason": "the stored original is unavailable; retry later"},

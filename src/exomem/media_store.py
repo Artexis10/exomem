@@ -570,11 +570,17 @@ def managed_event(vault: Path, path: Path) -> str | None:
     return None
 
 
-def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[OriginalSnapshot]:
+def bound_originals(
+    vault: Path, *, root: Path | None = None, selects: Callable[[str], bool] | None = None,
+    unconfirmed: Callable[[originals.RetirementUnconfirmed], None] | None = None,
+) -> Iterator[OriginalSnapshot]:
     """Discover sidecar bindings, including unsupported or physically absent originals.
 
+    `selects` takes a binding's vault-relative original path; a binding it rejects is never resolved.
+
     A binding whose Trash retirement is unconfirmed raises `originals.RetirementUnconfirmed`: its original is
-    unknown, and a walk that left it out would read as complete.
+    unknown, and a walk that left it out would read as complete. A sweep that may leave it out passes
+    `unconfirmed`, which receives the error, and the walk goes on without that binding.
     """
     from .backfill import iter_kb_files
     from .vault import parse_frontmatter
@@ -592,13 +598,19 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             raw = reserved_paths.read_generic_bytes(vault, rel)
             fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), custody=True)
             relative = originals.bound_path(fields)
-            if not isinstance(relative, str):
+            if not isinstance(relative, str) or (selects is not None and not selects(relative)):
                 continue
             snapshot = original_state(vault, relative)
             if snapshot.sidecar_path == sidecar and snapshot.binary_sha256 is not None:
                 yield snapshot
-        except originals.RetirementUnconfirmed:
-            raise
+        except originals.RetirementUnconfirmed as error:
+            # A page that names another companion's original, such as a trashed page that still names its old
+            # path, binds nothing here; the walk meets that companion's own unknown binding where it lies.
+            if error.companion != rel:
+                continue
+            if unconfirmed is None:
+                raise
+            unconfirmed(error)
         except (UnicodeError, ValueError):
             continue
         except reserved_paths.ReservedPathLeafError as error:
@@ -739,7 +751,13 @@ def enqueue_offloads(vault: Path) -> int:
             f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
             media_allowance.ALLOWANCE_REFUSAL_CODES)
         usage = media_allowance.reference_usage(vault) if rows else None
-        return sum(_enqueue_offload(vault, item.path, usage=usage) for item in bound_originals(vault))
+        return sum(_enqueue_offload(vault, item.path, usage=usage)
+                   for item in bound_originals(vault, unconfirmed=skip_unknown_original))
+
+
+def skip_unknown_original(error: originals.RetirementUnconfirmed) -> None:
+    """Log a background sweep's skipped binding as unknown; the sweep claims nothing about it."""
+    log.warning("skipped the original that %s names: its state is unknown (%s)", error.companion, error.code)
 
 
 def _guard(vault: Path, operation: str):
@@ -1754,15 +1772,18 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
             prefixes.append(relative[:-3])
     scan_roots = {target if target.is_dir() else target.parent
                   for prefix in prefixes for target in (root / prefix,)}
+    def selected(relative: str) -> bool:
+        return any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes)
+
     seen: set[Path] = set()
     with ExitStack() as stack:
-        for snapshot in (item for scan_root in scan_roots for item in bound_originals(root, root=scan_root)):
+        # Only the selected bindings are resolved, so a sibling's unknown original never refuses this operation.
+        for snapshot in (item for scan_root in scan_roots
+                         for item in bound_originals(root, root=scan_root, selects=selected)):
             if snapshot.path in seen:
                 continue
             seen.add(snapshot.path)
             relative = snapshot.path.relative_to(root).as_posix()
-            if not any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes):
-                continue
             ledger, token = stack.enter_context(_pin(root, snapshot.path, read=read))
             current = original_state(root, snapshot.path)
             if current.state == "evicted":

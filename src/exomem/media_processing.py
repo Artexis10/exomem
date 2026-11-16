@@ -865,7 +865,7 @@ def unplaced_originals(vault: Path):
 
     if originals.binding_for(vault) is None and not original_pool.enabled(vault):
         return
-    for stored in media_store.bound_originals(vault):
+    for stored in media_store.bound_originals(vault, unconfirmed=media_store.skip_unknown_original):
         if stored.state == "evicted" or stored.local_path is not None:
             yield stored
 
