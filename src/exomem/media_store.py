@@ -340,7 +340,8 @@ def recover_cache(vault: Path, path: Path, snapshot: OriginalSnapshot) -> bool:
     if snapshot.state != "cached" or snapshot.reference is None:
         return False
     with _pin(vault, path) as (ledger, _token):
-        with reserved_paths.open_generic_binary(vault, ledger._relative(path)) as source:
+        # A pooled original has no file at its logical path; its shared object is the bytes to verify.
+        with _open_local_original(vault, ledger._relative(path), snapshot) as source:
             if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                 return False
             source.require_current()
@@ -540,10 +541,13 @@ SUPPRESS = "suppress"
 
 def managed_event(vault: Path, path: Path) -> str | None:
     """Tell the watcher to defer an in-flight event or suppress proven cache bytes."""
-    if originals.binding_for(vault) is None:
-        return None
     relative = Path(path).relative_to(vault).as_posix()
     if reserved_paths.classify_logical(relative).blocked:
+        return None
+    if originals.pooled(vault, path) is not None:
+        # A pooled filing keeps no file at its logical path, with or without a media store: no file is no outside delete.
+        return SUPPRESS
+    if originals.binding_for(vault) is None:
         return None
     store = MediaJobStore(vault, create=False)
     if store.path.exists():
@@ -1664,6 +1668,7 @@ def _payload_path(companion: str, binary: originals.BinaryBinding, displaced: bo
 def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
     """Each original whose bytes are not on the volume and whose version the store holds, Trash included.
 
+    A pooled original is no member: its pool object ships as a canonical member, so the store adds nothing.
     Yields the path that the archive gives it, once however many pages bind it: a live original's bound path,
     or a Trash payload's path beside its companion. A companion that cannot be read binds nothing, so the ledger, which keeps a row
     for each evicted path, gives the version of an original behind one. Raises `MEDIA_LEDGER_UNRESOLVED`
@@ -1677,7 +1682,7 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
             vault, binding, unreadable=lambda path, _error: unreadable.add(path)):
         counted.add(ledger._relative(ledger.vault_root / binary.path))
         path = _payload_path(companion, binary, displaced)
-        if path not in yielded and not _on_volume(vault, path):
+        if path not in yielded and not _on_volume(vault, path) and not _pool_holds(vault, binary):
             yielded.add(path)
             yield path, binary, reference
     if not unreadable:
@@ -1698,7 +1703,9 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
         if (reference is None or reference.store != binding.store or not isinstance(size, int) or size < 0
                 or not originals.is_sha256(sha256)):
             raise MediaStoreError("MEDIA_LEDGER_UNRESOLVED", "an evicted original's ledger row holds no version to read")
-        yield relative, originals.BinaryBinding(relative, sha256, size), reference
+        held = originals.BinaryBinding(relative, sha256, size)
+        if not _pool_holds(vault, held):
+            yield relative, held, reference
 
 
 def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
@@ -1807,6 +1814,14 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
             require_current()
     except held_fs.HeldFsError as error:
         raise reserved_paths.ReservedPathLeafError(error.code) from error
+
+
+def pooled_head(vault: Path, relative: str, snapshot: OriginalSnapshot) -> ObjectHead:
+    """The size and digest that a pooled filing's shared object holds now, read behind the filing's binding check."""
+    with _open_local_original(vault, relative, snapshot) as source:
+        head = _digest(source.stream)
+        source.require_current()
+    return head
 
 
 @contextmanager
@@ -2590,6 +2605,13 @@ def _on_volume(vault: Path, relative: str) -> bool:
             raise
         return False
     return True
+
+
+def _pool_holds(vault: Path, binary: originals.BinaryBinding) -> bool:
+    """Whether the shared pool holds this binding's bytes locally; an export ships that object as a canonical member."""
+    from . import original_pool
+
+    return original_pool.enabled(vault) and original_pool.locally_present(vault, binary.sha256, binary.size)
 
 
 def _physical_drain_census(vault: Path, conn: sqlite3.Connection) -> None:

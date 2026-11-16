@@ -1312,7 +1312,8 @@ def register_transfer_routes(
                 )
                 # The destination decision comes before existence, which it never reveals.
                 preserve_module.admit_destination(vault_root, artifact)
-                if artifact.exists():
+                # A pooled filing has no file at its logical name, which stays taken.
+                if artifact.exists() or originals.pooled(vault_root, artifact) is not None:
                     return _tus_refusal(
                         "ARTIFACT_EXISTS",
                         f"{artifact.relative_to(vault_root).as_posix()!r} already exists; "

@@ -421,6 +421,13 @@ class _Unreadable(Exception):
 
 
 def _open(vault: Path, row: Row):
+    # A pooled filing keeps no file at its logical path: its bytes are the shared pool object, opened behind the binding.
+    if row.kind == FILE:
+        snapshot = originals.pooled(vault, row.path)
+        if snapshot is not None:
+            from . import media_store
+
+            return media_store._open_local_original(vault, row.path, snapshot)
     # A blob or text path came from a walk of the disk, so it opens as spelled there; a sidecar path as bound.
     return reserved_paths.open_generic_binary(vault, row.path, physical=row.kind != FILE)
 
@@ -435,6 +442,9 @@ def _held(vault: Path, row: Row) -> Iterator[reserved_paths.GenericBinarySource]
         if error.code == "MISSING":
             raise _Absent from None
         raise _Unreadable(error.code) from None
+    except ValueError:
+        # A shared pool object whose size differs from its binding is neither present nor missing.
+        raise _Unreadable("the shared original differs from its binding") from None
 
 
 def _parts(row: Row, stream: BinaryIO) -> Iterator[bytes]:
@@ -514,13 +524,14 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
     # a whole page for a text original and the compressed blob for a member.
     changed: list[tuple[Row, int]] = []
     steady: list[tuple[Row, int]] = []
+    shared = _shares_originals(vault)
     for row in foreground_priority.yielding(rows):
         try:
-            info = os.lstat(vault / row.path)
+            info = _stat(vault, row, shared)
         except FileNotFoundError:
             _absent(vault, row, result, reads)
             continue
-        except OSError:
+        except (OSError, _Unreadable):
             result.unreadable += 1
             continue
         if not stat.S_ISREG(info.st_mode):
@@ -552,6 +563,39 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
         _set_meta(connection, credit=carried, pass_at=time.time(), unresolved=unresolved,
                   unreadable=result.unreadable, rescheduled=result.rescheduled)
     return result
+
+
+def _shares_originals(vault: Path) -> bool:
+    """Whether the archive pools its originals, read once per pass; an unreadable marker answers yes, so each row names it."""
+    from . import original_pool
+
+    try:
+        return original_pool.enabled(vault)
+    except (ValueError, held_fs.HeldFsError):
+        return True
+
+
+def _stat(vault: Path, row: Row, shared: bool) -> os.stat_result:
+    """The presence check's stat: the row's file, or the shared pool object of a pooled filing that has no file.
+
+    A missing file and a missing pool object both raise `FileNotFoundError`. A pool object whose size differs from
+    its binding raises `_Unreadable`: `originals.pooled` reads it as no object, and it must not read as a missing
+    original or a retired binding. Only a pooled archive pays for the second look.
+    """
+    try:
+        return os.lstat(vault / row.path)
+    except FileNotFoundError:
+        if row.kind != FILE or not shared:
+            raise
+        try:
+            snapshot = originals.original_state(vault, row.path)
+        except (ValueError, held_fs.HeldFsError):
+            raise _Unreadable("the shared original is not readable as its binding") from None
+        except reserved_paths.ReservedPathLeafError:
+            raise FileNotFoundError(row.path) from None
+        if snapshot.local_path is None:
+            raise
+        return os.lstat(snapshot.local_path)
 
 
 def _marks(values: tuple[str, ...]) -> str:
@@ -774,6 +818,14 @@ def _plain(sink: BinaryIO) -> Iterator[BinaryIO]:
 def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, result: PassResult,
             reads: _Reads) -> None:
     """Restore a damaged original from the first copy that verifies, or record that none does."""
+    if row.kind == FILE and originals.pooled(vault, row.path) is not None:
+        # The damaged bytes are the shared pool object, and a restore would write an ordinary file at a logical path
+        # that keeps none. Another pooled filing of these bytes shares the damage, so it is no copy.
+        route = [copy for copy in _copies(vault, row, reads)
+                 if copy["source"] != STORED_ORIGINAL or originals.pooled(vault, copy["path"]) is None]
+        _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, route=route, verified=True)
+        _count(result, CORRUPT_NO_COPY)
+        return
     kept = _kept_trash(vault, row, hashed)
     for copy in _copies(vault, row, reads):
         staged = _stage(vault, row, copy, pace)
