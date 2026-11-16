@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from exomem import layout, note_types
+from exomem import vault as vault_module
 from exomem.layout import FixedBecause, Layout, NameClass, Placement
 from exomem.vault_store import read
 
@@ -359,7 +360,7 @@ def test_placement_reports_which_name_corrections_changed_the_title(registry):
     placed = _place(registry, f"{KB}/Notes/Insights/c-sharp.md", title=".C# basics")
 
     assert placed.stem == "C basics"
-    assert placed.corrections == (layout.CORRECTION_LINK_CHARACTERS, layout.CORRECTION_LEADING_DOTS)
+    assert placed.corrections == (vault_module.CORRECTION_LINK_CHARACTERS, vault_module.CORRECTION_LEADING_DOTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -370,31 +371,31 @@ def test_placement_reports_which_name_corrections_changed_the_title(registry):
 def test_each_link_grammar_character_is_removed_from_a_title():
     """A name that holds any of these would write a link that Obsidian reads as an anchor, a block or a code span."""
     for character in ("#", "^", "[", "]", "`"):
-        corrected = layout.corrected_title_name(f"Before{character} after")
+        corrected = vault_module.corrected_title_name(f"Before{character} after")
 
         assert corrected.name == "Before after", character
-        assert corrected.corrections == (layout.CORRECTION_LINK_CHARACTERS,), character
+        assert corrected.corrections == (vault_module.CORRECTION_LINK_CHARACTERS,), character
 
 
 def test_title_without_grammar_characters_is_untouched_apart_from_the_sanitiser():
     assert (
-        layout.corrected_title_name("Why churn rose in Q3: a look").name
+        vault_module.corrected_title_name("Why churn rose in Q3: a look").name
         == "Why churn rose in Q3 a look"
     )
-    assert layout.corrected_title_name("Why churn rose in Q3").corrections == ()
+    assert vault_module.corrected_title_name("Why churn rose in Q3").corrections == ()
 
 
 def test_leading_dots_are_stripped_so_the_file_is_not_hidden():
     """A dot-named file is outside the store and hidden in Obsidian."""
-    corrected = layout.corrected_title_name("..Roadmap v1.2")
+    corrected = vault_module.corrected_title_name("..Roadmap v1.2")
 
     assert corrected.name == "Roadmap v1.2"
-    assert corrected.corrections == (layout.CORRECTION_LEADING_DOTS,)
+    assert corrected.corrections == (vault_module.CORRECTION_LEADING_DOTS,)
 
 
 def test_a_name_that_becomes_a_reserved_device_name_after_the_dots_go_is_empty():
     """`.con` is a legal name on Windows, `con` is not, so the stripped form must be re-checked."""
-    assert layout.corrected_title_name(".con").name == ""
+    assert vault_module.corrected_title_name(".con").name == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -408,13 +409,13 @@ def _bytes(stem: str) -> int:
 
 def test_multibyte_title_is_cut_at_a_code_point_under_the_cap_with_the_suffix_counted():
     title = "あ" * 90  # 270 bytes
-    plain = layout.fit_filename(title)
-    second = layout.fit_filename(title, number=2)
+    plain = vault_module.fit_filename(title)
+    second = vault_module.fit_filename(title, number=2)
 
     assert plain is not None and second is not None
     for (stem, truncated), number in ((plain, 1), (second, 2)):
         assert truncated is True
-        assert _bytes(stem) <= layout.MAX_FILENAME_BYTES
+        assert _bytes(stem) <= vault_module.MAX_FILENAME_BYTES
         assert stem.removesuffix(" (2)").strip("あ") == ""  # only whole characters remain
         assert stem.endswith(" (2)") == (number == 2)
     # The suffix takes bytes from the title, not from the cap.
@@ -422,22 +423,22 @@ def test_multibyte_title_is_cut_at_a_code_point_under_the_cap_with_the_suffix_co
 
 
 def test_date_prefix_and_extension_are_never_shortened():
-    stem, truncated = layout.fit_filename("x" * 300, date_prefix="2026-05-02-", number=3)
+    stem, truncated = vault_module.fit_filename("x" * 300, date_prefix="2026-05-02-", number=3)
 
     assert stem.startswith("2026-05-02-x") and stem.endswith("x (3)")
     assert truncated is True
-    assert _bytes(stem) == layout.MAX_FILENAME_BYTES
+    assert _bytes(stem) == vault_module.MAX_FILENAME_BYTES
 
 
 def test_a_title_that_fits_is_not_marked_truncated_and_a_cut_does_not_end_on_a_dot_or_space():
-    assert layout.fit_filename("Short title") == ("Short title", False)
-    cut = layout.fit_filename("a" * 195 + " ...tail")[0]
+    assert vault_module.fit_filename("Short title") == ("Short title", False)
+    cut = vault_module.fit_filename("a" * 195 + " ...tail")[0]
 
     assert not cut.endswith((".", " "))
 
 
 def test_no_name_fits_when_the_prefix_and_suffix_use_the_whole_cap():
-    assert layout.fit_filename("Title", date_prefix="p" * 200) is None
+    assert vault_module.fit_filename("Title", date_prefix="p" * 200) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -566,7 +567,7 @@ def test_multibyte_homonyms_stay_under_the_byte_cap_with_their_suffix():
     by_path = {item.current_path: item for item in result.placed}
     assert by_path["a.md"].number == 1 and by_path["b.md"].number == 2
     assert all(
-        len(Path(item.new_path).name.encode()) <= layout.MAX_FILENAME_BYTES
+        len(Path(item.new_path).name.encode()) <= vault_module.MAX_FILENAME_BYTES
         for item in result.placed
     )
     assert by_path["b.md"].new_path.endswith(" (2).md") and by_path["b.md"].truncated is True

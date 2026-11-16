@@ -31,6 +31,7 @@ import yaml
 from . import collection_profiles, extraction_parts, homes, kbdir, note_types, vault
 from .cli_ops import OpError
 from .held_fs import vault_name_key
+from .vault import corrected_title_name, fit_filename
 
 
 class Layout(StrEnum):
@@ -300,71 +301,6 @@ def translate_path(value: str, target: Layout | str, registry: Registry) -> str:
 # --------------------------------------------------------------------------- #
 # Names
 # --------------------------------------------------------------------------- #
-
-#: A filename holds at most this many UTF-8 bytes, extension and collision suffix included.
-#: ext4 and APFS allow 255 bytes per name; the margin keeps room for a temporary name beside it.
-MAX_FILENAME_BYTES = 200
-
-#: The corrections that `corrected_title_name` can report. Each is a closed value of its own result.
-CORRECTION_LINK_CHARACTERS = "link_characters"
-CORRECTION_LEADING_DOTS = "leading_dots"
-
-
-@dataclass(frozen=True, slots=True)
-class CorrectedName:
-    """A title as a filename stem. `name` is empty when no usable name survives."""
-
-    name: str
-    corrections: tuple[str, ...] = ()
-
-
-def corrected_title_name(title: str) -> CorrectedName:
-    """`vault.sanitize_title_filename` with the link-grammar characters and leading dots removed.
-
-    A grammar character becomes a space and the spaces collapse, as for the characters that
-    the sanitiser already removes. The result is sanitised again, because a name that loses
-    its dots can become a reserved device name. The byte cap is not applied here: it depends
-    on the date prefix and the collision suffix, so `fit_filename` applies it.
-    """
-    base = vault.sanitize_title_filename(title)
-    corrections: list[str] = []
-    name = base
-    if not vault.LINK_FILENAME_REFUSED.isdisjoint(name):
-        corrections.append(CORRECTION_LINK_CHARACTERS)
-        name = vault.sanitize_title_filename(
-            "".join(
-                " " if character in vault.LINK_FILENAME_REFUSED else character for character in name
-            )
-        )
-    if name.startswith("."):
-        corrections.append(CORRECTION_LEADING_DOTS)
-        name = vault.sanitize_title_filename(name.lstrip(". "))
-    return CorrectedName(name, tuple(corrections))
-
-
-def fit_filename(
-    title: str,
-    *,
-    date_prefix: str = "",
-    number: int = 1,
-    extension: str = ".md",
-) -> tuple[str, bool] | None:
-    """The file stem for `title` under the byte cap, and whether the title was cut.
-
-    The stem is the date prefix, the title and, from `number` 2, the suffix ` (<number>)`.
-    The title part is the only part that shrinks, and it is cut at a code point. None when no
-    title text fits beside the prefix, the suffix and the extension.
-    """
-    tail = f" ({number})" if number > 1 else ""
-    budget = MAX_FILENAME_BYTES - len((date_prefix + tail + extension).encode())
-    shown = title
-    if len(title.encode()) > budget:
-        # Cutting the bytes leaves at most a partial code point, which `ignore` drops.
-        shown = title.encode()[: max(budget, 0)].decode("utf-8", errors="ignore").rstrip(". ")
-    if not shown:
-        return None
-    return date_prefix + shown + tail, shown != title
-
 
 # A date prefix is a field format, not a meaning: four digits, a month and optionally a day.
 _DAY_PREFIX = re.compile(r"(\d{4})-(\d{2})-(\d{2})-", re.ASCII)
