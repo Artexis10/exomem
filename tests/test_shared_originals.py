@@ -346,6 +346,21 @@ def test_a_pooled_original_is_available_although_its_logical_path_holds_no_file(
     assert not originals.available(vault, "Knowledge Base/Sources/never-filed.txt")
 
 
+def test_a_direct_read_of_a_pooled_text_original_returns_its_text(vault, tmp_path, monkeypatch) -> None:
+    """Catches a direct read of a pooled filing's path that answers NOT_FOUND because no file sits there, where the
+    same original kept as an ordinary file returns its text; an agent then reports the filing as gone."""
+    from exomem import get_page
+
+    data = b"Speaker A: the minutes, kept once.\n"
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", data)
+    assert not (vault / added.artifact_path).exists()
+
+    read = get_page.get_page(vault, path=added.artifact_path)
+
+    assert read.content == data.decode()
+    assert read.content_hash == hashlib.sha256(data).hexdigest()
+
+
 def test_a_decoder_view_keeps_the_logical_filename_and_disappears_after_use(vault, tmp_path, monkeypatch) -> None:
     """Decoders dispatch on the filename; a pooled object's digest name would select no decoder."""
     from exomem import media_store
