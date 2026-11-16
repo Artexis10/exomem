@@ -78,7 +78,7 @@ def call(kwargs):
         "cpu_ms": (time.process_time() - cpu) * 1000,
         "rows": measured[call_spans.CATALOGUE_ROWS],
         "decodes": decodes[0],
-        "hits": [hit.path for hit in hits],
+        "hits": [hit["path"] for hit in hits],
     }
 
 
