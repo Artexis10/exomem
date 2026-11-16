@@ -192,3 +192,47 @@ def test_an_archive_without_shared_storage_still_moves_its_ordinary_bytes(vault)
 
     assert (vault / target).read_bytes() == DATA and not (vault / binary).exists()
     assert _bound(vault, f"{target}.md") == target
+
+
+def _identical_pooled_evidence(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """Two Evidence pages of the same bytes, whose originals are one shared object, as their page paths."""
+    from duplicate_fixtures import evidence_filing
+
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", DATA)
+    copy = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", DATA)
+    _pool(vault, monkeypatch, canonical.removesuffix(".md"))
+    (vault / copy.removesuffix(".md")).unlink()
+    return canonical, copy
+
+
+def test_a_fold_of_filings_that_share_one_stored_copy_says_so_instead_of_calling_an_original_damaged(vault, monkeypatch):
+    """Catches the fold telling the owner an intact shared original no longer hashes to its page."""
+    from exomem import curation
+
+    canonical, copy = _identical_pooled_evidence(vault, monkeypatch)
+    pinned = {path: {"path": path, "expected_hash": vault_module.content_hash((vault / path).read_text(encoding="utf-8"))}
+              for path in (canonical, copy)}
+    step = {"step_id": "dedup", "kind": "fold-duplicate",
+            "args": {"canonical": pinned[canonical], "copy": pinned[copy], "why": "The same bytes are filed twice."}}
+
+    with library_scope(), pytest.raises(curation.CurationError) as refused:
+        curation.propose(vault, {"version": 1, "title": "Fold", "steps": [step]})
+
+    assert refused.value.code == "CURATION_STEP_INVALID"
+    assert "already share one stored copy" in refused.value.reason and "keep each filing" in refused.value.reason
+
+
+def test_the_audit_reports_filings_that_share_one_stored_copy_with_no_fold_and_nothing_to_free(vault, monkeypatch):
+    """Catches pooled duplicates counted as a stale index, which hides them and points the owner at the index."""
+    from exomem import commands
+
+    canonical, copy = _identical_pooled_evidence(vault, monkeypatch)
+
+    with library_scope():
+        result = commands.op_audit(vault, categories=["duplicate_content"])
+
+    [finding] = result["findings"]
+    assert sorted(finding["paths"]) == sorted([canonical, copy])
+    assert finding["meta"]["steps"] == [] and "already share one stored copy" in finding["meta"]["no_fold"]
+    assert finding["meta"]["bytes_freed"] == 0
+    assert result["metadata"]["duplicates"]["stale_index_groups"] == 0
