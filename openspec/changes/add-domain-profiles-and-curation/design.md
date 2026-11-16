@@ -101,11 +101,29 @@ Candidate arms:
 - (b) profile pages that appear among the task candidates;
 - (c) retrieval restricted to profile pages, using the existing lexical and semantic evidence.
 
-Round R1 compares the arms on a realistic fixture against keys written from the turn text alone. It ships the simplest arm unless a richer arm's interval excludes zero. The result is recorded below when the round completes.
+Round R1 compares the arms on a realistic fixture against keys written from the turn text alone. It ships the simplest arm unless a richer arm's interval excludes zero.
 
 Selection adds work to every maps response, so delivery includes a before-and-after measurement on the recall latency instrument.
 
-R1 result: pending.
+R1 result. The round ran on a fixture of about 3,300 real notes and six profile pages. A separate lane wrote 48 turns from the turn text alone and split them into dev and test halves of 24. The selection rule was calibrated on dev and fixed for test.
+
+| Arm | Test mean F1 |
+|---|---|
+| (a) domains of leads and slice rows | 0.407 |
+| (b) profile pages among task candidates | 0.367 |
+| (c) retrieval restricted to profile pages | 0.671 |
+
+The paired difference c − b was +0.304 (95% CI +0.096 to +0.508), and c − a was +0.264 (95% CI +0.067 to +0.456). Arm (c) ships.
+
+The shipped rule:
+
+1. Score each profile page against the turn. The semantic score is the best chunk similarity to a turn vector that the request already encoded. The lexical score is the bm25 score of the turn's content words.
+2. Select a page when its semantic score reaches `profile_semantic_floor`, or its lexical score reaches `profile_lexical_floor`.
+3. Keep at most `profile_domains_max` selected domains, ranked by summed score. Then add their ancestors, nearest first.
+
+The floors and the cap are vault-owned activation conventions, with defaults 0.50, 8.5 and 2. The selector reuses the turn slice's vector, or the task-context dense lane's vector when the slice has none. It adds one lexical query and one vector search, both restricted to profile pages, and it encodes nothing. When no turn vector exists, selection is lexical only, and the block's `selection` field says so.
+
+A scale-free lexical rule, where any content-word match selects a page, was rejected. On the R1 test half, 5 of 7 general and unprofiled turns matched a word on some profile page.
 
 ### D7. Curation as an upkeep family
 
@@ -118,7 +136,14 @@ The new family is `upkeep_profile_curation`, with kind `profile.curation`. The n
 - **Dismissal.** The signal digest over the sorted evidence references is the review-state fingerprint. A dismissal therefore holds until the evidence changes.
 - **Surfacing.** Items reach the agent through `upkeep.for_packet`, within its existing caps. Their route is the governed `edit_note` preview.
 
-Confirmation stays conversational, as the stance design chose. The agent shows the exact lines, and the owner confirms them or has explicitly asked for them. A server-side review gate would prevent nothing that an owner-driven conversation does not already prevent, and it would add a second approval surface.
+Confirmation stays conversational, as the stance design chose. The agent shows the exact lines, and the owner confirms them or has explicitly asked for them.
+
+A profile write needs a reviewed preview. A governed write that creates or changes a profile page commits only with the review hash from a preview of the same resulting content.
+
+- **What it prevents.** A one-call profile rewrite that the owner never saw, made on an agent's own initiative or under injected content. A profile is served on every turn of its domain, so one silent wrong line costs more than a wrong line in an ordinary note.
+- **What it costs when it fires wrongly.** One preview call, paid by the agent. The owner pays nothing.
+- **Why automation cannot replace the owner.** Only the owner knows whether a line is true of them. The hash proves only that the agent previewed the exact lines before writing them; the owner's confirmation stays in the conversation.
+- **What stays free.** Editing the profile file directly needs no preview. A profile is a note.
 
 A vault may tag preferences with its own categories, such as `interface_preference`. Those count only when the vault's context-role overlay adds them to the `preferences` role. That mapping is vault data; the product holds no category list.
 
@@ -150,6 +175,7 @@ R3 result: pending.
 - **Profiles drift from their long notes.** Curation raises new preference units and contradicted lines, and dismissals hold only until the evidence changes.
 - **A profile line names a withheld page.** The same unit egress applies as for stance. A test covers a release-gated vault.
 - **Latency.** Selection reads bounded data. A before-and-after on the recall latency instrument is required before release.
+- **Lexical floor portability.** The lexical score uses corpus statistics. On a vault with no resident encoder, or for a caller restricted to part of the vault, scores sit lower, and selection serves fewer profiles. A miss leaves the agent where it is today. The vault owns the value.
 
 ## Migration
 
