@@ -90,7 +90,9 @@ GUARDED_PREFIXES = ("EXOMEM_", "KB_MCP_", "XDG_")
 GUARDED_NAMES = ("HOME", "TMPDIR", "PYTHONPATH")
 LEASE_VAULT_ID = "store-rehearsal"
 LEASE_REPLICA_ID = "rehearsal-service"
-LEASE_TTL = loop._LEASE_TTL
+#: The lease term of the run, the length of a real service's default lease. The journey's short
+#: test lease is too short here: one operation on a real vault under load outlasts it.
+LEASE_TTL = 30.0
 
 
 class Refusal(Exception):
