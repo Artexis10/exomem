@@ -1300,8 +1300,9 @@ class Rehearsal:
             settled = await run_canary(served.client, self.cases)
             stop = await served.stop()
         started = time.monotonic()
+        # Cold finds over a real vault outlast the default; as long as a migrate.
         queries = await asyncio.to_thread(
-            self.rig.child, _QUERY_CHILD, {"queries": self.queries, "limit": 10}
+            self.rig.child, _QUERY_CHILD, {"queries": self.queries, "limit": 10}, 3600.0
         )
         queries_seconds = round(time.monotonic() - started, 1)
         return {
@@ -1526,7 +1527,8 @@ class Rehearsal:
             trial["stop"] = await recovered.stop()
         status = self.rig.store_json("status")
         dry_run = self.rig.store_json("rollback", "--dry-run")
-        verified = await asyncio.to_thread(self.rig.child, _VERIFY_CHILD)
+        # A fresh derivation of a real vault takes as long as its sidecar build.
+        verified = await asyncio.to_thread(self.rig.child, _VERIFY_CHILD, None, 3600.0)
         trial["status"] = {
             key: status.get(key)
             for key in (
