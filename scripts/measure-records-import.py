@@ -7,7 +7,8 @@ playlist export: 57 ordered lists and one 734-row list whose required
 ``position`` is ``null``, written last. It then previews and runs one
 ``records.import`` job through the real importer, one batch at a time.
 
-For each batch it records wall time, the invoking thread's CPU time, and the
+For each batch it records wall time, the invoking thread's CPU time, the rows it
+took, its wait for and hold of the vault mutation boundary, and the
 steps the batch took on the store connection. Python's sqlite3 gives up the GIL at
 every step: each ``execute`` call, each parameter set of ``executemany`` and each
 fetched row. The step count therefore multiplies the wait that other busy threads
@@ -78,8 +79,11 @@ item_schema:
 
 Invented playlist entries for an import measurement.
 """
+# ``skip`` rejects the null-position rows and completes the job; the default ``stop`` fails it at the
+# first of them, after 4,000 rows, and leaves the last batches unmeasured.
 MAPPING = {
     "rows": "[].tracks[]",
+    "on_invalid": "skip",
     "fields": {
         "platform": {"const": "invented"}, "list_id": "$.[].listId", "position": "position",
         "track_id": "trackId", "title": "title", "artist": "artist", "album": "album",
@@ -187,6 +191,7 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     (vault / SOURCE).write_text(json.dumps(source), encoding="utf-8")
     sys.path.insert(0, str(REPO / "src"))
 
+    from exomem import mutation_lock
     from exomem.collection_store import connection, importer
     from exomem.collection_store.preview import preview_store
     from exomem.collection_store.writer import CollectionWriter
@@ -197,6 +202,15 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     for _ in range(args.contenders):
         threading.Thread(target=_spin, args=(stop,), daemon=True).start()
     steps = _Steps()
+    taken: list[int] = []
+    next_batch = importer._next_batch
+
+    def counted_batch(*args, **kwargs):
+        batch = next_batch(*args, **kwargs)
+        taken.append(len(batch.rows) + len(batch.rejections))
+        return batch
+
+    importer._next_batch = counted_batch
     # The store's own seam for the connection class; the import then runs on the counting connection.
     connection._CONNECTION_FACTORY = _counting_connection(steps)
     result: dict[str, object] = {
@@ -227,14 +241,22 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         started = time.perf_counter()
         while True:
             steps.reset()
+            taken.clear()
+            held = mutation_lock.last_mutation_timing()
             wall, cpu = time.perf_counter(), time.thread_time()
             with preview_store(vault, handle):
                 ran = importer.run_jobs(vault, max_batches=1)
             if not ran.get("batches"):
                 break
+            timing = mutation_lock.last_mutation_timing()
+            # The same timing object means the batch completed no hold: its wait and hold are unknown.
+            timed = timing is not None and timing is not held
             result["batches"].append({
                 "wall_s": round(time.perf_counter() - wall, 4),
                 "thread_cpu_s": round(time.thread_time() - cpu, 4),
+                "rows": sum(taken),
+                "boundary_wait_s": round(timing["wait_ms"] / 1000, 4) if timed else None,
+                "boundary_hold_s": round(timing["hold_ms"] / 1000, 4) if timed else None,
                 **steps.snapshot(),
             })
         result["import_s"] = round(time.perf_counter() - started, 3)
@@ -252,12 +274,18 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
 
 def _summary(runs: list[dict]) -> dict[str, object]:
     walls = sorted(batch["wall_s"] for run in runs for batch in run["batches"])
+    holds = sorted(batch["boundary_hold_s"] for run in runs for batch in run["batches"]
+                   if batch.get("boundary_hold_s") is not None)
     steps = [batch["steps"] for run in runs for batch in run["batches"]]
     return {
         "runs": len(runs),
         "import_s": [run["import_s"] for run in runs],
+        "batches": [len(run["batches"]) for run in runs],
         "batch_wall_s_max": walls[-1] if walls else None,
         "batch_wall_s_median": walls[len(walls) // 2] if walls else None,
+        "boundary_hold_s_max": holds[-1] if holds else None,
+        "boundary_hold_s_median": holds[len(holds) // 2] if holds else None,
+        "untimed_holds": sum(batch.get("boundary_hold_s") is None for run in runs for batch in run["batches"]),
         "steps_per_batch_max": max(steps) if steps else None,
         "final_rows": runs[-1]["final"]["rows"] if runs else None,
         "stored_rows": runs[-1]["stored_rows"] if runs else None,

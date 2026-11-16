@@ -93,6 +93,9 @@ MAX_ROW_BYTES = 1 << 20
 MAX_DEPTH = 32
 MAX_BATCH_ROWS = 500
 MAX_BATCH_BYTES = 4 << 20
+# A batch's row work, timed between rows before its commit: a contended process reads rows slowly and
+# commits a smaller batch, so its write holds the vault boundary for less (the import hold budget).
+BATCH_SECONDS = 0.25
 PREVIEW_ROWS = 100
 # Preview runs on the store thread, where every store write and status call waits behind it.
 PREVIEW_HOLD_SECONDS = 1.0
@@ -3303,13 +3306,14 @@ def _batch(root: Path, writer, job: _Job) -> str:
         guards = []
         if _streamed(job.binding):
             reader = _live(writer, job, proof, plan)
-            batch = _next_batch(reader, plan, reader.pending, order)
+            batch = _next_batch(reader, plan, reader.pending, order, deadline=time.monotonic() + BATCH_SECONDS)
             batch.members = reader.taken(batch.checkpoint)
             reader.marked = _cursor(batch.checkpoint)
             guards = reader.guards()
         else:
             with _open_source(proof) as handle:
-                batch = _next_batch(_Reader(handle, fmt, job.checkpoint), plan, [], order)
+                reader = _Reader(handle, fmt, job.checkpoint)
+                batch = _next_batch(reader, plan, [], order, deadline=time.monotonic() + BATCH_SECONDS)
     except (_Lost, OSError, vault.PathGuardError):
         return "authority_lost"
     sequence = job.checkpoint["batch"]
