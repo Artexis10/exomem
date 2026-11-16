@@ -1109,8 +1109,9 @@ async def _completed_build(run: Run, shared: dict[str, Any]) -> None:
     run.touch()  # idle again would let the attempt follow the build's end before the evidence is read
 
     run.record["phase"] = "build_end"
-    await run.watch(lambda t: t.build["state"] != "running", timeout=LONG_BUILD_SECONDS * 2, touch=True,
-                    what="the build Job to end")
+    # A pod that has succeeded reads as waiting until the Job controller marks the Job complete; wait for that.
+    await run.watch(lambda t: t.build["state"] in ("complete", "failed", "absent"), timeout=LONG_BUILD_SECONDS * 2,
+                    touch=True, what="the build Job to end")
     run.touch()
     view = run.last_view or {}
     run.check("build_completed", view.get("state") == "complete", blocking=False, said=f"the build ended as {view.get('state')}")
@@ -1218,10 +1219,7 @@ def _restore_force_minutes(run: Run) -> bool:
 
 
 async def _unfinished_build(run: Run, shared: dict[str, Any]) -> None:
-    seconds = shared.get("build_seconds")
-    if not seconds:
-        raise StepFailure("scenario unfinished_build sizes its forced boundary from the build time that scenario "
-                          "completed_build measures, and that scenario measured none")
+    seconds = shared.get("build_seconds")  # recorded beside the boundary, so a lost race can be read against it
     await _begin(run, 1)
     # The build pod runs about 6-12 s after the window opens. cellctl's attempt follows the boundary within one
     # idle pass (30 s), and a build that ignores SIGTERM can run on through its 30 s grace period. A 35 s lead
