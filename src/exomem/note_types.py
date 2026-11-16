@@ -31,13 +31,15 @@ from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from .cli_ops import OpError
-from .vault import kb_root
 from .vocabulary import registry
+
+if TYPE_CHECKING:
+    from .layout import Managed
 
 PACK = "note-types.yaml"
 # nosemgrep: ep-word-set -- The note-type registry schema fixes these four closed roles.
@@ -69,7 +71,9 @@ def nested_folder(folder: str) -> str:
 
 
 def registry_path(root: Path) -> Path:
-    return kb_root(root) / "_Schema" / "note-types.yaml"
+    from . import layout  # imported here: `layout` imports this module
+
+    return Path(root) / layout.schema_relpath(root, PACK)
 
 
 def overlay_path(root: Path) -> Path:
@@ -205,6 +209,8 @@ class NoteTypeRegistry:
     types: Mapping[str, NoteType] = field(default_factory=dict)
     #: Each compiled folder's casefolded name, mapped to the type that owns it.
     folders: Mapping[str, str] = field(default_factory=dict)
+    #: The casefolded name of each area that a source, evidence or entity type declares.
+    held: frozenset[str] = frozenset()
 
 
 def _folder_name(folder: object, key: str) -> str:
@@ -260,9 +266,12 @@ def _check_routable(entry: registry.Entry) -> None:
         )
 
 
-def _index(entries: Mapping[str, registry.Entry]) -> tuple[dict[str, NoteType], dict[str, str]]:
+def _index(
+    entries: Mapping[str, registry.Entry],
+) -> tuple[dict[str, NoteType], dict[str, str], frozenset[str]]:
     types: dict[str, NoteType] = {}
     folders: dict[str, str] = {}
+    held: set[str] = set()
     for key, entry in entries.items():
         note_type = _note_type(entry)
         types[key] = note_type
@@ -275,16 +284,19 @@ def _index(entries: Mapping[str, registry.Entry]) -> tuple[dict[str, NoteType], 
                     f"NOTE_TYPE_FOLDER_TAKEN: {note_type.folder} already belongs to {folders[name]}"
                 )
             folders[name] = key
-    return types, folders
+        else:
+            held.add(name)
+    return types, folders, frozenset(held)
 
 
 def _registry(entries: Mapping[str, registry.Entry], findings: tuple = ()) -> NoteTypeRegistry:
-    types, folders = _index(entries)
+    types, folders, held = _index(entries)
     return NoteTypeRegistry(
         MappingProxyType(dict(entries)),
         findings,
         MappingProxyType(types),
         MappingProxyType(folders),
+        held,
     )
 
 
@@ -503,6 +515,21 @@ class Basis:
     _snapshot: registry.Snapshot | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
     _selection_error: registry.RegistryError | None = field(default=None, init=False, repr=False)
+    _managed: Managed | None = field(default=None, init=False, repr=False)
+
+    def managed(self) -> Managed | None:
+        """The `layout.Managed` of this basis's vault, read once; None for a basis bound to no vault.
+
+        The write gate asks which layout routes a page, and it judges a supplied page state
+        without reading the vault. Enrichment, which does read, asks first and keeps the answer here.
+        """
+        if self.root is None:
+            return None
+        if self._managed is None:
+            from . import layout  # imported here: `layout` imports this module
+
+            self._managed = layout.managed_of(self.root)
+        return self._managed
 
     def _load(self) -> None:
         self._attempted = True
@@ -542,7 +569,9 @@ class Basis:
 
     def reading(self) -> Basis:
         """This basis for a page the operation only reads or rewrites links in."""
-        return replace(self, refuses=False)
+        reading = replace(self, refuses=False)
+        reading._managed = self._managed
+        return reading
 
     def _withheld(self) -> Resolution:
         from .governance.principal import current_principal
@@ -582,6 +611,13 @@ class Basis:
             return self._withheld()
         key = extension.folders.get(name)
         return Resolution(extension.types[key]) if key is not None else _UNREGISTERED
+
+    def holds_area(self, name: str) -> bool:
+        """Whether a source, evidence or entity type declares the area `name` (casefolded).
+
+        An overlay that cannot be admitted leaves the shipped areas only, as `keys` does.
+        """
+        return name in (self._extension() or shipped_registry()).held
 
     def keys(self, predicate: Predicate) -> tuple[str, ...]:
         """Every type key the predicate selects, for a query over stored type keys.

@@ -18,7 +18,6 @@ from types import MappingProxyType
 from typing import Any
 
 from . import note_types
-from .vault import kb_root
 from .vocabulary import registry
 
 PACK = "homes.yaml"
@@ -27,7 +26,9 @@ MAX_SEGMENT_BYTES = 255
 
 
 def registry_path(root: Path) -> Path:
-    return kb_root(root) / "_Schema" / "homes.yaml"
+    from . import layout  # imported here: `layout` imports this module
+
+    return Path(root) / layout.schema_relpath(root, PACK)
 
 
 @dataclass(frozen=True, slots=True)

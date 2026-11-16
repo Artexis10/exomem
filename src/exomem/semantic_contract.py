@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     access,
@@ -46,11 +46,14 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError, relation_review_stable_id_remediation
-from .kbdir import managed_join, managed_split_parts
+from .kbdir import Layout, managed_join, managed_split_parts
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vocabulary import instances
+
+if TYPE_CHECKING:
+    from .layout import Managed
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
 _DISPOSITION_KINDS = frozenset(
@@ -968,18 +971,46 @@ def _path_excluded_from_semantic_minimum(path: str) -> bool:
     return any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES)
 
 
-def _route_name(path: str) -> str | None:
-    """The casefolded `Notes/<Name>` folder a compiled route would select, if any.
+def _managed(basis: note_types.Basis | None) -> Managed | None:
+    """The layout and unmanaged entries of the vault that `basis` reads, or None for a basis bound to no vault."""
+    return basis.managed() if basis is not None else None
 
+
+def _route_name(path: str, basis: note_types.Basis | None = None) -> str | None:
+    """The casefolded folder name a compiled route would select, if any.
+
+    A `nested` vault routes `Notes/<Name>/<file>`, and a basis bound to no vault reads it so too.
     Minimum-unit-only exemptions do not apply here.
+
+    In a `root` vault the areas sit at the vault root, so two rules replace the `Notes/` marker:
+    - `<Name>/<file>` routes unless a source, evidence or entity area or a collection layer holds
+      `<Name>`. A `nested` vault refuses a compiled page outside `Notes/` because every folder
+      there belongs to another role. The root layout has the same owners and no marker, and a
+      home or a new folder is as free as one below `Notes/`.
+    - `Notes/<X>/<file>` keeps today's meaning, because a leftover folder of that name is unregistered
+      and left as it is, and one that names a registered area reads as that area (design L9).
     """
     if _path_excluded_from_compiled_destination(path):
         return None
+    from . import layout  # imported here: `layout` reads registries that import this module
+
     parts = _path_parts(path)
-    below = managed_split_parts(parts, key=str.casefold)
-    if below is None or len(below) < 3 or below[0] != note_types.NOTES_FOLDER.casefold():
+    managed = _managed(basis)
+    if managed is None or managed.layout is not Layout.ROOT:
+        below = managed_split_parts(parts, key=str.casefold)
+        if below is None or len(below) < 3 or below[0] != note_types.NOTES_FOLDER.casefold():
+            return None
+        return below[1]
+    below = managed_split_parts(
+        parts, key=str.casefold, layout=managed.layout, unmanaged=managed.unmanaged
+    )
+    if below is None:
         return None
-    return below[1]
+    if below[0] == note_types.NOTES_FOLDER.casefold():
+        return below[1] if len(below) >= 3 else None
+    if len(below) < 2 or basis.holds_area(below[0]) or layout.in_collection_layer("/".join(below)):
+        return None
+    return below[0]
 
 
 def _type_basis(page: SemanticPageState) -> note_types.Basis:
@@ -1001,8 +1032,9 @@ def _route(page: SemanticPageState) -> note_types.NoteType | None:
     Raises `NOTE_TYPE_DEFINITION_UNAVAILABLE` when the folder needs a definition
     from an admitted overlay that is invalid.
     """
-    name = _route_name(page.path)
-    return _type_basis(page).route(name).require() if name is not None else None
+    basis = _type_basis(page)
+    name = _route_name(page.path, basis)
+    return basis.route(name).require() if name is not None else None
 
 
 def _compiled_type(page: SemanticPageState) -> note_types.NoteType | None:
@@ -1089,7 +1121,20 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             governed_element_identity=("compiled_intent", "type"),
             resolved_rule=("semantic_authoring", "compiled_intent", "structure"),
         )
-    if compiled_type is not None and _route_name(page.path) is None:
+    basis = _type_basis(page)
+    if compiled_type is not None and _route_name(page.path, basis) is None:
+        managed = _managed(basis)
+        in_root = managed is not None and managed.layout is Layout.ROOT
+        place = (
+            "the folders of compiled notes (an area or a home)"
+            if in_root
+            else f"a {managed_join(f'{note_types.NOTES_FOLDER}/')}<Folder> destination"
+        )
+        move = (
+            "into the area of a compiled type or into a home"
+            if in_root
+            else f"under `{note_types.NOTES_FOLDER}/<Folder>`"
+        )
         return ContractFinding(
             code="COMPILED_DESTINATION_MISMATCH",
             severity="error",
@@ -1097,10 +1142,10 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             span=None,
             detail=(
                 f"compiled frontmatter type {normalized_compiled_type(page.page_type)!r} "
-                f"sits outside a {managed_join(f'{note_types.NOTES_FOLDER}/')}<Folder> destination"
+                f"sits outside {place}"
             ),
             remediation=(
-                f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
+                f"Move the document {move} or use "
                 "a non-compiled type appropriate to this destination. "
                 + _RETYPE_ACROSS_FOLDERS
             ),
@@ -1433,6 +1478,7 @@ def enrich_page_state(
     ``_PAGE_DEFINITION_SUBJECTS``, shared by every page that build interprets.
     """
     type_basis = type_basis or note_types.Basis(root)
+    type_basis.managed()  # the gate reads the layout from the basis; read it here, where reading is allowed
     definitions = page_definitions or (state.definitions if state.definitions_explicit else None)
     definitions_explicit = definitions is not None
     unavailable = False

@@ -5,8 +5,9 @@ vault and compiled notes sit under a `Notes/` parent. In `root`, the managed roo
 vault root and each compiled area is a top-level folder. This module holds what depends on
 that choice and on no other state:
 
-- `resolve` reads which layout a vault has, from its layout record, and `of` answers from a cache
-  that a change to the record or to a schema folder invalidates;
+- `resolve` reads which layout a vault has, from its layout record, and `of` and `managed_of` answer
+  (the layout, and with it the unmanaged entries) from a cache that a change to the record or to a
+  schema folder invalidates;
 - `area_folder`, `home_folder` and `translate_path` say where an area, a home or an authored
   path selector sits in a layout;
 - `place` maps a single page of a `nested` vault to its folder and name class in `root`;
@@ -74,6 +75,11 @@ def schema_folder(layout: Layout | str) -> str:
     """The schema folder of `layout`, relative to the vault root: where that layout's record belongs."""
     root_folder, wrapper_folder = _schema_folders()
     return root_folder if Layout(layout) is Layout.ROOT else wrapper_folder
+
+
+def schema_relpath(vault_root: Path, name: str) -> str:
+    """The vault-relative path of the schema file `name` in the vault at `vault_root`: where its layout keeps the schema folder."""
+    return f"{schema_folder(of(vault_root))}/{name}"
 
 
 def _record_rels() -> tuple[str, str]:
@@ -201,8 +207,20 @@ def resolve(vault_root: Path) -> Layout:
     return inspect(vault_root).layout
 
 
-#: What `of` answered, by vault root and managed-root name, with the fingerprint it answered under.
-_ANSWERS: dict[tuple[str, str], tuple[tuple, Layout]] = {}
+@dataclass(frozen=True, slots=True)
+class Managed:
+    """What a reader of vault paths needs to find the managed root: the layout and the top-level entries outside it.
+
+    `unmanaged` is the layout record's list, empty in `nested` (the wrapper folder is the whole
+    boundary there). The `kbdir` helpers and the store's ownership rule take both as they are.
+    """
+
+    layout: Layout
+    unmanaged: tuple[str, ...] = ()
+
+
+#: What `managed_of` answered, by vault root and managed-root name, with the fingerprint it answered under.
+_ANSWERS: dict[tuple[str, str], tuple[tuple, Managed]] = {}
 _ANSWERS_LOCK = threading.Lock()
 #: A process serves a few vault roots. Past this the cache clears and refills, as `vault_store.mode` does.
 _ANSWERS_LIMIT = 256
@@ -243,8 +261,8 @@ def _fingerprint(root: Path) -> tuple | None:
     return tuple(taken)
 
 
-def of(vault_root: Path) -> Layout:
-    """The layout of the vault at `vault_root`, read once and kept until its record or schema folders change.
+def managed_of(vault_root: Path) -> Managed:
+    """The layout of the vault at `vault_root` and its unmanaged entries, read once and kept until its record or schema folders change.
 
     Vault resolution, service start and the writers call this on every operation, so the answer
     comes from a cache keyed by vault root and managed-root name. A call takes the fingerprint of
@@ -260,13 +278,19 @@ def of(vault_root: Path) -> Layout:
         cached = _ANSWERS.get(key)
     if fingerprint is not None and cached is not None and cached[0] == fingerprint:
         return cached[1]
-    answer = inspect(root).layout
+    resolved = inspect(root)
+    answer = Managed(resolved.layout, resolved.record.unmanaged if resolved.record else ())
     if fingerprint is not None:
         with _ANSWERS_LOCK:
             if len(_ANSWERS) >= _ANSWERS_LIMIT:
                 _ANSWERS.clear()
             _ANSWERS[key] = (fingerprint, answer)
     return answer
+
+
+def of(vault_root: Path) -> Layout:
+    """The layout of the vault at `vault_root`, from the cache that `managed_of` keeps."""
+    return managed_of(vault_root).layout
 
 
 # --------------------------------------------------------------------------- #
