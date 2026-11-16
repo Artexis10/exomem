@@ -1,8 +1,8 @@
 """What a store-mode browse reads: its cost grows with its page limit, not with the vault.
 
-OpenSpec make-vault-store-canonical, task 3.2 (browse latency budget). The first test is the
-load drill: a store of N generated pages is read by one child process per arm and sample, so two
-builds of the code read the same bytes and the arms interleave under one load.
+OpenSpec make-vault-store-canonical, task 3.2 (browse latency budget). The load drill reads a
+store of N generated pages with one child process per arm and sample, so two builds of the code
+read the same bytes and the arms interleave under one load. The window tests reuse its pages and probe.
 """
 
 from __future__ import annotations

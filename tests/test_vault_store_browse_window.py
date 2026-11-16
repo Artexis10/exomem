@@ -24,7 +24,7 @@ from test_vault_store_migration import build_indexes, migrate_apply, vault  # no
 from test_vault_store_read_write import stored, writer  # noqa: F401
 from test_vault_store_readers import EXTERNAL, restrict_external
 
-from exomem import commands, lexstore, structured_filters
+from exomem import commands, lexstore, readiness, structured_filters
 from exomem import find as find_module
 from exomem.cli_ops import OpError
 from exomem.governance.principal import request_scope
@@ -302,8 +302,12 @@ def test_the_window_runs_only_where_the_store_can_answer_it_whole(stored, monkey
     assert window(pending=SimpleNamespace(empty=False)) is None
     assert window(dimension_lookups=object()) is None
     unnarrowed = structured_filters.compile_filter(None)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     with pytest.raises(find_module.RetrievalIndexWarming):
         window(plan=unnarrowed)  # a refusal stays a refusal; the window does not answer it
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+    assert window(plan=plan) is not None, "an offline caller whose plan the columns answer"
+    assert window(plan=unnarrowed) is None, "an offline caller keeps its scan fallback"
     monkeypatch.setattr(lexstore, "store_rows_serve", lambda _root: False)
     assert window() is None
 
