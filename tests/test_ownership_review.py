@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,7 @@ from exomem import audit as audit_module
 from exomem import (
     capabilities,
     commands,
+    curation,
     due_state,
     mutation_terminal,
     operation_entries,
@@ -31,7 +33,9 @@ from exomem import (
 )
 from exomem.cli_ops import OpError
 from exomem.governance.principal import request_scope
+from exomem.vault import parse_frontmatter
 from tests.page_opens import pages_opened
+from tests.test_consolidated_tools import _build, _call, _tool
 from tests.test_episode_memory_command import _audience, _withhold_notes_from
 
 TODAY = dt.date(2026, 8, 16)
@@ -81,8 +85,14 @@ def _put(vault: Path, rel: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _key(vault: Path, rel: str) -> str:
+    """The page's ledger identity, read from the page on disk as the product reads it."""
+    frontmatter = parse_frontmatter((vault / rel).read_text(encoding="utf-8"))[0]
+    return ownership_rotation.page_key(rel, frontmatter)
+
+
 def _ask(vault: Path, *paths: str, on: dt.date = TODAY) -> None:
-    ownership_rotation.mark_asked(vault, paths, on=on)
+    ownership_rotation.mark_asked(vault, [_key(vault, path) for path in paths], on=on)
 
 
 def _create(vault: Path, title: str = "Quokka census", *, project: str = "travel") -> dict:
@@ -212,6 +222,38 @@ def test_a_created_page_opens_an_item_that_asks_and_makes_no_claim(vault: Path) 
     assert created in due_state.load(vault)["categories"]["ownership_review"]
 
 
+def test_a_successor_page_asks_the_ownership_question_and_opens_its_item(vault: Path) -> None:
+    """A supersede is the write that can carry a wrong project forward, so a successor is
+    asked like any creation, through the same door and with its item in the projection."""
+    _put(vault, PAGE, _text())
+    due_state.reconcile(vault, today=TODAY)
+    surface = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(),
+        tool_shape=operation_entries.TOOL_SHAPES[0],
+    )
+
+    with capabilities.active_surface(surface):
+        result = writer_lease.invoke_command(
+            _command("replace_memory"),
+            vault,
+            old_path=PAGE,
+            content=(
+                "## Observations\n\n- [finding] Fares dip in the second week of March. #travel\n"
+            ),
+            title="Seasonal fare scouting v2",
+            note_type="research-note",
+            project="travel",
+            relation_disposition="reviewed_none",
+            relation_review_reason="a standalone rewrite",
+            response_detail="full",
+        )
+
+    [successor] = [path for path in result["paths"] if path != PAGE]
+    suggestion = _suggestion(result)
+    assert suggestion is not None and suggestion["kind"] == "ownership"
+    assert list(due_state.load(vault)["categories"]["ownership_review"]) == [successor]
+
+
 def test_a_page_that_was_never_asked_has_no_item(vault: Path) -> None:
     _put(vault, PAGE, _text())
 
@@ -309,7 +351,66 @@ def test_a_retitle_or_project_change_opens_the_item_at_once_without_the_rotation
 
     suggestion = _suggestion(result)
     assert suggestion is not None and suggestion["kind"] == "ownership"
-    assert ownership_rotation.asked(vault)[PAGE] == dt.date.today()
+    assert ownership_rotation.asked(vault)[_key(vault, PAGE)] == dt.date.today()
+
+
+MOVED = "Knowledge Base/Notes/Research/Fares/seasonal-fare-scouting.md"
+RENAMED = f"{FOLDER}/fare-scouting-notes.md"
+
+
+def _dismissed_page(vault: Path) -> dict:
+    """A page that was asked and whose item the user dismissed; returns the dismissed row."""
+    _put(vault, PAGE, _text())
+    _ask(vault, PAGE)
+    due_state.reconcile(vault, today=TODAY)
+    [row] = _open_rows(vault)
+    commands.op_triage_memory(
+        vault,
+        ref=row["ref"],
+        action="dismiss",
+        why="intentional: the page serves the fare-scouting goal of the travel project",
+        expected_fingerprint=row["fingerprint"],
+    )
+    assert _open_rows(vault) == []
+    return row
+
+
+def test_a_dismissed_page_that_moves_to_another_folder_is_asked_again(vault: Path) -> None:
+    """The ledger follows the page's id. Keyed by path, a moved page would drop out of it and
+    the folder change could never reopen the dismissal."""
+    dismissed = _dismissed_page(vault)
+
+    (vault / MOVED).parent.mkdir(parents=True, exist_ok=True)
+    commands.op_move_file(vault, PAGE, MOVED)
+
+    # A move writes no due-state delta, so the first write to the page asks from its live
+    # state and the projection catches up at the next reconcile.
+    asked = _suggestion(_grow(vault, MOVED, 2))
+    assert asked is not None and asked["kind"] == "ownership"
+    assert asked["ref"] == dismissed["ref"]
+    assert asked["fingerprint"] != dismissed["fingerprint"]
+    due_state.reconcile(vault, today=TODAY)
+    [reopened] = _open_rows(vault)
+    assert (reopened["path"], reopened["fingerprint"]) == (MOVED, asked["fingerprint"])
+    assert len(ownership_rotation.asked_path(vault).read_text().splitlines()) == 1
+
+
+def test_a_rename_that_keeps_the_folder_and_title_keeps_the_dismissal(vault: Path) -> None:
+    """Nothing the user was asked about changed. The triaged row at the new path proves the
+    page is still asked: a path-keyed ledger would show no row and pass the quiet checks."""
+    dismissed = _dismissed_page(vault)
+
+    commands.op_move_file(vault, PAGE, RENAMED)
+    due_state.reconcile(vault, today=TODAY)
+
+    rows = [
+        row
+        for row in due_state.served_entries(vault, today=TODAY, include_triaged=True)
+        if row["category"] == "ownership_review"
+    ]
+    states = [(r["path"], r["fingerprint"], bool(r.get(due_state.TRIAGED))) for r in rows]
+    assert states == [(RENAMED, dismissed["fingerprint"], True)]
+    assert _suggestion(_grow(vault, RENAMED, 2)) is None
 
 
 def test_an_open_page_asks_again_on_each_write_and_an_answered_page_writes_quietly(
@@ -329,32 +430,58 @@ def test_an_open_page_asks_again_on_each_write_and_an_answered_page_writes_quiet
     assert _suggestion(_grow(vault, PAGE, 4)) is None
 
 
-def test_dismissing_another_family_on_the_page_leaves_the_question_open(vault: Path) -> None:
+def test_an_earlier_relation_debt_dismissal_leaves_the_question_open(vault: Path) -> None:
     """Without its own partition the item shares the page's bare review id, so a decision
-    on relation debt for the page would silently settle this question."""
+    on relation debt for the page would silently settle this question. The debt is dismissed
+    first: once the page is asked, the default listing folds the debt into the ownership row,
+    and the debt queue's own ref no longer resolves."""
     _put(vault, PAGE, _text())
-    _ask(vault, PAGE)
-    asked = _suggestion(_grow(vault, PAGE, 2))
     relation_debt = [
         item
         for item in commands.op_attention(vault, categories=["relation_debt"])["items"]
         if item.get("path") == PAGE
     ]
     assert relation_debt, "the fixture page must also carry relation debt"
-
     commands.op_triage_memory(
         vault, ref=relation_debt[0]["ref"], action="dismiss", why="intentional: no links needed"
     )
 
-    still = _suggestion(_grow(vault, PAGE, 3))
-    assert still is not None
-    assert (still["ref"], still["fingerprint"]) == (asked["ref"], asked["fingerprint"])
+    _ask(vault, PAGE)
+
+    asked = _suggestion(_grow(vault, PAGE, 2))
+    assert asked is not None and asked["kind"] == "ownership"
+
+
+def test_keeping_the_page_from_the_default_listing_leaves_its_relation_debt_open(
+    vault: Path,
+) -> None:
+    """The default listing folds the page's relation debt into its ownership row. Answering
+    that row settles the question and nothing else: the debt stays open in its own queue."""
+    _put(vault, PAGE, _text())
+    _ask(vault, PAGE)
+    [row] = [item for item in commands.op_attention(vault)["items"] if item["path"] == PAGE]
+    assert {"ownership_review", "relation_debt"} <= set(row["categories"])
+
+    commands.op_triage_memory(
+        vault,
+        ref=row["ref"],
+        action="dismiss",
+        why="intentional: this page serves the fare-scouting goal of the travel project",
+    )
+
+    debt = [
+        item
+        for item in commands.op_attention(vault, categories=["relation_debt"])["items"]
+        if item["path"] == PAGE
+    ]
+    assert [item["state"] for item in debt] == ["open"]
+    assert _suggestion(_grow(vault, PAGE, 2)) is None
 
 
 def test_the_spelled_keep_call_dismisses_by_reading_only_its_own_page(vault: Path) -> None:
-    """This family is on no review listing. A binder that finds an id only by reading the
-    listings refuses the call the response told the agent to make, and one that rebuilds
-    the queues reads every page in the vault for one decision."""
+    """A binder that finds an id only by rebuilding the review queues reads every page in
+    the vault for one decision, and the response told the agent to make this call after
+    every write."""
     _put(vault, PAGE, _text())
     _ask(vault, PAGE)
     due_state.reconcile(vault, today=TODAY)
@@ -481,7 +608,7 @@ def test_the_write_path_reads_no_vectors_and_scans_no_project(
     suggestion = _suggestion(created)
 
     assert suggestion is not None
-    assert created["path"] in ownership_rotation.asked(vault)
+    assert _key(vault, created["path"]) in ownership_rotation.asked(vault)
 
 
 # --- the asked ledger ------------------------------------------------------------------
@@ -490,26 +617,43 @@ def test_the_write_path_reads_no_vectors_and_scans_no_project(
 def test_a_torn_or_corrupt_ledger_line_never_loses_the_asked_pages(vault: Path) -> None:
     """A crash mid-append leaves a partial last line. Reading it as a page, or refusing the
     whole ledger, would either invent an item or silently forget every page asked."""
+    _put(vault, PAGE, _text())
     _ask(vault, PAGE)
+    key = _key(vault, PAGE)
     ledger = ownership_rotation.asked_path(vault)
     with ledger.open("ab") as handle:
         handle.write(b"not json\n")
-        handle.write(b'{"path":"Knowledge Base/Notes/torn.md","on":"2026-0')
+        handle.write(b'{"key":"torn-key","on":"2026-0')
 
-    assert dict(ownership_rotation.asked(vault)) == {PAGE: TODAY}
+    assert dict(ownership_rotation.asked(vault)) == {key: TODAY}
 
     with ledger.open("ab") as handle:
         handle.write(b'8-16"}\n')
 
-    assert set(ownership_rotation.asked(vault)) == {PAGE, "Knowledge Base/Notes/torn.md"}
+    assert set(ownership_rotation.asked(vault)) == {key, "torn-key"}
 
 
 def test_asking_the_same_page_twice_keeps_its_first_day_and_adds_no_line(vault: Path) -> None:
-    ownership_rotation.mark_asked(vault, [PAGE], on=TODAY)
-    ownership_rotation.mark_asked(vault, [PAGE], on=TODAY + dt.timedelta(days=3))
+    _put(vault, PAGE, _text())
+    key = _key(vault, PAGE)
+    ownership_rotation.mark_asked(vault, [key], on=TODAY)
+    ownership_rotation.mark_asked(vault, [key], on=TODAY + dt.timedelta(days=3))
 
-    assert ownership_rotation.asked(vault)[PAGE] == TODAY
+    assert ownership_rotation.asked(vault)[key] == TODAY
     assert len(ownership_rotation.asked_path(vault).read_text().splitlines()) == 1
+
+
+def test_a_page_without_an_exomem_id_is_asked_by_its_path(vault: Path) -> None:
+    """The fallback key: a page that has no id is still asked once and asks on each write."""
+    no_id = _text().replace("exomem_id: 00000000-0000-4000-8000-000000000001\n", "")
+    assert "exomem_id" not in no_id
+    _put(vault, PAGE, no_id)
+
+    assert _key(vault, PAGE) == PAGE
+    _ask(vault, PAGE)
+
+    assert list(ownership_rotation.asked(vault)) == [PAGE]
+    assert _suggestion(_grow(vault, PAGE, 2)) is not None
 
 
 # --- the backlog -----------------------------------------------------------------------
@@ -551,6 +695,62 @@ def test_a_creation_opens_the_pages_item_in_the_projection_without_a_recompute(
     assert created in due_state.load(vault)["categories"]["ownership_review"]
 
 
+# --- the default listing and the curation route -----------------------------------------
+
+
+def test_a_default_review_listing_shows_an_open_ownership_item_and_no_cohesion_item(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that lists review items without naming a category meets the question here
+    or not at all. A page at a size step also has a cohesion item, which stays opt-in."""
+    _put(vault, PAGE, _text(extra_units=10))
+    _ask(vault, PAGE)
+    mcp = _build(monkeypatch)
+
+    default = _tool(mcp, "list_review_items", {})
+    named = _tool(mcp, "list_review_items", {"categories": ["note_cohesion"]})
+
+    default_reasons = {
+        reason["category"]
+        for item in default["items"]
+        if item["path"] == PAGE
+        for reason in item["reasons"]
+    }
+    assert "ownership_review" in default_reasons
+    assert "note_cohesion" not in default_reasons
+    assert PAGE in {item["path"] for item in named["items"]}
+
+
+def test_an_ownership_items_ref_opens_a_curation_work_item_on_its_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent answers the question from the listing, so the ref that listing gives must
+    open the page for the curation route; it was refused as an entity candidate."""
+    _put(vault, PAGE, _text())
+    _ask(vault, PAGE)
+    mcp = _build(monkeypatch)
+    [item] = [i for i in _tool(mcp, "list_review_items", {})["items"] if i["path"] == PAGE]
+    assert "ownership_review" in {reason["category"] for reason in item["reasons"]}
+
+    work = _call(
+        mcp,
+        "maintain_memory",
+        {"mode": "curation", "curation_action": "work-item", "review_ref": item["ref"]},
+    )
+
+    assert "pages" in work, work
+    [page] = work["pages"]
+    assert page["path"] == PAGE
+    assert page["content"] == (vault / PAGE).read_text(encoding="utf-8")
+    assert "entity_candidate" not in work
+
+
+def test_a_review_ref_that_names_no_item_keeps_the_entity_candidate_refusal(vault: Path) -> None:
+    """Resolving a page item must not turn an unknown ref into an empty or different answer."""
+    with pytest.raises(curation.CurationError, match="CURATION_ENTITY_CANDIDATE_STALE"):
+        curation.work_item(vault, review_ref="exomem://review/" + "0" * 24)
+
+
 # --- the rotation ----------------------------------------------------------------------
 
 
@@ -569,15 +769,23 @@ def _generate(vault: Path, project: str, count: int, *, first: int, updated: str
 
 
 def _rotate(vault: Path, generated: list[str], day: int = 0, *, limit: int, read_means=None):
-    """One rotation over the generated pages only: the fixture vault has projects of its own."""
+    """One rotation over the generated pages only: the fixture vault has projects of its own.
+
+    Returns the pages' paths, though the rotation returns their ledger keys.
+    """
     pages = [
         page
         for page in audit_module._parse_all(vault / "Knowledge Base", vault)
         if page.rel_path in generated
     ]
-    return ownership_rotation.rotate(
+    by_key = {
+        ownership_rotation.page_key(page.rel_path, page.frontmatter): page.rel_path
+        for page in pages
+    }
+    newly = ownership_rotation.rotate(
         vault, pages, today=TODAY + dt.timedelta(days=day), limit=limit, read_means=read_means
     )
+    return [by_key[key] for key in newly]
 
 
 def _project_of(path: str) -> str:
@@ -653,6 +861,38 @@ def test_the_rotation_excludes_no_page_whatever_its_distance(vault: Path) -> Non
     assert ownership_rotation.never_asked_report(vault) == {
         "count": 0, "as_of": (TODAY + dt.timedelta(days=7)).isoformat(),
     }
+
+
+def test_two_overlapping_rotations_take_one_days_slice(vault: Path) -> None:
+    """A cold read starts the rotation and the projection rebuild, which rotates too, at the
+    same moment. Each saw the day as untaken, so each asked a full slice."""
+    paths = _generate(vault, "travel", 10, first=100)
+    holding, release = threading.Event(), threading.Event()
+    reads: list[int] = []
+
+    def read_means(_root, _group):
+        reads.append(1)
+        if len(reads) == 1:
+            holding.set()
+            release.wait(10)
+        return {}
+
+    taken: list[list[str]] = []
+
+    def run() -> None:
+        taken.append(_rotate(vault, paths, limit=3, read_means=read_means))
+
+    first, second = threading.Thread(target=run), threading.Thread(target=run)
+    first.start()
+    assert holding.wait(10)
+    second.start()
+    second.join(0.5)  # a run that is not held back passes the first one's day guard here
+    release.set()
+    first.join()
+    second.join()
+
+    assert sorted(len(slice_) for slice_ in taken) == [0, 3]
+    assert len(ownership_rotation.asked(vault)) == 3
 
 
 def test_the_rotation_runs_once_a_day_and_never_asks_a_page_twice(vault: Path) -> None:

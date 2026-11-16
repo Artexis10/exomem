@@ -5121,10 +5121,9 @@ def _creation_post_commit(
             vault_root, preflight.destination, before_source=None, after_source=preflight.source,
             origin=promotion_origin, corpus=preflight.corpus, source_state=preflight.semantic_state,
         )
-    # A successor page is a new version of an entity, so it opens no new question.
-    suggestion = _structure_suggestion(
-        vault_root, preflight.semantic_state, created=predecessor_path is None
-    )
+    # A successor asks the ownership question too: a supersede is a write that can carry
+    # a wrong project forward.
+    suggestion = _structure_suggestion(vault_root, preflight.semantic_state, created=True)
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)
     delivered_routing = _records_routing_for_delivery(

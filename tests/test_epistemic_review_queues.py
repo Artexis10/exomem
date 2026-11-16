@@ -310,6 +310,9 @@ def test_default_attention_union_is_pinned() -> None:
 
     `original_fixity` joins after it by the verify-stored-originals contract: a
     missing or damaged original is what every note citing it rests on.
+
+    `ownership_review` joins last by the add-ownership-review contract: a backlog whose
+    intake the daily rotation bounds, shown to a client that names no category.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -326,6 +329,7 @@ def test_default_attention_union_is_pinned() -> None:
         "transient_state_review",
         "collection_view_corrections",
         "original_fixity",
+        "ownership_review",
     )
 
 

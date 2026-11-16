@@ -255,11 +255,6 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # does not displace what is already there. The writing agent meets the same
     # item through the write-time question, and due-state serves it as a backlog.
     "note_cohesion",
-    # Same exclusion as `note_cohesion`: a grandfathered population (every page that
-    # already exists is a page the rotation will eventually ask about) and a cadence
-    # this system chose (`ownership_rotation.DEFAULT_ROTATION_DAILY`), not a date an
-    # author declared. Registered, selectable and triageable from the first run.
-    "ownership_review",
     # Same exclusion, a different reason for it, and the difference matters.
     # `unfinished_experiments` is held back by a grandfathered POPULATION;
     # `question_aging` is held back because its trigger is a THRESHOLD THIS
@@ -6407,10 +6402,10 @@ def _check_ownership_review(
     """Surface the question for each eligible page that was asked about.
 
     The rule, the question and the identity live in `ownership_review`, which the write
-    path calls as well; the asked ledger lives in `ownership_rotation`. A page the ledger
-    does not hold has no item, so this check reads the ledger once and judges only the
-    asked pages. It claims nothing about a page: whether the page belongs where it is
-    is the connected agent's judgement.
+    path calls as well; the asked ledger lives in `ownership_rotation`, keyed by the page's
+    identity so a moved page is still asked. A page the ledger does not hold has no item,
+    so this check reads the ledger once and judges only the asked pages. It claims nothing
+    about a page: whether the page belongs where it is is the connected agent's judgement.
     """
     from . import ownership_review, ownership_rotation
 
@@ -6423,7 +6418,7 @@ def _check_ownership_review(
     findings: list[AuditFinding] = []
     for page in pages:
         request_budget.checkpoint()
-        asked_on = asked.get(page.rel_path)
+        asked_on = asked.get(ownership_rotation.page_key(page.rel_path, page.frontmatter))
         if asked_on is None:
             continue
         subject = ownership_review.subject_of(

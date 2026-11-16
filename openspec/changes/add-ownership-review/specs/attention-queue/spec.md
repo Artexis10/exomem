@@ -56,10 +56,18 @@ The distances SHALL be computed off the write path, in a bulk refresh that reads
 
 The due-state projection SHALL maintain `ownership_review`, and a page write SHALL settle the written page's item in full. Open items SHALL sort after every dated obligation and before `note_cohesion`. Their counts SHALL be exact and never capped.
 
+The default review listing SHALL include `ownership_review`, ranked after the dated queues and the other default queues. `note_cohesion` SHALL stay outside the default listing and stay selectable by name. The rotation bounds the intake at `rotation_daily` items a day, so a vault that already holds many pages never receives them all at once; that bound is why this family is in the default listing and `note_cohesion` is not.
+
 #### Scenario: A backlog never displaces a due obligation
 
 - **WHEN** 50 `ownership_review` items are open and one prediction window is due
 - **THEN** the served top rows list the due prediction before any `ownership_review` row
+
+#### Scenario: A default listing shows an open ownership item
+
+- **WHEN** one `ownership_review` item is open and a client lists review items without naming a queue or a category
+- **THEN** the listing contains that item with its ref and fingerprint
+- **AND** a listing that names `note_cohesion` still shows `note_cohesion` items, and a default listing shows none
 
 #### Scenario: Ownership sorts ahead of note cohesion
 

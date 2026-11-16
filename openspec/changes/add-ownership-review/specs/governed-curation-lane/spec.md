@@ -14,3 +14,18 @@ A curation preview whose plan holds `create-note` or `move` steps for compiled n
 
 - **WHEN** a plan holds only `edit` steps
 - **THEN** the preview carries no ownership question
+
+### Requirement: A page-level review item opens a work item on its page
+
+A curation work item opened with the `review_ref` of a review item that is not a recurring-identity candidate SHALL assemble the context of that item's page, bounded as a work item opened with that page's ref is. A recurring-identity candidate's `review_ref` SHALL keep its own binding and continuation. A `review_ref` that resolves to no current item SHALL keep its current refusal. The work item SHALL NOT widen what curation may read or write.
+
+#### Scenario: An ownership item opens a work item on its page
+
+- **WHEN** a client opens a curation work item with the `review_ref` of an open `ownership_review` item
+- **THEN** the work item holds that item's page with its content and content hash
+- **AND** the call does not refuse the ref as a recurring-identity candidate
+
+#### Scenario: A recurring-identity ref keeps its binding
+
+- **WHEN** a client opens a curation work item with the `review_ref` of a recurring-identity candidate
+- **THEN** the work item carries the candidate binding and its allowed step kinds, as before

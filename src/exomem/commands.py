@@ -12224,7 +12224,7 @@ def op_maintain_memory(
         plan: Closed agent-authored plan for curation propose.
         refs: Memory refs for curation work-item.
         paths: Vault paths for curation work-item.
-        review_ref: Recurring-identity review ref for a work-item.
+        review_ref: Review ref for a work-item: a recurring-identity candidate, or an item on one page.
         hydration_recheck: Continuation ordinal 1-8; the eighth is closure-only.
         expected_plan_fingerprint: Reviewed plan fingerprint for approval.
         vocabulary_ref: Vocabulary decision for curation apply or resume.

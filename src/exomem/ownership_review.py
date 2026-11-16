@@ -231,13 +231,14 @@ def suggestion_after_write(
     )
     if subject is None:
         return None
+    key = ownership_rotation.page_key(state.path, state.frontmatter)
     if created or (
         previous is not None
         and (project_key(previous.frontmatter), previous.title)
         != (subject.project, subject.title)
     ):
-        ownership_rotation.mark_asked(vault_root, [state.path], on=dt.date.today())
-    asked_on = ownership_rotation.asked(vault_root).get(state.path)
+        ownership_rotation.mark_asked(vault_root, [key], on=dt.date.today())
+    asked_on = ownership_rotation.asked(vault_root).get(key)
     if asked_on is None:
         return None
     if envelope.active().get("structural_suggestions") == "off":

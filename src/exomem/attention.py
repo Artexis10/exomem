@@ -82,6 +82,11 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # are what every note citing it rests on, so the owner sees it unasked; a vault
     # whose originals all verify never sees it.
     "original_fixity",
+    # Last: a backlog, not an obligation, so every queue above it ranks first. It is in the
+    # default union because the rotation bounds its intake (`rotation_daily` a day), so no
+    # vault meets its whole population at once, and a client that lists review items without
+    # naming a queue is the only reader many sessions have; `note_cohesion` has no such bound.
+    "ownership_review",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large

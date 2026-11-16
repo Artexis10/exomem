@@ -1133,11 +1133,16 @@ _UNRESOLVED_WIKILINK_REASON = "unresolved_identity_recurs"
 _UNRESOLVED_WIKILINK_GRAMMAR = "unresolved-wikilink-v1"
 
 
+#: The one review family whose item carries an entity-candidate binding. Any other review
+#: item names a page, and this lane opens that page for it.
+ENTITY_CANDIDATE_FAMILY = "entity_recurrence"
+
+
 def _entity_candidate_binding(item: Any, *, registry_fallback: str) -> dict[str, Any]:
     reasons = [
         reason
         for reason in list(getattr(item, "reasons", None) or [])
-        if reason.get("category") == "entity_recurrence"
+        if reason.get("category") == ENTITY_CANDIDATE_FAMILY
     ]
     if len(reasons) != 1:
         raise _error(
@@ -1280,6 +1285,57 @@ def _candidate_step_kinds(state: str) -> list[str]:
     }[state]
 
 
+def _page_of_review_item(vault_root: Path, review_ref: str) -> str | None:
+    """The page a current review item that is not an entity candidate anchors on, else None.
+
+    The audience filter of the review surface applies, so a page the caller may not see
+    resolves to None exactly as a ref that names no item does.
+    """
+    from . import attention as attention_module
+
+    try:
+        item = attention_module.item_by_ref(vault_root, review_ref)
+    except ValueError:
+        return None
+    if any(reason.get("category") == ENTITY_CANDIDATE_FAMILY for reason in item.reasons):
+        return None
+    return item.path
+
+
+def _page_work_item(
+    vault_root: Path, selected: list[str], max_chars_per_page: int
+) -> dict[str, Any]:
+    """The bounded context of these explicitly named pages."""
+    pages: list[dict[str, Any]] = []
+    truncated: list[str] = []
+    seen: set[str] = set()
+    for raw in selected:
+        path, source = _read_page(Path(vault_root), raw)
+        if path in seen:
+            continue
+        seen.add(path)
+        was_truncated = len(source) > max_chars_per_page
+        if was_truncated:
+            truncated.append(path)
+        pages.append(
+            {
+                "path": path,
+                "content": source[:max_chars_per_page],
+                "content_hash": text_content_hash(source),
+                "chars": len(source),
+                "truncated": was_truncated,
+            }
+        )
+    return {
+        "action": "work-item",
+        "mutated": False,
+        "pages": pages,
+        "truncation": {"pages": truncated, "disclosed": bool(truncated)},
+        "registry_ids": registry_identities(Path(vault_root)),
+        "step_schemas": step_schemas(),
+    }
+
+
 def work_item(
     vault_root: Path,
     *,
@@ -1296,7 +1352,7 @@ def work_item(
         if refs or paths:
             raise _error(
                 "CURATION_WORK_ITEM_MIXED",
-                "an entity-candidate work item cannot add unrelated refs or paths",
+                "a review item's work item cannot add unrelated refs or paths",
             )
         if hydration_recheck is not None and (
             type(hydration_recheck) is not int or not 1 <= hydration_recheck <= 8
@@ -1322,8 +1378,15 @@ def work_item(
                 Path(vault_root), str(review_ref)
             )
         except CurationError as error:
-            if hydration_recheck is None or error.code != "CURATION_ENTITY_CANDIDATE_STALE":
+            if error.code != "CURATION_ENTITY_CANDIDATE_STALE":
                 raise
+            if hydration_recheck is None:
+                # Not an entity candidate: a page-level item opens its page, as a ref to
+                # that page does. A ref that names no current item keeps the refusal.
+                anchor = _page_of_review_item(Path(vault_root), str(review_ref))
+                if anchor is None:
+                    raise
+                return _page_work_item(Path(vault_root), [anchor], max_chars_per_page)
             # A continuation is read-only and identity-bound.  When the exact
             # row disappears after the terminal batch receipt, the useful
             # result is bounded closure rather than a misleading stale error.
@@ -1435,34 +1498,7 @@ def work_item(
             "CURATION_WORK_ITEM_TOO_LARGE",
             f"work-item may contain at most {MAX_WORK_ITEM_PAGES} explicit pages",
         )
-    pages: list[dict[str, Any]] = []
-    truncated: list[str] = []
-    seen: set[str] = set()
-    for raw in selected:
-        path, source = _read_page(Path(vault_root), raw)
-        if path in seen:
-            continue
-        seen.add(path)
-        was_truncated = len(source) > max_chars_per_page
-        if was_truncated:
-            truncated.append(path)
-        pages.append(
-            {
-                "path": path,
-                "content": source[:max_chars_per_page],
-                "content_hash": text_content_hash(source),
-                "chars": len(source),
-                "truncated": was_truncated,
-            }
-        )
-    return {
-        "action": "work-item",
-        "mutated": False,
-        "pages": pages,
-        "truncation": {"pages": truncated, "disclosed": bool(truncated)},
-        "registry_ids": registry_identities(Path(vault_root)),
-        "step_schemas": step_schemas(),
-    }
+    return _page_work_item(vault_root, selected, max_chars_per_page)
 
 
 def _read_target(vault_root: Path, path: str) -> tuple[str, str]:

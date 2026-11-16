@@ -6,9 +6,11 @@ project key or title changes, and when the daily rotation reaches it. It keeps t
 state files beside the due-state projection:
 
 - the asked ledger, `.ownership-asked.jsonl`: one appended line per page asked, which is
-  the only record that an item exists. It is append-only so a write adds one line and
-  never rewrites the file, and it is its own file because the projection is derived and
-  rebuilt while an asked page is a question that was put to the user;
+  the only record that an item exists. It is keyed by the page's identity (`page_key`), so
+  a page that moves or is renamed stays asked and its item reopens at its new home. It is
+  append-only so a write adds one line and never rewrites the file, and it is its own
+  file because the projection is derived and rebuilt while an asked page is a question
+  that was put to the user;
 - the rotation file, `.ownership-rotation.json`: the day the rotation last ran, the
   order in which each project's pages are asked, and how many eligible pages were never
   asked. Only the rotation writes it, once a day.
@@ -64,6 +66,7 @@ MIN_PAGES_FOR_DISTANCE = 3
 _PAGES_PER_VECTOR_READ = 500
 
 _LOCK = threading.Lock()
+_ROTATION_LOCK = threading.Lock()
 
 
 def rotation_daily() -> int:
@@ -95,6 +98,20 @@ def rotation_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / ROTATION_FILENAME
 
 
+def page_key(rel_path: str, frontmatter: Mapping[Any, Any]) -> str:
+    """The ledger's identity for a page: its `exomem_id`, else its vault-relative path.
+
+    The one place the identity is read, for the write path, the audit check and the
+    rotation alike. The id survives a move or a rename, so a dismissed page that moves to
+    another folder is still the page that was asked, and its item reopens there. A page
+    without an id can only be told by its path, and re-enters as never-asked when moved.
+    An id is a UUID and a path ends in a file extension, so the two cannot collide.
+    """
+    from . import memory_refs
+
+    return memory_refs.normalize_id(frontmatter.get("exomem_id")) or rel_path
+
+
 @dataclass(slots=True)
 class _Ledger:
     """The ledger as last read: the file it came from, how far, and the pages asked."""
@@ -108,7 +125,7 @@ _LEDGERS: dict[str, _Ledger] = {}
 
 
 def asked(vault_root: Path) -> Mapping[str, dt.date]:
-    """The pages that were asked, each with the day it was first asked.
+    """The pages that were asked, by `page_key`, each with the day it was first asked.
 
     Read incrementally: the file only ever grows, so a later call parses the lines that
     were appended since the last one. The returned mapping is never changed afterwards;
@@ -143,7 +160,7 @@ def asked(vault_root: Path) -> Mapping[str, dt.date]:
             try:
                 row = json.loads(line)
                 day = dt.date.fromisoformat(row["on"])
-                merged.setdefault(str(row["path"]), day)
+                merged.setdefault(str(row["key"]), day)
             except (ValueError, KeyError, TypeError):
                 continue
         ledger = _Ledger(info.st_ino, ledger.offset + len(whole), merged)
@@ -151,27 +168,23 @@ def asked(vault_root: Path) -> Mapping[str, dt.date]:
         return ledger.asked
 
 
-def mark_asked(vault_root: Path, paths: Iterable[str], *, on: dt.date) -> list[str]:
-    """Record that these pages were asked, and return the ones not asked before.
+def mark_asked(vault_root: Path, keys: Iterable[str], *, on: dt.date) -> list[str]:
+    """Record that these pages (by `page_key`) were asked, and return the ones not asked before.
 
     One append of whole lines. Not synced to disk: a lost tail only means the rotation
     asks that page again, which is the cheap direction to be wrong in.
     """
     current = asked(vault_root)
-    fresh = [
-        path
-        for path in dict.fromkeys(str(p).replace("\\", "/").lstrip("/") for p in paths)
-        if path and path not in current
-    ]
+    fresh = [key for key in dict.fromkeys(str(k) for k in keys) if key and key not in current]
     if not fresh:
         return []
     from . import state_paths
 
     state_paths.ensure_vault_state_dir(vault_root)
     lines = "".join(
-        json.dumps({"path": path, "on": on.isoformat()}, ensure_ascii=False, separators=(",", ":"))
+        json.dumps({"key": key, "on": on.isoformat()}, ensure_ascii=False, separators=(",", ":"))
         + "\n"
-        for path in fresh
+        for key in fresh
     )
     with _LOCK, asked_path(vault_root).open("ab") as handle:
         handle.write(lines.encode("utf-8"))
@@ -252,24 +265,30 @@ def never_asked_report(vault_root: Path) -> dict[str, Any] | None:
 
 @dataclass(frozen=True, slots=True)
 class Member:
-    """One eligible page of a project, with the date that orders a project without a distance."""
+    """One eligible page of a project, with the date that orders a project without a distance.
+
+    `path` locates the page's vectors; `key` is the page's identity in the ledger and in
+    the stored order, so a page that moves within its project keeps its place.
+    """
 
     path: str
     authored: dt.date | None
+    key: str
 
 
 def membership_token(members: Iterable[Member]) -> str:
     """The identity of a project's membership: changes when a page joins or leaves."""
-    encoded = "\0".join(sorted(member.path for member in members)).encode("utf-8", "surrogatepass")
+    encoded = "\0".join(sorted(member.key for member in members)).encode("utf-8", "surrogatepass")
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def _by_authored(members: Iterable[Member]) -> list[str]:
-    return [m.path for m in sorted(members, key=lambda m: (m.authored or dt.date.max, m.path))]
+    ordered = sorted(members, key=lambda m: (m.authored or dt.date.max, m.path))
+    return [member.key for member in ordered]
 
 
 def order_project(members: list[Member], means: Mapping[str, np.ndarray]) -> list[str]:
-    """The project's pages in the order they are asked.
+    """The project's pages, by `page_key`, in the order they are asked.
 
     Farthest first, where a page's distance is 1 minus the cosine between its mean vector
     and the sum of the project's other pages' mean vectors (the sum has the mean's
@@ -287,7 +306,7 @@ def order_project(members: list[Member], means: Mapping[str, np.ndarray]) -> lis
     )
     distance = 1.0 - cosine
     far_first = sorted(range(len(with_vector)), key=lambda i: (-distance[i], with_vector[i].path))
-    ordered = [with_vector[i].path for i in far_first]
+    ordered = [with_vector[i].key for i in far_first]
     ordered += _by_authored(member for member in members if member.path not in means)
     return ordered
 
@@ -347,7 +366,11 @@ def eligible_members(vault_root: Path, pages: Iterable[ParsedPage]) -> dict[str,
         fm = page.frontmatter
         authored = temporal.parse(fm.get("updated") or fm.get("created"))
         projects.setdefault(subject.project, []).append(
-            Member(page.rel_path, authored.day if authored is not None else None)
+            Member(
+                page.rel_path,
+                authored.day if authored is not None else None,
+                page_key(page.rel_path, fm),
+            )
         )
     return projects
 
@@ -368,17 +391,17 @@ def _take_in_turn(
     if after in keys:
         cut = keys.index(after) + 1
         keys = keys[cut:] + keys[:cut]
-    queues = {key: (path for path in orders[key] if path not in already) for key in keys}
+    queues = {key: (page for page in orders[key] if page not in already) for key in keys}
     picked: list[str] = []
     last: str | None = None
     live = list(keys)
     while live and len(picked) < limit:
         remaining = []
         for key in live:
-            path = next(queues[key], None)
-            if path is None:
+            page = next(queues[key], None)
+            if page is None:
                 continue
-            picked.append(path)
+            picked.append(page)
             last = key
             remaining.append(key)
             if len(picked) == limit:
@@ -395,12 +418,29 @@ def rotate(
     limit: int | None = None,
     read_means: Callable[[Path, list[str]], Mapping[str, np.ndarray]] | None = None,
 ) -> list[str]:
-    """Ask about today's never-asked pages once per day, and return the pages newly asked.
+    """Ask about today's never-asked pages once per day, and return the `page_key`s newly asked.
 
     Idempotent within a day. Refreshes the order of only those projects whose membership
     changed since the last run, then takes the slice in turn. The caller opens the returned
     pages' items in the projection.
     """
+    # The day's guard (`rotated_on`) is read at the top and written at the end, so two
+    # overlapping runs, as a read and a rebuild start together on a cold vault, would each
+    # take a full slice. The second waits here, then finds the day taken.
+    with _ROTATION_LOCK:
+        return _rotate_locked(
+            vault_root, pages, today=today, limit=limit, read_means=read_means
+        )
+
+
+def _rotate_locked(
+    vault_root: Path,
+    pages: Iterable[ParsedPage],
+    *,
+    today: dt.date,
+    limit: int | None,
+    read_means: Callable[[Path, list[str]], Mapping[str, np.ndarray]] | None,
+) -> list[str]:
     limit = rotation_daily() if limit is None else limit
     previous = state(vault_root)
     if limit <= 0 or previous.get("rotated_on") == today.isoformat():
@@ -426,7 +466,7 @@ def rotate(
     )
     newly = mark_asked(vault_root, picked, on=today)
     still_asked = asked(vault_root)
-    remaining = sum(1 for order in orders.values() for path in order if path not in still_asked)
+    remaining = sum(1 for order in orders.values() for key in order if key not in still_asked)
     _save_state(
         vault_root,
         {

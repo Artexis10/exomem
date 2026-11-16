@@ -1772,7 +1772,12 @@ def _rotate_ownership(vault_root: Path, *, today: dt.date, deltas: bool = True) 
         newly = ownership_rotation.rotate(root, pages, today=today)
         if deltas and newly:
             asked = set(newly)
-            apply_ownership_delta(root, [p for p in pages if p.rel_path in asked], today=today)
+            opened = [
+                page
+                for page in pages
+                if ownership_rotation.page_key(page.rel_path, page.frontmatter) in asked
+            ]
+            apply_ownership_delta(root, opened, today=today)
     except Exception:  # noqa: BLE001 - advisory work; a later read retries it
         log.warning("ownership rotation failed for %s", root, exc_info=True)
 
