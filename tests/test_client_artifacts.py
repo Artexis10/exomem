@@ -209,6 +209,35 @@ def test_an_over_long_warning_trims_to_the_bound_and_keeps_the_stored_file_store
     assert _terminal(_stored_row(warnings=warnings), summary)["warnings_count"] == 10
 
 
+def test_a_batch_sentence_counts_a_stored_file_whose_path_did_not_read() -> None:
+    from exomem.mutation_terminal import committed_terminal, project_terminal
+
+    unnamed = _stored_row(file_id="file-two", stored_path=None)
+    terminal = committed_terminal(
+        {"files": [_stored_row(), unnamed], "summary": {"stored": 2, "failed": 0}},
+        request_id="request",
+        receipt_id="receipt",
+        idempotency_key=None,
+    )
+
+    compact = project_terminal(terminal, outcome_verb="saved")
+
+    assert compact["summary"] == {"stored": 2, "failed": 0}
+    assert compact["files"][1]["unverified_fields"] == ["stored_path"]
+    # Two files were saved, so the sentence says two, and names the unnamed one by its id.
+    assert compact["user_summary"].startswith(
+        "Saved 2 files -> Knowledge Base/Evidence/case/raw/proof.bin and 1 more"
+    )
+
+
+def test_a_warnings_value_that_is_not_a_list_is_named_not_dropped() -> None:
+    [row] = _compact_batch(_stored_row(warnings="one advisory"), {"stored": 1, "failed": 0})["files"]
+
+    assert row["outcome"] == "stored"
+    assert row["unverified_fields"] == ["warnings"]
+    assert "warnings" not in row
+
+
 def test_client_artifact_url_validation_never_returns_the_signed_url() -> None:
     from exomem.client_artifacts import SafeFetchError, validate_download_url
 

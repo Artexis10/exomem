@@ -337,17 +337,29 @@ A `capture_source` or `preserve_artifacts` call that carries an adoption envelop
 
 ### Requirement: A committed file is never reported as failed
 
-The compact projection of a per-file outcome whose bytes were committed (`stored`, `already_stored`, or an adoption `replayed`) SHALL NOT report that file as `failed`, and SHALL NOT replace the row with `INVALID_ARTIFACT_RECEIPT`, whatever its warnings or receipt fields hold. Warnings are advisory. The row SHALL carry the first 8 warnings, each cut to 300 characters, and `warnings_omitted` with the number beyond 8; `warnings_count` SHALL count every warning. A receipt field that does not read, among `state`, `stored_path`, `size`, `hash`, `hash_algorithm`, `content_type`, `media_id` and the optional earlier-copy, archive, transcription and adoption receipts, SHALL be left out of the row and named in the row's `unverified_fields`. Such a row SHALL keep its `outcome` and, where it reads, its `state`. The server SHALL log a warning that names the fields. A terminal that committed a file SHALL NOT read "Nothing saved".
+The compact projection of a per-file outcome whose bytes were committed (`stored`, `already_stored`, or an adoption `replayed`) SHALL NOT report that file as `failed`, and SHALL NOT replace the row with `INVALID_ARTIFACT_RECEIPT`, whatever its warnings or receipt fields hold. Two rows are the exception: a row whose `file_id` does not read, which names no file, and a row that itself states `state: failed`. Warnings are advisory. The row SHALL carry the first 8 warnings, each cut to 300 characters, and `warnings_omitted` with the number beyond 8; `warnings_count` SHALL count every warning. A receipt field that does not read, among `state`, `stored_path`, `size`, `hash`, `hash_algorithm`, `content_type`, `media_id` and the optional earlier-copy, archive, transcription and adoption receipts, SHALL be left out of the row and named in the row's `unverified_fields`. A `warnings` value that is not a list is named there as `warnings`. Such a row SHALL keep its `outcome` and, where it reads, its `state`. The server SHALL log a warning that names the fields. A terminal that committed a file SHALL NOT read "Nothing saved". When a stored file's path does not read, the summary sentence SHALL still count that file and SHALL name it by its `file_id`.
 
 #### Scenario: A long title makes each file's warning long
 
-- **WHEN** `save_source` receives two attached files and a title whose slug exceeds the filename limit, and its per-file warnings exceed 300 characters
+- **WHEN** `save_source` receives two attached files and a title whose slug exceeds the filename limit
 - **THEN** both rows read `stored` with their own SHA-256, the stored bytes hash to the supplied bytes, and the summary reads "Saved 2 files"
+
+#### Scenario: A file carries more warnings than the row holds
+
+- **WHEN** a committed file's outcome carries 10 warnings, one of them longer than 300 characters
+- **THEN** the row reads `stored` and keeps the first 8 warnings, each at most 300 characters, with `warnings_omitted` of 2
+- **AND** `warnings_count` counts all 10
 
 #### Scenario: A stored row has a malformed size
 
 - **WHEN** a committed file's outcome carries a `size` that is not a non-negative integer
 - **THEN** the row reads `stored`, omits `size`, lists `size` in `unverified_fields`, and the summary counts the file as stored
+
+#### Scenario: A stored file's path does not read
+
+- **WHEN** one of two committed files has a `stored_path` that does not read
+- **THEN** its row lists `stored_path` in `unverified_fields`, and `summary.stored` is 2
+- **AND** the sentence counts 2 files, names the readable path first, and counts the unnamed file among the rest
 
 ### Requirement: A digest holds an upload
 

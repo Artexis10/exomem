@@ -114,7 +114,13 @@ identical call: the terminal is persisted before derived-state acknowledgement,
 so the same identity replays the same per-file paths, hashes, `request_id` and
 `receipt_id` without fetching or writing anything again. A retry under a new
 identity is a different mutation, and bytes the vault already holds come back as
-`already_stored` rather than being stored a second time. `scope` and
+`already_stored` rather than being stored a second time. A committed file is never
+reported as `failed` because its receipt reads badly. A field that did not read is
+left out of its row and named in `unverified_fields`, and the row keeps its state.
+A row with more than 8 warnings keeps the first 8, each cut to 300 characters, and
+`warnings_omitted` counts the rest. A row that lists `hash` in `unverified_fields`
+has no digest to check. Tell the person the file is kept and its digest is not
+confirmed; never say that it matched. `scope` and
 `category` are each one path segment: a separator, reserved character, control
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.
