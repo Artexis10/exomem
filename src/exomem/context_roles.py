@@ -416,9 +416,9 @@ def _intent(value: object, *, role_name: str, findings: list[dict[str, str]]) ->
 
 def _projection(value: object, *, role_name: str, findings: list[dict[str, str]]) -> str:
     # These are implemented packet shapes, not semantic categories or lens names.
-    if value in (None, "", "method"):
+    if value in (None, "", "method", "curation"):
         return str(value or "")
-    findings.append(_finding("invalid_projection", f"{role_name}.projection", "must be method or empty"))
+    findings.append(_finding("invalid_projection", f"{role_name}.projection", "must be method, curation or empty"))
     return ""
 
 
