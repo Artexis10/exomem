@@ -8,7 +8,7 @@ A vault SHALL have a single managed root: the folder that holds `_Schema/`. In `
 - No record and `_Schema/` at the vault root only SHALL refuse with an error that names the missing record.
 - No record and `_Schema/` in both the vault root and a wrapper folder SHALL refuse with an error that names both folders.
 
-Each refusal SHALL name the remedy: write a record that says `nested` or `root`. While a record exists, a leftover second `_Schema/` folder SHALL be reported by status and doctor and SHALL NOT be refused, because both folders exist during the relayout's projection window. A requirement that names `Knowledge Base/<rest>` SHALL mean `<managed root>/<rest>`, except that in `root` layout `Knowledge Base/Notes/<Area>/<rest>` SHALL mean `<Area>/<rest>` for a compiled area `<Area>`, because the `Notes/` level drops. An existing vault SHALL keep its layout until a relayout moves it, and an upgrade SHALL NOT move any file.
+Each refusal SHALL name the remedy, and the record that fits depends on the refusal. `_Schema/` only at the vault root means the vault was laid out as `root`, so the remedy is a `root` record there. `_Schema/` in both places with no record means an interrupted relayout or a stray folder, so the remedy is the record for the layout that the pages are in, which is `nested` when the pages sit under the wrapper, because a wrong record hides every page. While a record exists, a leftover second `_Schema/` folder SHALL be reported by status and doctor and SHALL NOT be refused, because both folders exist during the relayout's projection window. A requirement that names `Knowledge Base/<rest>` SHALL mean `<managed root>/<rest>`, except that in `root` layout `Knowledge Base/Notes/<Area>/<rest>` SHALL mean `<Area>/<rest>` for a compiled area `<Area>`, because the `Notes/` level drops. An existing vault SHALL keep its layout until a relayout moves it, and an upgrade SHALL NOT move any file.
 
 #### Scenario: A governed write in a root vault has no wrapper segment
 - **WHEN** a governed write creates a compiled note in a vault whose layout is `root`
@@ -54,7 +54,7 @@ Each refusal SHALL name the remedy: write a record that says `nested` or `root`.
 #### Scenario: A root-shaped vault without a record is refused
 - **WHEN** no layout record exists and `_Schema/` sits at the vault root with no wrapper folder
 - **THEN** resolution refuses and the error names the missing record
-- **AND** the error names the remedy: write a record that says `nested` or `root`
+- **AND** the error names the remedy: write a `root` record in the vault root's `_Schema/`
 - **AND** no file changes
 
 #### Scenario: A recorded layout decides between two roots
@@ -70,7 +70,7 @@ Each refusal SHALL name the remedy: write a record that says `nested` or `root`.
 #### Scenario: Two roots with no record are refused
 - **WHEN** no layout record exists and both the vault root and a wrapper folder hold `_Schema/`
 - **THEN** resolution refuses and the error names both folders
-- **AND** the error names the remedy: write a record that says `nested` or `root`
+- **AND** the error names the remedy: write the record for the layout that the pages are in, which is `nested` when they sit under the wrapper folder
 - **AND** no file changes
 
 ### Requirement: Areas come from registries
@@ -196,7 +196,7 @@ In a `root` vault, a write that chooses a name another page holds SHALL be refus
 - **THEN** the writer disambiguates it as `add-readable-note-filenames` defines
 
 ### Requirement: Links use the shortest trailing path that resolves to a single file
-In a `root` vault, a writer SHALL emit the shortest trailing path of the target page, cut at a folder boundary, that resolves to exactly a single file for both Exomem and Obsidian. That path SHALL be `[[Name]]` when no other file that Obsidian sees has that name. Graph rows SHALL keep the resolved vault path of the target. A link repoint SHALL change only the link's target text, and the repointed link SHALL resolve to the page it resolved to before. A writer in a `nested` vault SHALL keep today's link form.
+In a `root` vault, a writer SHALL emit the shortest trailing path of the target page, cut at a folder boundary, that resolves to exactly a single file for both Exomem and Obsidian. That path SHALL be `[[Name]]` when no other file that Obsidian sees has that name. When no trailing path singles the target out, the writer SHALL emit the target's full vault path. Graph rows SHALL keep the resolved vault path of the target. A link repoint SHALL change only the link's target text, and the repointed link SHALL resolve to the page it resolved to before. A writer in a `nested` vault SHALL keep today's link form.
 
 #### Scenario: A unique name gives a bare link
 - **WHEN** a governed write in a `root` vault links to a page whose name no other file holds
@@ -212,13 +212,18 @@ In a `root` vault, a writer SHALL emit the shortest trailing path of the target 
 - **THEN** the body carries `[[alpha/receipts/Scan]]`
 - **AND** the body does not carry `[[Evidence/Scan]]`, which is not a path suffix of either page
 
+#### Scenario: A page that no trailing path singles out keeps its full path
+- **WHEN** a governed write in a `root` vault links to `Evidence/Scan.md` and `Archive/Evidence/Scan.md` also exists
+- **THEN** the body carries `[[Evidence/Scan]]`, the full vault path of the target
+- **AND** a link to `Archive/Evidence/Scan.md` carries `[[Archive/Evidence/Scan]]`
+
 #### Scenario: A nested vault keeps today's link form
 - **WHEN** a governed write links to a page in a `nested` vault
 - **THEN** the body carries the link form that the writer emits today
 - **AND** no link takes the trailing-path form
 
 ### Requirement: A governed write in a root vault renames a derived name to match the title
-In a `root` vault in store mode whose filename style is `title`, a governed write to a page SHALL rename the page when its name is derived and does not match the page's frontmatter title after the write. A name matches when it equals the name that the naming rule gives that title under the `title` style or the `slug` style, so a name derived under another style counts as matching and two writers with different settings never flip a name. The date prefix of a `dated` or `started` stem SHALL come from the page's recorded date, which is its `started` value for a `started` stem and, for a `dated` stem, its frontmatter `created` value, falling back to the page's first store audit row. It SHALL never come from the date of the write. The rename SHALL happen in the same transaction as the page's own change, and in the collision check the page's own current name SHALL count as free. A single transaction SHALL move the page's rows, repoint every inbound link that uses the old name, re-derive the pages it repoints and record the old path as an alias. A pinned name and a fixed name SHALL NOT change. An outside-edit import SHALL NOT rename a file, even when it changes the title, and the next governed write to that page SHALL rename a derived name to match the page's current title. In a `nested` vault, in either mode, a governed write SHALL NOT rename an existing file. A change of filename style SHALL rename nothing in either layout. Only the relayout gives an existing derived name the form of the vault's resolved filename style.
+In a `root` vault in store mode whose filename style is `title`, a governed write to a page SHALL rename the page when its name is derived and does not match the page's frontmatter title after the write. A name matches when it equals the name that the naming rule gives that title under the `title` style or the `slug` style, so a name derived under another style counts as matching and two writers with different settings never flip a name. The date prefix of a `dated` or `started` stem SHALL come from the page's recorded date, which is its `started` value for a `started` stem and, for a `dated` stem, its frontmatter `created` value, falling back to the page's first store audit row. It SHALL never come from the date of the write. The rename SHALL happen in the same transaction as the page's own change, and in the collision check the page's own current name SHALL count as free. A single transaction SHALL move the page's rows, repoint every inbound link that uses the old name, re-derive the pages it repoints and keep the old path as a prior path of the page, as the prior-path index of `add-curation-relocation-protocol` reads it. A pinned name and a fixed name SHALL NOT change. An outside-edit import SHALL NOT rename a file, even when it changes the title, and the next governed write to that page SHALL rename a derived name to match the page's current title. In a `nested` vault, in either mode, a governed write SHALL NOT rename an existing file. A change of filename style SHALL rename nothing in either layout. Only the relayout gives an existing derived name the form of the vault's resolved filename style.
 
 #### Scenario: A derived name follows the title
 - **WHEN** a governed write changes the title of a page with a derived name in a `root` vault in store mode
@@ -272,35 +277,44 @@ In a `root` vault in store mode whose filename style is `title`, a governed writ
 - **AND** no link is repointed
 
 ### Requirement: Old paths keep resolving
-In store mode, a path alias table SHALL map each old path of a page to its current path. Every move SHALL update the table in the same transaction. The alias step SHALL sit inside the managed-relative form that the wikilink resolver, the executors and the hosted protected-tree guard share, after exact paths and before stems, so that no caller keeps its own alias lookup. An alias to a page that the caller may not see SHALL answer exactly as a missing page. `store_pages.path` SHALL remain the store key, and the page's `exomem_id` and the store's identities table SHALL carry its move-safe identity.
+The relayout SHALL write a durable record in the vault with a row for each moved file: its identity (or none), its old path and its new path. In store mode the record SHALL be a stored page. The relayout SHALL NOT write `moved_from` into any page. The prior-path index of `add-curation-relocation-protocol` SHALL read the relayout record as it reads a page's `moved_from`. It SHALL apply resolution, visibility, reserved paths and its guard against a new page at a prior path to a relayout row exactly as to a `moved_from` row. The managed-relative form that the hosted protected-tree guard and the executors share SHALL agree with the resolver's prior-path step. A prior path to a page that the caller may not see SHALL answer exactly as a missing page. `store_pages.path` SHALL remain the store key, and the page's `exomem_id` and the store's identities table SHALL carry its move-safe identity.
 
-#### Scenario: An old path still resolves after a move
-- **WHEN** a page moves in a store-mode vault and a link or call names its old path
+#### Scenario: An old path still resolves after the relayout
+- **WHEN** the relayout moves a page and a link or call names its old path
 - **THEN** the link or call resolves to the page at its current path
+
+#### Scenario: The relayout records moves in a record and not in pages
+- **WHEN** the relayout moves a page
+- **THEN** the relayout record holds a row with the page's old path and new path
+- **AND** the page's frontmatter gains no `moved_from` field
 
 #### Scenario: A reference survives a move
 - **WHEN** a page moves or is retitled in a store-mode vault
 - **THEN** its `exomem://memory/<uuid>` reference still names the same page
 
-#### Scenario: The guard and the executors read an alias the same way
-- **WHEN** the hosted protected-tree guard and an executor each read the old path of a moved page
+#### Scenario: The guard and the resolver read an old path the same way
+- **WHEN** the hosted protected-tree guard and the wikilink resolver each read the old path of a relaid-out page
 - **THEN** both read it as the same current path
 
-#### Scenario: An alias to a page the caller may not see answers as missing
-- **WHEN** a restricted caller names the old path of a moved page that the caller may not see
+#### Scenario: An old path to a page the caller may not see answers as missing
+- **WHEN** a restricted caller names the old path of a relaid-out page that the caller may not see
 - **THEN** the answer equals the answer for a path that never existed
 - **AND** the answer names neither the current path nor the page
 
-### Requirement: Relayout is a single verified governed move
-`exomem store-mode relayout` SHALL move a store-mode vault from `nested` to `root` in a single store change that holds the page moves, the repointed pages, the aliases and the layout record. It SHALL rewrite no governance file, no `_access.yaml` and no note-type overlay `folder` value, because those are read through the layout translation.
+#### Scenario: A revert keeps root-layout paths resolving
+- **WHEN** `--revert` returns a page to its nested path
+- **THEN** a link or call that names the page's root-layout path resolves to the page at its nested path
 
-`--plan` SHALL work in file mode and in store mode, SHALL compute every move, name, suffix, truncation, link repoint and pointer-field repoint, and SHALL write nothing. The relayout SHALL repoint every pointer field that names a moved page or file, including `evidence_file`, `data_file`, `parent_media`, `governance_companion.artifact_path` and `raw_protection.artifact_path`. For every governance scope, access tier and instance binding, `--plan` SHALL compute the member set by identity before and after the move, and SHALL list each path ref and filename glob that names a page the relayout renames, which an operator converts to an id ref.
+### Requirement: Relayout is a single verified governed move
+`exomem store-mode relayout` SHALL move a store-mode vault from `nested` to `root` in a single store change that holds the page moves, the repointed pages, the relayout record and the layout record. It SHALL rewrite no governance file, no `_access.yaml` and no note-type overlay `folder` value, because those are read through the layout translation.
+
+`--plan` SHALL work in file mode and in store mode, SHALL compute every move, name, suffix, truncation, link repoint and pointer-field repoint, and SHALL write nothing. The relayout SHALL repoint every pointer field that names a moved page or file, including `evidence_file`, `data_file`, `parent_media`, `governance_companion.artifact_path`, `raw_protection.artifact_path` and the `parent_path`, `parent_page` and `artifact_path` of a document container member's binding. In an append-only `Sources/` or `Evidence/` page the relayout SHALL repoint links and pointer fields only through the governed pointer write of `add-curation-relocation-protocol`. For every governance scope and access tier, `--plan` SHALL compute the member set by identity before and after the move, SHALL count the files each instance binding holds before and after, and SHALL list each path ref and filename glob that names a page the relayout renames, which an operator converts to an id ref.
 
 `--apply` SHALL refuse unless store mode is active, the service is stopped, no item is held, the projection queue is empty, a store backup exists and free disk space is at least the size of the store. It SHALL also refuse while any page cannot map to a single new path, while any member set differs, while a path ref to a renamed page stays unconverted, and when a top-level entry outside the old wrapper has the name of an area, `index.md` or `log.md`. The apply SHALL write a `relayout_pending` marker first, then commit the store change, then project every queued intent offline, then move the disk-canonical files (`_Governance/`, `_access.yaml` and the collection replica), and then clear the marker. While the marker stands, the service start and every CLI read SHALL refuse with an error that names `--apply` to resume and `--revert`. Governance root resolution SHALL refuse when the root-layout `_Governance/` is missing and the wrapper `_Governance/` exists. A copy of the collection replica SHALL stay at the old path, so that a build from before the layout record refuses with `VAULT_STORE_ELSEWHERE`, and doctor SHALL report that copy and remove it on request.
 
 `--verify` SHALL prove that every owned page maps to a single new path with its `exomem_id` unchanged, that every member set is equal by identity, that every link occurrence resolves to the same page as before, that page bytes equal the old bytes apart from the planned link and pointer-field edits, that binary files keep their content hashes, and that a fresh derivation equals the stored rows.
 
-`--revert` SHALL plan back to `nested` with the same planner. The relayout SHALL record each page's old path as an alias row and each link span's old text in its audit. The revert SHALL return every page that existed at the relayout to its recorded path, SHALL restore the old text of every recorded link span that is still byte-identical, and SHALL give a page created after the relayout nested placement by rule and today's link form. In the same store change it SHALL write a `nested` layout record in the wrapper's `_Schema/` and remove the record in the vault root. The managed upgrade migrator SHALL NOT run a relayout.
+`--revert` SHALL plan back to `nested` with the same planner. The relayout record SHALL hold each page's old path, and the relayout SHALL record each link span's old text in its audit. The revert SHALL return every page that existed at the relayout to its recorded path, SHALL restore the old text of every recorded link span that is still byte-identical, and SHALL give a page created after the relayout nested placement by rule and today's link form. In the same store change it SHALL write a `nested` layout record in the wrapper's `_Schema/`, remove the record in the vault root and write a relayout record of its own moves. The managed upgrade migrator SHALL NOT run a relayout.
 
 #### Scenario: The plan writes nothing
 - **WHEN** `--plan` runs on a store-mode vault
@@ -316,6 +330,11 @@ In store mode, a path alias table SHALL map each old path of a page to its curre
 - **WHEN** `--verify` compares each page after the relayout with its bytes before
 - **THEN** the two differ only in the planned link spans and pointer-field edits
 - **AND** every binary file keeps its content hash
+
+#### Scenario: An append-only page changes only in its pointers
+- **WHEN** the relayout moves a note that an `Evidence/` page links from its body
+- **THEN** the page's bytes differ from before only in that link's target text
+- **AND** the governed pointer write records the edit in the audit trail
 
 #### Scenario: A scope that would gain or lose a member refuses the relayout
 - **WHEN** a governance scope selects a page by path before the relayout and would not select it after

@@ -7,10 +7,10 @@ This change took over design D12 and task group 9 of `make-vault-store-canonical
 **What D12 got right and this design keeps.**
 - A relayout is a single store transaction.
 - `store_pages.path` stays the store key, so no table changes key and the whole-table equivalence proof holds.
-- A path alias table keeps old paths resolving.
+- Old paths keep resolving, through a durable record of each move and a single prior-path index (L8).
 - In `root` vaults, links use the shortest trailing path that resolves to a single file, and `nested` vaults keep today's link form.
 - Derived names are unique across the vault, and a date prefix comes from a recorded date.
-- Three naming corrections apply to `root` vaults, and to `nested` vaults only if owner choice O7 accepts.
+- Three naming corrections apply to every title-derived name, in `root` vaults and, by the owner's answer for new pages (O2), in `nested` vaults.
 - A requirement that says `Knowledge Base/<rest>` means `<managed root>/<rest>`. The canonical specs mention the wrapper 114 times in 29 files (plain text count, 2026-11-16), and none of them needs an edit.
 
 **Closest existing tool.** Obsidian's own move with "update links" repoints only the wikilinks that Obsidian resolves. It runs no disclosure check, touches no pointer field (`evidence_file`, `parent_media`), applies no naming rule, and sees only files under its own root. In store mode the outside-edit importer would hold each edit it makes to an append-only page. It cannot do the relayout, so custom work is justified. Most parts of that work are existing code (see "Reuse, not rewrite").
@@ -26,7 +26,7 @@ This change took over design D12 and task group 9 of `make-vault-store-canonical
 Facts checked against today's code:
 - The sites that built or compared the wrapper through `kb_dirname()` or `kb_prefix()` (512 lines in 131 files) now call the managed-root helpers in `src/exomem/kbdir.py`. The literal `Knowledge Base` still appears on 308 lines of 101 Python files under `src/exomem` (plain text count, 2026-11-16), in user-facing errors, docstrings, examples and the demo.
 - A semgrep rule refuses a new `kb_dirname()` or `kb_prefix()` call outside that module.
-- The store schema is at version 17 and has no alias or layout table.
+- The store schema is at version 17. This change adds no table: the layout record and the relayout record are pages.
 - The typed writer reads the shipped registry only.
 - `_APPEND_ONLY = ("Sources", "Evidence")` sits in code (`access.py`).
 - Governance scopes select by path globs and refs, and only `paths` and `refs` can select a non-Markdown item.
@@ -65,15 +65,21 @@ Inference from a folder is unsound. `_is_vault` accepts `Knowledge Base/_Schema/
 4. No record and `_Schema/` at the root only refuses, and the error names the missing record.
 5. No record and `_Schema/` in both places refuses, and the error names both folders.
 
-Each refusal names the remedy: write a record that says `nested` or `root`. While a record exists, a leftover second `_Schema/` is reported by status and doctor and never refused. Both folders exist during the relayout's projection window, and a refusal would leave a crashed relayout unresolvable.
+Each refusal names the remedy, and the record that fits depends on the refusal:
+- `_Schema/` only at the vault root means the vault was laid out as `root`. Write a `root` record in that folder.
+- `_Schema/` in both places with no record means an interrupted relayout or a stray folder. Write the record for the layout that the pages are in, which is `nested` when the pages sit under the wrapper. A wrong record hides every page.
 
-`EXOMEM_KB_DIRNAME` stays as a test override. An upgrade moves no file and changes no layout. The first delivery calls the resolution from the read-only plan only. Vault resolution and service start call it from the root layout step (task 4.6), so no existing code path changes behaviour before then.
+The delivered refusal text names both records and when each applies (`root` when the vault root is the managed root, `nested` when it is not). Task 4.6b makes each refusal name the record that fits it.
+
+While a record exists, a leftover second `_Schema/` is reported and never refused. `layout.inspect` reports it, the plan carries it in its diagnostics, and status and doctor report it (task 4.6a). Both folders exist during the relayout's projection window, and a refusal would leave a crashed relayout unresolvable.
+
+`EXOMEM_KB_DIRNAME` stays as a test override. An upgrade moves no file and changes no layout. The first delivery calls the resolution from the read-only plan only. Status and doctor then report its result without refusing (task 4.6a). Vault resolution and service start call it from the root layout step (task 4.6b), so no existing code path changes behaviour before then. Before that wiring reaches service start, doctor reports an unrelated vault-root `_Schema/`, so that no host meets the refusal first at service start. The report reads `layout.inspect` and turns each `LayoutError` into a finding with its code and remedy, so the remedy text lives once, in the error.
 
 ### L2. Managed-root helpers
 
 The managed-root helpers and their repository gate have landed. Code reaches the managed root through the `managed_*` helpers in `kbdir.py`. `kb_dirname()` and `kb_prefix()` remain only inside that module, and the semgrep rule in the repository's quality configuration refuses a new call elsewhere. In `nested` the helpers return today's strings exactly. The helpers do not rewrite the literal `Knowledge Base` text that remains in user-facing errors, docstrings, examples and the demo (308 lines in 101 Python files, plain text count, 2026-11-16). Task 4.9 makes that text layout-neutral.
 
-What remains is the layout argument. `managed_join` and `managed_split` take an optional layout. The process default suits the service and the cells. The planner, Cloud import and tests pass a layout explicitly. A requirement or tool text that says `Knowledge Base/<rest>` means `<managed root>/<rest>`, except that in `root` the path `Knowledge Base/Notes/<Area>/<rest>` means `<Area>/<rest>` for a compiled area, because the `Notes/` level drops.
+What remains is the layout argument (task 4.6b). `managed_join` and `managed_split` take an optional layout. The process default suits the service and the cells. The planner, Cloud import and tests pass a layout explicitly. A requirement or tool text that says `Knowledge Base/<rest>` means `<managed root>/<rest>`, except that in `root` the path `Knowledge Base/Notes/<Area>/<rest>` means `<Area>/<rest>` for a compiled area, because the `Notes/` level drops.
 
 ### L3. A single layout translation for every path reader (disclosure)
 
@@ -82,12 +88,12 @@ The relayout moves paths, and path selectors decide disclosure. Governance scope
 A selector that matches before the relayout and not after moves a page into the residual scope. An empty membership resolves to the widest disclosure, which releases the page. A concrete case: a scene frame inherits its video's scopes only when `parent_media` names the video and the frame sits in `<video>.frames/`. If the video and its frames move and `parent_media` keeps the wrapper path, the frame loses its video's narrower scopes. The same holds for `evidence_file`, `data_file`, `governance_companion.artifact_path` and `raw_protection.artifact_path`.
 
 The decision:
-1. `layout.translate_path(pattern, layout)` is the single function that reads path selectors. It reads note-type and home `folder` values, governance `paths`, `exclude_paths` and `refs`, `_access.yaml` tiers, instance bindings and folder topic carriers.
+1. `layout.translate_path(value, target, registry)` is the single function that reads path selectors. It reads note-type and home `folder` values, governance `paths`, `exclude_paths` and `refs`, `_access.yaml` tiers, instance bindings and folder topic carriers.
 2. In `root`, `translate_path` drops a leading wrapper segment and reads `Notes/<Area>/...` as `<Area>/...` for a registered compiled area or home.
 3. Governance YAML and `_access.yaml` are never rewritten. Selectors are read through the translation.
 4. A path `ref` or a filename glob that names a page the relayout renames cannot be translated. `--plan` lists each of them, and the operator converts it to an id ref. Membership already matches `exomem_id`.
-5. For every scope, tier and instance binding, `--plan` computes the member set by identity before and after. `--apply` refuses on any difference, and `--verify` repeats the check. The check reuses the existing membership kernels.
-6. Pointer fields get the move writer's transforms, and `parent_media` joins that set. The move writer repoints the other pointer fields today (`move_file._repoint_artifact` and its siblings) and does not repoint `parent_media`.
+5. For every scope, tier and instance binding, the check compares the members before and after. `--apply` refuses on any difference, and `--verify` repeats the check. The check reuses the existing membership kernels. The delivered plan compares a scope by identity, a tier by each file's tier at its path, and an instance binding by whether its translated path value still holds the same number of files. Comparing a binding's members by identity is the work of `--apply` and `--verify` (tasks 5.2 and 5.4). The same holds for a file whose scopes come from a document container's binding or from a companion page: the plan counts it under `files_not_evaluated` with its reason, because it reads neither source, and `--apply` and `--verify` evaluate it.
+6. Pointer fields get the move writer's transforms, and `parent_media` joins that set. The move writer repoints the other pointer fields today (`move_file._repoint_artifact` and its siblings, which include `governance_companion.artifact_path`) and does not repoint `parent_media` or the three path fields of a document container member's binding (`container_member.parent_path`, `parent_page` and `artifact_path`). The relayout repoints all four kinds, and the move writer's gap in the container fields stays old debt.
 
 ### L4. Areas come from registries, and the folder value is read, never rewritten
 
@@ -104,10 +110,12 @@ The typed writer reads the shipped registry only. An overlay-defined compiled ar
 
 ### L5. Readable names and the naming corrections
 
-`root` makes `title` the default filename style. The setting from `add-readable-note-filenames` still overrides it, and `nested` keeps `slug` as its default. The name rule is `sanitize_title_filename` with three corrections, which apply in `root`. A `nested` vault takes them only if owner choice O7 accepts, because they change the names of new pages there too:
-- Remove the characters of `_LINK_TITLE_REFUSED`, which sits next to the wikilink parser, and `^`: `/`, `#`, `|`, `[`, `]`, the backtick, CR, LF and `^`. The wikilink grammar gives them meaning. Reuse that set and add no second set.
+`root` makes `title` the default filename style. The setting from `add-readable-note-filenames` still overrides it. The owner's answer for new pages (under O2) extends title-derived names to new compiled notes and entities in `nested` vaults. The naming-and-organisation work builds that writer switch, and this change builds none of it for `nested`.
+
+The name rule lives in a single place, `vault.py`: `corrected_title_name` is `sanitize_title_filename` with the corrections below, and `fit_filename` applies the byte cap with the date prefix and the collision suffix. Both layouts use it, and the plan reads it through `layout.place` and `layout.allocate`. The three corrections apply to every title-derived name:
+- Remove the characters of `LINK_FILENAME_REFUSED`: `_LINK_TITLE_REFUSED`, which sits next to the wikilink parser, plus `^`. They are `/`, `#`, `|`, `[`, `]`, the backtick, CR, LF and `^`. The wikilink grammar gives them meaning. Each becomes a space and the spaces collapse, as the sanitiser does for the characters it already refuses. That set is derived once, so the parser's grammar is read once.
 - Strip leading dots. A dot-named file is outside the store (ownership rule 2), and Obsidian hides it.
-- Cap the whole name at 200 UTF-8 bytes as well as at the character cap, cutting at a code-point boundary. ext4 and APFS allow at most 255 bytes per name.
+- Cap the whole name at 200 UTF-8 bytes (`MAX_FILENAME_BYTES`), as well as at the character cap, cutting at a code-point boundary. The date prefix, the collision suffix and the extension count toward the cap, and the title part shrinks first. ext4 and APFS allow at most 255 bytes per name.
 
 A name is derived when the page's note type names its files from the page's frontmatter `title`, as a title stem with or without a date prefix. Every other name is fixed: an Evidence original, a Records or Planning recipe name, a generated navigation page (`index.md`, `log.md`, `hub.md`), and any page whose type has no title rule or that sits outside every registry area. `title` means that frontmatter value only. An H1 or a filename stem never stands in for it, and a page with no frontmatter title keeps its name. The relayout needs only this derived or fixed class. A pin, which records a caller's chosen name, exists only if owner choice O5 builds it. Without O5 the derived or fixed class is the whole rule.
 
@@ -125,39 +133,52 @@ On a collision of a derived name in a `root` vault, the writer appends ` (2)`, `
 
 ### L7. Links, the Obsidian rule and the resolver order
 
-`link_form(target, name_group, layout)` sits beside the resolver. In `root` it returns the shortest trailing path of the target, cut at a folder boundary, that is unique among the Markdown files Obsidian sees, under the casefold key. In `nested` it returns today's form, and a `nested` writer keeps it. It needs only the homonym group of the target's basename: an indexed lookup in store mode and the resolver's stem buckets in file mode. It never scans all paths. `normalize_body_wikilinks`, `render_wikilinks_for_vault` and the f-string emitters of `[[...]]` route through it.
+`obsidian_links.link_form(target, index)` is a pure function in `src/exomem/obsidian_links.py`, which `vault.py` can import. It returns the shortest trailing path of the target, cut at a folder boundary, that is unique among the Markdown files Obsidian sees, under the casefold key. When no trailing path is unique, it returns the target's full vault path, which resolves by the exact-path step of the rule. It takes no layout. A writer in `root` calls it, and a writer in `nested` keeps today's form. The `index` maps the basename key of each file to the paths that hold it. The planner builds that index once from the pages it reads.
+
+A writer needs only the homonym group of the target's basename: an indexed lookup in store mode and the resolver's stem buckets in file mode. It never scans all paths. That lookup belongs to group 4 (task 4.4). `normalize_body_wikilinks`, `render_wikilinks_for_vault` and the f-string emitters of `[[...]]` route through `link_form`.
 
 The path is `[[Name]]` when no other file Obsidian sees has that name. A grouped page needs a real path suffix. When `Scan` is not unique, `Evidence/alpha/receipts/Scan.md` gets `[[receipts/Scan]]` if that is unique, then `[[alpha/receipts/Scan]]`. It never gets `[[Evidence/Scan]]`, which is a suffix of no page. Graph rows keep the resolved vault path, so derived rows keep their meaning. A link repoint changes only the link's target text, and the link still resolves to the same page.
 
-A single function encodes Obsidian's basename-or-path resolution rule. The writer, the planner and `--verify` all use it. The rule is closed, because Obsidian's behaviour fixes it, and the function carries a single-line reason in the code saying so.
+`obsidian_links.IndexResolver` (and `resolve_link`) encode Obsidian's basename-or-path resolution rule. The rule resolves an exact vault path first. It then takes the strict union of the basename matches and the trailing-path matches, and resolves only when that union is a single file. A link text that two files satisfy is ambiguous, whichever file Obsidian would pick, so a writer never relies on Obsidian's choice. The writer, the planner and `--verify` all use it. The rule is closed, because Obsidian's behaviour fixes it, and the module docstring states the rule and its source.
+
+**What Obsidian does, from documentation.** A check of Obsidian's API typings and of a forum answer (not labelled as staff) on 2026-11-16 found three things:
+- An exact vault-root path wins over a same-named file in a subfolder. Only the forum answer says so.
+- The API typings imply that a link text matches the end of a file's path.
+- Which homonym a bare link opens, whether matching ignores case, and how it treats Unicode normalisation are undocumented.
+
+The rule leans on none of the undocumented parts. It compares under the NFC-casefold key and treats a shared text as ambiguous. Only its exact-path-first step rests on the forum answer. No test in the app has confirmed any of it. The in-app check on a fixture vault is an operator-run step of task 5.7, because Obsidian is a desktop app that no automation here can drive.
 
 The resolver's order becomes:
 1. exact path;
 2. the path with the wrapper prefixed;
-3. the path alias (store mode);
+3. the prior path (the prior-path index of `add-curation-relocation-protocol`, L8);
 4. a retired collection path;
 5. the trailing path (new);
 6. stem, then title, for bare names.
 
 Only links that resolve nowhere today change, because the trailing-path step is the last path step. A retired collection path keeps precedence over it.
 
-In store mode, append-only pages in `Sources/` and `Evidence/` accept link repoints and nothing else, each with its own audit reason (the `command-surface` delta of this change). File mode keeps today's `APPEND_ONLY` refusal.
+The relayout repoints the links and pointer fields of append-only `Sources/` and `Evidence/` pages through the governed pointer write that `add-curation-relocation-protocol` builds, in file mode and store mode. A pointer is a link target, a registry-declared pointer field or a page's own folder. The write rests on a ruling: Sources and Evidence content stays immutable, while their pointers become correctable through a governed, previewed, audited, reversible write. This change builds no write of its own and carries no delta of `command-surface`.
 
-Whether the trailing-path step and the naming corrections reach existing `nested` vaults is owner choice O7. The read-only plan computes both and wires nothing.
+Whether the trailing-path step reaches existing `nested` vaults is owner choice O7. The read-only plan computes it and wires nothing.
 
-### L8. Identity and path aliases
+### L8. Identity and prior paths
 
 `store_pages.path` stays the key. Every derived table is keyed by path and reused unchanged. A page-id key would still rekey the derived rows on every move and would break the equivalence proof. The move-safe identity already exists: `exomem_id` and the store's identities table, which every move updates.
 
-Store schema 18 adds `store_path_aliases(old_path PRIMARY KEY, page identity, current_path, relayout_id, created_revision)`. Every store move updates it in the same transaction.
+Old paths keep resolving through the prior-path index that `add-curation-relocation-protocol` owns. That index is derived and sits beside the identities. It replaces `store_path_aliases`, and its resolver step sits in `vault._normalize_wikilink`. This change adds no store table. The index takes its rows from two sources:
+- a moved page's `moved_from` frontmatter;
+- the relayout record, which this change writes.
 
-The alias step sits inside the shared managed-relative form, `kbdir.kb_relative_form`, after exact paths. The hosted protected-tree guard and the executors share that form. Three guard bypasses came from two rel-forms that disagreed, so a second alias lookup in the resolver would repeat the fault. An alias to a page that the caller may not see answers exactly as a missing page. The store change's rollback requirement does not export the table, so until task 5.9 adds a delta for it, a store-mode rollback exports no alias table.
+The relayout record is a vault-resident, durable record with a row for each moved file: its identity (or none, for a file without an `exomem_id`), its old path and its new path. In store mode it is a stored page, as the layout record is. The index rebuilds from both sources. Resolution, visibility, reserved paths and the index's squatter guard apply to a relayout row exactly as to a `moved_from` row, so a prior path to a page that the caller may not see answers as a missing page. The relayout writes no `moved_from` into pages, so page bytes change only in link spans and pointer fields. Task 5.1 fixes the record's name and format with the owner of the index.
+
+The resolver never calls `kbdir.kb_relative_form`. The prior-path step sits in the resolver, and the managed-relative form that the hosted protected-tree guard and the executors share must agree with it. Three guard bypasses came from two rel-forms that disagreed, so task 5.8 tests that the resolver and the guard read a relayout row as the same current path. The relayout record sits in the vault, so a store-mode rollback keeps it with the other pages and this change adds no export of its own (task 5.9).
 
 ### L9. The relayout command
 
 `exomem store-mode relayout` has four actions. The planner takes the target layout as a parameter, so `--plan` and `--revert` use the same code.
 
-**`--plan [--json]`.** It runs on any vault in file or store mode and writes nothing. It is deterministic and sorted by current path. It reports:
+**`--plan [--full]`.** It runs on any vault in file or store mode and writes nothing, and it always prints JSON with the outcome sentence first. `--full` lists every entry instead of the first 20 of each listing. It is deterministic and sorted by current path. It reports:
 - moves, renames, ` (2)` suffixes, truncations, link edits per page (append-only pages separately) and pointer-field edits;
 - each unregistered `Notes/<X>` folder, foreign top-level entries and their links into the managed tree, top-level name collisions and pages it cannot map;
 - every scope, tier or binding whose member set would change, with counts and sample ids, and path refs and globs that need id refs;
@@ -176,7 +197,7 @@ The managed upgrade migrator never runs a relayout.
 
 The store transaction cannot cover the disk-canonical files under the wrapper: `_Governance/`, `_access.yaml` and the collection replica that carries the store-mode decision. A start between the commit and the renames of those files would read a missing policy as an empty policy, which opens everything. A pre-layout build on another host would find no replica at the old path and start in file mode. The apply therefore runs this sequence:
 1. Write the `relayout_pending` marker.
-2. Commit the single store change: page moves, repointed pages, aliases and the layout record.
+2. Commit the single store change: page moves, repointed pages, the relayout record and the layout record.
 3. Run the offline projector drain that the store-mode rollback uses.
 4. Move the disk-canonical files.
 5. Clear the marker.
@@ -192,11 +213,12 @@ While the marker stands, the service start and every CLI read refuse with a code
 
 The rehearsal adds two checks that `--verify` does not run. It compares the recall canary case by case with 95% intervals. Exact equality is not the claim, because link text and filename-derived titles change search tokens. It also runs the revert and the rollback drills on the relaid-out vault.
 
-**`--revert`.** The relayout records each page's old path (an alias row) and each link span's old text (the relayout's audit). The revert plans back to `nested`:
+**`--revert`.** The relayout record holds each page's old path, and the relayout's audit holds each link span's old text. The revert plans back to `nested`:
 - every page that existed at the relayout returns to its recorded path;
 - every recorded link span that is still byte-identical gets its old text back;
 - a page created after the relayout takes nested placement by rule and today's link form;
-- a `nested` layout record in the wrapper `_Schema/` replaces the root record in the same store change.
+- a `nested` layout record in the wrapper `_Schema/` replaces the root record in the same store change;
+- a relayout record of the revert's own moves is written in that change, so root-layout paths keep resolving.
 
 It runs offline under the same marker sequence. Run it before a store-mode rollback when `nested` is wanted back.
 
@@ -204,13 +226,13 @@ It runs offline under the same marker sequence. Run it before a store-mode rollb
 
 **Cost of a move.** In file mode, a move renames a file, rewrites each linking page with its own guard and fan-out, and refuses when an append-only page links the target. A file-mode relayout of 14k pages is not practical. In store mode the relayout is a single transaction that re-derives about 8k pages. That is close to a cold build: 82 s for the lexical index plus 50 s for the graph on the spike's copy (unverified for this change). Projection follows. The queue's move intent (operation `move` with the old path, store schema 16) lets the projector rename a page file instead of deleting and rewriting it, which needs the optional addition of store task 4.1. Without it, a move projects as a delete plus a write, which takes roughly 80 minutes. With it, the relayout writes about 8k rewritten files at the spike's 7.5 files per second, roughly 18 minutes (unverified).
 
-**Rollback keeps the layout.** A store-mode rollback keeps `root`, and file mode serves it, because both modes share the layout code. The rollback's precondition of an empty projection queue means no leftover wrapper `_Schema/` exists when it runs. To get `nested` back, run `--revert` first.
+**Rollback keeps the layout.** A store-mode rollback keeps `root`, and file mode serves it, because both modes share the layout code. The rollback also keeps the relayout record in the vault, because the record is a page. The rollback's precondition of an empty projection queue means no leftover wrapper `_Schema/` exists when it runs. To get `nested` back, run `--revert` first.
 
 **Guarantees to the tool surface.**
 - Each owned page keeps its `exomem://memory/<uuid>` reference across moves, retitles and the relayout.
 - No path in a `root` vault contains the wrapper.
 - A derived name identifies a single page in a `root` vault. Where names collide (fixed names, outside-edit imports), the shortest trailing path identifies the page. A title does not identify a page, so a tool that shows titles must disambiguate them.
-- An old path still resolves through the alias table, for a caller who may see the page.
+- An old path still resolves through the prior-path index, for a caller who may see the page.
 
 **How an existing vault moves.** The store-mode switch is a separate decision. After the relayout ships:
 1. Make sure every host runs a build that knows the layout record, and stop the other hosts' services.
@@ -238,7 +260,7 @@ No area or folder name enters code. Areas come from the note-type `folder` attri
 
 **Reuse, not rewrite.** `semantic_writes.rewrite_wikilinks_for_move`, `move_file._repoint_artifact`, `_repoint_back_references` and `_repoint_parts`, `unique_path`, `sanitize_title_filename`, `WikilinkResolver`, the governance membership kernels, `vault_store.verify`, the multi-move machinery of `vault_store.directory`, and the offline projector entry of the store-mode rollback. The applier builds a single store change on that machinery. Derived rows take a path-map `UPDATE`, and only pages whose bytes change are re-derived. `--verify` proves that a fresh derivation equals the stored rows.
 
-**Load target.** The product's load target is recorded in the design of `make-vault-store-canonical`: 20,000 pages, about 100,000 units and 120,000 edges, with a hub of 10,000 links. In `root` each write adds a name-group lookup for uniqueness and a name-group lookup for each link it writes. No corpus walk is added to any route. The relayout runs offline. The plan over the 20,000-page drill generator finishes within twice a cold lexical build on the same host, with bounded memory.
+**Load target.** The product's load target is recorded in the design of `make-vault-store-canonical`: 20,000 pages, about 100,000 units and 120,000 edges, with a hub of 10,000 links. In `root` each write adds a name-group lookup for uniqueness and a name-group lookup for each link it writes. No corpus walk is added to any route. The relayout runs offline. The plan over a generated 20,000-page vault finishes within twice a cold lexical build on the same host, with bounded memory. The drill `tests/test_relayout_drill.py` measured this on a single host, in the delivering run: 20,000 pages and 80,000 links, plan 22.2 s against a 303 s cold lexical build, and a tracemalloc peak of 101 MB against 204 MB of page bodies. It runs only when `EXOMEM_RELAYOUT_DRILL_PAGES` is set.
 
 ### L11. Delivery order
 
@@ -247,22 +269,22 @@ Evidence comes first. Each step names what it waits on. The sizes are judgments,
 | Step | Outcome | Waits on | Size |
 |---|---|---|---|
 | Managed-root helpers | No code outside `kbdir.py` calls `kb_dirname()` or `kb_prefix()`. Done. | nothing | done |
-| Read-only plan and layout model | Layout record resolution (called by the plan only), `translate_path`, `link_form`, the Obsidian rule and `store-mode relayout --plan`. No behaviour change. | nothing | 4 to 6 days |
+| Read-only plan and layout model | Layout record resolution (called by the plan only), `translate_path`, `link_form`, the Obsidian rule and `store-mode relayout --plan`. No behaviour change. | nothing | done (this change's PR A) |
 | Owner choices | O1 to O7 decided from the plan's counts on a disposable real-vault copy. | the plan | the owner's time |
 | Root layout for new vaults | `exomem init` creates a `root` vault, and file mode and store mode serve it. | the plan's layout model and link rule; `add-note-type-registry` task 2.4 for overlay-defined areas | 8 to 12 days |
-| Relayout apply, verify and revert | A store-mode `nested` vault moves to `root` and can move back. | the plan, the root layout and the owner choices; the offline projector entry and per-effect writer authority that #2805 and #2818 delivered | 8 to 12 days |
+| Relayout apply, verify and revert | A store-mode `nested` vault moves to `root` and can move back. | the plan, the root layout and the owner choices; the prior-path index and the governed pointer write of `add-curation-relocation-protocol`; the offline projector entry and per-effect writer authority that #2805 and #2818 delivered | 8 to 12 days |
 | Cloud | Cloud import maps `nested` trees to `root` through the planner, and export emits the cell's own layout. | the relayout and Cloud task 6.2 of `make-vault-store-canonical` | 4 to 6 days |
 | Filenames follow retitles | Only if O5 says build. | the relayout | 5 to 8 days |
 
-The read-only plan ships no behaviour change. Only the plan calls the layout resolution, `translate_path`, `link_form` and the naming corrections, and the plan computes the trailing-path resolution. Group 4 wires the layout resolution into vault resolution and service start, and wires link form and naming corrections into `root` vaults. Both reach `nested` vaults only as owner choice O7 decides, so no link or name that exists today changes before then.
+The read-only plan ships no behaviour change. Only the plan calls the layout resolution, `translate_path`, `link_form` and the naming corrections, and the plan computes the trailing-path resolution. Group 4 wires the layout resolution into vault resolution and service start, and wires link form and naming corrections into `root` vaults. The trailing-path step reaches `nested` vaults only as the resolver half of owner choice O7 decides. New title-derived names in `nested` vaults follow the naming-and-organisation work. No link or name that exists today changes before then.
 
 Cuts considered. Task order after the writer PRs would delay the owner's evidence to the end and would land the largest refactor while store PRs were open. Root for new vaults first would decide O1 to O4 without counts from a real vault. The chosen order front-loads the disclosure finding and the owner's decisions, proves `root` serving before any vault moves, and does not wait on the store change.
 
-## Owner choices (open)
+## Owner choices
 
 Each choice changes what a person sees. Examples use an invented insight "Why churn rose in Q3", a research note "Churn drivers" in project "Alpha", and a source article "Pricing basics" of domain "Economics". "Today" means a nested vault whose Obsidian opens the outer vault.
 
-`relayout --plan` supplies the counts that each choice depends on, on a disposable real-vault copy and before anything is built for good. The requirements marked below as depending on a choice stay as written until the answer arrives. Then the answer rewrites them, and a requirement that no longer applies is removed with its scenarios.
+`relayout --plan` supplies the counts that each choice depends on, on a disposable real-vault copy and before anything is built for good. The requirements marked below as depending on a choice stay as written until the answer arrives. Two choices have an answer for new pages already, recorded under O2 and O7. Then the answer rewrites them, and a requirement that no longer applies is removed with its scenarios.
 
 **O1. Partition folders below an area.** This is a choice of how the relayout places pages.
 - *Keep (recommended for the first relayout).* `Research/Alpha/Churn drivers.md` and `Sources/Articles/Economics/2026-05-02-Pricing basics.md`. The tree goes area, then project, domain or medium, then the note. Links read `[[Churn drivers]]`. Cost: nothing beyond the relayout. Path scopes on project folders keep working. Flattening stays possible later as another pass of the same planner.
@@ -270,8 +292,10 @@ Each choice changes what a person sees. Examples use an invented insight "Why ch
 - Depends on O1: requirements "Pages sit flat inside areas", "Relayout places every page by rule" (the flattening clause) and the `adoption-studio` delta.
 
 **O2. Filenames.**
-- *Titles (D12, recommended).* `Insights/Why churn rose in Q3.md`, linked `[[Why churn rose in Q3]]`. Obsidian's tree, tabs, search and graph show readable names. Cost: nearly every page is renamed at the relayout. Homonym titles get ` (2)`. Bookmarks, outside notes and scripts that use old names break, and the alias table covers only Exomem calls.
+- *Titles (D12, recommended).* `Insights/Why churn rose in Q3.md`, linked `[[Why churn rose in Q3]]`. Obsidian's tree, tabs, search and graph show readable names. Cost: nearly every page is renamed at the relayout. Homonym titles get ` (2)`. Bookmarks, outside notes and scripts that use old names break, and the prior-path index covers only Exomem calls.
 - *Slugs.* `Insights/why-churn-rose-in-q3.md`, linked `[[why-churn-rose-in-q3]]`. Only folders change.
+- **Answer for new pages.** "Prefer authentic, title-derived filenames for new human-facing entities and notes." New compiled notes and entities take title-derived names, in `nested` vaults too, with the three naming corrections. The naming-and-organisation work builds that writer switch on the single rule in `vault.py` (`corrected_title_name`, `fit_filename`). This answer renames no existing page.
+- **Still open.** Whether the relayout renames existing pages to title names (the choice above).
 - Depends on O2: "Derived names are unique across the vault" and "Relayout places every page by rule".
 
 **O3. Where names must be unique (`root` with titles).**
@@ -295,10 +319,12 @@ Each choice changes what a person sees. Examples use an invented insight "Why ch
 - *Before the switch, with a file-mode offline relayout.* A second applier with its own crash journal and a file-mode exception for link-only repoints in append-only pages. About a week more. It pays only if the switch slips far.
 - Affects no requirement text. It adds a task group if the third option wins.
 
-**O7. A small change for existing nested vaults in file mode.** Exomem would resolve partial-path links such as `[[receipts/Scan]]` the way Obsidian does. Today those links do not resolve and get no graph edge. The naming corrections (the characters of `_LINK_TITLE_REFUSED` and `^`, leading dots and the 200-byte cap) change new names in vaults that set the `title` style.
-- *Accept (recommended).* Only links that do not resolve today change, and names stop breaking Obsidian links.
-- *Gate to `root`.* A `nested` vault keeps today's names and resolver, and the corrections and the trailing-path step carry a layout branch.
-- Depends on O7: the wiring of trailing-path resolution and of the naming corrections into `nested` vaults, and the `nested` sentence and scenario of "Links use the shortest trailing path that resolves to a single file". Accepting O7 adds the resolver's trailing-path step to that sentence. A `nested` writer keeps today's link form either way.
+**O7. A small change for existing nested vaults in file mode.** Exomem would resolve partial-path links such as `[[receipts/Scan]]` the way Obsidian does. Today those links do not resolve and get no graph edge. The naming corrections (the characters of `LINK_FILENAME_REFUSED`, leading dots and the 200-byte cap) are the other half of this choice, and the answer for new pages settles that half.
+- **Answer for new pages.** "Prefer authentic, title-derived filenames for new human-facing entities and notes." The three naming corrections apply to those new names in `nested` vaults, as under O2. The corrections no longer wait on this choice.
+- **Still open: the resolver half.** Whether Exomem resolves trailing-path links in `nested` vaults.
+  - *Accept (recommended).* Only links that do not resolve today change.
+  - *Gate to `root`.* A `nested` vault keeps today's resolver, and the trailing-path step carries a layout branch.
+- Depends on O7: the wiring of trailing-path resolution into `nested` vaults, and the `nested` sentence and scenario of "Links use the shortest trailing path that resolves to a single file". Accepting O7 adds the resolver's trailing-path step to that sentence. A `nested` writer keeps today's link form either way.
 
 **What would change a recommendation.**
 - Few partition-scoped selectors and few extra collisions in the plan's counts make flattening cheap. Then take D12's flat layout (O1).
@@ -318,11 +344,12 @@ Each choice changes what a person sees. Examples use an invented insight "Why ch
 - **Later homonyms.** A later fixed name or outside-edit import can add a second file with a name that an existing bare `[[Name]]` already uses, and the link becomes ambiguous. This is accepted debt, and this change adds no repoint rule for it.
 - **Obsidian homonyms.** A bare `[[Name]]` may resolve in Obsidian to a homonym in `_trash` or `_archive`. Writers count every Obsidian-visible file when they choose the short form.
 - **Old builds.** An older build pointed at a `root` vault could create a fresh wrapper folder. The vault-side marker of the store change's rollback design refuses a build that carries the check. A build from before it ignores the marker, so each host must upgrade before the relayout. The replica copy at the old path covers builds that predate the layout record.
-- **Append-only repoint.** The store-mode repoint of links in append-only pages is specified (`command-surface` delta) and built (task 5.6) in this change.
+- **Append-only repoint.** The relayout cannot repoint links in append-only pages without the governed pointer write that `add-curation-relocation-protocol` builds. The apply waits on that change (task 5.6). This change builds no such write.
+- **Prior-path index.** The relayout record is useful only when the prior-path index of `add-curation-relocation-protocol` reads it. The apply waits on that index, and task 5.1 fixes the record's format with that change.
 - **Scale.** Each added per-write cost is a bounded lookup. The relayout and the retitle option are the only operations that rewrite many pages. The first is offline and the second is gated by owner choice O5 and a bound.
 
 **Not verified.**
-- Obsidian's behaviour for partial paths, case-insensitive matching and extensionless links comes from its documented behaviour, not from a test. The read-only plan's fixture vault should confirm it a single time.
+- Obsidian's behaviour for partial paths, homonyms, case-insensitive matching and Unicode normalisation comes from its API typings and a forum answer, not from a test in the app (L7). Task 5.7 holds the operator-run check.
 - Every count from the real-vault copy, as listed in Context.
 - Where a given vault's `.obsidian` sits.
 - The relayout's transaction time, projection time and re-embedding time at the load target.

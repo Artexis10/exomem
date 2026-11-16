@@ -20,7 +20,7 @@ Registry operations SHALL NOT change page bytes.
 
 An entry MAY declare note-type role `compiled`, `entity`, `source` or `evidence`; an entry without a role SHALL match no role predicate.
 `time_bounded` SHALL be a boolean, and `sources` SHALL be `required` or `optional`.
-A compiled type SHALL declare one `Notes/<Name>` folder that no other compiled type holds, and that the write gate's compiled router does not exempt.
+A type's `folder` SHALL name an area: a single folder name whose parent the vault's layout supplies. A compiled type SHALL declare a single area that no other compiled type holds, and that the write gate's compiled router does not exempt. In `nested` layout a compiled area sits below `Notes/`, and in `root` layout it sits at the managed root. A `source`, `evidence` or `entity` type MAY declare an area, which sits at the managed root in both layouts, and the compiled-type rules in this paragraph do not bind it. A `folder` value that starts with `Notes/` SHALL read as the `nested` parent plus the area name, in either layout, and Exomem SHALL NOT rewrite it. Two `folder` values that give the same area name SHALL count as the same folder.
 A save SHALL refuse any other role or attribute value, and SHALL refuse to change `role`, `folder` or `time_bounded` on an existing entry.
 
 #### Scenario: An unknown role is refused
@@ -36,8 +36,22 @@ A save SHALL refuse any other role or attribute value, and SHALL refuse to chang
 - **THEN** the save is refused
 
 #### Scenario: A folder the router exempts is refused
-- **WHEN** a save gives a compiled type a folder whose name the write gate exempts from compiled routing, such as `Notes/Data`
+- **WHEN** a save gives a compiled type a folder whose area name the write gate exempts from compiled routing, such as `Data` or `Notes/Data`
 - **THEN** the save is refused with `NOTE_TYPE_FOLDER_RESERVED`
+
+#### Scenario: A folder value that starts with Notes reads as an area name
+- **WHEN** an overlay entry holds `folder: Notes/Playbooks` and the vault's layout is `root`
+- **THEN** the registry reads the area `Playbooks` for the type
+- **AND** the saved value keeps its bytes
+
+#### Scenario: The two spellings of an area cannot be taken twice
+- **WHEN** a save gives a new compiled type `folder: Playbooks` while another compiled type holds `folder: Notes/Playbooks`
+- **THEN** the save is refused with `NOTE_TYPE_FOLDER_TAKEN`
+
+#### Scenario: A source type declares an area
+- **WHEN** a save gives a type with note-type role `source` a `folder`
+- **THEN** the save is accepted
+- **AND** the area sits at the managed root in either layout
 
 ### Requirement: Shipped note types keep their meanings
 
@@ -188,7 +202,7 @@ The new type SHALL take its parent's note-type role, `time_bounded` and `sources
 A restore SHALL remove a promoted type without changing page bytes.
 
 #### Scenario: A promoted compiled type gets compiled behaviour
-- **WHEN** an owner promotes `meeting-note` under `insight` with folder `Notes/Meetings`, then creates one through `remember`
+- **WHEN** an owner promotes `meeting-note` under `insight` with folder `Notes/Meetings`, then creates a page through `remember` in a `nested` vault
 - **THEN** the page lands in `Notes/Meetings`, carries the compiled obligations of `insight`, and the notes index counts it
 - **AND** after a restore, the page keeps its bytes and surfaces as unregistered note-type debt
 
@@ -219,7 +233,7 @@ The creation draft SHALL report the chosen folder, the basis for the choice, and
 An older release SHALL ignore the homes registry and place new pages by type.
 
 #### Scenario: A topic home holds notes of several types
-- **WHEN** a vault declares a home `Notes/Equipment` for the topic `equipment`, and an agent creates an `insight` and a `failure` with that topic
+- **WHEN** a vault declares a home `Notes/Equipment` for the topic `equipment`, and an agent creates an `insight` and a `failure` with that topic in a `nested` vault
 - **THEN** both pages land in `Notes/Equipment` and keep the obligations of their own types
 
 #### Scenario: Without a home, placement is unchanged

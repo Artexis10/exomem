@@ -616,6 +616,32 @@ def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
     return checks
 
 
+def _check_vault_layout(vault_root: Path | None) -> list[DoctorCheck]:
+    """Report the vault's layout, and warn on whatever leaves it unsettled; it never refuses.
+
+    A vault-root schema folder with no layout record is a warning that names the record to
+    write: no other code reads the layout yet, so nothing here may fail on it. A remedy means a
+    person should act, so it is the single test between a pass and a warning.
+    """
+    if vault_root is None:
+        return []
+    from . import layout_report
+
+    found = layout_report.report(vault_root)
+    facts = dict(found)
+    outcome = facts.pop("outcome")
+    remedy = facts.pop("remedy")
+    return [
+        _check(
+            "vault.layout",
+            "warn" if remedy else "pass",
+            outcome,
+            remedy,
+            details=facts,
+        )
+    ]
+
+
 def _resolved_embedding_backend() -> str:
     """The runtime actually configured to serve the bi-encoder.
 
@@ -3986,6 +4012,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         _check_package_import(),
         vault_check,
         *_check_schema_files(vault_root),
+        *_check_vault_layout(vault_root),
         _check_repo_env(),
         _check_registry(),
         _check_resource_posture(profile),
