@@ -1937,6 +1937,72 @@ content into governed knowledge. Media status reports recorded processing and
 activity separately. `health_scope="reconciliation"` does not prove active
 inference; an unobserved worker remains `activity.state="unknown"`.
 
+## Shared original storage
+
+In shared original storage, an archive keeps the bytes of each original once,
+under `_Originals/` in its Knowledge Base. Each filing keeps its own path and
+its page, so links, references and grants do not change. Filings with
+identical bytes share one copy. Notes, datasets and Trash entries keep
+ordinary files.
+
+### New archives
+
+A new archive starts in shared storage only when the process that creates it
+has launcher support for the format. A managed worker gets that support from
+its launcher; a standalone server, including a Cloud cell, is its own
+launcher. Without that support, the archive starts in ordinary storage.
+`exomem init`, the setup wizard, the terminal interface and Cloud cell
+provisioning run without it today, so they create ordinary storage.
+`exomem init` and the setup wizard print the reason and the conversion action. `exomem init --force` on an existing archive never changes its
+storage.
+
+### Convert an existing archive
+
+An existing archive keeps ordinary storage until its owner converts it.
+Deployment, startup and upgrades never convert an archive. The conversion is
+the `convert-originals` maintenance mode, and only the vault owner can run it.
+It runs as a maintenance job on the running service.
+
+Before you convert:
+
+- The service needs launcher support. A managed service whose launcher
+  predates shared storage refuses with `ORIGINAL_POOL_LIFECYCLE_REQUIRED`.
+  Update the launcher first, as
+  [A supervisor older than the vault's state](managed-service-upgrades.md#a-supervisor-older-than-the-vaults-state)
+  describes.
+- Keep a backup from before the conversion if you may need an older release.
+  An older release refuses a converted archive, and the conversion has no
+  in-place undo.
+- Keep free space for the four largest originals together. The job converts
+  four filings per batch, and it copies their bytes into shared storage before
+  it removes their ordinary files.
+
+To convert:
+
+1. As the owner, call `inspect_memory` with `operation="maintenance.convert_originals"`.
+2. Read the job with `inspect_memory(operation="maintenance.job")` and its `run_id` until the state is `completed`.
+3. Check the receipt's `result`: `would_convert`, `already_shared`, `store_bound` and the `unreadable` list.
+4. Call `manage_memory` with `operation="maintenance.convert_originals"`, `dry_run=false`, the preview's `plan_id` and a `why`.
+5. Read the job until the state is `completed`, `failed`, `cancelled` or `interrupted`.
+6. Check `converted`, `skipped_changed` and `kept_pinned` in the receipt. Expect each original to read the same bytes.
+
+The job keeps each page byte for byte and keeps current Cloud references. It
+starts no offload. An original whose only copy is a stored Cloud version counts
+as `store_bound` and needs no move. An `unreadable` original stays as it was,
+with the reason.
+
+### Resume a conversion
+
+A run that stops, fails or is cancelled leaves every original readable. Each
+original then has an ordinary file, a shared copy, or both. The next run reads
+what remains and continues from there.
+
+`skipped_changed` lists originals whose bytes or page changed during the run.
+`kept_pinned` lists originals that a reader or a media job held. Such an
+original keeps both copies until a later run converts it. To finish them,
+preview and start the conversion again. A start with an old `plan_id` returns
+`STALE_MAINTENANCE_PLAN`, and you must preview again.
+
 ## Deploying a new version
 
 For an opt-in managed Linux/WSL service, `bash scripts/upgrade.sh` stages a new
