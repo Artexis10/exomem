@@ -110,6 +110,19 @@ def commit_drill_pages(writer, pages):  # noqa: F811
         write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "drill", puts=puts))
 
 
+def run_probe(store, source):
+    """One sample of every cell, read by a child process that imports `source`'s build of the code."""
+    done = subprocess.run(
+        [sys.executable, "-c", PROBE, str(store), json.dumps(CELLS), source],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env={**os.environ, "PYTHONPATH": source},
+    )
+    assert done.returncode == 0, done.stderr[-3000:]
+    return json.loads(done.stdout.splitlines()[-1])
+
+
 def arms_from_environment():
     """`name=path-to-src` pairs from EXOMEM_BROWSE_DRILL_ARMS; this tree alone when unset."""
     named = os.environ.get("EXOMEM_BROWSE_DRILL_ARMS")
@@ -131,16 +144,7 @@ def test_browse_load_drill(stored, writer):  # noqa: F811
     found = {arm: [] for arm in arms}
     for _ in range(samples):
         for arm, source in arms.items():  # interleaved: a load swing reaches every arm alike
-            env = {**os.environ, "PYTHONPATH": source}
-            done = subprocess.run(
-                [sys.executable, "-c", PROBE, str(stored), json.dumps(CELLS), source],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=900,
-                env=env,
-            )
-            found[arm].append(json.loads(done.stdout.splitlines()[-1]))
+            found[arm].append(run_probe(stored, source))
     for cell in CELLS:
         report["cells"][cell] = {}
         for arm in arms:

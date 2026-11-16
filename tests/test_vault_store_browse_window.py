@@ -8,9 +8,6 @@ the way a store without the browse index declines it) and with file mode on the 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -19,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_browse_drill import CELLS as DRILL_CELLS
-from test_vault_store_browse_drill import HUB_LINKS, PROBE, commit_drill_pages
+from test_vault_store_browse_drill import HUB_LINKS, commit_drill_pages, run_probe
 from test_vault_store_migration import build_indexes, migrate_apply, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 from test_vault_store_readers import EXTERNAL, restrict_external
@@ -427,15 +424,7 @@ def test_a_browse_reads_what_its_limit_needs_whatever_the_vault_holds(stored, wr
     commit_drill_pages(writer, pages)
     limit = 15
     source = str(Path(__file__).resolve().parents[1] / "src")
-    done = subprocess.run(
-        [sys.executable, "-c", PROBE, str(stored), json.dumps(DRILL_CELLS), source],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        env={**os.environ, "PYTHONPATH": source},
-    )
-    figures = json.loads(done.stdout.splitlines()[-1])
+    figures = run_probe(stored, source)
     for name in ("types=note", "types=insight", "no filter"):
         for state in ("cold", "warm"):
             read = figures[name][state]
