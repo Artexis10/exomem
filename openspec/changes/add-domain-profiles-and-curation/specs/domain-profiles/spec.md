@@ -52,14 +52,21 @@ A page marked `stance: true` SHALL keep supplying stance.
 
 ### Requirement: Maps responses serve the profiles that a turn touches
 
-Unless `EXOMEM_ACTIVATION_PROFILES=off`, each maps response SHALL carry `domain_profiles` with `state`, `profiles` and `omitted`.
+Unless `EXOMEM_ACTIVATION_PROFILES=off`, each maps response SHALL carry `domain_profiles` with `state`, `profiles`, `omitted` and `selection`.
 Each profile entry SHALL carry `domain`, `label`, `generation`, `state`, `lines`, `omitted` and `expired`. Each line SHALL be an admitted `{ref, text}` with `review_due` when applicable.
 
 Selection:
 
-- The product SHALL decide which domains a turn touches from the turn's own retrieval evidence over admitted pages.
+- The product SHALL decide which domains a turn touches by retrieval restricted to the caller's admitted profile pages. A page that is not a profile never touches a domain.
+- A semantic reading SHALL search the embedding index with the turn's vector that the activation pass already holds, and take each page's best chunk score. The response SHALL NOT encode the turn again.
+- A lexical reading SHALL run one bounded keyword query over the same pages.
+- A page SHALL be selected when its semantic score reaches `budgets.profile_semantic_floor` or its keyword score reaches `budgets.profile_lexical_floor`.
+- Selected pages SHALL rank by the sum of their scores, and the response SHALL keep at most `budgets.profile_domains_max` touched domains. Ancestors follow after that cap, so they do not count against it.
+- The three limits are vault-owned activation conventions with shipped defaults of 0.50, 8.5 and 2. The floors accept a number in 0..1 and 0..100, and the cap accepts a whole number in 1..8.
+- `selection` SHALL be `semantic` when the vector reading ran, `lexical` when no turn vector existed and only the keyword reading ran, and `none` when neither reading could run.
+- For a caller who sees only part of the vault, keyword statistics SHALL come from that caller's visible profile pages alone, and the semantic reading SHALL be absent unless the caller may read the vector bands.
 - It SHALL make no model call.
-- It SHALL hold no list of domains or words in code.
+- It SHALL hold no list of domains or words, and no limit, in code.
 - A turn that touches no domain with a profile SHALL receive no domain profile.
 
 Budgets:
@@ -80,7 +87,7 @@ Egress and state:
 
 - Every line SHALL pass the same unit and terminal egress checks as stance lines.
 - A caller-withheld page or unit SHALL affect no count and no generation.
-- State SHALL be `ready` when at least one profile is served or `unchanged`, `empty` when the turn touches no domain with a profile, and `unavailable` when compilation fails.
+- State SHALL be `ready` when at least one profile is served or `unchanged`, `empty` when the turn touches no domain with a profile, and `unavailable` when compilation fails or no reading could run while profile pages exist.
 - A compilation failure SHALL leave the map, stance, skills and turn context available.
 
 #### Scenario: A gaming question carries the gaming profile
@@ -92,6 +99,16 @@ Egress and state:
 
 - **WHEN** a turn asks about the music to play while gaming, and both profiles fit the total budget
 - **THEN** both domain profiles and their shared ancestor are served once each
+
+#### Scenario: A turn that shares no word with a profile still reaches it by meaning
+
+- **WHEN** a turn names none of the words in the games profile, its vector lies near that profile's page, and the turn vector is available
+- **THEN** `selection` is `semantic` and the response serves the games profile and its ancestor
+
+#### Scenario: Without a turn vector the block reports a keyword-only read
+
+- **WHEN** no turn vector exists and the turn shares no word with any profile page
+- **THEN** `selection` is `lexical` and no profile is served
 
 #### Scenario: A general-knowledge turn carries no domain profile
 

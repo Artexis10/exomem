@@ -141,6 +141,35 @@ _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
 )
 
 
+#: The turn and vector this activation encoded, held by `turn_vector_scope` so a later stage reads the vector
+#: and never encodes the turn a second time. A box shared by reference, so a stage that runs in a copy of the
+#: request's context still writes where the request reads.
+_TURN_VECTOR: ContextVar[list[tuple[str, Any]] | None] = ContextVar("activation_turn_vector", default=None)
+
+
+@contextmanager
+def turn_vector_scope() -> Iterator[None]:
+    """Hold the activation's one turn vector for the stages that run inside this scope."""
+    token = _TURN_VECTOR.set([])
+    try:
+        yield
+    finally:
+        _TURN_VECTOR.reset(token)
+
+
+def remember_turn_vector(turn: str, vector: Any) -> None:
+    """Record the vector the activation encoded for `turn`; a no-op outside `turn_vector_scope`."""
+    box = _TURN_VECTOR.get()
+    if box is not None and vector is not None:
+        box[:] = [(turn, vector)]
+
+
+def remembered_turn_vector(turn: str) -> Any:
+    """The vector the activation encoded for exactly `turn`, or None when it encoded none."""
+    box = _TURN_VECTOR.get()
+    return box[0][1] if box and box[0][0] == turn else None
+
+
 #: The vaults whose lexical catalogue a pinned request asked to repair (`pin_lexical_checkpoint`).
 _DEFERRED_LEXICAL_REPAIRS: ContextVar[set[Path] | None] = ContextVar(
     "activation_deferred_lexical_repairs", default=None

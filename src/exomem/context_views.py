@@ -1260,7 +1260,7 @@ def activation_packet(
     task_context: Callable[..., dict[str, Any]] | None = None,
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
-    known_profiles: Mapping[str, str] | None = None,
+    known_profiles: Mapping[str, str] | None = None, turn: str = "",
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1280,24 +1280,26 @@ def activation_packet(
     skills generation the caller holds: the block repeats no item when it is still current. The block has its own
     bound and takes nothing from `max_chars`. `known_stance` does the same for the stance block.
 
-    `known_profiles` maps each domain whose profile the caller holds to the generation it holds. The domain
-    profiles block, compiled once the turn's slice and task candidates are final, repeats no held profile, and it
-    has its own bound that takes nothing from `max_chars`.
+    `known_profiles` maps each domain whose profile the caller holds to the generation it holds. `turn` is the
+    request's turn: the domain profiles block selects the profiles that it touches, from the turn vector the
+    slice already encoded and from one keyword query, and repeats no held profile. The block has its own bound
+    that takes nothing from `max_chars`.
     """
-    if purpose is not None:
-        with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
-            return _activation_packet(
-                vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
-                packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
-                native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
-                known_profiles=known_profiles,
-            )
-    return _activation_packet(
-        vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
-        packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
-        native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
-        known_profiles=known_profiles,
-    )
+    with working_set_runtime.turn_vector_scope():
+        if purpose is not None:
+            with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
+                return _activation_packet(
+                    vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
+                    packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
+                    native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
+                    known_profiles=known_profiles, turn=turn,
+                )
+        return _activation_packet(
+            vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
+            packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
+            native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
+            known_profiles=known_profiles, turn=turn,
+        )
 
 
 def _activation_packet(
@@ -1308,7 +1310,7 @@ def _activation_packet(
     task_context: Callable[..., dict[str, Any]] | None = None,
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
-    known_profiles: Mapping[str, str] | None = None,
+    known_profiles: Mapping[str, str] | None = None, turn: str = "",
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1437,17 +1439,21 @@ def _activation_packet(
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
         if domain_profiles.enabled():
-            # Compiled after the slice and the task candidates are final, from what they reached. Its own bound
+            # Compiled after the slice, which encodes the turn once; the selection reads that vector. Its own bound
             # neither reduces `max_chars` nor counts in `used_chars`, so the profiles never cut the map or the leads.
             with find_types.timing_span(timings, "working_set.profiles"):
-                try:
-                    packet["domain_profiles"] = domain_profiles.compile_block(
-                        root, caller, turn_slice=packet.get("turn_slice"), task_context=packet.get("task_context"),
-                        catalogue=catalogue, known_generations=known_profiles,
-                    )
-                except Exception:  # noqa: BLE001 - optional profiles must leave the map, stance, skills and turn context available
-                    log.warning("domain profiles unavailable", exc_info=True)
+                if working_set.budget_exhausted("working_set.profiles"):
+                    # The request cannot afford the selection's two reads: the profiles are unknown, not absent.
                     packet["domain_profiles"] = domain_profiles._empty("unavailable")  # noqa: SLF001
+                else:
+                    try:
+                        packet["domain_profiles"] = domain_profiles.compile_block(
+                            root, caller, turn=turn, turn_vector=working_set_runtime.remembered_turn_vector(turn),
+                            catalogue=catalogue, known_generations=known_profiles,
+                        )
+                    except Exception:  # noqa: BLE001 - optional profiles must leave the map, stance, skills and turn context available
+                        log.warning("domain profiles unavailable", exc_info=True)
+                        packet["domain_profiles"] = domain_profiles._empty("unavailable")  # noqa: SLF001
         packet["abstained"] = False
         packet.pop("abstention", None)
         return packet

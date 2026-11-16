@@ -16,19 +16,23 @@ from pathlib import Path
 import pytest
 import yaml
 from conftest import initialize_vault_state_offline
+from test_activation_related_pages import FINGERPRINT, _planted_vault, _random_unit, _toward_turn
 from test_context_catalogue import _built, _page, _write
 from test_governance_egress import _external, _reset_caches
 from test_working_set_withheld_twins import _withhold
 
 from exomem import (
     activation_conventions,
+    bm25,
     commands,
     context_catalogue,
     domain_profiles,
+    embeddings,
     lexstore,
     note_types,
     source_taxonomy,
     stance,
+    working_set_index,
     working_set_runtime,
 )
 from exomem._hooks import exomem_retrieve_nudge as hook
@@ -135,7 +139,12 @@ RULE = {
 }
 GAMES_TURN = "Which tactical cooperative games suit tonight"
 BOTH_TURN = "Pick analogue warm albums and tactical cooperative games"
+THREE_TURN = "Pick analogue warm albums, tactical cooperative games and slow braises"
 GENERAL_TURN = "What is the boiling point of water at altitude"
+# Names no word that any profile page holds, so only a reading of its meaning can reach the games profile.
+PARAPHRASE_TURN = "Something fun for the table tonight with friends"
+# Five short pages score a matching word far below the shipped keyword floor, so a test vault sets its own.
+SMALL_VAULT_LIMITS = {"profile_lexical_floor": 1.0}
 
 
 def _profile(root: Path, name: str, topics: list[str] | None, text: str, extra: str = "") -> str:
@@ -157,21 +166,61 @@ def _refresh(root: Path) -> None:
     working_set_runtime.reset_caches_for_tests()
 
 
+def _set_budgets(root: Path, **budgets: float) -> None:
+    path = activation_conventions.override_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"schema_version": 1, "budgets": {**SMALL_VAULT_LIMITS, **budgets}}), encoding="utf-8")
+    activation_conventions.clear_cache()
+
+
+def _seed_profiles(root: Path) -> None:
+    """The domain registry, the schema the profile type needs, one global profile and one per domain."""
+    _write(root, f"{KB}/_Schema/source-taxonomy.yaml", TAXONOMY)
+    _write(root, f"{KB}/_Schema/SKILL.md", "# Memory schema\n")
+    schema = Path(stance.__file__).parent / "_scaffold/_Schema/references"
+    for name in ("frontmatter.md", "page-types.md"):
+        _write(root, f"{KB}/_Schema/references/{name}", (schema / name).read_text(encoding="utf-8"))
+    _profile(root, "global", None, _rule("global"))
+    for domain in ("media", "games", "music", "cooking"):
+        _profile(root, domain, [domain], _rule(domain))
+    _set_budgets(root)
+
+
 @pytest.fixture
 def profiles_vault(tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
-    _write(tmp_path, f"{KB}/_Schema/source-taxonomy.yaml", TAXONOMY)
-    _write(tmp_path, f"{KB}/_Schema/SKILL.md", "# Memory schema\n")
-    schema = Path(stance.__file__).parent / "_scaffold/_Schema/references"
-    for name in ("frontmatter.md", "page-types.md"):
-        _write(tmp_path, f"{KB}/_Schema/references/{name}", (schema / name).read_text(encoding="utf-8"))
-    _profile(tmp_path, "global", None, _rule("global"))
-    for domain in ("media", "games", "music", "cooking"):
-        _profile(tmp_path, domain, [domain], _rule(domain))
+    _seed_profiles(tmp_path)
     initialize_vault_state_offline(tmp_path, source="domain profiles fixture")
     _refresh(tmp_path)
     with principal.library_scope():
         yield tmp_path
+
+
+@pytest.fixture
+def semantic_vault(vault, monkeypatch):
+    """Fifty background anchors and a recall index in which the games page's chunk lies near the turn's vector.
+
+    The turn vector is planted (a real encoder is out of the loop); the vault, the catalogue, the recall matrix,
+    the lexical index, the anchor lane and egress are real.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _planted_vault(vault, monkeypatch, {})
+    _seed_profiles(vault)
+    recall = embeddings.get_embedding_index(vault)
+    for domain in ("global", "media", "games", "music", "cooking"):
+        rel = f"{PROFILES}/{domain}.md"
+        chunk = _toward_turn(0.8) if domain == "games" else _random_unit(rel)
+        recall.upsert_file(rel, ["profile chunk"], chunk[None, :], 1.0)
+    recall.all_vectors()
+    lexstore.ensure_fresh(vault)
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    index.close()
+    _built(vault).close()
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+    with principal.library_scope():
+        yield vault
 
 
 def _activate(root: Path, turn: str, *, who=None, **arguments) -> dict:
@@ -194,19 +243,14 @@ def _cost(packet: dict, *domains: str) -> int:
     )
 
 
-def _set_budgets(root: Path, **budgets: int) -> None:
-    path = activation_conventions.override_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump({"schema_version": 1, "budgets": budgets}), encoding="utf-8")
-    activation_conventions.clear_cache()
-
-
 def test_a_gaming_turn_serves_games_then_its_ancestor_and_no_music(profiles_vault) -> None:
     packet = _activate(profiles_vault, GAMES_TURN)
 
     assert packet["domain_profiles"]["state"] == "ready" and packet["domain_profiles"]["omitted"] == []
     assert _served(packet) == {"games": [RULE["games"]], "media": [RULE["media"]]}
     assert list(_served(packet)) == ["games", "media"]
+    # No turn vector exists in this vault (too few anchors to calibrate one), and the block says it read words only.
+    assert packet["domain_profiles"]["selection"] == "lexical"
 
 
 def test_two_touched_domains_serve_their_shared_ancestor_once(profiles_vault) -> None:
@@ -220,7 +264,7 @@ def test_two_touched_domains_serve_their_shared_ancestor_once(profiles_vault) ->
 def test_a_general_turn_touches_no_profile(profiles_vault) -> None:
     packet = _activate(profiles_vault, GENERAL_TURN)
 
-    assert packet["domain_profiles"] == {"state": "empty", "profiles": [], "omitted": []}
+    assert packet["domain_profiles"] == {"state": "empty", "profiles": [], "omitted": [], "selection": "lexical"}
 
 
 def test_an_unresolved_topic_supplies_nothing_and_never_becomes_global(profiles_vault) -> None:
@@ -231,6 +275,17 @@ def test_an_unresolved_topic_supplies_nothing_and_never_becomes_global(profiles_
 
     assert "silent" not in json.dumps(packet["domain_profiles"]) and "silent" not in json.dumps(packet["stance"])
     assert [item["text"] for item in packet["stance"]["items"]] == [RULE["global"]]
+
+
+def test_a_vault_keeps_the_most_domains_its_limit_names_and_their_ancestors(profiles_vault) -> None:
+    named = {"games", "music", "cooking"}
+    two = set(_served(_activate(profiles_vault, THREE_TURN)))
+    _set_budgets(profiles_vault, profile_domains_max=3)
+
+    three = set(_served(_activate(profiles_vault, THREE_TURN)))
+
+    assert len(named & two) == 2 and "media" in two
+    assert named <= three and "media" in three
 
 
 def test_over_budget_keeps_the_strongest_and_lists_the_rest_to_read_on_demand(profiles_vault) -> None:
@@ -286,9 +341,7 @@ def test_profiles_leave_the_turns_allowance_whole(profiles_vault, monkeypatch) -
     assert on["task_context"]["candidates"] == off["task_context"]["candidates"]
 
 
-def test_a_profile_line_naming_a_hidden_page_is_withheld_without_a_trace(profiles_vault, monkeypatch) -> None:
-    # Task candidates are the selection evidence, and a governed vault reports none unless released-corpus tasks are on.
-    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
+def test_a_profile_line_naming_a_hidden_page_is_withheld_without_a_trace(profiles_vault) -> None:
     hidden = _page(profiles_vault, "hidden", body="- [rule] Secret instruction. ^secret\n")
     _withhold(profiles_vault, hidden, ceiling=0)
     _refresh(profiles_vault)
@@ -390,6 +443,68 @@ def test_a_catalogue_from_before_profiles_rebuilds_and_lists_them(profiles_vault
         rebuilt.close()
 
     assert listed == {"global.md", "media.md", "games.md", "music.md", "cooking.md"}
+
+
+# --------------------------------------------------------------------------- #
+# Selection by meaning
+# --------------------------------------------------------------------------- #
+
+
+def test_a_turn_that_names_no_profile_word_but_means_the_games_profile_selects_it(semantic_vault) -> None:
+    packet = _activate(semantic_vault, PARAPHRASE_TURN)
+
+    assert packet["domain_profiles"]["selection"] == "semantic"
+    assert _served(packet) == {"games": [RULE["games"]], "media": [RULE["media"]]}
+
+
+def test_a_general_knowledge_turn_selects_no_profile_even_when_both_readings_run(semantic_vault, monkeypatch) -> None:
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda text: _random_unit("general " + text))
+
+    packet = _activate(semantic_vault, GENERAL_TURN)
+
+    assert packet["domain_profiles"] == {"state": "empty", "profiles": [], "omitted": [], "selection": "semantic"}
+
+
+def test_selecting_profiles_encodes_the_turn_no_more_often_than_without_them(semantic_vault, monkeypatch) -> None:
+    calls: list[str] = []
+    original = embeddings.embed_activation_query_if_loaded
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda text: calls.append(text) or original(text))
+    _activate(semantic_vault, PARAPHRASE_TURN)
+    with_profiles = len(calls)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PROFILES", "off")
+    calls.clear()
+    _activate(semantic_vault, PARAPHRASE_TURN)
+
+    assert with_profiles == len(calls) > 0
+
+
+def test_without_a_turn_vector_the_paraphrase_selects_nothing_and_the_block_says_it_read_words_only(
+    semantic_vault, monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+
+    packet = _activate(semantic_vault, PARAPHRASE_TURN)
+
+    assert packet["domain_profiles"] == {"state": "empty", "profiles": [], "omitted": [], "selection": "lexical"}
+
+
+def test_a_vault_floor_decides_whether_a_meaning_match_selects(semantic_vault) -> None:
+    _set_budgets(semantic_vault, profile_semantic_floor=0.9)
+
+    packet = _activate(semantic_vault, PARAPHRASE_TURN)
+
+    assert packet["domain_profiles"]["profiles"] == [] and packet["domain_profiles"]["selection"] == "semantic"
+
+
+def test_a_keyword_outage_with_no_turn_vector_leaves_the_profiles_unknown_not_absent(profiles_vault, monkeypatch) -> None:
+    def down(*args, **kwargs):
+        raise OSError("lexical index unreadable")
+
+    monkeypatch.setattr(bm25, "search", down)
+
+    packet = _activate(profiles_vault, GAMES_TURN)
+
+    assert packet["domain_profiles"] == {"state": "unavailable", "profiles": [], "omitted": None, "selection": "none"}
 
 
 # --------------------------------------------------------------------------- #

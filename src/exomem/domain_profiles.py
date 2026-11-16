@@ -25,6 +25,7 @@ from . import (
     activation_conventions,
     context_catalogue,
     note_types,
+    profile_selection,
     session_units,
     source_taxonomy,
     vocabulary_resolution,
@@ -49,9 +50,12 @@ def item_line(label: str, item: Mapping[str, Any]) -> str:
     return f"- profile {kind}: {body} [{handle}]" if handle else f"- profile {kind}: {body}"
 
 
-def _empty(state: str = "empty") -> dict[str, Any]:
-    """A block with no profile. `omitted` lists the profiles that did not fit; an unavailable block cannot say."""
-    return {"state": state, "profiles": [], "omitted": None if state == "unavailable" else []}
+def _empty(state: str = "empty", selection: str = profile_selection.NONE) -> dict[str, Any]:
+    """A block with no profile. `omitted` lists the profiles that did not fit; an unavailable block cannot say.
+
+    `selection` names the evidence read to choose profiles: `semantic`, `lexical`, or `none` when no reading ran.
+    """
+    return {"state": state, "profiles": [], "omitted": None if state == "unavailable" else [], "selection": selection}
 
 
 def _digest(value: Any) -> str:
@@ -86,27 +90,6 @@ def profile_pages(root: Path, caller: Any, catalogue: Any, taxonomy: source_taxo
     return sorted(pages, key=lambda page: page.path)
 
 
-def touched_domains(
-    pages: Sequence[ProfilePage], turn_slice: Mapping[str, Any] | None, task_context: Mapping[str, Any] | None,
-) -> list[str]:
-    """The domains the turn touches, most strongly first. This is the selection seam: replace this function to
-    change what touches a domain, and nothing else.
-
-    Arm (b) of the design's selection round: a profile page that appears among the turn's slice rows or task
-    candidates touches its domain. The slice rows come first, then the candidates, each in the rank order the
-    activation pass gave them. It reads only evidence the pass already holds, makes no model call and holds no
-    list of domains or words.
-    """
-    domain_of = {handle: page.domain for page in pages for handle in (page.path, page.ref)}
-    touched: dict[str, None] = {}
-    for items in ((turn_slice or {}).get("items") or (), (task_context or {}).get("candidates") or ()):
-        for item in items:
-            domain = next((domain_of[handle] for handle in (item.get("path"), item.get("ref"), item.get("source_ref")) if handle in domain_of), None)
-            if domain:
-                touched.setdefault(domain, None)
-    return list(touched)
-
-
 def _with_ancestors(taxonomy: source_taxonomy.SourceTaxonomy, touched: Sequence[str]) -> list[str]:
     """Each touched domain followed by its ancestors, nearest first, once each."""
     ordered: dict[str, None] = {}
@@ -117,10 +100,14 @@ def _with_ancestors(taxonomy: source_taxonomy.SourceTaxonomy, touched: Sequence[
 
 
 def compile_block(
-    root: Path, caller: Any, *, turn_slice: Mapping[str, Any] | None = None, task_context: Mapping[str, Any] | None = None,
+    root: Path, caller: Any, *, turn: str = "", turn_vector: Any = None,
     catalogue: Any = None, known_generations: Mapping[str, str] | None = None, today: date | None = None,
 ) -> dict[str, Any]:
-    """The profiles for what the turn touched, from admitted units only.
+    """The profiles for the domains the turn touches, from admitted units only.
+
+    A domain is touched when its profile page clears a floor in `profile_selection`, which reads the turn vector
+    the activation pass already holds and one keyword query, both restricted to the caller's profile pages.
+    `selection` on the block names the evidence read, so a turn without a vector shows as `lexical`.
 
     A hidden page or unit changes no count, generation or expiry. Each profile fits whole lines within the vault's
     `budgets.domain_profile_max_chars`, and together they fit `budgets.profiles_max_chars`. The block has its own
@@ -141,12 +128,27 @@ def compile_block(
     by_domain: dict[str, list[ProfilePage]] = {}
     for page in pages:
         by_domain.setdefault(page.domain, []).append(page)
-    order = [domain for domain in _with_ancestors(taxonomy, touched_domains(pages, turn_slice, task_context)) if domain in by_domain]
     conventions = activation_conventions.load_conventions(root).conventions
-    # The shipped conventions file always sets both budgets; the range's top only caps a broken install.
+    # The shipped conventions file always sets every limit; a missing one reads as the most restrictive value, so a
+    # broken install selects and serves nothing.
     each = max(0, conventions.budget("domain_profile_max_chars") or 0)
     total = max(0, conventions.budget("profiles_max_chars") or 0)
-    block = _empty()
+    semantic_floor = conventions.budget("profile_semantic_floor")
+    lexical_floor = conventions.budget("profile_lexical_floor")
+    selection = profile_selection.select(
+        root, [page.path for page in pages], turn, turn_vector, restricted=caller.restricted,
+        semantic_floor=float("inf") if semantic_floor is None else semantic_floor,
+        lexical_floor=float("inf") if lexical_floor is None else lexical_floor,
+    )
+    if pages and turn.strip() and selection.evidence == profile_selection.NONE:
+        # Profiles exist and neither reading could run: the turn's profiles are unknown, not absent.
+        block = _empty("unavailable")
+        _pin(root, caller, block, [])
+        return block
+    domain_of = {page.path: page.domain for page in pages}
+    touched = list(dict.fromkeys(domain_of[path] for path in selection.pages))[: max(0, int(conventions.budget("profile_domains_max") or 0))]
+    order = [domain for domain in _with_ancestors(taxonomy, touched) if domain in by_domain]
+    block = _empty(selection=selection.evidence)
     pinned: list[dict[str, Any]] = []
     used = 0
     stopped = False
