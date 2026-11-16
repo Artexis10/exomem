@@ -616,15 +616,27 @@ def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
     return checks
 
 
-def _check_vault_layout(vault_root: Path | None) -> list[DoctorCheck]:
+def _check_vault_layout(vault_root: Path | None, vault_check: DoctorCheck) -> list[DoctorCheck]:
     """Report the vault's layout, and warn on whatever leaves it unsettled; it never refuses.
 
-    A vault-root schema folder with no layout record is a warning that names the record to
-    write: no other code reads the layout yet, so nothing here may fail on it. A remedy means a
-    person should act, so it is the single test between a pass and a warning.
+    The layout is read from a vault, so a failed `vault.path` check leaves nothing to read: the
+    check then warns that no layout was read, and never reports `nested` for a folder that is
+    no vault. Otherwise the warning follows the layout's state (`layout_report.settled`): an
+    unresolved or unknown layout, or a second schema folder beside the record, is not settled,
+    whether or not the report found a remedy to name.
     """
     if vault_root is None:
         return []
+    if vault_check.status != "pass":
+        return [
+            _check(
+                "vault.layout",
+                "warn",
+                f"The layout was not read: the {vault_check.id} check did not pass, so there is no vault to read.",
+                f"Fix {vault_check.id} first; the layout is checked once it passes.",
+                details={"layout": None, "depends_on": vault_check.id},
+            )
+        ]
     from . import layout_report
 
     found = layout_report.report(vault_root)
@@ -634,7 +646,7 @@ def _check_vault_layout(vault_root: Path | None) -> list[DoctorCheck]:
     return [
         _check(
             "vault.layout",
-            "warn" if remedy else "pass",
+            "pass" if layout_report.settled(found) else "warn",
             outcome,
             remedy,
             details=facts,
@@ -4012,7 +4024,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         _check_package_import(),
         vault_check,
         *_check_schema_files(vault_root),
-        *_check_vault_layout(vault_root),
+        *_check_vault_layout(vault_root, vault_check),
         _check_repo_env(),
         _check_registry(),
         _check_resource_posture(profile),
