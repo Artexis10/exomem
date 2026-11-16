@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
@@ -704,6 +705,37 @@ def _retire_census(vault: Path, conn: sqlite3.Connection, placements: trash_meta
             raise ValueError("the source companion has no reciprocal retirement witness")
         conn.execute("INSERT INTO retired_census VALUES (?, ?)", (source["binary_rel"], source["companion_rel"]))
     conn.execute("DELETE FROM binding_census WHERE binary_rel IN (SELECT binary_rel FROM retired_census)")
+
+
+# Per process: one census at a time, and the checkpoint generation that each vault's last failed census left.
+_census_lock = threading.Lock()
+_failed_census: dict[Path, int] = {}
+
+
+def recover(vault: Path) -> bool:
+    """Make a shared archive's projection current with a background census; True when it is current.
+
+    Background passes call this outside any guard, since the census takes its own; a request or an eviction never
+    does. A failed census is not repeated until the projection's generation moves, so a persistent failure costs
+    one census, not one per pass. A census that lost a race to a write waits for the next generation change.
+    """
+    vault = Path(vault).resolve()
+    ledger = _ledger(vault, create=False)
+    if not ledger.path.exists() or not original_pool.enabled(vault):
+        return False
+    with _census_lock:
+        with closing(ledger._connect(readonly=True)) as conn:
+            if current(vault, conn):
+                return True
+            generation = checkpoint(conn).generation
+        if _failed_census.get(vault) == generation:
+            return False
+        if rebuild(vault):
+            _failed_census.pop(vault, None)
+            return True
+        with closing(ledger._connect(readonly=True)) as conn:
+            _failed_census[vault] = checkpoint(conn).generation
+        return False
 
 
 def unreferenced(vault: Path, *, batch: int = 1024) -> Iterator[tuple[str, str]] | None:

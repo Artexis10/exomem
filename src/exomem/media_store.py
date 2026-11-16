@@ -745,10 +745,13 @@ def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.Referenc
 
 
 def enqueue_offloads(vault: Path) -> int:
+    from . import media_bindings, original_pool
     from .writer_lease import get_manager
 
     if originals.binding_for(vault) is None:
         return 0
+    if original_pool.enabled(vault):
+        media_bindings.recover(vault)  # The census takes its own guard, so it runs before the scan's.
     with get_manager().consistency_guard(vault, operation="media_offload_scan", holder_kind="background"):
         placeholders = ",".join("?" for _code in media_allowance.ALLOWANCE_REFUSAL_CODES)
         rows, _coverage = _status_candidates(vault, "media_offload_refusals",

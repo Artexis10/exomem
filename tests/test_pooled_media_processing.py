@@ -153,6 +153,25 @@ def test_the_offload_scan_of_a_pooled_archive_reads_only_the_filings_that_still_
     assert offloaded.artifact_path + ".md" not in reads
 
 
+def test_the_first_offload_scan_of_a_pooled_archive_builds_the_binding_projection(
+        vault, tmp_path, monkeypatch, selected_store):
+    """Only a drain built the projection, so outside one every offload scan read every companion. The first scan runs
+    the census; a later scan reads no companion of an offloaded filing."""
+    from exomem import media_store, reserved_paths
+
+    offloaded = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"the minutes of the quarterly meeting")
+    assert media_store.offload(vault, vault / offloaded.artifact_path) is not None
+    media_store.enqueue_offloads(vault)
+    reads: list[str] = []
+    read = reserved_paths.read_generic_bytes
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes",
+                        lambda root, rel, *args, **kwargs: (reads.append(rel), read(root, rel, *args, **kwargs))[1])
+
+    assert media_store.enqueue_offloads(vault) == 0
+
+    assert offloaded.artifact_path + ".md" not in reads
+
+
 def test_a_failed_job_of_a_pooled_original_can_be_retried(vault, tmp_path, monkeypatch):
     """An explicit retry must find the pooled bytes the failed job named, not report the file as missing."""
     added = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", b"the minutes of the quarterly meeting")
