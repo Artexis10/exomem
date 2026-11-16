@@ -832,10 +832,7 @@ def _canonical_lifecycle_json(value: dict[str, Any]) -> str:
 
 def _bounded_lifecycle_text(value: dict[str, Any]) -> str:
     text = _canonical_lifecycle_json(value)
-    if len(text.encode("utf-8")) > _MAX_ARTIFACT_BYTES:
-        raise RelationReviewError(
-            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
-        )
+    _require_artifact_size(len(text.encode("utf-8")))
     return text
 
 
@@ -1322,6 +1319,15 @@ def _load_lifecycle_decision_bound(
     root = Path(vault_root).absolute()
     name = f"{fingerprint}.json"
     _require_artifact_admission(admission, _lifecycle_reference(identity, name))
+    stored = _stored_artifact(root, _lifecycle_reference(identity, name), admission)
+    if stored is not None:
+        raw, guard = stored
+        if raw is None:
+            return None, None
+        return (
+            _parse_lifecycle_decision(raw, page_identity=identity, after_fingerprint=fingerprint),
+            guard,
+        )
     inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
@@ -1366,6 +1372,12 @@ def _load_lifecycle_prepared_bound(
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
     _require_artifact_admission(admission, _lifecycle_reference(identity, "prepared.json"))
+    stored = _stored_artifact(root, _lifecycle_reference(identity, "prepared.json"), admission)
+    if stored is not None:
+        raw, guard = stored
+        if raw is None:
+            return None, None
+        return _parse_lifecycle_prepared(raw, page_identity=identity), guard
     inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
@@ -1804,6 +1816,40 @@ def _guard_lifecycle_primary_paths(
             ) from error
         guards.append(guard)
     return tuple(guards)
+
+
+def _stored_artifact(
+    root: Path, relative: str, admission: Callable[[str], bool] | None
+) -> tuple[bytes | None, vault.PathGuard] | None:
+    """A review artifact that a store-mode vault serves, read from the store with its guard; None
+    when the store does not serve the path, and the caller reads the disk.
+
+    In store mode the review folder is store-owned (the schema overlay), so its file is only a
+    projection, which lags a commit: a review that a write just committed is in the store first.
+    """
+    from .vault_store import read
+
+    if not read.serves(root, relative):
+        return None
+    _require_artifact_admission(admission, relative)
+    # The size is read first, from the snapshot that the bytes come from, so an artifact over the
+    # limit is refused before its body is loaded, as the file reader refuses one.
+    with read.snapshot(root) as view:
+        meta = view.page_meta(relative)
+        if meta is None:
+            return None, vault.PathGuard.of_stored(relative, None)
+        _require_artifact_size(meta.size)
+        page = view.page(relative)
+    assert page is not None  # the snapshot that held its metadata holds the page
+    return page.body, vault.PathGuard.of_stored(relative, hashlib.sha256(page.body).hexdigest())
+
+
+def _require_artifact_size(size: int) -> None:
+    """Refuse an artifact over the size limit, read from the disk or held in the store."""
+    if size > _MAX_ARTIFACT_BYTES:
+        raise RelationReviewError(
+            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
+        )
 
 
 def _read_bound(root: Path, relative: str) -> tuple[bytes | None, vault.PathGuard]:
@@ -2468,11 +2514,12 @@ def _validate_exact_lifecycle_trash_proof(
         and bool(_HASH.fullmatch(proof.source_hash))
         and bool(_HASH.fullmatch(proof.review_fingerprint))
         and proof.source_guard.target == proof.trash_path
-        and proof.source_guard.leaf_policy == "content"
+        # A guard binds exact bytes on disk (`content`) or, in store mode, in the store (`store`).
+        and proof.source_guard.binds_bytes
         and proof.source_guard.expected_content_hash == proof.source_hash
         and sidecar_target == f"{trash_root}.meta.json"
         and (directory_proof or trash_root == proof.trash_path)
-        and proof.sidecar_guard.leaf_policy == "content"
+        and proof.sidecar_guard.binds_bytes
         and proof.sidecar_guard.expected_content_hash
         == vault.content_hash(proof.sidecar_source)
         and not proof.live_owner_paths
@@ -2902,10 +2949,7 @@ def _read_artifact_bytes(
         raise RelationReviewError("RELATION_REVIEW_SWAPPED", "review artifact changed during read")
     _recheck_review_directory(opened.root, opened.chain)
     _require_artifact_admission(opened.admission, relative)
-    if len(raw) > _MAX_ARTIFACT_BYTES:
-        raise RelationReviewError(
-            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
-        )
+    _require_artifact_size(len(raw))
     try:
         guard = vault.PathGuard.capture(
             opened.root,
@@ -2958,6 +3002,12 @@ def _parse_record(
     opened: _OpenReviewDirectory, name: str, reference: str
 ) -> tuple[RelationReviewRecord, str]:
     raw, _ = _read_artifact_bytes(opened, name)
+    return _parse_record_bytes(raw, name, reference)
+
+
+def _parse_record_bytes(
+    raw: bytes, name: str, reference: str
+) -> tuple[RelationReviewRecord, str]:
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
@@ -3094,6 +3144,13 @@ def _load_one(root: Path, identity: str) -> tuple[RelationReviewRecord | None, s
     def admission(path: str) -> bool:
         return not access.refuse_if_excluded(root, path) and connector_boundary.permits(root, path, who)
 
+    name = f"{identity}.json"
+    reference = f"{'/'.join((kb_dirname(), *REVIEW_FOLDER))}/{name}"
+    # A receipt that the caller may not read goes to the listing below, which drops it.
+    stored = _stored_artifact(root, reference, None) if admission(reference) else None
+    if stored is not None:
+        raw, _ = stored
+        return (None, None) if raw is None else _parse_record_bytes(raw, name, reference)
     with _open_review_directory(root, admission=admission) as opened:
         matches = _artifact_children_for(opened, identity)
         if not matches or opened is None:

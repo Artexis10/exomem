@@ -681,6 +681,43 @@ def test_a_deadline_during_projection_serves_the_leads_already_projected(
     assert not packet.get("abstained") and packet["map"]
 
 
+def test_a_slow_link_lookup_never_costs_the_leads_their_projection(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a loaded host the link lookup once spent the time projection needed, so every lead found was dropped."""
+    from exomem import request_budget, working_set
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    target = _page(vault, "calibration-report", body="Notes on a different subject entirely.\n")
+    leads = {
+        _page(
+            vault, f"alignment-visit-{number}",
+            body=f"Inspect the optical alignment before the workshop.\n\nSee [[{target.removesuffix('.md')}]].\n",
+        )
+        for number in range(2)
+    }
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Inspect the optical alignment before the workshop"
+
+    clock = _clock_at(monkeypatch)
+    read_links = working_set._task_links
+
+    def leaves_less_than_a_stage(*args, **kwargs):
+        links = read_links(*args, **kwargs)
+        # The graph read ran on a starved host until less than one stage's reserve was left.
+        clock[0] += request_budget.current().remaining() - request_budget.ACTIVATION_STAGE_RESERVE_SECONDS / 2
+        return links
+
+    monkeypatch.setattr(working_set, "_task_links", leaves_less_than_a_stage)
+    packet, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    served = {item["source_ref"]: item for item in packet["task_context"]["candidates"]}
+    assert leads <= set(served)
+    assert all(served[lead]["links"][0]["title"] == "calibration-report" for lead in leads)
+    assert not packet.get("abstained") and packet["map"]
+
+
 def test_a_deadline_during_the_catalogue_scan_stops_the_scan_and_keeps_the_map(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

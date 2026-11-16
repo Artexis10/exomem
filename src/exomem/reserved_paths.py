@@ -2499,9 +2499,14 @@ def _list_candidate_records(
     identities: IdentityCatalogue | None,
     require_complete: bool = False,
     recursive: bool = True,
+    descend: Callable[[str], bool] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> tuple[held_fs.SagaRecord, ...]:
-    """Walk safe ordinary children without following or exposing aliases."""
+    """Walk safe ordinary children without following or exposing aliases.
+
+    `descend` receives the path of each folder, relative to the vault root, and says whether the
+    walk enters it. A folder it refuses is still listed as a child of its parent; nothing below it is.
+    """
 
     records: list[held_fs.SagaRecord] = []
 
@@ -2559,7 +2564,10 @@ def _list_candidate_records(
                 or descriptor_id is not None
                 or (record.identity.kind == "file" and record.identity.link_count != 1)
             )
-            if not recursive or record.identity.kind != "directory" or blocked:
+            if (
+                not recursive or record.identity.kind != "directory" or blocked
+                or (descend is not None and not descend(child))
+            ):
                 continue
             retained = filesystem.parent(child)
             if not retained.ok:
@@ -2750,11 +2758,15 @@ def open_generic_tree(
     identities: IdentityCatalogue | None = None,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
+    descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ):
     """Yield entries under one held walk; exhaust it before publishing a census.
+
+    `descend` prunes a recursive walk: it receives each folder's path relative to the vault root and
+    says whether to enter it (`_list_candidate_records`). A census that needs every entry omits it.
 
     A Markdown header that cannot be read, decoded or prepared within its own budget ends the walk,
     unless the caller passes `markdown_header_failed`: then the walk reports that entry's relative
@@ -2764,7 +2776,7 @@ def open_generic_tree(
             _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         entries = _iter_generic_tree_held(
             vault_root, value, recursive=recursive, identities=current,
-            select=select, require_complete=require_complete,
+            select=select, require_complete=require_complete, descend=descend,
             markdown_header_limit=markdown_header_limit, markdown_header_failed=markdown_header_failed,
             checkpoint=checkpoint,
         )
@@ -2817,6 +2829,7 @@ def _iter_generic_tree_held(
     identities: IdentityCatalogue,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
+    descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
@@ -2844,7 +2857,7 @@ def _iter_generic_tree_held(
                     relative,
                     identities=identities,
                     require_complete=require_complete,
-                    recursive=recursive, checkpoint=checkpoint,
+                    recursive=recursive, descend=descend, checkpoint=checkpoint,
                 )
             else:
                 enumerated = filesystem.children(source_directory)
@@ -3013,7 +3026,7 @@ def _iter_generic_tree_held(
             if require_complete:
                 current_records = _list_candidate_records(
                     filesystem, source_directory, relative, identities=identities,
-                    require_complete=True, recursive=recursive, checkpoint=checkpoint,
+                    require_complete=True, recursive=recursive, descend=descend, checkpoint=checkpoint,
                 )
                 if current_records != records:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")

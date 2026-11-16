@@ -64,10 +64,9 @@ def part_id(identity: str, version: str) -> str:
     `identity` is what survives edits (a unit ref, an item key); `version` is what changes with them
     (a fingerprint, an item version). The shape matches a page id, so one pattern recognises both.
     """
-    head = _base32(hashlib.sha256(identity.encode("utf-8")).digest()[:5], HEAD_CHARS)
-    return f"{head}.{_base32(hashlib.sha256(version.encode('utf-8')).digest()[:3], VERSION_CHARS)}"
+    return f"{part_head(identity)}.{_base32(hashlib.sha256(version.encode('utf-8')).digest()[:3], VERSION_CHARS)}"
 
 
 def part_head(identity: str) -> str:
-    return part_id(identity, "").partition(".")[0]
+    return _base32(hashlib.sha256(identity.encode("utf-8")).digest()[:5], HEAD_CHARS)
 

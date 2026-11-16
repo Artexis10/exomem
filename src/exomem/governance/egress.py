@@ -8026,14 +8026,26 @@ def owner_only_aggregate(
     who = principal if principal is not None else current_principal()
     writer = bound_writer(vault_root)
     if writer is not None and (who is None or (raw_protection.is_owner(who) and unrestricted_content_access(vault_root, who))):
-        from ..collection_store import authority
+        from ..collection_store import authority, ownership
 
         operation = writer._operation
         try:
             # The disk's census: a collection projects files, and a stored page is no collection's.
-            for entry in reserved_paths.list_generic_tree(
-                vault_root, ".", checkpoint=checkpoint, stored=False
-            ):
+            # A collection projects only inside its placement layers, so no view lives outside them:
+            # open a file only inside a layer and enter a folder only when a layer lies in or below it.
+            def in_a_layer(path, kind):
+                # `relevant` folds case and Unicode form like the ownership lookup; the knowledge base is
+                # spelled as that lookup spells it, so a recased folder is judged as the folder it is.
+                spelled = authority._knowledge_base_spelling(vault_root, path)
+                return ownership.relevant(spelled, ancestors=kind == "directory")
+
+            with reserved_paths.open_generic_tree(
+                vault_root, ".", checkpoint=checkpoint,
+                descend=lambda folder: in_a_layer(folder, "directory"),
+                select=lambda listed: [path for path, kind in listed if in_a_layer(path, kind)],
+            ) as walked:
+                entries = tuple(walked)
+            for entry in entries:
                 if checkpoint is not None:
                     checkpoint()
                 path = authority._knowledge_base_spelling(vault_root, entry.relative_path)

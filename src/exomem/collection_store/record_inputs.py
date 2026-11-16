@@ -123,9 +123,11 @@ def recheck_selected(writer, candidate, row, manifest, declared):
         raise connection.CollectionStoreError("COLLECTION_STORE_INPUT_CHANGED", "record candidate basis changed")
     if candidate.error is None:
         # Graph and policy reads can change without this collection's container changing.
+        append = candidate.name == "append_record"
         fresh = writer._validate(manifest, declared, candidate.key, candidate.values,
             before=candidate.prior_values,
-            operation="append" if candidate.name == "append_record" else candidate.arguments["operation"])
+            operation="append" if append else candidate.arguments["operation"],
+            written=None if append else candidate.changes)
         if fresh != candidate.values:
             raise connection.CollectionStoreError("COLLECTION_STORE_INPUT_CHANGED", "record candidate values changed")
 
@@ -238,7 +240,8 @@ def update(writer, row, manifest, declared, arguments):
         resumed, resumed, {}, changes=dict(changes), delete_fields=tuple(delete_fields), prior_values=old_values,
         supplied_body=body)
     try:
-        candidate.values = writer._validate(manifest, declared, key, final, before=old_values, operation=operation)
+        candidate.values = writer._validate(manifest, declared, key, final, before=old_values, operation=operation,
+                                            written=changes)
     except collections.CollectionError as error:
         if resumed and resumed["kind"] == "view-correction":
             raise

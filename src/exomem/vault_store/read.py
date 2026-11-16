@@ -817,6 +817,14 @@ def serves(vault_root: Path, rel: str) -> bool:
     return owned_as_page(vault_root, rel) and mode.store_mode_for_reads(vault_root)
 
 
+def serves_many(vault_root: Path, rels: Iterable[str]) -> dict[str, bool]:
+    """``serves`` for each path of ``rels``, with one read of the mode records, and none when the store owns no page of them."""
+    wanted = list(rels)
+    pages = owned_as_pages(vault_root, wanted)
+    stored = any(pages[rel] for rel in wanted) and mode.store_mode_for_reads(vault_root)
+    return {rel: stored and pages[rel] for rel in wanted}
+
+
 def owned_as_pages(vault_root: Path, rels: Iterable[str]) -> Mapping[str, bool]:
     """Whether ownership makes each path of ``rels`` a page, by path.
 

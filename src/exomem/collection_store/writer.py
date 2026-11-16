@@ -98,10 +98,7 @@ def _row(cursor: sqlite3.Cursor) -> dict[str, Any] | None:
 def _natural_key(manifest: collections.CollectionManifest, values: Mapping[str, Any]) -> str | None:
     if not manifest.schema.natural_key:
         return None
-    try:
-        return collections.manifest_natural_key(manifest, values)
-    except ValueError:
-        return None
+    return collections.complete_natural_key(manifest, values)
 
 
 def _renders_rows(manifest) -> bool:
@@ -2391,7 +2388,7 @@ class CollectionWriter:
 
     def _validate(
         self, manifest, declared, key, values, *, before=None, operation="append",
-        validate_graph=True,
+        validate_graph=True, written=None,
     ):
         _refuse_view_stamp(manifest, values)
         if declared.kind == "intended":
@@ -2407,7 +2404,7 @@ class CollectionWriter:
             planning._validate_declared_text(manifest, values)
             if before is not None:
                 planning._require_same_area_side(before, values)
-        values = records._validate_values(manifest, values)
+        values = records._validate_values(manifest, values, written=written)
         if declared.validators and validate_graph:
             validators = [types.named_validator(name) for name in declared.validators]
             plans = None
@@ -2963,6 +2960,8 @@ class CollectionWriter:
             self._precommit(manifest)
             for guard in source_guards.values():
                 self._recheck_guard(guard, publication=True)
+            if _import is not None:
+                _import.receipt(self, result)
             self._insert_txn(txn, result)
             if _import is not None:
                 _import(self, result)
@@ -3398,8 +3397,10 @@ class CollectionWriter:
         reference_declarations.require_targets(self._operation, proposed, current)
         if declared.kind == "intended":
             planning.require_planning_profile(proposed)
+        newly_required = records._newly_required(current, proposed)
         plans = {
-            key: self._validate(proposed, declared, key, values, operation="revise", validate_graph=False)
+            key: self._validate(proposed, declared, key, values, operation="revise", validate_graph=False,
+                                written=newly_required)
             for key, values in typed_storage.collection_values(self.connection, current.collection_id)
         }
         for name in declared.validators:

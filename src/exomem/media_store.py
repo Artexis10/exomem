@@ -1907,14 +1907,25 @@ def _retained_figures(vault: Path, config: dict[str, object]) -> tuple[int, int,
     return evicted, max(0, int(threshold * usage.total) - usage.used), usage.total
 
 
+def _retained_gap(vault: Path, config: dict[str, object], *, margin: bool) -> int:
+    """The evicted bytes that do not fit below the growth threshold, less the eviction margin when `margin` is set."""
+    evicted, room, total = _retained_figures(vault, config)
+    if margin and evicted:
+        try:
+            room = max(0, room - int(float(config["eviction_margin"]) * total))
+        except (KeyError, TypeError, ValueError) as error:
+            raise MediaStoreError("MEDIA_SHORTFALL_UNKNOWN", "the media store policy sets no readable eviction_margin") from error
+    return max(0, evicted - room)
+
+
 def retained_shortfall(vault: Path, config: dict[str, object]) -> int:
-    """The bytes of evicted originals that do not fit in the room below the growth threshold (D12, the retained store).
+    """The bytes of evicted originals that keep a retained store from draining (D12): those that do not fit below
+    the growth threshold less the eviction margin, the room the drain step needs before it starts.
 
     The store drains when this reaches zero. Raises `MediaStoreError` when the policy, the ledger or the volume
     cannot give it: an unknown shortfall is never zero.
     """
-    evicted, room, _total = _retained_figures(vault, config)
-    return max(0, evicted - room)
+    return _retained_gap(vault, config, margin=True)
 
 
 def record_demand(vault: Path, series: str, demand_bytes: int, *, budget: int, reachable_budget: int) -> bool:
@@ -2025,10 +2036,11 @@ def evict_to_target(vault: Path) -> int:
     if config is None or not _may_evict(config):
         return 0
     if config["enabled"] is False:
-        # A retained store drains once its evicted originals fit, so a copy that fits stays (D12). An unknown
-        # shortfall evicts as a served cell does: `evict` re-confirms the stored version first.
+        # A retained store drains once its evicted originals fit, so a copy that fits stays (D12). Eviction stops
+        # without the margin, which leaves the drain's band. An unknown figure evicts as a served cell does:
+        # `evict` re-confirms the stored version first.
         try:
-            if retained_shortfall(vault, config) == 0:
+            if _retained_gap(vault, config, margin=False) == 0:
                 return 0
         except MediaStoreError:
             pass
@@ -2339,8 +2351,7 @@ def _drain_pass(vault: Path, claimable: Callable[[], object | None] | None) -> t
     record = drain_record(vault)
     if threshold is None or bounds is None or (record is not None and record.latched):
         return 0, None
-    evicted, room, total = _retained_figures(vault, config)
-    if evicted > room - int(margin * total):
+    if retained_shortfall(vault, config):
         return 0, None  # Inside the margin band neither this nor eviction moves a byte.
     ledger = MediaJobStore(vault)
     claimable = claimable or ledger.next_pending

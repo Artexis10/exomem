@@ -37,7 +37,7 @@ A timeout, a transport failure, a non-JSON response, an HTTP error or the absenc
 - **THEN** the injection starts with the session-context data header, followed by the stance
 
 ### Requirement: The hook acknowledges a map only after it reached the agent
-In working-set and native activation modes, the retrieve hook SHALL give room first to an upkeep item, then to the map's floor, then to the stance. The floor is the map's ref, the count of items the hook left out and the overflow routes.
+In working-set and native activation modes, after the reset advice and the next action, the retrieve hook SHALL give room to an upkeep item, then to the map's floor, then to the stance. The floor is the map's ref, the count of items the hook left out and the overflow routes.
 The service records an upkeep item delivered when it attaches it, so an item the hook drops is lost. A map the hook cannot show keeps the previous token and arrives again, and the service sends the stance with every packet.
 The hook SHALL persist a packet's continuity token only when the map rendered whole, rendered at least its floor, or was already held, because the service answers a map that the token names `unchanged`.
 When a changed map renders in no form, the hook SHALL keep the previous token, so the next prompt's one request receives the map again.

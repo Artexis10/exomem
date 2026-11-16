@@ -93,16 +93,14 @@ def project_by_hand(root):
 
 
 def differences_from_a_cold_build(root, tmp_path):
-    """Rows that differ from what file mode derives from the same files, outside one key table."""
+    """Rows that differ from what file mode derives from the same files."""
     project_by_hand(root)
     expected = tmp_path / "expected.sqlite"
     verify.derive_expected(root, expected)
     with closing(sqlite3.connect(connection.store_path(root))) as store:
         comparison = verify.compare_tables(store, expected)
     assert comparison.tables, "the comparison must cover tables for this check to mean anything"
-    # A trigger stamps a revision key for a parent whose page rows go, in file mode as here; a cold
-    # build creates none, so that one key-only table is the only place the two may differ.
-    return [d for d in comparison.differences if d.table != "unit_revisions"]
+    return list(comparison.differences)
 
 
 def test_a_move_carries_the_rows_and_rewrites_a_stored_linker_without_writing_markdown(served):

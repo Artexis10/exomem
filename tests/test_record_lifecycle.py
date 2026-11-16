@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from record_fixtures import copy_x3_fixture
+from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
 from exomem import record_formats, records
 from exomem import structured_collections as collections
@@ -401,6 +401,78 @@ def test_revision_refuses_schema_that_invalidates_a_current_item(tmp_path: Path)
         )
 
     assert (tmp_path / current.path).read_bytes() == original
+
+
+NULL_ASSET_ROW = """---
+type: record
+collection_id: 49622075-9ff4-4660-9ab7-414854b5bca2
+record_id: 5c0b7d42-9e1a-4f63-a8d5-3b2e6f190c84
+schema_version: 1
+occurred_on: 2026-06-03
+asset: null
+provider: null
+---
+
+Written before a required value had to be non-null.
+"""
+
+
+def test_a_revision_and_a_rebaseline_commit_beside_a_stored_null_required_value(tmp_path: Path) -> None:
+    # Re-checking stored rows with the rule for new values makes a collection that holds one such row unrevisable.
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    (fixture / "Events/released/2026-06-03-unknown.md").write_text(NULL_ASSET_ROW, encoding="utf-8")
+    current = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, current).read()
+
+    revised = records.revise_collection(
+        tmp_path,
+        current.path,
+        manifest_text=(tmp_path / current.path).read_text(encoding="utf-8").replace("title:", "title: Revised", 1),
+        expected_manifest_hash=current.manifest_version.hash,
+        expected_container_hash=records.lifecycle_guards(current, snapshot)["expected_container_hash"],
+        why="clarify the collection title",
+    )
+    assert revised["outcome"] == "committed"
+
+    manifest_path = tmp_path / current.path
+    manifest_path.write_text(manifest_path.read_text(encoding="utf-8").replace("title:", "title: Direct", 1),
+                             encoding="utf-8")
+    changed = collections.load_manifest(tmp_path, current.path)
+    changed_snapshot = record_formats.load_adapter(tmp_path, changed).read()
+    rebaselined = records.rebaseline_collection(
+        tmp_path,
+        changed.path,
+        expected_manifest_hash=changed.manifest_version.hash,
+        expected_container_hash=records.lifecycle_guards(changed, changed_snapshot)["expected_container_hash"],
+        acknowledged_gap_codes=tuple(records.inspect_audit_gap(tmp_path, changed.path)["gaps"]),
+        why="acknowledge a direct title correction",
+    )
+    assert rebaselined["operation"] == "rebaseline"
+
+
+def test_a_revision_that_makes_a_field_required_refuses_a_stored_null_in_it(tmp_path: Path) -> None:
+    # Declaring a field required over stored nulls would leave the collection contradicting its own schema.
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    (fixture / "Events/released/2026-06-03-unknown.md").write_text(
+        NULL_ASSET_ROW.replace("asset: null", 'asset: "[[Assets/Vehicle]]"'), encoding="utf-8")
+    current = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, current).read()
+    stricter = (tmp_path / current.path).read_text(encoding="utf-8").replace(
+        "    provider:\n      type: string\n", "    provider:\n      type: string\n      required: true\n")
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.revise_collection(
+            tmp_path,
+            current.path,
+            manifest_text=stricter,
+            expected_manifest_hash=current.manifest_version.hash,
+            expected_container_hash=records.lifecycle_guards(current, snapshot)["expected_container_hash"],
+            why="every service names its provider",
+        )
+
+    assert (caught.value.code, caught.value.details["field"]) == ("SCHEMA_REQUIRED_FIELD", "provider")
 
 
 def test_lifecycle_hidden_manifest_matches_missing_without_reading_bytes(

@@ -9056,11 +9056,15 @@ def unload_ram_caches(
         # noise into the number that says whether a governed write discarded
         # receipt-covered work.
         _CACHE.release()
-        # Keyed by the catalogue snapshot, so a correctness eviction cannot make
-        # it stale; only a caller handing memory back drops it.
+        # The admitted recall rows are keyed by the catalogue snapshot, and each
+        # scope set by its subject text and the inputs of its evaluation, so a
+        # correctness eviction cannot make either stale; only a caller handing
+        # memory back drops them.
         from . import lexstore
+        from .governance import page_admission
 
         lexstore.release_admitted_recall_rows()
+        page_admission.forget_scopes()
     if not keep_recall_resolver:
         from . import epistemic_graph, graph_read_publication
 
