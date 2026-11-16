@@ -54,10 +54,12 @@ def _digest(value: Any) -> str:
 
 def compile_block(
     root: Path, caller: Any, max_chars: int | None = None, *, today: date | None = None, catalogue: Any = None,
+    known_generation: str | None = None,
 ) -> dict[str, Any]:
     """Compile only admitted inputs; a hidden line changes no generation, count or expiry.
 
     The block's own bound is the vault's `budgets.stance_max_chars`; `max_chars` only tightens it.
+    `known_generation` is the stance generation the caller holds: a block still at it repeats no line.
     """
     today = today or date.today()
     own_catalogue = catalogue is None
@@ -116,8 +118,8 @@ def compile_block(
         cached = _CACHE.get(key)
         if cached is not None and (cached[0] is None or today < cached[0]):
             _CACHE.move_to_end(key)
-            block = copy.deepcopy(cached[1])
-            _pin(root, caller, block, cached[2])
+            block, served = _as_held(copy.deepcopy(cached[1]), copy.deepcopy(cached[2]), known_generation)
+            _pin(root, caller, block, served)
             return block
     block = _empty()
     # Terminal egress re-decides the unit shape compile admitted, path included, not the bare served line.
@@ -156,8 +158,26 @@ def compile_block(
         _CACHE.move_to_end(key)
         while len(_CACHE) > CACHE_SIZE:
             _CACHE.popitem(last=False)
+    block, served = _as_held(block, served, known_generation)
     _pin(root, caller, block, served)
     return block
+
+
+def _as_held(
+    block: dict[str, Any], served: list[dict[str, Any]], known_generation: str | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The block as this caller is owed it: a caller that holds exactly these lines is sent none of them again."""
+    if block["state"] == "ready" and known_generation and known_generation == block["generation"]:
+        block.update(state="unchanged", items=[])
+        return block, []
+    return block, served
+
+
+def held_generation(block: dict[str, Any] | None) -> str | None:
+    """The generation a caller holds once it has been served `block`; an empty or unavailable block is owed again."""
+    if isinstance(block, dict) and block.get("state") in ("ready", "unchanged"):
+        return block.get("generation")
+    return None
 
 
 def _pin(root: Path, caller: Any, block: dict[str, Any], served: list[dict[str, Any]]) -> None:

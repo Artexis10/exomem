@@ -436,7 +436,7 @@ def test_method_reset_stance_and_move_fit_the_minimum_public_cap(stance_vault, m
     assert row["task_context"]["methods"]["reset"] is True
     second = invoke_command(command, stance_vault, turn="", continuity=first["continuity"], max_chars=500)
     assert second["task_context"]["methods"]["reset"] is False
-    assert second["stance"] == first["stance"]
+    assert second["stance"] == {**first["stance"], "state": "unchanged", "items": []}
     assert second["map"]["unchanged"] is True
     assert second["budget"]["used_chars"] <= 500
 
@@ -620,3 +620,24 @@ def test_the_hook_stance_cap_is_the_most_a_vault_may_set():
     from exomem._hooks import exomem_retrieve_nudge as hook
 
     assert hook._STANCE_MAX_CHARS == activation_conventions.BUDGET_BOUNDS["stance_max_chars"][1]
+
+
+def test_a_caller_holding_the_stance_is_not_sent_it_again_until_it_changes(stance_vault, monkeypatch):
+    """Per-subject recall calls several times a conversation; each once re-sent every stance line."""
+    from exomem import commands, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    working_set_runtime.reset_caches_for_tests()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    first = invoke_command(command, stance_vault, turn="Keep a source", max_chars=600)
+    second = invoke_command(command, stance_vault, turn="Keep a source", continuity=first["continuity"], max_chars=600)
+    _page(stance_vault, "global", "stance: true\n", body="- [rule] Cite a primary source for each claim. ^source\n")
+    _built(stance_vault).close()
+    third = invoke_command(command, stance_vault, turn="Keep a source", continuity=second["continuity"], max_chars=600)
+
+    assert first["stance"]["state"] == "ready" and first["stance"]["items"]
+    assert second["stance"]["state"] == "unchanged" and second["stance"]["items"] == []
+    assert second["stance"]["generation"] == first["stance"]["generation"]
+    assert third["stance"]["state"] == "ready"
+    assert [item["text"] for item in third["stance"]["items"]] == ["Cite a primary source for each claim."]
