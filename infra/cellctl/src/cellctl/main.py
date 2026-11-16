@@ -301,7 +301,7 @@ def build_media_listing() -> B2ObjectStorage | None:
 
 
 def build_catalogue_prewarm():
-    """The chart owns the conservative profile and bounded timeout; absent selects the old path."""
+    """The chart owns the measured build profile and bounded timeout; absent selects the old path."""
     from .catalogue_build import BuildConfig
 
     if os.environ.get("CELLCTL_CATALOGUE_PREWARM", "false") != "true":

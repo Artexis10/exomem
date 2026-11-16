@@ -39,9 +39,9 @@ After adoption, `checkpoint_state` compares projected state across processes. `_
 
 Reuse the existing SQLite publication and restart paths instead of adding a store or delta protocol. The custom additions are ownership of staged copies, boot selection and the build Job entrypoint. They require lifecycle and boundary tests. Publishing directly to the live path would expose the new identity to old code and trigger its repair worker. Building inside the serving pod cannot run the target parser.
 
-### D2 — One quota slot with requests that cover the build peak
+### D2 — One quota slot with requests for steady progress and limits for the peak
 
-The build Job uses serving-sized limits from the existing resource values, currently 2 CPU and 3 GiB. Requests cover the measured build peak. Until rehearsal supplies that measurement, use those limits as the conservative estimate for requests. Small ordinary Job requests would admit a build whose real memory use could evict a serving neighbour. The namespace quota adds exactly one pod plus this profile's requests and limits, preserving ordinary Job headroom.
+The build Job's limits match the serving-sized resource values, currently 2 CPU and 3 GiB, and cover the measured build peak. Its requests cover the build's non-reclaimable memory with headroom and the CPU it needs for steady progress. Task 3.1's rehearsal measured 12,000-note builds at a CPU peak of 1.0 to 1.5 cores, 117 MB of anonymous memory and a cgroup memory.peak of 1.9 GB, most of it reclaimable page cache. The chart therefore requests 1 CPU and 1 GiB. A build can use its limits when the node has room. Memory pressure evicts a pod that uses more than its request first, so a build that outgrows its memory request yields to serving cells and the upgrade proceeds cold. The namespace quota adds exactly one pod plus this profile's requests and limits, preserving ordinary Job headroom.
 
 Platform `infra/helm/platform/templates/cellctl.yaml` quota admission rule 9 currently permits pod quotas 2 or 4, plus 5 with local storage. Update that rule to admit the extra slot: 5 without local storage and 6 with local storage.
 
@@ -100,7 +100,7 @@ Restic backs up `/data/vault` and `/data/host` (`infra/cellctl/src/cellctl/manif
 ## Risks / Trade-offs
 
 - [Catch-up grows between build and boot] → reuse restart reconcile; accept a cold rebuild when reconcile cannot prove the drift.
-- [Build memory could evict a neighbour] → request the estimated peak and cap builds per node; never bypass scheduling.
+- [Build memory could evict a neighbour] → request the build's non-reclaimable memory with headroom, so a build that outgrows its request is evicted first; cap builds per node; never bypass scheduling.
 - [CPU contention slows serving reads] → use the upgrade window and bounded resources; measure contention in rehearsal.
 - [Image pull and startup consume the pre-attempt window] → build activity defers idle attempts only before the force minutes. The per-node attempt limit still bounds rollout throughput.
 - [Staged copies consume volume space] → retain only the current build Job's completed staged copy, then remove every unadopted staged copy at boot.
@@ -120,4 +120,4 @@ Rollback disables the flag and cancels unfinished build Jobs. Old images ignore 
 
 ## Open Questions
 
-- Rehearsal replaces the conservative resource estimate and sets the bounded build Job timeout. Neither value changes the attempt deadlines or scheduling decision. Answered 2026-11-16 from task 3.1's runs: a 12,000-note build took 129 to 223 s at 1.1 to 1.5 cores and 117 MB of anonymous memory (memory.peak 1.9 GB including page cache). The chart now requests 1 CPU and 1 GiB, so a build fits beside serving cells more often, and keeps 2 CPU and 3 GiB as limits for larger vaults; a cold rebuild on one production cell takes about 8 minutes. The timeout stays 1800 s, several times the longest measured build.
+- Rehearsal replaces the conservative resource estimate and sets the bounded build Job timeout. Neither value changes the attempt deadlines or scheduling decision. Answered 2026-11-16 from task 3.1's runs: 12,000-note builds took 129 to 223 s at a CPU peak of 1.0 to 1.5 cores and 117 MB of anonymous memory (memory.peak 1.9 GB including page cache). D2 records the resulting profile: 1 CPU and 1 GiB requests, so a build fits beside serving cells more often, and 2 CPU and 3 GiB limits for larger production vaults. The timeout stays 1800 s, several times the longest measured build.
