@@ -1533,7 +1533,14 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 # The grant route's pin: hydrate only after the release gate, and
                 # keep eviction out until the bytes are read.
                 with media_store.local_originals(vault_root, (rel,), read=True):
-                    snapshot = media_store.read_original_bytes(vault_root, rel)
+                    try:
+                        # An ordinary file is served as it stands, and the release gate below judges its bytes.
+                        snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                    except reserved_paths.ReservedPathLeafError as error:
+                        if error.code != "MISSING":
+                            raise
+                        # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
+                        snapshot = media_store.read_original_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
             except media_store.MediaStoreError as error:

@@ -1537,6 +1537,50 @@ def test_authorized_path_download_serves_an_evicted_original(vault: Path, select
     assert response.status_code == 200 and response.content == expected
 
 
+def test_authorized_path_download_serves_a_cached_original_that_the_owner_edited(
+        vault: Path, selected_store, monkeypatch):
+    """Catches the `?path=` download answering 503 "retry later" for good once an offloaded file is edited on the cell."""
+    from starlette.testclient import TestClient
+
+    from exomem import server, upload_tokens
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    with path.open("r+b") as handle:
+        handle.write(b"edited")
+    edited = path.read_bytes()
+    monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "test-secret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    token = upload_tokens.mint_bound("test-secret", audience="owner")
+
+    response = client.get("/download", params={"path": path.relative_to(vault).as_posix()},
+                          headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200, response.text
+    assert response.content == edited
+
+
+def test_authorized_path_download_serves_a_pooled_filing_from_its_shared_object(vault: Path, monkeypatch):
+    """Catches the `?path=` download answering 404 for a filing whose bytes live only in the shared pool."""
+    from starlette.testclient import TestClient
+    from test_pooled_move_trash import DATA, _filing, _pool
+
+    from exomem import server, upload_tokens
+
+    binary, _page = _filing(vault)
+    _pool(vault, monkeypatch, binary)
+    monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "test-secret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    token = upload_tokens.mint_bound("test-secret", audience="owner")
+
+    response = client.get("/download", params={"path": binary}, headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200, response.text
+    assert response.content == DATA
+
+
 def test_dataset_original_stays_local_so_query_data_reads_it(vault: Path, selected_store):
     """An evicted dataset made query_data answer NOT_FOUND; datasets stay on the volume (D1)."""
     from exomem import media_store, preserve, query_data
