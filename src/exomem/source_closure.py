@@ -71,7 +71,8 @@ class SourceClosurePlan:
     skipped_backrefs: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
+# Not frozen: contextlib assigns __traceback__ when an exception leaves a generator context manager.
+@dataclass(eq=False, slots=True)
 class SourceClosureViolation(Exception):
     code: str
     reason: str

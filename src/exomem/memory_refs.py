@@ -43,7 +43,8 @@ def _sqlite_connect_owned(
     return sqlite3.connect(database, *args, **kwargs)
 
 
-@dataclass(frozen=True)
+# Not frozen: contextlib assigns __traceback__ when an exception leaves a generator context manager.
+@dataclass(eq=False)
 class ReferenceError(Exception):
     code: str
     reason: str
