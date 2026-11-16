@@ -62,6 +62,7 @@ from pathlib import Path
 from . import access, find_corpus, foreground_priority, indexes, note_types, temporal
 from . import audit as audit_module
 from . import find as find_module
+from .kbdir import managed_join
 from .vault import (
     PathGuardError,
     PlannedWrite,
@@ -177,7 +178,7 @@ def _walk_compiled_pages(vault_root: Path, kb: Path):
     if not mode.store_mode_for_reads(root):
         yield from _walk_compiled(kb)
         return
-    prefix = kb.relative_to(root).as_posix() + "/"
+    prefix = managed_join("")
     with read.snapshot(root) as view:
         stored = [
             root / meta.path for meta in view.pages(prefix)

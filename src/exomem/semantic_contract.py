@@ -4372,10 +4372,10 @@ def _build_identity_census(
         # The walk's name rules, applied to each folder and file name of a stored page's path.
         from .vault_store import read
 
-        prefix = kb.relative_to(root).as_posix() + "/"
+        split = managed_splitter()
         with read.snapshot(root) as view:
             members = [
-                meta.path for meta in view.pages(prefix) if _stored_identity_member(prefix, meta.path)
+                meta.path for meta in view.pages(managed_join("")) if _stored_identity_member(split, meta.path)
             ]
             for start in range(0, len(members), read.KEYS_PER_QUERY):
                 request_budget.checkpoint()
