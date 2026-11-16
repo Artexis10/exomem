@@ -4518,7 +4518,13 @@ def test_a_census_that_the_walk_itself_cannot_finish_names_no_note(vault: Path, 
     from exomem import media_allowance, media_store
 
     _malformed_notes(vault, 1)
-    monkeypatch.setattr(media_allowance, "_binding", lambda *args: (_ for _ in ()).throw(OSError("disk")))
+    parse = media_allowance.parse_frontmatter
+
+    def disk_fails_after_parse(*args, **kwargs):
+        parse(*args, **kwargs)  # A damaged note still fails as itself first.
+        raise OSError("disk")
+
+    monkeypatch.setattr(media_allowance, "parse_frontmatter", disk_fails_after_parse)
     census = media_store.take_census(vault)
 
     assert census.used_bytes is None and census.blockers == ()
