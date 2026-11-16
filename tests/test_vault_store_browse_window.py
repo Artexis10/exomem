@@ -271,6 +271,39 @@ def test_a_hostile_parent_gives_the_exhaustive_answer(vault, routes, monkeypatch
     assert all(windowed[(100, name)] for name in CELLS)
 
 
+def test_a_page_that_fails_to_hydrate_is_replaced_by_the_next_one(world, monkeypatch):
+    """A browse that stops short of its limit, or lists a page that failed to hydrate, when the
+    window has pages left to read: the window refills from the next pages as the exhaustive route."""
+    everyone = [hit["path"] for hit in browse(world.root, world.caller, 100, {})]
+    lost = everyone[1]
+    admitted = SimpleNamespace(incomplete=False, capture_page_hashes=lambda paths: None)
+    hydrating = []
+    real_hits, real_resolve = find_module._browse_hits, find_module._resolve_page
+
+    def hits(*args, **kwargs):
+        hydrating.append(1)  # the request's admitted view exists only while the hits hydrate
+        try:
+            return real_hits(*args, **kwargs)
+        finally:
+            hydrating.pop()
+
+    def resolve(root, rel, *args, **kwargs):
+        return None if rel == lost else real_resolve(root, rel, *args, **kwargs)
+
+    monkeypatch.setattr(find_module, "_browse_hits", hits)
+    monkeypatch.setattr(find_module, "_resolve_page", resolve)
+    monkeypatch.setattr(
+        lexstore, "_admitted_catalog_view", lambda root: admitted if hydrating else None
+    )
+
+    windowed = [hit["path"] for hit in browse(world.root, world.caller, 3, {})]
+    declined_window(monkeypatch)
+    exhaustive = [hit["path"] for hit in browse(world.root, world.caller, 3, {})]
+
+    assert windowed == exhaustive == [path for path in everyone if path != lost][:3]
+    assert admitted.incomplete, "the failed page must mark the answer incomplete"
+
+
 def test_a_withheld_frame_never_reaches_a_visible_parents_hit(world):
     """A withheld child's excerpt or frame time on its visible parent's hit, or a withheld page that
     changes which pages the caller sees or in which order."""
