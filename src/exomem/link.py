@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    capabilities,
     entity_candidates,
     indexes,
     markdown_relations,
@@ -56,6 +57,7 @@ from .vault import (
     read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
+    sibling_name_variants,
     split_wikilink_target,
     writer_link_visibility,
     yaml_flow_list,
@@ -250,9 +252,24 @@ def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
             "create-only via `link`; use `replace` to supersede."
         )
     return (
-        f"{rel_entity!r} already exists. Entities are create-only via `link`; "
+        f"{_occupant_name(vault_root, rel_entity)} already exists. Entities are create-only via `link`; "
         "use `replace` to supersede."
     )
+
+
+def _occupant_name(vault_root: Path, rel_entity: str) -> str:
+    """How the refusal names the page that holds the name: by title for an agent on the public tool shape.
+
+    That shape names pages by title everywhere else, so a storage path would be the one place that
+    leaks it. Another caller, and a page whose title cannot be read, keep the path.
+    """
+    if capabilities.shows_links_by_title():
+        from . import page_names
+
+        found = page_names.read_identity(vault_root, rel_entity)
+        if found is not None:
+            return repr(found.title)
+    return repr(rel_entity)
 
 
 # ---------------- validation ----------------
@@ -289,21 +306,6 @@ def _validate(
     if missing:
         return _Err(code="INVALID_LINK", missing=missing, reason="; ".join(reasons))
     return None
-
-
-# ---------------- name + path sanitization ----------------
-
-
-_INVALID_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def _sanitize_name(name: str) -> str:
-    """Strip filesystem-reserved chars from an entity name while preserving
-    Title Case and spaces (which Obsidian filenames allow on Windows)."""
-    cleaned = _INVALID_NAME_CHARS.sub("", name.strip())
-    # Collapse repeated whitespace
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned or "Unnamed"
 
 
 # ---------------- render ----------------
@@ -756,15 +758,16 @@ def link(
         )
     requested_type = entity_type
     entity_type = definition.id
-    slug_warnings: list[str] = []
-    filename_slug: str | None = None
-    if slug is not None:
-        try:
-            filename_slug, slug_warnings = resolve_filename_slug(name, slug)
-        except InvalidSlugError as error:
-            raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
+    try:
+        # The vault's one naming path. An entity is named after the thing it is, so a
+        # vault that set no style gets the title style; `slug` stays an explicit opt-out.
+        filename_slug, slug_warnings = resolve_filename_slug(
+            name, slug, vault_root=vault_root, default_style="title"
+        )
+    except InvalidSlugError as error:
+        raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
     folder = kb_root(vault_root) / "Entities" / definition.folder
-    entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
+    entity_path = folder / f"{filename_slug}.md"
     from .governance import connector_boundary
 
     prospective_path = entity_path.relative_to(vault_root).as_posix()
@@ -888,8 +891,18 @@ def link(
             [{"alias": name, "path": path} for name, found in claimed.items() for path in found],
             fingerprint,
         )
-    if entity_path.exists():
-        reason = _entity_exists_reason(vault_root, rel_entity)
+    # Windows and default macOS hold `Ada Lovelace.md` and `ada lovelace.md` as one file, so a
+    # name that differs only by case or Unicode form is taken, not free.
+    occupant = (
+        entity_path.name
+        if entity_path.exists()
+        else next(iter(sibling_name_variants(folder, entity_path.name)), None)
+    )
+    if occupant is not None:
+        reason = _entity_exists_reason(
+            vault_root,
+            canonical_vault_rel(vault_root, (folder / occupant).relative_to(vault_root).as_posix()),
+        )
         if accepted_decision is not None:
             reason += " A distinct identity needs its own `slug`."
         raise LinkError("ENTITY_EXISTS", ["name"], reason)
@@ -1085,7 +1098,7 @@ def link(
             memory_refs.memory_ref(identity),
             warnings,
             preflight.as_dict(),
-            slug=filename_slug or "",
+            slug=filename_slug if slug is not None else "",
             identity_decision=accepted_decision,
             vocabulary_resolution=type_resolution,
         )
@@ -1102,7 +1115,7 @@ def link(
         memory_refs.memory_ref(identity),
         warnings,
         committed.as_dict(),
-        slug=filename_slug or "",
+        slug=filename_slug if slug is not None else "",
         identity_decision=accepted_decision,
         vocabulary_resolution=type_resolution,
     )

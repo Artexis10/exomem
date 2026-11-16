@@ -690,11 +690,14 @@ def fit_filename(
     return date_prefix + shown + tail, shown != title
 
 
-def resolve_filename_style(vault_root: Path | None = None) -> str:
+def resolve_filename_style(
+    vault_root: Path | None = None, *, default: str = DEFAULT_FILENAME_STYLE
+) -> str:
     """The filename style in force, by documented precedence.
 
     Environment first so a run can be pinned without editing the vault, then the
-    vault's own key, then the default. An unrecognised value is refused rather
+    vault's own key, then `default` (the built-in one unless a caller names its
+    own, as entity creation does). An unrecognised value is refused rather
     than quietly treated as the default -- a typo in a config key that silently
     means "carry on" is how a user concludes the setting does not work.
     """
@@ -706,7 +709,7 @@ def resolve_filename_style(vault_root: Path | None = None) -> str:
         configured = project_keys.filename_style(vault_root)
         source = "project-keys.yaml"
     if configured is None:
-        return DEFAULT_FILENAME_STYLE
+        return default
     normalized = str(configured).strip().lower()
     if normalized not in FILENAME_STYLES:
         raise InvalidSlugError(
@@ -741,7 +744,11 @@ def slugify_with_truncation_check(
 
 
 def resolve_filename_slug(
-    title: str, slug: str | None = None, *, vault_root: Path | None = None
+    title: str,
+    slug: str | None = None,
+    *,
+    vault_root: Path | None = None,
+    default_style: str = DEFAULT_FILENAME_STYLE,
 ) -> tuple[str, list[str]]:
     """Resolve a new filename component without conflating it with display title.
 
@@ -753,7 +760,8 @@ def resolve_filename_slug(
     An explicit `slug` keeps its contract under every style, because it is how a
     caller pins a name it already intends to link to. Omitting `vault_root`
     resolves the style from the environment alone, which keeps every existing
-    caller on today's behaviour.
+    caller on today's behaviour. `default_style` is the style of a vault that
+    configured none.
     """
     if slug is not None:
         if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
@@ -764,7 +772,7 @@ def resolve_filename_slug(
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
-    if resolve_filename_style(vault_root) == "title":
+    if resolve_filename_style(vault_root, default=default_style) == "title":
         readable = sanitize_title_filename(title)
         if readable:
             # No transliteration warning here: nothing was transliterated. That

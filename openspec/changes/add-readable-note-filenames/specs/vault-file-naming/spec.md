@@ -4,9 +4,10 @@
 
 Exomem SHALL resolve a single filename style per vault rather than per call. The
 style SHALL be one of `slug` (lowercase ASCII kebab-case, today's behaviour) or
-`title` (the human title preserved, sanitised only for filesystem safety). The
-default SHALL remain `slug`, so an existing install's derived names do not change
-on upgrade.
+`title` (the human title preserved, sanitised only for filesystem safety). For a
+compiled note the default SHALL remain `slug`, so an existing install's derived
+names do not change on upgrade. An entity follows the requirement "Entity
+Filenames Follow The Vault Naming Path".
 
 Resolution order SHALL be: an explicit per-call `slug` argument, then
 `EXOMEM_FILENAME_STYLE`, then the vault's `_Schema/project-keys.yaml` key, then
@@ -131,3 +132,45 @@ before the change stops resolving after it.
 - **GIVEN** a vault containing notes named under both styles
 - **WHEN** a wikilink is resolved by frontmatter title
 - **THEN** it resolves regardless of which style named the target file
+
+### Requirement: Entity Filenames Follow The Vault Naming Path
+
+Exomem SHALL derive an entity page's filename through the same vault naming path
+as a compiled note. The filename SHALL keep the name as written, including
+diacritics, case and punctuation, after the removals under "Filesystem-Safe Title
+Names". The entity's title SHALL be stored as given. When neither the environment
+nor the vault configures a style, an entity SHALL be named in `title` style. A
+vault that configures `slug` SHALL name its entities in `slug` style, and an
+explicit `slug` argument SHALL name the file under every style.
+
+#### Scenario: A name keeps its diacritics and case on disk
+
+- **WHEN** an entity named `Zöe Exämple` is created in a vault that sets no style
+- **THEN** the file is named `Zöe Exämple.md`
+- **AND** the entity's title is `Zöe Exämple`
+
+#### Scenario: Reserved characters are removed from an entity filename
+
+- **WHEN** an entity named `Draft: A/B plan? <v2>` is created
+- **THEN** the filename contains none of `:`, `/`, `?`, `<` or `>`
+- **AND** the entity's title is stored as given
+
+#### Scenario: An NFD name is written as NFC
+
+- **WHEN** an entity name arrives in decomposed Unicode form
+- **THEN** the filename is the NFC form of that name
+
+### Requirement: Entity Creation Refuses A Filename Clash
+
+Entity creation SHALL refuse a name when the destination folder already holds a
+leaf that equals the derived name after case folding and NFC normalisation. The
+refusal SHALL be `ENTITY_EXISTS`, SHALL name the page that holds the name, and
+SHALL leave that page unchanged. An agent on the public tool shape SHALL see that
+page named by its title, never by its storage path.
+
+#### Scenario: Two titles that map to one file do not overwrite each other
+
+- **GIVEN** an entity named `Orbit Lab` exists
+- **WHEN** an entity named `orbit lab?` is created in the same folder
+- **THEN** the call is refused with `ENTITY_EXISTS`
+- **AND** the existing page's bytes are unchanged

@@ -5353,6 +5353,17 @@ def _leaf_error_message(error: Any) -> str:
     return message
 
 
+def _candidates_by_title(candidates: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Entity candidates as a refusal names them: by title and `ref`, with no storage path for an agent.
+
+    The public tool shape names a page by title everywhere else, so a path here would be the one place
+    it leaks. REST and CLI callers keep the whole candidate.
+    """
+    if not capabilities_module.shows_links_by_title():
+        return candidates
+    return [{key: value for key, value in item.items() if key != "path"} for item in candidates]
+
+
 def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
     """The origin a creation records for its `ref`; None when none was given.
 
@@ -5497,7 +5508,7 @@ def op_link(
     except link_module.LinkError as e:
         msg = _leaf_error_message(e)
         if e.candidates:
-            msg += f" (candidates: {e.candidates})"
+            msg += f" (candidates: {_candidates_by_title(e.candidates)})"
         if e.candidate_fingerprint is not None:
             msg += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(msg) from e

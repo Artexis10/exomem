@@ -60,3 +60,21 @@
 - [x] 5.3 Write a real vault under each style and record the resulting `ls`
       side by side in the PR, the way #598 states the problem.
 - [x] 5.4 Validate the OpenSpec change artifacts.
+
+## 6. Entity Filenames
+
+- [x] 6.1 Derive an entity filename through `resolve_filename_slug` and delete the
+      private sanitiser in `link.py`.
+- [x] 6.2 Refuse a destination that the folder already holds under case folding
+      and NFC, by listing the folder; keep the occupant's own spelling in the refusal.
+- [x] 6.3 Keep an entity in a vault that sets no style on `title`, so no entity
+      name changes on upgrade, through an entity-only default that task 7.1 removes.
+- [x] 6.4 Test diacritics, case, reserved characters, NFC and both clash cases
+      against a real vault.
+
+## 7. Default Style
+
+- [ ] 7.1 Make `title` the default for new compiled notes and entities, with `slug`
+      as the opt-out, and delete the entity-only default of task 6.3. Do not start
+      before the sanitiser correction is agreed, because the default names every
+      new page.

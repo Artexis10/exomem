@@ -21,7 +21,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import find, find_corpus, memory_refs, page_ids, reserved_paths, semantic_contract, vault
+from . import (
+    capabilities,
+    find,
+    find_corpus,
+    memory_refs,
+    page_ids,
+    reserved_paths,
+    semantic_contract,
+    vault,
+)
 from .cli_ops import OpError
 from .governance import egress
 from .kbdir import kb_page_target, managed_join, managed_root
@@ -348,13 +357,42 @@ def _renamed(item: Mapping[str, Any], swaps: Mapping[str, Mapping[str, str]]) ->
     return out
 
 
-def _name_hit(root: Path, hit: Any, *, keep_paths: bool) -> Any:
+def _title_link_renderer(root: Path) -> Callable[[str], str] | None:
+    """Shows the links of a text by title, as `read_page` shows a body; None with no resident resolver.
+
+    A search reply only borrows the resident resolver: it never builds one, so a cold server keeps
+    the stored links rather than pay a vault-sized build.
+    """
+    visible = egress.visible_page_filter(root)
+    resolver = find.borrow_query_resolver(root, visible, schedule_rebuild=False)
+    if resolver is None:
+        return None
+    return lambda text: vault.render_title_links(text, root, resolver=resolver, visible=visible).text
+
+
+def _without_cut_link(text: str) -> str:
+    """`text` without a link that the excerpt ended inside: it would show half a stored path."""
+    start = text.rfind("[[")
+    if start == -1 or "]]" in text[start:]:
+        return text
+    return text[:start].rstrip() + "…"
+
+
+def _name_hit(
+    root: Path, hit: Any, *, keep_paths: bool, render: Callable[[str], str] | None = None
+) -> Any:
     if not isinstance(hit, Mapping) or not isinstance(hit.get("path"), str):
         return hit
     found = read_identity(root, hit["path"])
     if found is None:
         return hit
-    return {**hit, "id": found.id} if keep_paths else _renamed(hit, {"path": {"id": found.id}})
+    if keep_paths:
+        return {**hit, "id": found.id}
+    named = _renamed(hit, {"path": {"id": found.id}})
+    excerpt = named.get("excerpt")
+    if render is not None and isinstance(excerpt, str) and "[[" in excerpt:
+        named["excerpt"] = render(_without_cut_link(excerpt))
+    return named
 
 
 def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
@@ -437,13 +475,22 @@ def name_released_reply(
 
     A write reply swaps `path` for `title` and `id`; `response_detail="full"` still carries the
     path under `diagnostics.operational`. A search reply swaps each page hit's `path` for its `id`
-    (the hit keeps its `title` and `ref`). `keep_paths`, set for `detail="full"`, adds the `id` and
-    keeps the path, for a harness that reads vault files. A page that cannot be read keeps its
-    path. This runs after the egress release, so it names only what that filter let through. A
-    reply that is none of these comes back unchanged.
+    (the hit keeps its `title` and `ref`) and, on the public tool shape, shows the links in its
+    excerpt by title where a resolver is resident. `keep_paths`, set for `detail="full"`, adds the
+    `id` and keeps the path and the stored links, for a harness that reads vault files. A page
+    that cannot be read keeps its path. This runs after the egress release, so it names only what
+    that filter let through. A reply that is none of these comes back unchanged.
     """
     root = Path(root)
     hits = reply.get("hits")
     if isinstance(hits, list):
-        return {**reply, "hits": [_name_hit(root, hit, keep_paths=keep_paths) for hit in hits]}
+        render = None
+        if (
+            not keep_paths
+            and capabilities.shows_links_by_title()
+            and any(isinstance(hit, Mapping) and "[[" in str(hit.get("excerpt", "")) for hit in hits)
+        ):
+            render = _title_link_renderer(root)
+        named = [_name_hit(root, hit, keep_paths=keep_paths, render=render) for hit in hits]
+        return {**reply, "hits": named}
     return _name_write(root, reply)

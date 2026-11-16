@@ -41,7 +41,7 @@ title is already independent of how the file is named.
 
 ## Decisions
 
-### The default stays `slug`
+### The default stays `slug`, for now
 
 The tempting move is to default `title` on, since the issue argues it is the
 better name and the product's pitch supports that. The reason not to: the
@@ -52,6 +52,27 @@ is worse than a vault consistently named the less pretty way.
 
 New vaults can be offered the choice at setup, where the answer is a decision
 rather than a side effect.
+
+This decision is provisional. The intended end state is `title` for new compiled
+notes and entities, with `slug` as the opt-out (task 7.1). It waits on the
+sanitiser correction, because a default that every new note inherits must first
+produce names that a reader can trust.
+
+### Entities use the vault naming path
+
+An entity filename used to come from a private sanitiser in `link.py`, which
+dropped diacritics and kept other characters the vault path removes. The entity
+writer now calls `resolve_filename_slug`, so one rule names every derived page.
+An entity page keeps `Name With Marks.md`; the frontmatter title is untouched.
+
+An entity is create-only, so a clash must refuse rather than disambiguate. The
+writer lists the folder and compares each leaf by `held_fs.name_variants`, the
+same key the vault uses for case and NFC. The refusal names the page that holds
+the name, in that page's own spelling.
+
+Until task 7.1 lands, an entity in a vault that sets no style keeps the title
+style it had. The entity call passes that as its own default to
+`resolve_filename_slug`; task 7.1 deletes the parameter.
 
 ### Sanitise by the union, not by the host
 
