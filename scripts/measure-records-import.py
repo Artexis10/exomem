@@ -8,10 +8,14 @@ playlist export: 57 ordered lists and one 734-row list whose required
 ``records.import`` job through the real importer, one batch at a time.
 
 For each batch it records wall time, the invoking thread's CPU time, and the
-number of SQL statements the batch issued. Every statement gives up the GIL, so
-the statement count multiplies the wait that other busy threads impose.
-Statements are counted only without contenders, because the counting
-callback contends for the GIL too. ``--contenders N`` runs N CPU-bound Python threads beside the import, standing in
+steps the batch took on the store connection. Python's sqlite3 gives up the GIL at
+every step: each ``execute`` call, each parameter set of ``executemany`` and each
+fetched row. The step count therefore multiplies the wait that other busy threads
+impose. A SQLite trace callback is not used: it also fires for trigger programs,
+which run inside one step, and it expands every statement's SQL, so it inflates both
+the count and the wall time. The count comes from a connection and cursor subclass
+that add one integer per call, so wall time stays comparable across runs.
+``--contenders N`` runs N CPU-bound Python threads beside the import, standing in
 for the service's request and background passes in the same process.
 
     uv run python scripts/measure-records-import.py --contenders 0,1,2 --repeats 3 \\
@@ -26,6 +30,7 @@ import argparse
 import json
 import random
 import resource
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -107,6 +112,66 @@ def _spin(stop: threading.Event) -> None:
             value = (value * 31 + i) % 1_000_003
 
 
+class _Steps:
+    """Counts of the GIL-releasing steps that one connection takes, reset per batch."""
+
+    def __init__(self) -> None:
+        self.executes = self.parameter_sets = self.rows = 0
+
+    def reset(self) -> None:
+        self.executes = self.parameter_sets = self.rows = 0
+
+    def snapshot(self) -> dict[str, int]:
+        return {"executes": self.executes, "parameter_sets": self.parameter_sets, "rows_fetched": self.rows,
+                "steps": self.executes + self.parameter_sets + self.rows}
+
+
+def _counting_connection(steps: _Steps) -> type[sqlite3.Connection]:
+    """A connection class whose cursors count into ``steps``; results and errors are unchanged."""
+
+    class Cursor(sqlite3.Cursor):
+        def execute(self, sql, parameters=()):
+            steps.executes += 1
+            return super().execute(sql, parameters)
+
+        def executemany(self, sql, seq_of_parameters):
+            seq = list(seq_of_parameters)
+            steps.parameter_sets += len(seq)
+            return super().executemany(sql, seq)
+
+        def __next__(self):
+            row = super().__next__()
+            steps.rows += 1
+            return row
+
+        def fetchone(self):
+            row = super().fetchone()
+            steps.rows += row is not None
+            return row
+
+        def fetchmany(self, *args):
+            rows = super().fetchmany(*args)
+            steps.rows += len(rows)
+            return rows
+
+        def fetchall(self):
+            rows = super().fetchall()
+            steps.rows += len(rows)
+            return rows
+
+    class Connection(sqlite3.Connection):
+        def cursor(self, factory=None):
+            return super().cursor(factory or Cursor)
+
+        def execute(self, sql, parameters=()):
+            return self.cursor().execute(sql, parameters)
+
+        def executemany(self, sql, seq_of_parameters):
+            return self.cursor().executemany(sql, seq_of_parameters)
+
+    return Connection
+
+
 def _child(args: argparse.Namespace) -> dict[str, object]:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _records_measurement_env import clear_inherited, isolate
@@ -131,7 +196,9 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     stop = threading.Event()
     for _ in range(args.contenders):
         threading.Thread(target=_spin, args=(stop,), daemon=True).start()
-    statements = [0]
+    steps = _Steps()
+    # The store's own seam for the connection class; the import then runs on the counting connection.
+    connection._CONNECTION_FACTORY = _counting_connection(steps)
     result: dict[str, object] = {
         "contenders": args.contenders,
         "rows_in_source": sum(len(item["tracks"]) for item in source),
@@ -157,13 +224,9 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         result["preview_s"] = round(time.perf_counter() - started, 3)
         result["preview_rows"] = preview.get("rows")
         job = import_request(handle, {"mode": "start", **request})
-        # The trace callback is a Python call per statement and contends for the GIL itself,
-        # so statements are counted only in uncontended runs, where it cannot distort a wait.
-        if not args.contenders:
-            handle.connection.set_trace_callback(lambda _sql: statements.__setitem__(0, statements[0] + 1))
         started = time.perf_counter()
         while True:
-            statements[0] = 0
+            steps.reset()
             wall, cpu = time.perf_counter(), time.thread_time()
             with preview_store(vault, handle):
                 ran = importer.run_jobs(vault, max_batches=1)
@@ -172,10 +235,9 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
             result["batches"].append({
                 "wall_s": round(time.perf_counter() - wall, 4),
                 "thread_cpu_s": round(time.thread_time() - cpu, 4),
-                "statements": statements[0] if not args.contenders else None,
+                **steps.snapshot(),
             })
         result["import_s"] = round(time.perf_counter() - started, 3)
-        handle.connection.set_trace_callback(None)
         final = import_request(handle, {"mode": "status", "continuation": job["continuation"]})
         result["final"] = {"state": final.get("state"), "rows": final.get("rows")}
         result["stored_rows"] = handle.connection.execute(
@@ -190,13 +252,13 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
 
 def _summary(runs: list[dict]) -> dict[str, object]:
     walls = sorted(batch["wall_s"] for run in runs for batch in run["batches"])
-    stmts = [batch["statements"] for run in runs for batch in run["batches"] if batch["statements"] is not None]
+    steps = [batch["steps"] for run in runs for batch in run["batches"]]
     return {
         "runs": len(runs),
         "import_s": [run["import_s"] for run in runs],
         "batch_wall_s_max": walls[-1] if walls else None,
         "batch_wall_s_median": walls[len(walls) // 2] if walls else None,
-        "statements_per_batch_max": max(stmts) if stmts else None,
+        "steps_per_batch_max": max(steps) if steps else None,
         "final_rows": runs[-1]["final"]["rows"] if runs else None,
         "stored_rows": runs[-1]["stored_rows"] if runs else None,
         "stored_null_key_rows": runs[-1]["stored_null_key_rows"] if runs else None,

@@ -3,7 +3,7 @@
 - [ ] 1.1 Add a Records import scenario to the existing latency harness (`scripts/measure-records-append-latency.py`) or a sibling that shares its isolation setup. It covers:
   - a generated source of 58 lists and about 4,800 nested rows, with a 734-row `null`-position tail;
   - a contender option that runs CPU-bound threads in the process;
-  - recorded per-batch wall time, CPU time, statement count, and boundary wait and hold.
+  - recorded per-batch wall time, CPU time, step count (`execute` calls, `executemany` parameter sets and fetched rows), and boundary wait and hold.
 - [ ] 1.2 Record the baseline on `main`: the clean store, then 1 and 2 contenders, 3 repeats each. Keep the run files.
 
 ## 2. Validation and honest counts (delivery 1)
@@ -26,7 +26,10 @@
 
 ## 4. Import holds and status (delivery 2)
 
-- [ ] 4.1 Replace per-row store reads in a batch with set-based reads for existing rows, twins, versions and event effects. Read per-collection layout and epoch once per batch. Show the batch's statement count bounded by tables, not rows, in the benchmark.
+- [x] 4.1 Replace per-row store reads in a batch with set-based reads for existing rows, twins, versions and event effects. Read per-collection layout and epoch once per batch. Show the batch's statement count bounded by tables, not rows, in the benchmark.
+  - Built for a batch of new rows in a summary collection: 500 rows take 197 `execute` calls, no parameter-set steps and 664 fetched rows (861 steps), from 4,685, 3,000 and 4,660 (12,345 steps) on `main`. Fetched rows still grow by one per row, through the effect check's payload read.
+  - Not built: a batch that updates or restates existing rows still writes per row, and a collection with references still maintains its reference index per row.
+  - Evidence: the benchmark on the generated 58-list fixture, 3 repeats at 0, 1 and 2 contenders, from the change that delivered this task.
 - [ ] 4.2 Close a batch at the hold budget as well as at 500 rows or 4 MiB. Test an unrelated interactive write during an import beside two CPU-bound threads: it commits with no `MUTATION_BUSY`, and no hold exceeds the budget.
 - [ ] 4.3 Serve import status from a read snapshot off the store-thread queue, with phase, timings, wait and hold, throughput, ETA and resumable or cancellable. Test status while a batch runs.
 

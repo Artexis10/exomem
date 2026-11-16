@@ -122,7 +122,11 @@ The Q1 phase gate's other conditions stay with that change: typed v1, declared i
 
 ### 6. An import batch is short in statements and in time
 
-- **Statements.** One batch runs set-based reads for existing rows and natural-key twins, one `executemany` per table written, and one effects check for the event. Per-collection layout and epoch are read once per batch. This bounds GIL hand-offs by the number of tables, not the number of rows.
+- **Statements.** Python's sqlite3 releases the GIL at every step: an `execute` call, a parameter set of `executemany`, and a fetched row. A batch's cost under contention is its step count. The count excludes trigger programs, which run inside one step.
+  - A batch of new summary rows takes a number of `execute` calls that does not grow with its rows. It reads the stored rows and natural-key holders that its rows meet with one `IN` query per 500 keys. It writes each table with chunked multi-row `INSERT` statements and reads the new row ids back with one JSON aggregate per 500 keys. It checks the event's effects with one binding query and one payload read per payload layout. Its reads of layout and field epochs run a fixed number of times, not once per row.
+  - The effect check keeps its deep proof: it decodes each stored payload and recomputes its hash. That read returns one row per effect, so a batch of N new rows still takes about N fetch steps. Returning them as one row would need a lossless text form for blob and real cells, which this change does not build.
+  - A batch that updates or restates existing rows still writes them one row at a time, with their per-row reads. A collection that declares references still maintains its reference index row by row. Neither is bounded by this decision.
+  - The benchmark counts steps per batch on the store connection and reports `executes`, `parameter_sets`, `rows_fetched` and `steps`. It does not count through a SQLite trace callback, which also fires for trigger programs and slows the batch it counts.
 - **Time.** A batch closes at 500 rows, at 4 MiB, or when its elapsed time reaches 250 ms. The time is measured between rows before the commit, so a contended process commits smaller batches.
 - **Interactive waiters.** The existing interactive-waiter yield still ends the tick between batches.
 - **Status.** Status reads the job row through the store's read snapshot on the caller's own connection, not through the store-thread queue, so it answers while a batch runs.

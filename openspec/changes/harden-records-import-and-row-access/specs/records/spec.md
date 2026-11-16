@@ -83,7 +83,7 @@ A row withheld from the caller SHALL be reported exactly as an absent row. A sta
 - **THEN** the page returns at p95 within 300 ms, and its rows equal the legacy evaluation of the same request
 
 ### Requirement: Import work holds the write boundary briefly and status stays available
-An import batch SHALL issue a number of store statements bounded by the tables it writes, not by its rows. It SHALL close when its elapsed time reaches the documented hold budget, as well as at its row and byte limits. Between batches it SHALL end its hold for a waiting interactive writer.
+An import batch of new rows SHALL take a number of store `execute` calls bounded by the tables it writes, not by its rows. Its fetched rows SHALL be a fixed number plus at most one per row written. A batch that updates or restates existing rows is outside this bound. An import batch SHALL close when its elapsed time reaches the documented hold budget, as well as at its row and byte limits. Between batches it SHALL end its hold for a waiting interactive writer.
 
 Import `status` SHALL answer from a read snapshot without waiting for the collection store thread. It SHALL report:
 
@@ -93,6 +93,10 @@ Import `status` SHALL answer from a read snapshot without waiting for the collec
 - rows per second;
 - an ETA once two batches give a rate;
 - whether the job can be resumed and cancelled.
+
+#### Scenario: A batch of new rows
+- **WHEN** an import commits a batch of 500 new rows into a summary collection that declares no references
+- **THEN** the batch takes fewer `execute` calls than it has rows, and its fetched rows are at most the rows written plus a fixed number, as the benchmark records in `executes` and `rows_fetched`
 
 #### Scenario: An unrelated write during an import
 - **WHEN** a 4,795-row import runs while background passes keep the process busy, and the agent saves an unrelated note
