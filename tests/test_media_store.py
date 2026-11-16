@@ -4434,6 +4434,31 @@ def test_retirement_follows_canonical_edits_and_never_hides_an_identical_new_ori
     assert (vault / trashed.trash_path).read_bytes() == data
 
 
+@pytest.mark.parametrize("removed", ["whole entry", "recovery page only"])
+def test_a_page_stays_editable_after_its_deleted_originals_trash_entry_is_removed_by_hand(
+        vault: Path, selected_store, removed):
+    """Catches every later edit of a page refusing because the owner removed its deleted original's Trash entry by
+    hand, as the delete tells them to, in an archive that never shared its bytes."""
+    from test_vault_store_media import offloaded
+
+    from exomem import delete_file, edit, trash_metadata
+
+    original = "Knowledge Base/Notes/Media/kept-page.txt"
+    offloaded(vault, original)
+    trashed = delete_file.delete_file(vault, path=original, confirm=True)
+    page = f"{original}.md"
+    edit.edit(vault, path=page, why="note a first observation", old_string="extracted text", new_string="first note")
+    entry = vault / trashed.trash_path
+    originals.sidecar_path(entry).unlink()
+    if removed == "whole entry":
+        entry.unlink()
+        (vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).unlink()
+
+    edit.edit(vault, path=page, why="note a second observation", old_string="first note", new_string="second note")
+
+    assert "second note" in (vault / page).read_text(encoding="utf-8")
+
+
 def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vault: Path, selected_store, monkeypatch):
     """Pins the band rule: no hydration, and no eviction, while the evicted bytes leave less than the margin of room.
     The status names the bytes that keep the store from draining, never 0 while it cannot drain."""

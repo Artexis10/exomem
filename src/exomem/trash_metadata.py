@@ -155,7 +155,7 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
     """
     import json
 
-    from .vault import PlannedWrite, content_hash, parse_frontmatter
+    from .vault import PlannedWrite, content_hash
     from .vault_store import read as store_read
 
     writes = list(writes)
@@ -185,7 +185,12 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
                 after = None
             before_fields, after_fields = _companion_fields(before), _companion_fields(after)
             for metadata in dict.fromkeys(link for image in (before_fields, after_fields) if (link := _backlink(image)) is not None):
-                fields, text, _version = _document(vault, metadata)
+                try:
+                    fields, text, _version = _document(vault, metadata)
+                except reserved_paths.ReservedPathLeafError as error:
+                    if error.code != "MISSING":
+                        raise
+                    continue  # An emptied Trash entry leaves no witness to carry or invalidate.
                 value = fields.get("original_retirement")
                 if value is None:
                     continue  # A retired proof remains invalid even if its backlink survives.
@@ -197,13 +202,8 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
                 new_match = _matches_retirement(after, after_fields, metadata, proof)
                 if not old_match and not new_match:
                     continue
-                trash = reference_companion(vault, proof.trash.path)
-                if trash is None:
-                    raise ValueError("Trash retirement lost its recovery companion")
-                trash_fields = parse_frontmatter(trash[1].data.decode("utf-8"), custody=True)[0]
-                if (originals.binary_binding(trash_fields) != proof.trash
-                        or originals.stored_reference(trash_fields.get("stored_object")) != proof.reference):
-                    raise ValueError("Trash retirement lost its exact recovery binding")
+                # The Trash entry is not checked here: every reader confirms it (`PlacementCensus.retired_source`), so a
+                # damaged or partly emptied entry refuses reads rather than every later edit of the page.
                 if _completing.get() == (metadata, proof.before, proof.after) and new_match and proof.source.path not in incoming:
                     continue  # The deletion owns this one prepared reference-removal transition.
                 if (proof.source.path not in incoming and old_match and _backlink(after_fields) == metadata
