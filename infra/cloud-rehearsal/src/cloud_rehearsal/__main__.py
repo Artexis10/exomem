@@ -41,6 +41,7 @@ from . import (
     original_fixity,
     platform,
     raw_import,
+    release_rollout,
     substrate,
     tls,
 )
@@ -117,6 +118,12 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--original-fixity-notes", type=int, default=original_fixity.DEFAULT_NOTES,
                             help="with --original-fixity: the number of plain notes beside the originals")
     run_parser.add_argument(
+        "--release", action="store_true",
+        help="prove the cloud-release rollout on three local-storage cells: the deploy token sets the release image, "
+        "upgrade windows and idle rules order the rolls, a failed canary pauses the rollout and is restored, and only "
+        "the admin token clears the pause; runs after provisioning, in place of the other steps (partial proof; never gates a node)",
+    )
+    run_parser.add_argument(
         "--local-storage-coexistence", action="store_true",
         help="install TopoLVM while keeping Hetzner-class cells for the full P3 lifecycle",
     )
@@ -180,6 +187,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.original_fixity_originals * args.original_fixity_mean_kib * 1024 > original_fixity.MAX_SEED_BYTES:
             parser.error(f"--original-fixity seeds at most {original_fixity.MAX_SEED_BYTES // 1024**3} GiB "
                          "(originals times mean size)")
+    if args.command == "run" and args.release:
+        others = [flag for flag, chosen in (
+            ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
+            ("--operator-restore-abort", args.operator_restore_abort), ("--large-import", args.large_import),
+            ("--raw-import", args.raw_import), ("--original-fixity", args.original_fixity),
+            ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps)) if chosen]
+        if others:
+            parser.error(f"--release runs alone; remove {', '.join(others)}")
     if args.command == "local-storage-drill":
         return asyncio.run(drill.run_drill(args))
     if args.command == "k3s-link":
@@ -215,6 +230,7 @@ async def _run(args: argparse.Namespace) -> int:
         "large_import": args.large_import,
         "raw_import": args.raw_import,
         "original_fixity": args.original_fixity,
+        "release_rollout": args.release,
     }
     if args.cell_image:
         report.valid = False
@@ -230,15 +246,21 @@ async def _run(args: argparse.Namespace) -> int:
     if args.large_import or args.raw_import or args.original_fixity:
         # The cell must exist and be paid for; every later step is a P3 lifecycle check this mode does not make.
         only = {1, 2}
+    if args.release:
+        # The canary needs its connector too (step 3); the rollout proofs replace the other lifecycle steps.
+        only = {1, 2, 3}
     if only is not None:
         report.valid = False
         report.invalid_reasons.append(
             "the large-import mode runs steps 1 and 2, then its own scenario" if args.large_import
             else "the raw-import mode runs steps 1 and 2, then its own scenario" if args.raw_import
             else "the original-fixity mode runs steps 1 and 2, then its own scenario" if args.original_fixity
+            else "the release mode runs steps 1 to 3, then its own proofs" if args.release
             else f"only steps {sorted(only)} were selected")
     # The CLI journey needs the disposable CA in the images and versioned object storage.
     native_cli = args.cloud_import or args.large_import or args.raw_import
+    # Both modes run their cells on the local storage domain (TopoLVM on a loop-device disk).
+    local_domain = args.large_import or args.release
     node_storage: infra.NodeStorage | None = None
     node: drill_cluster.Agent | None = None
     plan: large_import.LargeImportPlan | None = None
@@ -247,9 +269,10 @@ async def _run(args: argparse.Namespace) -> int:
     stack: infra.Stack | None = None
     code = 1
     try:
-        if args.large_import:
+        if local_domain:
             with stage(report, "node_storage"):
-                node_storage, node = drill_cluster.prepare_node_storage(run_id, workdir, large_import.MAX_POOL_GIB)
+                node_storage, node = drill_cluster.prepare_node_storage(
+                    run_id, workdir, large_import.MAX_POOL_GIB if args.large_import else release_rollout.POOL_GIB)
         with stage(report, "substrate_source"):
             source = substrate.fetch_source(args.cache, args.substrate_commit)
             substrate.build_source(source)
@@ -318,6 +341,10 @@ async def _run(args: argparse.Namespace) -> int:
                     "volume_group": drill_cluster.create_volume_group(node, drill_cluster.pool_gib_for(plan.volume_gib)),
                 })
                 plan.node = node
+        if args.release:
+            with stage(report, "release_storage"):
+                report.stages["release_storage"]["volume_group"] = drill_cluster.create_volume_group(
+                    node, release_rollout.POOL_GIB)
         if args.raw_import:
             raw_plan = raw_import.RawImportPlan(run_id=run_id, workdir=workdir, cli_image=v1, python=args.raw_import_python)
         with stage(report, "control_database"):
@@ -343,8 +370,11 @@ async def _run(args: argparse.Namespace) -> int:
                     public_base_url=substrate.PUBLIC_BASE_URL, mcp_path=substrate.MCP_PATH,
                     trusted_ingress_source_value=control.secrets.ingress_source_value,
                     local_storage_coexistence=args.local_storage_coexistence,
-                    local_storage_cell_gib=plan.volume_gib if plan else None,
+                    local_storage_cell_gib=plan.volume_gib if plan else release_rollout.CELL_GIB if args.release else None,
                     operator_restore_abort=args.operator_restore_abort,
+                    upgrade_idle_minutes=release_rollout.IDLE_MINUTES if args.release else None,
+                    upgrade_force_minutes=release_rollout.FORCE_MINUTES if args.release else None,
+                    gateway_hold_budget_seconds=release_rollout.HOLD_BUDGET_SECONDS if args.release else None,
                 ),
                 cellctl_secrets=platform.cellctl_secrets(
                     stack, cell_token_key=control.secrets.cell_token_key,
@@ -358,7 +388,7 @@ async def _run(args: argparse.Namespace) -> int:
             report.stages["platform"]["storage_coexistence"] = deployed.storage_evidence
             report.stages["platform"]["hetzner_class"] = deployed.hetzner_class
             report.stages["platform"]["cell_class"] = deployed.cell_class
-            if plan is not None:
+            if local_domain:
                 report.stages["platform"]["storage_node"] = platform.label_storage_node(stack, deployed)
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "cellctl")
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "exomem-cloud-gateway")
@@ -368,13 +398,18 @@ async def _run(args: argparse.Namespace) -> int:
                       cli_image=v1 if args.cloud_import else None,
                       raw_import=raw_plan,
                       owner_export_image=v1 if args.owner_export else None,
-                      operator_restore_abort=args.operator_restore_abort, large_import=plan,
+                      operator_restore_abort=args.operator_restore_abort, large_import=plan, release_rollout=args.release,
                       original_fixity=original_fixity.FixityPlan(
                           originals=args.original_fixity_originals, mean_bytes=args.original_fixity_mean_kib * 1024,
                           notes=args.original_fixity_notes) if args.original_fixity else None)
         with stage(report, "release"):
-            # The owner's first release: cell_image through Substrate's own route.
-            await ctx.admin_release({"cellImage": built.cell_v1, "release": RELEASE_V1})
+            # The owner's first release: cell_image through Substrate's own route. The release mode sends it as
+            # the workflow does, with the deploy token, which may send the image and its tag and nothing else.
+            if args.release:
+                await ctx.deploy_release(built.cell_v1, RELEASE_V1)
+            else:
+                await ctx.admin_release({"cellImage": built.cell_v1, "release": RELEASE_V1})
+            report.stages["release"]["principal"] = "deploy token" if args.release else "admin token"
             report.stages["release"]["published_cell_slots"] = await _published_cell_slots(ctx, timeout=120)
         try:
             await run_steps(ctx, only=only)
@@ -411,6 +446,9 @@ async def _run(args: argparse.Namespace) -> int:
         elif args.original_fixity:
             # Its stage passed, or StageFailed would have ended the run; steps 3 to 12 did not run.
             code = 0
+        elif args.release:
+            # Every proof is a step record; --harness-check does not excuse a failed proof.
+            code = 0 if report.stages["release_rollout"]["status"] == "passed" else 1
         elif outcome["gates_node"] or args.harness_check:
             code = 0
         else:
@@ -505,9 +543,14 @@ def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
         "events": ["get", "events", "--all-namespaces", "--sort-by=.lastTimestamp"],
         "cellctl": ["logs", "--namespace", platform.CLOUD_NAMESPACE, "deployment/cellctl", "--tail=400"],
         "gateway": ["logs", "--namespace", platform.CLOUD_NAMESPACE, "deployment/exomem-cloud-gateway", "--tail=400"],
+        # The stand-in Traefik's warnings and errors, and its access log of every 5xx it returned.
+        "traefik": ["logs", "--namespace", platform.EDGE_NAMESPACE, "deployment/rehearsal-traefik", "--tail=1000"],
     }.items():
         result = stack.k3s.kubectl(*command, check=False)
-        (out / f"{name}.txt").write_text(result.stdout + result.stderr, encoding="utf-8")
+        # The gateway logs only warnings and errors, so a healthy run leaves its log empty. An empty file reads
+        # as a collection that failed, so the file says the command ran and printed nothing.
+        text = result.stdout + result.stderr
+        (out / f"{name}.txt").write_text(text or f"(kubectl {' '.join(command)} printed nothing)\n", encoding="utf-8")
     artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
     if artifacts:
         shutil.copytree(out, Path(artifacts), dirs_exist_ok=True)

@@ -141,6 +141,22 @@ spec:
     - name: http
       port: 8080
 ---
+# The gateway's Node HTTP server closes a keep-alive connection that stays idle
+# for its keepAliveTimeout (5 s) plus keepAliveTimeoutBuffer (1 s). Traefik keeps
+# an idle backend connection for 90 s by default, so a POST sent just as the
+# gateway closes the connection fails with "broken pipe", and Traefik does not
+# retry a POST: the client sees a plain-text 502. Closing the idle connection
+# sooner than the gateway does means Traefik never reuses a connection the
+# gateway has closed. Every route to the gateway names this transport.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ $edge }}
+spec:
+  forwardingTimeouts:
+    idleConnTimeout: {{ .Values.cloudIngress.gatewayIdleConnTimeout | quote }}
+---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -161,6 +177,7 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+          serversTransport: exomem-cloud-gateway
     # The Exomem icon at the conventional site-icon path. Clients that show a site icon for
     # this MCP server read it here; without the route they fall back to the parent domain's.
     - kind: Rule
@@ -170,6 +187,7 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+          serversTransport: exomem-cloud-gateway
 {{- if .Values.cloudGateway.uploadCellIds }}
     # The gateway's fixed upload route (CLOUD_UPLOAD_PATH). It checks the signed handoff
     # before it reads a body byte, so the route adds no buffering or body-size middleware:
@@ -183,6 +201,7 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+          serversTransport: exomem-cloud-gateway
     # The gateway's original download route. It checks the caller's access token and signs a
     # per-request proof before it contacts the cell, and it streams the body back unbuffered.
     - kind: Rule
@@ -192,6 +211,7 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+          serversTransport: exomem-cloud-gateway
 {{- end }}
 {{- if .Values.cloudIngress.functionalHealthEnabled }}
     - kind: Rule
@@ -202,5 +222,6 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+          serversTransport: exomem-cloud-gateway
 {{- end }}
 {{- end }}

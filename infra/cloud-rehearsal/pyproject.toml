@@ -9,6 +9,7 @@ dependencies = [
     "exomem-cellctl",
     "httpx>=0.28,<1",
     "kubernetes>=35.0,<36",
+    "markdown-it-py==4.2.0",
     "mcp>=1.20,<2",
     "pyyaml>=6,<7",
 ]

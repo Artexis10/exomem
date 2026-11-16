@@ -9,15 +9,17 @@ on:
       - ".github/actions/substrate-test-contract/**"
       - ".github/actions/free-runner-disk/**"
       - ".github/workflows/cloud-rehearsal.yml"
+      - "docs/runbooks/cloud-platform-deploy.md"
+      - "infra/scripts/cloud_deploy.py"
   # The live rehearsal (P3) is the node gate; run it by hand before P4 and
   # after any change to cellctl, the platform chart, the cell image or the
   # pinned Substrate commit.
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook. release: the cloud-release rollout on three local-storage cells (the deploy token sets the image, upgrade windows and idle rules order the rolls, a failed canary pauses the rollout and is restored, only the admin token clears the pause); a partial proof that never gates a node."
         type: choice
-        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, original-fixity]
+        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, original-fixity, release]
         default: full
       large_import_files:
         description: "large-import only: files in both folders (default 70000). The byte total shrinks before the count does."
@@ -114,10 +116,11 @@ jobs:
           RESTORE_ABORT: ${{ inputs.mode == 'operator-restore-abort' && '--operator-restore-abort --steps 1,2 --harness-check' || '' }}
           OWNER_EXPORT: ${{ inputs.mode == 'owner-export' && '--owner-export --steps 1,2 --harness-check' || '' }}
           ORIGINAL_FIXITY: ${{ inputs.mode == 'original-fixity' && '--original-fixity' || '' }}
+          RELEASE: ${{ inputs.mode == 'release' && '--release' || '' }}
           ORIGINAL_FIXITY_ORIGINALS: ${{ inputs.mode == 'original-fixity' && inputs.original_fixity_originals || '' }}
           ORIGINAL_FIXITY_MEAN_KIB: ${{ inputs.mode == 'original-fixity' && inputs.original_fixity_mean_kib || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} ${OWNER_EXPORT} ${ORIGINAL_FIXITY} \
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} ${OWNER_EXPORT} ${ORIGINAL_FIXITY} ${RELEASE} \
             ${ORIGINAL_FIXITY_ORIGINALS:+--original-fixity-originals "$ORIGINAL_FIXITY_ORIGINALS"} \
             ${ORIGINAL_FIXITY_MEAN_KIB:+--original-fixity-mean-kib "$ORIGINAL_FIXITY_MEAN_KIB"} \
             --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"

@@ -35,6 +35,8 @@ HELM = shutil.which("helm")
 # live here, away from every namespace that holds a durable key.
 EDGE_NAMESPACE = "exomem-edge"
 TRAEFIK = "platform-header-test-traefik"
+# A route's service entry for the Cloud gateway: it names the ServersTransport that closes idle connections.
+CLOUD_GATEWAY_SERVICE = {"name": "exomem-cloud-gateway", "port": 8080, "serversTransport": "exomem-cloud-gateway"}
 
 
 def _helm_render(*extra_args: str, chart: Path = PLATFORM_CHART) -> subprocess.CompletedProcess[str]:
@@ -92,6 +94,28 @@ def test_cloud_gateway_route_does_not_strip_x_real_ip() -> None:
                 f"Middleware {doc['metadata']['name']!r}, used by the Cloud gateway's route, "
                 "blanks X-Real-Ip"
             )
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_every_route_to_the_cloud_gateway_closes_idle_connections_before_the_gateway_does() -> None:
+    """The gateway closes an idle connection after 6 s, and Traefik does not retry a POST that meets the closed
+    socket: the client gets a plain-text 502. A route that reaches the gateway without the ServersTransport
+    brings that race back, so each service entry must name a transport that sets an idle timeout."""
+    documents = _helm_template(*UPLOAD_ARGS, "--set", "cloudIngress.functionalHealthEnabled=true")
+    gateway = next(doc for doc in documents if doc.get("kind") == "Service"
+                   and doc["spec"].get("type") == "ExternalName"
+                   and doc["metadata"].get("namespace") == EDGE_NAMESPACE)
+    route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
+    matches = [rule["match"] for rule in route["spec"]["routes"]]
+    assert any("/upload" in match for match in matches) and any("/healthz" in match for match in matches), (
+        "the render must include the optional routes, or this test would not see them")
+    services = [service for rule in route["spec"]["routes"] for service in rule["services"]
+                if service["name"] == gateway["metadata"]["name"]]
+    assert len(services) == len(matches)
+    for service in services:
+        transport = _find(documents, "ServersTransport", service.get("serversTransport", "(none)"))
+        assert transport["metadata"]["namespace"] == route["metadata"]["namespace"]
+        assert transport["spec"]["forwardingTimeouts"]["idleConnTimeout"], service
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1325,7 +1349,7 @@ def test_the_upload_route_posts_to_the_gateway_without_buffering_and_traefik_wai
     # The trusted-ingress header only: a buffering middleware would take the whole body
     # onto the edge pod before the gateway checks the handoff.
     assert upload["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
-    assert upload["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    assert upload["services"] == [CLOUD_GATEWAY_SERVICE]
     assert not [doc for doc in documents if doc.get("kind") == "Middleware" and "buffering" in doc["spec"]]
     traefik_args = _find(documents, "Deployment", TRAEFIK)["spec"]["template"]["spec"]["containers"][0]["args"]
     assert "--entryPoints.websecure.transport.respondingTimeouts.readTimeout=900s" in traefik_args
@@ -1337,7 +1361,7 @@ def test_the_download_route_reaches_the_gateway_for_selected_cells() -> None:
     (download,) = [route for route in routes if "/download" in route["match"]]
     assert download["match"] == "Host(`mcp.example.test`) && Path(`/download`) && Method(`GET`)"
     assert download["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
-    assert download["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    assert download["services"] == [CLOUD_GATEWAY_SERVICE]
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1605,7 +1629,7 @@ def test_functional_health_ingress_rewrites_get_only_without_changing_pod_probes
         {"name": "exomem-cloud-functional-health"},
         {"name": "exomem-cloud-trusted-ingress"},
     ]
-    assert health["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    assert health["services"] == [CLOUD_GATEWAY_SERVICE]
     middleware = _find(documents, "Middleware", "exomem-cloud-functional-health")
     assert middleware["spec"] == {"replacePath": {"path": "/healthz/canary"}}
     assert route["spec"]["tls"]["secretName"] == "exomem-cloud-gateway-tls"

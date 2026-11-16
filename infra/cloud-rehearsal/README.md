@@ -223,6 +223,25 @@ The stage's `runbook_deviations` list each place where the rehearsal differs fro
 Seeding costs about 3 seconds per original on a GitHub runner, so the default 1,000 originals take about an hour of the job's 150 minutes.
 Set the workflow inputs `original_fixity_originals` and `original_fixity_mean_kib` to change the fixture.
 
+## Release rollout
+
+`--release` proves `automate-cloud-releases` tasks 1.13, 1.15, 2.1 and 3.1. It runs only on demand, as the `release` mode of the `Cloud rehearsal` workflow, after steps 1 to 3. Dispatch it with `gh workflow run cloud-rehearsal.yml -f mode=release`.
+The canary and two more cells run on the local storage domain. The baseline release and every later release go through the deploy token and the workflow script's own Substrate client.
+Substrate inserts each cell at 10 GiB, which leaves the pool no slot. The mode sets each cell's row to the 4 GiB default before checkout, and step 13 stops, with the published slots in its evidence, when admission still has no room.
+Each proof is a step record from 13 up. The steps cover the canary rolling at once, an idle cell rolling after its idle minute, a busy cell waiting, a second release leaving the running attempt pinned, a failed canary pausing the rollout and being restored, and the deploy token failing to clear the pause (step 22).
+Step 24 runs the commands of three runbook sections in `docs/runbooks/cloud-platform-deploy.md`, byte for byte, while the pause from step 19 is still set: "Read and clear a paused rollout", "End a forward-only hold" and "Rotate a key under upgrade windows". Its admin-token clear is the proof that the admin token clears the pause.
+The step reads the fenced `bash` blocks with a CommonMark parser, and fails by name when a heading is missing or a block count changes. It runs each block with `bash -o pipefail -c` and only `EXOMEM_ADMIN_TOKEN`, `EXOMEM_SUBSTRATE_URL`, `FIXED_IMAGE`, `FIXED_TAG`, `CELL_ID`, `KUBECONFIG`, `PATH`, `HOME` and `CURL_HOME`.
+The `.curlrc` in `CURL_HOME` sets curl's `cacert` to the run's CA and `connect-to` to the Substrate port on this runner, so no command is edited. A command whose namespace, label or output differs from the rehearsal's fails the step as a runbook finding, with each block's exit code and redacted output in the evidence.
+The run polls each rolled cell through its switch. An errored call fails step 23, and step 23 is blocked when step 14, which starts the first poll, did not pass.
+When the broken release lands on the canary (step 18), a write loop starts. It writes a note with a unique title through the canary's switch about every 2 seconds and keeps each write that returned success with its time. A refused or errored write ends the loop and is not counted. A watch on the canary's row, independent of the loop, records when cellctl holds the canary for its attempt (`hold_kind` `upgrade`), which is when the cell stops.
+Step 21, `acknowledged_writes_survive_and_no_broken_file_remains`, fails when no write was acknowledged, when the stop was never seen, when the last acknowledged write came more than 10 seconds before the stop, or when a search of the restored canary lacks any acknowledged write. Its evidence records the count and the gap from the last acknowledgement to the stop. A negative gap means a write was acknowledged after the stop began.
+An errored poll keeps its UTC time and the first 120 bytes of the response body, with the deploy and admin tokens and bearer credentials removed. A plain-text `502 Bad Gateway` from the edge shows as such, not as a non-JSON body.
+The Traefik stand-in gets the chart's `ServersTransport` settings: its idle backend connection timeout comes from `cloudIngress.gatewayIdleConnTimeout` in the chart's `values.yaml`. Its access log, filtered to 5xx answers, goes to `traefik.txt` in the diagnostics artifact. `gateway.txt` is the gateway's log, which holds lines only for warnings and errors. When a log is empty, the file says the command printed nothing.
+Each poller keeps its MCP session open across calls, because the gateway limits the requests from an address to 120 a minute. No two pollers at 1 Hz overlap. An errored call names the gateway's error code, such as `RATE_LIMITED`.
+Hand-set window annotations hold the cells back, because cellctl keeps a cell's window for the UTC day. A window opens only with 20 minutes of the hour left, so a run can wait for the next hour before step 16. Step 14 also waits past 00:00 UTC when fewer than 45 minutes of the UTC day remain, so no window spans midnight during steps 15 to 17; its evidence records `waited_for_the_next_utc_day_seconds`.
+The chart's gateway hold budget is 0, which turns the hold off. The mode sets 40 seconds and records it.
+The exit code is 0 only when every proof passed. The mode never gates a node.
+
 ## Report
 
 `schema: exomem-cloud-rehearsal-report-v1`. It records:

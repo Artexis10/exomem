@@ -649,6 +649,10 @@ cloudIngress:
   acmeEmail: ""
   cloudflareApiTokenSecretName: exomem-cloudflare-dns-token
   cloudflareApiTokenSecretKey: token
+  # How long Traefik keeps an idle connection to the Cloud gateway. Keep it below the
+  # gateway's Node keep-alive close (5 s plus a 1 s buffer), so Traefik never reuses a
+  # connection the gateway has closed: a POST on a closed connection fails with a 502 and is not retried.
+  gatewayIdleConnTimeout: 4s
 
 cert-manager:
   enabled: true

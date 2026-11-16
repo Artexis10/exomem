@@ -1359,6 +1359,21 @@ def http_middleware(mcp: FastMCP, *, worker_socket: Path | None = None) -> list:
     return middleware
 
 
+def finish_responses_on_shutdown() -> None:
+    """Let a tool call in flight at SIGTERM return its result.
+
+    Each streamable-HTTP tool result travels in a server-sent event stream.
+    sse-starlette ends every open stream the moment uvicorn receives SIGTERM, so
+    a stopping server, such as a Cloud cell at an upgrade, cut its in-flight
+    calls; a proxy in front answered them with a 502. With that drain off,
+    uvicorn's graceful shutdown refuses new connections and lets the calls in
+    flight finish within its timeout (FastMCP's 2 s), then cancels the rest.
+    """
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.disable_automatic_graceful_drain()
+
+
 def run(
     *,
     transport: str = "stdio",
@@ -1441,6 +1456,7 @@ def run(
         from . import download_links
 
         download_links.serve()
+        finish_responses_on_shutdown()
         mcp.run(
             transport=transport,
             host=host,

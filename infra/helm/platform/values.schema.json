@@ -651,7 +651,8 @@
         "hostname": {"type": "string"},
         "acmeEmail": {"type": "string"},
         "cloudflareApiTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
-        "cloudflareApiTokenSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+        "cloudflareApiTokenSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "gatewayIdleConnTimeout": {"type": "string", "pattern": "^[0-9]+(ms|s|m|h)$"}
       },
       "if": {"properties": {"enabled": {"const": true}}},
       "then": {"properties": {
