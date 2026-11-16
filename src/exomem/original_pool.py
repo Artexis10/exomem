@@ -147,7 +147,13 @@ def activate_at_start(vault: Path) -> None:
     global _held
     _held = None
     _record_arrived_format(vault)
-    if not state_migration.shared_originals_intent(vault):
+    try:
+        intended = state_migration.shared_originals_intent(vault)
+    except (ValueError, OSError, state_migration.StateMigrationManifestError):
+        # State that cannot be read shows no intent: ordinary storage serves, and the next start reads it again.
+        log.warning("could not read whether this archive starts in shared original storage", exc_info=True)
+        return
+    if not intended:
         return
     try:
         if _activate_intent(vault, lock_timeout=_START_LOCK_SECONDS):
@@ -166,12 +172,12 @@ def activate_at_start(vault: Path) -> None:
 
 
 def _record_arrived_format(vault: Path) -> None:
-    required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID
-    if required in (state_migration.recorded_descriptor_ids(vault) or ()):
+    # A plain stat first: an archive with no marker, every ordinary one, reads no state and never waits on the
+    # identity gate here, which a promotion must survive while it is busy.
+    if not (pool_root(vault) / _MARKER_NAME).exists():
         return
-    # A plain stat first: an archive with no marker, every ordinary one, never waits on the identity gate here,
-    # which a promotion must survive while it is busy.
-    if not (pool_root(vault) / _MARKER_NAME).exists() or not enabled(vault):
+    required = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID
+    if required in (state_migration.recorded_descriptor_ids(vault) or ()) or not enabled(vault):
         return
     if not launcher_supported():
         log.error("refusing to serve a shared-storage archive whose state does not record that format")
