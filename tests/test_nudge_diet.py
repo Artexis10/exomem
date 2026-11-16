@@ -44,8 +44,10 @@ CEILINGS = {
     # reminder, the KB is the source of truth) are restored for at most 60 bytes.
     "retrieval reminder": (retrieve.REMINDER, 332),
     "retrieval pointer": (retrieve.REMINDER_POINTER, 160),
-    # 1140 in use at balanced; sent on every substantive MCP-mode turn, so growth costs every turn.
-    "mcp activation": (retrieve._MCP_ACTIVATION, 1150),
+    # 1150 -> 1210 (1198 in use at balanced); sent on every substantive MCP-mode turn, so growth costs every
+    # turn. The added scope (the user's work or life; general questions need no recall) stopped agents recalling
+    # on general-knowledge turns, where each needless recall cost a tool call and its packet.
+    "mcp activation": (retrieve._MCP_ACTIVATION, 1210),
 }
 
 
