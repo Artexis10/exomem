@@ -268,11 +268,14 @@ def main() -> int:
         if top_index_path.exists() else None
     )
     sub_writes, new_top = indexes.compute_subindex_writes(
-        vault_root, top_index_text=top_text
+        vault_root,
+        top_index_write=(
+            PlannedWrite(path=top_index_path, content=top_text) if top_text is not None else None
+        ),
     )
     refresh_writes: list[PlannedWrite] = list(sub_writes)
-    if new_top is not None and top_text is not None and new_top != top_text:
-        refresh_writes.append(PlannedWrite(path=top_index_path, content=new_top))
+    if new_top is not None and top_text is not None and new_top.content != top_text:
+        refresh_writes.append(new_top)
     print(f"  refresh writes: {len(refresh_writes)}")
     for w in refresh_writes:
         print(f"    {w.path.relative_to(vault_root)}")

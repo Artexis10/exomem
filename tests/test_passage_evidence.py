@@ -50,6 +50,8 @@ def publish_reference(vault):
 @pytest.fixture
 def passage_tools(vault, monkeypatch):
     monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    # CI's core tier sets the legacy alias; the server would promote it back to EXOMEM_DISABLE_EMBEDDINGS.
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
     encoder = install_encoder(monkeypatch)
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     mcp = server.build_server(require_auth=False)

@@ -217,7 +217,7 @@ class SearchMemory(Wire):
         default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
     options: dict[str, Any] | None = Field(
-        default=None, description="Rare knobs: result_level (page, unit, mixed, passage), mode, rerank, scope, relations, categories, kinds."
+        default=None, description="Rare knobs: result_level=passage, mode, rerank, scope, relations, categories, kinds."
     )
     deep: bool | None = Field(default=None, description="Return a packed context for reasoning.")
     limit: int | None = None
@@ -588,7 +588,7 @@ class SaveSource(Wire):
     projects: list[str] | None = None
     tags: list[str] | None = None
     why: str | None = None
-    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: passages (ordered key/text objects), raw_protection, source_identity, expected_sha256, correction.")
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: passages=[{key,text}], raw_protection, source_identity, expected_sha256, correction.")
     detail: Detail | None = _DETAIL
 
 

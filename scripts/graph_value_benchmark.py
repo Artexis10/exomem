@@ -1440,18 +1440,19 @@ def _canonical_wikilink(path: str) -> str:
 def _refresh_exomem_fixture_indexes(root: Path) -> None:
     """Render generated index counts so public maintenance is Markdown-stable."""
     from exomem import indexes
+    from exomem.vault import PlannedWrite
 
     top_index = Path(root) / "Knowledge Base" / "index.md"
     top_text = top_index.read_text(encoding="utf-8")
     writes, new_top = indexes.compute_subindex_writes(
         Path(root),
-        top_index_text=top_text,
+        top_index_write=PlannedWrite(top_index, top_text),
     )
     for write in writes:
         write.path.parent.mkdir(parents=True, exist_ok=True)
         write.path.write_text(write.content, encoding="utf-8")
-    if new_top is not None and new_top != top_text:
-        top_index.write_text(new_top, encoding="utf-8")
+    if new_top is not None and new_top.content != top_text:
+        top_index.write_text(new_top.content, encoding="utf-8")
 
 
 def render_basic_memory(manifest: dict[str, Any], root: Path) -> RenderedCorpus:

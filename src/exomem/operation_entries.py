@@ -593,8 +593,8 @@ _REMAINING = {
     "coordination_status": (None, (_row("writer-status", "bootstrap"),)),
     "inspect_captured_sources": (None, (_row("inventory", "read_memory"),)),
     "inspect_capture_erasure_policy": (None, (_row("erasure_policy", "read_memory"),)),
-    "reserve_source_capture": (None, (_row("reserve_capture", "reserve_capture"),)),
-    "settle_source_capture": (None, (_row("settle_capture", "settle_capture"),)),
+    "reserve_source_capture": (None, (_row("reserve_capture", "reserve_capture", verb="saved"),)),
+    "settle_source_capture": (None, (_row("settle_capture", "settle_capture", verb="updated"),)),
     "configure_memory": ("action", (
         _row("inspect", "bootstrap", (), kind="settings"),
         _row("set", "change_settings", ("prominence", "expected_revision", "context"), ("prominence", "expected_revision"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.

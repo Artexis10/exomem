@@ -559,6 +559,9 @@ class Invocation:
             return nullcontext()
         return self.manager.absorbing_mutation_guard(self.root, operation="source_result_publication")
 
+    def _enrolled(self, recipe):
+        return any(source_custody.read_manifest(self.root, ref)[0] is not None for ref in recipe.sources)
+
     def _retired(self, recipe):
         return frozenset(reference for reference in recipe.sources
                          if (manifest := source_custody.read_manifest(self.root, reference)[0]) is not None
@@ -590,6 +593,10 @@ class Invocation:
     def _publish(self, pointer, value, *, state, allowed, encode, write, encoding):
         if self.binding is None and not source_custody.available():
             return None
+        if self.binding is None and self.value is None and not self._enrolled(attribution.recipe(_tree(value))):
+            # Only a Source's own capture enrolls it, so an unenrolled result needs no boundary;
+            # waiting would turn a busy holder into an uncertain acknowledgement of a committed write.
+            return None
         with self._hold():
             if self.value is not None:
                 carry_result(self.value, value)
@@ -598,8 +605,7 @@ class Invocation:
                 return None
             retired = self._retired(recipe)
             value, recipe = redact(value, recipe, retired, encoding=encoding)
-            enrolled = any(source_custody.read_manifest(self.root, ref)[0] is not None for ref in recipe.sources)
-            if not enrolled and self.binding is None:
+            if not self._enrolled(recipe) and self.binding is None:
                 return None  # Default-off capture does not create canonical custody.
             owner = ResultCustody(self.root, journal=self.journal)
             try:

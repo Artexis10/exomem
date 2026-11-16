@@ -28,10 +28,9 @@ from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 
 
-def previous_release(patch):
-    """Seed the historical schema-10 identity and payload wire through the maintained writer."""
-    patch.setattr(schema, "SCHEMA_VERSION", 10)
-    # Schema 10 writes v1 events and predates the version-Source association table.
+def before_source_dependencies(patch):
+    """Make the maintained writer seed v1 events, as every release before schema 18 wrote them."""
+    # A store before schema 18 has no event_version column and no version-Source association table.
     columns = tuple(column.name for column in tables.txns.c if column.name != "event_version")
     patch.setattr(tables, "INSERT_TXN", text(
         f"INSERT INTO txns({','.join(columns)}) VALUES({','.join(':' + name for name in columns)})"))
@@ -49,6 +48,12 @@ def previous_release(patch):
             prepared.manifest.collection_id, (), edit_back.NativeInputs((), True))
 
     patch.setattr(source_dependencies, "_bulk_plan", historical_dependencies)
+
+
+def previous_release(patch):
+    """Seed the historical schema-10 identity and payload wire through the maintained writer."""
+    patch.setattr(schema, "SCHEMA_VERSION", 10)
+    before_source_dependencies(patch)
 
     def historical_watermark(conn, cid, **_options):
         # This producer predates the canonical verifier; only the current reader verifies after upgrade.

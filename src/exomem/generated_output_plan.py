@@ -249,9 +249,11 @@ class GeneratedProducer:
 @contextmanager
 def producer(root: Path, *, initialize: bool = False, preview: bool = False) -> Iterator[GeneratedProducer | None]:
     """Reuse existing file custody independently of current Source enrollment."""
-    from .vault_store import availability
+    from .vault_store import mode
 
-    if preview or availability.page_writer(root) is not None:
+    # Store mode opts out on every thread: a preview off the store thread plans and never writes,
+    # and the commit refuses an off-thread write itself.
+    if preview or mode.store_mode_active(root):
         yield None
         return
     store = generated.GeneratedFragmentStore(root)

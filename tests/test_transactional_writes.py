@@ -1275,6 +1275,8 @@ def test_restore_bound_source_timestamps_distinguishes_read_and_write_churn(
     source = vault_module._BatchArtifactGuard.capture(target)
     descriptor = vault_module._open_bound_artifact(source)
     source_info = os.fstat(descriptor)
+    # The snapshot read moved the timestamps; restoring unchanged ones is a no-op that skips utime.
+    os.utime(descriptor, ns=(source_info.st_atime_ns + 10**9, source_info.st_mtime_ns + 10**9))
     real_fstat = os.fstat
     descriptor_observations = 0
 

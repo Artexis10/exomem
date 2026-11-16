@@ -14779,6 +14779,10 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "preserve_artifacts",
             "process_media",
             "episode_memory",
+            "reserve_source_capture",
+            "settle_source_capture",
+            "inspect_captured_sources",
+            "inspect_capture_erasure_policy",
         ],
     },
     "review": {

@@ -1195,7 +1195,8 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     segmenter would have run, and the caller decides what a page whose current
     chunking it cannot afford to derive is worth to it.
     """
-    if "declared_passages" in page.frontmatter:
+    # Frontmatter is optional in the seam's page interface, like media_type below.
+    if "declared_passages" in (getattr(page, "frontmatter", None) or {}):
         from .passage_evidence import declared_chunks
 
         declared = declared_chunks(page)

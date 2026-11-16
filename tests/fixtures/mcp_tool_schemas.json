@@ -1353,7 +1353,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: passages (ordered key/text objects), raw_protection, source_identity, expected_sha256, correction."
+          "description": "Rare knobs: passages=[{key,text}], raw_protection, source_identity, expected_sha256, correction."
         },
         "detail": {
           "enum": [
@@ -1401,7 +1401,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: result_level (page, unit, mixed, passage), mode, rerank, scope, relations, categories, kinds."
+          "description": "Rare knobs: result_level=passage, mode, rerank, scope, relations, categories, kinds."
         },
         "deep": {
           "type": "boolean",
