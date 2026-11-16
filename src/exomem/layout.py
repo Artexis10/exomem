@@ -171,21 +171,21 @@ def inspect(vault_root: Path) -> Resolved:
         )
     root_folder, wrapper_folder = _schema_folders()
     root_record, wrapper_record = _record_rels()
-    remedy = (
-        f"Write a layout record: {root_record} with `layout: root` when the vault root is the "
-        f"managed root, or {wrapper_record} with `layout: nested` when it is not."
-    )
     if root_folder in present and wrapper_folder in present:
         raise LayoutError(
             "LAYOUT_AMBIGUOUS",
             f"Both {root_folder}/ and {wrapper_folder}/ exist and the vault has no layout record.",
-            remedy,
+            f"Write the record for the layout the pages are in: {wrapper_record} with "
+            f"`layout: nested` when the pages sit under {wrapper_folder.rpartition('/')[0]}/, or "
+            f"{root_record} with `layout: root` when they sit at the vault root. A record that "
+            "names the wrong layout hides every page.",
         )
     if root_folder in present:
         raise LayoutError(
             "LAYOUT_RECORD_MISSING",
             f"{root_folder}/ sits at the vault root and the vault has no layout record.",
-            remedy,
+            f"Write {root_record} with `layout: root`: a schema folder only at the vault root "
+            "means the vault root is the managed root.",
         )
     return Resolved(Layout.NESTED)
 

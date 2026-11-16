@@ -113,7 +113,7 @@ def test_schema_folder_at_the_root_without_a_record_is_refused_naming_the_record
 
     assert refused.value.code == "LAYOUT_RECORD_MISSING"
     assert f"_Schema/{layout.RECORD_NAME}" in refused.value.remediation
-    assert "Write a layout record" in refused.value.remediation
+    assert "layout: root" in refused.value.remediation
 
 
 def test_schema_folders_in_both_places_without_a_record_are_refused_naming_both_and_the_remedy(
