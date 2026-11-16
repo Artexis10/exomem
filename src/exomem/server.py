@@ -909,6 +909,11 @@ def build_server(
         # The writer lease is state ownership. A standby acquires it only at
         # promotion (`seamless-managed-worker-handoff` D7).
         start_server_lifecycle()
+        from . import original_pool
+
+        # After the launcher or standalone claim in `run` and before any
+        # request; a standby runs this at promotion instead.
+        original_pool.activate_at_start(runtime.vault_root)
     # Cloud mode (design D1): EXOMEM_CLOUD_CELL=1 selects a thin seam over
     # this exact standalone path. LocalRuntimeActivation,
     # AuthorizationSessionMiddleware and the local writer lease are the

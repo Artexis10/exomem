@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from pathlib import Path, PurePosixPath
 
 from . import artifact_lifecycle, held_fs, originals, reserved_paths, state_migration
 from .kbdir import managed_join, managed_root
+
+log = logging.getLogger(__name__)
 
 DESCRIPTOR_ID = reserved_paths.ORIGINAL_POOL_DESCRIPTOR_ID
 OWNER = reserved_paths.ORIGINAL_POOL_OWNER
@@ -98,6 +101,48 @@ def _activate_intent(vault: Path, *, lock_timeout: float | None = None) -> bool:
     state_migration.clear_shared_originals_intent(
         vault, authority_check=lambda: artifact_lifecycle.supports(required), lock_timeout=lock_timeout)
     return True
+
+
+#: What a service start reports when it holds a new archive's shared storage for want of launcher support.
+LAUNCHER_UPDATE_ACTION = ("Update the managed launcher offline, as docs/managed-service-upgrades.md describes, then "
+                          "restart the service; its next start moves new originals into shared storage.")
+# Bounded like startup admission: a service start never waits indefinitely on another migrator.
+_START_LOCK_SECONDS = state_migration._BOOTSTRAP_LOCK_TIMEOUT_SECONDS
+# This process's held activation, for readiness; None once activation is done or never needed.
+_held: dict[str, str] | None = None
+
+
+def activate_at_start(vault: Path) -> None:
+    """Activate a new archive's recorded shared storage before the service admits writes.
+
+    The service calls this once it owns the vault, after the launcher or standalone claim: at its start, or at a
+    standby's promotion, since a standby proves no support. Without launcher support, or when activation fails,
+    the archive keeps ordinary storage and its intent for the next start, and the startup log and readiness name
+    the action; startup never fails over it. Originals filed before activation keep their ordinary storage.
+    """
+    global _held
+    _held = None
+    if not state_migration.shared_originals_intent(vault):
+        return
+    try:
+        if _activate_intent(vault, lock_timeout=_START_LOCK_SECONDS):
+            log.info("a new archive's originals now use shared storage")
+            return
+        _held = {"state": "held", "reason": "launcher_support_unproven", "action": LAUNCHER_UPDATE_ACTION}
+    except Exception:  # noqa: BLE001 - ordinary storage serves every request; the recorded intent retries next start
+        log.warning("shared original storage activation failed", exc_info=True)
+        _held = {"state": "held", "reason": "activation_failed",
+                 "action": "Restart the service to retry; the archive keeps ordinary storage until then."}
+    log.warning("a new archive keeps ordinary original storage (%s). %s", _held["reason"], _held["action"])
+    from . import runtime_readiness
+
+    # A ready answer proved before the hold, as during a promotion, must not be served without it.
+    runtime_readiness.invalidate_cached_readiness()
+
+
+def held_activation() -> dict[str, str] | None:
+    """The readiness block for a new archive whose shared storage this process holds, or None."""
+    return None if _held is None else dict(_held)
 
 
 def enable(vault: Path, *, lock_timeout: float | None = None) -> None:

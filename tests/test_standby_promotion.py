@@ -1503,3 +1503,26 @@ def test_the_promote_endpoint_hands_the_supervisors_request_budget_to_the_standb
         )
         assert invalid.status_code == 400, unusable
     assert received == [30.0, None], "an unusable budget must not reach promotion"
+
+
+def test_promotion_activates_a_new_archives_shared_storage_that_the_standby_could_not(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Catches a managed upgrade whose promoted worker never activates a new archive's shared storage: a standby proves
+    no launcher support, so promotion is that worker's first capable start."""
+    from exomem import artifact_lifecycle, init, original_pool, state_migration
+
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    vault = tmp_path / "vault"
+    init.init_vault(vault)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    assert not artifact_lifecycle.supports(state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID)
+
+    service_standby.promote(vault, migrated=False)
+
+    assert original_pool.enabled(vault)
+    assert not state_migration.shared_originals_intent(vault)
