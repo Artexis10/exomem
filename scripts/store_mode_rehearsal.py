@@ -1604,7 +1604,8 @@ class Rehearsal:
                 )
                 entry["detail"] = done.get("status")
         with self.step("build the sidecars: exomem maintain --reconcile", fatal=True):
-            rig.cli_json("maintain --reconcile", "maintain", "--reconcile", "--json")
+            # A cold build of every sidecar on a real vault outlasts the default; as long as a migrate.
+            rig.cli_json("maintain --reconcile", "maintain", "--reconcile", "--json", timeout=3600.0)
         self.report["vault"] = vault_stats(layout.vault)
         with self.step("store-mode status before the switch", fatal=True) as entry:
             status = rig.store_json("status")
