@@ -60,8 +60,8 @@ def rows(count, *, note_at=None, width=0):
     return found
 
 
-def make(store, *, summary, items):
-    text = manifest_text().replace("    count: {type: integer}\n", FIELDS)
+def make(store, *, summary, items, fields=FIELDS):
+    text = manifest_text().replace("    count: {type: integer}\n", fields)
     store.create_collection(manifest_path(), summary_text(text) if summary else text, why="create",
                             scaffold=False)
     _evidence(store.root)
@@ -160,36 +160,91 @@ def test_a_filtered_page_of_five_thousand_rows_rebuilds_only_its_rows(store):
         result = query(store, columns=["title"], **arguments)
         assert rebuilt == [("store.materialize", 10)]
         rebuilt.clear()
-        # Default columns come from the leading rows; every seeded row holds only a title, so the
-        # first row shows every column and is the only other row rebuilt.
+        # Default columns come from the 500 leading rows, which are rebuilt with the page.
         inferred = query(store, **arguments)
     assert result.total_matched == inferred.total_matched == 1111  # Seed 4, 40-49, 400-499, 4000-4999
     assert [row["title"] for row in result.rows][:2] == ["Seed 4999", "Seed 4998"]
-    assert sorted(rebuilt) == [("store.materialize", 1), ("store.materialize", 10)]
+    assert sorted(rebuilt) == [("store.materialize", 10), ("store.materialize", 500)]
+
+
+@pytest.mark.parametrize("field, value", [("note", None), ("tags", ["blue"])], ids=["null-value", "array"])
+def test_default_columns_rebuild_the_leading_rows_in_a_few_reads(store, field, value):
+    """Rebuilding leading rows one read at a time costs a statement per row, seconds beside busy threads.
+
+    A null value that projection drops, or an array field that the field-tree walk decodes row by
+    row, made every leading row look like it might add a column.
+    """
+    fields = FIELDS + "    tags: {type: array, items: {type: string}}\n"
+    make(store, summary=True, items=[{"title": f"R{n:04d}", "count": n, field: value} for n in range(400)],
+         fields=fields)
+    statements = []
+    init = reader._Selecting.__init__
+
+    def traced(self, adapter, manifest, snapshot, admitted):
+        init(self, adapter, manifest, snapshot, admitted)
+        admitted.session.connection.set_trace_callback(lambda _sql: statements.append(1))
+
+    arguments = {"filters": [{"column": "count", "op": "gte", "value": 0}], "limit": 5}
+    with whole_read_only():
+        expected = query(store, **arguments)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(reader._Selecting, "__init__", traced)
+        actual = query(store, **arguments)
+    assert answer(actual) == answer(expected)
+    assert len(statements) < 100  # one or more per leading row before: 400 rows took over 400
 
 
 @pytest.mark.query_deadline
-def test_a_summary_query_beside_busy_threads_answers(store):
-    """Time spent waiting for the GIL behind other threads is not the query's cost."""
+def test_time_spent_waiting_is_not_the_query_s_cost(store, monkeypatch):
+    """A deadline that counts time spent waiting for the GIL behind busy threads refused a 154-row page."""
     make(store, summary=True, items=rows(154))
-    stop = threading.Event()
+    # Each clock reading on this thread jumps half a second and spends no CPU, as a wait does. The
+    # wall backstop is raised so that only the CPU budget decides.
+    caller, jumped, monotonic = threading.get_ident(), [0.0], time.monotonic
 
-    def spin():
-        while not stop.is_set():
-            pass
+    def waited():
+        if threading.get_ident() == caller:
+            jumped[0] += 0.5
+        return monotonic() + jumped[0]
 
-    spinners = [threading.Thread(target=spin, daemon=True) for _ in range(2)]
-    for spinner in spinners:
-        spinner.start()
-    try:
-        result = query(store, filters=[{"column": "title", "op": "startswith", "value": "Row 1"}],
-                       sort_by="count", limit=5)
-    finally:
-        stop.set()
-        for spinner in spinners:
-            spinner.join()
+    monkeypatch.setattr(runtime, "WALL_BACKSTOP_MS", 10**9, raising=False)
+    monkeypatch.setattr(time, "monotonic", waited)
+    result = query(store, filters=[{"column": "title", "op": "startswith", "value": "Row 1"}],
+                   sort_by="count", limit=5)
     assert result.total_matched == 64  # Row 1, Row 10-19, Row 100-153
     assert result.returned == 5
+
+
+def test_a_stopped_query_refuses_alike_on_both_routes(store, monkeypatch):
+    """A caller that branches on the refusal must not see a different one when routing declines."""
+    make(store, summary=True, items=rows(20))
+    monkeypatch.setitem(runtime.PROFILES, "records", {**runtime.PROFILES["records"], "timeout_ms": 0})
+    with pytest.raises(collections.CollectionError) as routed:
+        query(store, sort_by="title", limit=3)
+    with whole_read_only(), pytest.raises(collections.CollectionError) as whole:
+        query(store, sort_by="title", limit=3)
+    assert (routed.value.code, routed.value.reason, routed.value.details) == \
+        (whole.value.code, whole.value.reason, whole.value.details)
+    assert routed.value.code == "QUERY_TIMEOUT" and "CPU budget" in routed.value.reason
+
+
+def test_converted_summary_rows_keep_their_item_key_order(store):
+    """Rows a conversion left with their old view paths must not reorder an unsorted page or its offsets."""
+    make(store, summary=True, items=rows(12))
+    keys = [key for (key,) in store.connection.execute(
+        "SELECT item_key FROM items WHERE collection_id=? ORDER BY item_key", (CID,))]
+    # A conversion keeps each row's item file path, which need not follow item key order.
+    with store.handle.transaction() as tx:
+        tx.executemany("UPDATE items SET view_path=? WHERE item_key=?",
+                       [(f"Knowledge Base/Records/Work/Items/{n:02d}.md", key) for n, key in enumerate(reversed(keys))])
+    with store.read_collection(CID) as manifest:
+        whole = [record.identity.key for record in reader.StoreAdapter(store, manifest, None).read().records]
+    with whole_read_only():
+        expected = query(store, limit=5)
+    with selections() as made:
+        actual = query(store, limit=5)
+    assert whole == keys
+    assert made and answer(actual) == answer(expected)
 
 
 def test_a_withheld_row_and_a_restricted_caller_keep_the_whole_read(store):
@@ -209,6 +264,24 @@ def test_a_withheld_row_and_a_restricted_caller_keep_the_whole_read(store):
         owner = query(store, **arguments)
     assert made and answer(owner) == answer(expected)
     assert owner.total_matched == 9 and "Secret" in {row["title"] for row in owner.rows}
+
+
+@pytest.mark.query_deadline
+def test_a_whole_summary_read_outside_a_query_answers_under_the_shipped_profile(store, monkeypatch):
+    """Only a Records query bounds the decode: an export, alias or audit read of 5,000 rows refused."""
+    make(store, summary=True, items=[])
+    _seed(store, CID, 5000)
+    decode = typed_storage._current
+
+    def slow(*args, **kwargs):  # 30 ms of CPU per 500-row batch: 300 ms, past the 200 ms profile
+        start = time.thread_time()
+        while time.thread_time() - start < 0.03:
+            pass
+        return decode(*args, **kwargs)
+
+    monkeypatch.setattr(typed_storage, "_current", slow)
+    with store.read_collection(CID) as manifest:
+        assert len(reader.StoreAdapter(store, manifest, None).read().records) == 5000
 
 
 def test_a_whole_summary_read_stops_decoding_at_its_deadline(store, monkeypatch):

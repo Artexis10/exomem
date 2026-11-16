@@ -37,6 +37,7 @@ from ..governance.decisions import Decision, decide
 from ..governance.principal import RequestPrincipal, effective_principal
 from ..planning_values import PlanningValues
 from . import tokens, types
+from .summary import SUMMARY
 
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
@@ -2228,20 +2229,25 @@ class OperationAuthorization:
         Larger reads page through a collection query with its continuation;
         this never returns some of the rows as if they were all of them.
         """
-        from ..query_engine.runtime import Deadline, QueryLimits, current_deadline
+        from ..query_engine.runtime import Deadline, QueryLimits, current_deadline, records_refusal
         limits = QueryLimits()
         if release.released > limits.max_row_visits:
             raise collections.CollectionError(
                 "QUERY_COST_LIMIT", "summary rows exceed one bounded read; page them with a collection query",
                 {"released_rows": release.released, "max_row_visits": limits.max_row_visits})
-        # A request's own deadline when it set one (a Records query's), else one interactive read's.
-        deadline = current_deadline() or Deadline(limits.timeout_ms)
+        # A Records query's deadline bounds its whole read, decode included, and refuses as its routed
+        # read does. Any other whole read keeps one interactive read's bound on its fetch alone.
+        query = current_deadline()
+        deadline = query or Deadline(limits.timeout_ms)
 
         def check():
-            if (expired := deadline.expired()) is not None:
-                raise collections.CollectionError(
-                    "QUERY_TIMEOUT", f"summary rows exceed one bounded read ({expired.message}); "
-                    "page them with a collection query", {"timeout_ms": deadline.cpu_ms, "wall_ms": deadline.wall_ms})
+            if (expired := deadline.expired()) is None:
+                return
+            if query is not None:
+                raise records_refusal(expired, query)
+            raise collections.CollectionError(
+                "QUERY_TIMEOUT", f"summary rows exceed one bounded read ({expired.message}); "
+                "page them with a collection query", {"timeout_ms": deadline.cpu_ms, "wall_ms": deadline.wall_ms})
 
         rows = []
         if release.released and self.conn.execute("SELECT derived FROM collections WHERE collection_id=?",
@@ -2261,9 +2267,9 @@ class OperationAuthorization:
                     if not uniform:
                         batch = [row for row in batch if self._summary_row_released(release, row)]
                     rows.extend(batch)
-        rows.sort(key=_view_order)
+        rows.sort(key=_key_order)
         held = {subject.row_id for subject, decision in release.held if decision.level >= 6}
-        rows, snapshot = self.field_rows(cid, rows, release.snapshot, check=check)
+        rows, snapshot = self.field_rows(cid, rows, release.snapshot, check=check if query else lambda: None)
         return rows, snapshot, held
 
     def _summary_row_released(self, release: SummaryRelease, row: Mapping[str, Any]) -> bool:
@@ -2275,17 +2281,22 @@ class OperationAuthorization:
 def input_order(manifest: collections.CollectionManifest) -> Callable[[Mapping[str, Any]], tuple]:
     """The key of the order a collection's rows reach every legacy reader, over ``items`` columns.
 
-    A markdown log keeps its declared insertion order; other rows go by view path, then item key
-    (a summary row has no view path).
+    A markdown log keeps its declared insertion order. Summary rows go by item key: a converted
+    row keeps its old item file path, which need not follow it. Other rows go by view path, then
+    item key.
     """
     if manifest.storage.strategy == "markdown-log":
         sign = -1 if manifest.storage.descriptor.get("insertion") == "newest-first" else 1
         return lambda row: (sign * row["created_txn"], sign * row["row_id"])
-    return _view_order
+    return _key_order if manifest.view_mode == SUMMARY else _view_order
 
 
 def _view_order(row: Mapping[str, Any]) -> tuple[str, str]:
     return row["view_path"] or "", row["item_key"]
+
+
+def _key_order(row: Mapping[str, Any]) -> tuple[str]:
+    return (row["item_key"],)
 
 
 def resolve_bound_membership(root: Path, identity: str, candidate: policy.Policy,

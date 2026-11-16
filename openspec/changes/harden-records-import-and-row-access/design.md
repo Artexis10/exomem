@@ -116,10 +116,11 @@ This change keeps `execute_legacy` as the one entry point and replaces its strat
 
 - It reads only the fields that the filters, sort, date bounds and aggregate decide on. It reads them in packed keyset chunks in row-id order, one statement step per chunk.
 - It decides each row with the `query_compat` primitives of the file evaluator, so the answers are equal by construction. It does not run each legacy operator in SQL.
-- It returns the row ids of the page, the totals and the aggregate. The Records surface rebuilds only the returned rows and infers default columns from the stored field names of the leading rows.
+- It returns the row ids of the page, the totals and the aggregate. The Records surface rebuilds only the returned rows. When the request names no columns, it also rebuilds the leading rows in one read and infers the default columns from them, as the file evaluator does.
+- Summary rows keep their item key order. A converted row keeps its old item file path, so view path order would reorder them.
 - Its deadline counts the CPU time of the request's own thread, under a fixed `records` profile of 1 s with a 2 s wall-clock backstop (`add-collection-query-engine` design §9 and §12).
 
-The Records query keeps the whole read, under the same deadline, wherever a selected answer could differ from it: a caller limited to some fields, a derived collection, `typed-v1` rows, child tables, a profile aggregate, or a root that is a system or non-scalar field. The whole read now checks the deadline while it decodes rows, too. There is still one query engine.
+The Records query keeps the whole read, under the same deadline, wherever a selected answer could differ from it: a caller limited to some fields, a derived collection, `typed-v1` rows, child tables, a profile aggregate, or a root that is a system or non-scalar field. Inside a Records query, the whole read also checks the deadline while it decodes rows, and it refuses with the same code, message and details as the selected read. Other whole summary reads bound only their fetch, as before. There is still one query engine.
 
 - The continuation keeps its legacy offset form.
 - The ownership proof is taken once per request. A routed store request hands its proof to the store thread, which proves nothing itself; only a call outside that route proves again.

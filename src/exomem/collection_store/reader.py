@@ -32,20 +32,20 @@ class StoreAdapter:
         self.writer = writer
         self.manifest = manifest
         self.project_values = project_values
-        self._deadline = None
+        self.deadline = None  # the Records query's (`begin_query`), shared by every read it makes
 
     def begin_query(self) -> None:
-        """Bound this adapter's reads by one Records query deadline, shared by every read it makes."""
+        """Bound this adapter's reads by one Records query deadline."""
         from ..query_engine import runtime
 
-        self._deadline = runtime.Deadline(runtime.PROFILES["records"]["timeout_ms"])
+        self.deadline = runtime.Deadline(runtime.PROFILES["records"]["timeout_ms"])
 
     def _deadline_scope(self):
-        if self._deadline is None:
+        if self.deadline is None:
             return nullcontext()
         from ..query_engine import runtime
 
-        return runtime.deadline_scope(self._deadline)
+        return runtime.deadline_scope(self.deadline)
 
     def read(self) -> record_formats.AdapterSnapshot:
         with self._deadline_scope(), self.writer.read_collection(self.manifest) as manifest:
@@ -135,12 +135,6 @@ class _Selecting:
 
         return sqlite.execute_legacy(self.admitted, query, path=self.manifest.storage.source,
                                      format=self.manifest.storage.strategy, lead=lead)
-
-    def present(self, row_ids: Sequence[int]) -> dict[int, set[str]]:
-        """The names of the values each of ``row_ids`` holds as stored, before any projection."""
-        from ..query_engine import sqlite
-
-        return {row_id: set(values) for row_id, _, values in sqlite.scan(self.admitted, self.fields, rows=row_ids)}
 
     def records(self, row_ids: Sequence[int]) -> record_formats.AdapterSnapshot:
         """The records of ``row_ids`` in that order, built as the whole read builds each one.

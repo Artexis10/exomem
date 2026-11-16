@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .. import query_compat as compat
@@ -157,9 +156,8 @@ class _Smallest:
         return self.entries
 
 
-def scan(admitted: AdmittedCollection, fields: tuple[str, ...], *, rows: Sequence[int] | None = None):
-    """Yield ``(row_id, input key, values)`` of every admitted row, or of the admitted ``rows``, in no
-    particular order.
+def scan(admitted: AdmittedCollection, fields: tuple[str, ...]):
+    """Yield ``(row_id, input key, values)`` of every admitted row, in no particular order.
 
     ``values`` holds only ``fields``, after the session's projection. A withheld row is excluded
     before any of its values is read.
@@ -189,20 +187,17 @@ def scan(admitted: AdmittedCollection, fields: tuple[str, ...], *, rows: Sequenc
         columns, source, decode = scan_parts(session, admitted.collection_id, admitted.layout, fields)
     key = admitted.input_key
     head = ("item_key", "view_path", "created_txn", "row_id")
-    chosen, scope = "", ()
-    if rows is not None:
-        chosen, scope = " AND i.row_id IN (SELECT value FROM json_each(?))", (json.dumps(list(rows)),)
     # Row id order walks items_by_collection_row and both tables in storage order; item key order
     # reads them at random, about three times slower once a collection outgrows the page cache.
     select = (f"SELECT {','.join([*(f'i.{name}' for name in head), *columns])} FROM {source} "  # noqa: S608
-              f"WHERE i.collection_id=? AND {admitted.membership_sql}{chosen} AND i.row_id {{}} ? "
+              f"WHERE i.collection_id=? AND {admitted.membership_sql} AND i.row_id {{}} ? "
               "ORDER BY i.row_id LIMIT ?")
     width, size, after, grow = len(head) + len(columns), _FIRST_CHUNK, None, True
     while True:
         session.check()
         try:
             found = packed.rows(conn, select.format(">=" if after is None else ">"),
-                                (admitted.collection_id, *scope, -1 << 63 if after is None else after, size), width)
+                                (admitted.collection_id, -1 << 63 if after is None else after, size), width)
         except sqlite3.Error as error:
             if not packed.too_big(error) or size == 1:
                 raise

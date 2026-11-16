@@ -104,6 +104,12 @@ class Deadline:
         return None
 
 
+def records_refusal(error: QueryError, deadline: Deadline) -> collections.CollectionError:
+    """The refusal of a Records query that ``error`` stopped, the same on every route it takes."""
+    return collections.CollectionError(error.code, f"the records query stopped: {error.message}",
+                                       {"timeout_ms": deadline.cpu_ms, "wall_ms": deadline.wall_ms})
+
+
 def current_deadline() -> Deadline | None:
     """The deadline a request set on this thread with `deadline_scope`, or None."""
     found = _DEADLINE.get()

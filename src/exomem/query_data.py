@@ -41,6 +41,7 @@ from .query_compat import (
     DATE_LIKE as _DATE_LIKE,
 )
 from .query_compat import (
+    DEFAULT_DATE_COLUMN,
     DEFAULT_OP,
     QueryDataError,
     distinct_key,
@@ -183,18 +184,8 @@ def _infer_columns(
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> list[str]:
     cols: list[str] = []
-    extend_columns(cols, set(), rows[:INFERENCE_ROWS], project_values)
-    return cols
-
-
-def extend_columns(
-    cols: list[str],
-    seen: set[str],
-    rows: list[dict],
-    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
-) -> None:
-    """Append to ``cols`` each key of ``rows`` not in ``seen``, in order; ``seen`` tracks ``cols``."""
-    for r in rows:
+    seen: set[str] = set()
+    for r in rows[:INFERENCE_ROWS]:
         if isinstance(r, dict):
             candidates = r
             if project_values is not None:
@@ -206,6 +197,7 @@ def extend_columns(
                 if k not in seen:
                     seen.add(k)
                     cols.append(k)
+    return cols
 
 
 def load_generic_rows(
@@ -622,7 +614,7 @@ def evaluate_rows(
             raise QueryDataError("BAD_OP", f"unknown op {f0.get('op')!r}; allowed: {sorted(_OPS)}")
         flt.append(f0)
 
-    date_col = date_column or ("date" if "date" in cols else None)
+    date_col = date_column or (DEFAULT_DATE_COLUMN if DEFAULT_DATE_COLUMN in cols else None)
     if (date_from or date_to) and not date_col:
         warnings.append("date_from/date_to ignored: no date column found (pass date_column=)")
     if date_col and date_from:

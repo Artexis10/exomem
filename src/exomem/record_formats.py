@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from . import call_spans, memory_refs, query_data, record_item_cache, vault
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+from .query_compat import DEFAULT_DATE_COLUMN
 
 _MARKER = re.compile(rb"<!--\s*exomem-record-id:\s*([0-9a-fA-F-]{36})\s*-->")
 _HEADING = re.compile(rb"^(#{1,6})\s+(.+?)\s*(?:\r?\n|$)")
@@ -2399,8 +2400,8 @@ def _selection_roots(
             if type(column) is not str or not column.strip():
                 return None
             roots.add(column.strip().split(".", 1)[0])
-    if date_column is None and (date_from or date_to or (aggregate and "date" in fields)):
-        roots.add("date")  # the default date column, which bounds dates and orders `latest`
+    if date_column is None and (date_from or date_to or (aggregate and DEFAULT_DATE_COLUMN in fields)):
+        roots.add(DEFAULT_DATE_COLUMN)  # it bounds dates and orders `latest`
     if filters is not None:
         if not isinstance(filters, list):
             return None
@@ -2476,24 +2477,8 @@ def _selected_query(
                                    include_item_version=adapter.mutable, item_id_property=item_id_property)
 
     def inferred(row_ids):
-        # The default columns are the leading rows' keys in first-appearance order. Every row carries
-        # every system column and projection never adds a key, so a row whose stored names all
-        # appeared before it adds none: only the first row and each row that may add one is rebuilt.
-        # A rebuilt row's projection can drop a name; the next pass then rebuilds the next holder.
-        present = store.present(row_ids)
-        built: dict[int, dict] = {}
-        chosen = list(row_ids[:1])
-        cols: list[str] = []
-        while chosen:
-            built.update(zip(chosen, rows_of(chosen)[1], strict=True))
-            cols, seen, expected, chosen = [], set(), set(), []
-            for row_id in row_ids:
-                if row_id in built:
-                    query_data.extend_columns(cols, seen, [built[row_id]], staged_projector)
-                elif present.get(row_id, set()) - seen - expected:
-                    expected |= present[row_id]
-                    chosen.append(row_id)
-        return cols
+        # The default columns are the leading rows' keys after projection, as the whole read infers them.
+        return query_data._infer_columns(rows_of(row_ids)[1], staged_projector)
 
     try:
         with adapter.selecting() as store:
@@ -2504,8 +2489,8 @@ def _selected_query(
                          "offset": offset, "aggregate": aggregate, "date_from": date_from, "date_to": date_to,
                          "date_column": date_column, "string_columns": string_columns}
             cols = None
-            if date_column is None and (date_from or date_to or aggregate) and "date" in store.fields:
-                # The default date column is "date" only when the default columns hold it.
+            if date_column is None and (date_from or date_to or aggregate) and DEFAULT_DATE_COLUMN in store.fields:
+                # The default date column applies only when the default columns hold it.
                 cols = inferred(store.select(legacy.normalize(columns_available=(), limit=1),
                                              lead=query_data.INFERENCE_ROWS).leading_row_ids)
             infer = cols is None and (bool(aggregate) or not columns)
@@ -2528,7 +2513,7 @@ def _selected_query(
                 available=cols or [], project_values=staged_projector, **common)
     except runtime.QueryError as error:
         if error.code in {"QUERY_TIMEOUT", "QUERY_CANCELLED"}:
-            raise collections.CollectionError(error.code, f"the records query stopped: {error.message}") from error
+            raise runtime.records_refusal(error, adapter.deadline) from error
         # Busy readers, a value past the decode cap, or a refusal the whole read reports in its own words.
         return None
 
@@ -2584,7 +2569,7 @@ def _late_link_projection_safe(
     roots: set[str] = set()
     if sort_by:
         roots.add(sort_by.split(".", 1)[0])
-    effective_date_column = date_column or ("date" if (date_from or date_to) else None)
+    effective_date_column = date_column or (DEFAULT_DATE_COLUMN if (date_from or date_to) else None)
     if effective_date_column:
         roots.add(effective_date_column.split(".", 1)[0])
     return not any(
