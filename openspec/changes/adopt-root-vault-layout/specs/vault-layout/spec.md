@@ -351,6 +351,11 @@ The relayout SHALL write a durable record in the vault with a row for each moved
 - **THEN** each frame's `parent_media` names the moved video
 - **AND** each frame still inherits the video's scopes
 
+#### Scenario: A sidecar page keeps the name that binds it to its file
+- **WHEN** the relayout plans a page named `<file name>.md` beside the file it describes, such as the page of a video or of a scene frame
+- **THEN** the page keeps its name even when its title would rename it
+- **AND** the file, the page, the folder `<file name>.frames/` and the frame pages keep their names, and only the managed folder prefix drops
+
 #### Scenario: A top-level name collision refuses the relayout
 - **WHEN** a foreign top-level folder outside the old wrapper has the name of an area and `--apply` runs
 - **THEN** the relayout refuses and names the folder
