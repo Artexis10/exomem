@@ -5,14 +5,22 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import multiprocessing
+import os
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_connector_boundary import PRIVATE, PUBLIC, configured_boundary  # noqa: F401
+from test_connector_boundary import PRIVATE, PUBLIC, SCOPE, configured_boundary  # noqa: F401
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_records_recall_policy import _manifest
-from test_vault_store_migration import build_indexes, migrate_apply, vault  # noqa: F401
+from test_vault_store_migration import (  # noqa: F401
+    build_indexes,
+    migrate_apply,
+    rollback_apply,
+    vault,
+)
 from test_vault_store_read_write import put, stored, writer  # noqa: F401
 from test_vault_store_readers import EXTERNAL, restrict_external
 
@@ -27,8 +35,9 @@ from exomem import (
     recall_policy,
     state_paths,
 )
-from exomem.collection_store import connection
-from exomem.governance import connector_boundary, egress, policy
+from exomem.collection_store import connection, preview
+from exomem.collection_store.writer import CollectionWriter
+from exomem.governance import connector_boundary, egress, page_admission, policy
 from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.vault_store import read, write
 
@@ -70,9 +79,12 @@ def test_single_page_content_check_does_not_read_unrelated_metadata(stored, writ
     assert counts[0] > 0 and counts[1] == counts[0], counts
 
 
-@pytest.mark.parametrize("store_mode", [False, True])
-def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, monkeypatch, store_mode):  # noqa: F811
-    """A shortcut must not widen selectors, purpose, grants, RAW or inherited container restrictions."""
+def exception_corpus(vault):  # noqa: F811
+    """A page of every exception kind that a release decision has, under an external policy.
+
+    Each case rewrites ``scope_file`` to one of ``selectors`` and writes or removes ``grant_file``;
+    a purpose rule and the grant change what a caller with the audit purpose may see.
+    """
     from test_document_containers import container_bytes
 
     source = preserve.preserve_stream(
@@ -132,14 +144,44 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
         "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\nkind: standing\n"
         'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 6\n'
     )
-    if store_mode:
-        build_indexes(vault)
-        assert migrate_apply(vault) == 0
     paths = list(pages) + [mixed_fence, lone_cr_bridge, child, source.sidecar_path,
         "Knowledge Base/Records/Measurements/_collection.md",
         "Knowledge Base/Records/Measurements/items/raw.md",
         "Knowledge Base/Notes/Missing.md", "Knowledge Base/Notes/../Notes/Open.md"]
-    scope_file = governance / "scopes/secret.yaml"
+    selectors = (
+        'tags: [secret]\nexclude:\n  tags: [public]',
+        'paths: ["Notes/Hidden.md"]', 'projects: [restricted]', 'types: [insight]',
+        'classes: [confidential]',
+        'refs: ["exomem://memory/12345678-1234-4abc-8def-123456789abc"]',
+        f'paths: [{json.dumps(source.path)}]',
+    )
+    return SimpleNamespace(
+        paths=paths, child=child, source=source, mixed_fence=mixed_fence, selectors=selectors,
+        scope_file=governance / "scopes/secret.yaml", grant_file=grant_file, grant=grant,
+    )
+
+
+def apply_case(corpus, selector, granted):
+    """Select ``selector`` into the withheld scope, with the audit grant or without it."""
+    corpus.scope_file.write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n" + selector + "\n"
+    )
+    if granted:
+        corpus.grant_file.write_text(corpus.grant)
+    else:
+        corpus.grant_file.unlink(missing_ok=True)
+    document_containers.clear_unclaimed_notes()
+
+
+@pytest.mark.parametrize("store_mode", [False, True])
+def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, monkeypatch, store_mode):  # noqa: F811
+    """A shortcut must not widen selectors, purpose, grants, RAW or inherited container restrictions."""
+    corpus = exception_corpus(vault)
+    if store_mode:
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+    paths, child, source = corpus.paths, corpus.child, corpus.source
+    mixed_fence = corpus.mixed_fence
 
     def answers(keep):
         result = {}
@@ -154,23 +196,9 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
                 result[path] = str(error)
         return result
 
-    selectors = (
-        'tags: [secret]\nexclude:\n  tags: [public]',
-        'paths: ["Notes/Hidden.md"]', 'projects: [restricted]', 'types: [insight]',
-        'classes: [confidential]',
-        'refs: ["exomem://memory/12345678-1234-4abc-8def-123456789abc"]',
-        f'paths: [{json.dumps(source.path)}]',
-    )
-    for selector in selectors:
-        scope_file.write_text(
-            "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n" + selector + "\n"
-        )
+    for selector in corpus.selectors:
         for purpose, granted in ((None, False), ("audit", False), ("audit", True)):
-            if granted:
-                grant_file.write_text(grant)
-            else:
-                grant_file.unlink(missing_ok=True)
-            document_containers.clear_unclaimed_notes()
+            apply_case(corpus, selector, granted)
             who = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", purpose=purpose)
             with request_scope(who), policy.request_policy_snapshot(), state_paths.resolution_scope(), read.request_snapshot(vault):
                 compiled = policy.load(vault)
@@ -212,6 +240,225 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
                 if selector.startswith("refs:"):
                     assert not actual["Knowledge Base/Notes/Invalid-id.md"]
                 assert actual["Knowledge Base/Notes/Open.md"]
+
+
+@pytest.mark.timeout(300)
+def test_a_bound_writers_sweep_decides_a_set_of_pages_as_it_decides_each_page(vault):  # noqa: F811
+    """A store-mode write's corpus and registry sweeps decide their pages as one set, and a read
+    decides it by scope class. A set route that answered one exception kind differently from the
+    per-page route would change what the owner's or a restricted caller's request may see."""
+    corpus = exception_corpus(vault)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    paths = [path for path in corpus.paths if ".." not in path]
+    # The companion child raises on either route, which fails a whole sweep; it is its own set here.
+    others = [path for path in paths if path != corpus.child]
+
+    def outcome(decide, *arguments):
+        try:
+            return decide(*arguments)
+        except AttributeError as error:  # a stored companion snapshot has no file identity
+            return str(error)
+
+    def one_by_one(keep):
+        return {path: outcome(keep, path) for path in paths}
+
+    def as_one_set(keep):
+        admitted = egress.admitted(keep, others)
+        answers = {path: path in admitted for path in others}
+        child = corpus.child
+        answers[child] = outcome(lambda: child in egress.admitted(keep, [child]))
+        return answers
+
+    def compare(sweep, case):
+        expected = one_by_one(sweep(vault))
+        # Each caller is withheld something here, so both verdicts are compared.
+        assert False in expected.values(), case
+        assert as_one_set(sweep(vault)) == expected, ("in a write", *case)
+        with read.request_snapshot(vault):
+            assert as_one_set(sweep(vault)) == expected, ("in a read", *case)
+
+    # The selector, purpose and grant change only the external caller's verdicts. The owner and
+    # the link view (the corpus filter wrapped for links that may name no page) take one case each.
+    cases = [(selector, None, False) for selector in corpus.selectors]
+    cases += [(corpus.selectors[0], "audit", False), (corpus.selectors[0], "audit", True)]
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        token = preview._BOUND.set((vault.resolve(), CollectionWriter(vault, handle), False))
+        try:
+            for index, (selector, purpose, granted) in enumerate(cases):
+                apply_case(corpus, selector, granted)
+                restricted = RequestPrincipal(
+                    audience_id=EXTERNAL.audience_id, surface="mcp", purpose=purpose
+                )
+                case = (selector, purpose, granted)
+                with request_scope(restricted):
+                    compare(egress.restricted_release_filter, (*case, "restricted"))
+                    if index == 0:
+                        compare(egress.visible_page_filter, (*case, "restricted links"))
+                if index == 0:
+                    compare(egress.restricted_release_filter, (*case, "owner"))
+                    compare(egress.visible_page_filter, (*case, "owner links"))
+        finally:
+            preview._BOUND.reset(token)
+
+
+def decide_in_a_new_request(root, who, paths, monkeypatch, scalar=False):
+    """`who`'s release verdict for each path, from the batch rule or, with `scalar`, from the per-page chain."""
+    with request_scope(who), policy.request_policy_snapshot(), state_paths.resolution_scope(), read.request_snapshot(root):
+        document_containers.clear_unclaimed_notes()
+        keep = egress.edge_view(root, egress.content_admission(root, who))
+        if scalar:
+            # Disable only the set proof of container claims; the per-page chain is the oracle.
+            with monkeypatch.context() as patch:
+                patch.setattr(document_containers, "_stored_unclaimed", lambda *args: False)
+                return {path: keep(path) for path in paths}
+        offered = published_admission.admission_of(keep)
+        return {path: verdict[0] for path, verdict in offered.decide_many(paths).items()}
+
+
+def count_subject_decodes(monkeypatch):
+    """The paths whose stored subject text the memo had to decode, in order."""
+    decoded = []
+    subject = page_admission._subject
+    monkeypatch.setattr(page_admission, "_subject", lambda *args: decoded.append(args[1]) or subject(*args))
+    return decoded
+
+
+def commit_here(root, change):
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+        write.commit(CollectionWriter(root, handle), change)
+
+
+def commit_in_a_child(environment, root, change):
+    """One commit by another process, which never calls this process's commit hook."""
+    os.environ.clear()
+    os.environ.update(environment)
+    commit_here(Path(root), change)
+
+
+def note(tags):
+    return f"---\ntitle: Ledger\ntags: [{tags}]\n---\nOrdinary page.\n"
+
+
+RETAGGED, MOVER = "Knowledge Base/Notes/Retagged.md", "Knowledge Base/Notes/Mover.md"
+MOVED = "Knowledge Base/Restricted/Mover.md"
+
+
+@pytest.mark.parametrize("event", [
+    "retag", "move into a path-selected folder", "commit from a subprocess",
+    "facts rewritten without a byte change", "roll back then migrate again",
+])
+def test_a_warm_scope_memo_answers_what_the_scalar_chain_answers_after_each_event(vault, tmp_path, monkeypatch, event):  # noqa: F811
+    """Defect: a scope set that outlives a change to its page leaves a restricted caller reading a page
+    that the per-page chain withholds. Each event changes one page; the memo is warm before it."""
+    corpus = exception_corpus(vault)
+    apply_case(corpus, 'tags: [secret]\npaths: ["Restricted/**"]\nexclude:\n  tags: [public]', False)
+    for rel in (RETAGGED, MOVER):
+        (vault / rel).write_text(note("calm"))
+    # The container child fails alike in both rules in store mode (its companion snapshot has no filesystem identity), so it stays out.
+    asked = [path for path in [*corpus.paths, RETAGGED, MOVER, MOVED] if ".." not in path and path != corpus.child]
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    who = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp")
+    decoded = count_subject_decodes(monkeypatch)
+
+    before = decide_in_a_new_request(vault, who, asked, monkeypatch)
+    assert decoded, "the first request decodes the stored facts"
+    decoded.clear()
+    assert decide_in_a_new_request(vault, who, asked, monkeypatch) == before
+    assert not decoded, "the second request is served by the memo, or this test proves nothing"
+    if event == "retag":
+        commit_here(vault, put(RETAGGED, note("secret").encode()))
+    elif event == "move into a path-selected folder":
+        commit_here(vault, write.StoreChange(write.Origin.GOVERNED, "move", moves=(write.PageMove(MOVER, MOVED),)))
+    elif event == "commit from a subprocess":
+        change = put(RETAGGED, note("secret").encode())
+        child_process = multiprocessing.get_context("spawn").Process(
+            target=commit_in_a_child, args=(dict(os.environ), vault, change),
+        )
+        child_process.start()
+        child_process.join(180)
+        assert child_process.exitcode == 0
+    elif event == "facts rewritten without a byte change":
+        with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+            with handle.transaction() as tx:
+                row = json.loads(tx.execute("SELECT subject FROM page_admission WHERE path = ?", (RETAGGED,)).fetchone()[0])
+                row["tags"] = [*row["tags"], "secret"]
+                tx.execute("UPDATE page_admission SET subject = ? WHERE path = ?",
+                           (json.dumps(row, sort_keys=True, separators=(",", ":")), RETAGGED))
+    else:
+        assert rollback_apply(vault, tmp_path / "export") == 0
+        (vault / RETAGGED).write_text(note("secret"))
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+    after = decide_in_a_new_request(vault, who, asked, monkeypatch)
+    assert after != before, "the event must change an answer, or a stale memo would pass"
+    page_admission.forget_scopes()
+    assert after == decide_in_a_new_request(vault, who, asked, monkeypatch)
+    if event != "facts rewritten without a byte change":  # there the stored facts and the bytes disagree by construction
+        assert after == decide_in_a_new_request(vault, who, asked, monkeypatch, scalar=True)
+
+
+def test_a_scope_set_is_never_borrowed_from_another_page_with_the_same_subject_text(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: a facts row that carries another page's subject text, while that page's entry is warm, takes
+    that page's scope set and releases a page that the per-page chain withholds."""
+    open_page, shut_page = "Knowledge Base/Notes/Open Alpha.md", "Knowledge Base/Notes/Shut Beta.md"
+    restrict_external(stored, 'tags: ["secret"]')
+    write.commit(writer, put(open_page, note("calm").encode()))
+    write.commit(writer, put(shut_page, note("secret").encode()))
+    who = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp")
+    asked = [open_page, shut_page]
+    assert decide_in_a_new_request(stored, who, asked, monkeypatch) == {open_page: True, shut_page: False}
+    entries = page_admission._SCOPE_MEMOS[str(stored)].entries
+    open_text = next(text for text, entry in entries.items() if entry[0] == open_page)
+    assert entries[open_text][1] == frozenset(), "the open page's warm entry holds an empty scope set"
+    with writer.handle.transaction() as tx:
+        tx.execute("UPDATE page_admission SET subject = ? WHERE path = ?", (open_text, shut_page))
+    answers = decide_in_a_new_request(stored, who, asked, monkeypatch)
+    assert answers == {open_page: True, shut_page: False}
+    assert answers == decide_in_a_new_request(stored, who, asked, monkeypatch, scalar=True)
+
+
+def test_a_warm_scope_memo_follows_a_rearmed_registry_binding(vault, configured_boundary, monkeypatch):  # noqa: F811
+    """Defect: a scope set that outlives the connector's registry binding leaves a page that the new binding
+    assigns to a private scope released to the client that is denied that scope."""
+    from exomem import state_migration
+    from exomem.vocabulary import registry_specs
+
+    config, authenticate = configured_boundary
+    first, second = "Knowledge Base/Notes/Ledger-a.md", "Knowledge Base/Notes/Ledger-b.md"
+    for rel in (first, second):
+        (vault / rel).write_text("---\nproject: public-project\n---\nA ledger page.\n")
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    who = authenticate("limited")
+
+    def arm(namespace):
+        data = json.loads(config.read_text())
+        # Arming requires the host to assign every definition and history that already exists.
+        overrides = {spec.stem: {"overlay": spec.overlay(vault).relative_to(vault).as_posix(), "history": spec.stem}
+                     for spec in registry_specs().values()}
+        data["vocabulary"] = {
+            "public": {"namespace": "Knowledge Base/_Schema/public", "history": "public", "overrides": overrides},
+            "private": {SCOPE: {"namespace": namespace, "history": "private"}},
+            "destinations": {}, "selections": {},
+        }
+        config.write_text(json.dumps(data))
+        state_migration.arm_connector_boundary_offline(
+            vault, authority=state_migration.assert_offline_migration_authority(source="memo re-arm"),
+        )
+
+    asked = [first, second]
+    arm(first)
+    before = decide_in_a_new_request(vault, who, asked, monkeypatch)
+    assert before == {first: False, second: True}
+    assert decide_in_a_new_request(vault, who, asked, monkeypatch) == before  # warm
+    arm(second)
+    after = decide_in_a_new_request(vault, who, asked, monkeypatch)
+    assert after == {first: True, second: False}
+    assert after == decide_in_a_new_request(vault, who, asked, monkeypatch, scalar=True)
+    page_admission.forget_scopes()
+    assert after == decide_in_a_new_request(vault, who, asked, monkeypatch)
 
 
 def test_store_absence_proof_rechecks_claims_supplied_bytes_and_next_commit(stored, writer, monkeypatch):  # noqa: F811

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .. import capabilities, collection_profiles, held_fs, memory_refs, vault
 from .. import structured_collections as collections
+from ..kbdir import managed_respell, managed_root, managed_root_rel
 from .connection import CollectionStoreError
 
 PENDING_CREATE = "pending_collection_create"
@@ -25,7 +26,7 @@ MARKER_REQUIRED = "collection_store_marker_required"
 
 
 def marker_path(root):
-    return Path(root) / vault.kb_dirname() / "_Collections" / "mode.json"
+    return managed_root(Path(root)) / "_Collections" / "mode.json"
 
 
 def read_marker(root):
@@ -63,8 +64,8 @@ def parse_marker(root, raw):
     """
     if not isinstance(raw, (str, bytes)):
         # Anything else, a missing marker included, is refused exactly as before, uncached.
-        return _parsed_marker.__wrapped__(str(root), vault.kb_dirname(), raw)
-    return copy.deepcopy(_parsed_marker(str(root), vault.kb_dirname(), raw))
+        return _parsed_marker.__wrapped__(str(root), managed_root_rel(), raw)
+    return copy.deepcopy(_parsed_marker(str(root), managed_root_rel(), raw))
 
 
 # Validation reads only the raw bytes, the root and the kb folder name, so those are the key.
@@ -278,7 +279,7 @@ def _owning_entry(root, paths, *, expected_marker=None):
 
 def _knowledge_base_spelling(root, path):
     # A case-folding volume opens another casing of the knowledge base folder as the folder itself.
-    canonical = vault._canonical_kb_segment(path)
+    canonical = managed_respell(path)
     return canonical if canonical == path or vault.vault_casefolds(root) else path
 
 

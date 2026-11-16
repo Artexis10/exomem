@@ -36,8 +36,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import move_file as move_file_module
-from . import record_formats, semantic_writes, source_taxonomy, vocabulary_resolution
-from .kbdir import kb_dirname
+from . import (
+    originals,
+    path_mentions,
+    record_formats,
+    semantic_writes,
+    source_pointers,
+    source_taxonomy,
+    vocabulary_resolution,
+)
+from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
     PathGuard,
@@ -64,7 +72,12 @@ RECORD_FIELDS = (
 HISTORY_FIELD = "reclassified_from"
 #: These fields and event actions are closed Source-format tokens, not vocabulary.
 EVENTS_FIELD = "classification_history"
+#: The optional history-entry and event key that records the pointer fields a repair
+#: changed, each with the value it recorded before (None when the field was absent).
+POINTER_KEY = "pointer"
 
+#: The form a prose mention of the source's path is reported under, beside the link forms.
+MENTION_FORM = "mention"
 _MAX_REASON_CHARS = 400
 #: The preview judges references and the destination, not the semantic
 #: contract of the pages a move rewrites, so it says so beside its refusals.
@@ -99,13 +112,16 @@ class ReclassifyProposal:
     relocation_required: bool = False
     references: int = 0
     #: Pages the caller may see that the move would rewrite: mutable pages
-    #: whose links name the source by its path.
+    #: whose links or prose name the source by its path.
     rewritten: tuple[str, ...] = ()
     #: Append-only pages the caller may see that the move leaves byte-identical,
-    #: grouped by the link form they use (`basename` or `path`).
+    #: grouped by the link form they use (`basename` or `path`), or `mention` when the page
+    #: only cites the source's path in prose.
     append_only_unchanged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #: Why the move would be refused, each naming only a page the caller may see.
     refusals: tuple[Mapping[str, str], ...] = ()
+    #: What the preview could not check, such as path mentions the catalogue could not answer.
+    warnings: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -127,6 +143,7 @@ class ReclassifyProposal:
             },
             "refusals": [dict(refusal) for refusal in self.refusals],
             **({"refusal_scope": _REFUSAL_SCOPE} if self.destination is not None else {}),
+            **({"warnings": list(self.warnings)} if self.warnings else {}),
         }
 
 
@@ -140,9 +157,13 @@ class ReclassifyResult:
     reason: str
     relocated: bool = False
     references_updated: int = 0
+    #: Prose mentions of the source's path that the relocation renamed in page bodies.
+    path_mentions_updated: int = 0
     warnings: tuple[str, ...] = field(default_factory=tuple)
     # One line per source kind or domain this correction registered on first use.
     vocabulary_receipt: tuple[str, ...] = field(default_factory=tuple)
+    #: The pointer fields this correction set or restored.
+    repointed: tuple[str, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict:
         value: dict[str, object] = {
@@ -154,15 +175,19 @@ class ReclassifyResult:
             "relocated": self.relocated,
             "references_updated": self.references_updated,
         }
+        if self.path_mentions_updated:
+            value["path_mentions_updated"] = self.path_mentions_updated
         if self.warnings:
             value["warnings"] = list(self.warnings)
         if self.vocabulary_receipt:
             value["vocabulary_receipt"] = list(self.vocabulary_receipt)
+        if self.repointed:
+            value["repointed"] = list(self.repointed)
         return value
 
 
 def _sources_root() -> str:
-    return f"{kb_dirname()}/{source_taxonomy.SOURCES_ROOT}"
+    return managed_join(source_taxonomy.SOURCES_ROOT)
 
 
 def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
@@ -170,8 +195,8 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
     rel = str(path).replace("\\", "/").strip().lstrip("/")
     if not rel:
         raise ReclassifyError("PATH_REQUIRED", "supply the source page to reclassify.")
-    if not rel.startswith(f"{kb_dirname()}/"):
-        rel = f"{kb_dirname()}/{rel}"
+    if managed_split(rel) is None:
+        rel = managed_join(rel)
     if not rel.lower().endswith(".md"):
         rel = f"{rel}.md"
     try:
@@ -268,6 +293,7 @@ def _classification_events(
     domain: str | None,
     reason: str,
     operation: Literal["reclassify", "revert"],
+    pointer: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Append a retained event without interpreting the legacy undo stack.
 
@@ -307,6 +333,8 @@ def _classification_events(
         },
         "after": {"path": destination, "kind": kind, "domain": domain},
     }
+    if pointer:
+        event[POINTER_KEY] = dict(pointer)
     return {**record, "coverage": "retained-only", "events": [*record["events"], event]}
 
 
@@ -319,18 +347,30 @@ def _rewrite_classification(
     classification_events: dict[str, Any],
     reason: str,
     today: dt.date,
+    pointer: Mapping[str, str | None] | None = None,
 ) -> str:
     """Return `text` with only the classification and record fields changed.
 
     Each field is patched where the YAML parser places it, so every other byte
     of the page is kept, and the body is proven unchanged before anything is
-    written. A None kind or domain removes the field, which is how a revert
-    restores a source that recorded none. `history=None` leaves the history
-    as it is; an empty history removes the field.
+    written. A kind or domain equal to the one the page states is left as it is. A
+    None kind or domain removes the field, which is how a revert restores a source
+    that recorded none. `history=None` leaves the history
+    as it is; an empty history removes the field. `pointer` sets each pointer field to
+    its path, or removes it where the path is None.
     """
     changes: dict[str, Any] = {}
     deletes: list[str] = []
+    front, _, _ = parse_frontmatter(text)
     for key, value in (("source_type", kind), ("domain", domain)):
+        if value == _recorded(front, key):
+            # A field the correction leaves as stated keeps its bytes, a list domain included.
+            continue
+        if value is None:
+            deletes.append(key)
+        else:
+            changes[key] = value
+    for key, value in (pointer or {}).items():
         if value is None:
             deletes.append(key)
         else:
@@ -376,9 +416,59 @@ def _clean_reason(reason: str | None) -> str:
     return " ".join(text.split())[:_MAX_REASON_CHARS]
 
 
+def _plan_pointer(
+    vault_root: Path, rel: str, front: Mapping[str, Any], artifact_path: str
+) -> tuple[dict[str, str], dict[str, str | None]]:
+    """The pointer fields a repair sets, and the value each recorded before.
+
+    Every structured pointer the card has is set to the target, so none keeps naming a
+    stale path; a card with none gets `evidence_file`, the general artifact pointer. A
+    card that follows its bytes by name (a descriptor, or a card at its file's companion
+    path) is refused: the repair there is to move the file back beside the card.
+    """
+    target = artifact_path.replace("\\", "/").strip().lstrip("/")
+    if target:
+        target = managed_form(target)
+    found = source_pointers.pointers(front)
+    if any(source_pointers.bound(rel, pointer.field, pointer.path) for pointer in found):
+        raise ReclassifyError(
+            "POINTER_BOUND",
+            "the source follows its file by name (a descriptor, or a card beside its file); "
+            "move the file back beside the source with move_file instead of repointing it.",
+        )
+    refusal = source_pointers.target_refusal(vault_root, front, target)
+    if refusal is not None:
+        raise ReclassifyError(*refusal)
+    fields = [pointer.field for pointer in found] or [originals.SCALAR_POINTERS[0]]
+    recorded = {key: _recorded(front, key) for key in fields}
+    changes = {key: target for key in fields if recorded[key] != target}
+    return changes, {key: recorded[key] for key in changes}
+
+
+def _restorable_pointer(entry: Any) -> dict[str, str | None]:
+    """The pointer fields a history entry restores; empty when the entry repaired none.
+
+    Only the scalar pointer fields are restorable, so an edited history cannot make a
+    revert write any other field.
+    """
+    recorded = entry.get(POINTER_KEY) if isinstance(entry, dict) else None
+    if recorded is None:
+        return {}
+    if not isinstance(recorded, dict) or any(
+        key not in originals.SCALAR_POINTERS or not (value is None or isinstance(value, str))
+        for key, value in recorded.items()
+    ):
+        raise ReclassifyError(
+            "HISTORY_POINTER_INVALID",
+            f"the latest history entry's `{POINTER_KEY}` is not a map of pointer fields to "
+            "their earlier paths; correct the entry before reverting.",
+        )
+    return dict(recorded)
+
+
 def _destination(vault_root: Path, rel: str, kind, domain) -> str:
     segments = source_taxonomy.source_segments(kind, domain)
-    return "/".join((kb_dirname(), *segments, rel.rsplit("/", 1)[-1]))
+    return managed_join("/".join((*segments, rel.rsplit("/", 1)[-1])))
 
 
 def _projection(
@@ -417,7 +507,7 @@ def _projection(
             domain_resolution,
             _destination(vault_root, rel, kind_resolution, domain_resolution),
         )
-    destination = "/".join((kb_dirname(), *binding.segments, rel.rsplit("/", 1)[-1]))
+    destination = managed_join("/".join((*binding.segments, rel.rsplit("/", 1)[-1])))
     return binding.kind, binding.domain, destination
 
 
@@ -581,6 +671,7 @@ def propose(
         rewritten=outcome.rewritten,
         append_only_unchanged=outcome.append_only_unchanged,
         refusals=outcome.refusals,
+        warnings=() if outcome.mentions_checked else (path_mentions.NOT_CHECKED,),
     )
 
 
@@ -589,6 +680,18 @@ class _ReferrerOutcome:
     rewritten: tuple[str, ...] = ()
     append_only_unchanged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     refusals: tuple[Mapping[str, str], ...] = ()
+    #: False when the catalogue could not say which pages cite the source's path in prose.
+    mentions_checked: bool = True
+
+
+@dataclass(frozen=True)
+class _Written:
+    """Where a committed correction left the source, and what its relocation rewrote."""
+
+    path: str
+    references_updated: int = 0
+    path_mentions_updated: int = 0
+    warnings: tuple[str, ...] = ()
 
 
 def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
@@ -631,16 +734,34 @@ def _referrer_outcome(
 
     relocating = destination != rel
     writable_page = connector_boundary.effect_admission(vault_root)
+    paired = move_file_module.paired_move(vault_root, rel, destination) if relocating else None
+    visible = egress.visible_page_filter(vault_root)
+    lookup = (
+        path_mentions.find_pages(vault_root, [rel, *([paired[0]] if paired else [])])
+        if relocating
+        else None
+    )
+    named_in = [
+        page
+        for page in (lookup.pages if lookup is not None else ())
+        if visible is None or visible(page)
+    ]
     forms: dict[str, set[str]] = {}
     for hit in inbound:
         forms.setdefault(hit.path, set()).add(_link_form(hit.raw_target))
     rewritten: list[str] = []
     unchanged: dict[str, list[str]] = {}
     refusals: list[dict[str, str]] = []
-    for item in move_file_module.plan_inbound_rewrites(vault_root, rel, destination, inbound):
+    plans = move_file_module.plan_inbound_rewrites(
+        vault_root, rel, destination, inbound, named_in=named_in, paired=paired
+    )
+    for item in plans:
         if not writable_page(item.path):
             continue  # the move leaves a page its mover may not write unchanged
         changes = item.changes if relocating else 0
+        if relocating and item.left_mentions:
+            # A prose mention in an immutable body keeps its bytes; it never refuses the move.
+            unchanged.setdefault(MENTION_FORM, []).append(item.path)
         if changes and item.append_only:
             refusals.append({
                 "code": "APPEND_ONLY",
@@ -651,7 +772,7 @@ def _referrer_outcome(
                     "where it is until history-aware resolution exists"
                 ),
             })
-        elif changes:
+        elif changes or item.mentions:
             rewritten.append(item.path)
         elif item.append_only:
             for form in sorted(forms.get(item.path, ())):
@@ -664,7 +785,6 @@ def _referrer_outcome(
                 "path": rel,
                 "reason": "the source links itself by its path, and its own bytes cannot change",
             })
-        visible = egress.visible_page_filter(vault_root)
         if (vault_root / destination).exists() and (visible is None or visible(destination)):
             refusals.append({
                 "code": "DEST_EXISTS",
@@ -675,6 +795,7 @@ def _referrer_outcome(
         rewritten=tuple(rewritten),
         append_only_unchanged={form: tuple(paths) for form, paths in sorted(unchanged.items())},
         refusals=tuple(refusals),
+        mentions_checked=lookup is None or lookup.complete,
     )
 
 
@@ -690,8 +811,8 @@ def _write_correction(
     today: dt.date,
     extra_writes: tuple[PlannedWrite, ...] = (),
     _validate_prepared_bindings: Callable[[], None] | None = None,
-) -> tuple[str, int]:
-    """Commit a correction and return the source's final path and rewrite count.
+) -> _Written:
+    """Commit a correction and return where the source is and what the relocation rewrote.
 
     A relocation goes through `move_file`, which moves the source, its companion
     and every reference in one transaction. The preview's refusals are raised
@@ -706,7 +827,7 @@ def _write_correction(
             vault_root=vault_root,
             _validate_prepared_bindings=_validate_prepared_bindings,
         )
-        return rel, 0
+        return _Written(rel)
     outcome = _referrer_outcome(
         vault_root, rel, text, destination, _visible_inbound(vault_root, rel)
     )
@@ -735,7 +856,11 @@ def _write_correction(
         )
     except move_file_module.MoveFileError as error:
         raise ReclassifyError(error.code, error.reason) from error
-    return result.new_path, result.wikilinks_updated
+    # The move's warnings carry the append-only mentions it kept and a lookup it could not make.
+    return _Written(
+        result.new_path, result.wikilinks_updated, result.path_mentions_updated,
+        tuple(result.warnings),
+    )
 
 
 def reclassify(
@@ -744,6 +869,7 @@ def reclassify(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    artifact_path: str | None = None,
     reason: str | None = None,
     today: dt.date | None = None,
 ) -> ReclassifyResult:
@@ -751,14 +877,20 @@ def reclassify(
 
     The source's location, kind and domain before the correction are appended
     to its history, unless the correction changes none of them.
+
+    `artifact_path` repairs the pointer to the source's raw file in the same step. It
+    must name an existing file that fits the identity the source records, and the
+    earlier pointer values join the history entry so `revert` restores them. With no
+    kind or domain, the source stays where it is.
     """
     vault_root = Path(vault_root)
     rel, absolute = _require_source(vault_root, path)
-    if source_kind is None and domain is None:
+    pointer_only = source_kind is None and domain is None
+    if pointer_only and artifact_path is None:
         raise ReclassifyError(
             "NO_CHANGE_REQUESTED",
-            "supply source_kind, domain, or both. Reclassification is not a "
-            "general file move: a correction with nothing to correct would "
+            "supply source_kind, domain, artifact_path, or any of them. Reclassification "
+            "is not a general file move: a correction with nothing to correct would "
             "relocate a source for no recorded reason.",
         )
     clean_reason = _clean_reason(reason)
@@ -769,58 +901,73 @@ def reclassify(
     current_kind, current_domain = _current_classification(text)
     history = _history(front)
 
-    taxonomy = source_taxonomy.load_taxonomy(vault_root)
-    try:
-        effective_domain = domain if domain is not None else current_domain
-        kind_resolution, domain_resolution, destination = _projection(
-            vault_root,
-            rel,
-            taxonomy,
-            source_kind or current_kind,
-            effective_domain,
-            supplied=domain is not None,
-        )
-    except source_taxonomy.TaxonomyError as error:
-        raise ReclassifyError("INVALID_CLASSIFICATION", str(error)) from error
-    except vocabulary_resolution.VocabularyResolutionError as error:
-        raise ReclassifyError(
-            error.code, vocabulary_resolution.registry_refusal_reason(vault_root, error)
-        ) from error
-    _refuse_episode_kind(current_kind, kind_resolution.key)
-    if source_kind:
-        _refuse_unchosen_kind(kind_resolution.key)
-
-    plan = source_taxonomy.plan_registrations(
-        vault_root, kind=kind_resolution, domain=domain_resolution
+    pointer_changes, pointer_previous = (
+        _plan_pointer(vault_root, rel, front, artifact_path)
+        if artifact_path is not None
+        else ({}, {})
     )
-    corrected_domain = domain_resolution.key if domain_resolution else None
-    previous = {
+    previous: dict[str, Any] = {
         "path": rel,
         "kind": _recorded(front, "source_type"),
         "domain": _recorded(front, "domain"),
     }
-    changed = (rel, previous["kind"], previous["domain"]) != (
+    plan: source_taxonomy.TaxonomyPlan | None = None
+    if pointer_only:
+        # A pointer repair leaves the classification, and so the location, as stated.
+        _refuse_episode_kind(current_kind, None)
+        kind_key, corrected_domain, destination = previous["kind"], previous["domain"], rel
+    else:
+        taxonomy = source_taxonomy.load_taxonomy(vault_root)
+        try:
+            effective_domain = domain if domain is not None else current_domain
+            kind_resolution, domain_resolution, destination = _projection(
+                vault_root,
+                rel,
+                taxonomy,
+                source_kind or current_kind,
+                effective_domain,
+                supplied=domain is not None,
+            )
+        except source_taxonomy.TaxonomyError as error:
+            raise ReclassifyError("INVALID_CLASSIFICATION", str(error)) from error
+        except vocabulary_resolution.VocabularyResolutionError as error:
+            raise ReclassifyError(
+                error.code, vocabulary_resolution.registry_refusal_reason(vault_root, error)
+            ) from error
+        _refuse_episode_kind(current_kind, kind_resolution.key)
+        if source_kind:
+            _refuse_unchosen_kind(kind_resolution.key)
+        plan = source_taxonomy.plan_registrations(
+            vault_root, kind=kind_resolution, domain=domain_resolution
+        )
+        kind_key = kind_resolution.key
+        corrected_domain = domain_resolution.key if domain_resolution else None
+    changed = bool(pointer_changes) or (rel, previous["kind"], previous["domain"]) != (
         destination,
-        kind_resolution.key,
+        kind_key,
         corrected_domain,
     )
+    if pointer_changes:
+        previous[POINTER_KEY] = pointer_previous
     events = _classification_events(
-        front, path=rel, destination=destination, kind=kind_resolution.key,
+        front, path=rel, destination=destination, kind=kind_key,
         domain=corrected_domain, reason=clean_reason, operation="reclassify",
+        pointer={"before": pointer_previous, "after": pointer_changes} if pointer_changes else None,
     )
 
     def transform(current: str) -> str:
         return _rewrite_classification(
             current,
-            kind=kind_resolution.key,
+            kind=kind_key,
             domain=corrected_domain,
             history=[*history, previous] if changed else None,
             classification_events=events,
             reason=clean_reason,
             today=today,
+            pointer=pointer_changes,
         )
 
-    final_path, references_updated = _write_correction(
+    written = _write_correction(
         vault_root,
         rel,
         absolute,
@@ -829,19 +976,23 @@ def reclassify(
         transform,
         today=today,
         source_guard=source_guard,
-        extra_writes=tuple(plan.writes),
-        _validate_prepared_bindings=lambda: plan.recheck_bindings(vault_root),
+        extra_writes=tuple(plan.writes) if plan else (),
+        _validate_prepared_bindings=(
+            (lambda: plan.recheck_bindings(vault_root)) if plan else None
+        ),
     )
     return ReclassifyResult(
         old_path=rel,
-        new_path=final_path,
-        kind=kind_resolution.key,
+        new_path=written.path,
+        kind=kind_key,
         domain=corrected_domain,
         reason=clean_reason,
         relocated=destination != rel,
-        references_updated=references_updated,
-        warnings=_introduction_warnings(plan),
-        vocabulary_receipt=tuple(plan.receipt()),
+        references_updated=written.references_updated,
+        path_mentions_updated=written.path_mentions_updated,
+        warnings=(*(_introduction_warnings(plan) if plan else ()), *written.warnings),
+        vocabulary_receipt=tuple(plan.receipt()) if plan else (),
+        repointed=tuple(pointer_changes),
     )
 
 
@@ -893,6 +1044,7 @@ def revert(
             "NO_HISTORY", f"{rel} records no earlier classification to restore."
         )
     recorded_path, kind, domain = _restorable(history[-1])
+    restored_pointer = _restorable_pointer(history[-1])
     destination = _previous_location(vault_root, recorded_path)
     current_kind, _ = _current_classification(text)
     _refuse_episode_kind(current_kind, kind)
@@ -905,6 +1057,14 @@ def revert(
     events = _classification_events(
         front, path=rel, destination=destination, kind=kind,
         domain=domain, reason=clean_reason, operation="revert",
+        pointer=(
+            {
+                "before": {key: _recorded(front, key) for key in restored_pointer},
+                "after": restored_pointer,
+            }
+            if restored_pointer
+            else None
+        ),
     )
 
     def transform(current: str) -> str:
@@ -916,18 +1076,22 @@ def revert(
             classification_events=events,
             reason=clean_reason,
             today=today,
+            pointer=restored_pointer,
         )
 
-    final_path, references_updated = _write_correction(
+    written = _write_correction(
         vault_root, rel, absolute, text, destination, transform,
         today=today, source_guard=source_guard,
     )
     return ReclassifyResult(
         old_path=rel,
-        new_path=final_path,
+        new_path=written.path,
         kind=kind,
         domain=domain,
         reason=clean_reason,
         relocated=destination != rel,
-        references_updated=references_updated,
+        references_updated=written.references_updated,
+        path_mentions_updated=written.path_mentions_updated,
+        warnings=written.warnings,
+        repointed=tuple(restored_pointer),
     )

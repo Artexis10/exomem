@@ -91,7 +91,7 @@ from . import (
     state_paths,
 )
 from .find_types import ParsedPage, RankingPage
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_root_rel, managed_split_parts
 from .log_events import log_event
 from .published_admission import Admission, admission_of, deciding
 
@@ -1278,6 +1278,35 @@ def _log_repair_finished(
     log_event(log, logging.INFO, "lexical_repair_finished", fields=fields)
 
 
+def _log_catalogue_materialized(
+    route: str, basis: str, counts: tuple[int, int, int, int], started: float
+) -> None:
+    """Name how one catalogue build got its pages, in a hosted-safe structured event.
+
+    `route` is `reconciled` when the build started from a copy of the live
+    catalogue and re-parsed only what moved, else `rebuilt` (every page parsed).
+    `basis` is the closed token that says why: `current` for a reused copy, the
+    reason the live copy could not be reused, `not_requested` for a detached
+    build, or `in_place` for a rebuild of the live catalogue itself. Counts and
+    milliseconds only, so a hosted cell keeps the line.
+    """
+    reparsed, removed, inserted, unchanged = counts
+    log_event(
+        log,
+        logging.INFO,
+        "lexical_catalogue_materialized",
+        fields={
+            "route": route,
+            "basis": basis,
+            "reparsed": reparsed,
+            "removed": removed,
+            "inserted": inserted,
+            "unchanged": unchanged,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
+
+
 #: Why each pending request was made, until the worker names them in its pass line.
 _REPAIR_CAUSES: dict[Path, set[RepairCause]] = {}
 _REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
@@ -2004,7 +2033,8 @@ def _remove_lexical_rebuild_artifact(
         )
 
 
-_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v4"
+# v5 retires NULL payload hashes derived before legacy Evidence identity support.
+_CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v5"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:
@@ -4033,7 +4063,7 @@ def _excluded_rows_clause(
         from . import working_set_index
 
         prefixes = sorted(
-            f"{kb_dirname()}/{folder}/"
+            managed_join(f"{folder}/")
             for folder in working_set_index._RAW_MATERIAL_FOLDERS
         )
         clause += " AND NOT (" + " OR ".join(
@@ -4858,6 +4888,7 @@ def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> Lexical
     A catalogue that is missing, at an older schema or built under another semantic identity is rebuilt from
     canonical pages in the background (`rebuild_atomic`) and reads as None until that lands: the rebuild is
     O(vault) and a storing door asks under its mutation boundary (D5), so the door stores unchecked meanwhile.
+    In store mode the owner's bounded background pass repairs old rows, without a file-catalogue rebuild.
     A store flagged by a failed `record_payload_commit` is reconciled inline, which costs one pass over the
     pages and never rebuilds whole, because the identity was proved first. `verify` reconciles the catalogue
     against the pages even when nothing flags it, because the audit counts every row and a row lost to a failed
@@ -4870,7 +4901,8 @@ def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> Lexical
     if store._failed:
         return None
     if not store.catalogue_current():
-        _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
+        if not store._reads_store():
+            _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
         return None
     if store._payload_stale or verify:
         try:
@@ -5439,11 +5471,8 @@ def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
     in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage(
         "/".join(dirs)
     )
-    in_kb = (
-        len(rel_parts) > 1
-        and rel_parts[0] == kb_dirname()
-        and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
-    )
+    below = managed_split_parts(rel_parts)
+    in_kb = bool(below) and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
     return in_kb, in_vault
 
 
@@ -5453,9 +5482,19 @@ def page_membership(rel: str) -> tuple[bool, bool]:
     Returns ``(in_kb, in_vault)``.
 
     A store-mode commit has no file to walk, so it asks here for the flags that ``page_rows``
-    stores.
+    stores. Both walks yield a Markdown file outside every reserved family alone
+    (``find_corpus._classify_walk_entry``, ``vault._walk_vault_md_entry``). The store also holds
+    other pages, such as a compiled-history entry, and the walks yield none of them.
     """
-    return _membership_of_parts(tuple(rel.split("/")))
+    from . import find_corpus
+
+    parts = tuple(rel.split("/"))
+    if (
+        not find_corpus.walk_name_admits(parts[-1], directory=False)
+        or reserved_paths.classify_logical(rel).blocked
+    ):
+        return False, False
+    return _membership_of_parts(parts)
 
 
 def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]) -> int:
@@ -5549,10 +5588,14 @@ def _delete_page_rowid(conn: sqlite3.Connection, rowid: int, *, projections: fro
 
 
 def delete_page_rows(conn: sqlite3.Connection, rel: str, *, projections: frozenset[str] | None = None) -> None:
-    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
+    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction).
+
+    The delete triggers stamp the parent a fresh revision, which names rows that no longer exist,
+    so it goes too: a reader asks only for the parents it admits, rows that a write inserts again
+    stamp a new one, and a derivation from the files makes none for a page with no rows.
+    """
     for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
         _delete_page_rowid(conn, rowid, projections=projections)
-    # DELETE triggers rotate revisions; absent parents need no retained key and recreate with a fresh random revision.
     conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
@@ -6136,7 +6179,7 @@ class LexicalStore:
         finally:
             conn.close()
 
-    def _sweep_orphan_rebuild_temps(self) -> list[Path]:
+    def _sweep_orphan_rebuild_temps(self, *, boot: bool = False) -> list[Path]:
         """Remove rebuild temps a killed build left beside the live sidecar.
 
         Each temp is a whole catalogue, and a catalogue version bump sends
@@ -6164,14 +6207,14 @@ class LexicalStore:
             if _RebuildTempLock(base).held():
                 continue
             try:
-                if any(
+                if not boot and any(
                     now - member.stat().st_mtime < _ORPHAN_REBUILD_TEMP_AGE_SECONDS
                     for member in members
                 ):
                     continue
             except OSError:
                 continue
-            if base in members and self._rebuild_temp_in_use(base):
+            if not boot and base in members and self._rebuild_temp_in_use(base):
                 continue
             for member in (base, *self._wal_shm_paths(base), base.with_name(f"{base.name}-journal")):
                 try:
@@ -6538,7 +6581,9 @@ class LexicalStore:
             conn.close()
         return False
 
-    def _publish_over_quarantined_set(self, temp_path: Path) -> bool:
+    def _publish_over_quarantined_set(
+        self, temp_path: Path, *, source_owner: str = "lexical-rebuild"
+    ) -> bool:
         """Recover a missing-main-with-orphans or proven-fatal live set by moving
         the ENTIRE live-name set aside, then installing the validated temp.
 
@@ -6565,7 +6610,7 @@ class LexicalStore:
                 reserved_paths._move_owner_file(
                     self.vault_root,
                     temp_path,
-                    "lexical-rebuild",
+                    source_owner,
                     self.path,
                     "lexical-store",
                     replace=False,
@@ -7425,7 +7470,7 @@ class LexicalStore:
         from . import recall_policy
         from .vault import walk_vault_md
 
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         members: dict[Path, list[bool]] = {}  # abs path -> [in_kb, in_vault]
         def check() -> None:
             if cancel is not None and cancel.is_set():
@@ -7492,6 +7537,7 @@ class LexicalStore:
             scope: freshness_module.recall_checkpoint(self.vault_root, scope)
             for scope in ("kb", "vault")
         }
+        started = time.monotonic()
         members, signatures = self._walk_entries()
         log.info(
             "lexical sync: rebuilding %s from %d markdown file(s)",
@@ -7513,6 +7559,7 @@ class LexicalStore:
             conn.execute("DELETE FROM unit_revisions")
             self._insert_members(conn, members, signatures)
             self._stamp_whole_build(conn)
+        _log_catalogue_materialized("rebuilt", "in_place", (0, 0, len(members), 0), started)
         self._witnessed.clear()
         self._term_frequency_cache = None
         self._filtered_term_frequency_cache = None
@@ -9161,19 +9208,11 @@ class LexicalStore:
                             raise _DetachedBuildCancelled
                         self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
                 self._stamp_whole_build(conn)
-            reparsed, removed, inserted, unchanged = (
-                counts if counts is not None else (0, 0, len(members), 0)
-            )
-            log.info(
-                "lexical catalogue pages materialized route=%s basis=%s reparsed=%d "
-                "removed=%d inserted=%d unchanged=%d elapsed_ms=%d",
+            _log_catalogue_materialized(
                 "reconciled" if counts is not None else "rebuilt",
                 basis,
-                reparsed,
-                removed,
-                inserted,
-                unchanged,
-                int((time.monotonic() - started) * 1000),
+                counts if counts is not None else (0, 0, len(members), 0),
+                started,
             )
             with conn:
                 for _scope, (kind, delta, _cp, _tr) in scope_targets.items():
@@ -9439,7 +9478,9 @@ class LexicalStore:
                 reparsed += 1
         return reparsed, removed, inserted, unchanged
 
-    def _replace_live_catalog(self, temp_path: Path) -> bool:
+    def _replace_live_catalog(
+        self, temp_path: Path, *, source_owner: str = "lexical-rebuild"
+    ) -> bool:
         """Install a folded temp catalogue over the live set.
 
         The caller holds the publication barrier and has already decided the
@@ -9450,11 +9491,11 @@ class LexicalStore:
             # setup together so none opens the new main between those steps.
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
-                descriptor_ids=("lexical-store", "lexical-rebuild", "lexical-quarantine"),
+                descriptor_ids=("lexical-store", source_owner, "lexical-quarantine"),
             ):
                 # A missing or fatal main with sidecars must move as one set.
                 if self._live_set_disposition() == "quarantine":
-                    if not self._publish_over_quarantined_set(temp_path):
+                    if not self._publish_over_quarantined_set(temp_path, source_owner=source_owner):
                         return self._decline_rebuild("publish_conflict")
                 else:
                     if not self._quiesce_live_wal():
@@ -9463,7 +9504,7 @@ class LexicalStore:
                     reserved_paths._move_owner_file(
                         self.vault_root,
                         temp_path,
-                        "lexical-rebuild",
+                        source_owner,
                         self.path,
                         "lexical-store",
                         replace=True,
@@ -11047,7 +11088,7 @@ class LexicalStore:
             # bytes and path (see `_page_identity`); they key every identity, so a change of either reads as
             # every page changed.
             context = hashlib.blake2b(
-                f"{dict(generation[1:]).get('catalog_identity')}\0{kb_dirname()}".encode(), digest_size=16
+                f"{dict(generation[1:]).get('catalog_identity')}\0{managed_root_rel()}".encode(), digest_size=16
             ).digest()
             digests = {
                 path: _page_identity(context, content_hash, rows.get(path))
@@ -11978,13 +12019,17 @@ class LexicalStore:
             return dict.fromkeys(rel_paths, None)
 
     def catalogue_current(self) -> bool:
-        """Whether the sidecar exists at the current schema, shape and semantic identity. Read-only, no DDL.
+        """Whether derived rows are current for duplicate lookup. Read-only, no DDL.
 
-        A catalogue that fails any of these is one that `ensure_fresh` rebuilds whole, so a caller that must not
-        wait for that (the duplicate lookup) treats it as absent.
+        A file catalogue must match this build's schema, shape and semantic identity.
+        Store rows must finish their owner-version pass before the index can answer.
         """
         if self._reads_store():
-            return True  # the store derives each page's rows in its commit
+            from .vault_store import rederive
+
+            # Old store rows stay incomplete until the owner's background pass finishes.
+            with self._store_connection() as conn:
+                return conn is not None and not rederive.owner_schema_behind(conn)
         from .vocabulary.registry import RegistryError
 
         if self._sidecar_unreadable():
@@ -12519,7 +12564,7 @@ class LexicalStore:
         and the receipt for what a caller reads comes from the hits it is given.
         """
         decided: dict[str, bool] = {}
-        stored: dict[str, bool] = {}
+        publishable: dict[str, tuple[bool, tuple]] = {}
         # A collection store decides its pages on one thread, so the pages it owns share one store request.
         with deciding(plan.missing):
             # The predicate's set rule decides each ordinary scope class once; the rest stay scalar.
@@ -12527,8 +12572,15 @@ class LexicalStore:
                 decided[path] = allowed
                 if page_local and path not in plan.live and plan.signatures is not None:
                     signature = plan.signatures.get(path)
-                    if signature is not None and self._page_unchanged_since(path, signature):
-                        stored[sys.intern(path)] = allowed
+                    if signature is not None:
+                        publishable[path] = (allowed, signature)
+        from .vault_store import read as store_read
+
+        served = store_read.serves_many(self.vault_root, publishable)
+        stored = {
+            sys.intern(path): allowed for path, (allowed, signature) in publishable.items()
+            if self._page_unchanged_since(path, signature, served[path])
+        }
         if stored or not plan.current:
             known = plan.signatures or {}
             allowed_map = {
@@ -12560,15 +12612,13 @@ class LexicalStore:
             _key, dropped = held.popitem(last=False)
             total -= len(dropped.allowed)
 
-    def _page_unchanged_since(self, path: str, signature: tuple) -> bool:
+    def _page_unchanged_since(self, path: str, signature: tuple, served: bool) -> bool:
         """Whether the file still carries the `mtime_ns` its catalogue row was built from.
 
-        A page that the store serves has no file to ask: its commit derived its row, so the row is
-        the page's at the snapshot that the plan read.
+        A page that the store serves (`served`, decided once for the batch) has no file to ask: its
+        commit derived its row, so the row is the page's at the snapshot that the plan read.
         """
-        from .vault_store import read as store_read
-
-        if store_read.serves(self.vault_root, path):
+        if served:
             return True
         try:
             return os.stat(self.vault_root / path).st_mtime_ns == signature[1]

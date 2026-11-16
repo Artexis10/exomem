@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import bisect
 import contextvars
+import functools
 import hashlib
 import json
 import logging
@@ -45,7 +46,7 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError, relation_review_stable_id_remediation
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_split_parts
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
@@ -101,9 +102,15 @@ _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts", "_trash
 
 def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
     """Whether an entry is runtime state rather than canonical Markdown."""
+    return _prune_identity_census_name(name, at_kb_root=directory == kb)
+
+
+def _prune_identity_census_name(name: str, *, at_kb_root: bool) -> bool:
+    """``_prune_identity_census_directory`` for an entry of the Knowledge Base folder itself, or of
+    a folder below it."""
     if vault.is_scan_skipped_runtime_name(name):
         return True
-    if directory != kb:
+    if not at_kb_root:
         return False
     if name in _IDENTITY_CENSUS_RESERVED_KB_DIRS:
         return True
@@ -129,7 +136,7 @@ def _reference_only_directory_names() -> tuple[str, ...]:
         sorted(
             name
             for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
-            if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+            if not vault.in_excluded_scan_dir(managed_join(name))
         )
     )
 
@@ -137,17 +144,33 @@ def _reference_only_directory_names() -> tuple[str, ...]:
 def _is_reference_only_path(rel_path: str) -> bool:
     """Whether a vault-relative path lies under a reference-only directory."""
     segments = PurePosixPath(rel_path).parts
-    return (
-        len(segments) > 2
-        and segments[0] == kb_dirname()
-        and segments[1] in _reference_only_directory_names()
-    )
+    below = managed_split_parts(segments)
+    return below is not None and len(below) > 1 and below[0] in _reference_only_directory_names()
 
 
 def _reference_only_entries(root: Path) -> tuple[StableIdentityEntry, ...]:
-    """Every owner under a reference-only directory, read as the reference scan reads it."""
+    """Every owner under a reference-only directory, read as the reference scan reads it.
+
+    In store mode the store holds those pages, and its bytes are what the delta reconciliation
+    reads; their files are projections that may trail it.
+    """
     kb = vault.kb_root(root)
     entries: list[StableIdentityEntry] = []
+    if _store_census_owns(root) is not None:
+        from .vault_store import read
+
+        kb_prefix = kb.relative_to(root).as_posix() + "/"
+        with read.snapshot(root) as view:
+            for name in _reference_only_directory_names():
+                rels = [meta.path for meta in view.pages(f"{kb_prefix}{name}/")]
+                for start in range(0, len(rels), read.KEYS_PER_QUERY):
+                    chunk = rels[start : start + read.KEYS_PER_QUERY]
+                    bodies = view.bodies(chunk)
+                    for rel in chunk:
+                        owner = memory_refs.reference_owner_from_bytes(root, rel, bodies.get(rel))
+                        if owner is not None:
+                            entries.append(StableIdentityEntry(rel, owner))
+        return tuple(entries)
     for name in _reference_only_directory_names():
         directory = kb / name
         # `rglob` does not descend a linked directory below the root, so the scan
@@ -953,9 +976,10 @@ def _route_name(path: str) -> str | None:
     if _path_excluded_from_compiled_destination(path):
         return None
     parts = _path_parts(path)
-    if len(parts) < 4 or parts[:2] != (kb_dirname().casefold(), note_types.NOTES_FOLDER.casefold()):
+    below = managed_split_parts(parts, key=str.casefold)
+    if below is None or len(below) < 3 or below[0] != note_types.NOTES_FOLDER.casefold():
         return None
-    return parts[2]
+    return below[1]
 
 
 def _type_basis(page: SemanticPageState) -> note_types.Basis:
@@ -1073,7 +1097,7 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             span=None,
             detail=(
                 f"compiled frontmatter type {normalized_compiled_type(page.page_type)!r} "
-                f"sits outside a {kb_dirname()}/{note_types.NOTES_FOLDER}/<Folder> destination"
+                f"sits outside a {managed_join(f'{note_types.NOTES_FOLDER}/')}<Folder> destination"
             ),
             remediation=(
                 f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
@@ -2049,7 +2073,7 @@ def _resolve_reference_wikilink_from_context(
         return ReferenceWikilinkResolution("unresolved")
 
     if "/" in cleaned:
-        for key in (cleaned, f"{vault.kb_prefix()}{cleaned}"):
+        for key in (cleaned, managed_join(cleaned)):
             matches = vault.wikilink_candidates(
                 context.resolver_candidates_by_key, (key,), visible=visible
             )
@@ -2058,7 +2082,7 @@ def _resolve_reference_wikilink_from_context(
             if matches:
                 return ReferenceWikilinkResolution("resolved", matches[0].path)
         # No Knowledge-Base-relative step follows: `normalize_wikilink` matches that form
-        # by `kb_prefix() + cleaned` in `full_paths`, which the second candidate above
+        # by `managed_join(cleaned)` in `full_paths`, which the second candidate above
         # already tried. Testing `kb_stripped` instead would let a hidden vault-root page
         # with the same name decide the result.
         return ReferenceWikilinkResolution("unresolved")
@@ -2288,7 +2312,9 @@ def _corpus_census(root: Path) -> tuple | None:
     (the full vault minus skip dirs and sync-conflict copies) — and appends
     the non-Markdown inputs in ``_config_inputs``: ``_access.yaml`` (page
     eligibility via ``access.access_tier``) and the selected note-type
-    overlay (the owner's compiled eligibility). Returns
+    overlay (the owner's compiled eligibility). In store mode the walks skip
+    the stored pages, and each stored page that a cold build reads has its
+    store row's entry instead. Returns
     ``None`` when the tree cannot be fingerprinted safely; callers must then
     build uncached so the build path surfaces its own safety errors.
     """
@@ -2381,7 +2407,15 @@ def _corpus_census(root: Path) -> tuple | None:
             strict_walk(kb)
         loose_walk(root)
         request_budget.checkpoint()
-        config = _config_census(root)
+        if owned is None:
+            config = _config_census(root)
+        else:
+            from .vault_store import read
+
+            # One snapshot: the revision entry vouches for no page that a later commit changed.
+            with read.snapshot(root) as view:
+                entries.update(_stored_page_census(root, view))
+                config = _configuration_entries(root, owned, view)
         if config is None:
             raise OSError("the semantic configuration inputs could not be read")
         entries.update(config)
@@ -2534,16 +2568,21 @@ def validity_stamp_current(
     return fresh_review is not None and fresh_review == sc_token[1]
 
 
-#: The census entry that stands for every stored page of a store-mode vault. A path never starts
-#: with "<", so it names no file.
+#: The census entry that stands for the store at one revision. A path never starts with "<", so it
+#: names no file. Every commit moves it, so a context that no file event reported still fails the
+#: event-hit proof; the stored pages' own entries then name the pages that the commits changed.
 _STORE_CENSUS_MARKER = "<store>"
+#: The kind of a stored page's census entry, ``(path, "p:" + sha256, size, 0)``. A page parses from
+#: its path and its bytes, so the store's hash of those bytes stands for it. The projector moves a
+#: stored page's mtime when it writes the file, so the file entry's size and mtime would not do.
+_STORED_PAGE_KIND = "p:"
 
 
 def _store_census_owns(root: Path) -> Callable[[str], bool] | None:
-    """In store mode, the test for a path whose state the store revision stands for; else None.
+    """In store mode, the test for a path that the store holds the page of; else None.
 
     A stored page's file is a projection that may trail the store, so the census never stats it:
-    its entry is the store's revision, which every commit moves.
+    its entry is the store's row (``_stored_page_census``).
     """
     from .vault_store import ownership
 
@@ -2552,22 +2591,109 @@ def _store_census_owns(root: Path) -> Callable[[str], bool] | None:
     return lambda rel: ownership.classify(rel) is ownership.Ownership.PAGE
 
 
+def _is_page_entry(entry: tuple) -> bool:
+    """Whether a census entry describes one page: a file ("f") or a stored page."""
+    kind = entry[1]
+    return kind == "f" or kind.startswith(_STORED_PAGE_KIND)
+
+
+def _without_store_revision(entries: tuple) -> tuple:
+    return tuple(entry for entry in entries if entry[0] != _STORE_CENSUS_MARKER)
+
+
+def _stored_identity_member(kb_prefix: str, rel: str) -> bool:
+    """Whether the identity census admits the stored page at ``rel``: a Knowledge Base Markdown page
+    that the walk's name rules, applied to each of its folder and file names, do not prune."""
+    if not rel.startswith(kb_prefix) or PurePosixPath(rel).suffix.casefold() != ".md":
+        return False
+    folder, _, name = rel[len(kb_prefix):].rpartition("/")
+    return not _pruned_identity_folder(folder) and not _prune_identity_census_name(
+        name, at_kb_root=not folder
+    )
+
+
+@functools.lru_cache(maxsize=4096)
+def _pruned_identity_folder(folder: str) -> bool:
+    """Whether the identity census prunes a folder of the Knowledge Base ("" is the folder itself).
+
+    A census judges each stored page by its folder, and many pages share one; the name rules are
+    fixed, so the answer for a folder never changes.
+    """
+    return bool(folder) and any(
+        _prune_identity_census_name(name, at_kb_root=depth == 0)
+        for depth, name in enumerate(folder.split("/"))
+    )
+
+
+def _stored_page_is_input(kb_prefix: str, rel: str) -> bool:
+    """Whether a cold build reads the stored page at ``rel``: as an identity, as a page of the vault
+    corpus, or as the owner of a reference."""
+    if _stored_identity_member(kb_prefix, rel) or _is_reference_only_path(rel):
+        return True
+    from .vault_store import read
+
+    return read.corpus_member(rel, "vault")
+
+
+def _stored_page_entry(meta: Any) -> tuple[str, str, int, int]:
+    return (meta.path, _STORED_PAGE_KIND + meta.sha256, meta.size, 0)
+
+
+def _stored_page_census(root: Path, view: Any) -> list[tuple[str, str, int, int]]:
+    """The census entry of each stored page that a cold build reads, from one store snapshot."""
+    kb_prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
+    entries = []
+    for meta in view.pages():
+        request_budget.checkpoint()
+        if _stored_page_is_input(kb_prefix, meta.path):
+            entries.append(_stored_page_entry(meta))
+    return entries
+
+
 def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:
     """O(1) freshness stamp for non-Markdown semantic inputs.
 
     In store mode it also holds the store's revision, so a commit that a file event never reports
-    still retires a cached context.
+    still retires a cached context, and the two ``store_meta`` revisions that an overlay change and
+    a finished registry pass move.
     """
-    entries: list[tuple[str, str, int, int]] = []
     owned = _store_census_owns(root)
-    if owned is not None:
-        from .vault_store import read
+    if owned is None:
+        return _configuration_entries(root, None, None)
+    from .vault_store import read
 
-        entries.append((_STORE_CENSUS_MARKER, "r", read.current_revision(root), 0))
+    with read.snapshot(root) as view:
+        return _configuration_entries(root, owned, view)
+
+
+def _configuration_entries(
+    root: Path, owned: Callable[[str], bool] | None, view: Any
+) -> tuple[tuple[str, str, int, int], ...] | None:
+    """``_config_census``, reading a store-mode vault's store through ``view``."""
+    entries: list[tuple[str, str, int, int]] = []
+    if view is not None:
+        from .vault_store import rederive
+
+        entries.append((_STORE_CENSUS_MARKER, "r", view.revision, 0))
+        recorded = rederive.recorded_revisions(view.connection)
+        for key in sorted(recorded):
+            value = recorded[key]
+            entries.append(
+                (f"<store:{key}>", "absent", -1, -1)
+                if value is None
+                else (f"<store:{key}>", "cfg:" + value, 0, 0)
+            )
     try:
         for extra in _config_inputs(root):
             marker = extra.relative_to(root).as_posix()
             if owned is not None and owned(marker):
+                # A stored input is the store's row; its file is a projection that may trail it.
+                meta = view.page_meta(marker)
+                entries.append(
+                    (marker, "absent", -1, -1)
+                    if meta is None
+                    else (marker, "cfg:" + meta.sha256, meta.size, 0)
+                )
                 continue
             try:
                 info = extra.stat()
@@ -2589,7 +2715,7 @@ def _config_kind(root: Path, extra: Path) -> str:
 
 
 def _stored_config_census(census: tuple) -> tuple:
-    return tuple(entry for entry in census if entry[1] != "f")
+    return tuple(entry for entry in census if not _is_page_entry(entry))
 
 
 def _patch_markdown_census(
@@ -2602,7 +2728,25 @@ def _patch_markdown_census(
     entries = {str(entry[0]): entry for entry in census}
     for rel_path in deleted_paths:
         entries.pop(rel_path, None)
+    owned = _store_census_owns(root)
+    stored = tuple(rel for rel in changed_paths if owned is not None and owned(rel))
+    if stored:
+        from .vault_store import read
+
+        # The store's row, as the walk gives it; the revision entry stays, because these events
+        # name only some of the commits that may have moved it.
+        kb_prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
+        with read.snapshot(root) as view:
+            metas = view.page_metas(stored)
+        for rel_path in stored:
+            meta = metas.get(rel_path)
+            if meta is None or not _stored_page_is_input(kb_prefix, rel_path):
+                entries.pop(rel_path, None)
+            else:
+                entries[rel_path] = _stored_page_entry(meta)
     for rel_path in changed_paths:
+        if rel_path in stored:
+            continue
         path = root / rel_path
         try:
             info = path.stat()
@@ -2638,10 +2782,12 @@ def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | Non
 
     Census entries are ``(path, kind, size, mtime_ns)``. A removed path only
     exists in ``before`` and an added path only in ``after``; both remain safe
-    incremental page changes when their surviving entry kind is ``f``.
+    incremental page changes when their surviving entry is a page's
+    (``_is_page_entry``). The store revision names no page: the stored pages'
+    entries say what its move changed, so it is no delta of its own.
     """
-    before_by_path = {str(entry[0]): entry for entry in before}
-    after_by_path = {str(entry[0]): entry for entry in after}
+    before_by_path = {str(entry[0]): entry for entry in _without_store_revision(before)}
+    after_by_path = {str(entry[0]): entry for entry in _without_store_revision(after)}
     changed = tuple(
         sorted(
             path
@@ -2652,7 +2798,9 @@ def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | Non
     for path in changed:
         old = before_by_path.get(path)
         new = after_by_path.get(path)
-        if (old is not None and old[1] != "f") or (new is not None and new[1] != "f"):
+        if (old is not None and not _is_page_entry(old)) or (
+            new is not None and not _is_page_entry(new)
+        ):
             return None
     return changed
 
@@ -2759,6 +2907,10 @@ def _reconcile_markdown_delta(
     ``vault.walk_vault_md`` and therefore excludes trash/schema/sync-conflict
     paths. Any read or identity ambiguity raises through the same full-build
     validation types instead of blessing partial state.
+
+    In store mode a stored page is read from the store, as the cold build reads
+    it, and judged by the cold build's rules for a stored page, its strict
+    frontmatter parse included.
     """
     request_budget.checkpoint()
     states = dict(context.pages)
@@ -2769,6 +2921,15 @@ def _reconcile_markdown_delta(
     }
     reference_only = dict(previous_reference_only)
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
+    owned = _store_census_owns(root)
+    stored = tuple(rel for rel in changed_paths if owned is not None and owned(rel))
+    stored_bodies: Mapping[str, bytes] = {}
+    if stored:
+        from .vault_store import read
+
+        # A stored page's file is a projection that may trail the store.
+        with read.snapshot(root) as view:
+            stored_bodies = view.bodies(stored)
     for rel_path in changed_paths:
         request_budget.checkpoint()
         reference_only_path = _is_reference_only_path(rel_path)
@@ -2776,23 +2937,43 @@ def _reconcile_markdown_delta(
             # Read as the reference scan reads it and as leniently: a deleted
             # page's frontmatter must never block a live write, so an
             # unreadable or malformed page is no owner rather than a refusal.
-            owner = memory_refs.read_reference_owner(root, root / rel_path)
+            owner = (
+                memory_refs.reference_owner_from_bytes(root, rel_path, stored_bodies.get(rel_path))
+                if rel_path in stored
+                else memory_refs.read_reference_owner(root, root / rel_path)
+            )
             if owner is None:
                 reference_only.pop(rel_path, None)
             else:
                 reference_only[rel_path] = StableIdentityEntry(rel_path, owner)
         source_path = root / rel_path
         in_kb = rel_path == kb_rel or rel_path.startswith(kb_rel + "/")
-        included = not vault.in_excluded_scan_dir(rel_path) and (
-            ".sync-conflict-" not in PurePosixPath(rel_path).name
-        )
-        if in_kb:
-            source = _identity_guarded_delta_source(root, rel_path)
-        else:
+        if rel_path in stored:
+            # The cold build parses a stored page only when the identity census admits it, and
+            # keeps its state when the vault corpus holds it too.
+            identity_member = _stored_identity_member(kb_rel + "/", rel_path)
+            included = identity_member and read.corpus_member(rel_path, "vault")
+            raw = stored_bodies.get(rel_path) if identity_member else None
             try:
-                source = _read_corpus_source(root, source_path)
-            except FileNotFoundError:
-                source = None
+                source = None if raw is None else raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise _unreadable_identity_page(root, rel_path, source_path) from error
+            if source is not None:
+                # The cold build's refusal, so that whether a page is accepted never depends on
+                # the cache. A parse that it accepts reads the identity that the state below holds.
+                _strict_page_identity(rel_path, source)
+        else:
+            identity_member = in_kb and not reference_only_path
+            included = not vault.in_excluded_scan_dir(rel_path) and (
+                ".sync-conflict-" not in PurePosixPath(rel_path).name
+            )
+            if in_kb:
+                source = _identity_guarded_delta_source(root, rel_path)
+            else:
+                try:
+                    source = _read_corpus_source(root, source_path)
+                except FileNotFoundError:
+                    source = None
         if source is None:
             states.pop(rel_path, None)
             identities.pop(rel_path, None)
@@ -2809,7 +2990,7 @@ def _reconcile_markdown_delta(
             states[rel_path] = state
         else:
             states.pop(rel_path, None)
-        if in_kb and not reference_only_path:
+        if identity_member:
             # The reference census admits every canonical Markdown path while
             # treating missing or malformed IDs as path-fallback identities,
             # exactly like ``memory_refs.ReferenceIndex``.
@@ -3028,7 +3209,12 @@ def _patch_corpus_files_changed_locked(
         cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
     if entry is None:
         return _CORPUS_PATCH_MISS
-    if _config_census(root) != _stored_config_census(entry[0]):
+    # Not the store revision: these events name the pages they changed, and the patched census keeps
+    # the old revision, so a commit that no event named still fails the next event-hit proof.
+    config = _config_census(root)
+    if config is None or _without_store_revision(config) != _without_store_revision(
+        _stored_config_census(entry[0])
+    ):
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
                 _forget_corpus_entry_locked(cache_key)
@@ -3087,19 +3273,24 @@ def _patch_corpus_files_changed_locked(
     )
     relation_definitions = relation_registry.core_registry()
     language = semantic_language_registry.core_registry()
-    context = _reconcile_markdown_delta(
-        root,
-        entry[1],
-        reconcile_paths,
-        relation_definitions=relation_definitions,
-        language=language,
-    )
-    census = _patch_markdown_census(
-        root,
-        entry[0],
-        changed_paths=changed_paths,
-        deleted_paths=deleted_paths,
-    )
+    from .vault_store import read
+
+    # The pages and their census entries read one store state. A commit between two reads would
+    # leave a page in the context that its entry no longer names, so no later walk would see it.
+    with read.request_snapshot(root):
+        context = _reconcile_markdown_delta(
+            root,
+            entry[1],
+            reconcile_paths,
+            relation_definitions=relation_definitions,
+            language=language,
+        )
+        census = _patch_markdown_census(
+            root,
+            entry[0],
+            changed_paths=changed_paths,
+            deleted_paths=deleted_paths,
+        )
     with _CORPUS_CONTEXT_CACHE_LOCK:
         if _CORPUS_CONTEXT_CACHE.get(cache_key) is entry:
             _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
@@ -3424,6 +3615,8 @@ def build_corpus_context_with_census(
                 return memo[2], census
         previous = memo[0].pages if memo is not None else {}
         reused = memo[3] if memo is not None else {}
+        # A filter turns the memo off, so it decides every page: as one set, under one snapshot.
+        admitted = None if visible is None else egress.admitted(visible, context.pages)
         states = {
             path: (
                 reused[path]
@@ -3431,7 +3624,7 @@ def build_corpus_context_with_census(
                 else enrich_page_state(root, state, basis, type_basis, relation_definitions=registry,
                                        language=language_registry, require_status=False,
                                        definitions_selection=selection)
-                if visible is None or visible(path)
+                if admitted is None or path in admitted
                 else state
             )
             for path, state in context.pages.items()
@@ -3542,6 +3735,15 @@ def _event_miss_reason(
         relation_definitions.extension_hash,
     ):
         return "relation_registry_changed"
+    config = _config_census(root)
+    recorded = _stored_config_census(entry[0])
+    if (
+        config is not None
+        and config != recorded
+        and _without_store_revision(config) == _without_store_revision(recorded)
+    ):
+        # A store commit, which no file event reports: the census walk names its pages.
+        return "store_changed"
     return "config_changed"
 
 
@@ -3653,7 +3855,9 @@ def _build_corpus_context_with_census(
                     changed_paths = _markdown_census_delta(entry[0], census)
                     if changed_paths is not None:
                         started = time.perf_counter()
-                        context = _reconcile_markdown_delta(
+                        # No changed page: only the store revision moved, as a commit of no page
+                        # that a build reads moves it. The context stands for the new census.
+                        context = entry[1] if not changed_paths else _reconcile_markdown_delta(
                             root,
                             entry[1],
                             changed_paths,
@@ -3831,13 +4035,14 @@ def _build_corpus_context_with_census(
                     if changed_paths is None:
                         stable_census = None
                         break
-                    context = _reconcile_markdown_delta(
-                        root,
-                        context,
-                        changed_paths,
-                        relation_definitions=relation_definitions,
-                        language=language,
-                    )
+                    if changed_paths:
+                        context = _reconcile_markdown_delta(
+                            root,
+                            context,
+                            changed_paths,
+                            relation_definitions=relation_definitions,
+                            language=language,
+                        )
                     stable_census = confirmed
                 else:
                     confirmed = None
@@ -3968,6 +4173,39 @@ def _read_corpus_source(root: Path, path: Path) -> str:
     return vault.read_guarded_text(root, path)[0]
 
 
+def _unreadable_identity_page(
+    root: Path, rel: str, path: Path
+) -> activation_manifest.ActivationManifestError:
+    """The refusal for a page that the identity census admits and cannot read."""
+    code = (
+        "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
+        if activation.is_managed_governed_path(root, path)
+        and access.access_tier(root, rel) == access.TIER_READ_WRITE
+        else "IDENTITY_CENSUS_PAGE_UNREADABLE"
+    )
+    return activation_manifest.ActivationManifestError(
+        code,
+        f"could not safely inspect stable identity at {rel}",
+    )
+
+
+def _strict_page_identity(rel: str, source: str) -> str | None:
+    """The stable identity that the identity census reads from a page's text, by its strict parse:
+    frontmatter that the parse refuses refuses the census."""
+    # Newlines as `_parse_page_state` and the reference scan read them:
+    # on raw bytes a CR-only page shows no frontmatter, so no identity.
+    logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
+    try:
+        frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
+    except vault.FrontmatterError as error:
+        raise activation_manifest.ActivationManifestError(
+            error.code,
+            f"could not safely inspect stable identity at {rel}",
+        ) from error
+    raw_identity = frontmatter.get(ID_FIELD)
+    return None if raw_identity is None else normalize_id(raw_identity)
+
+
 def _build_identity_census(
     root: Path,
     *,
@@ -3980,35 +4218,12 @@ def _build_identity_census(
     owned = _store_census_owns(root)
 
     def admit(rel: str, source: str, path: Path) -> None:
-        # Newlines as `_parse_page_state` and the reference scan read them:
-        # on raw bytes a CR-only page shows no frontmatter, so no identity.
-        logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
-        try:
-            frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
-        except vault.FrontmatterError as error:
-            raise activation_manifest.ActivationManifestError(
-                error.code,
-                f"could not safely inspect stable identity at {rel}",
-            ) from error
-        raw_identity = frontmatter.get(ID_FIELD)
-        identity: str | None = None
-        if raw_identity is not None:
-            identity = normalize_id(raw_identity)
-        entries.append(StableIdentityEntry(rel, identity))
+        entries.append(StableIdentityEntry(rel, _strict_page_identity(rel, source)))
         if consume is not None:
             consume(rel, source)
 
     def unreadable(rel: str, path: Path) -> activation_manifest.ActivationManifestError:
-        code = (
-            "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
-            if activation.is_managed_governed_path(root, path)
-            and access.access_tier(root, rel) == access.TIER_READ_WRITE
-            else "IDENTITY_CENSUS_PAGE_UNREADABLE"
-        )
-        return activation_manifest.ActivationManifestError(
-            code,
-            f"could not safely inspect stable identity at {rel}",
-        )
+        return _unreadable_identity_page(root, rel, path)
 
     def walk(directory: Path) -> None:
         try:
@@ -4111,14 +4326,7 @@ def _build_identity_census(
         prefix = kb.relative_to(root).as_posix() + "/"
         with read.snapshot(root) as view:
             members = [
-                meta.path
-                for meta in view.pages(prefix)
-                if PurePosixPath(meta.path).suffix.casefold() == ".md"
-                and not any(
-                    _prune_identity_census_directory(kb, kb.joinpath(*parts[:depth]), name)
-                    for parts in (meta.path[len(prefix) :].split("/"),)
-                    for depth, name in enumerate(parts)
-                )
+                meta.path for meta in view.pages(prefix) if _stored_identity_member(prefix, meta.path)
             ]
             for start in range(0, len(members), read.KEYS_PER_QUERY):
                 request_budget.checkpoint()
@@ -5191,17 +5399,25 @@ def _relation_disposition(
             rejected.append(RejectedRelationFact(fact, result.reasons))
     review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
-    other_governed = corpus.eligible_governed_paths - {page.path}
-    other_unknown = corpus.status_unavailable_paths - {page.path}
-    if visible is not None:
-        other_governed = frozenset(path for path in other_governed if visible(path))
-        other_unknown = frozenset(path for path in other_unknown if visible(path))
+
+    def _any_seen(paths: frozenset[str]) -> bool:
+        """Whether the writer may see any of `paths`.
+
+        Only the bootstrap branches ask, and only whether one exists: the pages are decided in
+        path order under one snapshot, up to the first that the writer may see.
+        """
+        if visible is None or not paths:
+            return bool(paths)
+        from .governance import egress
+
+        with egress.release_decision_context(corpus.vault_root):
+            return any(visible(path) for path in sorted(paths))
 
     def _no_other_governed(governed: frozenset[str], unknown: frozenset[str]) -> bool:
         # "No other governed page" is undecided while a page's class is unavailable.
-        if governed:
+        if _any_seen(governed):
             return False
-        if unknown:
+        if _any_seen(unknown):
             lifecycle_statuses.Classification(None).require()
         return True
 
@@ -5312,7 +5528,10 @@ def _relation_disposition(
         review_is_current
         and review is not None
         and review.kind == "bootstrap"
-        and _no_other_governed(other_governed, other_unknown)
+        and _no_other_governed(
+            corpus.eligible_governed_paths - {page.path},
+            corpus.status_unavailable_paths - {page.path},
+        )
     ):
         return RelationDisposition(
             "bootstrap",
@@ -5322,25 +5541,20 @@ def _relation_disposition(
             review_reason=review.reason,
             review_reference=review.reference,
         )
-    before_governed = before_corpus.eligible_governed_paths
-    after_governed = corpus.eligible_governed_paths
-    before_unknown = before_corpus.status_unavailable_paths
-    after_unknown = corpus.status_unavailable_paths - {page.path}
-    if visible is not None:
-        # A writer that sees no governed page bootstraps its first one, as in
-        # a vault without the pages withheld from it.
-        before_governed = frozenset(path for path in before_governed if visible(path))
-        after_governed = frozenset(path for path in after_governed if visible(path))
-        before_unknown = frozenset(path for path in before_unknown if visible(path))
-        after_unknown = frozenset(path for path in after_unknown if visible(path))
+    # A writer that sees no governed page bootstraps its first one, as in a vault without the pages
+    # withheld from it. The governed pages it sees after the write are this page alone.
     automatic_bootstrap = (
         review is None
         and mode == "precommit"
         and operation in _CREATE_LIKE
         and before is None
-        and after_governed == frozenset({page.path})
-        and _no_other_governed(before_governed, before_unknown)
-        and _no_other_governed(frozenset(), after_unknown)
+        and page.path in corpus.eligible_governed_paths
+        and (visible is None or visible(page.path))
+        and not _any_seen(corpus.eligible_governed_paths - {page.path})
+        and _no_other_governed(
+            before_corpus.eligible_governed_paths, before_corpus.status_unavailable_paths
+        )
+        and _no_other_governed(frozenset(), corpus.status_unavailable_paths - {page.path})
     )
     if automatic_bootstrap:
         return RelationDisposition(

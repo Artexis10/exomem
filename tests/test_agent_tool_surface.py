@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ from exomem import server as server_module
 LISTED = {
     "recall_context", "search_memory", "read_page", "read_instructions", "create_note", "add_observation",
     "edit_note", "supersede_note", "save_source", "save_evidence", "save_episode", "upload_files",
-    "download_files", "query_records", "add_record", "edit_record", "query_plan_items", "add_plan_item",
+    "download_files", "cancel_uploads", "query_records", "add_record", "edit_record", "query_plan_items", "add_plan_item",
     "edit_plan_item", "list_review_items", "decide_review_item", "inspect_memory", "manage_memory",
 }
 
@@ -423,6 +424,21 @@ def test_a_call_to_the_wrong_door_or_an_unknown_operation_is_refused_with_where_
     assert wrong_door["error"]["code"] == "INVALID_OPERATION" and "inspect_memory" in wrong_door["error"]["message"]
     assert misspelt["error"]["code"] == "INVALID_OPERATION"
     assert "records.create" in misspelt["error"]["candidates"]
+
+
+def test_an_argument_outside_arguments_is_refused_in_the_text_a_host_reads(build) -> None:
+    # A host that shows only text content saw an empty reply here, so the agent never learnt why.
+    async def scenario(client):
+        return await client.call_tool(
+            "manage_memory", {"operation": "media.retry", "path": "Sources/a.wav"}, raise_on_error=False
+        )
+
+    result = _session(build(), scenario)
+
+    text = " ".join(getattr(block, "text", "") for block in result.content)
+    refusal = json.loads(text)["error"]
+    assert refusal["code"] == "INVALID_ARGUMENT"
+    assert "path is not a field" in refusal["message"]
 
 
 def test_a_note_without_an_observation_is_refused_with_the_syntax_to_add(build, vault) -> None:

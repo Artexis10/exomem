@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
-from .. import collection_profiles, held_fs, state_migration, state_paths, vault
+from .. import collection_profiles, held_fs, state_migration, state_paths
 from .. import structured_collections as collections
+from ..kbdir import managed_join, managed_root_rel
 from ..planning_values import PlanningValues
 from . import authority, connection, legacy_originals, schema, tokens
 
@@ -36,7 +37,7 @@ def _manager(root):
 
 def layer_folders():
     """The vault-relative folder of each profile's placement layer: what lies below one is the collection store's."""
-    return tuple(vault.kb_dirname() + "/" + profile.placement_layer for profile in collection_profiles.PROFILES.values())
+    return tuple(managed_join(profile.placement_layer) for profile in collection_profiles.PROFILES.values())
 
 
 #: The portable keys of `layer_folders`, with the folder name and the profiles object they were read from.
@@ -49,7 +50,7 @@ def _layer_roots():
     The profiles are an immutable mapping of frozen profiles, so their identity names their value.
     """
     global _LAYER_ROOTS
-    kb, profiles = vault.kb_dirname(), collection_profiles.PROFILES
+    kb, profiles = managed_root_rel(), collection_profiles.PROFILES
     cached = _LAYER_ROOTS
     if cached[0] != kb or cached[1] is not profiles:
         cached = (kb, profiles, tuple(collections._portable_path_key(folder) for folder in layer_folders()))
@@ -129,7 +130,7 @@ def declarations(root, conn, *, generation=1):
     # Every call rereads and rechecks the rows, so a re-proof still sees any change; only the parse of
     # text that matched its hash is reused, across requests. Each caller gets its own marker. A Planning
     # manifest's parse reads the vocabulary overlay, so a hit also needs the overlay it read to be current.
-    key = (str(root), vault.kb_dirname(), sid, generation, tuple((*row[:4], row[5]) for row in rows))
+    key = (str(root), managed_root_rel(), sid, generation, tuple((*row[:4], row[5]) for row in rows))
     planning_values = PlanningValues(root, server_side=True)
     with _PARSED_LOCK:
         cached = _PARSED.get(key)
@@ -386,7 +387,8 @@ _READ: ContextVar[ReadScope | None] = ContextVar("collection_ownership_read", de
 
 class ReadScope:
     def __init__(self, root, *, initial=None):
-        self.root = Path(root).resolve()
+        # A decision set's resolution scope resolves the root once; `finish` proves it again.
+        self.root = state_paths.resolved_vault_path(root, expanduser=False)
         # A proof the caller made earlier skips this scope's own; `finish` still proves again and compares.
         self.initial = initial
         self.store_enrolled = False

@@ -8,13 +8,14 @@ from test_activation_log import _rows
 from test_activation_log import activation_log as activation_log  # noqa: F401  (the pytest fixture)
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
+from test_command_path_spans import token as token  # noqa: F401 (the pytest fixture)
 from test_context_catalogue import _built, _page, _source_schema, _write
 from test_context_views import _cold, _second_vault
 from test_governance_egress import _external, write_rule
 from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
-from exomem import commands, context_catalogue, freshness, lexstore, working_set_runtime
+from exomem import call_spans, commands, context_catalogue, freshness, lexstore, working_set_runtime
 from exomem.governance import principal
 from exomem.writer_lease import invoke_command
 
@@ -63,7 +64,9 @@ def test_task_discovery_does_not_require_an_anchor(vault: Path, monkeypatch: pyt
     assert refreshed["task_context"]["methods"]["items"] == []
 
 
-def test_a_public_method_edit_invalidates_an_unchanged_unit_across_clients(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_public_method_edit_invalidates_an_unchanged_unit_across_clients(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
     """An independently authored exclusion changes while the selected procedure stays identical."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     procedure = "Compare total coating time and cleanup effort at the same exposure requirement. Record the evidence and prefer the lower combined time."
@@ -78,6 +81,19 @@ def test_a_public_method_edit_invalidates_an_unchanged_unit_across_clients(vault
     turn = "What method should I use to compare finishes for a temporary display that will stand in rain?"
     first = _activate(vault, turn=turn, max_chars=8000, client="fixture-a")
     before = next(item for item in first["task_context"]["methods"]["items"] if item["source_ref"] == method)
+    cold_methods = next(
+        span for span in call_spans.pop_call_spans(token)
+        if span["name"] == "recall.working_set.task_context_methods"
+    )
+    assert cold_methods["fields"]["unit_parents_interpreted"] > 0
+    assert cold_methods["fields"]["stats_rebuilt"] == 1
+    _activate(vault, turn=turn, max_chars=8000, client="fixture-warm")
+    warm_methods = next(
+        span for span in call_spans.pop_call_spans(token)
+        if span["name"] == "recall.working_set.task_context_methods"
+    )
+    assert warm_methods["fields"]["unit_parents_interpreted"] == 0
+    assert warm_methods["fields"]["stats_rebuilt"] == 0
     with principal.request_scope(principal.owner_principal(surface="library")):
         from exomem.vault import content_hash
 
@@ -91,7 +107,15 @@ def test_a_public_method_edit_invalidates_an_unchanged_unit_across_clients(vault
             "relation_review_reason": "The changed exclusion adds no authored relation.",
         })
     assert procedure in (vault / method).read_text()
+    # Separate MCP calls have separate bounded span sets.
+    call_spans.pop_call_spans(token)
     refreshed = _activate(vault, turn=turn, max_chars=8000, continuity=first["continuity"], client="fixture-a")
+    changed_methods = next(
+        span for span in call_spans.pop_call_spans(token)
+        if span["name"] == "recall.working_set.task_context_methods"
+    )
+    assert changed_methods["fields"]["unit_parents_interpreted"] == 1
+    assert changed_methods["fields"]["stats_rebuilt"] == 1
     fresh = _activate(vault, turn=turn, max_chars=8000, client="fixture-b")
     assert refreshed["task_context"]["methods"]["reset"] is True
     after = next(item for item in fresh["task_context"]["methods"]["items"] if item["source_ref"] == method)
@@ -654,6 +678,43 @@ def test_a_deadline_during_projection_serves_the_leads_already_projected(
     assert [item["source_ref"] for item in task["candidates"]] == projected
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert not packet.get("abstained") and packet["map"]
+
+
+def test_a_slow_link_lookup_never_costs_the_leads_their_projection(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a loaded host the link lookup once spent the time projection needed, so every lead found was dropped."""
+    from exomem import request_budget, working_set
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    target = _page(vault, "calibration-report", body="Notes on a different subject entirely.\n")
+    leads = {
+        _page(
+            vault, f"alignment-visit-{number}",
+            body=f"Inspect the optical alignment before the workshop.\n\nSee [[{target.removesuffix('.md')}]].\n",
+        )
+        for number in range(2)
+    }
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Inspect the optical alignment before the workshop"
+
+    clock = _clock_at(monkeypatch)
+    read_links = working_set._task_links
+
+    def leaves_less_than_a_stage(*args, **kwargs):
+        links = read_links(*args, **kwargs)
+        # The graph read ran on a starved host until less than one stage's reserve was left.
+        clock[0] += request_budget.current().remaining() - request_budget.ACTIVATION_STAGE_RESERVE_SECONDS / 2
+        return links
+
+    monkeypatch.setattr(working_set, "_task_links", leaves_less_than_a_stage)
+    packet, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    served = {item["source_ref"]: item for item in packet["task_context"]["candidates"]}
+    assert leads <= set(served)
+    assert all(served[lead]["links"][0]["title"] == "calibration-report" for lead in leads)
     assert not packet.get("abstained") and packet["map"]
 
 

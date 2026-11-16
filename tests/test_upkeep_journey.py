@@ -443,6 +443,100 @@ def test_a_stale_decision_on_an_evicted_twin_holds_only_until_it_is_proposed_aga
     assert offered_path in offered, offered
 
 
+def test_an_empty_turn_fetch_leaves_the_session_item_to_the_first_recall_with_a_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The start-of-turn hook fetches session context with an empty turn and may abandon that answer at its
+    deadline. An item attached to it would be recorded delivered and never reach the agent."""
+    monkeypatch.setattr(upkeep, "_monotonic", lambda: 1_000_000.0)
+    monkeypatch.setattr(upkeep, "_wall", lambda: time.time() + 3 * HOUR)
+    upkeep.reset_delivery_state()
+    vault = fx.build(tmp_path)
+    monkeypatch.setenv(dreamer.ENV, "paused")
+    assert dreamer.start(vault) is not None and dreamer.delivering()
+    start = time.time()
+    _quiet(vault, start)
+    _quiet(vault, start + 2 * HOUR)
+    try:
+        fetched = _tool(vault, "activate_context", turn="", session="conversation-a")
+        assert "upkeep" not in fetched
+        assert upkeep.pending_deliveries() == []
+
+        recalled = _tool(vault, "activate_context", turn="how is the orbit pump doing", session="conversation-a")
+        assert len((recalled.get("upkeep") or {}).get("items") or []) == 1
+        assert len(upkeep.pending_deliveries()) == 1
+    finally:
+        dreamer.stop()
+
+
+def test_a_working_set_prompt_shows_the_item_it_was_sent_beside_the_map_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The service records an item delivered when it attaches it. A hook that spends the item's room on the
+    map's floor, or charges a header the layout never renders, drops an item that would have fit."""
+    import io
+    import json
+
+    from hook_requests import answer_requests
+
+    from exomem import working_set_runtime
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    monkeypatch.setattr(upkeep, "_monotonic", lambda: 1_000_000.0)
+    monkeypatch.setattr(upkeep, "_wall", lambda: time.time() + 3 * HOUR)
+    upkeep.reset_delivery_state()
+    vault = fx.build(tmp_path / "vault")
+    monkeypatch.setenv(dreamer.ENV, "paused")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    working_set_runtime.reset_caches_for_tests()
+    for name, value in {
+        "HOME": tmp_path, "EXOMEM_HOOK_HOME": tmp_path / "hook-home", "EXOMEM_HOOK_CLIENT": "claude",
+        "EXOMEM_SERVICE_ENV": tmp_path / "absent-service.env", "EXOMEM_CONFIG_PATH": tmp_path / "absent-config.json",
+        "EXOMEM_RETRIEVE_INJECT": "working_set", "EXOMEM_PROMINENCE": "maximal", "EXOMEM_REST_API_KEY": "sekret",
+        "EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC": "0", "EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC": "0",
+        "EXOMEM_RETRIEVE_INJECT_MAX_CHARS": "650",
+    }.items():
+        monkeypatch.setenv(name, str(value))
+    # An earlier prompt taught the hook this map's framing overhead and kept no token, as after a map that did
+    # not fit; the remembered overhead sets the request cap to the service's 500-character minimum.
+    hook._write_activation_value(hook._activation_map_overhead_path("conversation-a"), "150")
+    bodies: list[dict] = []
+    answers: list[dict] = []
+
+    class _Response(io.BytesIO):
+        def getcode(self) -> int:
+            return 200
+
+    def answer(request, timeout=None):
+        bodies.append(json.loads(request.data.decode("utf-8")))
+        answers.append(_tool(vault, "activate_context", **bodies[-1]))
+        return _Response(json.dumps({"success": True, "data": answers[-1]}).encode("utf-8"))
+
+    def prompt(text: str) -> str:
+        event = {"hook_event_name": "UserPromptSubmit", "prompt": text, "session_id": "conversation-a"}
+        monkeypatch.setattr(hook.sys, "stdin", io.StringIO(json.dumps(event)))
+        assert hook.main() == 0
+        output = capsys.readouterr().out
+        return json.loads(output)["hookSpecificOutput"]["additionalContext"] if output.strip() else ""
+
+    answer_requests(monkeypatch, answer)
+    assert dreamer.start(vault) is not None and dreamer.delivering()
+    start = time.time()
+    try:
+        _quiet(vault, start)
+        _quiet(vault, start + 2 * HOUR)
+        shown = prompt("how is the orbit pump doing")
+        prompt("and what about the pump inlet")
+    finally:
+        dreamer.stop()
+
+    assert bodies[0]["max_chars"] == 500
+    (line,) = hook._upkeep_lines(answers[0])
+    assert line in shown
+    assert "[exomem://map]" in shown
+    assert bodies[1]["continuity"] == answers[0]["continuity"]
+
+
 def test_the_next_ordinary_session_receives_and_disposes_of_an_item_unasked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

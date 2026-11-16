@@ -36,7 +36,7 @@ import pytest
 
 from exomem import commands, memory_refs, structured_filters
 from exomem import find as find_module
-from exomem.vault import kb_dirname
+from exomem.kbdir import kb_dirname
 
 
 def _scope_roots(vault: Path) -> tuple[Path, ...]:

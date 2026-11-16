@@ -37,7 +37,7 @@ from . import (
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_root_rel
 from .vault import (
     MISSING_CONTENT_HASH,
     VAULT_SCAN_SKIP_DIRS,
@@ -424,7 +424,7 @@ def reconcile_media(
     except ValueError as error:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must resolve inside {kb_dirname()}: {binary}",
+            f"media path must resolve inside {managed_root_rel()}: {binary}",
         ) from error
     if (
         reserved_paths.classify_logical(lexical_relative).disposition
@@ -772,7 +772,7 @@ def reconcile_all_media(
     reconcile_one = reconcile_one or (
         lambda binary: reconcile_media(vault, binary, explicit=False)
     )
-    kb = vault / kb_dirname()
+    kb = managed_root(vault)
     if not kb.is_dir():
         return 0
 
@@ -798,10 +798,15 @@ def reconcile_all_media(
             attempted += 1
             try:
                 reconcile_one(binary)
-            except BoundaryBusy:
+            except BoundaryBusy as busy:
                 # Ordinary contention in a store-mode vault: the cursor stops before this file.
                 if propagate_transient_errors:
-                    raise
+                    raise OpError(
+                        "MUTATION_BUSY",
+                        f"another write holds the vault, so {binary.name} was not reconciled",
+                        "Run this command again once the current write finishes.",
+                        details={"committed": False},
+                    ) from busy
                 held = True
             except OpError as error:
                 if error.code in _TRANSIENT_COORDINATION_CODES:
@@ -958,9 +963,9 @@ def _capture_owned_shape_is_valid(frontmatter: dict[str, object]) -> bool:
     validity rather than for particular values.
 
     That distinction used to be absent. Both shape checks required
-    `source_type: other`, which is the Evidence sidecar's hard-coded value and
-    which no real Source has, so a media page captured as a Source failed every
-    check and was rebuilt from scratch — losing its title, kind, domain,
+    `source_type: other`, the value Evidence sidecars then hard-coded (they now
+    record the unclassified kind) and which no real Source has, so a media page
+    captured as a Source failed every check and was rebuilt from scratch — losing its title, kind, domain,
     projects and tags, and having its body demoted under `## Preserved notes`.
     A non-empty `tags` list was required for the same reason, and did the same
     to a capture that legitimately has none.
@@ -1532,13 +1537,13 @@ def _retire_completed_ocr(
 
 def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
     try:
-        binary.relative_to(vault / kb_dirname())
+        binary.relative_to(managed_root(vault))
         resolved = binary.resolve(strict=True)
-        resolved.relative_to((vault / kb_dirname()).resolve(strict=True))
+        resolved.relative_to(managed_root(vault).resolve(strict=True))
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must resolve inside {kb_dirname()}: {binary}",
+            f"media path must resolve inside {managed_root_rel()}: {binary}",
         ) from exc
     if not resolved.is_file():
         raise MediaProcessingError(
@@ -1551,13 +1556,13 @@ def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
 def _confine_sidecar(vault: Path, sidecar: Path) -> None:
     """Reject an existing sidecar symlink that escapes the governed tree."""
     try:
-        sidecar.relative_to(vault / kb_dirname())
+        sidecar.relative_to(managed_root(vault))
         resolved = sidecar.resolve(strict=False)
-        resolved.relative_to((vault / kb_dirname()).resolve(strict=True))
+        resolved.relative_to(managed_root(vault).resolve(strict=True))
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media sidecar must resolve inside {kb_dirname()}: {sidecar}",
+            f"media sidecar must resolve inside {managed_root_rel()}: {sidecar}",
         ) from exc
 
 

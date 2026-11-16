@@ -205,13 +205,14 @@ if watcher_boot_seed:
     # carried forward, nothing re-adopts to put one back.
     from exomem import find as find_module  # noqa: E402
     from exomem import freshness  # noqa: E402
+    from exomem.kbdir import kb_dirname  # noqa: E402
     from exomem.vault import walk_vault_md  # noqa: E402
 
     def _entries(scope):
         if scope == "vault":
             paths = walk_vault_md(root)
         else:
-            kb = root / freshness.kb_dirname()
+            kb = root / kb_dirname()
             paths = find_module._walk_md(kb) if kb.is_dir() else ()
         for path in paths:
             try:
@@ -797,6 +798,7 @@ from test_graph_post_handoff_writes import GENERATED  # noqa: E402
 
 from exomem import find as find_module  # noqa: E402
 from exomem import freshness, lexstore, readiness, service_standby, warmup  # noqa: E402
+from exomem.kbdir import kb_dirname  # noqa: E402
 from exomem.vault import walk_vault_md  # noqa: E402
 
 root = Path(sys.argv[1])
@@ -907,7 +909,7 @@ def _entries(scope):
     if scope == "vault":
         paths = walk_vault_md(root)
     else:
-        kb = root / freshness.kb_dirname()
+        kb = root / kb_dirname()
         paths = find_module._walk_md(kb) if kb.is_dir() else ()
     for path in paths:
         try:

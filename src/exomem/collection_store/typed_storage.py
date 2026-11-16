@@ -64,7 +64,7 @@ from sqlalchemy.types import UserDefinedType
 
 from .. import records
 from ..query_engine.scalars import scalar_key
-from . import tables
+from . import multirow, tables
 
 JSON_V1 = "json-v1"
 TYPED_V1 = "typed-v1"
@@ -209,13 +209,28 @@ def encode_row(layout: Layout, values: Mapping[str, Any], *, connection=None, sc
     return (*columns, canonical_json(residual) if residual else None)
 
 
-def decode_row(layout: Layout, columns, *, connection=None) -> dict[str, Any]:
+def shared_metadata(conn, layout: Layout):
+    """Field metadata for ``decode_row(metadata=...)``: the rows of one read then read each field's epoch and format once.
+
+    Use it for one synchronous read of one snapshot; the memo is not kept past that read. None for a
+    layout that is not native, whose rows need no metadata.
+    """
+    if layout.encoding != TYPED_V2:
+        return None
+    from .native_metadata import snapshot_fields
+
+    return snapshot_fields(conn, layout.collection_id, layout.generation, range(len(layout.fields)),
+                           database=layout.database)
+
+
+def decode_row(layout: Layout, columns, *, connection=None, metadata=None) -> dict[str, Any]:
+    """Decode one stored row; ``metadata`` is a ``shared_metadata`` map shared by the rows of one read."""
     if layout.encoding == TYPED_V2:
         from . import native_rows
 
         if connection is None:
             raise TypedStorageError("native row decoding requires its metadata connection")
-        return native_rows.decode_row(connection, layout, columns, database=layout.database)
+        return native_rows.decode_row(connection, layout, columns, database=layout.database, metadata=metadata)
     columns = tuple(columns)
     if len(columns) != 3 * len(layout.fields) + 1:
         raise TypedStorageError("typed row width differs from its layout")
@@ -432,18 +447,24 @@ def version_layout(conn, collection_id: str, generation: int) -> Layout:
     return _layout(collection_id, generation, row[0])
 
 
-def _current(conn, layout: Layout, where: str, parameters) -> list[tuple[int, str, dict[str, Any]]]:
-    """Decode typed current rows selected on ``items i`` in one statement, refusing stale ones."""
+def _current(conn, layout: Layout, where: str, parameters, *, fetch=None) -> list[tuple[int, str, dict[str, Any]]]:
+    """Decode typed current rows selected on ``items i`` in one statement, refusing stale ones.
+
+    ``fetch(sql, parameters, width)`` reads the statement's rows in place of a cursor, in any order.
+    """
     columns = ",".join(f"t.{column}" for column in (*layout.value_columns, "r"))
+    sql = (f"SELECT i.row_id,i.item_key,i.row_version,t.row_version,{columns} FROM {layout.items} i "  # noqa: S608
+           f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id WHERE i.collection_id=? AND {where}")
+    parameters = (layout.collection_id, *parameters)
+    found = (conn.execute(sql, parameters).fetchall() if fetch is None
+             else fetch(sql, parameters, 5 + len(layout.value_columns)))
+    # One read's rows share each field's metadata reads; a per-row read is a statement per row.
+    metadata = shared_metadata(conn, layout)
     rows = []
-    for row_id, key, version, current, *values in conn.execute(
-        f"SELECT i.row_id,i.item_key,i.row_version,t.row_version,{columns} FROM {layout.items} i "  # noqa: S608
-        f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id WHERE i.collection_id=? AND {where}",
-        (layout.collection_id, *parameters),
-    ).fetchall():
+    for row_id, key, version, current, *values in found:
         if version != current:
             raise TypedStorageError("typed current row is missing or stale")
-        rows.append((row_id, key, decode_row(layout, values, connection=conn)))
+        rows.append((row_id, key, decode_row(layout, values, connection=conn, metadata=metadata)))
     return rows
 
 
@@ -533,11 +554,12 @@ def keyed_values(conn, collection_id: str, keys) -> list[tuple[str, dict[str, An
     return found
 
 
-def hydrate(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def hydrate(conn, rows: list[dict[str, Any]], *, fetch=None, check=None) -> list[dict[str, Any]]:
     """Give ``items`` row dicts their canonical ``values_json`` text without storing it.
 
     json-v1 rows are untouched. Typed rows are decoded with one statement per
-    collection and batch of 500, never per row.
+    collection and batch of 500, never per row; ``fetch`` reads each as `_current` does.
+    ``check`` runs before each batch and raises to stop the read.
     """
     typed: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -546,8 +568,11 @@ def hydrate(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for collection_id, members in typed.items():
         layout = require_layout(conn, collection_id)
         for offset in range(0, len(members), _HYDRATE_BATCH):
+            if check is not None:
+                check()
             batch = {row["row_id"]: row for row in members[offset:offset + _HYDRATE_BATCH]}
-            decoded = _current(conn, layout, f"i.row_id IN ({','.join('?' for _ in batch)})", tuple(batch))
+            decoded = _current(conn, layout, f"i.row_id IN ({','.join('?' for _ in batch)})", tuple(batch),
+                               fetch=fetch)
             if len(decoded) != len(batch):
                 raise TypedStorageError("item is absent from its typed collection")
             for row_id, _, values in decoded:
@@ -624,18 +649,22 @@ def write_new_versions(conn, layout: Layout, rows, *, txn_id: int, schema_versio
         version, identity = _version_parameters(layout, row_id, 1, encoded, body, payload_hash, txn_id, schema_version)
         history.append(version)
         identities.append(identity)
-    _, _, upsert, insert_version = _declarations(layout)
+    current_table, history_table, _, _ = _declarations(layout)
+    raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection
+
+    def write(table, rows, **options):
+        multirow.insert_rows(conn.execute, raw, table.name, rows, **options)
+
     if layout.encoding == TYPED_V2:
         from .native_operands import FileRole, operand_snapshot
 
-        raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection
         with operand_snapshot(raw, layout, role=FileRole.STORE):
-            conn.executemany(upsert, current)
+            write(current_table, current, upsert_key="row_id")
     else:
-        conn.executemany(upsert, current)
+        write(current_table, current, upsert_key="row_id")
     # History must precede its identity: triggers refuse payloads attached to existing identities.
-    conn.executemany(insert_version, history)
-    conn.executemany(tables.INSERT_IDENTITY, identities)
+    write(history_table, history)
+    write(tables.version_identity, identities)
 
 
 # --- forward migration --------------------------------------------------------

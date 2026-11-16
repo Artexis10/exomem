@@ -26,7 +26,7 @@ Stance remains data under current instructions and governance. The mark supplies
 
 ### D3. The stance cache has a bounded lifetime
 
-Whole lines fit under `STANCE_MAX_CHARS`, initially 800, and the remaining counted-prose budget. The cap is a protocol resource bound, not a measured optimum. Count omitted current lines and expired admitted lines. An empty block consumes no stance prose allocation.
+Whole lines fit under the stance budget, which is the block's own bound beside `max_chars`, as the skills block has. The stance first drew on the remaining counted-prose budget; it rides on every packet, so that cut the turn's task leads on every call, and it was moved to its own bound. How much of every response the stance may use is the vault owner's choice, so the budget is the vault-settable activation convention `budgets.stance_max_chars`. It started at 800 as a code constant. A first real profile of nine short-anchored lines measured 1,539 characters and fit only four lines, so the shipped value is 1600. Count omitted current lines and expired admitted lines. An empty block consumes no stance prose allocation.
 
 Cache the block separately from conversation-dependent packets. Bind it to the caller's released view, admitted stance inputs and the next relevant date boundary. A passed boundary invalidates the cached block even when no page changed. No hidden line affects its public generation or counts. Serving the block is independent of prominence; capture still follows the resolved engagement policy.
 
@@ -56,7 +56,7 @@ Preserve the hook's related-pages instruction through the central source. Render
 
 A standalone hook can call an older configured service. Generate its bounded fallback from the same move source through the existing artifact pipeline; do not hand-copy it. The fallback preserves existing recovery when `next_action` is absent, and never duplicates a supplied move.
 
-Reserve 240 characters of counted prose for the move before packet caching. Count all new stance/move prose through the existing budget definition. Structure remains outside `max_chars`; refresh `serialized_chars` after final fields are attached. An empty stance block spends none of the separate stance prose allocation.
+Reserve 240 characters of counted prose for the move before packet caching. Count new move prose through the existing budget definition; the stance has its own bound outside `max_chars`. Structure remains outside `max_chars`; refresh `serialized_chars` after final fields are attached. An empty stance block spends none of the separate stance prose allocation.
 
 ### D7. Capture authority follows the existing engagement gate
 

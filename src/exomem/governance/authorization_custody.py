@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from exomem import __version__, held_fs, mutation_lock
 
+from ..kbdir import managed_join, managed_root_rel
 from . import authorization_serving_membership
 from .authorization_serving_membership import ServingMembershipEpoch
 
@@ -2056,11 +2057,11 @@ def _governance_negative_scan(vault_root: Path) -> None:
         if not acquired.ok:
             raise AuthorizationCustodyUnavailable
         with acquired.require() as filesystem:
-            kb_result = filesystem.parent("Knowledge Base")
+            kb_result = filesystem.parent(managed_root_rel())
             if not kb_result.ok:
                 raise AuthorizationCustodyUnavailable
             with kb_result.require() as knowledge_base:
-                governance = filesystem.parent("Knowledge Base/_Governance")
+                governance = filesystem.parent(managed_join("_Governance"))
                 if governance.ok:
                     governance.require().close()
                     raise AuthorizationCustodyUnavailable

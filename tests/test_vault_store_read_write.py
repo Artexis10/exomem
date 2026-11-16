@@ -11,14 +11,13 @@ from __future__ import annotations
 import hashlib
 import multiprocessing
 import os
-import signal
 import sqlite3
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from contextvars import copy_context
 
 import pytest
+from hard_kill import KILLED, kill_self
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
     ALPHA,
@@ -35,10 +34,6 @@ from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import ownership, read, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 LIMIT = 1 << 20
 NEW = "Knowledge Base/Notes/Gamma.md"
@@ -98,6 +93,24 @@ def test_inherited_worker_snapshot_cannot_mix_revisions(stored, writer, committe
                 assert future.result() == pinned
     if committed:
         assert body() == (pinned[0] + 1, EDITED)
+
+
+def test_fresh_mutation_read_preserves_the_pinned_request_and_inherited_worker(stored, writer):
+    """A guarded recheck needs current commits without changing the request's earlier read view."""
+    with read.request_snapshot(stored):
+        with read.snapshot(stored) as pinned:
+            earlier = pinned.revision, pinned.page(ALPHA).body
+        write.commit(writer, put(ALPHA, EDITED))
+
+        def current():
+            with read.snapshot(stored, join_request=False) as view:
+                return view.revision, view.page(ALPHA).body
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(copy_context().run, current).result(timeout=10) == (earlier[0] + 1, EDITED)
+        assert current() == (earlier[0] + 1, EDITED)
+        with read.snapshot(stored) as unchanged:
+            assert (unchanged.revision, unchanged.page(ALPHA).body) == earlier
 
 
 def test_path_resolution_uses_stored_files_and_folders_without_probing_projections(
@@ -650,7 +663,7 @@ def _commit_and_die(environment, root, log):
             with open(log, "a") as record:
                 record.write(statement.split("(")[0].strip() + "\n")
             if statement.startswith("UPDATE store_mode SET revision"):
-                os.kill(os.getpid(), signal.SIGKILL)
+                kill_self()
 
         handle.connection.set_trace_callback(trace)
         write.commit(
@@ -682,7 +695,7 @@ def test_a_kill_inside_a_commit_leaves_the_pages_audit_intents_and_revision_all_
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
     ran = log.read_text().splitlines()
     assert any(line.startswith("INSERT INTO store_pages") for line in ran) and any(
         line.startswith("INSERT INTO store_audit") for line in ran

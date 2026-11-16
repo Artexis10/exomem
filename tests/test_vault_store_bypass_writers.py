@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import sys
 from contextlib import closing
 from pathlib import Path
 
@@ -59,10 +58,6 @@ from exomem.vault_store import (
     read,
     verify,
     write,
-)
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
 )
 
 # The fixtures of the suites that build this vault, re-exported by assignment: a test that takes one

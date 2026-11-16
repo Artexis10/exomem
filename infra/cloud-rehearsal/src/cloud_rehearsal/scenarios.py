@@ -36,6 +36,7 @@ from cellctl.manifests import (
     render_restore_job,
 )
 
+from . import platform as platform_mod
 from . import substrate as substrate_mod
 from .build import BuiltImages
 from .http import Resolver
@@ -63,6 +64,7 @@ from .shell import run, wait_for
 from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
+    from .catalogue_prewarm import CataloguePlan
     from .large_import import LargeImportPlan
     from .original_fixity import FixityPlan
     from .raw_import import RawImportPlan
@@ -70,6 +72,15 @@ if TYPE_CHECKING:
 WARM_ITERATIONS = 20
 LATENCY_ITERATIONS = 10
 CELLCTL_REPO = "Artexis10/exomem#1368"
+
+# automate-cloud-releases 1.15: the release route wants a vMAJOR.MINOR.PATCH
+# tag with every cellImage it has not seen. The rehearsal's control plane is
+# disposable, so the tags are a fixed ascending set per run, and the resume
+# re-records the good image under a newer tag rather than going back.
+RELEASE_V1 = "v0.0.1"
+RELEASE_V2 = "v0.0.2"
+RELEASE_BROKEN = "v0.0.3"
+RELEASE_RESUMED = "v0.0.4"
 
 # Runs inside a cell: its own readiness report, reduced to content-free fields.
 HEALTH_READY_PROBE = """
@@ -148,6 +159,8 @@ class Context:
     raw_import: RawImportPlan | None = None
     # The original-fixity mode (original_fixity.py): what to seed after provisioning.
     original_fixity: FixityPlan | None = None
+    # The catalogue-prewarm mode (catalogue_prewarm.py): the scenarios to run after provisioning.
+    catalogue_prewarm: CataloguePlan | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -309,13 +322,19 @@ class Context:
         return keys
 
     def set_backup_window(self, window: str) -> None:
-        """A chart value change: cellctl's Deployment env, rolled with Recreate."""
+        """A chart value change: cellctl's Deployment env, rolled with Recreate. The
+        upgradeWindow default range moves with it in the same update — cellctl
+        refuses to start while the two overlap."""
 
+        upgrade_start, upgrade_end = platform_mod.upgrade_default_range(window)
         self.report.overlays.append(
             f"cellctl Deployment: CELLCTL_BACKUP_WINDOW={window} at step 11 (the chart value cells.backupWindow, "
             "changed so a nightly backup falls inside the run)"
         )
-        self.kubectl("set", "env", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, f"CELLCTL_BACKUP_WINDOW={window}")
+        self.kubectl("set", "env", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE,
+                     f"CELLCTL_BACKUP_WINDOW={window}",
+                     f"CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START={upgrade_start}",
+                     f"CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_END={upgrade_end}")
         self.kubectl("rollout", "status", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, "--timeout=180s")
 
     async def backup(self, cell_id: str) -> str:
@@ -723,7 +742,7 @@ async def step_7_upgrade(ctx: Context, record: StepRecord) -> None:
     started = time.monotonic()
     # The upgrade contract starts at the release request, after diagnostics.
     record.evidence["pre_release_log_snapshot_seconds"] = round(started - snapshot_started, 4)
-    await ctx.admin_release({"cellImage": ctx.images.cell_v2})
+    await ctx.admin_release({"cellImage": ctx.images.cell_v2, "release": RELEASE_V2})
     record.evidence["release_request_seconds"] = round(time.monotonic() - started, 4)
     saw_hold = False
 
@@ -769,7 +788,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
     previous = (await ctx.cell(ctx.a.cell_id))["observed_image"]
     started = time.monotonic()
     snapshot_logs(ctx)
-    await ctx.admin_release({"cellImage": ctx.images.cell_broken})
+    await ctx.admin_release({"cellImage": ctx.images.cell_broken, "release": RELEASE_BROKEN})
     deadline = started + 2400
 
     def canary_applied(row: dict[str, Any]) -> bool:
@@ -850,7 +869,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
     if after.error_code:
         raise StepFailure(f"a governed write after the restore failed: {after.error_code}")
     # The owner resumes on the known-good release (D6 "While paused").
-    await ctx.admin_release({"cellImage": previous, "clearRolloutPause": True})
+    await ctx.admin_release({"cellImage": previous, "release": RELEASE_RESUMED, "clearRolloutPause": True})
     resumed = await ctx.rollout()
     record.evidence["resumed"] = {"paused": resumed.get("paused")}
 
@@ -1291,6 +1310,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the original-fixity mode needs the provisioned cell, and step 2 did not pass")
                 await run_original_fixity(ctx, ctx.original_fixity)
+        if number == 2 and ctx.catalogue_prewarm is not None:
+            from .catalogue_prewarm import run_catalogue_prewarm
+
+            with stage(ctx.report, "catalogue_prewarm"):
+                if record.status != PASSED:
+                    raise StepFailure("the catalogue-prewarm mode needs the provisioned cell, and step 2 did not pass")
+                await run_catalogue_prewarm(ctx, ctx.catalogue_prewarm)
     if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
         with stage(ctx.report, "operator_restore_abort"):
             raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
@@ -1306,6 +1332,9 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.original_fixity is not None and "original_fixity" not in ctx.report.stages:
         with stage(ctx.report, "original_fixity"):
             raise StepFailure("the requested original-fixity stage requires provisioning at step 2")
+    if ctx.catalogue_prewarm is not None and "catalogue_prewarm" not in ctx.report.stages:
+        with stage(ctx.report, "catalogue_prewarm"):
+            raise StepFailure("the requested catalogue-prewarm stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:

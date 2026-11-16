@@ -39,9 +39,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
+from . import indexes, memory_refs, privacy_log, semantic_contract, source_taxonomy, temporal
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .ocr_facts import OcrFacts
 from .source_inspection import Inspection, inspect_source
 from .vault import (
@@ -813,7 +813,7 @@ def preserve(
                       "writes": [write for write in planned if write.path in core_paths]})
 
         # Index + log updates.
-        rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
+        rel_artifact_for_summary = managed_relative(rel_artifact)
         activity_summary = (
             f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
             f"mobile via exomem)"
@@ -858,7 +858,7 @@ def preserve(
             )
             writes.extend(sub_writes)
         elif not raw_protection and not top_index.exists():
-            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
         if log_file.exists() and not raw_protection and effect_admitted(log_file):
@@ -877,7 +877,7 @@ def preserve(
                 )
             )
         elif not raw_protection and not log_file.exists():
-            warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+            warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer
 
@@ -1225,9 +1225,10 @@ def _render_sidecar(
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
-    Uses `type: source` (with `source_type: other`) since the page-type
-    taxonomy doesn't have a dedicated `evidence` type. Tags surface the
-    evidence + scope context.
+    Uses `type: source` since the page-type taxonomy doesn't have a dedicated
+    `evidence` type. A dataset card carries `dataset-export`; every other sidecar
+    carries the unclassified kind, because no agent chose one for the artifact.
+    Tags surface the evidence + scope context.
 
     `description` is a short human caption; `text` is the full extracted/OCR'd
     content of the artifact. Either or both may be present (the caller only
@@ -1257,7 +1258,11 @@ def _render_sidecar(
     label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
     display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
-    lines.append("source_type: dataset-export" if dataset_format else "source_type: other")
+    lines.append(
+        "source_type: dataset-export"
+        if dataset_format
+        else f"source_type: {source_taxonomy.UNCLASSIFIED_KIND}"
+    )
     lines.append(f"captured: {date_iso}")
     if inspection is not None:
         lines.append(f"inspection_status: {inspection.status}")

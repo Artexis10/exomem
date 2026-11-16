@@ -28,6 +28,8 @@ MAX_ANALYTICS_SESSIONS = 1
 _ADMISSION_SEAL = object()
 _CURRENT_SESSION: ContextVar[ReadSession | None] = ContextVar("collection_query_session", default=None)
 _MAX_DECODE_BYTES = 256 * 1024
+#: Admitted row ids written to TEMP per statement; each statement step re-takes the GIL.
+_ADMISSION_BATCH = 4096
 #: The whole serialized v1 result, rows or groups (design §8).
 MAX_RESULT_BYTES = 64 * 1024
 
@@ -46,6 +48,7 @@ def wire_bytes(value) -> int:
 
 _MIB = 1024 * 1024
 #: Each execution profile's bounds, which are also the widest a caller may set (design §12).
+#: ``timeout_ms`` is CPU time of the request's own thread (`Deadline`).
 #: Analytics is explicit and synchronous: a whole-call deadline, no partial
 #: aggregate and no continuation.
 PROFILES = {
@@ -53,7 +56,74 @@ PROFILES = {
                     "max_groups": 1000, "max_state_bytes": 8 * _MIB},
     "analytics": {"timeout_ms": 2000, "max_row_visits": 10_000_000, "max_temp_bytes": 256 * _MIB,
                   "max_groups": 1000, "max_state_bytes": 8 * _MIB},
+    # The retained Records query (record_formats.query_collection), never a caller's choice: its load
+    # target is a filtered page over 100,000 rows within 1 s, which a 200 ms budget cannot scan.
+    "records": {"timeout_ms": 1000, "max_row_visits": 100_000, "max_temp_bytes": 64 * _MIB,
+                "max_groups": 1000, "max_state_bytes": 8 * _MIB},
 }
+#: The wall-clock bound on any query deadline. The budget counts the request thread's CPU, so time
+#: spent waiting for the GIL behind in-process background threads is not the query's cost; this
+#: still bounds the waits that burn none of it, such as a lock held elsewhere.
+WALL_BACKSTOP_MS = 2000
+#: VM instructions between deadline checks inside one statement: about a millisecond of SQLite work.
+#: Every check re-takes the GIL, which beside a busy thread costs milliseconds of its own.
+_PROGRESS_PERIOD = 200_000
+_DEADLINE: ContextVar[Deadline | None] = ContextVar("collection_query_deadline", default=None)
+
+
+class Deadline:
+    """One request's query time: the CPU its own thread spends, with a wall-clock backstop.
+
+    The backstop is `WALL_BACKSTOP_MS`, or the CPU budget when that is longer, cut to what remains
+    of the store request's checkpoint: a query never outlives the request that runs it.
+    """
+
+    __slots__ = ("cpu_ms", "wall_ms", "_thread", "_cpu", "_wall")
+
+    def __init__(self, cpu_ms: int) -> None:
+        from .. import request_budget
+
+        wall_ms = max(WALL_BACKSTOP_MS, cpu_ms)
+        checkpoint = request_budget.current_checkpoint()
+        if checkpoint is not None:
+            wall_ms = min(wall_ms, int(checkpoint.remaining() * 1000))
+        self.cpu_ms, self.wall_ms = cpu_ms, wall_ms
+        self._thread = threading.get_ident()
+        self._cpu, self._wall = time.thread_time(), time.monotonic()
+
+    def elapsed_ms(self) -> float:
+        """CPU milliseconds this deadline's thread has spent since it started."""
+        return (time.thread_time() - self._cpu) * 1000
+
+    def expired(self) -> QueryError | None:
+        """The refusal naming the bound that has passed, or None while both hold."""
+        if self.elapsed_ms() >= self.cpu_ms:
+            return QueryError("QUERY_TIMEOUT", f"the query used its {self.cpu_ms} ms CPU budget")
+        if (time.monotonic() - self._wall) * 1000 >= self.wall_ms:
+            return QueryError("QUERY_TIMEOUT", f"the query passed its {self.wall_ms} ms wall-clock bound")
+        return None
+
+
+def records_refusal(error: QueryError, deadline: Deadline) -> collections.CollectionError:
+    """The refusal of a Records query that ``error`` stopped, the same on every route it takes."""
+    return collections.CollectionError(error.code, f"the records query stopped: {error.message}",
+                                       {"timeout_ms": deadline.cpu_ms, "wall_ms": deadline.wall_ms})
+
+
+def current_deadline() -> Deadline | None:
+    """The deadline a request set on this thread with `deadline_scope`, or None."""
+    found = _DEADLINE.get()
+    return found if found is not None and found._thread == threading.get_ident() else None
+
+
+@contextmanager
+def deadline_scope(deadline: Deadline) -> Iterator[Deadline]:
+    """Share one deadline among the reads of one request on this thread."""
+    token = _DEADLINE.set(deadline)
+    try:
+        yield deadline
+    finally:
+        _DEADLINE.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,18 +173,11 @@ class AdmittedCollection:
     collection_id: str
     fields: tuple[str, ...]
     visible_count: int
-    input_order: str
+    input_key: Callable  # `governance.input_order` of the admitted manifest, over ``items`` columns
     membership_sql: str
     layout: typed_storage.Layout | None
     _seal: object
     items: str = "main.items"  # the relation standing for ``items``: the store's, or a derived file's
-
-    @property
-    def values_sql(self) -> str:
-        self.check()
-        # Typed rows decode by row_id, so SQL function arity never grows with field count.
-        raw = "i.values_json" if self.layout is None else "exomem_typed_values(i.collection_id,i.row_id)"
-        return f"CASE WHEN {self.membership_sql} THEN exomem_query_values(i.collection_id,{raw}) END"
 
     def check(self) -> None:
         if self._seal is not _ADMISSION_SEAL or self.session._admitted.get(self.collection_id) is not self:
@@ -195,8 +258,8 @@ class ReadSession:
             raise QueryError("QUERY_CANCELLED")
         if self._cancelled is not None and self._cancelled():
             self._failure = QueryError("QUERY_CANCELLED")
-        elif time.monotonic() >= self._deadline:
-            self._failure = QueryError("QUERY_TIMEOUT")
+        else:
+            self._failure = self._deadline.expired()
         if self._failure is not None:
             raise self._failure
 
@@ -207,64 +270,6 @@ class ReadSession:
             self._failure = error
             return 1
         return 0
-
-    def _values(self, collection_id, raw):
-        try:
-            self.check()
-            admitted = self._admitted.get(collection_id)
-            if admitted is None:
-                raise QueryError("COLLECTION_NOT_FOUND")
-            # Bound an individual decode independently of total row count.
-            maximum = min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes)
-            from io import BytesIO
-
-            from .selected_values import read_selected_tree
-
-            plan = self._field_plans[collection_id]
-            if plan.owner:
-                if len(raw) > maximum or len(raw.encode()) > maximum:
-                    raise QueryError("QUERY_COST_LIMIT")
-                stored = json.loads(raw)
-            else:
-                stored = read_selected_tree(BytesIO(raw.encode()), plan.fields,
-                                            max_bytes=maximum, check=self.check)
-            self.check()
-            values = {name: stored[name] for name in admitted.fields if name in stored}
-            if self._project_values is not None:
-                values = self._project_values(values)
-            self.check()
-            encoded = json.dumps(values, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-            if len(encoded.encode()) > maximum:
-                raise QueryError("QUERY_COST_LIMIT")
-            self.check()
-            return encoded
-        except QueryError as error:
-            self._failure = error
-            raise
-        except (ValueError, TypeError, RecursionError) as error:
-            self._failure = QueryError("QUERY_COST_LIMIT")
-            raise self._failure from error
-
-    def _typed_values(self, collection_id, row_id):
-        """Decode one admitted typed row to its canonical JSON text for the value UDF."""
-        try:
-            self.check()
-            admitted = self._admitted.get(collection_id)
-            if admitted is None or admitted.layout is None:
-                raise QueryError("COLLECTION_NOT_FOUND")
-            encoded = typed_storage.canonical_json(self.selected_values(
-                row_id, admitted.layout, admitted.fields,
-                max_bytes=min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes), check=self.check))
-            if len(encoded.encode()) > min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes):
-                raise QueryError("QUERY_COST_LIMIT")
-            self.check()
-            return encoded
-        except QueryError as error:
-            self._failure = error
-            raise
-        except (typed_storage.TypedStorageError, ValueError, TypeError, RecursionError) as error:
-            self._failure = QueryError("QUERY_UNAVAILABLE")
-            raise self._failure from error
 
     def _selected_fields(self, collection_id, fields):
         """Release only the requested dependencies from the admitted field plan."""
@@ -315,7 +320,6 @@ class ReadSession:
                 # Keep payload batches below the general 128-row ceiling;
                 # Python strings and decoded containers also consume memory.
                 batch = cursor.fetchmany(min(self.limits.fetch_size, 16))
-                self.check_temp()
                 if not batch:
                     return
                 yield batch
@@ -351,10 +355,7 @@ class ReadSession:
                 grammar = record_formats.log_grammar_tokens(manifest)
                 if grammar is not None and grammar.note_field is not None and grammar.note_field not in fields:
                     fields += (grammar.note_field,)
-                order = "i.view_path ASC, i.row_id ASC"
-                if manifest.storage.strategy == "markdown-log":
-                    direction = "DESC" if manifest.storage.descriptor.get("insertion") == "newest-first" else "ASC"
-                    order = f"i.created_txn {direction}, i.row_id {direction}"
+                order = governance.input_order(manifest)
                 source = self.row_source(collection_id)
                 if source is not derived_rows.STORE and not uniform:
                     raise QueryError("QUERY_UNAVAILABLE", "a derived collection's rows are released whole or not at all")
@@ -366,14 +367,17 @@ class ReadSession:
                     predicate = "1"
                 else:
                     self.connection.execute("CREATE TEMP TABLE IF NOT EXISTS query_admitted(row_id INTEGER PRIMARY KEY)")
-                    count = 0
+                    count, admitted = 0, []
                     for subject in subjects:
                         self.check()
                         if operation.decision(subject).level >= 6:
                             count += 1
                             if count + self._estimated_visits > self.limits.max_row_visits:
                                 raise QueryError("QUERY_COST_LIMIT")
-                            self.connection.execute("INSERT INTO query_admitted VALUES(?)", (subject.row_id,))
+                            admitted.append(subject.row_id)
+                            if len(admitted) == _ADMISSION_BATCH:
+                                self._insert_admitted(admitted)
+                    self._insert_admitted(admitted)
                     predicate = "EXISTS (SELECT 1 FROM temp.query_admitted AS admitted WHERE admitted.row_id=i.row_id)"
                 self._estimated_visits += count
                 if self._estimated_visits > self.limits.max_row_visits:
@@ -386,6 +390,14 @@ class ReadSession:
                 return result
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
             raise QueryError("COLLECTION_NOT_FOUND") from error
+
+    def _insert_admitted(self, row_ids: list) -> None:
+        """Write a batch of admitted row ids in one statement and empty the batch."""
+        if row_ids:
+            self.connection.execute("INSERT INTO temp.query_admitted SELECT value FROM json_each(?)",
+                                    (json.dumps(row_ids),))
+            row_ids.clear()
+            self.check_temp()
 
     def admit_lookup(self, collection_id: str) -> LookupAdmission:
         """Admit a collection for lookups by key, under the decision `admit` makes and without counting its rows.
@@ -487,10 +499,14 @@ def _summary_released(operation, collection_id: str) -> bool:
 
 @contextmanager
 def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = None,
-                 cancelled: Callable[[], bool] | None = None) -> Iterator[ReadSession]:
-    """Own a fresh connection, snapshot, evaluator and admission until return."""
+                 cancelled: Callable[[], bool] | None = None,
+                 deadline: Deadline | None = None) -> Iterator[ReadSession]:
+    """Own a fresh connection, snapshot, evaluator and admission until return.
+
+    ``deadline`` shares a request's deadline; by default the session starts its own from ``limits``.
+    """
     limits = limits or QueryLimits()
-    deadline = time.monotonic() + limits.timeout_ms / 1000
+    deadline = deadline or Deadline(limits.timeout_ms)
     target = Path(store_path).resolve()
     analytics = limits.profile == "analytics"
     with _READERS_GUARD:
@@ -507,9 +523,7 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
         session = ReadSession(Path(root), conn, limits, cancelled, deadline)
         session._attached = attached
         token = _CURRENT_SESSION.set(session)
-        conn.set_progress_handler(session._progress, 1000)
-        conn.create_function("exomem_query_values", 2, session._values)
-        conn.create_function("exomem_typed_values", 2, session._typed_values)
+        conn.set_progress_handler(session._progress, _PROGRESS_PERIOD)
         page_size = conn.execute("PRAGMA temp.page_size").fetchone()[0]
         conn.execute(f"PRAGMA temp.max_page_count={max(1, limits.max_temp_bytes // page_size)}")
         conn.execute("BEGIN")

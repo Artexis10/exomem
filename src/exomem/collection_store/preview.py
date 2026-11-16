@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import memory_refs, published_admission, request_budget, state_paths
 from .. import structured_collections as collections
-from .connection import CollectionStoreError, WriterConnection
+from .connection import CollectionStoreError, SnapshotHandle, WriterConnection
 
 if TYPE_CHECKING:
     from .writer import CollectionWriter
@@ -34,13 +34,18 @@ QUERY_RECEIPT_BOUNDARY = "record_query"
 
 
 @contextmanager
-def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
-    """Bind a dark writer for this call context; ownership remains with the caller."""
+def preview_store(
+    vault_root: Path, handle: WriterConnection | SnapshotHandle, *, production: bool = False
+) -> Iterator[CollectionWriter]:
+    """Bind a dark writer for this call context; ownership remains with the caller.
+
+    A runtime says itself whether a production session serves it; a handle takes ``production``
+    from its trusted caller, as a read beside the store thread does (``runtime.StoreServer.read_beside``).
+    """
     from ..writer_lease import active_manager
     from .runtime import CollectionStoreRuntime, borrowed_writer
 
     root = Path(vault_root).resolve()
-    production = False
     if isinstance(handle, CollectionStoreRuntime):
         if root != handle.root:
             raise CollectionStoreError("COLLECTION_STORE_VAULT_MISMATCH", "foreign preview runtime")
@@ -524,6 +529,45 @@ def _validate_create(writer, profile, args):
         writer.validate_create(args["manifest_path"], args["manifest_text"], scaffold=args.get("scaffold", True))
 
 
+def _prover(vault_root: Path, writer, binding):
+    @cache
+    def prove():
+        # One ownership proof serves one request's checks; the next request proves again.
+        from . import ownership
+
+        return ownership.current(vault_root, conn=writer.connection, private=not binding[2])
+
+    return prove
+
+
+def bind_row(vault_root: Path, collection: str, item_id: str) -> dict[str, str] | None:
+    """The `item_key` and guards a Records row id stands for, bound by one key-and-version read.
+
+    It enters as a query of the collection would, so an absent or withheld collection or row
+    refuses alike. None where the generic scan of the leaf's own query must answer: no served
+    store, a collection the store does not own, or one the binder cannot read by key.
+    """
+    binding = _BOUND.get()
+    if binding is None or binding[0] != Path(vault_root).resolve():
+        return None
+    writer = binding[1]
+    prove = _prover(vault_root, writer, binding)
+    if binding[2]:
+        from .capability import require_records_summary_route
+
+        require_records_summary_route(vault_root, writer, "query", {"collection": collection}, prove=prove)
+    if prove().marker is not None and selected_writer(vault_root, collection, prove=prove) is None:
+        return None
+    from .. import collection_refs
+    from .row_binding import readable_matches
+
+    writer._require_operation_context()
+    writer._facade_profile = "records"
+    with writer.read_collection(collection, facade_profile="records") as manifest:
+        found = readable_matches(writer, manifest, item_id.partition(".")[0])
+    return None if found is None else collection_refs.bound_row(item_id, *found)
+
+
 def dispatch(
     vault_root: Path, profile: str, action: str, values: Mapping[str, Any]
 ) -> tuple[bool, Any]:
@@ -532,13 +576,7 @@ def dispatch(
     if binding is None or binding[0] != Path(vault_root).resolve():
         return False, None
     writer = binding[1]
-    from . import ownership
-
-    @cache
-    def prove():
-        # One ownership proof serves this dispatch's checks; the next dispatch proves again.
-        return ownership.current(vault_root, conn=writer.connection, private=not binding[2])
-
+    prove = _prover(vault_root, writer, binding)
     if binding[2]:
         from .capability import require_records_summary_route
 

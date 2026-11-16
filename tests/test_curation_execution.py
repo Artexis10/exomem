@@ -859,13 +859,14 @@ def test_a_folded_head_still_reads_back_every_history_entry_under_an_access_poli
     from test_latency_gate import _seed_freshness_live
 
     from exomem import vault as vault_module
+    from exomem.kbdir import kb_prefix
 
     if obsidian_root:
         (vault_module.kb_root(vault) / ".obsidian").mkdir()
     pages = earlier_episode(4)
     named = pages[1].removesuffix(".md")
     written = vault_module.parse_frontmatter((vault / pages[0]).read_text(encoding="utf-8"))[0]["superseded_by"]
-    assert written == [f"[[{named.removeprefix(vault_module.kb_prefix()) if obsidian_root else named}]]"]
+    assert written == [f"[[{named.removeprefix(kb_prefix()) if obsidian_root else named}]]"]
     # Only a governed vault runs the gate's name lookup: an ungoverned one returns before it.
     _write_source_rule(vault, ceiling=6)
     _apply(vault, _propose(vault, _fold_step(pages, vault)))

@@ -223,6 +223,54 @@ The stage's `runbook_deviations` list each place where the rehearsal differs fro
 Seeding costs about 3 seconds per original on a GitHub runner, so the default 1,000 originals take about an hour of the job's 150 minutes.
 Set the workflow inputs `original_fixity_originals` and `original_fixity_mean_kib` to change the fixture.
 
+## Catalogue pre-warm
+
+`--catalogue-prewarm` rehearses `cellctl.cataloguePrewarm` for `warm-cell-catalogue` task 3.1. It runs only on demand, as the `catalogue-prewarm` mode of the `Cloud rehearsal` workflow, after steps 1 and 2.
+It adds a second synthetic tenant, seeds its cell with 12,000 generated notes by default, and publishes three releases in turn.
+Each release's image holds the same product with the parser version raised by one, so the cell's catalogue identity changes as it does for a release that changes how pages are parsed.
+The platform turns `cataloguePrewarm` on and sets the upgrade window's idle and force minutes to the 1-minute floor.
+The build timeout and resources stay the chart's values. The stage reads them back from cellctl's Deployment, records the timeout and sizes scenario 3's filler pod from the CPU request.
+The stage reads adoption and rebuilds from the cell's structured log events `staged_catalogue_adoption` and `lexical_catalogue_materialized`, which keep their fields through a cloud cell's log redaction.
+
+| Scenario | Precondition the stage sets up | What the stage asserts |
+|---|---|---|
+| Completed build | An idle cell with a running build. The stage keeps the cell busy until the build pod runs, then lets it go idle. | The idle attempt waits for the build. The new pod logs adoption outcome `adopted` and no catalogue build with route `rebuilt`. Its live catalogue holds a page for a note written after the build. The vault manifest (size, mtime and SHA-256 of every file) taken before the window opens differs from the one after the restart only in the paths that the edit wrote. Manifests just before and after the edit measure those paths: they must add the edited note and remove nothing, and a governed write may also update indexes and the log. |
+| Unfinished build | A forced-attempt boundary that falls while the build runs. The stage keeps the cell busy so only the boundary can start the attempt. | cellctl cancels the build. One pod watch on the cell's namespace shows every build pod deleted before the serving pod begins to stop. The new pod adopts nothing and logs a catalogue build with route `rebuilt`. |
+| Insufficient capacity | A filler pod that leaves the node less free CPU than the build requests, so the build pod stays unschedulable. | The waiting build does not defer the idle attempt, which starts before the hour's forced boundary. The pod watch shows the build pod deleted before the stop. The new pod adopts nothing and logs a catalogue build with route `rebuilt`. |
+
+A scenario whose precondition does not hold fails. It never passes without the proof it was built to give.
+The completed-build scenario records each check before the stop without ending there. It still watches the stop and the upgrade, and any failed check fails it at the end.
+
+After each scenario, a gate reads whether the cell is fit for the next one. The gate passes when all of these hold:
+- the control row shows the cell running and ready, with no hold, on the release the stage published last;
+- the cell's StatefulSet carries none of the upgrade hold annotations (`exomem.io/hold`, `hold-started-at`, `previous-image`, `upgrade-target`);
+- the fleet rollout is not paused.
+
+The gate rereads for up to 75 s, two cellctl passes, so a state that the next pass converges does not count. A paused rollout fails it at once, because only an operator resumes one.
+Each scenario records the gate's result as the check `cell_settled_after_the_scenario`. A failed gate also marks every scenario left `BLOCKED` with the gates that failed, so none waits 25 minutes for a cell that will not settle.
+The harness never resumes the rollout or clears a hold. A scenario that fails before its cell reaches the release also fails the gate, so the rest are blocked; such a run is repeated anyway.
+
+The stage keeps its diagnostics in `catalogue-prewarm/` in the run's diagnostics artifact:
+- `<cellctl pod>.log`: cellctl's log for the whole stage, one file per pod, because changing the force minutes replaces the pod;
+- `<scenario>-statefulset.yaml`: the cell's StatefulSet with its field owners (`--show-managed-fields`), read after the gate;
+- `<scenario>-events.json`: the cell namespace's events;
+- `<scenario>-pod-<pod>.log`: the log of each pod that replaced the serving pod.
+
+A stage that stops early also writes `stage-statefulset.yaml` and `stage-events.json`.
+Each scenario's `states` list records the StatefulSet's images, replicas and hold annotations with `target-applied-at`, the control row and the rollout's `paused`, `error_code` and held cell. A new entry starts whenever a poll reads a change, and it names that poll.
+
+For each scenario the report records the build Job's start, end and outcome, the stop and ready times, the build container's CPU and memory peaks and the configured build timeout.
+Scenario 3's build never runs, so its peaks read "no build container ran".
+`summarize.py` shows them in the job summary.
+The stage's `deviations` list each place where the rehearsal differs from a production upgrade.
+
+Set the workflow input `catalogue_prewarm_notes` to change the vault size, from 1 to 30,000 notes.
+The default of 12,000 notes of about 4 KiB aims at a build of 120 to 330 s. The measured build, stop and run times are in task 3.1's evidence in `openspec/changes/warm-cell-catalogue/tasks.md`.
+The completed-build scenario records the build time as an observation. It fails when the build ends before the cell has been idle long enough to show the deferral.
+The unfinished-build scenario waits for a forced boundary between :30 and :59 of a UTC hour.
+cellctl re-dates the window annotations at 00:00 UTC, so a scenario that would cross that time waits until 00:05 UTC. Each wait counts against the 140-minute step limit.
+The stage never gates the node.
+
 ## Report
 
 `schema: exomem-cloud-rehearsal-report-v1`. It records:

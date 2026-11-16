@@ -12,7 +12,6 @@ import json
 import logging
 import shutil
 import sqlite3
-import sys
 import time
 from contextlib import closing
 
@@ -21,6 +20,7 @@ from test_collection_store_migration import OPERATOR
 from test_collection_store_replica import _commit as commit_a_collection_row
 from test_managed_collections_migration import OPERATOR_SECRET, coordinator_url  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
+    SHORT_LEASE_TTL,
     migrate_apply,
     rollback_apply,
     store_mode,
@@ -37,10 +37,6 @@ from exomem import (
 )
 from exomem.collection_store import admission, connection, replica, schema
 from exomem.vault_store import availability, marker, mode
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 
 @pytest.fixture
@@ -78,6 +74,8 @@ def rollback_that_publishes_nothing(vault_root, export, monkeypatch):
 
     with monkeypatch.context() as broken:
         broken.setattr(replica, "publish_replica", fail)
+        # The failed hand-back leaves this owner's lease to expire.
+        broken.setenv("EXOMEM_WRITER_LEASE_TTL", SHORT_LEASE_TTL)
         rollback_apply(vault_root, export)
 
 
@@ -91,6 +89,8 @@ def rollback_that_dies_after_publishing(vault_root, export, monkeypatch):
 
     with monkeypatch.context() as broken:
         broken.setattr(replica, "publish_replica", publish_then_fail)
+        # The failed hand-back leaves this owner's lease to expire.
+        broken.setenv("EXOMEM_WRITER_LEASE_TTL", SHORT_LEASE_TTL)
         rollback_apply(vault_root, export)
 
 
@@ -555,6 +555,8 @@ def test_a_migration_whose_claim_cannot_be_published_stays_in_file_mode_and_leav
 
     with monkeypatch.context() as broken:
         broken.setattr(replica, "publish_replica", fail_once_the_store_says_store)
+        # The failed hand-back leaves this owner's lease to expire.
+        broken.setenv("EXOMEM_WRITER_LEASE_TTL", SHORT_LEASE_TTL)
         assert migrate_apply(vault) == 1
     assert not mode.store_mode_active(vault)
     assert marker.read_replica(vault).state == marker.CLEAR

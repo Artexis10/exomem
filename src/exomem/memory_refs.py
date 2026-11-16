@@ -17,7 +17,7 @@ from urllib.parse import unquote
 
 from . import call_spans, foreground_priority, reserved_paths, state_paths
 from . import vault as vault_module
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_split
 
 if TYPE_CHECKING:
     from .pending_recall import ReferenceProjection
@@ -278,10 +278,10 @@ def _managed_runtime() -> bool:
 def _sidecar_prefix() -> str:
     """The one prefix `rebuild_all` can reach, resolved at call time.
 
-    `kb_dirname()` is configurable per vault, so this cannot be a module
+    The managed root's name is configurable per vault, so this cannot be a module
     constant without freezing the first vault a process sees.
     """
-    return f"{kb_dirname()}/"
+    return managed_join("")
 
 
 def _decline_if_managed(vault_root: Path) -> None:
@@ -1312,16 +1312,10 @@ def _pages_without_id(
     from . import access, recall_policy
     from .collection_store import ownership
 
-    kb = Path(vault_root) / kb_dirname()
-    if not kb.is_dir():
-        return
     # A backfill job plans over every page before it holds the boundary, so the walk yields
     # to a foreground read.
     with ownership.read_scope(vault_root, finalize=True):
-        for path in foreground_priority.yielding_in_bulk(sorted(kb.rglob("*.md"))):
-            rel = _relative_markdown(vault_root, path)
-            if rel is None:
-                continue
+        for rel, path in foreground_priority.yielding_in_bulk(_backfill_candidates(vault_root)):
             try:
                 raw, guard = vault_module.read_guarded_text(vault_root, path)
             except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
@@ -1346,6 +1340,49 @@ def _pages_without_id(
                 skipped.append({"path": rel, "reason": reason})
                 continue
             yield rel, path, raw, guard
+
+
+def _backfill_candidates(vault_root: Path) -> Iterator[tuple[str, Path]]:
+    """The `(rel, path)` of each Markdown page that a backfill reads, in the walk's path order.
+
+    A store-mode vault lists its stored pages from the store, where a page may have no file yet,
+    and walks the disk only for the files that the store does not own.
+    """
+    from .collection_store import connection
+    from .vault_store import mode, read
+    from .vault_store import ownership as page_ownership
+
+    root = Path(vault_root)
+    kb = managed_root(root)
+    if mode.store_mode_for_reads(root):
+        try:
+            with read.snapshot(root) as view:
+                # `rglob("*.md")` below matches the suffix case-sensitively; stored pages do too.
+                stored = {
+                    root / meta.path: meta.path for meta in view.pages(managed_join(""))
+                    if meta.path.endswith(".md") and is_scanned_page(meta.path)
+                }
+        except connection.CollectionStoreError as error:
+            if error.code != read.NOT_ACTIVE:
+                raise
+        else:
+            unowned = (
+                path for path in kb.rglob("*.md")
+                if page_ownership.classify(path.relative_to(root).as_posix())
+                is not page_ownership.Ownership.PAGE
+            )
+            for path in unowned:
+                rel = _relative_markdown(root, path)
+                if rel is not None:
+                    stored[path] = rel
+            yield from ((stored[path], path) for path in sorted(stored))
+            return
+    if not kb.is_dir():
+        return
+    for path in sorted(kb.rglob("*.md")):
+        rel = _relative_markdown(root, path)
+        if rel is not None:
+            yield rel, path
 
 
 def _backfill_plan_id(pages: Iterable[tuple[str, str]]) -> str:
@@ -1538,10 +1575,10 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
         for row in _scan_pages(vault_root)
     }
     if not index.path.exists():
-        return ([{"path": f"{kb_dirname()}/", "reason": "reference sidecar missing"}]
+        return ([{"path": managed_join(""), "reason": "reference sidecar missing"}]
                 if current else [])
     if not index.available():
-        return [{"path": f"{kb_dirname()}/", "reason": "reference sidecar incompatible"}]
+        return [{"path": managed_join(""), "reason": "reference sidecar incompatible"}]
     try:
         conn = index._connect_readonly()
         try:
@@ -1551,7 +1588,7 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
         finally:
             conn.close()
     except (OSError, RuntimeError, sqlite3.Error) as exc:
-        return [{"path": f"{kb_dirname()}/", "reason": f"reference sidecar unreadable: {exc}"}]
+        return [{"path": managed_join(""), "reason": f"reference sidecar unreadable: {exc}"}]
     indexed = {
         str(path): (
             str(exomem_id) if exomem_id is not None else None,
@@ -1707,8 +1744,7 @@ def _relative_markdown(vault_root: Path, path: Path) -> str | None:
 
 def is_scanned_page(rel: str) -> bool:
     """Whether the reference scan reads this path: a Markdown page in the Knowledge Base."""
-    prefix = f"{kb_dirname()}/"
-    if not rel.startswith(prefix) or not rel.lower().endswith(".md"):
+    if managed_split(rel) is None or not rel.lower().endswith(".md"):
         return False
     return not vault_module.in_excluded_scan_dir(rel)
 
@@ -1815,7 +1851,7 @@ def replace_identity_row(
 
 
 def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]:
-    return _scan_directory(vault_root, Path(vault_root) / kb_dirname())
+    return _scan_directory(vault_root, managed_root(Path(vault_root)))
 
 
 def _scan_directory(
@@ -1855,4 +1891,13 @@ def read_reference_owner(vault_root: Path, path: Path) -> str | None:
     page and a missing or malformed id, because the scan maps each to no owner.
     """
     row = _read_identity(vault_root, path)
+    return row[1] if row is not None and row[4] == "valid" else None
+
+
+def reference_owner_from_bytes(vault_root: Path, rel: str, raw: bytes | None) -> str | None:
+    """``read_reference_owner`` for a page's bytes, such as a stored page's, instead of its file.
+
+    ``raw`` is None for a page that does not exist.
+    """
+    row = None if raw is None else identity_row(vault_root, rel, raw)
     return row[1] if row is not None and row[4] == "valid" else None

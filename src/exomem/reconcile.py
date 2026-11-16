@@ -39,9 +39,17 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from . import audit as audit_module
-from . import indexes, maintenance_jobs, originals, relation_review, semantic_index, semantic_writes
+from . import (
+    find_corpus,
+    indexes,
+    maintenance_jobs,
+    originals,
+    relation_review,
+    semantic_index,
+    semantic_writes,
+)
 from .cli_ops import OpError
-from .vault import PlannedWrite, batch_atomic_write, content_hash, kb_root
+from .vault import PlannedWrite, batch_atomic_write, content_hash, kb_root, read_guarded_text
 
 log = logging.getLogger(__name__)
 
@@ -412,23 +420,32 @@ def _media_present(vault_root: Path, path: Path | str) -> bool:
 
 
 def _rel(path: Path, vault_root: Path) -> str:
+    # A page that the store serves is named by its store key, unresolved: its file may be absent or a link.
+    stored = find_corpus.stored_relative(path, vault_root)
+    if stored is not None:
+        return stored
     try:
         return path.resolve().relative_to(vault_root.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
 
 
-def _changed_writes(writes: list[PlannedWrite]) -> list[PlannedWrite]:
-    """Keep only writes that actually change on-disk content (idempotency)."""
-    out: list[PlannedWrite] = []
-    for w in writes:
-        try:
-            current = w.path.read_text(encoding="utf-8") if w.path.exists() else None
-        except OSError:
-            current = None
-        if current != w.content:
-            out.append(w)
-    return out
+def _current_text(vault_root: Path, path: Path) -> str | None:
+    """The page's text: the stored page when the store serves it, else the file's; None when absent."""
+    from .vault_store import read as store_read
+
+    try:
+        rel = path.relative_to(vault_root).as_posix()
+        if not store_read.page_exists(vault_root, rel):
+            return None
+        return read_guarded_text(vault_root, path)[0]
+    except (OSError, ValueError):
+        return None
+
+
+def _changed_writes(vault_root: Path, writes: list[PlannedWrite]) -> list[PlannedWrite]:
+    """Keep only writes that actually change the page's current content (idempotency)."""
+    return [w for w in writes if _current_text(vault_root, w.path) != w.content]
 
 
 def _bounded_lifecycle_values(values):
@@ -449,12 +466,18 @@ def _iter_frame_dirs(kb: Path):
     while stack:
         d = stack.pop()
         try:
-            children = list(d.iterdir())
+            with os.scandir(d) as entries:
+                children = list(entries)
         except OSError:
             continue
-        for child in children:
-            if not child.is_dir():
+        for entry in children:
+            # The entry's own type, so a page file is never statted to learn that it is no directory.
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
                 continue
+            child = Path(entry.path)
             if child.name in VAULT_SCAN_SKIP_DIRS:
                 continue
             if child.name.endswith(scene_frames.FRAMES_DIR_SUFFIX):
@@ -765,10 +788,15 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
             )
 
     maintenance_jobs.checkpoint("units")
+    from .vault_store import mode as store_mode
+
+    # A store-mode vault's commits write its lexical and graph rows with each page (design D9), so
+    # its file-mode lexical and graph sidecars are neither audited nor repaired here.
+    in_store = store_mode.store_mode_for_reads(vault_root)
     # The audit and the values it is scoped by are read with no hold. A stale scope only changes
     # which sidecars the audit compares, and `initial_graph_drift` only decides whether the graph
     # phase looks again: that phase reads the drift again inside its own hold before it repairs.
-    include_unit_lexical = lexstore.lexical_path(vault_root).exists()
+    include_unit_lexical = not in_store and lexstore.lexical_path(vault_root).exists()
     include_unit_vectors = bool(
         not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
         and index_paths.sidecar_path(vault_root).exists()
@@ -776,11 +804,12 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     graph_sidecar_exists = epistemic_graph.sidecar_path(vault_root).exists()
     initial_graph_drift = (
         []
-        if suppressed_paths and not graph_sidecar_exists
+        if in_store or (suppressed_paths and not graph_sidecar_exists)
         else audit_module._check_graph_drift(vault_root)
     )
     include_unit_graph = bool(
-        epistemic_graph.graph_enabled()
+        not in_store
+        and epistemic_graph.graph_enabled()
         and epistemic_graph.sidecar_path(vault_root).exists()
         and not initial_graph_drift
     )
@@ -929,14 +958,11 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     with _phase_hold(vault_root, "reconcile_indexes", dry_run=dry_run):
         # Counted inside the hold, so the counts it writes are the vault's as it writes them.
         top_index_path = kb / "index.md"
-        top_text = (
-            top_index_path.read_text(encoding="utf-8")
-            if top_index_path.exists() else None
-        )
+        top_text = _current_text(vault_root, top_index_path)
         sub_writes, new_top = indexes.compute_subindex_writes(
             vault_root, top_index_text=top_text
         )
-        writes: list[PlannedWrite] = _changed_writes(list(sub_writes))
+        writes: list[PlannedWrite] = _changed_writes(vault_root, list(sub_writes))
         if new_top is not None and top_text is not None and new_top != top_text:
             writes.append(PlannedWrite(path=top_index_path, content=new_top))
         report.indexes_updated = [_rel(w.path, vault_root) for w in writes]
@@ -1021,6 +1047,11 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     maintenance_jobs.checkpoint("graph")
     if os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX"):
         report.graph_status = "disabled"
+        if rebuild_graph:
+            report.graph_rebuild_status = "not_applicable"
+    elif in_store:
+        # Each commit derives its graph rows in the commit, so the store's graph is current at
+        # every revision; the registry job reports its own state to the graph readers.
         if rebuild_graph:
             report.graph_rebuild_status = "not_applicable"
     else:

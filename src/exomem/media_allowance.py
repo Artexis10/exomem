@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from . import held_fs, originals, reserved_paths, runtime_resources, trash_metadata
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root_rel
 from .vault import parse_frontmatter
 
 # These refusal codes belong to the closed media protocol, not a content vocabulary.
@@ -137,9 +138,11 @@ def _binding(
 ) -> tuple[originals.BinaryBinding, originals.StoredObject] | None:
     try:
         return originals.referenced_binding(fields, sidecar_path=path, store=store)
-    except ValueError:
-        if not PurePosixPath(path).is_relative_to(PurePosixPath(kb_dirname()) / trash_metadata.TRASH_SUBPATH):
+    except ValueError:  # A live page's `DisplacedReference` goes to `bound_references`, which confirms it.
+        if not PurePosixPath(path).is_relative_to(PurePosixPath(managed_join(trash_metadata.TRASH_SUBPATH))):
             raise
+    # A Trash page that sat away from its companion path before its deletion goes to the same confirmation.
+    displaced: originals.DisplacedReference | None = None
     from .relation_review import parse_exact_json_object
 
     current = PurePosixPath(path)
@@ -172,25 +175,35 @@ def _binding(
             meta = placements[key]
             historical = trash_metadata.original_path(meta, trash_root=root.as_posix(), current_path=path)
             return originals.referenced_binding(fields, sidecar_path=historical, store=store)
+        except originals.DisplacedReference as error:
+            displaced = error
         except (ValueError, UnicodeError):
             continue
+    if displaced is not None:
+        raise displaced
     raise ValueError("stored Trash reference has no trustworthy placement")
 
 
 def bound_references(
     vault: Path, store: originals.StoreBinding, *, unreadable: Callable[[str, Exception], None] | None = None,
-) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject]]:
-    """Every reference to `store` under the Knowledge Base, as the companion's path and what it binds.
+) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject, bool]]:
+    """Every reference to `store` under the Knowledge Base: the companion's path, what it binds, and if displaced.
 
     The caller holds the consistency guard around the whole iteration, and takes any read failure as an
     unknown census: a failed read never ends the walk early and reads as complete. A caller that passes
     `unreadable` is told of each note that fails on its own: a header that the tree cannot read, decode or
     prepare within the note's own budget, or one that does not parse or bind. The walk then goes on to the next note, and that caller must treat
     the census as unknown once told. Without it, the first such note raises.
+
+    A page that binds a reference away from its original's companion path, as a confined move leaves
+    one, counts only when the media ledger records that exact version at the original's path; those pages
+    come after the walk, from one batched ledger read, with True last. Such a page holds no original
+    beside it: its original stays at `binary.path`, and several pages may name the same one.
     """
     metadata: dict[str, str] = {}
     placements: dict[str, dict[str, object]] = {}
     placement_versions: dict[str, held_fs.FileVersion] = {}
+    displaced: list[tuple[str, originals.DisplacedReference]] = []
 
     def select(candidates: list[tuple[str, str]]):
         for relative, kind in candidates:
@@ -199,21 +212,21 @@ def bound_references(
             # Markdown and Trash metadata extensions belong to the fixed vault format.
             if (PurePosixPath(relative).is_relative_to(trash_metadata.TRASH_SUBPATH)
                     and relative.endswith(trash_metadata.METADATA_SUFFIX)):
-                metadata[f"{kb_dirname()}/{relative[:-len(trash_metadata.METADATA_SUFFIX)]}"] = f"{kb_dirname()}/{relative}"
+                metadata[managed_join(relative[:-len(trash_metadata.METADATA_SUFFIX)])] = managed_join(relative)
             if relative.lower().endswith(".md"):
                 yield relative
 
     def header_failed(relative: str, error: Exception) -> None:
         assert unreadable is not None
-        unreadable(f"{kb_dirname()}/{relative}", error)
+        unreadable(managed_join(relative), error)
 
     with reserved_paths.open_generic_tree(
-        vault, kb_dirname(), select=select, require_complete=True,
+        vault, managed_root_rel(), select=select, require_complete=True,
         markdown_header_limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
         markdown_header_failed=None if unreadable is None else header_failed,
     ) as entries:
         for entry in entries:
-            path = f"{kb_dirname()}/{entry.relative_path}"
+            path = managed_join(entry.relative_path)
             try:
                 if entry.markdown is None:
                     raise ValueError("companion header was not read")
@@ -221,6 +234,9 @@ def bound_references(
                     parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
                     path, store, metadata, vault, placements, placement_versions,
                 )
+            except originals.DisplacedReference as error:
+                displaced.append((path, error))
+                continue
             except ValueError as error:  # This note's YAML or binding. The tree reports a header it cannot read; a walk or I/O failure is no ValueError.
                 if unreadable is None:
                     raise
@@ -229,7 +245,21 @@ def bound_references(
             finally:
                 del entry
             if bound is not None:
-                yield path, bound[0], bound[1]
+                yield path, bound[0], bound[1], False
+    if displaced:
+        from . import media_store
+
+        try:
+            recorded = media_store.recorded_versions(vault, [(item.binary, item.reference) for _path, item in displaced])
+        except sqlite3.Error as error:
+            raise OSError("the media ledger that confirms a moved page's reference cannot be read") from error
+        for (path, item), confirmed in zip(displaced, recorded, strict=True):
+            if confirmed:
+                yield path, item.binary, item.reference, True
+            elif unreadable is None:
+                raise item
+            else:
+                unreadable(path, item)
     for metadata_path, version in placement_versions.items():
         with reserved_paths.open_generic_binary(vault, metadata_path) as source:
             if source.version != version:
@@ -264,7 +294,7 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
         if store is None:
             raise ValueError("no selected media store")
         with get_manager().consistency_guard(vault, operation="media_reference_usage", holder_kind="background"):
-            for path, binary, reference in bound_references(vault, store, unreadable=blocked_by):
+            for path, binary, reference, displaced in bound_references(vault, store, unreadable=blocked_by):
                 key = _key(reference)
                 if key in versions:
                     try:
@@ -273,7 +303,8 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                         blocked_by(path, error)
                         continue
                 versions[key] = (binary, reference)
-                if not trash_metadata.is_trash_path(path):
+                # A displaced page's original reads missing at its path, so it is no candidate for reuse.
+                if not displaced and not trash_metadata.is_trash_path(path):
                     live_paths.setdefault(key, binary.path)
     except UNREADABLE:  # The walk itself failed, so any note named so far is not the whole reason: name none.
         return ReferenceUsage(None, datetime.now(UTC).isoformat())

@@ -6,7 +6,10 @@ owner's answer shows that the surface does expose the view to a reader who may s
 """
 
 import json
+import os
 import shutil
+import sys
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
@@ -437,21 +440,159 @@ def test_a_sync_conflict_copy_of_a_withheld_view_is_absent(vault):
     assert _as(vault, _external(), observe) == absent
 
 
-def test_a_casefold_folder_spelling_cannot_bypass_the_aggregate_view_check(vault, monkeypatch):
-    """An owner aggregate must refuse an edited view even when the volume changes folder casing."""
+REFUSED = {"available": False, "reason": "audience_restricted"}
+
+
+def _owner_aggregate(vault):
+    return _as(vault, owner_principal(), lambda: egress.owner_only_aggregate(vault.root))
+
+
+@contextmanager
+def _volume_reporting_the_knowledge_base_recased(monkeypatch):
+    """List the disk as a case-folding volume reports it: the knowledge base folder in another casing.
+
+    Opens work in either casing, so the real walk runs and every spelling that it reports, to its
+    folder filter as well as in its entries, is recased.
+    """
     monkeypatch.setenv("EXOMEM_CASEFOLD_PATHS", "1")
+    walk = reserved_paths.open_generic_tree
+
+    def recase(path):
+        return "knowledge base" + path[len("Knowledge Base"):] if path.split("/")[0] == "Knowledge Base" else path
+
+    @contextmanager
+    def recased(vault_root, value, *, descend=None, **options):
+        if descend is not None:
+            options["descend"] = lambda folder: descend(recase(folder))
+        with walk(vault_root, value, **options) as entries:
+            yield (replace(entry, relative_path=recase(entry.relative_path)) for entry in entries)
+
+    monkeypatch.setattr(reserved_paths, "open_generic_tree", recased)
+    yield
+
+
+def _edit_a_view(vault, monkeypatch):
     page = vault.root / OPEN
     page.write_text(page.read_text().replace("Open plan", "Edited outside the store"))
-    entries = reserved_paths.list_generic_tree(vault.root, ".")
-    recased = tuple(
-        replace(entry, relative_path=entry.relative_path.replace("Knowledge Base/", "knowledge base/", 1))
-        for entry in entries
-    )
-    monkeypatch.setattr(reserved_paths, "list_generic_tree", lambda *_args, **_kwargs: recased)
 
-    assert _as(vault, owner_principal(), lambda: egress.owner_only_aggregate(vault.root)) == {
-        "available": False, "reason": "audience_restricted",
-    }
+
+def test_a_casefold_folder_spelling_cannot_bypass_the_aggregate_view_check(vault, monkeypatch):
+    """An owner aggregate must refuse an edited view even when the volume changes folder casing."""
+    _edit_a_view(vault, monkeypatch)
+    with _volume_reporting_the_knowledge_base_recased(monkeypatch):
+        assert _owner_aggregate(vault) == REFUSED
+
+
+def _leave_a_view_older_than_its_row(vault, monkeypatch):
+    vault.connection.execute("UPDATE items SET body='Changed in the store.' WHERE item_key=?", (KEY,))
+
+
+def _tombstone_a_row(vault, monkeypatch):
+    from exomem.governance import lifecycle
+
+    monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda root: frozenset({collections.record_ref(CID, KEY)}))
+
+
+def _copy_the_view_into(folder):
+    """A copy of the view in a folder that names the layer's folder in another casing or Unicode form."""
+
+    def copy(vault, monkeypatch):
+        stray = vault.root / folder / OPEN.rsplit("/", 1)[1]
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_bytes((vault.root / OPEN).read_bytes())
+        if stray.samefile(vault.root / OPEN):
+            pytest.skip("this volume reads the spelling as the layer's own folder")
+
+    return copy
+
+
+_DAMAGE = {
+    "every view released": (lambda vault, monkeypatch: None, None),
+    "view edited": (_edit_a_view, REFUSED),
+    "view older than its row": (_leave_a_view_older_than_its_row, REFUSED),
+    "row deleted": (_tombstone_a_row, REFUSED),
+    "view copied into a recased layer folder": (_copy_the_view_into("Knowledge Base/records/Work/Items"), REFUSED),
+    "view copied into a layer folder in another Unicode form": (
+        _copy_the_view_into("Knowledge Base/\uff32ecords/Work/Items"), REFUSED
+    ),
+}
+
+
+@pytest.fixture(params=list(_DAMAGE))
+def damage_and_answer(request):
+    return _DAMAGE[request.param]
+
+
+def test_the_owner_aggregate_refuses_exactly_a_view_that_is_not_fully_released(vault, monkeypatch, damage_and_answer):
+    """The walk visits every view of a collection, whatever is wrong with it: one that is not current
+    or fully released refuses the aggregate, and a vault with none such serves it."""
+    damage, answer = damage_and_answer
+    damage(vault, monkeypatch)
+    assert _owner_aggregate(vault) == answer
+
+
+def test_the_owner_aggregate_lists_no_entry_of_a_folder_outside_every_layer(vault, monkeypatch):
+    """A collection projects only into its placement layers, so the check lists nothing beside them:
+    its cost per write does not grow with the notes that a vault keeps in its other folders."""
+    listed = []
+    list_records = reserved_paths._list_candidate_records
+
+    def counting(*args, **options):
+        records = list_records(*args, **options)
+        listed.append(len(records))
+        return records
+
+    monkeypatch.setattr(reserved_paths, "_list_candidate_records", counting)
+    notes = vault.root / "Knowledge Base/Notes/Journal"
+    notes.mkdir()
+
+    def entries_listed(total):
+        for number in range(len(list(notes.iterdir())), total):
+            (notes / f"Day {number}.md").write_text("---\ntype: insight\nstatus: active\n---\n\nA day.\n")
+        listed.clear()
+        assert _owner_aggregate(vault) is None
+        return sum(listed)
+
+    few, many = entries_listed(50), entries_listed(500)
+    assert 0 < few == many
+
+
+def _a_folder(path):
+    path.mkdir(exist_ok=True)
+
+
+def _a_file(path):
+    path.write_text("x")
+
+
+_UNREADABLE = {
+    "a file in a folder that leads to a layer": ("Knowledge Base/loose.md", _a_file, None),
+    "a folder in a folder that leads to no layer": ("Knowledge Base/Notes/sealed", _a_folder, None),
+    "inside a layer": (f"{ITEMS}/sealed", _a_folder, REFUSED),
+    "at a layer's root": ("Knowledge Base/Records/sealed", _a_folder, REFUSED),
+    "an ancestor of a layer": ("Knowledge Base", _a_folder, REFUSED),
+}
+
+
+@pytest.fixture(params=list(_UNREADABLE))
+def unreadable_entry(request):
+    return _UNREADABLE[request.param]
+
+
+def test_an_unreadable_entry_refuses_the_aggregate_only_where_a_view_could_be(vault, unreadable_entry):
+    """An entry that no layer contains cannot be a view, so a walk that cannot read it loses nothing.
+    An entry in a layer, or a folder that leads to one, still refuses."""
+    if sys.platform != "linux" or os.geteuid() == 0:
+        pytest.skip("a folder the walk cannot open needs a POSIX user without root")
+    unreadable, make, answer = unreadable_entry
+    assert _owner_aggregate(vault) is None  # builds the once-per-process identity baseline, which walks every folder
+    sealed = vault.root / unreadable
+    make(sealed)
+    sealed.chmod(0)
+    try:
+        assert _owner_aggregate(vault) == answer
+    finally:
+        sealed.chmod(0o700)
 
 
 @pytest.mark.parametrize("dry_run", [True, False])

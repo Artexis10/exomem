@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+from .kbdir import managed_split
+
 if TYPE_CHECKING:
     from .mutation_lock import _SecureDirectory
     from .vault import PlannedWrite
@@ -988,11 +990,10 @@ def checkpoint_path(vault_root: Path) -> Path:
 def _resolver_requires_full_scope(
     epoch: GraphEpochState, paths: Iterable[tuple[str, str | None]]
 ) -> bool:
-    from .kbdir import kb_dirname
 
     # Non-KB inputs and physical names outside the checkpoint format use full recovery.
     return epoch.requires_full_recovery or any(
-        not rel.startswith(f"{kb_dirname()}/") or not _is_canonical_relative_path(rel)
+        managed_split(rel) is None or not _is_canonical_relative_path(rel)
         for rel, _digest in paths
     )
 

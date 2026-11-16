@@ -13,7 +13,6 @@ import json
 import multiprocessing
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tarfile
@@ -23,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from hard_kill import KILLED, kill_self
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
     ALPHA,
@@ -33,13 +33,14 @@ from test_vault_store_migration import (  # noqa: F401
     vault,
 )
 
-from exomem import _held_fs_posix, held_fs, lexstore, server_runtime
+from exomem import held_fs, lexstore, server_runtime
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import mode, projector, read, write
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
+#: The folder-flush trials name each folder through /proc/self/fd, which only Linux has.
+posix_only_spy = pytest.mark.skipif(
+    sys.platform != "linux", reason="the spy reads each folder's path from /proc/self/fd"
 )
 
 NOTES = "Knowledge Base/Notes"
@@ -131,6 +132,103 @@ def test_committed_pages_a_delete_and_a_move_reach_the_disk_byte_exact(stored, w
     assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
     assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
     assert temporaries(stored) == []
+
+
+def test_a_projector_that_loses_its_writer_authority_changes_no_file_after_the_loss(stored):
+    """A projector that checks writer authority once and then changes the disk: a lease lost after
+    that check still lets the next record's file reach the vault, though its record is refused, so
+    a process without the lease changes the person's vault."""
+    pages = [f"{NOTES}/Fenced {n}.md" for n in range(2)]
+    authority = {"held": True}
+    path = connection.store_path(stored)
+    with connection.open_writer(path, lease_check=lambda: authority["held"]) as handle:
+        writer = CollectionWriter(stored, handle)
+        commit(writer, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in pages))
+        on_disk_at_the_loss = []
+
+        def run(work):
+            work(writer)
+            if authority["held"]:  # the lease is lost once the first hop has returned
+                authority["held"] = False
+                on_disk_at_the_loss.extend(rel for rel in pages if (stored / rel).exists())
+
+        with pytest.raises(connection.CollectionStoreError) as refused:
+            projector.Projector(stored, run=run).run_pass()
+
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert [rel for rel in pages if (stored / rel).exists()] == on_disk_at_the_loss
+
+
+# A new file installs by a link and a replaced one by a rename: each checks at its own last step.
+@pytest.mark.parametrize("target", [NEW, ALPHA], ids=["a new file", "a replaced file"])
+def test_a_grant_revoked_while_a_publication_stages_its_bytes_installs_nothing(
+    stored, monkeypatch, target
+):
+    """A projector that checks writer authority once before a publication: the coordinator revokes
+    the grant while the bytes are staged, and the file still reaches the vault after the loss."""
+    before = (stored / target).read_bytes() if (stored / target).exists() else None
+    authority = {"held": True}
+    publish = held_fs.publish_bytes
+
+    def revoked_while_staging(*arguments, prepare=None, **keywords):
+        def the_coordinator_revokes(staged):
+            authority["held"] = False
+            if prepare is not None:
+                prepare(staged)
+
+        return publish(*arguments, prepare=the_coordinator_revokes, **keywords)
+
+    monkeypatch.setattr(held_fs, "publish_bytes", revoked_while_staging)
+    path = connection.store_path(stored)
+    with connection.open_writer(path, lease_check=lambda: authority["held"]) as handle:
+        writer = CollectionWriter(stored, handle)
+        commit(writer, **put(target, EDITED))
+
+        with pytest.raises(connection.CollectionStoreError) as refused:
+            projector.Projector(stored, run=lambda work: work(writer)).run_pass()
+
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert ((stored / target).read_bytes() if (stored / target).exists() else None) == before
+    assert temporaries(stored) == []
+
+
+def test_a_moved_pages_parts_follow_it_after_the_pass_that_moved_it_met_a_busy_boundary(
+    stored, writer, projecting, monkeypatch
+):
+    """A projector that completes a move before it moves the page's parts: a busy boundary at the
+    parts then leaves them at the old path with nothing queued to move them, and the moved page
+    loses its extracted content for good."""
+    from exomem.extraction_parts import folder_for
+
+    commit(writer, **put(MOVE_FROM, b"# Drifter\n"))
+    projecting.run_pass()
+    old_parts = stored / folder_for(Path(MOVE_FROM))
+    old_parts.mkdir()
+    (old_parts / "part-2.md").write_bytes(b"The rest of the extraction.\n")
+    commit(writer, moves=(write.PageMove(MOVE_FROM, MOVE_TO),))
+    with held_fs.acquire(stored).require() as filesystem:
+        filesystem_type = type(filesystem)  # the class this platform's vault uses
+    rename_directory = filesystem_type.rename_directory
+    busy = []
+
+    def busy_when_the_parts_move_first(self, *arguments, **keywords):
+        if not busy:
+            busy.append(True)
+            # As the parts' turn on the store thread meets a busy boundary: nothing moved yet.
+            raise projector.BoundaryBusy("another holder has the vault's mutation boundary")
+        return rename_directory(self, *arguments, **keywords)
+
+    monkeypatch.setattr(filesystem_type, "rename_directory", busy_when_the_parts_move_first)
+
+    assert projecting.run_pass().busy
+    projecting.run_pass()
+
+    assert (stored / MOVE_TO).read_bytes() == b"# Drifter\n"
+    moved_parts = stored / folder_for(Path(MOVE_TO))
+    assert (moved_parts / "part-2.md").read_bytes() == b"The rest of the extraction.\n"
+    assert not old_parts.exists() and not (stored / MOVE_FROM).exists()
+    assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
+    assert rows(stored, "SELECT path FROM store_manifest WHERE path = ?", MOVE_FROM) == []
 
 
 def test_a_vacated_folder_goes_once_its_files_moved_and_stays_while_it_holds_a_persons_file(
@@ -567,6 +665,7 @@ def test_a_refused_rename_leaves_no_new_folder_behind(stored, writer, projecting
     assert not (stored / NOTES / "Fresh").exists()
 
 
+@posix_only_spy
 def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_records_it(
     stored, writer, projecting, monkeypatch
 ):
@@ -574,6 +673,8 @@ def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_record
     unlink, or of a folder that the projection made is still only in the page cache."""
     deep = f"{NOTES}/Fresh/Deeper/Page.md"
     flushed = []
+    from exomem import _held_fs_posix
+
     flush_directory = _held_fs_posix.PosixHeldFilesystem.flush_directory
 
     def spy(self, directory):
@@ -601,6 +702,7 @@ def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_record
     assert [folder for folder, _ in flushed] == [str(root / NOTES / "Fresh" / "Deeper")]
 
 
+@posix_only_spy
 def test_a_retry_that_finds_the_file_in_place_flushes_its_folder_and_every_folder_above(
     stored, writer, projecting, monkeypatch
 ):
@@ -612,6 +714,8 @@ def test_a_retry_that_finds_the_file_in_place_flushes_its_folder_and_every_folde
     (stored / deep).parent.mkdir(parents=True)
     (stored / deep).write_bytes(body)  # the first attempt installed it and died before a flush
     flushed = []
+    from exomem import _held_fs_posix
+
     flush_directory = _held_fs_posix.PosixHeldFilesystem.flush_directory
 
     def spy(self, directory):
@@ -752,7 +856,7 @@ def _project_and_die(environment, root, where, countdown):
     seen = {"count": 0}
 
     def die():
-        os.kill(os.getpid(), signal.SIGKILL)
+        kill_self()
 
     if where == "publication":
         publish = held_fs.publish_bytes
@@ -794,7 +898,7 @@ def die_in_a_child(root, where, countdown):
     started = time.monotonic()
     child.start()
     child.join(300)
-    assert child.exitcode == -signal.SIGKILL, "the child must be killed where the trial says"
+    assert child.exitcode == KILLED, "the child must be killed where the trial says"
     return time.monotonic() - started
 
 
@@ -885,3 +989,90 @@ def test_a_killed_projector_drains_on_restart_to_identical_files_and_no_held_row
     if destination:
         with open(destination, "w") as record:
             json.dump(timings, record, indent=2, sort_keys=True)
+
+
+def sha(body):
+    return hashlib.sha256(body).hexdigest()
+
+
+def test_the_facts_of_a_batch_name_each_paths_current_life_as_a_single_read_does(
+    stored, writer, projecting
+):
+    """A batched facts read that counts the bytes of an earlier life as Exomem's, or misses those of
+    the current one, when one batch mixes a recorded path, a reset, a queued removal and a move:
+    the projector then replaces a file that a person restored, or holds Exomem's own file."""
+    recorded, reset, removed = f"{NOTES}/Recorded.md", f"{NOTES}/Reset.md", f"{NOTES}/Removed.md"
+    moved_from, moved_to = f"{NOTES}/Moved.md", f"{NOTES}/Archive/Moved.md"
+    first, second, third = b"# One\n", b"# Two\n", b"# Three\n"
+    commit(writer, **put(recorded, first))
+    assert projecting.run_pass().projected == 1  # its manifest records the first bytes
+    commit(writer, **put(recorded, second))
+    commit(writer, **put(recorded, third))
+    commit(writer, **put(reset, first))
+    with writer.handle.transaction() as tx:  # the row that a migration writes, with no path
+        tx.execute(
+            "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at) "
+            "SELECT MAX(revision), NULL, 'migrate', ?, NULL, 'test', ? FROM store_audit",
+            (write.Origin.MIGRATION.value, write.timestamp()),
+        )
+    commit(writer, **put(reset, second))
+    commit(writer, **put(removed, first))
+    commit(writer, deletes=(write.PageDelete(removed),))
+    commit(writer, **put(removed, second))
+    commit(writer, **put(removed, third))
+    commit(writer, deletes=(write.PageDelete(removed),))  # queued: its file is still this life's
+    commit(writer, **put(moved_from, first))
+    commit(writer, moves=(write.PageMove(moved_from, moved_to),))
+    commit(writer, **put(moved_to, second))
+    expected = {
+        recorded: {sha(second), sha(third)},
+        reset: {sha(second)},
+        removed: {sha(second), sha(third)},
+        moved_from: {sha(first)},
+        moved_to: {sha(first), sha(second)},
+    }
+
+    with read.snapshot(stored) as view:
+        batched = projector._facts_for(view, list(expected))
+    single = {rel: projector.read_facts(stored, rel) for rel in expected}
+
+    assert {rel: set(facts.audited) for rel, facts in batched.items()} == expected
+    assert {rel: set(facts.audited) for rel, facts in single.items()} == expected
+
+
+def facts_read_work(root, rel):
+    """The SQLite virtual-machine steps, in hundreds, of one facts read of ``rel``."""
+    steps = []
+
+    def count():
+        steps.append(1)
+        return 0  # go on
+
+    with read.request_snapshot(root), read.snapshot(root) as view:  # the read joins this view
+        view.connection.set_progress_handler(count, 100)
+        try:
+            projector.read_facts(root, rel)
+        finally:
+            view.connection.set_progress_handler(None, 100)
+    return len(steps)
+
+
+def test_one_paths_facts_read_does_work_in_proportion_to_its_audit_history(stored, writer):
+    """A facts read whose work grows faster than the path's audit history. The importer reads facts
+    on the store thread inside the vault boundary, so a path that is written and deleted often held
+    that boundary for seconds: 16 s at 800 audit rows."""
+
+    def rewritten(times):
+        # A write and a delete per turn. No projector runs, so the path has no manifest row.
+        for turn in range(times):
+            commit(writer, **put(NEW, f"# Gamma\n\nVersion {turn}.\n".encode()))
+            commit(writer, deletes=(write.PageDelete(NEW),))
+
+    rewritten(50)
+    short = facts_read_work(stored, NEW)
+    rewritten(150)
+    long = facts_read_work(stored, NEW)
+
+    assert rows(stored, "SELECT COUNT(*) FROM store_audit WHERE path = ?", NEW) == [(400,)]
+    # Four times the rows is four times the work for a linear read; a quadratic one does sixteen.
+    assert long < 8 * short, (short, long)

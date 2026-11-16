@@ -1,0 +1,42 @@
+{
+  "branch": "release-cuts/8693c8049dd6ecd200d53b7754f6b4678981e7c7",
+  "evidence": {
+    "artifact_id": 14173019319,
+    "event": "workflow_dispatch",
+    "package_checks": "release-packages-v1",
+    "repository": "Artexis10/exomem",
+    "run_attempt": "1",
+    "run_id": "43733466094",
+    "scope": "full",
+    "source_commit": "8693c8049dd6ecd200d53b7754f6b4678981e7c7",
+    "successful_attempt": "1",
+    "tested_commit": "8693c8049dd6ecd200d53b7754f6b4678981e7c7",
+    "tested_tree": "88e5cb917306db4826952ba83557ea9962eb1aa5",
+    "workflow": ".github/workflows/ci.yml"
+  },
+  "head": "010a68fd38e5b692ed03fa56a2be13bbaab8be1f",
+  "head_tree": "7a3cacf3a2411dd29a06f038e465554bd5fb6648",
+  "predecessor": {
+    "reconciliation_commit": "c4129ca2ff864bdfcc919394d28373e48e7e0874",
+    "source": "3d6edddc1490922a88fff8fadc7493c2374e9afa",
+    "tag": "v0.181.0",
+    "version": "0.181.0"
+  },
+  "release": "2f9dc5d69eb0aee4c0f32fba4a4b3418385bef57",
+  "release_tree": "7a3cacf3a2411dd29a06f038e465554bd5fb6648",
+  "required_checks": [
+    {
+      "app_id": 15368,
+      "context": "Conventional Commit title"
+    },
+    {
+      "app_id": 15368,
+      "context": "required CI gate"
+    }
+  ],
+  "schema": 1,
+  "source": "8693c8049dd6ecd200d53b7754f6b4678981e7c7",
+  "source_tree": "88e5cb917306db4826952ba83557ea9962eb1aa5",
+  "tag": "v0.182.0",
+  "version": "0.182.0"
+}

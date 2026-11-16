@@ -63,7 +63,7 @@ from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
 from .cli_ops import OpError
 from .governance import projected_retrieval
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .media_jobs import (
     BLOCKED,
     FAILED,
@@ -2682,7 +2682,7 @@ class MediaWorker:
         """Re-enqueue every `extracted_by: pending` sidecar under the KB. Returns count."""
         from . import media_processing, originals
 
-        kb = self._vault_root / kb_dirname()
+        kb = managed_root(self._vault_root)
         if not kb.is_dir():
             return 0
         n = 0
@@ -2767,7 +2767,7 @@ class MediaWorker:
         wasted work. The deliberate `exomem backfill-media` pass writes their sidecars
         (+ OCR + CLIP) — this incremental scan only tops up already-sidecar'd images.
         """
-        kb = self._vault_root / kb_dirname()
+        kb = managed_root(self._vault_root)
         if not kb.is_dir():
             return 0
         clip_enabled = embeddings.clip_enabled()

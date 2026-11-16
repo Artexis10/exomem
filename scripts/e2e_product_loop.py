@@ -560,14 +560,10 @@ def _unwrap_result(value: Any) -> Any:
 
 
 #: The tools a local server lists, the contract this journey proves from the client side.
-PUBLIC_TOOLS = frozenset({
-    "recall_context", "search_memory", "read_page", "read_instructions",
-    "create_note", "add_observation", "edit_note", "supersede_note",
-    "save_source", "save_evidence", "save_episode", "upload_files", "download_files",
-    "query_records", "add_record", "edit_record",
-    "query_plan_items", "add_plan_item", "edit_plan_item",
-    "list_review_items", "decide_review_item", "inspect_memory", "manage_memory",
-})
+#: It is the reviewed schema fixture that scripts/dump-tool-schemas.py generates.
+PUBLIC_TOOLS = frozenset(json.loads(
+    (REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json").read_text(encoding="utf-8")
+))
 
 
 async def _call(client, name: str, arguments: dict[str, Any], timeout: float) -> Any:

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import re
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -32,7 +34,40 @@ SILENT_TRAFFIC_MINIMUM_HEALTH_PROBES = 288
 COORDINATION_STATUS_TIMEOUT_SECONDS = 0.75
 
 _COORDINATION_PROBES_LOCK = threading.Lock()
-_COORDINATION_PROBES: dict[str, tuple[threading.Event, dict[str, object]]] = {}
+
+
+@dataclass
+class _CoordinationProbe:
+    vault: Path | None
+    probe: Callable[[Path | None], Mapping[str, Any]]
+    deadline: float
+    completed: threading.Event = field(default_factory=threading.Event)
+    result: dict[str, object] = field(default_factory=dict)
+    finished_at: float = float("inf")
+
+
+_COORDINATION_PROBES: dict[str, _CoordinationProbe] = {}
+_COORDINATION_WORK: queue.Queue[tuple[str, _CoordinationProbe]] = queue.Queue(maxsize=1)
+_COORDINATION_WORKER: threading.Thread | None = None
+
+
+def _run_coordination_probes() -> None:
+    """Keep the coordinator client's thread-local connection across fresh probes."""
+    while True:
+        key, current = _COORDINATION_WORK.get()
+        try:
+            if time.monotonic() < current.deadline:
+                current.result["value"] = current.probe(current.vault)
+        except Exception as error:  # noqa: BLE001 - re-raised on the request thread
+            current.result["error"] = error
+        finally:
+            current.finished_at = time.monotonic()
+            with _COORDINATION_PROBES_LOCK:
+                if _COORDINATION_PROBES.get(key) is current:
+                    _COORDINATION_PROBES.pop(key, None)
+                current.completed.set()
+            _COORDINATION_WORK.task_done()
+            del current
 
 # Bumped at every transition after which a cached ready answer must not be
 # served again; see `invalidate_cached_readiness`.
@@ -724,49 +759,46 @@ def _bounded_coordination_status(
     *,
     timeout_seconds: float = COORDINATION_STATUS_TIMEOUT_SECONDS,
 ) -> Mapping[str, Any] | None:
-    """Run at most one status probe per vault and fail closed on its deadline.
+    """Share one fresh status probe per vault and fail closed on its deadline.
 
-    A real boundary or coordinator probe can stall. The public endpoint must
-    answer within its budget, and repeated polls must not create an unbounded
-    thread pile while the first probe is still blocked.
+    One worker and one queued probe bound resource use while a probe stalls.
+    Completed attempts leave the map, so a later poll never inherits an old
+    measurement with a new proof age.
     """
+    global _COORDINATION_WORKER
+
     key = (
         "<process-local>"
         if vault_root is None
         else os.path.normcase(str(vault_root.resolve(strict=False)))
     )
     with _COORDINATION_PROBES_LOCK:
-        current = _COORDINATION_PROBES.get(key)
-        if current is None:
-            completed = threading.Event()
-            result: dict[str, object] = {}
-            current = (completed, result)
-            _COORDINATION_PROBES[key] = current
-
-            def run_probe() -> None:
-                try:
-                    result["value"] = probe(vault_root)
-                except Exception as error:  # noqa: BLE001 - re-raised on request thread
-                    result["error"] = error
-                finally:
-                    completed.set()
-
-            threading.Thread(
-                target=run_probe,
+        if _COORDINATION_WORKER is None or not _COORDINATION_WORKER.is_alive():
+            # A daemon preserves process exit when a status probe remains blocked.
+            worker = threading.Thread(
+                target=_run_coordination_probes,
                 name="exomem-readiness-coordination",
                 daemon=True,
-            ).start()
+            )
+            worker.start()
+            _COORDINATION_WORKER = worker
+        current = _COORDINATION_PROBES.get(key)
+        if current is None:
+            current = _CoordinationProbe(vault_root, probe, time.monotonic() + timeout_seconds)
+            try:
+                _COORDINATION_WORK.put_nowait((key, current))
+            except queue.Full:
+                # A stalled proof must not turn polls into an unbounded work queue.
+                return None
+            _COORDINATION_PROBES[key] = current
 
-    completed, result = current
-    if not completed.wait(timeout_seconds):
+    remaining = max(0.0, current.deadline - time.monotonic())
+    if not current.completed.wait(remaining) or current.finished_at > current.deadline:
         return None
-    with _COORDINATION_PROBES_LOCK:
-        if _COORDINATION_PROBES.get(key) is current:
-            _COORDINATION_PROBES.pop(key, None)
-    error = result.get("error")
+    error = current.result.get("error")
     if isinstance(error, Exception):
         raise error
-    value = result.get("value")
+    value = current.result.get("value")
     if not isinstance(value, Mapping):
         raise RuntimeError("coordination status returned an invalid payload")
     return value
@@ -818,6 +850,8 @@ def runtime_readiness(
             from . import lexstore
 
             progress = lexstore.repair_progress(configured_vault)
+            if progress is None and lexstore.await_repairs_idle(configured_vault, timeout=0):
+                progress = {"phase": "idle", "age_seconds": 0.0}
         except Exception:  # noqa: BLE001 - diagnostics must not break readiness
             progress = None
         if progress is not None:

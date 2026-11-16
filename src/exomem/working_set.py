@@ -56,6 +56,7 @@ from . import (
     working_set_state,
 )
 from .governance import policy as governance_policy
+from .kbdir import managed_split
 from .runtime_resources import SEMANTIC_PREPARATION_BYTES as TASK_CORPUS_MAX_BYTES
 
 if TYPE_CHECKING:
@@ -1491,10 +1492,12 @@ def task_candidates(
     snapshot: Any, limit: int,
     index_token: tuple[int, int, int] | None = None, projections: dict | None = None,
     timings: Any = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], Mapping[str, Any]]:
     """Independent bounded recall over catalogue carriers, never anchor evidence.
 
-    Each lane records a child span of `working_set.task_context`, so a slow recall names its stage.
+    Returns the leads, the missing reasons and the catalogue entries a lead's links may name, for
+    `attach_task_links` once the leads are projected. Each lane records a child span of
+    `working_set.task_context`, so a slow recall names its stage.
     """
     from . import (
         bm25,
@@ -1521,7 +1524,7 @@ def task_candidates(
                     entries.append(entry)
         except BudgetExhausted:
             # A prefix of the catalogue would quietly narrow the allowed set, so a stopped scan gives no lead.
-            return [], [{"role": "task_context", "reason": "budget"}]
+            return [], [{"role": "task_context", "reason": "budget"}], {}
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
@@ -1656,7 +1659,8 @@ def task_candidates(
             break
         started = time.monotonic()
         with (
-            find_types.timing_span(timings, "working_set.task_context_methods"),
+            call_spans.meter(call_spans.STATS_REBUILT, call_spans.UNIT_PARENTS_INTERPRETED) as measured,
+            find_types.timing_span(timings, "working_set.task_context_methods", measured=measured),
             request_budget.leaving(kept),
             lexstore.stopping_at_budget(),
         ):
@@ -1681,28 +1685,42 @@ def task_candidates(
             found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
         ]
     ordered = ordered[:limit]
-    if ordered and not restricted:
-        # Links are read for the candidates that will be served, so the agent sees what each lead points at
-        # and chooses what to follow; no neighbour page becomes a candidate by itself.
-        if budget_exhausted("working_set.task_context_links"):
-            missing.append({"role": "task_context", "reason": "budget"})
-        else:
-            try:
-                with find_types.timing_span(timings, "working_set.task_context_links"):
-                    links = _task_links(vault_root, ordered, by_path=by_path, visible=caller.visible)
-            except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
-                log.debug("task-context links unavailable", exc_info=True)
-                links = None
-            if links is None:
-                missing.append({"role": "task_context", "reason": "lane_failed"})
-            else:
-                for candidate in ordered:
-                    listed, omitted = links.get(candidate["source_ref"], ((), 0))
-                    if listed:
-                        candidate["links"] = list(listed)
-                    if omitted:
-                        candidate["links_omitted"] = omitted
-    return ordered, [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+    # A restricted caller's leads list no links, so it gets no link targets.
+    link_targets: Mapping[str, Any] = {} if restricted else by_path
+    return ordered, [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)], link_targets
+
+
+def attach_task_links(
+    vault_root: Path, candidates: Sequence[dict[str, Any]], *, link_targets: Mapping[str, Any], caller: Any,
+    timings: Any = None,
+) -> list[str]:
+    """List each served lead's outbound links on it, and return the task-context missing reasons of a skipped lookup.
+
+    Links are read only for the leads that projection kept, and only with the time that projection left: a lead
+    without its links still serves the turn, but a link lookup that ran first could spend the deadline that
+    projection needed and drop every lead. No neighbour page becomes a candidate by itself.
+    """
+    from . import find_types
+
+    if not candidates or not link_targets:
+        return []
+    if budget_exhausted("working_set.task_context_links"):
+        return ["budget"]
+    try:
+        with find_types.timing_span(timings, "working_set.task_context_links"):
+            links = _task_links(vault_root, candidates, by_path=link_targets, visible=caller.visible)
+    except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
+        log.debug("task-context links unavailable", exc_info=True)
+        links = None
+    if links is None:
+        return ["lane_failed"]
+    for candidate in candidates:
+        listed, omitted = links.get(candidate["source_ref"], ((), 0))
+        if listed:
+            candidate["links"] = list(listed)
+        if omitted:
+            candidate["links_omitted"] = omitted
+    return []
 
 
 def _task_links(
@@ -2926,7 +2944,7 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
        `posixpath.normpath` would write differently — one rule that covers a
        leading `./`, a doubled slash, a trailing slash, and a literal `.`/
        `..` segment together, rather than one pattern for each.
-    3. Under the knowledge-base folder (`kbdir.kb_prefix()`).
+    3. Under the knowledge-base folder (`kbdir.managed_split`).
     4. A row the LEXICAL catalogue already holds under this EXACT string —
        one indexed lookup (`lexstore.page_content_hashes`), never a search
        and never a directory read.
@@ -2952,9 +2970,8 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
         return None
     if posixpath.normpath(text) != text:
         return None
-    from .kbdir import kb_prefix
 
-    if not text.startswith(kb_prefix()):
+    if managed_split(text) is None:
         return None
     from . import lexstore
 
@@ -6383,12 +6400,11 @@ def _recent_reason_for(
     names the recap folder of each configured capture path (`recap_folder.inbox_folders`).
     """
     from . import find_corpus
-    from .kbdir import kb_prefix
+    from .kbdir import managed_relative
 
     if not rel.lower().endswith(".md"):
         return ""
-    prefix = kb_prefix()
-    inner = rel[len(prefix) :] if rel.startswith(prefix) else rel
+    inner = managed_relative(rel)
     parts = inner.split("/")
     if any(part.startswith(".") or part in find_corpus.EXCLUDED_DIR_NAMES for part in parts[:-1]):
         return ""

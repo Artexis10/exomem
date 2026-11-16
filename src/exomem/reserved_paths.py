@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING
 
 from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root_rel, managed_split_parts
 
 if TYPE_CHECKING:
     from .vault_store import read
@@ -54,6 +54,12 @@ _DUE_TEMP_RE = re.compile(
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
+)
+# Closed runtime filenames, not vocabulary or content classifiers.
+LEXICAL_STAGED_LOCK = ".lexical-staged-build.lock"
+# nosemgrep: ep-word-search -- Closed SQLite filenames and sidecars, not content meaning.
+_LEXICAL_STAGED_RE = re.compile(
+    r"^\.lexical-staged-[0-9a-f]{16}\.sqlite(?:-(?:wal|shm|journal))?$", re.ASCII
 )
 _LEXICAL_QUARANTINE_RE = re.compile(
     r"^\.lexical\.sqlite(?:-(?:wal|shm))?\.quarantine-[0-9a-f]{32}$",
@@ -89,6 +95,11 @@ _COLLECTION_EXPORTED_RE = re.compile(
     r"^collections(?:-derived)?\.sqlite\.exported-[0-9]{8}t[0-9]{6}z$", re.ASCII
 )
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
+
+
+def _fold(text: str) -> str:
+    """The comparison key of a path component: compatibility-normalised, then case-folded."""
+    return unicodedata.normalize("NFKC", text).casefold()
 
 
 class PathDisposition(StrEnum):
@@ -631,6 +642,18 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         patterns=(_LEXICAL_REBUILD_RE,),
         migrates_from_vault=True,
+    ),
+    InternalStateDescriptor(
+        "lexical-staged",
+        "lexstore",
+        StatePlacement.EXTERNAL_STATE,
+        patterns=(_LEXICAL_STAGED_RE,),
+    ),
+    InternalStateDescriptor(
+        "lexical-staged-lock",
+        "lexstore",
+        StatePlacement.EXTERNAL_STATE,
+        exact=(LEXICAL_STAGED_LOCK,),
     ),
     InternalStateDescriptor(
         "lexical-quarantine",
@@ -1208,9 +1231,9 @@ def _reserved_after_bounded_dot_collapse(value: object) -> PathClassification | 
     parts = text.split("/")
     if not parts or any(not part for part in parts):
         return None
-    knowledge_base = unicodedata.normalize("NFKC", kb_dirname()).casefold()
-    if parts[0].casefold() == knowledge_base:
-        parts = parts[1:]
+    below = managed_split_parts(parts, key=_fold)
+    if below is not None:
+        parts = list(below)
     collapsed: list[str] = []
     for part in parts:
         if part == ".":
@@ -2467,9 +2490,14 @@ def _list_candidate_records(
     identities: IdentityCatalogue | None,
     require_complete: bool = False,
     recursive: bool = True,
+    descend: Callable[[str], bool] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> tuple[held_fs.SagaRecord, ...]:
-    """Walk safe ordinary children without following or exposing aliases."""
+    """Walk safe ordinary children without following or exposing aliases.
+
+    `descend` receives the path of each folder, relative to the vault root, and says whether the
+    walk enters it. A folder it refuses is still listed as a child of its parent; nothing below it is.
+    """
 
     records: list[held_fs.SagaRecord] = []
 
@@ -2527,7 +2555,10 @@ def _list_candidate_records(
                 or descriptor_id is not None
                 or (record.identity.kind == "file" and record.identity.link_count != 1)
             )
-            if not recursive or record.identity.kind != "directory" or blocked:
+            if (
+                not recursive or record.identity.kind != "directory" or blocked
+                or (descend is not None and not descend(child))
+            ):
                 continue
             retained = filesystem.parent(child)
             if not retained.ok:
@@ -2718,11 +2749,15 @@ def open_generic_tree(
     identities: IdentityCatalogue | None = None,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
+    descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ):
     """Yield entries under one held walk; exhaust it before publishing a census.
+
+    `descend` prunes a recursive walk: it receives each folder's path relative to the vault root and
+    says whether to enter it (`_list_candidate_records`). A census that needs every entry omits it.
 
     A Markdown header that cannot be read, decoded or prepared within its own budget ends the walk,
     unless the caller passes `markdown_header_failed`: then the walk reports that entry's relative
@@ -2732,7 +2767,7 @@ def open_generic_tree(
             _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         entries = _iter_generic_tree_held(
             vault_root, value, recursive=recursive, identities=current,
-            select=select, require_complete=require_complete,
+            select=select, require_complete=require_complete, descend=descend,
             markdown_header_limit=markdown_header_limit, markdown_header_failed=markdown_header_failed,
             checkpoint=checkpoint,
         )
@@ -2785,6 +2820,7 @@ def _iter_generic_tree_held(
     identities: IdentityCatalogue,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
+    descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
@@ -2812,7 +2848,7 @@ def _iter_generic_tree_held(
                     relative,
                     identities=identities,
                     require_complete=require_complete,
-                    recursive=recursive, checkpoint=checkpoint,
+                    recursive=recursive, descend=descend, checkpoint=checkpoint,
                 )
             else:
                 enumerated = filesystem.children(source_directory)
@@ -2981,7 +3017,7 @@ def _iter_generic_tree_held(
             if require_complete:
                 current_records = _list_candidate_records(
                     filesystem, source_directory, relative, identities=identities,
-                    require_complete=True, recursive=recursive, checkpoint=checkpoint,
+                    require_complete=True, recursive=recursive, descend=descend, checkpoint=checkpoint,
                 )
                 if current_records != records:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
@@ -3026,18 +3062,15 @@ def _normalized_parts(
         return _invalid("alternate stream or URI spelling is forbidden")
     if any(part.endswith((".", " ")) for part in parts):
         return _invalid("platform-aliased components are forbidden")
-    folded = tuple(unicodedata.normalize("NFKC", part).casefold() for part in parts)
-    knowledge_base = unicodedata.normalize("NFKC", kb_dirname()).casefold()
-    if folded and folded[0] == knowledge_base:
-        folded = folded[1:]
-    return folded
+    below = managed_split_parts(parts, key=_fold)
+    return tuple(_fold(part) for part in (parts if below is None else below))
 
 
 def classify_logical(value: object) -> PathClassification:
     """Classify one KB-relative or vault-prefixed spelling without touching disk."""
 
     if type(value) is str:
-        return _classify_logical_text(value, kb_dirname(), id(_REGISTRY))
+        return _classify_logical_text(value, managed_root_rel(), id(_REGISTRY))
     return _classify_logical(value)
 
 
@@ -3124,7 +3157,7 @@ def _prefilter() -> _Prefilter:
 
 
 def _classify_parts(parts: tuple[str, ...]) -> PathClassification:
-    canonical = kb_dirname() if not parts else f"{kb_dirname()}/{'/'.join(parts)}"
+    canonical = managed_root_rel() if not parts else managed_join("/".join(parts))
     if not _prefilter().may_match(parts):
         return PathClassification(PathDisposition.ORDINARY, canonical=canonical)
     replica = _DESCRIPTOR_BY_ID["collection-replica"]
@@ -3227,7 +3260,7 @@ class IdentityCatalogue:
                     add(
                         record.identity,
                         descriptor_id,
-                        f"{kb_dirname()}/{relative}",
+                        managed_join(relative),
                     )
                 if record.identity.kind != "directory":
                     continue
@@ -3236,7 +3269,7 @@ class IdentityCatalogue:
                     raise RuntimeError(
                         "reserved identity catalogue encountered a directory cycle"
                     )
-                child = filesystem.parent(f"{kb_dirname()}/{relative}")
+                child = filesystem.parent(managed_join(relative))
                 if not child.ok:
                     raise RuntimeError(
                         "reserved identity catalogue could not retain a KB directory"
@@ -3253,7 +3286,7 @@ class IdentityCatalogue:
                         seen_directories.remove(key)
 
         with acquired.require() as filesystem:
-            kb_parent = filesystem.parent(kb_dirname())
+            kb_parent = filesystem.parent(managed_root_rel())
             if not kb_parent.ok:
                 if kb_parent.error is not None and kb_parent.error.code == "MISSING":
                     return cls(
@@ -4653,10 +4686,8 @@ def classify_physical(
     assert isinstance(value, (str, os.PathLike))
     physical_text = unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
     physical_parts = tuple(physical_text.split("/"))
-    if physical_parts[0].casefold() == unicodedata.normalize("NFKC", kb_dirname()).casefold():
-        physical_parts = (kb_dirname(), *physical_parts[1:])
-    else:
-        physical_parts = (kb_dirname(), *physical_parts)
+    below = managed_split_parts(physical_parts, key=_fold)
+    physical_parts = (managed_root_rel(), *(physical_parts if below is None else below))
     candidate = root.joinpath(*physical_parts)
 
     try:

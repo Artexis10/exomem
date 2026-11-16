@@ -41,7 +41,7 @@ from . import review_state as review_state_module
 from . import semantic_contract as semantic_contract_module
 from . import vault as vault_module
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 from .vault import kb_root
 
 RELATION_REVIEW_PREFIX = "exomem://review/relation/"
@@ -899,7 +899,7 @@ def _page_for(vault_root: Path, rel_path: str) -> Any | None:
 
 
 def _fallback_ref(rel_path: str) -> str:
-    if rel_path.startswith(f"{kb_dirname()}/Sources/"):
+    if rel_path.startswith(managed_join("Sources/")):
         return context_refs.source_ref(rel_path)
     return context_refs.vault_ref(rel_path)
 

@@ -20,30 +20,18 @@ import yaml
 
 from . import freshness, privacy_log, request_budget
 from .find_types import ParsedPage
+from .kbdir import managed_root, managed_split
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
-from .vault import relative_posix
+from .vault import CORPUS_EXCLUDED_DIR_NAMES, relative_posix
 
 if TYPE_CHECKING:
     from .vault_store.read import PageMeta, StoredPage
 
 log = logging.getLogger(__name__)
 
-# Operational state is not knowledge: `_Governance` (policy/receipts) and
-# `_Adoption` (durable run objects + run manifests) both name items whose own
-# disclosure decisions may be restrictive, so neither may enter the content
-# corpus or be reachable by recall.
-EXCLUDED_DIR_NAMES = frozenset(
-    {
-        ".graph-coordination",
-        ".trash",
-        "_Adoption",
-        "_Schema",
-        "_Governance",
-        "_attachments",
-        "_archive",
-        "_trash",
-    }
-)
+# The KB corpus walk skips the folders `vault.CORPUS_EXCLUDED_DIR_NAMES` names: operational state
+# and machinery, never knowledge. The vault-wide walk skips those and more (`vault.VAULT_SCAN_SKIP_DIRS`).
+EXCLUDED_DIR_NAMES = CORPUS_EXCLUDED_DIR_NAMES
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
@@ -381,9 +369,8 @@ _CUSTODY_SEAM = "frontmatter_cache"
 
 
 def _scope_root(vault_root: Path, scope: str) -> Path:
-    from .kbdir import kb_dirname
 
-    return vault_root / kb_dirname() if scope == "kb" else vault_root
+    return managed_root(vault_root) if scope == "kb" else vault_root
 
 
 def _cache_key_candidates(vault_root: Path, rel: str) -> tuple[Path, ...]:
@@ -632,13 +619,12 @@ def kb_walk_member(rel: str) -> bool:
     have no file yet, so it cannot judge a page. That is the gap: this keeps the rule's path tests
     (the reserved registry, the excluded folders, the Markdown suffix, the conflict copy).
     """
-    from .kbdir import kb_dirname
     from .reserved_paths import classify_logical
 
-    prefix = kb_dirname() + "/"
-    if not rel.startswith(prefix):
+    below = managed_split(rel)
+    if below is None:
         return False
-    parts = rel[len(prefix) :].split("/")
+    parts = below.split("/")
     return (
         walk_name_admits(parts[-1], directory=False)
         and all(walk_name_admits(part, directory=True) for part in parts[:-1])

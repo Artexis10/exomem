@@ -23,6 +23,7 @@ from typing import TypeVar
 
 from .. import find_corpus, reserved_paths, semantic_index, vault
 from ..collection_store import connection, runtime
+from ..kbdir import managed_root_rel
 from . import mode, ownership
 
 NOT_ACTIVE = "VAULT_STORE_NOT_ACTIVE"
@@ -695,7 +696,7 @@ def request_snapshot(vault_root: Path) -> Iterator[None]:
 
 
 @contextmanager
-def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
+def snapshot(vault_root: Path, *, join_request: bool = True) -> Iterator[StoreSnapshot]:
     """Open one consistent view of a store-mode vault's store.
 
     The first read pins the WAL snapshot, so ``revision`` is the revision that every later read
@@ -706,9 +707,10 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
 
     Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned.
     A worker with inherited context must see that revision too, or refuse so the caller can retry the request.
+    Under a mutation guard, ``join_request=False`` reads commits made after request preflight.
     """
     root = Path(vault_root)
-    scope = _REQUEST.get()
+    scope = _REQUEST.get() if join_request else None
     if scope is not None and scope.thread == threading.get_ident() and scope.root == root:
         yield scope.view
         return
@@ -905,6 +907,14 @@ def serves(vault_root: Path, rel: str) -> bool:
     return owned_as_page(vault_root, rel) and mode.store_mode_for_reads(vault_root)
 
 
+def serves_many(vault_root: Path, rels: Iterable[str]) -> dict[str, bool]:
+    """``serves`` for each path of ``rels``, with one read of the mode records, and none when the store owns no page of them."""
+    wanted = list(rels)
+    pages = owned_as_pages(vault_root, wanted)
+    stored = any(pages[rel] for rel in wanted) and mode.store_mode_for_reads(vault_root)
+    return {rel: stored and pages[rel] for rel in wanted}
+
+
 def owned_as_pages(vault_root: Path, rels: Iterable[str]) -> Mapping[str, bool]:
     """Whether ownership makes each path of ``rels`` a page, by path.
 
@@ -917,7 +927,7 @@ def owned_as_pages(vault_root: Path, rels: Iterable[str]) -> Mapping[str, bool]:
     page = ownership.Ownership.PAGE
     if memo is None:
         return {rel: owner is page for rel, owner in ownership.classify_many(wanted).items()}
-    known = memo.setdefault((__name__, "page", vault.kb_dirname()), {})
+    known = memo.setdefault((__name__, "page", managed_root_rel()), {})
     missing = [rel for rel in wanted if rel not in known]
     if missing:
         known.update((rel, owner is page) for rel, owner in ownership.classify_many(missing).items())

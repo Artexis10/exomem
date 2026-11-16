@@ -52,7 +52,7 @@ from exomem import (
     semantic_writes,
 )
 from exomem import find as find_module
-from exomem.vault import kb_dirname
+from exomem.kbdir import kb_dirname
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="SQLite build lacks FTS5"

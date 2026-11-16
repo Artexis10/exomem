@@ -12,7 +12,6 @@ import hashlib
 import io
 import os
 import sqlite3
-import sys
 from contextlib import closing
 
 import pytest
@@ -25,10 +24,6 @@ from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview, runtime
 from exomem.vault_store import availability, projection, read, verify, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 GAMMA = "Knowledge Base/Notes/Gamma.md"
 OUTSIDE = "Outside/Loose.md"

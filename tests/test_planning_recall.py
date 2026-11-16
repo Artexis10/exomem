@@ -42,6 +42,18 @@ item_schema:
     assert is_structured_only_path(tmp_path, item)
 
 
+def test_every_collection_profile_layer_is_structured_only_in_any_letter_case(tmp_path: Path) -> None:
+    # A profile layer that recall policy did not read from the profiles would leak raw items into recall.
+    from exomem.collection_profiles import PROFILES
+    from exomem.kbdir import managed_join
+    from exomem.recall_policy import is_structured_only_path
+
+    for profile in PROFILES.values():
+        layer = profile.placement_layer
+        assert is_structured_only_path(tmp_path, tmp_path / managed_join(f"{layer}/Work/Items/x.md"))
+        assert is_structured_only_path(tmp_path, tmp_path / managed_join(f"{layer.lower()}/Work/Items/x.md"))
+
+
 def _seed_thousand_planning_items(tmp_path: Path) -> tuple[Path, Path]:
     from exomem.planning import add, create_collection
 

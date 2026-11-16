@@ -54,7 +54,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import semantic_authoring
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root_rel
 
 
 def _module_available(name: str) -> bool:
@@ -737,19 +737,14 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         parser.error("--root requires --handoff-file")
     args.lane = args.lane or "evidence"
 
-    token_file = args.token_file or os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
-    raw_port = str(args.port or os.environ.get("EXOMEM_LOCAL_PORT", "")).strip()
-    if not token_file:
-        parser.error("a local client token file is required (--token-file or EXOMEM_LOCAL_TOKEN_FILE)")
-    if not raw_port.isascii() or not raw_port.isdigit() or not 0 < int(raw_port) < 65536:
-        parser.error("a valid local port is required (--port or EXOMEM_LOCAL_PORT)")
+    from .local_transfer_client import LocalListenerUnset, local_listener
+
     try:
-        token = Path(token_file).expanduser().read_text(encoding="ascii").strip()
-    except (OSError, UnicodeDecodeError):
-        print("attach: the local client token file could not be read", file=sys.stderr)
-        return 2
-    if not token:
-        print("attach: the local client token file is empty", file=sys.stderr)
+        token, port = local_listener(args.token_file, args.port)
+    except LocalListenerUnset as error:
+        parser.error(str(error))
+    except ValueError as error:
+        print(f"attach: {error}", file=sys.stderr)
         return 2
     source = Path(args.file).expanduser()
     if not source.is_file():
@@ -782,7 +777,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
 
     from .upload_sessions import MAX_PATCH_BYTES
 
-    base = f"http://127.0.0.1:{int(raw_port)}"
+    base = f"http://127.0.0.1:{port}"
     timeout = httpx.Timeout(30.0, read=300.0, write=300.0)
     if hold or not (args.resumable or source.stat().st_size > MAX_PATCH_BYTES):
         try:
@@ -802,7 +797,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
                     data=fields,
                 )
         except (httpx.ConnectError, httpx.ConnectTimeout):
-            print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+            print(f"attach: the local listener on 127.0.0.1:{port} is unreachable", file=sys.stderr)
             return 1
         except httpx.HTTPError:
             # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
@@ -827,7 +822,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         ) as client:
             return _attach_resumable(client, base, token, source, name, fields)
     except (httpx.ConnectError, httpx.ConnectTimeout):
-        print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+        print(f"attach: the local listener on 127.0.0.1:{port} is unreachable", file=sys.stderr)
         return 1
     except httpx.HTTPError:
         print("attach: the upload was interrupted; run the same command again to resume",
@@ -1231,7 +1226,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--dry-run",
@@ -1293,21 +1288,21 @@ def _index_main(argv: list[str]) -> int:
         description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
         "skip files already up to date, embed new/changed ones in batches, prune "
         "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
-        f"it never wipes the sidecar first. Covers {kb_prefix()} by default, or "
-        f"the whole vault with --scope vault (so notes outside {kb_prefix()} "
+        f"it never wipes the sidecar first. Covers {managed_join('')} by default, or "
+        f"the whole vault with --scope vault (so notes outside {managed_join('')} "
         "become semantically searchable).",
     )
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--scope",
         choices=("kb", "vault"),
         default=None,
         help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
-        f"'vault' indexes the whole vault, not just {kb_prefix()}.",
+        f"'vault' indexes the whole vault, not just {managed_join('')}.",
     )
     parser.add_argument(
         "--batch-size",
@@ -1651,7 +1646,7 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
@@ -1731,7 +1726,7 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=None,
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--profile",
@@ -1808,7 +1803,7 @@ def _relations_main(argv: list[str]) -> int:
         "--vault",
         default=None,
         help=(
-            f"vault root containing '{kb_prefix()}'; reads its snapshot locally "
+            f"vault root containing '{managed_join('')}'; reads its snapshot locally "
             "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
         ),
     )
@@ -2102,7 +2097,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2135,7 +2130,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2164,7 +2159,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2496,7 +2491,7 @@ def _collections_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -2636,7 +2631,7 @@ def _store_mode_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -3242,7 +3237,7 @@ def _reclaim_schema_main(argv: list[str]) -> int:
         prog="exomem reclaim-schema",
         description=(
             f"Remove the superseded copy of the shipped schema from "
-            f"{kb_prefix()}_Schema/ once it has been redeployed to .exomem/schema/."
+            f"{managed_join('_Schema/')} once it has been redeployed to .exomem/schema/."
         ),
     )
     parser.add_argument(
@@ -3273,11 +3268,11 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     verb = "Removed" if report["applied"] else "Would remove"
     print(f"{verb} {len(report['removed'])} file(s), {report['reclaimed_kb']} KB:")
     for relative in report["removed"]:
-        print(f"  {kb_prefix()}_Schema/{relative}")
+        print(f"  {managed_join(f'_Schema/{relative}')}")
     if report["declined"]:
         print(f"Kept {len(report['declined'])} file(s):")
         for entry in report["declined"]:
-            print(f"  {kb_prefix()}_Schema/{entry['path']} — {entry['reason']}")
+            print(f"  {managed_join('_Schema/')}{entry['path']} — {entry['reason']}")
     if not report["applied"]:
         print("Re-run with --apply to delete.")
     return 0
@@ -3352,7 +3347,7 @@ def _cell_init_main(argv: list[str]) -> int:
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem init",
-        description=f"Bootstrap a fresh {kb_dirname()} scaffold into a vault.",
+        description=f"Bootstrap a fresh {managed_root_rel()} scaffold into a vault.",
     )
     parser.add_argument(
         "--vault",
@@ -3361,7 +3356,7 @@ def _init_main(argv: list[str]) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help=f"Overlay the scaffold even if {kb_prefix()} exists (existing files kept).",
+        help=f"Overlay the scaffold even if {managed_join('')} exists (existing files kept).",
     )
     args = parser.parse_args(argv)
 
@@ -3377,15 +3372,15 @@ def _init_main(argv: list[str]) -> int:
     except OpError as error:
         print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
-    print(f"Initialized {kb_dirname()} at {report['kb']}")
+    print(f"Initialized {managed_root_rel()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
-        f"  2. Install the Exomem {kb_dirname()} skill so Claude knows how to use it: "
+        f"  2. Install the Exomem {managed_root_rel()} skill so Claude knows how to use it: "
         "python -m exomem install-skill"
     )
-    print(f"  3. Adapt {kb_prefix()}_Schema/project-keys.yaml to your own projects.")
+    print(f"  3. Adapt {managed_join('_Schema/project-keys.yaml')} to your own projects.")
     print(
         "  4. For low-resource mode: exomem mode quiet; inspect with "
         "exomem status --resources --json."
@@ -4446,6 +4441,10 @@ def _simple_maintain_main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--cleanup-held-upload-cancellations", action="store_true",
+        help="with --migrate-state --offline: finish temporary cancellation markers before downgrading",
+    )
+    parser.add_argument(
         "--deadline-monotonic",
         type=float,
         help=(
@@ -4470,18 +4469,48 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("--arm-connector-boundary requires --migrate-state --offline without --adopt-state")
     if args.migrate_collections and (
         not args.migrate_state or args.adopt_state or args.arm_connector_boundary
+        or args.cleanup_held_upload_cancellations
     ):
         parser.error("--migrate-collections requires --migrate-state --offline without other state steps")
-    if (args.deadline_monotonic is not None) != args.migrate_collections or (
-        args.deadline_monotonic is not None
-        and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0)
+    if args.cleanup_held_upload_cancellations and (
+        not args.migrate_state or args.adopt_state or args.arm_connector_boundary or args.migrate_collections
     ):
-        parser.error("--migrate-collections requires a positive --deadline-monotonic, and only it takes one")
+        parser.error("--cleanup-held-upload-cancellations requires --migrate-state --offline without other state steps")
+    if (
+        (args.deadline_monotonic is not None and not (args.migrate_collections or args.cleanup_held_upload_cancellations))
+        or (args.migrate_collections and args.deadline_monotonic is None)
+        or (args.deadline_monotonic is not None
+            and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0))
+    ):
+        parser.error("collections migration requires a positive --deadline-monotonic; only it and held-upload cleanup take one")
     if args.migrate_state:
         if not args.offline:
             parser.error("--migrate-state requires --offline")
         if args.fix or args.reconcile:
             parser.error("--migrate-state cannot be combined with --fix or --reconcile")
+        if args.cleanup_held_upload_cancellations:
+            from . import artifact_lifecycle, state_migration
+
+            try:
+                authority = state_migration.assert_offline_migration_authority(
+                    source="exomem maintain --cleanup-held-upload-cancellations --offline",
+                )
+                # The launcher passes its own deadline; an operator's run gets a bounded default budget.
+                deadline = args.deadline_monotonic if args.deadline_monotonic is not None else time.monotonic() + 600
+                completed = artifact_lifecycle.cleanup_cancellations(
+                    _offline_vault_root(args.vault), authority=authority, deadline=deadline,
+                )
+            except (OSError, RuntimeError, ValueError, TimeoutError) as error:
+                if args.json:
+                    print(json.dumps({"success": False, "error": {"message": str(error)}}))
+                else:
+                    print(f"Error: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(json.dumps({"success": True, "data": {"completed": completed}}))
+            else:
+                print(f"Completed {completed} held-upload cancellations")
+            return 0
         try:
             resolution = _run_offline_state_migration(
                 vault=args.vault,
@@ -4748,7 +4777,7 @@ def _print_adopt_human(result: dict) -> None:
         f"{totals.get('dirs', 0)} folders"
     )
     if governance.get("kb_present"):
-        print(f"  Governed layer: {governance.get('governed_path') or kb_prefix()}")
+        print(f"  Governed layer: {governance.get('governed_path') or managed_join('')}")
     else:
         print("  Governed layer: not initialized yet")
     print("  Originals: untouched; non-KB files stay read-only input.")
@@ -4918,7 +4947,7 @@ def _print_triage_human(result: dict) -> None:
         print(f"  {result['ref']}")
 
 
-def _core_op_main(argv: list[str]) -> int:
+def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
     from . import cli_ops, product_invoke
     from . import commands as commands_module
 
@@ -4988,9 +5017,16 @@ def _core_op_main(argv: list[str]) -> int:
         if resolved is not None:
             argv = [resolved.public_name, *argv[1:]]
 
+    local_cancellation = False
+    if argv and argv[0] in cmds and cmds[argv[0]].name == "transfer_artifact":
+        # The closed transfer selector chooses transport before any fresh CLI owner is constructed.
+        selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        selector.add_argument("--operation", default="upload")
+        selected, _ = selector.parse_known_args(argv[1:])
+        local_cancellation = selected.operation == "cancel"
     preverified_root = None
     preverified_admission = None
-    if not authorization_carrier.is_absent and argv and argv[0] in cmds:
+    if not authorization_carrier.is_absent and argv and argv[0] in cmds and not local_cancellation:
         try:
             preverified_root, preverified_admission = (
                 product_invoke.verify_local_authorization_transport(
@@ -5008,7 +5044,7 @@ def _core_op_main(argv: list[str]) -> int:
                 print(f"Error [{err['code']}]: {err['message']}", file=sys.stderr)
             return 1
 
-    parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
+    parser = _CLIParser(prog="kb", description=f"Query and write the local {managed_root_rel()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
     for name in sorted(cmds):
         cmd = cmds[name]
@@ -5035,13 +5071,35 @@ def _core_op_main(argv: list[str]) -> int:
             ),
         )
         _add_command_args(sp, cmd)
+        if cmd.name == "transfer_artifact":
+            sp.add_argument("--token-file", default="", help="holding local client's token file (default EXOMEM_LOCAL_TOKEN_FILE)")
+            sp.add_argument("--port", default="", help="local listener port (default EXOMEM_LOCAL_PORT)")
 
     args = parser.parse_args(argv)
     cmd = cmds[args.op]
     as_json = getattr(args, "json", False)
+    if cmd.name == "transfer_artifact" and not local_cancellation:
+        if getattr(args, "operation", None) == "cancel":
+            # The transport selector reads only the full spelling; an abbreviation must not run in-process.
+            parser.error("spell --operation cancel in full")
+        if args.token_file or args.port:
+            parser.error("--token-file and --port apply only to --operation cancel")
 
     try:
         raw = _collect_raw_args(cmd, args, parser)
+        if local_cancellation:
+            from .local_transfer_client import cancel_uploads
+
+            kwargs = cli_ops.coerce(cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True)
+            result = cancel_uploads(
+                kwargs, authorization_carrier=authorization_carrier,
+                token_file=args.token_file, port=args.port, transport=local_transfer_transport,
+            )
+            if as_json:
+                print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
+            else:
+                _print_human(result, op=cmd.name)
+            return 1 if result.get("failed") else 0
         if preverified_admission is None:
             root, principal = product_invoke.prepare_local_authorization(
                 cmd,
@@ -5088,6 +5146,10 @@ def _core_op_main(argv: list[str]) -> int:
             if err.get("remediation"):
                 print(err["remediation"], file=sys.stderr)
         return 1
+    finally:
+        from . import writer_lease
+
+        writer_lease.hand_back_after_command()
 
     if as_json:
         print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))

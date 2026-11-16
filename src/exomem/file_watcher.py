@@ -54,7 +54,7 @@ from . import (
     semantic_writes,
     state_paths,
 )
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root, managed_split
 
 if TYPE_CHECKING:
     from .vault_store.importer import Importer, ImportReport
@@ -1132,7 +1132,7 @@ class FileWatcher:
         # Retain the invoking manager: background threads do not inherit its
         # ContextVar, and publication must contend with that same writer.
         self._freshness_manager = active_manager()
-        self._kb_root = vault_root / kb_dirname()
+        self._kb_root = managed_root(vault_root)
         self._debounce_override = debounce_seconds
         self._lock = threading.Lock()
         self._pending_upsert: set[Path] = set()
@@ -1355,7 +1355,7 @@ class FileWatcher:
                 artifact_census.note_created(self._vault_root, [rel])
         if owned_rel is not None:
             self._pend_import(owned_rel)
-        if rel == f"{kb_prefix()}_access.yaml":
+        if rel == managed_join("_access.yaml"):
             # Access policy changes are a publication boundary despite not
             # being Markdown.  Do this before the generic non-Markdown return
             # so graph reads fail closed until policy projection is reconciled.
@@ -2316,7 +2316,7 @@ class FileWatcher:
         # Lexstore serves both KB and vault scopes, so it receives the complete
         # vault-wide generation. index_sync keeps every heavier derived lane
         # KB-scoped while applying that one combined lexical mutation.
-        kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
+        kb_del_rels = [r for r in del_rels if managed_split(r) is not None]
         if not (kb_ups or kb_del_rels) and (up_rels or del_rels):
             # Graph sources live in KB, but their resolver is vault-wide. A
             # sibling-folder title/path change can alter KB edge resolution
@@ -2569,7 +2569,7 @@ class FileWatcher:
         if not self._vault_root.is_dir():
             log.info("file watcher: %s not found; not watching", self._vault_root)
             return False
-        kb_root = self._vault_root / kb_dirname()
+        kb_root = managed_root(self._vault_root)
         if not kb_root.is_dir():
             log.info("file watcher: %s not found; not watching", kb_root)
             return False

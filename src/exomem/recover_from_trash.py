@@ -7,6 +7,13 @@ the trash path format AND the original-path encoding to recover.
 
 Refuses to overwrite an existing file at the restore destination — pick
 a different `restore_path` if the original location is now occupied.
+
+A recovery is a move out of the trash, so a restricted writer's confinement binds it as it binds
+`move_file`: both modes admit the trash entry as the source and the restore path as the
+destination before any existence check, and a refusal is `WRITE_REFUSED: target is unavailable`.
+A stored original is fetched only after those admissions, as `move_file` materializes an original
+once its own checks have passed: a dry run fetches nothing and reads an evicted original from its
+stored version, and a commit fetches only the originals that it moves (`_materialize`).
 """
 
 from __future__ import annotations
@@ -33,7 +40,7 @@ from . import (
     trash_metadata,
 )
 from .governance import catalog_publication, lifecycle
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_split
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .trash_metadata import original_path as trash_original_path
 from .vault import (
@@ -99,10 +106,9 @@ def recover_from_trash(
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
     _fold: bool = False,
 ) -> RecoverResult:
-    from .media_store import local_originals
-
-    with local_originals(vault_root, (trash_path,)):
-        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews, _fold=_fold)
+    # The pins of the originals that a commit fetches hold until the recovery returns.
+    with ExitStack() as originals_context:
+        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews, _fold=_fold, originals_context=originals_context)
 
 
 def _recover_from_trash_local(
@@ -115,6 +121,7 @@ def _recover_from_trash_local(
     validate_only: bool = False,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
     _fold: bool = False,
+    originals_context: ExitStack,
 ) -> RecoverResult:
     if store_targets.owns_any(vault_root, files=(trash_path,)):
         return _recover_in_store(
@@ -126,38 +133,52 @@ def _recover_from_trash_local(
             validate_only=validate_only,
             relation_reviews=relation_reviews,
             fold=_fold,
+            originals_context=originals_context,
         )
+    # A recovery is a move out of the trash, so its source is admitted as a move's is: before any
+    # existence check, and a withheld entry answers as an absent one.
+    stored_original = None
     try:
         trash_abs, trash_rel = resolve_under_vault(
-            vault_root, trash_path, must_exist=True
+            vault_root, trash_path, must_exist=True, refuse_withheld=True
         )
     except VaultPathError as e:
-        raise RecoverError(code=e.code, reason=e.reason) from e
+        # An evicted original is not on the volume: one that the caller may see is accepted without
+        # a fetch, as `move_file` accepts it, and a withheld one answers as an absent one.
+        evicted = (
+            originals.evicted_visible_original(vault_root, trash_path)
+            if e.code == "NOT_FOUND"
+            else None
+        )
+        if evicted is None:
+            raise RecoverError(code=e.code, reason=e.reason) from e
+        trash_abs, trash_rel, stored_original = evicted
 
     _refuse_outside_trash(trash_rel)
 
     # Bind and classify the complete source before reading its sidecar, parsing
     # Markdown, counting children, or allocating lifecycle state. The later
-    # lifecycle manifest performs the immediate pre-rename recheck.
+    # lifecycle manifest performs the immediate pre-rename recheck. An evicted
+    # original is bound by the digest of its stored version until a commit fetches it.
     trash_file_snapshot = None
     trash_tree: tuple[reserved_paths.GenericTreeFile, ...] = ()
+    evicted_below: tuple[originals.OriginalSnapshot, ...] = ()
     try:
-        if trash_abs.is_file():
+        if stored_original is not None:
+            trash_kind = "file"
+        elif trash_abs.is_file():
             trash_kind = "file"
             trash_file_snapshot = reserved_paths.read_generic_bytes(vault_root, trash_rel)
         elif trash_abs.is_dir():
             trash_kind = "directory"
             trash_tree = reserved_paths.read_generic_tree(vault_root, trash_rel)
+            evicted_below = _evicted_below(vault_root, trash_rel)
         else:
             raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH")
     except reserved_paths.ReservedPathLeafError as error:
-        code = "NOT_FOUND" if error.code == "MISSING" else "RESERVED_PATH"
-        raise RecoverError(
-            code=code,
-            reason="trash source could not be acquired through the generic boundary",
-        ) from None
+        raise _unacquired_source(error) from None
 
-    if trash_kind == "file" and trash_rel.lower().endswith(".md"):
+    if trash_file_snapshot is not None and trash_rel.lower().endswith(".md"):
         _refuse_reference_companion(trash_file_snapshot.data)
 
     sidecar, meta, sidecar_guard, sidecar_proof_guard, sidecar_source, sidecar_identity = (
@@ -171,19 +192,30 @@ def _recover_from_trash_local(
         allow_curated=allow_curated,
         fold=_fold,
     )
+    # A file entry's commit fetches its original once every other check has passed, so a refused
+    # recovery reads nothing from the store. A folder fetches before its census guards, which must see
+    # the fetched files, so its census and semantic checks are the ones that come after its fetch.
+    restored: tuple[tuple[str, str], ...]
     if trash_kind == "file":
-        assert trash_file_snapshot is not None
-        restored = ((restore_rel, trash_file_snapshot.data),)
+        if trash_file_snapshot is not None:
+            _admit_publication(vault_root, restore_rel, trash_file_snapshot.data)
+            digest = hashlib.sha256(trash_file_snapshot.data).hexdigest()
+        else:
+            # An evicted original counts by the digest of its stored version, which its fetch
+            # verifies. Only a page's membership needs its bytes, so a commit judges a page after
+            # the fetch below, and a dry run, which fetches nothing, cannot judge it.
+            assert stored_original is not None and stored_original.binary_sha256 is not None
+            if not restore_rel.lower().endswith(".md"):
+                _admit_publication(vault_root, restore_rel, None)
+            digest = stored_original.binary_sha256
+        restored = ((restore_rel, digest),)
     else:
-        restored = tuple(
-            (f"{restore_rel.rstrip('/')}/{item.relative_path}", item.snapshot.data)
-            for item in trash_tree
-        )
+        restored = _tree_state(vault_root, trash_rel, restore_rel, trash_tree, evicted_below)
     from .collection_store import authority as collection_authority
 
     # Decided before the existence check below, so it cannot tell a withheld view from none.
     collection_authority.refuse_view_paths(
-        vault_root, (restore_rel, *(path for path, _data in restored)), RecoverError
+        vault_root, (restore_rel, *(path for path, _digest in restored)), RecoverError
     )
 
     try:
@@ -221,9 +253,7 @@ def _recover_from_trash_local(
                 ),
             )
 
-    initial_restore_state = tuple(
-        sorted((path, hashlib.sha256(data).hexdigest()) for path, data in restored)
-    )
+    initial_restore_state = tuple(sorted(restored))
     catalog_content_paths = tuple(path for path, _digest in initial_restore_state)
 
     today = today or dt.date.today()
@@ -255,6 +285,20 @@ def _recover_from_trash_local(
                 code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 reason=str(error),
             ) from error
+
+    def fetch_file() -> None:
+        # The transition reads the fetched original and checks it against `initial_restore_state`.
+        _materialize(vault_root, originals_context, trash_rel, trash_kind)
+        if stored_original is not None and restore_rel.lower().endswith(".md"):
+            # Only a page's membership needs the original's bytes, so it is the one check after the fetch.
+            try:
+                fetched = reserved_paths.read_generic_bytes(vault_root, trash_rel)
+            except reserved_paths.ReservedPathLeafError as error:
+                raise _unacquired_source(error) from None
+            _admit_publication(vault_root, restore_rel, fetched.data)
+
+    if trash_kind == "directory" and not validate_only:
+        _materialize(vault_root, originals_context, trash_rel, trash_kind)
 
     semantic: dict | None = None
     lifecycle_operation: lifecycle.LifecycleOperation | None = None
@@ -372,6 +416,8 @@ def _recover_from_trash_local(
                     warnings=[],
                     semantic=preflight.as_dict(),
                 )
+            if trash_kind == "file":
+                fetch_file()
 
             try:
                 graph_transition = graph_sync.begin_recovery_transition(
@@ -491,6 +537,8 @@ def _recover_from_trash_local(
                     code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                     reason=str(error),
                 ) from error
+        if trash_kind == "file":
+            fetch_file()
         try:
             graph_transition = graph_sync.begin_recovery_transition(
                 vault_root,
@@ -696,10 +744,7 @@ def _recover_from_trash_local(
     if lifecycle_operation is not None and not lifecycle.finish_recovery(
         lifecycle_operation, index_report=index_feedback
     ):
-        warnings.append(
-            "recovery staged but governed derived state is not exact; "
-            "content remains tombstoned until reconcile"
-        )
+        warnings.append(lifecycle.RECOVERY_NOT_EXACT)
 
     log_warning = log_plan.warning
     if not catalog_published:
@@ -739,18 +784,104 @@ def _recover_from_trash_local(
 
 def _refuse_outside_trash(trash_rel: str) -> None:
     """Refuse a path that is not a trash entry: recovery moves out of the trash only."""
-    parts = trash_rel.split("/")
-    in_trash = (
-        len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH
-    )
+    below = managed_split(trash_rel)
+    in_trash = below is not None and below.split("/")[0] == TRASH_SUBPATH
     if not in_trash:
         raise RecoverError(
             code="NOT_IN_TRASH",
             reason=(
-                f"{trash_rel} is not under {kb_prefix()}{TRASH_SUBPATH}/. "
+                f"{trash_rel} is not under {managed_join(f'{TRASH_SUBPATH}/')}. "
                 f"Use `move_file` for general relocations."
             ),
         )
+
+
+def _admit_restore_destination(vault_root: Path, restore_rel: str) -> None:
+    """Admit the restore path as a move's destination, judged as a creation, before any existence check.
+
+    A limited caller may create only in a capture namespace, so a hidden page holding the name
+    cannot change its answer. It is `move_file`'s destination rule, with this door's error.
+    """
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, restore_rel)
+    except ValueError:
+        raise RecoverError("WRITE_REFUSED", "target is unavailable") from None
+
+
+def _admit_publication(vault_root: Path, restore_rel: str, data: bytes | None) -> None:
+    """Admit the restored bytes at their destination, as the batch target check would.
+
+    The rename publishes outside that check, so the recovery asks here, as `move_file` does for a
+    move out of the trash: every writer keeps capture namespaces free of protected content. Only
+    a page's bytes decide its membership, so any other file is judged by its path and its
+    governance companion. A file with no companion has no resolved membership, and the boundary
+    refuses it into a capture namespace.
+    """
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_write(
+            vault_root, restore_rel, content=data if restore_rel.lower().endswith(".md") else None
+        )
+    except ValueError:
+        raise RecoverError("WRITE_REFUSED", "target is unavailable") from None
+
+
+def _materialize(vault_root: Path, originals_context: ExitStack, trash_rel: str, trash_kind: str) -> None:
+    """Fetch the evicted originals that a commit moves, and pin them until the recovery returns.
+
+    Only a commit calls this, once the source and the destination are admitted. A folder carries
+    the originals below it; a file carries what ``media_store.moved_originals`` decides, the rule
+    that a move shares.
+    """
+    from .media_store import local_originals, moved_originals
+
+    originals_context.enter_context(
+        moved_originals(vault_root, trash_rel)
+        if trash_kind == "file"
+        else local_originals(vault_root, (trash_rel,))
+    )
+
+
+def _evicted_below(vault_root: Path, trash_rel: str) -> tuple[originals.OriginalSnapshot, ...]:
+    """The evicted originals in a trashed folder, which its tree read cannot see."""
+    if originals.binding_for(vault_root) is None:
+        return ()
+    from .media_store import bound_originals
+
+    return tuple(
+        item for item in bound_originals(vault_root, root=vault_root / trash_rel) if item.state == "evicted"
+    )
+
+
+def _tree_state(
+    vault_root: Path,
+    trash_rel: str,
+    restore_rel: str,
+    tree: tuple[reserved_paths.GenericTreeFile, ...],
+    evicted: tuple[originals.OriginalSnapshot, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Where each file of a trashed folder goes back to, with its content digest, in path order.
+
+    An evicted original counts by the digest of its stored version, which its fetch verifies.
+    """
+    folder = Path(vault_root).resolve() / trash_rel
+    root = restore_rel.rstrip("/")
+    state = [(f"{root}/{item.relative_path}", hashlib.sha256(item.snapshot.data).hexdigest()) for item in tree]
+    for original in evicted:
+        assert original.binary_sha256 is not None  # `bound_originals` yields only a bound version
+        state.append((f"{root}/{original.path.relative_to(folder).as_posix()}", original.binary_sha256))
+    return tuple(sorted(state))
+
+
+def _unacquired_source(error: reserved_paths.ReservedPathLeafError) -> RecoverError:
+    """The refusal for a trash source that the generic boundary could not read."""
+    return RecoverError(
+        code="NOT_FOUND" if error.code == "MISSING" else "RESERVED_PATH",
+        reason="trash source could not be acquired through the generic boundary",
+    )
 
 
 def _refuse_reference_companion(data: bytes) -> None:
@@ -853,6 +984,8 @@ def _restore_destination(
         restore_abs, restore_rel = resolve_under_vault(vault_root, restore_path)
     except VaultPathError as e:
         raise RecoverError(code=e.code, reason=e.reason) from e
+    # Before any rule that reads the destination's state, so a refused path tells nothing about it.
+    _admit_restore_destination(vault_root, restore_rel)
 
     if reserved_paths.classify_logical(restore_rel).blocked:
         raise RecoverError(
@@ -866,8 +999,8 @@ def _restore_destination(
         raise RecoverError(code=error.code, reason=error.reason) from error
 
     # The destination must not be inside the trash (recovery, not re-trashing).
-    rparts = restore_rel.split("/")
-    if len(rparts) >= 2 and rparts[0] == kb_dirname() and rparts[1] == TRASH_SUBPATH:
+    restore_below = managed_split(restore_rel)
+    if restore_below is not None and restore_below.split("/")[0] == TRASH_SUBPATH:
         raise RecoverError(
             code="RESTORE_INTO_TRASH",
             reason=(
@@ -960,6 +1093,7 @@ def _recover_in_store(
     validate_only: bool,
     relation_reviews: Mapping[str, Mapping[str, str]] | None,
     fold: bool,
+    originals_context: ExitStack,
 ) -> RecoverResult:
     """Recover a trashed page, binary or folder in one store transaction.
 
@@ -991,8 +1125,10 @@ def _recover_in_store(
     with ExitStack() as reading:
         # The read phase sees one revision; the commit's expectations recheck all that it read.
         reading.enter_context(store_read.request_snapshot(root))
+        # The source of a move out of the trash is admitted before the store is read, for a folder
+        # as for a page, as file mode admits it.
         try:
-            trash_abs, trash_rel = resolve_under_vault(root, trash_path)
+            trash_abs, trash_rel = resolve_under_vault(root, trash_path, refuse_withheld=True)
         except VaultPathError as e:
             raise RecoverError(code=e.code, reason=e.reason) from e
         _refuse_outside_trash(trash_rel)
@@ -1016,7 +1152,15 @@ def _recover_in_store(
             try:
                 trash_abs, trash_rel = store_targets.resolve_existing(root, trash_path)
             except VaultPathError as e:
-                raise RecoverError(code=e.code, reason=e.reason) from e
+                # An evicted original that the store has no record for, as file mode accepts it.
+                evicted = (
+                    originals.evicted_visible_original(root, trash_path)
+                    if e.code == "NOT_FOUND"
+                    else None
+                )
+                if evicted is None:
+                    raise RecoverError(code=e.code, reason=e.reason) from e
+                trash_abs, trash_rel, _stored = evicted
             trash_kind = "file"
             data = store_read.owned_bytes(root, trash_rel) if store_read.serves(root, trash_rel) else None
             stored = {} if data is None else {trash_rel: data}
@@ -1035,6 +1179,11 @@ def _recover_in_store(
             allow_curated=allow_curated,
             fold=fold,
         )
+        if trash_kind == "file":
+            _admit_publication(root, restore_rel, stored.get(trash_rel))
+        if not validate_only:
+            # Before anything below lists or reads the files that the commit moves.
+            _materialize(root, originals_context, trash_rel, trash_kind)
 
         def restored(source: str) -> str:
             return f"{restore_rel.rstrip('/')}/{source[len(trash_rel) + 1:]}"
@@ -1060,6 +1209,12 @@ def _recover_in_store(
                     operation="recover_from_trash",
                     error_class=RecoverError,
                     failed_code="RECOVER_FAILED",
+                    # A dry run fetches nothing, so it lists an evicted original from its record.
+                    # Its companion lies beside it, so below the folder: `stored` holds its bytes.
+                    evicted=None if not validate_only else (
+                        lambda rel: store_targets.evicted_original(root, rel, companions=stored)
+                        is not None
+                    ),
                 )
             if len(stored) + listing.file_count > DIRECTORY_TRANSITION_LIMIT:
                 raise RecoverError(

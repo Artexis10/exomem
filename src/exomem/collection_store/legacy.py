@@ -16,12 +16,13 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import held_fs, records, reserved_paths, vault
 from .. import structured_collections as collections
+from ..kbdir import managed_join, managed_root_rel
 from .connection import CollectionStoreError
 
 _PREFIX = ".exomem-collection-audit-"
@@ -185,6 +186,8 @@ class LegacyAuditSpool:
         self._token = secrets.token_hex(16)
         self._path = self._staging_directory / f"{_PREFIX}{self._token}.sqlite"
         self._connection = None
+        # The cursors that row generators hold open; see `_rows`.
+        self._streaming = set()
         self._filesystem = self._parent = self._owned_file = None
         self._owns_companions = False
         self._failed = False
@@ -232,13 +235,21 @@ class LegacyAuditSpool:
             raise self._interruption or _invalid() from error
 
     def _rows(self, statement: str, parameters=()):
+        cursor = None
         try:
-            for row in self._sql(statement, parameters):
+            cursor = self._sql(statement, parameters)
+            self._streaming.add(cursor)
+            for row in cursor:
                 self._check()
                 yield row
         except sqlite3.DatabaseError as error:
             self._failed = True
             raise self._interruption or _invalid() from error
+        finally:
+            if cursor is not None:
+                self._streaming.discard(cursor)
+                with suppress(sqlite3.Error):
+                    cursor.close()
 
     def __enter__(self) -> LegacyAuditSpool:
         if self._entered:
@@ -281,6 +292,13 @@ class LegacyAuditSpool:
 
     def __exit__(self, *_exc) -> None:
         try:
+            # A row generator that a reference cycle keeps suspended holds its cursor, and so the file open:
+            # Windows cannot delete an open file, so the cursors close here rather than when the cycle is collected.
+            # A tuple copy: collecting a cycle during the loop finalizes a generator, which discards its cursor.
+            for cursor in tuple(self._streaming):
+                with suppress(sqlite3.Error):
+                    cursor.close()
+            self._streaming.clear()
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
@@ -402,12 +420,11 @@ class LegacyAuditSpool:
         try:
             with held_fs.acquire(self._root).require() as filesystem:
                 self._observe(".", "anchor", filesystem.root_identity, recheck=recheck)
-                kb = vault.kb_prefix().rstrip("/")
-                self._directory(filesystem, kb, recheck=recheck)
-                self._directory(filesystem, kb + "/_archive", recheck=recheck)
-                archive = kb + "/_archive/logs"
+                self._directory(filesystem, managed_root_rel(), recheck=recheck)
+                self._directory(filesystem, managed_join("_archive"), recheck=recheck)
+                archive = managed_join("_archive/logs")
                 exists = self._directory(filesystem, archive, recheck=recheck)
-                self._file(filesystem, kb + "/log.md", "live", recheck=recheck, ingest=not recheck)
+                self._file(filesystem, managed_join("log.md"), "live", recheck=recheck, ingest=not recheck)
                 if exists:
                     with (
                         filesystem.parent(archive).require() as parent,

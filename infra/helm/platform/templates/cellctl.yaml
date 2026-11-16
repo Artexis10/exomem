@@ -1,5 +1,14 @@
 {{- if .Values.cellctl.enabled }}
 {{- $workloadName := "cellctl" }}
+{{- /* JSON Schema fixes the supported CPU and memory quantity formats. It cannot compare request and limit fields. */}}
+{{- $build := .Values.cellctl.catalogueBuildResources }}
+{{- $cpuRequest := mul (int64 (trimSuffix "m" $build.requests.cpu)) (ternary 1 1000 (hasSuffix "m" $build.requests.cpu)) }}
+{{- $cpuLimit := mul (int64 (trimSuffix "m" $build.limits.cpu)) (ternary 1 1000 (hasSuffix "m" $build.limits.cpu)) }}
+{{- $memoryRequest := mul (int64 (trimSuffix "Mi" (trimSuffix "Gi" $build.requests.memory))) (ternary 1024 1 (hasSuffix "Gi" $build.requests.memory)) }}
+{{- $memoryLimit := mul (int64 (trimSuffix "Mi" (trimSuffix "Gi" $build.limits.memory))) (ternary 1024 1 (hasSuffix "Gi" $build.limits.memory)) }}
+{{- if or (gt $cpuRequest $cpuLimit) (gt $memoryRequest $memoryLimit) }}
+{{- fail "cellctl.catalogueBuildResources requests must not exceed limits" }}
+{{- end }}
 {{- $shared := .Values.cellctl.sharedWorker }}
 {{- /*
 The cell alerts' thresholds come from the observability contract the chart already
@@ -270,6 +279,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        # Kubernetes writes Secret files as root without an fsGroup, so the 0440 media edge
+        # signing key is readable by cellctl only through this group.
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -319,6 +331,18 @@ spec:
               value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
             - name: CELLCTL_UPGRADE_READY_DEADLINE_MINUTES
               value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
+            {{- if .Values.cellctl.cataloguePrewarm }}
+            - name: CELLCTL_CATALOGUE_PREWARM
+              value: "true"
+            - name: CELLCTL_CATALOGUE_BUILD_TIMEOUT_SECONDS
+              value: {{ .Values.cellctl.catalogueBuildTimeoutSeconds | quote }}
+            - name: CELLCTL_CATALOGUE_BUILD_RESOURCES
+              value: {{ .Values.cellctl.catalogueBuildResources | toJson | quote }}
+            {{- end }}
+            - name: CELLCTL_UPGRADE_CONCURRENCY_PER_NODE
+              value: {{ .Values.cellctl.upgradeConcurrencyPerNode | quote }}
+            - name: CELLCTL_UPGRADE_PREPARE_ENABLED
+              value: {{ .Values.cellctl.upgradePrepareEnabled | quote }}
             # automate-cloud-releases D4: each cell's upgrade window.
             - name: CELLCTL_UPGRADE_WINDOW_ENABLED
               value: {{ .Values.cellctl.upgradeWindow.enabled | toString | quote }}
@@ -873,6 +897,25 @@ spec:
     {{- end }}
     - expression: >-
         !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        {{- /* automate-cloud-releases D9: a prepare Job's nodeName is its whole placement; it carries no selector, toleration or affinity, so it warms one node and nothing else. */}}
+        (request.resource.resource == 'jobs' &&
+          variables.target.metadata.name.matches('^cell-prepare-[0-9a-f]{16}$') &&
+          has(variables.target.spec.template.metadata.labels) &&
+          'exomem.io/cell-job' in variables.target.spec.template.metadata.labels &&
+          variables.target.spec.template.metadata.labels['exomem.io/cell-job'] == 'prepare' &&
+          (!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0) &&
+          (!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0) &&
+          {{- /* A compromised cellctl must not make a chosen node's kubelet fetch a cell secret. */}}
+          !has(variables.podSpec.imagePullSecrets) &&
+          variables.podSpec.containers.all(c,
+            has(c.command) && c.command == ['true'] && !has(c.lifecycle) &&
+            !has(c.envFrom) && (!has(c.env) || c.env.all(e, !has(e.valueFrom))) &&
+            !has(c.startupProbe) && !has(c.livenessProbe) && !has(c.readinessProbe)) &&
+          has(variables.podSpec.nodeName) &&
+          !has(variables.podSpec.nodeSelector) && !has(variables.podSpec.tolerations) &&
+          !has(variables.podSpec.affinity) &&
+          !has(variables.podSpec.runtimeClassName) && !has(variables.podSpec.priorityClassName) &&
+          !has(variables.podSpec.hostAliases)) ||
         (!has(variables.podSpec.nodeName) && !has(variables.podSpec.runtimeClassName) &&
           !has(variables.podSpec.priorityClassName) && !has(variables.podSpec.hostAliases) &&
           ((!has(variables.podSpec.tolerations) && !has(variables.podSpec.nodeSelector)) ||
@@ -918,7 +961,8 @@ spec:
           {{- /* add-cloud-media-store D8: on a Hetzner volume an export's pack joins its own upload's node, so the one attachable staging volume serves both. */}}
           (!has(variables.podSpec.affinity) ||
             (request.resource.resource == 'jobs' &&
-              variables.target.metadata.name.matches('^export-[0-9a-f]{32}-pack$') &&
+              (variables.target.metadata.name.matches('^export-[0-9a-f]{32}-pack$'){{ if .Values.cellctl.cataloguePrewarm }} ||
+                variables.target.metadata.name.matches('^catalogue-build-[0-9a-f]{16}$'){{ end }}) &&
               !has(variables.podSpec.affinity.nodeAffinity) && !has(variables.podSpec.affinity.podAntiAffinity) &&
               has(variables.podSpec.affinity.podAffinity) &&
               !has(variables.podSpec.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution) &&
@@ -929,10 +973,58 @@ spec:
                 !has(t.namespaces) && !has(t.namespaceSelector) && !has(t.matchLabelKeys) && !has(t.mismatchLabelKeys) &&
                 has(t.labelSelector) && !has(t.labelSelector.matchExpressions) &&
                 t.labelSelector.matchLabels ==
-                  {'batch.kubernetes.io/job-name': variables.target.metadata.name.substring(0, 39) + '-upload'}))) &&
+                  {{- if .Values.cellctl.cataloguePrewarm }}
+                  (variables.target.metadata.name.startsWith('catalogue-build-')
+                    ? {'statefulset.kubernetes.io/pod-name': 'cell-0'}
+                    : {'batch.kubernetes.io/job-name': variables.target.metadata.name.substring(0, 39) + '-upload'})
+                  {{- else }}
+                  {'batch.kubernetes.io/job-name': variables.target.metadata.name.substring(0, 39) + '-upload'}
+                  {{- end }}))) &&
           (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
             size(variables.target.spec.volumeClaimTemplates) == 0))
-      message: cellctl may use only exact operator-selected dedicated or qualified shared placement{{ if $local }}, or a Job's toleration of its node's cordon{{ end }}, without nodeName, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates, and without affinity but an export pack's to its own upload's node.
+      message: cellctl may use only exact operator-selected dedicated or qualified shared placement{{ if $local }}, or a Job's toleration of its node's cordon{{ end }}, or a cell-prepare Job's nodeName pin alone, otherwise without nodeName, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates, and without affinity but an export pack's to its own upload's node.
+    {{- if .Values.cellctl.cataloguePrewarm }}
+    # warm-cell-catalogue: only the narrow builder may share a serving claim with this affinity and no egress.
+    - expression: >-
+        request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
+        (!(variables.target.metadata.name.startsWith('catalogue-build-')) &&
+          (!('exomem.io/cell-job' in variables.podLabels) || variables.podLabels['exomem.io/cell-job'] != 'catalogue-build') &&
+          (!('exomem.io/cell-job' in variables.labels) || variables.labels['exomem.io/cell-job'] != 'catalogue-build')) ||
+        (variables.target.metadata.name.matches('^catalogue-build-[0-9a-f]{16}$') &&
+          'exomem.io/cell-job' in variables.podLabels && variables.podLabels['exomem.io/cell-job'] == 'catalogue-build' &&
+          'exomem.io/cell-job' in variables.labels && variables.labels['exomem.io/cell-job'] == 'catalogue-build' &&
+          'exomem.io/cell' in variables.podLabels && variables.podLabels['exomem.io/cell'] == variables.namespaceName.substring(9) &&
+          'app.kubernetes.io/name' in variables.podLabels && variables.podLabels['app.kubernetes.io/name'] == 'exomem-catalogue-build' &&
+          has(variables.podSpec.affinity) &&
+          (!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0) &&
+          (!has(variables.podSpec.ephemeralContainers) || size(variables.podSpec.ephemeralContainers) == 0) &&
+          variables.podSpec.restartPolicy == 'Never' &&
+          variables.target.spec.backoffLimit == 0 &&
+          variables.target.spec.activeDeadlineSeconds > 0 &&
+          variables.target.spec.activeDeadlineSeconds <= {{ int .Values.cellctl.catalogueBuildTimeoutSeconds }} &&
+          size(variables.podSpec.containers) == 1 &&
+          variables.podSpec.containers.all(c,
+            c.name == 'catalogue-build' &&
+            c.command == ['sh', '-c', 'ulimit -c 0 && exec "$@"', 'cell-process',
+                          'python', '-m', 'exomem.catalogue_prewarm', '--vault', '/data/vault'] &&
+            (!has(c.args) || size(c.args) == 0) && !has(c.envFrom) &&
+            c.env == [{'name': 'TMPDIR', 'value': '/data/scratch/tmp'}] &&
+            c.resources.requests == {{ .Values.cellctl.catalogueBuildResources.requests | toJson }} &&
+            c.resources.limits == {{ .Values.cellctl.catalogueBuildResources.limits | toJson }} &&
+            size(c.volumeMounts) == 2 &&
+            c.volumeMounts.all(m,
+              ((m.name == 'data' && m.mountPath == '/data') || (m.name == 'tmp' && m.mountPath == '/tmp')) &&
+              !m.?readOnly.orValue(false) && !has(m.subPath) && !has(m.subPathExpr) && !has(m.mountPropagation))) &&
+          size(variables.podSpec.volumes) == 2 &&
+          variables.podSpec.volumes.all(v,
+            (v.name == 'data' && has(v.persistentVolumeClaim) &&
+              v.persistentVolumeClaim.claimName == 'cell-data' && !v.persistentVolumeClaim.?readOnly.orValue(false)) ||
+            (v.name == 'tmp' && has(v.emptyDir) && !has(v.emptyDir.medium) && !has(v.emptyDir.sizeLimit))) &&
+          variables.podSpec.securityContext.runAsUser == 10001 &&
+          variables.podSpec.securityContext.runAsGroup == 10001 &&
+          variables.podSpec.securityContext.fsGroup == 10001)
+      message: catalogue builds require their exact name, label, command, resources, serving affinity, shared uid and live claim, without other mounts or credentials.
+    {{- end }}
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-
@@ -1014,8 +1106,8 @@ spec:
           variables.target.spec.hard.all(k, k in ['persistentvolumeclaims', 'requests.storage', 'pods',
             'requests.cpu', 'requests.memory', 'limits.cpu', 'limits.memory']) &&
           variables.target.spec.hard['persistentvolumeclaims'] in ['1', '2'{{ if $local }}, '3'{{ end }}] &&
-          variables.target.spec.hard['pods'] in ['2', '4'{{ if $local }}, '5'{{ end }}])
-      message: cellctl may write only the ResourceQuota cell-quota, with at most {{ if $local }}three PVCs and five pods{{ else }}two PVCs and four pods{{ end }}.
+          variables.target.spec.hard['pods'] in ['2', '4'{{ if $local }}, '5'{{ end }}{{ if .Values.cellctl.cataloguePrewarm }}, '{{ if $local }}6{{ else }}5{{ end }}'{{ end }}])
+      message: cellctl may write only the ResourceQuota cell-quota, with at most {{ if $local }}three PVCs and {{ if .Values.cellctl.cataloguePrewarm }}six{{ else }}five{{ end }} pods{{ else }}two PVCs and {{ if .Values.cellctl.cataloguePrewarm }}five{{ else }}four{{ end }} pods{{ end }}.
     # 10. NetworkPolicies are exactly the three cellctl renders (D5, D11),
     # each pinned to its rendered shape, so a policy can never open egress
     # or ingress. The cell id in runtime-ingress's selector is the one the
@@ -1119,9 +1211,14 @@ spec:
           variables.np.podSelector.matchExpressions[0].operator == 'Exists' &&
           variables.np.podSelector.matchExpressions[1].key == 'exomem.io/cell-job' &&
           variables.np.podSelector.matchExpressions[1].operator == 'NotIn' &&
-          size(variables.np.podSelector.matchExpressions[1].values) == 2 &&
+          {{- /* automate-cloud-releases D9: the pull-only prepare Job needs no egress either; the kubelet pulls its image. */}}
+          size(variables.np.podSelector.matchExpressions[1].values) == {{ if .Values.cellctl.cataloguePrewarm }}4{{ else }}3{{ end }} &&
+          {{- if .Values.cellctl.cataloguePrewarm }}
+          'catalogue-build' in variables.np.podSelector.matchExpressions[1].values &&
+          {{- end }}
           'export-pack' in variables.np.podSelector.matchExpressions[1].values &&
           'export-pause' in variables.np.podSelector.matchExpressions[1].values &&
+          'prepare' in variables.np.podSelector.matchExpressions[1].values &&
           (!has(variables.np.ingress) || size(variables.np.ingress) == 0) &&
           {{- if .Values.mediaEdge.enabled }}
           {{- /* collect-released-media D3: a collecting cell's Jobs may also reach the edge port; the edge's own ingress admits only backup Jobs. */}}
@@ -1149,7 +1246,7 @@ spec:
           !has(variables.np.egress[1].to[0].podSelector.matchExpressions) &&
           size(variables.np.egress[1].ports) == 2 &&
           variables.np.egress[1].ports.all(p, p.protocol in ['UDP', 'TCP'] && p.port == 53 && !has(p.endPort)))
-      message: cellctl may write job-egress only as egress for every Job but the export pause and pack to TCP 443 outside the excepted ranges, plus kube-dns{{ if .Values.mediaEdge.enabled }} and the media edge on TCP 8769{{ end }}.
+      message: cellctl may write job-egress only as egress for every Job but the export pause and pack and the pull-only prepare Job to TCP 443 outside the excepted ranges, plus kube-dns{{ if .Values.mediaEdge.enabled }} and the media edge on TCP 8769{{ end }}.
     {{- if $relocation }}
     # 11. move-cloud-cells-to-local-storage D4: cellctl's one PV write sets a
     # cell volume's reclaim policy to Retain before relocation deletes its

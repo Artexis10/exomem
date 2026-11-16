@@ -44,6 +44,7 @@ from . import call_spans, durable_write, mutation_journal, mutation_lock, reques
 from . import capabilities as capabilities_module
 from . import curation as curation_module
 from .cli_ops import OpError, leaf_contract_code
+from .kbdir import managed_root
 from .mutation_lock import (
     COORDINATOR_IDENTITY_DOMAIN,
     COORDINATOR_IDENTITY_GATE,
@@ -4603,9 +4604,8 @@ def _effective_idempotency_key(
 
 def _is_receipt_vault_root(root: Path) -> bool:
     """Receipt storage is allowed only inside an existing vault scaffold."""
-    from .kbdir import kb_dirname
 
-    return (root / kb_dirname()).is_dir()
+    return managed_root(root).is_dir()
 
 
 # Every keyed write: a busy boundary is the server's problem to wait out, not
@@ -8661,6 +8661,11 @@ def _collection_store_thread(func):
                     command.name, injected[0], kwargs, write=not (read_only or import_status)
                 )
                 server = routing.server
+                if server is not None and import_status and read_only:
+                    # Status answers while a batch keeps the store thread busy: it reads the store's
+                    # last commit on this thread, under the proof that routed it.
+                    return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof,
+                                              collection=kwargs.get("collection"))
                 if server is not None:
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
@@ -8720,6 +8725,7 @@ def invoke_command(
     from .commands import (
         invocation_is_audit,
         invocation_is_read_only,
+        invocation_writes_outside_writer,
         validate_process_media_operation,
         writes_through_superseded_maintenance_leaf,
     )
@@ -8760,7 +8766,7 @@ def invoke_command(
         selector_error = error
         read_only = False
 
-    if not read_only:
+    if not read_only or invocation_writes_outside_writer(command, kwargs):
         from . import cloud_cell
 
         if cloud_cell.cloud_read_only_enabled():
@@ -9073,6 +9079,34 @@ def stop_server_lifecycle() -> None:
         logger.warning("lease handback at stop is pending; the lease expires on its TTL")
     finally:
         # A stopped manager is not reusable; the next lifecycle builds a fresh one.
+        with _MANAGERS_LOCK:
+            if _MANAGERS.get(manager.config) is manager:
+                del _MANAGERS[manager.config]
+
+
+def hand_back_after_command() -> None:
+    """Hand back the writer lease that a one-shot command took, as its process ends.
+
+    Nothing else does: a command process has no lifespan, and it ends before the renewer's idle
+    release. The lease then outlived the command by up to its TTL, and the owner's next offline
+    step refused with a service that was not running. A serving process keeps its lease to its
+    own stop; a handback that cannot finish leaves the lease to expire on its TTL, as before.
+    It assumes one command at a time in the process, as the CLI runs them: the close stops the
+    manager's renewer, so a command that another thread runs on it keeps its lease only to its TTL.
+    """
+    with _MANAGERS_LOCK:
+        manager = _MANAGERS.get(LeaseConfig.from_env())
+    if manager is None or not manager.config.enabled or manager._serves_collection_store:
+        return
+    with manager._lock:
+        if manager._fencing_token is None:
+            return
+    try:
+        manager.close()
+    except OpError as error:
+        logger.warning("the command's writer lease expires on its TTL: %s", error.code)
+    finally:
+        # A closed manager is not reusable; a later command in this process builds a fresh one.
         with _MANAGERS_LOCK:
             if _MANAGERS.get(manager.config) is manager:
                 del _MANAGERS[manager.config]

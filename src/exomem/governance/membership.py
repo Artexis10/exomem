@@ -12,6 +12,8 @@ membership still evaluates the current policy at read time, so a policy edit nee
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -21,7 +23,7 @@ from typing import Any, Literal
 
 from .. import document_containers, find_corpus, memory_refs, reserved_paths
 from ..find_types import ParsedPage
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root_rel, managed_split_parts
 from . import companions
 from .policy import Policy, Scope
 from .policy import load as load_policy
@@ -91,15 +93,13 @@ def clear_memo() -> None:
 
 def _kb_relative(rel_path: str) -> str:
     """Strip a leading KB dirname so both authored path forms compare equal."""
-    return _relative_to_kb(rel_path, kb_dirname())
+    return _relative_to_kb(rel_path)
 
 
-def _relative_to_kb(rel_path: str, dirname: str) -> str:
+def _relative_to_kb(rel_path: str) -> str:
     rel = rel_path.replace("\\", "/").strip("/")
-    parts = rel.split("/")
-    if parts and parts[0].casefold() == dirname.casefold():
-        return "/".join(parts[1:])
-    return rel
+    below = managed_split_parts(rel.split("/"), key=str.casefold)
+    return rel if below is None else "/".join(below)
 
 
 def _matches_paths(patterns: tuple[str, ...], rel_path: str) -> bool:
@@ -119,19 +119,20 @@ class MetadataSubject:
 
 @lru_cache(maxsize=128)
 def _normalized_refs(values: tuple[str, ...], dirname: str) -> frozenset[str]:
+    # `dirname` is unused in the body; it keys the cache, so a renamed root normalizes afresh.
     # Cache only configured selector data; current subject and authorization decisions stay fresh.
     normalized: set[str] = set()
     for v in values:
         normalized.add(v)
-        normalized.add(_relative_to_kb(v, dirname))
+        normalized.add(_relative_to_kb(v))
     return frozenset(normalized)
 
 
 def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
     if not values:
         return False
-    dirname = kb_dirname()
-    kb_rel = _relative_to_kb(rel_path, dirname)
+    dirname = managed_root_rel()
+    kb_rel = _relative_to_kb(rel_path)
     normalized = _normalized_refs(values, dirname)
     return rel_path in normalized or kb_rel in normalized
 
@@ -274,6 +275,19 @@ def evaluate_subject(
         policy, matched,
         classified=_classified_by_registry(root, subject.path, assigned, policy),
     )
+
+
+def subject_inputs(root: Path, policy: Policy) -> tuple:
+    """Every input of `evaluate_subject` that the subject does not carry, for a memo of its answers.
+
+    The page-admission scope-set memo keys on this tuple: an input that `evaluate_subject` gains goes here.
+    The policy's scopes follow its fingerprint; registry assignment follows the connector requirement,
+    the Knowledge Base folder name and the root.
+    """
+    from . import connector_boundary  # imports this module, so it loads on use
+
+    requirement = json.dumps(connector_boundary.read_requirement(root), sort_keys=True)
+    return str(root), policy.fingerprint, managed_root_rel(), hashlib.sha256(requirement.encode()).hexdigest()
 
 
 def _page_membership(

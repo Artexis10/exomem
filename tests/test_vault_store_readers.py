@@ -34,6 +34,7 @@ from exomem import __main__ as cli
 from exomem import (
     activation_conventions,
     bm25,
+    capabilities,
     commands,
     context_roles,
     document_containers,
@@ -60,10 +61,6 @@ from exomem.governance.principal import RequestPrincipal, owner_principal, reque
 from exomem.vault_store import availability, importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 SENTINEL = b"POISONED PROJECTION: a reader served this file instead of the store\n"
 #: How many pages only the store holds; the drill at scale sets it from the environment.
@@ -861,6 +858,10 @@ def test_a_file_that_the_store_does_not_own_is_answered_from_the_rows_that_its_s
 CLAIMED = "Knowledge Base/Notes/Gen/Claimed.md"
 
 
+@pytest.mark.skipif(
+    not vault_module.STAT_GENERATION_TRUSTED,
+    reason="ctime does not move on a write here, so a file-mode read is never remembered",
+)
 @pytest.mark.timeout(300)
 def test_a_container_claim_is_read_from_the_stored_page_though_a_file_mode_read_remembered_none(
     vault, monkeypatch  # noqa: F811
@@ -1046,6 +1047,121 @@ def test_a_write_door_withholds_a_stored_page_that_has_no_projection(stored, wri
     assert withheld == (True, False)
 
 
+@pytest.mark.parametrize("projection", ("present", "deleted", "poisoned"))
+def test_the_terminal_filter_withholds_a_stored_page_under_each_spelling_whatever_its_projection(
+    stored, writer, projection  # noqa: F811
+):
+    """The terminal filter keeps an entry that names no vault item, and it found vault items on the
+    disk only: a stored page that has no file reached a restricted caller under every spelling."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Sources/Secret/**"]')
+    secret = "Knowledge Base/Sources/Secret/Ledger.md"
+    visible = "Knowledge Base/Sources/Open/Notice.md"
+    page = b"---\ntitle: Ledger\ntype: source\ncreated: 2025-01-01\n---\n# Ledger\n\nFigures.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(secret, page), write.PagePut(visible, page),
+    )))
+    for rel in (secret, visible):
+        path = stored / rel
+        path.unlink(missing_ok=True)
+        if projection != "deleted":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(page if projection == "present" else SENTINEL)
+    spellings = (
+        secret, secret.upper(), "knowledge base/sources/secret/ledger.MD", secret.replace(" ", "%20"),
+    )
+
+    with request_scope(EXTERNAL):
+        released = egress.filter_withheld_entries(
+            stored, {"entries": [{"path": name} for name in (*spellings, visible)]}
+        )
+
+    assert released == {"entries": [{"path": visible}]}
+
+
+@pytest.fixture
+def case_sensitive_volume() -> None:
+    """The test builds folders that differ only in case, which a folding volume merges into one."""
+    if sys.platform in {"win32", "darwin"}:
+        pytest.skip("needs a case-sensitive volume: Windows and default macOS volumes fold case")
+
+
+@pytest.mark.parametrize("store", (False, True), ids=("file", "store"))
+def test_a_spelling_that_two_pages_share_once_case_is_folded_is_released_only_when_both_are(
+    vault, store, case_sensitive_volume  # noqa: F811
+):
+    """The terminal filter decided a case-folded spelling against one matching page, the first in
+    the directory's order on disk and in name order in the store. With `secret/Ledger.md` withheld
+    and `Secret/Ledger.md` released, the store released the entry that file mode withheld."""
+    notes = "Knowledge Base/Notes"
+    # The first pair is created withheld first, the second released first; each pair withholds
+    # the other letter case, so no listing order can pick the released page for both.
+    created = ("secret", "Secret", "vault", "Vault")
+    page = b"---\ntitle: Ledger\ntype: note\n---\n# Ledger\n\nFigures.\n"
+    for folder in created:
+        (vault / notes / folder).mkdir(parents=True, exist_ok=True)
+        (vault / notes / folder / "Ledger.md").write_bytes(page)
+    restrict_external(vault, f'paths: ["{notes}/secret/**", "{notes}/Vault/**"]')
+    if store:
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+    exact = {folder: f"{notes}/{folder}/Ledger.md" for folder in created}
+    folded = (f"{notes}/SECRET/LEDGER.MD", f"{notes}/vault/ledger.md".upper())
+
+    with request_scope(EXTERNAL):
+        kept = egress.filter_withheld_entries(
+            vault, {"entries": [{"path": name, "body": "Figures."} for name in (*exact.values(), *folded)]}
+        )
+
+    assert kept == {"entries": [
+        {"path": exact["Secret"], "body": "Figures."}, {"path": exact["vault"], "body": "Figures."},
+    ]}
+
+
+def test_a_case_folded_reference_costs_the_same_work_beside_ten_times_as_many_other_pages(
+    stored, writer  # noqa: F811
+):
+    """The terminal filter lists the folders on a case-folded reference's path. Its listing joined
+    the folder's children to the metadata of every page in the vault, so one reference into a
+    folder of twenty pages cost work that grew with the pages in unrelated folders."""
+    folder, bulk = "Knowledge Base/Notes/Crowd", "Knowledge Base/Notes/Bulk"
+    restrict_external(stored, f'paths: ["{folder}/**"]')
+    page = b"---\ntitle: P\ntype: note\n---\n# P\n\nA page.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
+        write.PagePut(f"{folder}/Page-{number:04d}.md", page) for number in range(20)
+    )))
+
+    def vm_steps():
+        steps = [0]
+
+        def tick() -> int:
+            steps[0] += 1
+            return 0
+
+        with read.request_snapshot(stored), read.snapshot(stored) as view:
+            view.connection.set_progress_handler(tick, 1)
+            try:
+                with request_scope(EXTERNAL):
+                    kept = egress.filter_withheld_entries(
+                        stored, {"entries": [{"path": f"{folder}/PAGE-0000.MD"}]}
+                    )
+            finally:
+                view.connection.set_progress_handler(None, 0)
+        assert kept == {"entries": []}
+        return steps[0]
+
+    work = []
+    for first, last in ((0, 200), (200, 2000)):
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
+            write.PagePut(f"{bulk}/Page-{number:04d}.md", page) for number in range(first, last)
+        )))
+        vm_steps()  # the first filter after a commit reads the page's body once more than later ones
+        work.append(vm_steps())
+
+    assert work[1] < 2 * work[0], (
+        f"one reference took {work[0]} VM steps beside 200 other pages and {work[1]} beside 2,000"
+    )
+
+
 def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_yet(
     stored, writer  # noqa: F811
 ):
@@ -1067,6 +1183,56 @@ def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_ye
 
     assert deleted["file_count"] == len(pages)
     assert not any(read.holds_file(stored, rel) for rel in pages)
+
+
+#: The public tool shape, which shows a page's links by title (`commands._show_links_by_title`).
+PUBLIC_SHAPE = capabilities.ActiveSurfaceDescriptor(
+    surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+)
+
+
+class LinkShownByStoredPath(AssertionError):
+    """The store-mode read showed the link by its stored path where file mode showed its title."""
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("resolver", [
+    "evicted",
+    pytest.param("resident", marks=pytest.mark.xfail(
+        strict=True, raises=LinkShownByStoredPath,
+        reason="find.borrow_query_resolver compares the file registry's triple with a resolver "
+        "that store mode keys on the snapshot's revision, so a resident resolver never counts as current",
+    )),
+])
+def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolver_is_resident(
+    vault, resolver  # noqa: F811
+):
+    """The public read shows a link by title only through the resident resolver, so a store-mode
+    read that never finds it current shows stored paths where file mode shows titles."""
+    linker = "Knowledge Base/Notes/Linker.md"
+    (vault / linker).write_text(
+        "---\ntitle: Linker\ntype: note\n---\n# Linker\n\nSee [[Knowledge Base/Notes/Beta]] for the table.\n"
+    )
+    build_indexes(vault)
+
+    def body():
+        find_module.evict_resolver_caches(vault)
+        if resolver == "resident":
+            find_module.shared_resolver(vault)
+        with capabilities.active_surface(PUBLIC_SHAPE):
+            return commands.op_read_memory(vault, path=linker)["body"]
+
+    file_mode = body()
+    shown = "[[Beta]]" if resolver == "resident" else "[[Knowledge Base/Notes/Beta]]"
+    if shown not in file_mode:
+        # Not an assertion: the xfail above names only the store-mode difference.
+        pytest.fail(f"file mode no longer shows {shown}: {file_mode!r}")
+    assert migrate_apply(vault) == 0
+
+    store_mode = body()
+    if store_mode != file_mode and store_mode == file_mode.replace("[[Beta]]", "[[Knowledge Base/Notes/Beta]]"):
+        raise LinkShownByStoredPath(store_mode)
+    assert store_mode == file_mode
 
 
 #: Who asks, and whether an active policy withholds a page from the external audience. A caller

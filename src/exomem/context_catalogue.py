@@ -45,12 +45,13 @@ from . import (
     source_taxonomy,
     topic_carriers,
     vault,
+    vault_skills,
     working_set_index,
     working_set_runtime,
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_split, managed_splitter
 from .state_paths import vault_state_dir
 from .working_set_runtime import READY
 
@@ -58,7 +59,8 @@ log = logging.getLogger(__name__)
 
 #: 2: titles and descriptions are stored without their wikilinks.
 #: 3: the raw boolean stance mark narrows global-unit reads without a corpus walk.
-SCHEMA_VERSION = 3
+#: 4: a skill page stores its frontmatter name and its authored description, so skill rows rebuild.
+SCHEMA_VERSION = 4
 SIDECAR_NAME = ".context-catalogue.sqlite"
 
 # The catalogue's entry kinds. A closed set the schema declares; topics are the
@@ -146,6 +148,8 @@ class Entry:
     #: The page's frontmatter tags in carrier form (`topic_carriers.tag_form`).
     tags: tuple[str, ...] = ()
     stance: bool = False
+    #: The frontmatter `name` of an Agent Skills page (`vault_skills.recognise`), empty for any other page.
+    skill: str = ""
 
     def digest(self) -> str:
         """Identity of everything this entry stores, to diff a stored row without loading it."""
@@ -154,7 +158,7 @@ class Entry:
                 self.kind, self.anchor_kind, self.path, self.ref, self.title, self.description,
                 self.description_origin, self.status, self.lifecycle_class, self.activity,
                 self.thread_key, self.thread_order, self.source_signature,
-                self.topics, self.projects, self.sources, self.tags, self.stance,
+                self.topics, self.projects, self.sources, self.tags, self.stance, self.skill,
             ],
             separators=(",", ":"),
         )
@@ -278,14 +282,19 @@ class ContextCatalogue:
                 thread_order TEXT NOT NULL,
                 source_signature TEXT NOT NULL,
                 stance INTEGER NOT NULL DEFAULT 0,
+                skill TEXT NOT NULL DEFAULT '',
                 entry_digest TEXT NOT NULL
             )
             """
         )
-        if "stance" not in {row[1] for row in conn.execute("PRAGMA table_info(entries)")}:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+        if "stance" not in columns:
             conn.execute("ALTER TABLE entries ADD COLUMN stance INTEGER NOT NULL DEFAULT 0")
+        if "skill" not in columns:
+            conn.execute("ALTER TABLE entries ADD COLUMN skill TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS entries_thread ON entries(thread_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS entries_stance ON entries(stance) WHERE stance = 1")
+        conn.execute("CREATE INDEX IF NOT EXISTS entries_skill ON entries(skill) WHERE skill != ''")
         for table, column in (
             ("declared_topics_raw", "raw"),
             ("entry_projects", "project_key"),
@@ -395,6 +404,11 @@ class ContextCatalogue:
         """Only entries with the schema boolean mark, without loading declarations."""
         conn = self._connect()
         return [] if conn is None else [row[0] for row in conn.execute("SELECT entry_id FROM entries WHERE stance = 1")]
+
+    def skill_ids(self) -> list[str]:
+        """Only the entries recognised as skill pages, without loading declarations."""
+        conn = self._connect()
+        return [] if conn is None else [row[0] for row in conn.execute("SELECT entry_id FROM entries WHERE skill != ''")]
 
     def reached_ids(self, kind: str, match: str) -> list[str]:
         """The ids of the entries one carrier reaches: a project key, a folder (by `folder_reaches`) or a tag form."""
@@ -708,7 +722,7 @@ class ContextCatalogue:
 
 _ENTRY_COLUMNS = (
     "entry_id", "kind", "anchor_kind", "path", "ref", "title", "description", "description_origin",
-    "status", "lifecycle_class", "activity", "thread_key", "thread_order", "source_signature", "stance",
+    "status", "lifecycle_class", "activity", "thread_key", "thread_order", "source_signature", "stance", "skill",
 )
 
 
@@ -791,7 +805,7 @@ class _Fold:
 
         self.root = vault_root
         self.prove = prove
-        self.kb = kb_dirname()
+        self.under = managed_splitter()
         self.registry = activation_conventions.load_conventions(vault_root)
         self.skip_folders = self.registry.conventions.skip_folders
         self.basis = lifecycle_statuses.Basis(vault_root)
@@ -982,10 +996,10 @@ class _Fold:
 
     def _in_walk(self, rel: str) -> bool:
         """Whether the KB walk would reach `rel`: the per-path twin of `working_set_index._walk_kb`'s skip rule."""
-        prefix = f"{self.kb}/"
-        if not rel.startswith(prefix) or not rel.lower().endswith(".md"):
+        below = self.under(rel)
+        if below is None or not rel.lower().endswith(".md"):
             return False
-        return not any(part.startswith(".") or part in self.skip_folders for part in rel[len(prefix):].split("/"))
+        return not any(part.startswith(".") or part in self.skip_folders for part in below.split("/"))
 
     def _kind_of(self, rel: str) -> tuple[str, str] | None:
         """`(kind, anchor_kind)` a page is, or None when it is not an entry. Anchor, collection, thread, then note."""
@@ -1058,7 +1072,14 @@ class _Fold:
             titles.insert(0, getattr(manifest[0], "title", ""))
             status = str(getattr(manifest[0], "lifecycle", "") or status).strip()
         title = _title(*titles)
-        description, origin = _describe(frontmatter.get("summary"), page.body, rel)
+        skill = vault_skills.recognise(rel, frontmatter)
+        # A skill's authored description is what the page says it is for, so it leads the row.
+        description, origin = _describe(
+            skill.description if skill else frontmatter.get("summary"),
+            page.body,
+            rel,
+            limit=vault_skills.DESCRIPTION_MAX_CHARS if skill else working_set_index.LEDE_MAX_CHARS,
+        )
         thread_key = thread_order = ""
         if entry_kind == KIND_THREAD:
             parts = episode_capture.filename_parts(rel.rpartition("/")[2])
@@ -1084,6 +1105,7 @@ class _Fold:
             sources=_sorted_values(frontmatter.get("sources")),
             tags=_tags(frontmatter.get("tags")),
             stance=frontmatter.get("stance") is True,
+            skill=skill.name if skill else "",
         )
 
     def _mirror_other_anchors(self) -> None:
@@ -1197,8 +1219,8 @@ def _folder_segments(path: str) -> list[str]:
 
     The one rule for folder reach: a folder carrier reaches exactly the entries whose segments start with its own.
     """
-    kb = kb_prefix()
-    return path.removeprefix(kb).split("/")[:-1] if path.startswith(kb) else []
+    below = managed_split(path)
+    return below.split("/")[:-1] if below is not None else []
 
 
 def folder_of(path: str) -> tuple[str, ...]:
@@ -1242,7 +1264,7 @@ def _title(*candidates: object) -> str:
     return ""
 
 
-def _describe(summary: object, body: str, rel: str) -> tuple[str, str]:
+def _describe(summary: object, body: str, rel: str, *, limit: int = working_set_index.LEDE_MAX_CHARS) -> tuple[str, str]:
     """A one-line description and its origin: the authored `summary`, else the page's lede, else none.
 
     Every wikilink is removed whole before the text is normalised and cut, so no cut
@@ -1256,7 +1278,7 @@ def _describe(summary: object, body: str, rel: str) -> tuple[str, str]:
     if isinstance(summary, str):
         summary = " ".join(egress.without_wikilinks(summary).split())
         if summary:
-            return summary[: working_set_index.LEDE_MAX_CHARS], ORIGIN_AUTHORED
+            return summary[:limit], ORIGIN_AUTHORED
     # Read withheld, as the activation signature does: an origin carrier is never a lede.
     prose = egress.without_wikilinks(provenance.withheld_prose(body, owner_path=rel)) if body else ""
     lede = " ".join(working_set_index.lede(prose).split())

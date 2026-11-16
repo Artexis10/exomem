@@ -11,7 +11,6 @@ import base64
 import copy
 import datetime as dt
 import json
-import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -58,10 +57,7 @@ from exomem.governance.principal import request_scope
 from exomem.vault_store import mode, ownership, read
 from exomem.writer_lease import invoke_command
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(180),
-]
+pytestmark = pytest.mark.timeout(180)
 
 SOURCE = "Knowledge Base/Sources/Beacon Survey.md"
 DATA = "Knowledge Base/Records/dataset/readings.csv"
@@ -512,9 +508,31 @@ def prepare_sample(root, monkeypatch, request, sample):
     dated = sample in ("record_memory:query", "review_memory:plan-progress")
     if sample_arguments.get("validate_only") or name == "observe_memory" or dated:
         request.getfixturevalue("validation_clock")
+    if sample == "maintain_memory:reconcile":
+        # Reconcile verifies the receipt journal, which each call extends: keep it as prepared.
+        monkeypatch.setattr(egress, "emit_boundary_receipt", lambda _collector: None)
     if sample == "schema_memory:census":
         from exomem import relation_census
         monkeypatch.setattr(relation_census, "_cohort_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    if sample == "maintain_memory:fix":
+        # The fix plan backfills a missing date with today, and its audit ages sources from today.
+        # Both answers read one today, so a run that crosses midnight compares them.
+        from exomem import audit, audit_fix
+
+        today = dt.date.today()
+
+        class AnyDate(type):
+            # The modules check values with isinstance; every real date stays an instance.
+            def __instancecheck__(cls, value):
+                return isinstance(value, dt.date)
+
+        class PinnedDate(dt.date, metaclass=AnyDate):
+            @classmethod
+            def today(cls):
+                return today
+
+        for module in (audit, audit_fix):
+            monkeypatch.setattr(module, "dt", SimpleNamespace(**{**vars(dt), "date": PinnedDate}))
     write_pages(root)
     write_pages(root, UNIT_PAGES)
     write_pages(root, {
@@ -549,23 +567,27 @@ def prepare_sample(root, monkeypatch, request, sample):
     return command, arguments, source_schema
 
 
-#: Each registered read that still breaks the store-mode read contract, and why. Its marker is strict,
-#: so a fix that makes the read pass fails here until its entry goes.
+#: The held listing of a store-mode folder takes each disk entry's identity before it drops the files
+#: at stored pages' paths, so it stats and opens every projected page in the folder. Answers are equal.
+HELD_LISTING_PROBES = (
+    "the store-mode folder listing (reserved_paths.list_generic_tree) stats and opens each projected "
+    "page file for its identity before it leaves the file out; the answer is the store's",
+    frozenset({"page filesystem read"}),
+)
+#: Each registered read that still breaks the store-mode read contract, why, and the only violations
+#: it may show. Its marker is strict, so a fix that makes the read pass fails here until its entry
+#: goes, and any other violation fails it as a regression.
 STORE_READ_GAPS = {
-    "maintain_memory:backfill-ids": (
-        "the page walk stats projections; listing stored pages instead would release withheld names, "
-        "because the terminal egress filter finds vault items on the disk (filter_withheld_entries)"
-    ),
-    "maintain_memory:fix": "the fix scan walks and reads page projections",
-    "maintain_memory:reconcile": (
-        "the dry run opens the lexical sidecar, stats projections and raises in store mode"
-    ),
+    **dict.fromkeys((
+        "audit", "browse_memory", "list_directory", "maintain_memory:audit", "maintain_memory:fix",
+        "manage_memory_file:list", "review_memory:audit",
+    ), HELD_LISTING_PROBES),
 }
 
 
 @pytest.mark.parametrize("sample", [
     pytest.param(key, marks=pytest.mark.xfail(
-        strict=True, raises=ReadSurfaceViolation, reason=STORE_READ_GAPS[key]
+        strict=True, raises=ReadSurfaceViolation, reason=STORE_READ_GAPS[key][0]
     )) if key in STORE_READ_GAPS else key
     for key in sorted(READ_INVOCATIONS)
 ])
@@ -605,6 +627,9 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         for item in ownership.iter_owned(vault)
         if item.ownership is ownership.Ownership.PAGE
     }
+    # Settle repair started by the file-mode baselines before switching modes.
+    # The process-wide audit must still catch repair started after migration.
+    assert lexstore.await_repairs_idle(vault), "file-mode baseline repair did not settle"
     assert migrate_apply(vault) == 0
     if name == "coordination_status" or sample == "maintain_memory:collections-store-adopt-local":
         # Migration takes a lease and changes contention counters, and it publishes a new vault
@@ -681,5 +706,9 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
             })
     record_property("read_surface", json.dumps(observations, default=str))
     failures = [row for row in observations if row["violations"]]
+    tolerated = STORE_READ_GAPS[sample][1] if sample in STORE_READ_GAPS else frozenset()
+    if any(not set(row["violations"]) <= tolerated for row in failures):
+        # Not the known gap: a plain assertion, which the strict marker does not take as expected.
+        raise AssertionError(json.dumps(failures, indent=2, default=str))
     if failures:
         raise ReadSurfaceViolation(json.dumps(failures, indent=2, default=str))

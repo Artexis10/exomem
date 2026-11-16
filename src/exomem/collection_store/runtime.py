@@ -916,8 +916,9 @@ def _store_mode_server(root):
             availability.SERVICE_REQUIRED,
             "this vault's pages live in the collection store, so a write needs the service that "
             "serves it",
-            "Send the request to the service that serves this vault. "
-            f"Run {availability.ROLLBACK} to return the pages to files.",
+            "Send this request to the Exomem service for this vault, through its MCP or REST "
+            "interface, and start that service first if none runs. To work without a service, "
+            f"run {availability.ROLLBACK} to return the pages to files.",
         )
     return server
 
@@ -1245,6 +1246,7 @@ class StoreServer:
         self._view_census_needed = False
         self._view_retry_at = 0.0
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
+        self._lease_refused = {}  # maintenance step -> the lease refusal last logged for it
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
         self._references_seeded = None  # the writer handle whose reference build states were last seeded
         self.pending_create = None  # the marker entries a served create left pending, until it finishes
@@ -1378,6 +1380,66 @@ class StoreServer:
         if request.error is not None:
             raise request.error
         return request.result
+
+    def read_beside(self, work, *, initial, collection=None):
+        """Run a read-only ``work`` on the caller's thread, over a pooled reader of the store's last commit.
+
+        For import status, which must answer while a batch keeps the store thread busy. The
+        caller borrows the store as a checkout does, so the writer handle and its readers stay
+        open, and passes the same admission (``CollectionStoreRuntime.checkout``). The work runs
+        under the views of placement, policy and ownership a store-thread read runs under
+        (``_serve``), with a writer over a ``connection.SnapshotHandle``, which refuses every write.
+        Where this process holds no admitted writer, the request queues on the store thread as
+        before (``call``), whose checkout opens one. ``collection`` is the request's selector: a
+        collection the store keeps in full needs no read of the derived file.
+        """
+        from ..cli_ops import OpError
+        from ..governance import policy
+        from . import capability, derived_rows, ownership
+        from .preview import preview_store
+
+        manager, runtime = self.manager, self.runtime
+        with call_spans.span("store.read_beside"), ExitStack() as scope:
+            handle = None
+            # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.
+            if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):
+                capability.require_not_disabled(self.root)
+                scope.enter_context(manager._collection_store_checkout())
+                # A rollback between the first check and borrowing must also refuse this read, as in ``checkout``.
+                capability.require_not_disabled(self.root)
+                with manager._lock:
+                    token = manager._fencing_token
+                handle = runtime._handle
+                if token is None or handle is None or handle._closed or runtime._writer_token != token:
+                    handle = None
+                else:
+                    try:
+                        runtime._admit(token, reads=True)
+                    except OpError as error:
+                        if error.code != "WRITER_FENCED":
+                            raise
+                        handle = None  # the store thread's checkout reacquires, as it does for any read
+            if handle is None:
+                scope.close()
+                return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
+            reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
+            entry = None if initial is None or collection is None else initial.selected(self.root, collection)
+            # Read before the snapshot begins; a selection this proof cannot name reads the derived file.
+            derived = entry is None or derived_rows.is_derived(reader, entry["collection_id"])
+            production = runtime._session is not None and runtime._session.production
+            scope.enter_context(state_paths.resolution_scope())
+            scope.enter_context(policy.request_policy_snapshot())
+            snapshot = connection.SnapshotHandle(runtime.path, reader, handle, derived=derived)
+            scope.enter_context(preview_store(self.root, snapshot, production=production))
+            if initial is not None:
+                scope.enter_context(ownership.read_scope(self.root, initial=initial))
+            # One read transaction, so the job row and every check of it read the same commit.
+            reader.execute("BEGIN")
+            try:
+                return work()
+            finally:
+                if reader.in_transaction:
+                    reader.execute("ROLLBACK")
 
     def _busy_refusal(self, message):
         """The retryable refusal for a request this store thread did not serve in time."""
@@ -1816,9 +1878,26 @@ class StoreServer:
                                    collection_id, exc_info=True)
                     self._backfill_refused[collection_id] = time.monotonic() + IMPORT_RETRY_SECONDS
         except Exception:  # noqa: BLE001 - a store that cannot be checked out is retried later
-            logger.warning("derived backfill could not check out the store; retrying later", exc_info=True)
+            self._retrying("derived backfill could not check out the store")
             return IMPORT_RETRY_SECONDS
         return 0.0
+
+    def _retrying(self, step):
+        """Log a maintenance step that failed and retries later, from inside its handler.
+
+        A replica without the writer lease is refused each time a request wakes this thread, and
+        in store mode every request does: that refusal is its expected state, so it is said once
+        per step and holder, without a traceback. Any other failure is logged in full.
+        """
+        from ..cli_ops import OpError
+
+        error = sys.exc_info()[1]
+        if isinstance(error, OpError) and error.code == "WRITER_LEASE_REQUIRED":
+            if self._lease_refused.get(step) != error.message:
+                self._lease_refused[step] = error.message
+                logger.info("%s until this replica holds the writer lease: %s", step, error.message)
+            return
+        logger.warning("%s; retrying later", step, exc_info=True)
 
     def _derived_tick(self):
         """Reconcile a new writer handle's derived file and advance a rebuild one bounded step.
@@ -2043,7 +2122,7 @@ class StoreServer:
             except (Exception, mutation_lock.WaitEnded) as error:  # noqa: BLE001
                 stopped = isinstance(error, mutation_lock.WaitEnded)
                 if not stopped:
-                    logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+                    self._retrying("collection view edits could not be applied")
                     wait = IMPORT_RETRY_SECONDS
                     self._view_retry_at = time.monotonic() + IMPORT_RETRY_SECONDS
                 self._sweep_pending, self._sweep_seen = {}, {}  # the next sweep finds the edits again
@@ -2089,7 +2168,7 @@ class StoreServer:
                     if self._views_after is None or self._aside() or self._stopping():
                         break
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
-            logger.warning("pending collection views could not publish; retrying later", exc_info=True)
+            self._retrying("pending collection views could not publish")
             self._views_after = None
             return min(wait, IMPORT_RETRY_SECONDS)
         if self._views_after is None:

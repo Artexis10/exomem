@@ -48,10 +48,19 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .kbdir import managed_relative, managed_root
+
 log = logging.getLogger(__name__)
+
+#: The registry indexes built inside `one_registry_index`, by corpus: `(corpus, filtered, index)`.
+_WRITE_INDEXES: ContextVar[dict[int, tuple[Any, bool, Any]] | None] = ContextVar(
+    "capture_sweep_write_indexes", default=None
+)
 
 #: How long a caller must have been quiet for the next durable write to count as
 #: the start of an episode. A module constant with NO environment knob: a tunable
@@ -746,12 +755,11 @@ def _attachment_exists(vault_root: Path, target: str) -> bool:
     rooted and KB-relative -- so this agrees with the audit family on what an
     attachment is.
     """
-    from .kbdir import kb_dirname, kb_prefix
 
     try:
-        normalized = target.removeprefix(kb_prefix()).lstrip("/")
+        normalized = managed_relative(target).lstrip("/")
         return _ordinary_file_exists(vault_root, vault_root / target.lstrip("/")) or (
-            _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
+            _ordinary_file_exists(vault_root, managed_root(vault_root) / normalized)
         )
     except Exception:  # noqa: BLE001 -- a probe failure is never an attachment
         return False
@@ -866,6 +874,22 @@ def _proactive_capture_permitted() -> bool:
         return False
 
 
+@contextmanager
+def one_registry_index() -> Iterator[None]:
+    """Build the registry index once for the advisories of one write.
+
+    A write's post-commit advisories (`block`, `entity_candidate`, `undeclared_referents`) read the
+    same corpus, the same entity types and the writer's own view, and no commit runs between them,
+    so the first build serves the others. The scope ends with that write: the next write of a
+    batch commits first and builds its own.
+    """
+    token = _WRITE_INDEXES.set({})
+    try:
+        yield
+    finally:
+        _WRITE_INDEXES.reset(token)
+
+
 def _registry_index(corpus: Any, visible: Callable[[str], bool] | None = None) -> Any:
     """The entity registry's resolution surface, from pages already in memory.
 
@@ -876,21 +900,39 @@ def _registry_index(corpus: Any, visible: Callable[[str], bool] | None = None) -
 
     `visible` is the writer's own view (`vault.writer_link_visibility`): an
     Entity the writer may not see neither registers a name nor offers itself
-    as a near match. `None` admits every page.
+    as a near match. `None` admits every page. The index reads only pages under
+    `entity_recurrence.entities_prefix()`, so only those pages are decided. A
+    verdict does not depend on the set it is decided in: `egress._decide_path`
+    reads the page, the policy and the caller, and decides a container parent
+    that the page needs itself (`egress.container_parent_allows`).
     """
+    built = _WRITE_INDEXES.get()
+    known = None if built is None else built.get(id(corpus))
+    if known is not None and known[0] is corpus and known[1] == (visible is not None):
+        return known[2]
     try:
         from . import entity_recurrence, entity_types
+        from .governance import egress
 
         pages = getattr(corpus, "pages", None) or {}
         registry = entity_types.load_entity_types(getattr(corpus, "vault_root", None))
-        return entity_recurrence.registry_index(
+        prefix = entity_recurrence.entities_prefix()
+        entities = [state for state in pages.values() if str(state.path).startswith(prefix)]
+        seen = (
+            None if visible is None
+            else egress.admitted(visible, [state.path for state in entities])
+        )
+        index = entity_recurrence.registry_index(
             (
                 _RegistryPage(state.path, state.frontmatter)
-                for state in pages.values()
-                if visible is None or visible(state.path)
+                for state in entities
+                if seen is None or state.path in seen
             ),
             entity_types=registry,
         )
     except Exception:  # noqa: BLE001 -- a missing registry only widens the hint
         log.debug("capture-sweep registry index unavailable", exc_info=True)
         return None
+    if built is not None:
+        built[id(corpus)] = (corpus, visible is not None, index)
+    return index

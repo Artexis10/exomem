@@ -777,6 +777,27 @@ def test_preserve_with_description_writes_sidecar(vault: Path) -> None:
     assert "type: source" in text
 
 
+def test_a_binary_sidecar_records_that_nobody_chose_its_kind(vault: Path) -> None:
+    """A sidecar written with no agent classifying it must not use the retired `other` kind.
+
+    The retired catch-all reads as a deliberate choice; `unclassified` is the kind that
+    says classification is still owed, and the one a later reclassify clears.
+    """
+    result = preserve_module.preserve(
+        vault,
+        scope="Project Alpha",
+        category="court-docs",
+        filename="2026-05-01-summons.pdf",
+        content_base64=base64.b64encode(b"%PDF-fake").decode("ascii"),
+        description="Civil summons received via courier.",
+        today=TODAY,
+    )
+
+    frontmatter = vault_module.parse_frontmatter(_read(vault / result.sidecar_path), strict=True)[0]
+
+    assert frontmatter["source_type"] == "unclassified"
+
+
 def test_preserve_md_artifact_uses_notes_sidecar(vault: Path) -> None:
     """Regression for the .md.md double-extension bug fixed in 35f07db.
 

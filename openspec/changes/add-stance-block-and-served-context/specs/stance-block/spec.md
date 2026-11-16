@@ -27,11 +27,21 @@ A governed write SHALL reject nonboolean `stance`, with an error naming the key 
 
 ### Requirement: Maps responses carry a bounded caller-visible stance block
 
-Unless `EXOMEM_ACTIVATION_STANCE=off`, each maps response SHALL carry `stance` with `state`, `generation`, `items`, `omitted` and `expired`. State SHALL be `ready` for at least one served line, `empty` for none and `unavailable` for failed compilation. Items SHALL contain admitted `{ref, text}` lines and `review_due` when applicable. Compilation failure SHALL leave the existing map and slice available.
+Unless `EXOMEM_ACTIVATION_STANCE=off`, each maps response SHALL carry `stance` with `state`, `generation`, `items`, `omitted` and `expired`. State SHALL be `ready` for at least one served line, `empty` for none, `unavailable` for failed compilation, and `unchanged` with no items when the caller's continuity names the generation of a block that would be `ready`. Per-subject recall calls several times a conversation, and a stance resent in full on each call repeats the same lines. Items SHALL contain admitted `{ref, text}` lines and `review_due` when applicable. Compilation failure SHALL leave the existing map and slice available.
 
-Lines SHALL follow page path and unit order. Keep whole lines under `STANCE_MAX_CHARS` (initially 800) and remaining counted-prose space. Charge actual new counted prose through the packet's existing budget rule. An empty block SHALL consume no stance prose allocation. Structural fields remain outside `max_chars`.
+Lines SHALL follow page path and unit order. Keep whole lines under the vault's `budgets.stance_max_chars` activation convention (shipped 1600). The stance block SHALL have its own bound, as the skills block does: it SHALL neither reduce the request's `max_chars` nor count in `budget.used_chars`, because it rides on every packet and would otherwise cut the turn's leads on every call. Structural fields remain outside `max_chars`.
 
 Omitted SHALL count admitted current lines that did not fit. Expired SHALL count admitted lines withheld by typed expiry. A caller-withheld page or unit SHALL affect neither count, public generation nor date boundary. Every line SHALL pass the same unit and terminal egress checks as other served units.
+
+#### Scenario: A held stance is not sent again
+
+- **WHEN** a caller's continuity names the current stance generation
+- **THEN** the stance block is `unchanged` with no items, and a later change to a stance line serves the block `ready` again
+
+#### Scenario: A ready stance leaves the turn's allowance whole
+
+- **WHEN** the same turn is compiled once with the stance on and once with it off
+- **THEN** the map, the turn slice, the task candidates and `budget.used_chars` are the same, and only the stance block differs
 
 #### Scenario: A visible line cannot expose a hidden reference
 
@@ -42,6 +52,11 @@ Omitted SHALL count admitted current lines that did not fit. Expired SHALL count
 
 - **WHEN** no admitted eligible stance line exists
 - **THEN** `stance.state` is `empty` and the stance block consumes no counted prose
+
+#### Scenario: An identified page's lines survive terminal egress
+
+- **WHEN** a stance page has an `exomem_id` and the vault's release gate is active
+- **THEN** terminal egress decides each line with the page path that compilation admitted, and the block is `ready`
 
 #### Scenario: Overflow preserves whole lines
 

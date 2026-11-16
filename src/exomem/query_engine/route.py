@@ -284,7 +284,7 @@ def chapter(name: str | None) -> dict:
                      "execute": "the default; one page of rows or groups"},
             "execution_profile": {name: {**bounds, **({"concurrent_per_store": runtime.MAX_ANALYTICS_SESSIONS}
                                                       if name == "analytics" else {})}
-                                  for name, bounds in runtime.PROFILES.items()},
+                                  for name, bounds in runtime.PROFILES.items() if name in validation.PROFILES},
             "select": f"up to {limits['select']} declared fields; default every declared field; "
                       "a dotted path through a single-valued declared reference selects a target field",
             "related": "up to 8 entries naming declared references to expand per row; a string, or "

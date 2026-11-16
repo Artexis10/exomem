@@ -424,6 +424,39 @@ def test_rows_without_a_complete_natural_key_insert_only_and_rerun_duplicates(
     assert len(record_formats.load_adapter(tmp_path, manifest).read().records) == 4
 
 
+def _declare(vault_root: Path, text: str) -> None:
+    from exomem.collection_store.preview import bound_writer
+
+    writer = bound_writer(vault_root)
+    if writer is None:
+        (vault_root / LEDGER_COLLECTION_PATH).write_text(text, encoding="utf-8")
+    else:
+        writer.revise_collection(LEDGER_COLLECTION_PATH, manifest_text=text, why="declare an optional key part",
+                                 **writer.inspect_collection(LEDGER_COLLECTION_PATH)["lifecycle_guards"])
+
+
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
+def test_a_null_optional_key_part_takes_a_generated_identity_and_does_not_merge_rows(vault_root: Path) -> None:
+    # A `null` serialised into the key would give two different observations one identity, and the later would overwrite.
+    _declare(vault_root, LEDGER_MANIFEST_TEXT.replace(
+        "    slug:\n      type: string\n      required: true\n", "    slug:\n      type: string\n"))
+    rows = [{"item": ledger_item(slug=None, exact_text=f"Observation {index}.")} for index in range(2)]
+    result = _bulk(vault_root, rows)
+    assert _outcomes(result) == ["inserted", "inserted"]
+    assert {row["identity"] for row in result["rows"]} == {"generated"}
+    assert len({row["item_key"] for row in result["rows"]}) == 2
+
+
+@pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
+def test_a_null_required_key_part_rejects_the_row_naming_the_field(vault_root: Path) -> None:
+    rows = [{"item": ledger_item(slug="kept")}, {"item": ledger_item(slug=None)}]
+    result = _bulk(vault_root, rows, on_reject="skip")
+    assert _outcomes(result) == ["inserted", "rejected"]
+    rejected = result["rows"][1]
+    assert rejected["code"] == "SCHEMA_REQUIRED_FIELD"
+    assert rejected["fields"][0]["field"] == "slug"
+
+
 @pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_natural_keyed_rows_report_their_identity_kind(vault_root: Path) -> None:
     assert {row["identity"] for row in _bulk(vault_root, _rows(2))["rows"]} == {"natural-key"}

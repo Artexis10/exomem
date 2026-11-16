@@ -37,6 +37,7 @@ from ..governance.decisions import Decision, decide
 from ..governance.principal import RequestPrincipal, effective_principal
 from ..planning_values import PlanningValues
 from . import tokens, types
+from .summary import SUMMARY
 
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
@@ -1048,8 +1049,11 @@ class OperationAuthorization:
             self.refuse()
         return manifest
 
-    def field_rows(self, cid, rows, snapshot):
-        """Read only admitted columns; public versions describe their released values."""
+    def field_rows(self, cid, rows, snapshot, *, check=lambda: None):
+        """Read only admitted columns; public versions describe their released values.
+
+        ``check`` runs between batches of rows and raises to stop the read.
+        """
         from io import BytesIO
 
         from ..query_engine.selected_values import read_selected_tree
@@ -1057,10 +1061,12 @@ class OperationAuthorization:
 
         plan = self.field_plan(self.field_manifest(cid))
         if plan.owner:
-            return typed_storage.hydrate(self.conn, rows), snapshot
+            return typed_storage.hydrate(self.conn, rows, check=check), snapshot
         layout = (typed_storage.require_layout(self.conn, cid)
                   if typed_storage.collection_encoding(self.conn, cid) != typed_storage.JSON_V1 else None)
-        for row in rows:
+        for index, row in enumerate(rows):
+            if index % 256 == 0:
+                check()  # a clock read per row would cost more than the decode it bounds
             if layout is None:
                 values = read_selected_tree(BytesIO(row["values_json"].encode()), plan.fields,
                                             max_bytes=256 * 1024, check=lambda: None)
@@ -2171,16 +2177,20 @@ class OperationAuthorization:
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             return False  # An input that cannot be read leaves the content-free refusal.
 
-    def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
-        """Decode only released rows; the manifest is an independent L6 gate."""
+    def _release_or_refuse(self, cid: str) -> SummaryRelease | None:
+        """``summary_release``, or the content-free refusal for any failure, so no row reader is an existence oracle."""
         try:
-            release = self.summary_release(cid)
+            return self.summary_release(cid)
         except collections.CollectionError as error:
             _pass_release_limit(error)
             self.refuse()
         except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
+
+    def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
+        """Decode only released rows; the manifest is an independent L6 gate."""
+        release = self._release_or_refuse(cid)
         if release is not None:
             return self._summary_rows(cid, release)
         allowed = self.released_subjects(cid)
@@ -2192,11 +2202,26 @@ class OperationAuthorization:
             names = [column[0] for column in cursor.description]
             rows.extend(dict(zip(names, row, strict=True)) for row in cursor)
         rows, snapshot = self.field_rows(cid, rows, self.visible_snapshot(cid, allowed))
-        rows.sort(key=lambda row: (row["view_path"] or "", row["item_key"]))
+        rows.sort(key=_view_order)
         return rows, snapshot, {
             subject.row_id for subject in allowed if isinstance(subject.row_id, str)
         }
 
+
+    def row_release(self, cid: str) -> tuple[Callable[[int, str], bool], str]:
+        """This caller's read decision on one row, and the snapshot ``authorized_rows`` would return.
+
+        It decodes no row and refuses as ``authorized_rows`` does, so a caller that cannot read
+        the collection learns nothing from it and a withheld row decides as an absent one.
+        """
+        release = self._release_or_refuse(cid)
+        if release is not None:
+            uniform = release.released == release.rows
+            return (lambda _row_id, key: release.released > 0 and (
+                uniform or self._summary_row_released(release, {"item_key": key}))), release.snapshot
+        allowed = self.released_subjects(cid)
+        row_ids = {subject.row_id for subject in allowed if isinstance(subject.row_id, int)}
+        return (lambda row_id, _key: row_id in row_ids), self.visible_snapshot(cid, allowed)
 
     def _summary_rows(self, cid: str, release: SummaryRelease) -> tuple[list[dict[str, Any]], str, set[str]]:
         """A whole summary snapshot only within the interactive visit and deadline bounds.
@@ -2204,13 +2229,26 @@ class OperationAuthorization:
         Larger reads page through a collection query with its continuation;
         this never returns some of the rows as if they were all of them.
         """
-        from ..query_engine.runtime import QueryLimits
+        from ..query_engine.runtime import Deadline, QueryLimits, current_deadline, records_refusal
         limits = QueryLimits()
         if release.released > limits.max_row_visits:
             raise collections.CollectionError(
                 "QUERY_COST_LIMIT", "summary rows exceed one bounded read; page them with a collection query",
                 {"released_rows": release.released, "max_row_visits": limits.max_row_visits})
-        deadline = time.monotonic() + limits.timeout_ms / 1000
+        # A Records query's deadline bounds its whole read, decode included, and refuses as its routed
+        # read does. Any other whole read keeps one interactive read's bound on its fetch alone.
+        query = current_deadline()
+        deadline = query or Deadline(limits.timeout_ms)
+
+        def check():
+            if (expired := deadline.expired()) is None:
+                return
+            if query is not None:
+                raise records_refusal(expired, query)
+            raise collections.CollectionError(
+                "QUERY_TIMEOUT", f"summary rows exceed one bounded read ({expired.message}); "
+                "page them with a collection query", {"timeout_ms": deadline.cpu_ms, "wall_ms": deadline.wall_ms})
+
         rows = []
         if release.released and self.conn.execute("SELECT derived FROM collections WHERE collection_id=?",
                                                   (cid,)).fetchone()[0]:
@@ -2224,23 +2262,41 @@ class OperationAuthorization:
             with closing(self.conn.execute("SELECT * FROM items WHERE collection_id=? ORDER BY row_id", (cid,))) as cursor:
                 names = [column[0] for column in cursor.description]
                 while batch := cursor.fetchmany(512):
-                    if time.monotonic() > deadline:
-                        raise collections.CollectionError(
-                            "QUERY_TIMEOUT", "summary rows exceed one bounded read; page them with a collection query",
-                            {"timeout_ms": limits.timeout_ms})
+                    check()
                     batch = [dict(zip(names, row, strict=True)) for row in batch]
                     if not uniform:
                         batch = [row for row in batch if self._summary_row_released(release, row)]
                     rows.extend(batch)
-        rows.sort(key=lambda row: row["item_key"])
+        rows.sort(key=_key_order)
         held = {subject.row_id for subject, decision in release.held if decision.level >= 6}
-        rows, snapshot = self.field_rows(cid, rows, release.snapshot)
+        rows, snapshot = self.field_rows(cid, rows, release.snapshot, check=check if query else lambda: None)
         return rows, snapshot, held
 
     def _summary_row_released(self, release: SummaryRelease, row: Mapping[str, Any]) -> bool:
         found = subjects(self.conn, release.manifest.collection_id, self.logical_vault_id,
                          identity=release.row_prefix + row["item_key"])
         return bool(found) and self.decision(found[0]).level >= 6
+
+
+def input_order(manifest: collections.CollectionManifest) -> Callable[[Mapping[str, Any]], tuple]:
+    """The key of the order a collection's rows reach every legacy reader, over ``items`` columns.
+
+    A markdown log keeps its declared insertion order. Summary rows go by item key: a converted
+    row keeps its old item file path, which need not follow it. Other rows go by view path, then
+    item key.
+    """
+    if manifest.storage.strategy == "markdown-log":
+        sign = -1 if manifest.storage.descriptor.get("insertion") == "newest-first" else 1
+        return lambda row: (sign * row["created_txn"], sign * row["row_id"])
+    return _key_order if manifest.view_mode == SUMMARY else _view_order
+
+
+def _view_order(row: Mapping[str, Any]) -> tuple[str, str]:
+    return row["view_path"] or "", row["item_key"]
+
+
+def _key_order(row: Mapping[str, Any]) -> tuple[str]:
+    return (row["item_key"],)
 
 
 def resolve_bound_membership(root: Path, identity: str, candidate: policy.Policy,

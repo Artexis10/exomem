@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import threading
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from test_connector_boundary import SCOPE
@@ -50,6 +50,7 @@ from exomem import (
     epistemic_graph,
     find,
     graph_read_publication,
+    held_fs,
     lexstore,
     recover_from_trash,
     semantic_index,
@@ -61,10 +62,6 @@ from exomem.governance import egress, lifecycle
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 INSIGHTS = "Knowledge Base/Notes/Insights"
 CLAIM = f"{INSIGHTS}/Lantern Claim.md"
@@ -182,26 +179,82 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
 
     Keep the graph test and the registry surface test on the same instrument. Repair seams
     record intent without starting a background repair against deliberately damaged files.
+
+    A page read through the held filesystem is recorded where every backend passes it: the `file`,
+    `children` and `enumerate` calls of the class that the vault uses. On Linux the backend's own
+    native calls are watched as well, which also sees a stat by name. Windows has no such seam, so
+    a by-name check that its backend makes inside a single call is not measured there.
     """
     events = {name: [] for name in (
         "page_io", "sidecars", "snapshots", "snapshot_threads", "request_threads", "machinery",
     )}
 
+    bases = (Path(root), Path(root).resolve())
+    with held_fs.acquire(Path(root)).require() as filesystem:
+        filesystem_type = type(filesystem)
+    #: The vault-relative folder of each held directory, from the `parent` call that made it.
+    folders = {}
+
+    def page_owned(rel):
+        if page_paths is not None:
+            return rel in page_paths
+        return rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
+
+    def relative(path, dir_fd=None):
+        """The call's vault-relative target, also through a descriptor or a held directory's descriptor.
+
+        The kernel names an open descriptor at /proc/self/fd, so this sees descriptor reads on Linux only.
+        """
+        try:
+            if isinstance(path, int):
+                path = os.readlink(f"/proc/self/fd/{path}")
+            elif dir_fd is not None:
+                path = Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / os.fsdecode(path)
+            target = Path(os.fsdecode(path))
+        except (TypeError, OSError):
+            return None
+        for base in bases:
+            if target.is_relative_to(base):
+                return target.relative_to(base).as_posix()
+        return None  # A path outside the vault.
+
     def watching(real, operation):
         def watched(path, *arguments, **keywords):
-            try:
-                rel = Path(path).relative_to(root).as_posix()
-            except (TypeError, ValueError):
-                rel = None  # A descriptor, or a path outside the vault.
-            page_owned = (
-                rel in page_paths if page_paths is not None
-                else rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
-            )
-            if page_owned:
+            rel = relative(path, keywords.get("dir_fd"))
+            if page_owned(rel):
                 events["page_io"].append((operation, rel))
             return real(path, *arguments, **keywords)
 
         return watched
+
+    def held_parent(real):
+        def parent(self, relative, *arguments, **keywords):
+            held = real(self, relative, *arguments, **keywords)
+            if held.ok:
+                folders[id(held.value)] = relative
+            return held
+
+        return parent
+
+    def held_file(real):
+        def file(self, parent, leaf, *arguments, **keywords):
+            rel = PurePosixPath(folders.get(id(parent), ""), leaf).as_posix()
+            if page_owned(rel):
+                events["page_io"].append(("file", rel))
+            return real(self, parent, leaf, *arguments, **keywords)
+
+        return file
+
+    def held_listing(operation, real):
+        def listing(self, parent, *arguments, **keywords):
+            held = real(self, parent, *arguments, **keywords)
+            for record in held.value if held.ok else ():
+                rel = PurePosixPath(folders.get(id(parent), ""), record.relative_path).as_posix()
+                if page_owned(rel):
+                    events["page_io"].append((operation, rel))
+            return held
+
+        return listing
 
     real_reader = connection.store_reader
     real_connect = sqlite3.connect
@@ -240,11 +293,35 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
                 owner_module, name,
                 lambda *a, _name=name, **k: events["machinery"].append(_name),
             )
-        for owner_module, name in (
+        watched_calls = [
             (os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
             (builtins, "open"), (io, "open"),
-        ):
+        ]
+        if os.name != "nt":
+            # The POSIX backend imports `posix`, so a module-level import would stop collection on
+            # Windows.
+            from exomem import _held_fs_posix
+
+            # The held filesystem binds its own native calls, so patching `os` does not reach them.
+            # Its `_open` stays: the capability probe requires it in `os.supports_dir_fd`, and on
+            # Linux a held open below the root goes through openat2, watched below.
+            watched_calls += [(_held_fs_posix, "_stat"), (_held_fs_posix, "_scandir")]
+            real_openat2 = _held_fs_posix._linux_openat2
+            held_open = watching(
+                lambda name, parent, *rest, dir_fd: real_openat2(parent, name, *rest), "openat2"
+            )
+            patch.setattr(
+                _held_fs_posix, "_linux_openat2",
+                lambda parent, name, *rest: held_open(name, parent, *rest, dir_fd=parent),
+            )
+        for owner_module, name in watched_calls:
             patch.setattr(owner_module, name, watching(getattr(owner_module, name), name))
+        patch.setattr(filesystem_type, "parent", held_parent(filesystem_type.parent))
+        patch.setattr(filesystem_type, "file", held_file(filesystem_type.file))
+        patch.setattr(filesystem_type, "children", held_listing("children", filesystem_type.children))
+        patch.setattr(
+            filesystem_type, "enumerate", held_listing("enumerate", filesystem_type.enumerate)
+        )
         patch.setattr(connection, "store_reader", counting)
         patch.setattr(read, "request_snapshot", requesting)
         patch.setattr(sqlite3, "connect", connecting)
@@ -1494,6 +1571,25 @@ def test_a_repeated_restricted_hub_read_looks_up_names_and_held_pages_once(store
     assert lookups[40] == lookups[20], lookups
 
 
+def test_a_restricted_hub_read_after_a_commit_evaluates_only_the_pages_whose_facts_changed(stored, writer):  # noqa: F811
+    """Defect: every restricted request decodes and evaluates every endpoint's facts, so the read after a
+    one-page commit grows with the hub's degree."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    work = {}
+    for links in (20, 40):
+        commit_linked(writer, links)
+        admission_sample(stored, "few withheld", "participants")  # fills what the commit changed
+        path, body = linked_page(1)
+        # A tag that no selector names, new to this round: an earlier round's text is rightly still known.
+        write.commit(writer, put(path, body.replace(b"cohort-1]", f"cohort-1, round-{links}]".encode())))
+        sample = admission_sample(stored, "few withheld", "participants")
+        assert sample["result_count"] >= links * 9 // 10
+        assert sample["subject_decodes"] == 1, sample
+        work[links] = sample["subject_decodes"], sample["membership_evaluations"]
+    assert work[40] == work[20], work
+
+
 def cpu_pressure():
     """The host's CPU stall share over the last ten seconds, or None where the kernel does not report it."""
     try:
@@ -1599,7 +1695,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
             elapsed = (time.perf_counter() - started) * 1000
             cpu = (time.process_time() - cpu_started) * 1000
     return {"ms": elapsed, "cpu_ms": cpu, "result_count": size, **counters,
-            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg(), "cpu_pressure_avg10": cpu_pressure()}
+            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg() if hasattr(os, "getloadavg") else None,
+            "cpu_pressure_avg10": cpu_pressure()}
 
 
 def fitted_slope(samples):

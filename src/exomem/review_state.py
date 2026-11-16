@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import context_refs, memory_refs
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 
 log = logging.getLogger(__name__)
 
@@ -342,7 +342,7 @@ def refs_for_paths(vault_root: Path, paths: list[str]) -> dict[str, str]:
     for path in clean:
         if memory.get(path):
             out[path] = str(memory[path])
-        elif path.startswith(f"{kb_dirname()}/Sources/"):
+        elif path.startswith(managed_join("Sources/")):
             out[path] = context_refs.source_ref(path)
         else:
             out[path] = context_refs.vault_ref(path)

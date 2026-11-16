@@ -23,6 +23,7 @@ import pytest
 import yaml
 
 from exomem import add as add_module
+from exomem import lexstore
 from exomem import reclassify_source as rc
 from exomem import schema as schema_module
 from exomem import source_taxonomy as st
@@ -641,6 +642,7 @@ def test_a_correction_into_known_vocabulary_stays_quiet(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     captured = _capture(vault, source_schema, title="Hedgerow notes", domain="media")
+    lexstore.ensure_fresh(vault)
 
     result = rc.reclassify(
         vault,
@@ -1072,3 +1074,65 @@ def test_an_edit_after_preflight_survives_the_failed_relocation(
     assert injected
     assert page.read_text() == edited
     assert "classification_history" not in _front(vault, source)
+
+
+def test_a_reclassified_source_is_followed_by_prose_paths_in_notes_but_not_in_evidence(
+    vault: Path,
+) -> None:
+    """A page that cites the source by vault path in prose must follow it, or say it stayed.
+
+    The Note is rewritable and has to name the new location; the Evidence page is immutable, so
+    it keeps its bytes, the move still goes ahead, and the preview names it as left unchanged.
+    """
+    source = _legacy_source(vault)
+    evidence = _write(
+        vault,
+        f"{KB}/Evidence/Harbor/tide-proof.md",
+        f"---\ntype: evidence\n---\n\nThe table is kept at `{source}`.\n",
+    )
+    evidence_bytes = evidence.read_bytes()
+    note = _write(
+        vault,
+        f"{KB}/Notes/Insights/tide-note.md",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nThe table: `{source}`.\n"
+        f"Read again from {source} on Monday.\n",
+    )
+    lexstore.ensure_fresh(vault)
+
+    preview = rc.propose(vault, source, source_kind="dataset", domain="travel")
+    result = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel", reason="a table of readings"
+    )
+
+    assert preview.append_only_unchanged == {
+        rc.MENTION_FORM: (f"{KB}/Evidence/Harbor/tide-proof.md",)
+    }
+    assert preview.rewritten == (f"{KB}/Notes/Insights/tide-note.md",)
+    assert note.read_text(encoding="utf-8").count(result.new_path) == 2
+    assert result.path_mentions_updated == 2
+    assert any("append-only" in warning for warning in result.warnings)
+    assert evidence.read_bytes() == evidence_bytes
+
+
+def test_a_reclassification_says_so_when_it_could_not_check_path_mentions(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalogue that cannot answer must read as "not checked" in the preview and the result,
+    never as "no page cites the source"."""
+    # Hold the background repair back, so the catalogue stays behind for the whole correction.
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_k: True)
+    source = _legacy_source(vault)
+    note = _write(
+        vault,
+        f"{KB}/Notes/Insights/tide-note.md",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nAt `{source}`.\n",
+    )
+
+    preview = rc.propose(vault, source, source_kind="dataset", domain="travel")
+    result = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel", reason="a table of readings"
+    )
+
+    assert any("path mentions were not checked" in warning for warning in preview.warnings)
+    assert any("path mentions were not checked" in warning for warning in result.warnings)
+    assert f"`{source}`" in note.read_text(encoding="utf-8")

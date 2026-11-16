@@ -524,7 +524,7 @@ def test_a_vault_may_remove_its_own_dimension_and_a_filter_naming_it_lists_the_r
 def served_vault(tmp_path: Path, warm_managed_cell, walk_sentinel, monkeypatch):
     """The unit-edge vault, its offline answers, then the vault as the live cell serves it, with
     the scan oracle withdrawn and every enumeration of the corpus counted."""
-    from exomem.vault import kb_dirname
+    from exomem.kbdir import kb_dirname
 
     vault = _unit_edges_vault(tmp_path)
     offline = {

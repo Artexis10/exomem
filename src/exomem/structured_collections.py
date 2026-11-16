@@ -22,6 +22,7 @@ from urllib.parse import quote, unquote
 
 from . import call_spans, item_keys, memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import profile_for
+from .kbdir import managed_join, managed_split, managed_split_parts
 from .planning_values import PlanningValues, Unavailable
 
 if TYPE_CHECKING:
@@ -298,7 +299,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
     return {
         "contract_version": COLLECTION_VERSION,
         "manifest_filename": MANIFEST_FILENAME,
-        "records_path": f"{vault.kb_dirname()}/Records/",
+        "records_path": managed_join("Records/"),
         "records_action_constraint": {"semantic_profile": "records"},
         "closed_values": {
             "semantic_profile": profiles,
@@ -622,12 +623,12 @@ One item records the state observed for one identity on one effective date.
 """
     examples = {
         "minimal": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Events/_collection.md",
+            "manifest_path": managed_join("Records/Examples/Events/_collection.md"),
             "manifest_text": minimal_text,
             "append_item": {"occurred_on": "2026-01-01", "label": "Example event"},
         },
         "laboratory_panel": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Laboratory/_collection.md",
+            "manifest_path": managed_join("Records/Examples/Laboratory/_collection.md"),
             "manifest_text": laboratory_text,
             "child_item_shape": {
                 "name": "string",
@@ -666,7 +667,7 @@ One item records the state observed for one identity on one effective date.
             },
         },
         "readable_nested_records": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Observations/_collection.md",
+            "manifest_path": managed_join("Records/Examples/Observations/_collection.md"),
             "manifest_text": readable_text,
             "record_presentation": {
                 "version": 1,
@@ -695,7 +696,7 @@ One item records the state observed for one identity on one effective date.
             },
         },
         "state_ledger": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/States/_collection.md",
+            "manifest_path": managed_join("Records/Examples/States/_collection.md"),
             "manifest_text": state_ledger_text,
             "append_item": {
                 "identity": "example-subject",
@@ -946,6 +947,8 @@ class ItemSchema:
         if unknown:
             raise CollectionError("SCHEMA_UNKNOWN_FIELD", f"field is not declared: {unknown[0]}")
         for name, spec in self.fields.items():
+            # A stored row is checked as it was written, so a read or a legacy migration asks for presence only.
+            # The non-null rule for written values lives in `records._collect_schema_issues`.
             if spec.required and name not in value:
                 raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {name}")
             if name in value:
@@ -1235,7 +1238,7 @@ def parse_manifest_bytes(
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
         ) from error
-    if not rel.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(rel):
+    if managed_split(rel) is None or _unsafe_relative(rel):
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
         )
@@ -1688,13 +1691,34 @@ def manifest_natural_key(manifest: CollectionManifest, values: Mapping[str, Any]
     )
 
 
+def _natural_key_incomplete(manifest: CollectionManifest, values: Mapping[str, Any]) -> bool:
+    """A missing or `null` component leaves the natural key incomplete: it names no item."""
+    return any(values.get(name) is None for name in manifest.schema.natural_key)
+
+
+def complete_natural_key(manifest: CollectionManifest, values: Mapping[str, Any]) -> str | None:
+    """The serialised natural key a write may store and match twins by, or `None` when it is incomplete.
+
+    A stored row's read identity keeps `manifest_natural_key`, which serialises a `null` component
+    as rows written before this rule were keyed.
+    """
+    if _natural_key_incomplete(manifest, values):
+        return None
+    try:
+        return manifest_natural_key(manifest, values)
+    except ValueError:
+        return None
+
+
 def derived_item_key(manifest: CollectionManifest, values: Mapping[str, Any]) -> str | None:
     """The identity a complete natural key implies, or `None` when one is absent.
 
-    A partial natural key cannot be serialised, so it cannot carry identity; the
+    A partial natural key, with a component missing or `null`, cannot carry identity; the
     caller falls back to a deterministic or random key rather than deriving one from a hole.
     The manifest's `item_key_scheme` decides the key: a hash of the serialization, or an order-preserving encoding.
     """
+    if _natural_key_incomplete(manifest, values):
+        return None
     try:
         if manifest.item_key_scheme == item_keys.ORDERED_V1:
             return item_keys.spell(item_keys.ordered_key(
@@ -3451,7 +3475,7 @@ def _parse_plan_join(value: object, schema: ItemSchema, index: int) -> Mapping[s
     return MappingProxyType(join)
 
 
-def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
+def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool = False) -> None:
     if value is None:
         return
     if spec.type not in _SUPPORTED_FIELD_TYPES:
@@ -3475,7 +3499,7 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
             raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
         assert spec.items is not None
         for item in value:
-            _validate_field_value(name, item, spec.items)
+            _validate_field_value(name, item, spec.items, non_null)
     if spec.type == "object":
         if not isinstance(value, Mapping) or not _is_json_value(value):
             raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
@@ -3483,8 +3507,10 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
             path = f"{name}.{child}"
             if child_spec.required and child not in value:
                 raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is missing: {path}")
+            if child_spec.required and non_null and value[child] is None:
+                raise CollectionError("SCHEMA_REQUIRED_FIELD", f"required field is null: {path}")
             if child in value:
-                _validate_field_value(path, value[child], child_spec)
+                _validate_field_value(path, value[child], child_spec, non_null)
     if spec.type == "link" and type(value) is not str:
         raise CollectionError("SCHEMA_FIELD_TYPE", f"field has wrong type: {name}")
     if spec.enum and not any(
@@ -3493,14 +3519,15 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
         raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
 
 
-def validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:
+def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:
     """Validate one declared field, raising the same refusal `validate` raises.
 
     Exposed so an aggregating validator can run the shipped per-field rules
     field by field, and address each failure by path, without a second copy of
-    those rules drifting away from this one.
+    those rules drifting away from this one. With `non_null`, for a value being
+    written, a required nested field must also hold a value.
     """
-    _validate_field_value(name, value, spec)
+    _validate_field_value(name, value, spec, non_null)
 
 
 def normalize_item_values(schema: ItemSchema, values: Mapping[str, Any]) -> dict[str, Any]:
@@ -3646,7 +3673,7 @@ def _reference_key(root: Path, raw: str) -> str | None:
         except ValueError:
             return None
     normalized = candidate.as_posix()
-    if not normalized.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(normalized):
+    if managed_split(normalized) is None or _unsafe_relative(normalized):
         return None
     return normalized
 
@@ -3756,7 +3783,7 @@ def _declared_candidate_rel(root: Path, candidate: Path) -> str | None:
         rel = candidate.relative_to(root).as_posix()
     except ValueError:
         return None
-    if not rel.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(rel):
+    if managed_split(rel) is None or _unsafe_relative(rel):
         return None
     if reserved_paths.classify_logical(rel).blocked:
         return None
@@ -3797,11 +3824,11 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
     if type(value) is not str or not value or len(value.encode("utf-8")) > _MAX_PATH_BYTES:
         raise CollectionError("INVALID_COLLECTION_PATH", f"{name} must be a bounded relative path")
     raw = value.replace("\\", "/")
-    if raw.startswith(f"{vault.kb_dirname()}/"):
+    if managed_split(raw) is not None:
         rel = raw
     else:
         rel = (Path(manifest_rel).parent / raw).as_posix()
-    if _unsafe_relative(rel) or not rel.startswith(f"{vault.kb_dirname()}/"):
+    if _unsafe_relative(rel) or managed_split(rel) is None:
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under the Knowledge Base"
         )
@@ -3814,7 +3841,8 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
 def _require_records_layer(path: str, name: str) -> None:
     """Keep Records paths in the exact portable layer used by recall policy."""
     parts = path.split("/")
-    if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != "Records":
+    below = managed_split_parts(parts)
+    if below is None or len(below) < 2 or below[0] != "Records":
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/Records"
         )
@@ -3823,7 +3851,8 @@ def _require_records_layer(path: str, name: str) -> None:
 def _require_profile_layer(profile: str, path: str, name: str) -> None:
     layer = profile_for(profile).placement_layer
     parts = path.split("/")
-    if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != layer:
+    below = managed_split_parts(parts)
+    if below is None or len(below) < 2 or below[0] != layer:
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/{layer}"
         )

@@ -38,7 +38,7 @@ import pytest
 from exomem import commands, derived_receipts, freshness, lexstore, readiness, structured_filters
 from exomem import find as find_module
 from exomem.derived_receipts import DerivedBatchPath, DerivedComponent
-from exomem.vault import kb_dirname
+from exomem.kbdir import kb_dirname
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="SQLite build lacks FTS5"

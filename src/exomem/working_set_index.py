@@ -49,7 +49,7 @@ from .collection_store.preview import (
     canonical_read,
     selected_writer,
 )
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_root_rel
 from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
@@ -567,7 +567,7 @@ def subject_text(turn: str) -> str:
         cursor = end
     parts.append(text[cursor:])
     text = "".join(parts)
-    text = _vault_path(kb_dirname()).sub(lambda match: _final_segment(match.group(0)), text)
+    text = _vault_path(managed_root_rel()).sub(lambda match: _final_segment(match.group(0)), text)
     return _SLASH_RUN.sub(slash_run, _REFERENCE.sub(reference, text))
 
 
@@ -1062,7 +1062,7 @@ def _walk_kb(vault_root: Path, *, skip_folders: frozenset[str] = _SKIP_DIR_NAMES
     """Walk the KB tree, skipping dot-directories and `skip_folders` (the
     vault's effective `anchors.skip_folders` convention — case-sensitive,
     exactly as this walk always compared its own skip list)."""
-    root = Path(vault_root) / kb_dirname()
+    root = managed_root(Path(vault_root))
     if not root.is_dir():
         return
     stack = [root]
@@ -1337,7 +1337,7 @@ def _walk_page_entries(
     outbound: dict[str, tuple[str, ...]] = {}
     names: dict[str, list[str]] = {}
     project_members: dict[str, list[tuple[str, str, bool]]] = {}
-    kb = kb_dirname()
+    kb = managed_root_rel()
     kb_root = Path(vault_root) / kb
     filler = activation_conventions.shipped_conventions().conventions.referential_filler
     # An entry is derived under these, so a walk under others reuses none.

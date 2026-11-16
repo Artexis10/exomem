@@ -40,7 +40,7 @@ from .. import (
     semantic_contract,
     vault,
 )
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root
 from ..restore_journal import CONTINUITY_EVIDENCE, MEMBERSHIP_EVIDENCE
 from . import (
     authorization_custody,
@@ -52,6 +52,7 @@ from . import (
     decisions,
     graph_producer,
     membership,
+    page_admission,
     projection_store,
     projections,
     receipts,
@@ -846,7 +847,7 @@ def _membership_manifest(
     affected = _affected_scope_ids(current, prospective, document_paths)
     rows: dict[str, str] = {}
     if affected:
-        for candidate in sorted((vault_root / kb_dirname()).rglob("*")):
+        for candidate in sorted(managed_root(vault_root).rglob("*")):
             if not candidate.is_file():
                 continue
             rel = candidate.relative_to(vault_root).as_posix()
@@ -1086,7 +1087,7 @@ def _purpose_direction(
     before: dict[str, int] = {}
     after: dict[str, int] = {}
     try:
-        for candidate in sorted((vault_root / kb_dirname()).rglob("*")):
+        for candidate in sorted(managed_root(vault_root).rglob("*")):
             if not candidate.is_file():
                 continue
             rel = candidate.relative_to(vault_root).as_posix()
@@ -1451,6 +1452,7 @@ def _durable_bytes(path: Path, value: bytes) -> None:
 def _clear_policy_caches(vault_root: Path) -> None:
     policy_module._CACHE.pop(str(policy_module.governance_root(vault_root)), None)
     membership.clear_memo()
+    page_admission.forget_scopes(vault_root)
     try:
         from . import egress
 
@@ -5433,20 +5435,18 @@ def _actual_backfill_value(vault_root: Path, companion_path: str) -> dict[str, A
 
 
 def _publish_backfilled_companion(
-    vault_root: Path, plan: companion_backfill.BackfillPlan
+    vault_root: Path, plan: companion_backfill.BackfillPlan, writer: Any
 ) -> None:
     """Replace the companion with the plan's target bytes, bound to the bytes the plan read.
 
-    A store-mode vault holds the companion page, so one store commit replaces it, bound to its
-    stored hash; the journal, the receipt and the terminal around it are governance's own. A file
-    is published in place, bound to its identity and hash. Either raises when the companion
-    changed since the plan read it: ``ContentHashMismatchError`` and ``PathGuardError`` from the
-    store, and ``ReservedPathLeafError`` from the disk.
+    A store-mode vault holds the companion page, so one store commit through ``writer`` replaces
+    it, bound to its stored hash; the journal, the receipt and the terminal around it are
+    governance's own. With no ``writer`` (file mode) a file is published in place, bound to its
+    identity and hash. Either raises when the companion changed since the plan read it:
+    ``ContentHashMismatchError`` and ``PathGuardError`` from the store, and
+    ``ReservedPathLeafError`` from the disk.
     """
     prior_sha256 = hashlib.sha256(plan.prior_bytes).hexdigest()
-    from ..vault_store import availability as store_availability
-
-    writer = store_availability.page_writer(vault_root)
     if writer is None:
         reserved_paths.publish_generic_bytes(
             vault_root,
@@ -5536,6 +5536,12 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             str(error),
         ) from error
 
+    from ..vault_store import availability as store_availability
+
+    # A store that refuses the write refuses it here, before the attempt is reserved: a refusal
+    # after the reservation leaves a reserved attempt and an intent receipt for a write that never
+    # ran.
+    writer = store_availability.page_writer(vault_root)
     prior_attempt = int(row[5])
     attempt_no = prior_attempt + 1
     attempt_nonce = uuid.uuid4().hex
@@ -5679,7 +5685,7 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     if kwargs.get("crash_at") == "after_arming":
         raise GovernanceCrash("after_arming")
     try:
-        _publish_backfilled_companion(vault_root, plan)
+        _publish_backfilled_companion(vault_root, plan, writer)
     except vault.PathGuardError as error:
         if error.code not in (vault.PATH_GUARD_CHANGED, vault.PATH_GUARD_CONTENT):
             raise

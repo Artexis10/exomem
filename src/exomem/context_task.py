@@ -31,6 +31,7 @@ from . import (
     semantic_index,
     semantic_units,
     vault,
+    vault_skills,
     working_set,
     working_set_currency,
 )
@@ -42,6 +43,8 @@ log = logging.getLogger(__name__)
 MAX_CANDIDATES = 12
 RESET_ADVICE = "Discard held methods."
 READ_ADVICE = "Retrieval lead; read the source and its current state before using it."
+#: The `kind` of a method item that is a whole vault skill rather than one unit of a page.
+SKILL_KIND = "skill"
 
 # Use the serving serializer for admitted YAML scalars, including authored dates.
 _PUBLIC_SOURCE = TypeAdapter(Any)
@@ -65,6 +68,10 @@ def _add_missing(block: dict[str, Any], reason: str) -> None:
 
 
 def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
+    if method and item.get("kind") == SKILL_KIND:
+        # The name and description are page text, so they are quoted and escaped like a method's title.
+        name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
+        return f"Skill {name}: {description}. Load it with read_page before acting."
     if method:
         # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
         title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
@@ -218,10 +225,11 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             methods = _method_refs(root, page, caller, method_cache, check=check)
         except Exception:  # noqa: BLE001 - failed method currency leaves the source read route usable
             methods = None
+        public = {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": page.body}
+        reference = procedure_approval.page_ref(page.frontmatter)
         result = SourceProjection(
-            {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": page.body},
-            page.snapshot_hash, page.snapshot_hash, methods, egress.without_wikilinks(page.title), page.page_type,
-            procedure_approval.page_ref(page.frontmatter),
+            public, page.snapshot_hash, page.snapshot_hash, _with_skill(methods, public, reference),
+            egress.without_wikilinks(page.title), page.page_type, reference,
         )
     else:
         with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash) as prepared:
@@ -287,12 +295,24 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             prepared.guard.recheck(root)
             check()
             version = hashlib.sha256(json.dumps(released, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            result = SourceProjection(released, page.snapshot_hash, version, methods,
+            result = SourceProjection(released, page.snapshot_hash, version, _with_skill(methods, released, reference),
                                       egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None,
                                       reference)
     if cache is not None and provider is None:
         cache[source_ref] = result
     return result
+
+
+def skill_ref(source: SourceProjection) -> str:
+    """The identity of a skill page as a method: its own ref, as the catalogue serves it."""
+    return source.ref or source.public["path"]
+
+
+def _with_skill(methods: tuple[str, ...] | None, public: Mapping[str, Any], reference: str | None) -> tuple[str, ...] | None:
+    """`methods` led by the page's own ref when the page, as released to this caller, is a skill."""
+    if methods is None or vault_skills.recognise(public["path"], public.get("frontmatter")) is None:
+        return methods
+    return (reference or public["path"], *methods)
 
 
 def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[dict[str, str], bool]:
@@ -430,7 +450,7 @@ def compile_context(
     try:
         try:
             with find_types.timing_span(timings, "working_set.task_context"):
-                discovered, missing = working_set.task_candidates(
+                discovered, missing, link_targets = working_set.task_candidates(
                     root, catalogue=catalogue, caller=caller, turn=turn,
                     focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
                     index_token=index_token, projections=sources, timings=timings,
@@ -475,13 +495,20 @@ def compile_context(
             candidates.append(item)
             if source.methods is None:
                 _add_missing(block, "lane_failed")
+            skill = vault_skills.recognise(source.public["path"], source.public.get("frontmatter"))
             for reference in source.methods or ():
                 method = {
                     "ref": reference,
                     "source_ref": candidate["source_ref"], "source_version": source.version,
                     "applicability": "read_required", "read_ref": candidate["source_ref"],
                 }
-                if source.title:
+                if skill is not None and reference == skill_ref(source):
+                    # A skill page is one method as a whole: it carries its full description and no unit attribution.
+                    method.update(
+                        kind=SKILL_KIND, name=skill.name, read_ref=skill_ref(source),
+                        description=" ".join(egress.without_wikilinks(skill.description).split()),
+                    )
+                elif source.title:
                     method["attribution"] = source.title
                 methods_by_source.setdefault(candidate["source_ref"], []).append(method)
         from . import context_fit
@@ -503,11 +530,18 @@ def compile_context(
             if value == procedure_approval.UNAPPROVED:
                 continue
             for method in methods:
+                if method.get("kind") == SKILL_KIND:
+                    continue  # A skill is a whole page's method; an approval attaches to a procedure's units.
                 method["approval"] = value
                 if value == procedure_approval.APPROVED:
                     method["attribution"] = approved_title(sources[path])
                     # The read handle is the stable ref, never the path: a rename must not put words into the line.
                     method["read_ref"] = sources[path].ref
+        # The links come last: a lead served without them still answers the turn, a lead never read does not.
+        for reason in working_set.attach_task_links(
+            root, candidates, link_targets=link_targets, caller=caller, timings=timings,
+        ):
+            _add_missing(block, reason)
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
             # Links spend only what every lead and method leaves, so a link never displaces one.
@@ -642,6 +676,6 @@ def continuity_token(packet: dict[str, Any], *, held: Sequence[Mapping[str, str]
         block["state"] = "partial"
         _add_missing(block, "lane_truncated")
     packet["budget"]["used_chars"] = context_views.packet_chars(
-        packet["map"], packet.get("turn_slice"), block, packet.get("stance"), packet.get("next_action"),
+        packet["map"], packet.get("turn_slice"), block, packet.get("next_action"),
     )
     return token

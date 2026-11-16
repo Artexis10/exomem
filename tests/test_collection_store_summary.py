@@ -17,6 +17,7 @@ from test_collection_store_legacy_import import CONTEXT, _capture, _connection, 
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, _gov_dir, write_rule, write_scope
+from test_query_engine_legacy_sql import engine_result
 from test_records_bulk_upsert import EVIDENCE, _evidence
 
 from exomem import due_state, get_page, mutation_terminal, record_formats, records, vault
@@ -25,8 +26,7 @@ from exomem.collection_store import governance, legacy_import, typed_storage, wr
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.reader import StoreAdapter
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.query_engine import legacy, runtime
-from exomem.query_engine import sqlite as legacy_sql
+from exomem.query_engine import runtime
 
 COPY_CID = "6f1c2d01-5c0f-4f8e-9a51-4a438d0b6b4a"
 COPY_PATH = "Knowledge Base/Records/Daily/_collection.md"
@@ -489,10 +489,7 @@ def test_summary_store_metrics_follow_declared_row_policy(store, rule):
                 titles = [record.values["title"] for record in StoreAdapter(store, manifest, None)._read(manifest).records]
             assert sorted(titles) == ["One", "Two"]
             assert len(store.discover_collections()[0]) == 1
-            with runtime.read_session(store.root, store.handle.path) as session:
-                admitted = session.admit(CID)
-                plan = legacy.normalize(columns_available=admitted.fields, columns=["title"], sort_by="title")
-                result = legacy_sql.execute_legacy(admitted, plan, path="source", format="markdown-items").as_dict()
+            result = engine_result(store, columns=["title"], sort_by="title").as_dict()
             assert [row["title"] for row in result["rows"]] == ["One", "Two"]
 
 

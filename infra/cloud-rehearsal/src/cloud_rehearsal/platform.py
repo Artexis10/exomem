@@ -73,6 +73,18 @@ SNAPSHOT_CLASS_API = "snapshot.storage.k8s.io/v1/VolumeSnapshotClass"
 TRANSFER_TOOLS_ENABLED = False
 
 
+@dataclass(frozen=True)
+class CataloguePrewarm:
+    """The values the catalogue-prewarm mode sets over the chart: the feature on, and the upgrade
+    window's idle and force minutes cut to the schema's 1-minute floor so a scenario finishes inside
+    one UTC hour. The build timeout and resources stay the chart's own; the mode reads them back
+    from cellctl's Deployment.
+    """
+
+    idle_minutes: int = 1
+    force_minutes: int = 1
+
+
 @dataclass
 class PlatformConfig:
     cellctl_image: str
@@ -87,6 +99,7 @@ class PlatformConfig:
     # Selects the local domain (design D1): new cells run on TopoLVM, their volume capped at this size.
     local_storage_cell_gib: int | None = None
     operator_restore_abort: bool = False
+    catalogue_prewarm: CataloguePrewarm | None = None
 
     @property
     def renders_local_storage(self) -> bool:
@@ -101,6 +114,17 @@ class Platform:
     storage_evidence: dict[str, Any] = field(default_factory=dict)
     # The StorageClass a new cell's claim names: the Hetzner class unless the local domain is selected.
     cell_class: str = ""
+
+
+def upgrade_default_range(backup_window: str) -> tuple[int, int]:
+    """The `cellctl.upgradeWindow` default range complementary to a backup window
+    "start-end": every hour the backup does not cover. cellctl refuses to start
+    when the two overlap, and the rehearsal moves the backup window per run."""
+    start_text, _, end_text = backup_window.partition("-")
+    start, end = int(start_text), int(end_text)
+    if not (0 <= start < 24 and 0 <= end < 24) or start == end:
+        raise ValueError(f"backup window {backup_window!r} leaves no upgrade default hours")
+    return end, start
 
 
 def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[str, Any]:
@@ -135,8 +159,16 @@ def cell_data_values(stack: Stack) -> dict[str, Any]:
 
 def _render(stack: Stack, config: PlatformConfig) -> Platform:
     pg_cidr = f"{stack.postgres.ip}/32"
+    cellctl = cellctl_values(stack, image=config.cellctl_image, cell_repository=config.cell_repository)
+    # The chart's static default range cannot know where this run's backup
+    # window lands, so the render carries the complement.
+    upgrade_start, upgrade_end = upgrade_default_range(config.backup_window)
+    cellctl["upgradeWindow"] = {"defaultHourStart": upgrade_start, "defaultHourEnd": upgrade_end}
+    if (prewarm := config.catalogue_prewarm) is not None:
+        cellctl["cataloguePrewarm"] = True
+        cellctl["upgradeWindow"] |= {"idleMinutes": prewarm.idle_minutes, "forceMinutes": prewarm.force_minutes}
     values = {
-        "cellctl": cellctl_values(stack, image=config.cellctl_image, cell_repository=config.cell_repository),
+        "cellctl": cellctl,
         "cellData": cell_data_values(stack),
         "capacity": {"attachmentsLimitFallback": config.attachments_limit_fallback},
         "cells": {

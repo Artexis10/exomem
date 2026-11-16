@@ -277,6 +277,12 @@ class WriterConnection:
         # how many checks in a row failed.
         self.import_retry: dict[str, tuple[float, int]] = {}
         self.import_readers: dict[str, Any] = {}
+        # Per running job, what this host saw of its batches (``importer._Activity``). The store thread
+        # replaces a job's whole value at each phase, so a status read off that thread sees one value.
+        self.import_telemetry: dict[str, Any] = {}
+        # Each collection's row-id head map at the generation it was read, or None for a collection
+        # too large to keep one (``row_binding``); a write advances the generation, and a new handle starts with none.
+        self.row_heads: dict[str, tuple[tuple[int, str], Any]] = {}
         self.import_last_turn: tuple[str, str] | None = None
         # This handle's connection to the derived-rows file (``derived_rows``), opened and
         # reconciled on first use, so a new handle, as after a takeover, reconciles again.
@@ -414,6 +420,7 @@ class WriterConnection:
             for reader in self.import_readers.values():
                 reader.close()
             self.import_readers.clear()
+            self.row_heads.clear()
             if self.derived is not None:
                 self.derived.close()
                 self.derived = None
@@ -431,6 +438,62 @@ class WriterConnection:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+class SnapshotHandle:
+    """A read-only stand-in for the writer handle: one pooled reader, on the thread that opened it.
+
+    A ``CollectionWriter`` over it reads the store's last commit under the same governance
+    checks as over the writer, without the store thread (``runtime.StoreServer.read_beside``).
+    It shows the live writer handle's host-local import facts read-only, and refuses every write.
+    ``derived`` False, for a request on a collection the store keeps in full, skips the derived file.
+    """
+
+    def __init__(self, path: Path, conn: sqlite3.Connection, live: WriterConnection, *,
+                 derived: bool = True) -> None:
+        from types import MappingProxyType
+
+        from . import derived_rows
+
+        self.path = path
+        self.connection = conn
+        self._owner_thread = threading.get_ident()
+        self._closed = False
+        self._release_cache = None
+        self._inspection_identity = object()
+        self.import_proofs = MappingProxyType(live.import_proofs)
+        self.import_blocked = MappingProxyType(live.import_blocked)
+        self.import_telemetry = MappingProxyType(live.import_telemetry)
+        # Read before this reader's first store read, so a record either names a member the store
+        # snapshot has not checkpointed past or is dropped (``derived_rows.member_progress``).
+        # None, unread or unreadable, is a status's unknown, never an absent member.
+        records = derived_rows.progress_records(path) if derived else None
+        self.derived_progress = None if records is None else MappingProxyType(records)
+
+    @property
+    def release_cache(self):
+        self.require_owner_thread()
+        if self._release_cache is None:
+            from .governance import ReleaseCache
+
+            self._release_cache = ReleaseCache(self.connection)
+        return self._release_cache
+
+    def require_owner_thread(self) -> None:
+        if threading.get_ident() != self._owner_thread:
+            raise CollectionStoreError(
+                "COLLECTION_STORE_WRITER_THREAD", "only the thread that opened a snapshot may read through it"
+            )
+
+    def require_write_authority(self, *, allow_diverged: bool = False) -> None:
+        raise CollectionStoreError("COLLECTION_STORE_SNAPSHOT_READ_ONLY", "a store snapshot cannot write")
+
+    # The writer's two write entry points (``WriterConnection``), so a write refuses as designed.
+    def transaction(self, *, resolve_divergence: bool = False) -> None:
+        self.require_write_authority()
+
+    def execute(self, statement, parameters=None) -> None:
+        self.require_write_authority()
 
 
 def open_writer(

@@ -1,267 +1,215 @@
-"""Bounded SQL execution of the admitted legacy collection dialect.
+"""Bounded execution of the admitted legacy collection dialect.
 
-No public route accepts this module's SQL or admission handles. Typed v1
-execution remains unavailable until its field and physical-plan gates pass.
+The engine reads only the fields a query depends on, decides every filter, sort and aggregate
+with the dialect's own primitives (`query_compat`), so its answers equal the file evaluator's by
+construction, and returns which rows answer the query rather than their values: a caller
+rebuilds only the rows it returns. No public route accepts this module's admission handles.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import closing, contextmanager
+from dataclasses import dataclass
 
 from .. import query_compat as compat
 from .. import query_data
+from . import packed
 from .legacy import LegacyQuery
-from .runtime import AdmittedCollection, QueryError
+from .runtime import _MAX_DECODE_BYTES, AdmittedCollection, QueryError
 
-# Capability admission is deliberately explicit: expanding the legacy dialect
-# does not automatically enable a new SQL push-down without its parity proof.
-LEGACY_SQL_OPERATORS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains",
-                                 "icontains", "startswith", "in", "nin", "exists", "missing"})
+#: Rows a scan reads in its first statement; each next statement reads twice as many, up to
+#: `_MAX_CHUNK`, until one packed result passes the session's length limit.
+_FIRST_CHUNK = 256
+_MAX_CHUNK = 8192
 
 
-def execute_legacy(admitted: AdmittedCollection, query: LegacyQuery, *, path: str,
-                   format: str) -> query_data.QueryDataResult:
-    """Read one admitted source, never a bare IR or a caller release flag."""
+@dataclass(frozen=True, slots=True)
+class LegacySelection:
+    """Which admitted rows answer one legacy query."""
+
+    total_rows: int
+    total_matched: int
+    row_ids: tuple[int, ...]  # the page, in answer order; empty for an aggregate
+    aggregate: dict | None  # a `latest` answer carries "row": None; `latest_row_id` names its row
+    latest_row_id: int | None
+    leading_row_ids: tuple[int, ...]  # the first ``lead`` admitted rows in input order
+    warnings: tuple[str, ...]
+
+
+def execute_legacy(admitted: AdmittedCollection, query: LegacyQuery, *, path: str, format: str,
+                   lead: int = 0) -> LegacySelection:
+    """Select the answer of one admitted source, never a bare IR or a caller release flag."""
     if not isinstance(admitted, AdmittedCollection):
         raise QueryError("QUERY_UNSUPPORTED")
     admitted.check()
     if not isinstance(query, LegacyQuery) or query.compatibility_version != compat.VERSION:
         raise QueryError("QUERY_UNSUPPORTED")
     session = admitted.session
-    requested = set(query.columns) | {p["column"] for p in json.loads(query.filters_json)}
-    requested.update(name for name in (query.sort_by, query.date_column) if name)
-    if query.aggregate and ":" in query.aggregate:
-        requested.add(query.aggregate.split(":", 1)[1])
+    predicates = json.loads(query.filters_json)
+    spec = query.aggregate.strip() if query.aggregate else None
+    function, column = (spec.split(":", 1) + [None])[:2] if spec else (None, None)
+    function = function.strip() if function else None
+    column = column.strip() if column else None
+    requested = set(query.columns) | {predicate["column"] for predicate in predicates}
+    requested.update(name for name in (query.sort_by, query.date_column, column) if name)
     plan = session._field_plans[admitted.collection_id]
     if not plan.owner and any(not plan.admits_path(name) for name in requested):
         raise QueryError("QUERY_FIELD_UNAVAILABLE")
-    # Account for base admission/filtering and the bounded reduction passes.
-    passes = 1 + (len(query.available) if query.aggregate and query.aggregate.strip() == "profile" else 1)
-    if admitted.visible_count * passes > session.limits.max_row_visits:
+    if spec == "profile" and admitted.visible_count * (1 + len(query.available)) > session.limits.max_row_visits:
         raise QueryError("QUERY_COST_LIMIT")
-    warnings = list(query.warnings)
-    with _matched(admitted, query) as total:
-        if query.aggregate:
-            aggregate = _reduce(session, query, total, path, format, admitted.input_order)
-            session.check()
-            aggregate, truncated = query_data._bounded_aggregate(aggregate)
-            if truncated:
-                warnings.append("response size cap truncated aggregate")
-            session.check()
-            return query_data.QueryDataResult(path, format, admitted.visible_count, total, 0,
-                                             list(query.available), [], aggregate, truncated, warnings)
-        order = admitted.input_order
-        if query.sort_by:
-            direction = "DESC" if query.descending else "ASC"
-            order = f"i.sort_key COLLATE exomem_legacy_order {direction}, {order}"
-        cursor = session.connection.execute(
-            f"SELECT i.values_json FROM temp.exomem_legacy_rows i ORDER BY {order} LIMIT ? OFFSET ?",
-            (query.limit, query.offset),
-        )
-        rows, size = [], 2
-        byte_truncated = False
-        with closing(session.fetch(cursor)) as batches:
-            for batch in batches:
-                for (raw,) in batch:
-                    session.check()
-                    value = json.loads(raw)
-                    row = {field: compat.get_field(value, field) for field in query.columns} if query.columns else value
-                    encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode()
-                    if size + len(encoded) + bool(rows) > query_data.MAX_RESPONSE_BYTES:
-                        byte_truncated = True
-                        break
-                    size += len(encoded) + bool(rows)
-                    rows.append(row)
-                if byte_truncated:
-                    break
-        if byte_truncated:
-            warnings.append("response size cap truncated returned rows")
-        session.check()
-        return query_data.QueryDataResult(path, format, admitted.visible_count, total, len(rows),
-                                         list(query.columns or query.available), rows,
-                                         truncated=byte_truncated or query.offset + len(rows) < total,
-                                         warnings=warnings)
-
-
-@contextmanager
-def _matched(admitted, query):
-    """A bounded disk relation; indexes exist before data, so no uncapped sorter."""
-    session, conn = admitted.session, admitted.session.connection
-    predicates = json.loads(query.filters_json)
-    if any(predicate.get("op", compat.DEFAULT_OP) not in LEGACY_SQL_OPERATORS for predicate in predicates):
-        raise QueryError("QUERY_UNSUPPORTED")
-
-    def matches(raw):
-        session.check()
-        if raw is None:
-            return 0
-        row = json.loads(raw)
-        result = int(all(compat.match(row, predicate, as_string=predicate["column"] in query.string_columns)
-                         for predicate in predicates))
-        session.check()
-        return result
-
-    def order(left, right):
-        session.check()
-        a, b = tuple(json.loads(left)), tuple(json.loads(right))
-        return (a > b) - (a < b)
-
-    conn.create_function("exomem_legacy_matches", 1, matches, deterministic=True)
-    conn.create_collation("exomem_legacy_order", order)
-    try:
-        conn.execute("CREATE TEMP TABLE exomem_legacy_rows(row_id INTEGER PRIMARY KEY, "
-                     "created_txn INTEGER, view_path TEXT, values_json TEXT NOT NULL, sort_key TEXT)")
-        input_order = admitted.input_order.replace("i.", "")
-        conn.execute(f"CREATE INDEX temp.exomem_legacy_input ON exomem_legacy_rows({input_order})")
-        if query.sort_by:
-            direction = "DESC" if query.descending else "ASC"
-            conn.execute("CREATE INDEX temp.exomem_legacy_sorted ON exomem_legacy_rows("
-                         f"sort_key COLLATE exomem_legacy_order {direction}, {input_order})")
-        cursor = conn.execute(
-            f"SELECT {admitted.values_sql}, i.row_id,i.created_txn,i.view_path FROM {admitted.items} i "
-            f"WHERE i.collection_id=? AND {admitted.membership_sql} "
-            f"AND exomem_legacy_matches({admitted.values_sql})", (admitted.collection_id,),
-        )
-        total = 0
-        with closing(session.fetch(cursor)) as batches:
-            for batch in batches:
-                for raw, row_id, created, view_path in batch:
-                    session.check()
-                    key = None
-                    if query.sort_by:
-                        key = json.dumps(compat.sort_key(compat.get_field(json.loads(raw), query.sort_by)),
-                                         ensure_ascii=False)
-                    conn.execute("INSERT INTO temp.exomem_legacy_rows VALUES(?,?,?,?,?)",
-                                 (row_id, created, view_path, raw, key))
-                    total += 1
-                session.check_temp()
-        yield total
-    finally:
-        # If interruption prevents DDL, the owning session closes its private
-        # connection; neither membership nor result relations can be reused.
-        try:
-            conn.execute("DROP TABLE IF EXISTS temp.exomem_legacy_rows")
-        except sqlite3.Error:
-            pass
-        conn.create_function("exomem_legacy_matches", 1, None)
-        conn.create_collation("exomem_legacy_order", None)
-
-
-def _rows(session, order):
-    cursor = session.connection.execute(
-        f"SELECT i.values_json FROM temp.exomem_legacy_rows i ORDER BY {order}",
-    )
-    with closing(session.fetch(cursor)) as batches:
-        for batch in batches:
-            for (raw,) in batch:
-                session.check()
-                yield json.loads(raw)
-
-
-@contextmanager
-def _keys(session):
-    """Distinct/group state is disk-backed, never an unbounded Python set."""
-    conn = session.connection
-    try:
-        conn.execute("CREATE TEMP TABLE exomem_legacy_keys(key TEXT PRIMARY KEY, "
-                     "value TEXT NOT NULL, display_key TEXT NOT NULL, count INTEGER NOT NULL) WITHOUT ROWID")
-        conn.execute("CREATE INDEX temp.exomem_legacy_groups ON exomem_legacy_keys(display_key)")
-        yield conn
-    finally:
-        try:
-            conn.execute("DROP TABLE IF EXISTS temp.exomem_legacy_keys")
-        except sqlite3.Error:
-            pass
-
-
-def _reduce(session, query, total, path, format, order):
-    spec = query.aggregate.strip()
-    if spec == "count":
-        return {"count": total}
-    # The input index preserves first occurrence and floating-point reduction
-    # order, independent of a filter's physical access path.
+    # Only the values a decision reads: filter, sort and aggregate roots, never the page's columns.
+    roots = {predicate["column"] for predicate in predicates}
     if spec == "profile":
-        columns = [_profile(session, field, order) for field in query.available]
-        profile = {"path": path, "format": format, "total_rows": total, "columns": columns}
-        return {"profile": profile, "dataset_card": query_data.build_dataset_card(profile)}
-    if ":" not in spec:
-        raise compat.QueryDataError("BAD_AGGREGATE", "aggregate must be 'count' or 'func:column' "
-                                   "(func in min,max,sum,avg,latest,distinct)")
-    func, field = (part.strip() for part in spec.split(":", 1))
-    if func in {"min", "max", "sum", "avg"}:
-        with closing(_rows(session, order)) as rows:
-            return compat.numeric_aggregate(rows, func, field)
-    if func == "latest":
-        with closing(_rows(session, order)) as rows:
-            return compat.latest_aggregate(rows, query.date_column or field)
-    if func not in {"distinct", "group"}:
-        raise compat.QueryDataError("BAD_AGGREGATE", f"unknown aggregate func {func!r}")
-    out, distinct = [], 0
-    with _keys(session) as conn, closing(_rows(session, order)) as rows:
-        for row in rows:
-            value = compat.get_field(row, field)
-            key = compat.distinct_key(value) if func == "distinct" else compat.group_key(value)
-            encoded = json.dumps(value, ensure_ascii=False)
-            if func == "distinct":
-                fresh = conn.execute("INSERT OR IGNORE INTO temp.exomem_legacy_keys VALUES(?,?,?,1)",
-                                     (key, encoded, encoded)).rowcount
-                if fresh:
-                    distinct += 1
-                    if len(out) < query_data.PROFILE_MAX_DISTINCT:
-                        out.append(value)
+        roots.update(query.available)
+    elif function == "latest":
+        roots.add(query.date_column or column)
+    elif column:
+        roots.add(column)
+    if query.sort_by and not spec:
+        roots.add(query.sort_by)
+    fields = tuple(name for name in admitted.fields if name in {str(root).split(".", 1)[0] for root in roots})
+
+    tests = [(predicate, predicate["column"] in query.string_columns) for predicate in predicates]
+    match, get_field, sort_key = compat.match, compat.get_field, compat.sort_key
+    leading = _Smallest(lead)
+    page = _Smallest(0 if spec else query.offset + query.limit)
+    matched_rows = [] if spec and spec != "count" else None
+    total = matched = 0
+    for row_id, key, values in scan(admitted, fields):
+        total += 1
+        if lead:
+            leading.push((key, row_id))
+        if not all(match(values, predicate, as_string=as_string) for predicate, as_string in tests):
+            continue
+        matched += 1
+        if matched_rows is not None:
+            matched_rows.append((key, row_id, values))
+        elif not spec:
+            if query.sort_by:
+                order = sort_key(get_field(values, query.sort_by))
+                page.push((_Descending(order) if query.descending else order, key, row_id))
             else:
-                conn.execute("INSERT INTO temp.exomem_legacy_keys VALUES(?,?,?,1) "
-                             "ON CONFLICT(key) DO UPDATE SET count=count+1,value=excluded.value,"
-                             "display_key=excluded.display_key", (key, encoded, encoded))
-            session.check_temp()
-        if func == "distinct":
-            return {"distinct": out, "n": distinct, "truncated": distinct > len(out)}
-        count = conn.execute("SELECT count(*) FROM temp.exomem_legacy_keys").fetchone()[0]
-        cursor = conn.execute("SELECT value,count FROM temp.exomem_legacy_keys ORDER BY display_key LIMIT ?",
-                              (query_data.PROFILE_MAX_DISTINCT,))
-        groups = [{"value": json.loads(raw), "count": n}
-                  for batch in session.fetch(cursor) for raw, n in batch]
-        return {"groups": groups, "n": count, "truncated": count > len(groups)}
+                page.push((key, row_id))
+        if total % 1024 == 0:
+            session.check()
+
+    aggregate, latest = None, None
+    if spec == "count":
+        aggregate = {"count": matched}
+    elif spec:
+        # The file evaluator reduces in input order: float sums, first occurrences and ties depend on it.
+        matched_rows.sort(key=lambda entry: entry[0])
+        rows = [values for _, _, values in matched_rows]
+        if spec == "profile":
+            aggregate = query_data._profile_payload(rows, list(query.available), format, path)
+        else:
+            aggregate = query_data._aggregate(rows, spec, query.date_column)
+        session.check()
+        if function == "latest":
+            best = aggregate["row"]
+            latest = next((row_id for _, row_id, values in matched_rows if values is best), None)
+            aggregate = {**aggregate, "row": None}
+    selected = page.result()[query.offset:]
+    return LegacySelection(total, matched, tuple(entry[-1] for entry in selected), aggregate, latest,
+                           tuple(entry[-1] for entry in leading.result()), tuple(query.warnings))
 
 
-def _profile(session, field, order):
-    non_null = numeric = date_like = distinct = 0
-    numeric_min = numeric_max = earliest = latest = None
-    samples = []
-    with _keys(session) as conn, closing(_rows(session, order)) as rows:
-        def numbers():
-            nonlocal non_null, numeric, date_like, distinct, numeric_min, numeric_max, earliest, latest
-            for row in rows:
-                value = compat.get_field(row, field)
-                if value in (None, ""):
-                    continue
-                non_null += 1
-                text = str(value)
-                date_like += bool(compat.DATE_LIKE.search(text))
-                earliest = text if earliest is None else min(earliest, text)
-                latest = text if latest is None else max(latest, text)
-                encoded = json.dumps(value, ensure_ascii=False)
-                if conn.execute("INSERT OR IGNORE INTO temp.exomem_legacy_keys VALUES(?,?,?,1)",
-                                (text, encoded, encoded)).rowcount:
-                    distinct += 1
-                    if len(samples) < query_data.PROFILE_MAX_DISTINCT:
-                        samples.append(value)
-                session.check_temp()
-                number = compat.coerce_num(value)
-                if number is not None:
-                    numeric += 1
-                    numeric_min = number if numeric_min is None else min(numeric_min, number)
-                    numeric_max = number if numeric_max is None else max(numeric_max, number)
-                    yield number
-        total = sum(numbers())
-    kind = compat.profile_kind(field, non_null, numeric, date_like, distinct, query_data.PROFILE_MAX_DISTINCT)
-    kwargs = {"distinct_truncated": distinct > len(samples)}
-    if kind == "date":
-        kwargs.update(earliest=earliest, latest=latest)
-    elif kind == "numeric":
-        kwargs.update(min=numeric_min, max=numeric_max, sum=total, avg=total / numeric)
+class _Descending:
+    """A sort key in reverse; ties still fall to the input order that follows it."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, key):
+        self.key = key
+
+    def __eq__(self, other):
+        return self.key == other.key
+
+    def __lt__(self, other):
+        return other.key < self.key
+
+
+class _Smallest:
+    """The ``size`` smallest entries pushed, which equals sorting all of them and taking the head."""
+
+    __slots__ = ("size", "entries", "bound")
+
+    def __init__(self, size: int):
+        self.size, self.entries, self.bound = size, [], None
+
+    def push(self, entry) -> None:
+        if not self.size or (self.bound is not None and not entry < self.bound):
+            return
+        self.entries.append(entry)
+        if len(self.entries) >= 2 * self.size:
+            self._trim()
+
+    def _trim(self) -> None:
+        self.entries.sort()
+        del self.entries[self.size:]
+        if self.size and len(self.entries) == self.size:
+            self.bound = self.entries[-1]
+
+    def result(self) -> list:
+        self._trim()
+        return self.entries
+
+
+def scan(admitted: AdmittedCollection, fields: tuple[str, ...]):
+    """Yield ``(row_id, input key, values)`` of every admitted row, in no particular order.
+
+    ``values`` holds only ``fields``, after the session's projection. A withheld row is excluded
+    before any of its values is read.
+    """
+    from .reductions import scan_parts
+
+    admitted.check()
+    session, conn = admitted.session, admitted.session.connection
+    project = session._project_values
+    plan = session._field_plans[admitted.collection_id]
+    if not fields:
+        columns, source = [], f"{admitted.items} i"
+
+        def decode(cells):
+            return {}
+    elif admitted.layout is None and plan.owner:
+        # The owner reads its stored document whole: one JSON decode beats a field-tree walk per row.
+        columns = [f"CASE WHEN length(CAST(i.values_json AS BLOB)) <= {_MAX_DECODE_BYTES} THEN i.values_json END"]
+        source = f"{admitted.items} i"
+
+        def decode(cells):
+            if cells[0] is None:
+                raise QueryError("QUERY_COST_LIMIT")
+            stored = json.loads(cells[0])
+            return {name: stored[name] for name in fields if name in stored}
     else:
-        kwargs["top_values"] = samples
-    return query_data.ColumnProfile(field, kind, non_null, distinct, **kwargs).as_dict()
+        columns, source, decode = scan_parts(session, admitted.collection_id, admitted.layout, fields)
+    key = admitted.input_key
+    head = ("item_key", "view_path", "created_txn", "row_id")
+    # Row id order walks items_by_collection_row and both tables in storage order; item key order
+    # reads them at random, about three times slower once a collection outgrows the page cache.
+    select = (f"SELECT {','.join([*(f'i.{name}' for name in head), *columns])} FROM {source} "  # noqa: S608
+              f"WHERE i.collection_id=? AND {admitted.membership_sql} AND i.row_id {{}} ? "
+              "ORDER BY i.row_id LIMIT ?")
+    width, size, after, grow = len(head) + len(columns), _FIRST_CHUNK, None, True
+    while True:
+        session.check()
+        try:
+            found = packed.rows(conn, select.format(">=" if after is None else ">"),
+                                (admitted.collection_id, -1 << 63 if after is None else after, size), width)
+        except sqlite3.Error as error:
+            if not packed.too_big(error) or size == 1:
+                raise
+            size, grow = size // 2, False
+            continue
+        for row in found:
+            values = decode(row[len(head):])
+            yield row[3], key({"item_key": row[0], "view_path": row[1], "created_txn": row[2], "row_id": row[3]}), \
+                values if project is None else project(values)
+        if len(found) < size:
+            session.check()
+            return
+        after = max(row[3] for row in found)
+        if grow:
+            size = min(2 * size, _MAX_CHUNK)

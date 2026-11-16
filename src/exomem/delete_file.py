@@ -33,7 +33,7 @@ from pathlib import Path
 from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
 from .fold_leaf import Placement
 from .governance import catalog_publication, graph_producer, lifecycle
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_form, managed_join, managed_relative, managed_split
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import (
     LogWritePlan,
@@ -97,7 +97,7 @@ class DeleteFileValidation:
 
 def planned_trash_path(vault_root: Path, rel_path: str, now: dt.datetime) -> str:
     """The vault-relative trash path `rel_path` takes at `now`, before any collision suffix."""
-    sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
+    sanitized = managed_relative(rel_path).replace("/", "__")
     name = trash_metadata.preserve_floor(rel_path, f"{now.strftime('%H%M%S')}-{sanitized}")
     trash_dir = kb_root(vault_root) / TRASH_SUBPATH / now.strftime("%Y-%m-%d")
     return (trash_dir / name).relative_to(vault_root).as_posix()
@@ -154,7 +154,7 @@ def _delete_file_local(
             code="UNCONFIRMED",
             reason=(
                 "delete_file requires `confirm=true` explicitly. "
-                f"Deletes go to {kb_prefix()}_trash/ (recoverable) but the "
+                f"Deletes go to {managed_join('_trash/')} (recoverable) but the "
                 "action is still deliberate. Supersession via `replace` is "
                 "the preferred path for compiled material (SKILL.md rule 6)."
             ),
@@ -221,8 +221,8 @@ def _delete_file_local(
         raise DeleteFileError(code=error.code, reason=error.reason) from error
 
     # Trash items can't be re-trashed.
-    parts = rel_path.split("/")
-    if len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH:
+    below = managed_split(rel_path)
+    if below is not None and below.split("/")[0] == TRASH_SUBPATH:
         raise DeleteFileError(
             code="ALREADY_TRASHED",
             reason=(
@@ -316,8 +316,7 @@ def _delete_file_local(
             n = str(raw).strip().replace("\\", "/").lstrip("/")
             if not n.endswith(".md"):
                 n = n + ".md"
-            if not n.startswith(kb_prefix()):
-                n = kb_prefix() + n
+            n = managed_form(n)
             expected_set.add(n)
 
     # Inbound-link check (with `expected_dead_inbound` filtering). For a
@@ -732,10 +731,7 @@ def _delete_file_local(
     if not lifecycle.finish_deletion(
         lifecycle_operation, index_report=index_feedback
     ):
-        warnings.append(
-            "trash succeeded but governed derived state is not exact; "
-            "content remains tombstoned until reconcile"
-        )
+        warnings.append(lifecycle.TRASH_NOT_EXACT)
 
     if catalog_target is not None:
         try:

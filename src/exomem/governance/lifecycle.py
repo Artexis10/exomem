@@ -31,7 +31,7 @@ from .. import (
     semantic_index,
 )
 from ..cli_ops import OpError
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root
 from ..vault import parse_frontmatter
 from . import membership, receipts
 from . import policy as policy_module
@@ -42,6 +42,16 @@ TOMBSTONE_DIR = "deletion-tombstones"
 RECOVERY_DIR = "recovery"
 FAIL_CLOSED_TOMBSTONE = "__governance_lifecycle_state_unavailable__"
 MAX_MARKER_BYTES = 256 * 1024
+#: What a trash or a recovery reports when ``finish_deletion`` or ``finish_recovery`` finds governed
+#: derived state left; every writer, in either vault mode, reports these words.
+TRASH_NOT_EXACT = (
+    "trash succeeded but governed derived state is not exact; "
+    "content remains tombstoned until reconcile"
+)
+RECOVERY_NOT_EXACT = (
+    "recovery staged but governed derived state is not exact; "
+    "content remains tombstoned until reconcile"
+)
 
 
 @dataclass
@@ -114,7 +124,7 @@ def _digest(value: Any) -> str:
 
 
 def _governance_root(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / policy_module.GOVERNANCE_DIRNAME
+    return managed_root(Path(vault_root)) / policy_module.GOVERNANCE_DIRNAME
 
 
 def _tombstone_root(vault_root: Path) -> Path:
@@ -180,7 +190,7 @@ def protected_path(vault_root: Path, rel_path: str) -> bool:
     """Whether moving ``rel_path`` would move receipt/tombstone evidence."""
     target = (Path(vault_root) / _normalize_rel(rel_path)).resolve()
     governed_root = _governance_root(vault_root).resolve()
-    kb_root = (Path(vault_root) / kb_dirname()).resolve()
+    kb_root = managed_root(Path(vault_root)).resolve()
     try:
         target.relative_to(governed_root)
         return True

@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 
 from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import is_managed_root_name, managed_join, managed_relative
 from .vault import (
     PathGuard,
     PlannedWrite,
@@ -223,7 +223,7 @@ def _stored_index_listing(
     """Stored count inputs plus the same unowned directory entries the file counters see."""
     from .vault_store import mode, ownership, read
 
-    if directory.parent.name != kb_dirname():
+    if not is_managed_root_name(directory.parent.name):
         return None  # Standalone directory counters have no vault whose mode they can inspect.
     root = directory.parents[1]
     if not mode.store_mode_for_reads(root):
@@ -470,7 +470,7 @@ def _replace_by_type_section(
 
     for name in sorted(counts.keys()):
         desc = known_descriptions.get(name, "captured material")
-        rows.append(f"- [[{kb_prefix()}Sources/{name}/|{name}]] — {desc} ({counts[name]})")
+        rows.append(f"- [[{managed_join(f'Sources/{name}/')}|{name}]] — {desc} ({counts[name]})")
 
     new_block = SOURCES_BY_TYPE_HEADER + "\n\n" + "\n".join(rows) + "\n"
     return _replace_section(text, SOURCES_BY_TYPE_HEADER, new_block, next_h2_or_end=True)
@@ -877,7 +877,7 @@ def _refresh_notes_subindex_text(
 
     text = _NOTES_H3_COUNT.sub(_h3, text)
     text = _add_home_sections(text, owners, counts_by_type, _owner_titled)
-    text = _notes_subfolder_bullet_re(kb_prefix()).sub(_bullet, text)
+    text = _notes_subfolder_bullet_re(managed_join("")).sub(_bullet, text)
     return text
 
 
@@ -935,7 +935,7 @@ def _refresh_entities_subindex_text(
     """Refresh registered entity rows while preserving hand-authored prose."""
     registry = registry or core_registry()
     pattern = _entities_bullet_re(
-        kb_prefix(),
+        managed_join(""),
         registry.core_version,
         registry.extension_hash,
         tuple(item.folder for item in registry.active_definitions),
@@ -968,7 +968,7 @@ def _refresh_entities_subindex_text(
     if section_end == -1:
         section_end = len(refreshed)
     rows = [
-        f"- [[{kb_prefix()}Entities/{definition.folder}/|{definition.folder}]] "
+        f"- [[{managed_join(f'Entities/{definition.folder}/')}|{definition.folder}]] "
         f"({counts_by_type.get(definition.id, 0)})"
         for definition in missing
     ]
@@ -1048,7 +1048,7 @@ def compute_subindex_writes(
     # Virtually count each pending path so the index shows post-write state.
     for raw_path in pending_paths or []:
         rel = raw_path.removesuffix(".md").replace("\\", "/")
-        rel = rel.removeprefix(kb_prefix()).lstrip("/")
+        rel = managed_relative(rel).lstrip("/")
         parts = rel.split("/")
         if len(parts) < 2:
             continue
@@ -1180,7 +1180,7 @@ def _update_log(
     log_entry_body: str,
 ) -> str:
     """Prepend `## [<date>] add | <path>` entry right after the `---` separator."""
-    title = rel_source_path.replace(kb_prefix(), "", 1)
+    title = managed_relative(rel_source_path)
     new_entry = f"## [{date_iso}] add | {title}\n\n{escape_wikilinks_for_log(log_entry_body)}\n"
 
     sep_idx = text.find(LOG_SEPARATOR)

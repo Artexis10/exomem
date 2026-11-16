@@ -138,7 +138,7 @@ from . import vault as vault_module
 from .collection_store import ownership
 from .collection_store.aliases import link_target as retired_link_target
 from .collection_store.preview import canonical_read, selected_writer
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_form, managed_join, managed_relative, managed_root, managed_split
 from .planning_values import PlanningValues
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vault import (
@@ -191,6 +191,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "transient_state_review",
     "collection_view_corrections",
     "original_fixity",
+    "source_pointer_drift",
 )
 # The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
 DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
@@ -840,6 +841,9 @@ def audit(
             findings.extend(fixity_findings)
             if fixity_coverage is not None:
                 metadata.setdefault("coverage", {})["original_fixity"] = fixity_coverage
+    with stage('source_pointer_drift') as run:
+        if run:
+            findings.extend(_check_source_pointers(vault_root, pages))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     with stage(semantic_categories) as run:
         if run:
@@ -908,6 +912,86 @@ def _check_original_fixity(vault_root: Path) -> tuple[list[AuditFinding], str | 
     from . import original_fixity
 
     return original_fixity.attention_findings(vault_root)
+
+
+@call_spans.timed("audit.source_pointer_drift")
+def _check_source_pointers(
+    vault_root: Path, pages: list[find_module.ParsedPage]
+) -> list[AuditFinding]:
+    """A Source or Evidence card whose recorded pointer no longer names its bytes."""
+    from . import source_pointers
+
+    inspector = source_pointers.Inspector(vault_root)
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if page.page_type != "source" or in_append_only_tree(page.rel_path) is None:
+            continue
+        request_budget.checkpoint()
+        card = str(page.rel_path)
+        for drift in inspector.inspect_card(page.frontmatter, page.body):
+            candidate = (
+                inspector.candidate(drift.recorded_path)
+                if drift.problem == source_pointers.MISSING
+                else None
+            )
+            findings.append(
+                AuditFinding(
+                    category="source_pointer_drift",
+                    severity="warn",
+                    path=card,
+                    detail=(
+                        f"{drift.field} names {drift.recorded_path}: "
+                        f"{source_pointers.PROBLEM_TEXT[drift.problem]}"
+                    ),
+                    proposed_fix=_source_pointer_fix(
+                        card, drift.field, drift.recorded_path, drift.problem, candidate
+                    ),
+                    paths=[drift.recorded_path, *([candidate] if candidate else [])],
+                    meta={
+                        "field": drift.field,
+                        "recorded_path": drift.recorded_path,
+                        "problem": drift.problem,
+                        "candidate_path": candidate,
+                    },
+                )
+            )
+    return findings
+
+
+def _source_pointer_fix(
+    card: str, field: str, recorded: str, problem: str, candidate: str | None
+) -> str:
+    """The one step that repairs a drifted pointer, spelled as the serving surface calls it.
+
+    Only a Source that does not follow its file by name can be repointed (reclassify refuses an
+    Evidence card and a bound one); for any other card the file moves back to the recorded path.
+    """
+    from . import source_pointers
+
+    repointable = in_append_only_tree(card) == source_taxonomy.SOURCES_ROOT and not (
+        source_pointers.bound(card, field, recorded)
+    )
+    if candidate is not None and not repointable:
+        return capabilities.active_call_text(
+            "manage_memory_file", {"operation": "move", "old_path": candidate, "new_path": recorded}
+        )
+    repoint = capabilities.active_call_text(
+        "manage_memory_file",
+        {
+            "operation": "reclassify",
+            "path": card,
+            "artifact_path": candidate or "<where the card's bytes are now>",
+            "reason": "<why the pointer changes>",
+        },
+    )
+    if candidate is not None:
+        return repoint
+    if problem == source_pointers.OUTSIDE_VAULT:
+        if repointable:
+            return f"Point the card at where its bytes are now with {repoint}."
+        return "No governed step repoints this card, and its pointer leaves the vault."
+    restore = f"Put the card's own bytes back as a plain file at {recorded!r}"
+    return f"{restore}, or point the card at where its bytes are now with {repoint}." if repointable else f"{restore}."
 
 
 @call_spans.timed("audit.bridge_review")
@@ -2142,7 +2226,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
             AuditFinding(
                 category="semantic_recall_isolation",
                 severity="info",
-                path=kb_prefix(),
+                path=managed_join(""),
                 detail=f"{component} census capped; at least {remaining} persisted row remains",
                 proposed_fix="Run `reconcile` again to continue bounded semantic cleanup.",
                 meta={
@@ -2158,7 +2242,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
             AuditFinding(
                 category="semantic_recall_isolation",
                 severity="warn",
-                path=kb_prefix(),
+                path=managed_join(""),
                 detail="semantic sidecar isolation could not be proven",
                 proposed_fix="Repair or rebuild the affected derived sidecar, then rerun audit.",
                 meta={"component": component, "state": "incomplete", "code": code},
@@ -2380,7 +2464,7 @@ def _check_unregistered_entity_types(
 ) -> list[AuditFinding]:
     """Surface authored entity kinds/folders absent from the active registry."""
     registry = entity_types_module.load_entity_types(vault_root)
-    prefix = f"{kb_prefix()}Entities/"
+    prefix = managed_join("Entities/")
     entities: list[tuple[find_module.ParsedPage, str]] = []
     for page in pages:
         request_budget.checkpoint()
@@ -2687,7 +2771,7 @@ def _check_wikilinks(
             continue
         no_ext = rel.removesuffix(".md")
         full_paths.add(no_ext)
-        kb_stripped_paths.add(no_ext.removeprefix(kb_prefix()))
+        kb_stripped_paths.add(managed_relative(no_ext))
         names_to_paths.setdefault(md_path.stem, []).append(no_ext)
         # Title fallback: lets `[[Test Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
@@ -2716,7 +2800,7 @@ def _check_wikilinks(
             target_for_resolve = target.split("#", 1)[0].strip()
             if not target_for_resolve:
                 continue
-            normalized = target_for_resolve.removeprefix(kb_prefix()).lstrip("/")
+            normalized = managed_relative(target_for_resolve).lstrip("/")
             if normalized in kb_stripped_paths:
                 continue
             if target_for_resolve.lstrip("/") in full_paths:
@@ -2749,7 +2833,7 @@ def _check_wikilinks(
             if suffix and suffix != ".md":
                 rel = target_for_resolve.lstrip("/")
                 if _ordinary_file_exists(vault_root, vault_root / rel) or _ordinary_file_exists(
-                    vault_root, vault_root / kb_dirname() / normalized
+                    vault_root, managed_root(vault_root) / normalized
                 ):
                     continue
 
@@ -2879,7 +2963,7 @@ def _has_non_markdown_collision(vault_root: Path, vault_relative: str, kb_relati
     """Whether an extensionless note link names an existing non-note file."""
     for candidate in (
         vault_root / vault_relative,
-        vault_root / kb_dirname() / kb_relative,
+        managed_root(vault_root) / kb_relative,
     ):
         try:
             parent_rel = candidate.parent.relative_to(vault_root).as_posix()
@@ -2942,13 +3026,13 @@ def _check_orphan_entities(
         # (those are hub listings, not real "uses").
         request_budget.checkpoint()
         if page.rel_path.endswith("/Entities/index.md") or page.rel_path == (
-            f"{kb_prefix()}Entities/index.md"
+            managed_join("Entities/index.md")
         ):
             continue
         # A carrier is recorded data, not a use of the entity it names.
         for match in WIKILINK_PATTERN.finditer(provenance_module.without_carriers(page.body)):
             request_budget.checkpoint()
-            target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
+            target = managed_relative(match.group(1).strip()).lstrip("/")
             if target:
                 referenced.add(target)
         # Frontmatter wikilinks (sources, related, supersedes, etc.) count too.
@@ -2956,11 +3040,11 @@ def _check_orphan_entities(
             request_budget.checkpoint()
             for link in _extract_wikilinks_from_value(value):
                 request_budget.checkpoint()
-                referenced.add(link.removeprefix(kb_prefix()).lstrip("/"))
+                referenced.add(managed_relative(link).lstrip("/"))
 
     for page in pages:
         request_budget.checkpoint()
-        if not page.rel_path.startswith(f"{kb_prefix()}Entities/"):
+        if not page.rel_path.startswith(managed_join("Entities/")):
             continue
         if page.path.name == "index.md":
             continue
@@ -3240,7 +3324,7 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
                 AuditFinding(
                 category="index_drift",
                 severity="warn",
-                path=f"{kb_prefix()}index.md",
+                path=managed_join("index.md"),
                 detail=(
                     f"Counts row {key!r} declared {declared_count} but the on-disk "
                     "folder doesn't exist"
@@ -3254,7 +3338,7 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
                 AuditFinding(
                 category="index_drift",
                 severity="warn",
-                path=f"{kb_prefix()}index.md",
+                path=managed_join("index.md"),
                 detail=(
                     f"Counts row {key!r} declared {declared_count}, actual is {actual_count}"
                 ),
@@ -3657,7 +3741,7 @@ def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     for item in epistemic_graph.graph_drift(vault_root):
         request_budget.checkpoint()
-        path = str(item.get("path") or kb_prefix())
+        path = str(item.get("path") or managed_join(""))
         if path.lower().endswith(".md"):
             safe_path = _safe_persisted_markdown_rel(path)
             if safe_path is None:
@@ -3694,7 +3778,7 @@ def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
             AuditFinding(
             category="relation_registry",
             severity=str(item.get("severity") or "warning"),
-            path=str(item.get("path") or kb_prefix()),
+            path=str(item.get("path") or managed_join("")),
             detail=str(item.get("detail") or item.get("code") or "relation registry finding"),
             proposed_fix=(
                 "Review corpus evidence with schema_memory(subject='relations') and save "
@@ -4215,8 +4299,7 @@ def _derivation_best_effort_path(raw: str) -> str:
     cleaned = raw.strip().strip("/")
     if not cleaned:
         return raw
-    if not cleaned.startswith(kb_prefix()):
-        cleaned = kb_prefix() + cleaned
+    cleaned = managed_form(cleaned)
     if not cleaned.lower().endswith(".md"):
         cleaned = cleaned + ".md"
     return cleaned
@@ -4478,7 +4561,7 @@ def _check_derivation_double_counting(
             AuditFinding(
                 category="derivation_double_counting",
                 severity="info",
-                path=kb_prefix(),
+                path=managed_join(""),
                 detail=(
                     f"derivation-chain traversal capped by {reasons_label} "
                     f"(depth<={max_depth}, edges<={max_edges}); some ancestor "
@@ -5392,7 +5475,7 @@ def _observation_page_signal(
         "tags": [str(tag) for tag in page.tags],
     }
     terms = [page.title, *page.tags]
-    if page.rel_path.startswith(f"{kb_prefix()}Evidence/"):
+    if page.rel_path.startswith(managed_join("Evidence/")):
         match = re.search(
             r"(?ms)^## Description\s*$\n(?P<body>.*?)(?=^## |\Z)", page.body
         )
@@ -5642,8 +5725,8 @@ def _check_unreflected_observations(
     for page in sorted(pages, key=lambda page: page.rel_path):
         request_budget.checkpoint()
         if not (
-            page.rel_path.startswith(f"{kb_prefix()}Notes/")
-            or page.rel_path.startswith(f"{kb_prefix()}Evidence/")
+            page.rel_path.startswith(managed_join("Notes/"))
+            or page.rel_path.startswith(managed_join("Evidence/"))
         ):
             continue
         if (
@@ -5916,7 +5999,7 @@ def _check_collection_candidate(
     rows: list[dict[str, Any]] = []
     for page in pages:
         request_budget.checkpoint()
-        if not page.rel_path.startswith(f"{kb_prefix()}Notes/") or not authorize(
+        if not page.rel_path.startswith(managed_join("Notes/")) or not authorize(
             page.rel_path
         ):
             continue
@@ -6376,7 +6459,7 @@ def _check_supersession_integrity(
         # use. Without the prefixed candidate every such pointer resolves to
         # nothing and an intact chain is reported as rot, which is indis-
         # tinguishable from the rot this check exists to find.
-        prefixed = target if target.startswith(kb_prefix()) else f"{kb_prefix()}{target}"
+        prefixed = target if managed_split(target) is not None else managed_join(target)
         for candidate in (target, f"{target}.md", prefixed, f"{prefixed}.md"):
             request_budget.checkpoint()
             if candidate in known:
@@ -6601,18 +6684,18 @@ def _inbound_degree(pages: list[find_module.ParsedPage]) -> dict[str, int]:
     for page in pages:
         if (
             page.rel_path.endswith("/Entities/index.md")
-            or page.rel_path == f"{kb_prefix()}Entities/index.md"
+            or page.rel_path == managed_join("Entities/index.md")
         ):
             continue
         self_key = _relevance_canon(page.rel_path)
         targets: set[str] = set()
         for match in WIKILINK_PATTERN.finditer(page.body):
-            target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
+            target = managed_relative(match.group(1).strip()).lstrip("/")
             if target:
                 targets.add(_relevance_canon(target))
         for value in page.frontmatter.values():
             for link in _extract_wikilinks_from_value(value):
-                targets.add(_relevance_canon(link.removeprefix(kb_prefix()).lstrip("/")))
+                targets.add(_relevance_canon(managed_relative(link).lstrip("/")))
         for target in targets:
             if target == self_key:
                 continue
@@ -7459,10 +7542,10 @@ def _entity_recurrence_attachment_probe(vault_root: Path) -> Callable[[str], boo
         KB-relative — through the same `_ordinary_file_exists`, so the two agree
         on what an attachment is.
         """
-        normalized = target.removeprefix(kb_prefix()).lstrip("/")
+        normalized = managed_relative(target).lstrip("/")
         return _ordinary_file_exists(
             vault_root, vault_root / target.lstrip("/")
-        ) or _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
+        ) or _ordinary_file_exists(vault_root, managed_root(vault_root) / normalized)
 
     return attachment_probe
 
@@ -7857,7 +7940,7 @@ def _proximity_contradictions(
             AuditFinding(
             category="corpus_contradictions",
             severity="info",
-            path=kb_prefix(),
+            path=managed_join(""),
             detail=(
                 f"{omitted} more lower-priority/same-family contradiction pair(s) "
                 f"not shown (showing top {top_n} of {len(scored)}; raise "
@@ -7886,4 +7969,4 @@ def _rel_kb_path_no_ext(absolute: Path, vault_root: Path) -> str:
 
     rel = PurePosixPath(find_corpus.page_relative_path(absolute, vault_root))
     no_ext = rel.with_suffix("").as_posix()
-    return no_ext.removeprefix(kb_prefix()).lstrip("/")
+    return managed_relative(no_ext).lstrip("/")

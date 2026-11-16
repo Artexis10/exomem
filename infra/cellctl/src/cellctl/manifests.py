@@ -123,7 +123,19 @@ JOB_KIND_LABEL = "exomem.io/cell-job"
 JOB_KIND_EXPORT = "export"
 JOB_KIND_EXPORT_PAUSE = "export-pause"
 JOB_KIND_EXPORT_PACK = "export-pack"
-NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE)
+# Closed Job kind and name protocol for warm-cell-catalogue.
+JOB_KIND_CATALOGUE_BUILD = "catalogue-build"
+CATALOGUE_BUILD_APP_LABEL = "exomem-catalogue-build"
+CATALOGUE_BUILD_PREFIX = "catalogue-build-"
+CATALOGUE_BUILD_NAME_RE = re.compile(re.escape(CATALOGUE_BUILD_PREFIX) + r"[0-9a-f]{16}")
+CATALOGUE_BUILD_NODE_ANNOTATION = "exomem.io/catalogue-build-node"
+CATALOGUE_BUILD_CANCELLED_ANNOTATION = "exomem.io/catalogue-build-cancelled"
+CATALOGUE_BUILD_OUTCOME_ANNOTATION = "exomem.io/catalogue-build-outcome"
+CATALOGUE_BUILD_JOB_ANNOTATION = "exomem.io/catalogue-build-job"
+# automate-cloud-releases D9: the kubelet pulls the image; the pod needs no
+# egress of its own.
+JOB_KIND_PREPARE = "prepare"
+NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE, JOB_KIND_PREPARE)
 JOB_EGRESS_POLICY = "job-egress"
 EXPORT_STAGING_DIR = "/staging"
 INIT_CONTAINER_NAME = "cell-init"
@@ -136,6 +148,8 @@ HOLD_ANNOTATION = "exomem.io/hold"
 HOLD_STARTED_ANNOTATION = "exomem.io/hold-started-at"
 PREVIOUS_IMAGE_ANNOTATION = "exomem.io/previous-image"
 PRE_UPGRADE_SNAPSHOT_ANNOTATION = "exomem.io/pre-upgrade-snapshot"
+# automate-cloud-releases D6: a local cell's pre-upgrade VolumeSnapshot name.
+PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION = "exomem.io/pre-upgrade-volume-snapshot"
 TARGET_APPLIED_ANNOTATION = "exomem.io/target-applied-at"
 RESTORED_SNAPSHOT_ANNOTATION = "exomem.io/restored-snapshot"
 # Not in D6's own annotation list: bookkeeping so the D6/D8 backoff can
@@ -173,6 +187,19 @@ UPGRADE_WINDOW_ANNOTATION = "exomem.io/upgrade-window"
 UPGRADE_WINDOW_AT_ANNOTATION = "exomem.io/upgrade-window-at"
 CANDIDATE_SINCE_ANNOTATION = "exomem.io/candidate-since"
 ROLLOUT_ANNOTATIONS = (UPGRADE_WINDOW_ANNOTATION, UPGRADE_WINDOW_AT_ANNOTATION, CANDIDATE_SINCE_ANNOTATION)
+
+
+def upgrade_start_annotations(started_at: str, previous_image: str, target: str) -> dict[str, str]:
+    """warm-cell-catalogue: the hold that an upgrade start writes by patch, not by
+    server-side apply, in the pass that cancels the cell's catalogue builds."""
+
+    return {HOLD_ANNOTATION: "upgrade", HOLD_STARTED_ANNOTATION: started_at,
+            PREVIOUS_IMAGE_ANNOTATION: previous_image, UPGRADE_TARGET_ANNOTATION: target}
+
+
+# The keys that patch writes, read from the function itself so the ownership
+# check in ClusterClient.observe_cells cannot drift from what the patch writes.
+UPGRADE_START_ANNOTATION_KEYS = frozenset(upgrade_start_annotations("", "", ""))
 
 
 def namespace_name(cell_id: str) -> str:
@@ -281,6 +308,7 @@ class CellManifestSpec:
     # claim, storage_gib for a Hetzner one (reconcile.py).
     storage_gib: int = 10
     resources: ResourceSettings = field(default_factory=ResourceSettings)
+    catalogue_build_resources: ResourceSettings | None = None
     model_env: dict[str, str] = field(default_factory=dict)
     dedicated_node: bool = False
     placement: dict = field(default_factory=dict)
@@ -311,6 +339,7 @@ class CellManifestSpec:
     hold_started_at: str | None = None
     previous_image: str | None = None
     pre_upgrade_snapshot: str | None = None
+    pre_upgrade_volume_snapshot: str | None = None
     target_applied_at: str | None = None
     restored_snapshot: str | None = None
     backup_outcome: str | None = None
@@ -517,6 +546,13 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
         "limits.cpu": _cpu(_cpu_millicores(r.cpu_limit) + jobs * _cpu_millicores(JOB_CPU_LIMIT)),
         "limits.memory": _quota_memory_limit(r.memory_limit, jobs),
     })
+    if spec.catalogue_build_resources is not None:
+        build = spec.catalogue_build_resources
+        hard["pods"] = str(int(hard["pods"]) + 1)
+        hard["requests.cpu"] = _cpu(_cpu_millicores(hard["requests.cpu"]) + _cpu_millicores(build.cpu_request))
+        hard["limits.cpu"] = _cpu(_cpu_millicores(hard["limits.cpu"]) + _cpu_millicores(build.cpu_limit))
+        hard["requests.memory"] = _memory(_memory_mib(hard["requests.memory"]) + _memory_mib(build.memory_request))
+        hard["limits.memory"] = _memory(_memory_mib(hard["limits.memory"]) + _memory_mib(build.memory_limit))
     return {
         "apiVersion": "v1",
         "kind": "ResourceQuota",
@@ -622,7 +658,7 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
             # only the peers runtime-ingress names, the media edge among them.
             "podSelector": {"matchExpressions": [
                 {"key": JOB_KIND_LABEL, "operator": "Exists"},
-                {"key": JOB_KIND_LABEL, "operator": "NotIn", "values": list(NO_PUBLIC_EGRESS_JOB_KINDS)},
+                {"key": JOB_KIND_LABEL, "operator": "NotIn", "values": [*NO_PUBLIC_EGRESS_JOB_KINDS, *([JOB_KIND_CATALOGUE_BUILD] if spec.catalogue_build_resources else [])]},
             ]},
             "policyTypes": ["Egress"],
             "egress": [
@@ -1050,6 +1086,8 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
             annotations[PREVIOUS_IMAGE_ANNOTATION] = spec.previous_image
         if spec.pre_upgrade_snapshot:
             annotations[PRE_UPGRADE_SNAPSHOT_ANNOTATION] = spec.pre_upgrade_snapshot
+        if spec.pre_upgrade_volume_snapshot:
+            annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION] = spec.pre_upgrade_volume_snapshot
         if spec.target_applied_at:
             annotations[TARGET_APPLIED_ANNOTATION] = spec.target_applied_at
         if spec.restored_snapshot:
@@ -1242,6 +1280,14 @@ HOURLY_RETENTION_ARGS = ["--keep-hourly", "24", *RETENTION_ARGS]
 # D8: what a backup covers and a restore rewrites. The volume root, including
 # lost+found, is never in scope.
 BACKUP_PATHS = ("/data/vault", "/data/host")
+# Closed SQLite runtime names, anchored outside the vault; no note can match them.
+# Mirrors reserved_paths' families: cellctl is a separate package; test_catalogue_build pins this boundary.
+CATALOGUE_BACKUP_EXCLUDES = tuple(
+    f"/data/host/.local/state/exomem/state/*/{name}{suffix}"
+    for name in (".lexical-staged-*.sqlite", ".lexical.sqlite.rebuild-*.tmp")
+    for suffix in ("", "-wal", "-shm", "-journal")
+)
+
 
 # move-cloud-cells-to-local-storage D10: the backed-up filesystem's used and
 # total bytes, appended to the termination message after the snapshot id. Every
@@ -1278,6 +1324,16 @@ def snapshot_backup_name(base: str, cell_id: str, hold_started_at: str | None,
     if hold_started_at is None:
         raise ValueError("a legacy snapshot backup needs its hold start")
     return hold_job_name(base, hold_started_at)
+
+
+def clone_claim_name(volume_snapshot_name: str) -> str:
+    """automate-cloud-releases D6: the read-only clone claim an upgrade hold's
+    VolumeSnapshot feeds. The claim shares the snapshot's hold digest, so the
+    one name answers everywhere the pair is created, observed, mounted or
+    deleted."""
+
+    return (CLONE_CLAIM_NAME + volume_snapshot_name[len(SNAPSHOT_NAME):]
+            if volume_snapshot_name.startswith(f"{SNAPSHOT_NAME}-") else volume_snapshot_name)
 
 
 def _job_name_for_hold(spec: CellManifestSpec, base: str) -> str:
@@ -1330,18 +1386,18 @@ def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
     ]
 
 
-def render_volume_snapshot(spec: CellManifestSpec, *, snapshot_class: str) -> dict:
-    """D3: a crash-consistent snapshot of the cell's own volume, named for its hold."""
+def render_volume_snapshot(spec: CellManifestSpec, *, snapshot_name: str, snapshot_class: str) -> dict:
+    """D3: snapshot the cell's volume under the caller's recorded name."""
 
     return {
         "apiVersion": "snapshot.storage.k8s.io/v1",
         "kind": "VolumeSnapshot",
-        "metadata": {"name": _job_name_for_hold(spec, SNAPSHOT_NAME), "namespace": spec.namespace, "labels": _labels(spec)},
+        "metadata": {"name": snapshot_name, "namespace": spec.namespace, "labels": _labels(spec)},
         "spec": {"volumeSnapshotClassName": snapshot_class, "source": {"persistentVolumeClaimName": spec.pvc_name}},
     }
 
 
-def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
+def render_clone_claim(spec: CellManifestSpec, *, snapshot_name: str, clone_name: str, clone_class: str) -> dict:
     """D3: the claim the backup Job reads, cloned from this hold's snapshot.
     Its class binds at once, and TopoLVM pins the clone's PV to the source's
     node, so the Job lands there with no node selector of its own."""
@@ -1349,7 +1405,7 @@ def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
     return {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
-        "metadata": {"name": _job_name_for_hold(spec, CLONE_CLAIM_NAME), "namespace": spec.namespace, "labels": _labels(spec)},
+        "metadata": {"name": clone_name, "namespace": spec.namespace, "labels": _labels(spec)},
         "spec": {
             "accessModes": ["ReadWriteOnce"],
             "storageClassName": clone_class,
@@ -1357,7 +1413,7 @@ def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
             "dataSourceRef": {
                 "apiGroup": "snapshot.storage.k8s.io",
                 "kind": "VolumeSnapshot",
-                "name": _job_name_for_hold(spec, SNAPSHOT_NAME),
+                "name": snapshot_name,
             },
         },
     }
@@ -1391,10 +1447,19 @@ CORDON_TOLERATION = {"key": "node.kubernetes.io/unschedulable", "operator": "Exi
 def _job_pod_spec(
     spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool, repo: str,
     claim_name: str | None = None, tolerate_cordon: bool = False,
+    snapshot_claim: str | None = None, scratch_dirs: bool = True,
 ) -> dict:
     placement = _dedicated_placement(spec)
     if tolerate_cordon and not placement:
         placement = {"tolerations": [dict(CORDON_TOLERATION)]}
+    volume_mounts = _job_volume_mounts(data_read_only=data_read_only)
+    volumes = _job_volumes(data_read_only=data_read_only, pvc_name=claim_name or spec.pvc_name)
+    if snapshot_claim is not None:
+        # automate-cloud-releases D6: the attempt's clone, mounted read-only
+        # beside the cell's read-write volume for a snapshot restore.
+        volumes.append({"name": "snapshot",
+                        "persistentVolumeClaim": {"claimName": snapshot_claim, "readOnly": True}})
+        volume_mounts.append({"name": "snapshot", "mountPath": "/snapshot", "readOnly": True})
     return {
         **placement,
         "restartPolicy": "Never",
@@ -1406,7 +1471,8 @@ def _job_pod_spec(
                 "image": spec.image,
                 "imagePullPolicy": "IfNotPresent",
                 "command": ["sh", "-c", "ulimit -c 0 && " +
-                            ("" if data_read_only else "mkdir -p /data/scratch/tmp /data/scratch/cache && ") +
+                            ("mkdir -p /data/scratch/tmp /data/scratch/cache && "
+                             if not data_read_only and scratch_dirs else "") +
                             " && ".join(command)],
                 "env": [({"name": entry["name"], "value": "/tmp"} if data_read_only and entry["name"] == "TMPDIR"
                          else {"name": entry["name"], "value": "/data/scratch/cache"}
@@ -1422,10 +1488,10 @@ def _job_pod_spec(
                     "runAsGroup": RUNTIME_GID,
                     **_container_security_context(),
                 },
-                "volumeMounts": _job_volume_mounts(data_read_only=data_read_only),
+                "volumeMounts": volume_mounts,
             }
         ],
-        "volumes": _job_volumes(data_read_only=data_read_only, pvc_name=claim_name or spec.pvc_name),
+        "volumes": volumes,
     }
 
 
@@ -1449,6 +1515,50 @@ def _with_media_collector(pod_spec: dict, spec: CellManifestSpec) -> dict:
         },
     }]
     return pod_spec
+
+
+def catalogue_build_name(image: str) -> str:
+    return CATALOGUE_BUILD_PREFIX + hashlib.sha256(image.encode()).hexdigest()[:16]
+
+
+def render_catalogue_build_job(spec: CellManifestSpec, *, deadline_seconds: int, node: str) -> dict:
+    """Run only the narrow builder, beside this cell's serving pod, without credentials or egress."""
+    resources = spec.catalogue_build_resources
+    if resources is None:
+        raise ValueError("catalogue build resources are required when prewarm is enabled")
+    labels = {**_labels(spec), "app.kubernetes.io/name": CATALOGUE_BUILD_APP_LABEL,
+              JOB_KIND_LABEL: JOB_KIND_CATALOGUE_BUILD}
+    pod = {
+        **_dedicated_placement(spec),
+        "restartPolicy": "Never",
+        "automountServiceAccountToken": False,
+        "securityContext": _pod_security_context(),
+        "affinity": {"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [{
+            "labelSelector": {"matchLabels": {"statefulset.kubernetes.io/pod-name": "cell-0"}},
+            "topologyKey": "kubernetes.io/hostname",
+        }]}},
+        "containers": [{
+            "name": JOB_KIND_CATALOGUE_BUILD,
+            "image": spec.image,
+            "imagePullPolicy": "IfNotPresent",
+            "command": _cell_command(["python", "-m", "exomem.catalogue_prewarm", "--vault", CELL_VAULT_PATH], scratch=False),
+            "env": [{"name": "TMPDIR", "value": "/data/scratch/tmp"}],
+            "securityContext": _container_security_context(),
+            "resources": {
+                "requests": {"cpu": resources.cpu_request, "memory": resources.memory_request},
+                "limits": {"cpu": resources.cpu_limit, "memory": resources.memory_limit},
+            },
+            "volumeMounts": [{"name": "data", "mountPath": "/data", "readOnly": False},
+                             {"name": "tmp", "mountPath": "/tmp"}],
+        }],
+        "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": spec.pvc_name, "readOnly": False}},
+                    {"name": "tmp", "emptyDir": {}}],
+    }
+    return {"apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": catalogue_build_name(spec.image), "namespace": spec.namespace, "labels": labels,
+                         "annotations": {CATALOGUE_BUILD_NODE_ANNOTATION: node}},
+            "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline_seconds,
+                     "template": {"metadata": {"labels": labels}, "spec": pod}}}
 
 
 def render_backup_job(
@@ -1497,7 +1607,8 @@ def render_backup_job(
         *([media_manifest_command()] if collects else []),
         "restic snapshots || restic init",
         # Without --host restic records the Job pod's random hostname.
-        f"restic backup --json --host {shlex.quote(spec.cell_id)} {' '.join(backed_up)} "
+        f"restic backup --json --host {shlex.quote(spec.cell_id)}"
+        f"{''.join(' --exclude ' + shlex.quote(pattern) for pattern in CATALOGUE_BACKUP_EXCLUDES)} {' '.join(backed_up)} "
         "> /tmp/backup.json || exit 1",
         (
             "SNAPSHOT_ID=$(grep -o '\"snapshot_id\":\"[a-f0-9]\\{64\\}\"' /tmp/backup.json "
@@ -1583,6 +1694,104 @@ def render_restore_job(
                 "spec": _job_pod_spec(
                     spec, job_kind=JOB_KIND_RESTORE, command=commands, data_read_only=False, repo=repo
                 ),
+            },
+        },
+    }
+
+
+def render_clone_restore_job(spec: CellManifestSpec, *, snapshot_claim: str) -> dict:
+    """automate-cloud-releases D6: restore from the attempt's own clone instead
+    of restic. The Job mounts the clone read-only at /snapshot beside the
+    cell's read-write volume at /data, then replaces the two backup paths
+    wholesale: files the target created under them go with the directories,
+    and the volume root -- including lost+found -- is never touched. It runs
+    as the runtime UID on the cell's node, which both claims pin it to. It
+    shares the restic restore's Job name and labels, so one restore hold
+    still has one Job and one observation."""
+
+    commands = [
+        *[f"test -d /snapshot/{path.rsplit('/', 1)[-1]}" for path in BACKUP_PATHS],
+        # Empty each backed-up path and refill it from the clone: the
+        # directories themselves stay, so the runtime UID needs write
+        # permission under them, not on the volume root. Files the target
+        # created under them still go; the root, including lost+found, is
+        # never touched.
+        *[f"find {path} -mindepth 1 -delete" for path in BACKUP_PATHS],
+        *[f"cp -a /snapshot/{path.rsplit('/', 1)[-1]}/. {path}/" for path in BACKUP_PATHS],
+    ]
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": _job_name_for_hold(spec, RESTORE_JOB_NAME),
+            "namespace": spec.namespace,
+            "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTORE},
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": 900,
+            "ttlSecondsAfterFinished": 300,
+            "template": {
+                "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTORE}},
+                "spec": _job_pod_spec(
+                    spec, job_kind=JOB_KIND_RESTORE, command=commands, data_read_only=False, repo="",
+                    snapshot_claim=snapshot_claim, scratch_dirs=False
+                ),
+            },
+        },
+    }
+
+
+def render_prepare_job(spec: CellManifestSpec, *, node: str, image: str) -> dict:
+    """automate-cloud-releases D9: one pull-only Job per node per target image,
+    started before the node's first upgrade window so the node's first attempt
+    finds the image already pulled. It runs `true` under the target image on
+    that node alone, holds no volume, finishes at once, and its TTL removes it.
+    The name derives from node and image, so re-applying it is a no-op and a
+    new target renders a new Job."""
+
+    name = "cell-prepare-" + hashlib.sha256(f"{node}|{image}".encode()).hexdigest()[:16]
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": name,
+            "namespace": spec.namespace,
+            "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_PREPARE},
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": 900,
+            # Outlasts every window hour plus a day: while the Job exists a
+            # re-apply is a no-op, so one Job really is one per node per
+            # target, not one per pass after a short TTL removes it.
+            "ttlSecondsAfterFinished": 93600,
+            "template": {
+                "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_PREPARE}},
+                "spec": {
+                    "nodeName": node,
+                    "restartPolicy": "Never",
+                    "automountServiceAccountToken": False,
+                    "securityContext": _pod_security_context(),
+                    "containers": [
+                        {
+                            "name": JOB_KIND_PREPARE,
+                            "image": image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "command": ["true"],
+                            "resources": {
+                                "requests": {"cpu": "10m", "memory": "16Mi"},
+                                "limits": {"cpu": "100m", "memory": "64Mi"},
+                            },
+                            "securityContext": {
+                                "runAsNonRoot": True,
+                                "runAsUser": RUNTIME_UID,
+                                "runAsGroup": RUNTIME_GID,
+                                **_container_security_context(),
+                            },
+                        }
+                    ],
+                },
             },
         },
     }

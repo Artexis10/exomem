@@ -51,10 +51,20 @@ import zlib
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any, Never
 
-from .. import __version__, archive_members, auth_sessions, item_keys, records, vault, writer_lease
+from .. import (
+    __version__,
+    archive_members,
+    auth_sessions,
+    item_keys,
+    mutation_lock,
+    records,
+    vault,
+    writer_lease,
+)
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
@@ -83,7 +93,13 @@ MAX_ROW_BYTES = 1 << 20
 MAX_DEPTH = 32
 MAX_BATCH_ROWS = 500
 MAX_BATCH_BYTES = 4 << 20
+# The time a store batch may spend reading its source rows on the store thread before it closes and
+# takes the vault boundary, so a process that reads rows slowly commits smaller batches. It does not
+# bound the hold itself, which the batch's row and byte limits size (design Decision 6).
+BATCH_SECONDS = 0.25
 PREVIEW_ROWS = 100
+# Preview runs on the store thread, where every store write and status call waits behind it.
+PREVIEW_HOLD_SECONDS = 1.0
 JOB_WINDOW_SECONDS = 3600
 # A job paused because the session store was unreadable retries after this many seconds, doubling per
 # consecutive failure up to the cap: each retry can wait out the store's own timeout.
@@ -201,14 +217,36 @@ def contract() -> dict[str, Any]:
             "member_row, counts consumed bytes in whole members, and reports members read and "
             "skipped"
         ),
+        "activity": (
+            "status reports what this service saw of a running job's batches since it began timing them "
+            "(since); it is never stored, so every value is null after a restart and once the job stops. "
+            "phase is reading (authority and source rows, outside the write boundary), waiting (for the "
+            "boundary) or writing (holding it), null between batches; batch is the running batch. "
+            "timings_ms sums read, wait and hold over the timed batches; last_batch and longest_hold give one "
+            "batch's rows, read_ms, wait_ms and hold_ms. rows_per_second and eta_seconds, from the source "
+            "bytes read per second, need two timed batches. resumable says a continuation resumes the job, "
+            "cancellable that cancel ends it"
+        ),
         "identity": (
-            "rows sharing a natural key: the last valid occurrence wins whatever the batching; "
-            "status counts the superseded ones as duplicates"
+            "rows sharing a natural key: the last valid occurrence wins whatever the batching, and status "
+            "counts each earlier one as collapsed_in_source. A row that restates a row stored before the "
+            "job is counted again as restated_existing, within updated or unchanged; duplicates is the sum. "
+            "A batch that commits rows puts its counts in its receipt as import_batch; uncommitted holds the "
+            "counts of batches that committed none, so the totals equal the receipts plus uncommitted. "
+            "uncommitted is null on a derived collection, which writes no batch receipts, and for a job "
+            "recorded by an earlier release"
         ),
         "preview": (
-            f"owner-only; reads up to {PREVIEW_ROWS} rows and writes nothing: fields, nested shape, time "
+            f"owner-only; writes nothing. The first {PREVIEW_ROWS} rows give the fields, nested shape, time "
             "fields, how the sampled rows' times resolved (instant, local or day), flagged rows, mapping "
-            "findings, row identity and recommended_declarations"
+            "findings, row identity and recommended_declarations. With a valid mapping, every row then goes "
+            "through the job's own mapping, validation and identity rule, as if on_invalid were skip: "
+            "rows_total, would_insert, would_match_stored (null on a derived collection), would_reject by "
+            "code with its first coordinates, and would_collapse with sample keys. coverage is full when "
+            "every row was read and sampled when the mapping is not valid. It is partial when a row stopped "
+            f"the read, or when the read reached the {PREVIEW_HOLD_SECONDS:g} s preview budget between rows; "
+            "survey then gives rows_read and the counts so far as partial_counts. Only full carries the "
+            "source's counts"
         ),
         "states": {
             "running": (
@@ -1104,6 +1142,10 @@ class _Streams:
     def after(self, row: Row) -> dict[str, Any]:
         return row.after
 
+    def at_end(self) -> bool:
+        """Whether no row follows; it reads the next row to find out, so call it last."""
+        return self.next() is None
+
     def next(self) -> Row | None:
         while self.member < len(self.streams):
             stream = self.streams[self.member]
@@ -1972,7 +2014,8 @@ _GAP = "TIME_LOCAL_GAP"
 
 
 def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold | None, *,
-                limit: int | None = None) -> Batch:
+                limit: int | None = None, deadline: float | None = None) -> Batch:
+    """The next batch of rows; a ``deadline`` (``time.monotonic``) also closes it, after at least one row."""
     limit = MAX_BATCH_ROWS if limit is None else limit
     begin = reader.position()["byte"] if not pending else pending[0].start
     rows: list[tuple[Row, dict[str, Any]]] = []
@@ -1980,7 +2023,9 @@ def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold 
     checkpoint = reader.position() if not pending else None
     eof = ended = False
     spent = 0
-    while len(rows) + len(rejections) < limit:
+    while len(rows) + len(rejections) < limit and (
+        deadline is None or not (rows or rejections) or time.monotonic() < deadline
+    ):
         row = pending.pop() if pending else reader.next()
         if row is None or row is _MEMBER_END:
             eof, ended = row is None, True
@@ -2081,10 +2126,25 @@ def _load(conn, job_id: str) -> _Job | None:
         row[3],
         row[4],
         json.loads(row[5]),
-        json.loads(row[6]),
+        _current_progress(conn, row[1], json.loads(row[6])),
         row[7],
         row[8],
     )
+
+
+def _current_progress(conn, collection_id: str, progress: dict[str, Any]) -> dict[str, Any]:
+    """A job recorded by an earlier release, in the counters this release keeps.
+
+    Its ``duplicates`` are ``collapsed_in_source``. A store job left a row that restated an earlier-stored
+    row in ``updated`` or ``unchanged``, so their sum is ``restated_existing``; a derived job counts none,
+    as it still does. It tallied no batch that committed nothing, so ``uncommitted`` is unknown.
+    Job rows are kept, so this stays until a store migration rewrites their progress.
+    """
+    if "uncommitted" in progress:
+        return progress
+    restated = 0 if derived_rows.is_derived(conn, collection_id) else progress["updated"] + progress["unchanged"]
+    return {**progress, "collapsed_in_source": progress["duplicates"], "restated_existing": restated,
+            "duplicates": progress["duplicates"] + restated, "uncommitted": None}
 
 
 def _bound_principal(who: principal_module.RequestPrincipal) -> dict[str, Any]:
@@ -2218,11 +2278,16 @@ def _deadline_passed(job: _Job) -> bool:
 
 
 def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
-    progress, checkpoint = job.progress, job.checkpoint
-    if job.state == "running" and derived_rows.is_derived(writer.connection, job.collection_id):
-        record = derived_rows.open_store(writer).progress(job.collection_id)
-        if record is not None and record["job"] == job.id:
-            progress = _with_member(progress, record["counts"])
+    progress, checkpoint, warnings = job.progress, job.checkpoint, {}
+    derived = derived_rows.is_derived(writer.connection, job.collection_id)
+    if job.state == "running" and derived:
+        try:
+            record = derived_rows.member_progress(writer, job.collection_id)
+        except derived_rows.ProgressUnknown as unknown:
+            progress, warnings = _with_member(progress, None), {"warnings": [str(unknown)]}
+        else:
+            if record is not None and record["job"] == job.id:
+                progress = _with_member(progress, record["counts"])
     rejections = [
         {"row": ordinal, "byte": offset, "code": code, "at": at}
         for ordinal, offset, code, at in writer.connection.execute(
@@ -2257,6 +2322,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     if "members" in bound:
         exported["members"] = {"selected": len(bound["members"]["sha256"]), **progress["members"]}
     message = _message(state, reason, deadline)
+    total = bound["members"]["bytes"] if "members" in bound else bound["bytes"]
     if deadline:
         limit = {"expires_at": _iso(deadline[0])}
     elif state == "running":
@@ -2278,6 +2344,8 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
             "imported": progress["imported"],
             "rejected": progress["rejected"],
             "duplicates": progress["duplicates"],
+            "collapsed_in_source": progress["collapsed_in_source"],
+            "restated_existing": progress["restated_existing"],
             "remaining": 0 if state == "complete" else None,
             "inserted": progress["inserted"],
             "updated": progress["updated"],
@@ -2285,9 +2353,10 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         },
         "source_bytes": {
             "consumed": checkpoint["byte"],
-            "total": bound["members"]["bytes"] if "members" in bound else bound["bytes"],
+            "total": total,
         },
         "batches": progress["batches"],
+        "uncommitted": None if derived else progress["uncommitted"],
         "window": {
             "started_at": _iso(job.window_started),
             **limit,
@@ -2296,6 +2365,10 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "last_receipt": progress["last_receipt"],
         "rejections": rejections,
         "error": error,
+        "activity": _activity(writer, job, checkpoint["byte"], total),
+        "resumable": state == "partial" and reason in _RESUMABLE,
+        "cancellable": job.state == "running" or (job.state == "partial" and job.reason in _RESUMABLE),
+        **warnings,
         **_reference_report(writer, job, state),
     }
 
@@ -2321,6 +2394,9 @@ def _reference_report(writer, job: _Job, state: str) -> dict:
 def _snapshot(writer):
     """One read transaction for fresh authority checks outside a mutation."""
     writer.handle.release_cache.check()
+    if writer.connection.in_transaction:  # a read beside the store thread already holds one (``read_beside``)
+        yield writer.connection
+        return
     writer.connection.execute("BEGIN")
     try:
         yield writer.connection
@@ -2518,6 +2594,32 @@ class _PreparedRow:
     token: bytes | None
 
 
+# A rejection whose first issue names no field, such as a key conflict or a missing source, refuses the whole row.
+_WHOLE_ROW = "item"
+
+
+def _rejected_at(outcome: Mapping[str, Any]) -> str:
+    """The field path a rejected row's first validation issue names, as preview reports it, else the whole row."""
+    issues = outcome.get("fields")
+    first = issues[0] if isinstance(issues, list) and issues else None
+    field = first.get("field") if isinstance(first, Mapping) else None
+    return field if isinstance(field, str) and field else _WHOLE_ROW
+
+
+def _identify(
+    manifest, values: Mapping[str, Any], source_ref: str
+) -> tuple[str | None, dict[str, Any] | None, tuple[str, str, dict[str, Any]] | None]:
+    """One mapped row's natural key and stored values by the writer's own rule, or its refusal data.
+
+    A batch and the whole-source preview both prepare rows here, so they cannot disagree.
+    """
+    try:
+        stored = records._bulk_row_values(manifest, values, source_ref)
+        return collections.derived_item_key(manifest, stored), stored, None
+    except collections.CollectionError as error:
+        return None, None, (error.code, error.reason, error.details)
+
+
 def _collapse(
     rows: list[tuple[Row, dict[str, Any]]], manifest, source_ref: str, *, logged: bool = False
 ) -> tuple[list[tuple[Row, dict[str, Any]]], int, list[_PreparedRow]]:
@@ -2530,14 +2632,10 @@ def _collapse(
     """
     if not (manifest.schema.natural_key or logged):
         return rows, 0, []
-    prepared: list[_PreparedRow] = []
-    for _, values in rows:
-        token = _preparation_token(values)
-        try:
-            stored = records._bulk_row_values(manifest, values, source_ref)
-            prepared.append(_PreparedRow(collections.derived_item_key(manifest, stored), stored, None, token))
-        except collections.CollectionError as error:
-            prepared.append(_PreparedRow(None, None, (error.code, error.reason, error.details), token))
+    prepared = [
+        _PreparedRow(*_identify(manifest, values, source_ref), _preparation_token(values))
+        for _, values in rows
+    ]
     if not manifest.schema.natural_key:
         return rows, 0, prepared
     last = {row.key: index for index, row in enumerate(prepared) if row.key is not None}
@@ -2565,6 +2663,33 @@ def _rewrote(writer, job: _Job, outcome: Mapping[str, Any]) -> bool:
     return found is not None and (found[0] or "").startswith(f"import:{job.id}:")
 
 
+#: What one batch settles each of its rows as. The receipt and the job totals carry exactly these.
+_BATCH_COUNTS = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+
+
+def _batch_tally(
+    writer, job: _Job, batch: Batch, superseded: int, result: Mapping[str, Any] | None
+) -> dict[str, int]:
+    """Settle each row of one batch once, so the counts do not depend on where batches end.
+
+    A row superseded within the batch, or one that re-states what this job stored in an earlier batch,
+    is ``collapsed_in_source``: the source gave its key twice. A row that restates a row stored before
+    the job is ``updated`` or ``unchanged`` as the writer decided, and also ``restated_existing``.
+    ``duplicates`` is the sum of the two causes.
+    """
+    tally = dict.fromkeys(_BATCH_COUNTS, 0)
+    tally["rejected"], tally["collapsed_in_source"] = len(batch.rejections), superseded
+    for outcome in (result or {}).get("rows", ()):
+        if outcome["outcome"] == "rejected":
+            tally["rejected"] += 1
+        elif _rewrote(writer, job, outcome):
+            tally["collapsed_in_source"] += 1
+        else:
+            tally[outcome["outcome"]] += 1
+            tally["restated_existing"] += outcome["outcome"] != "inserted"
+    return tally
+
+
 def _record(
     writer,
     job: _Job,
@@ -2576,14 +2701,15 @@ def _record(
     fail: tuple[Row, str, str] | None = None,
     prepared: list[_PreparedRow] = (),
     version: int = 0,
+    tally: Mapping[str, int] | None = None,
 ) -> None:
     """Advance the checkpoint, counters and rejections inside the batch transaction.
 
-    A row superseded in this batch, or re-stating what this job wrote in an
-    earlier one, counts once as a duplicate, so the counts do not depend on where
-    batches end. ``batches`` counts settlements that committed rows. ``prepared``
-    is ``_collapse``'s identity of each batch row and ``version`` the collection's
-    schema version, from which an export member's import log hashes its rows.
+    The counters add the batch's ``tally`` (``_batch_tally``), the same counts its receipt
+    carries. A batch that committed no row writes no receipt, so its tally is added to
+    ``uncommitted`` too, and the totals equal the receipts plus ``uncommitted``. ``batches`` counts
+    settlements that committed rows. ``prepared`` is ``_collapse``'s identity of each batch row and ``version``
+    the collection's schema version, from which an export member's import log hashes its rows.
     """
     progress = dict(job.progress)
     sequence = job.checkpoint["batch"]
@@ -2594,17 +2720,13 @@ def _record(
         state, reason = "failed", "invalid_row"
     else:
         rejections = list(batch.rejections)
-        counts = {"inserted": 0, "updated": 0, "unchanged": 0}
-        duplicates = superseded
         for outcome in (result or {}).get("rows", ()):
             if outcome["outcome"] == "rejected":
                 rejections.append(
-                    (kept[outcome["index"]][0], outcome.get("code", "IMPORT_ROW_REJECTED"), "item")
+                    (kept[outcome["index"]][0], outcome.get("code", "IMPORT_ROW_REJECTED"), _rejected_at(outcome))
                 )
-            elif _rewrote(writer, job, outcome):
-                duplicates += 1
-            else:
-                counts[outcome["outcome"]] += 1
+        if tally is None:
+            tally = _batch_tally(writer, job, batch, superseded, result)
         if result is not None and result.get("committed"):
             progress["last_receipt"] = {
                 "batch": sequence,
@@ -2612,11 +2734,12 @@ def _record(
                 "transition_id": result["first_transition"],
             }
             progress["batches"] += 1
-        for name, value in counts.items():
-            progress[name] += value
-        progress["imported"] += sum(counts.values())
-        progress["rejected"] += len(rejections)
-        progress["duplicates"] += duplicates
+        elif progress["uncommitted"] is not None:
+            progress["uncommitted"] = {name: progress["uncommitted"][name] + tally[name] for name in _BATCH_COUNTS}
+        for name in _BATCH_COUNTS:
+            progress[name] += tally[name]
+        progress["imported"] += tally["inserted"] + tally["updated"] + tally["unchanged"]
+        progress["duplicates"] += tally["collapsed_in_source"] + tally["restated_existing"]
         logged = _logged(batch, kept, result, prepared, version) if "members" in job.binding["source"] else []
         tally = _members(writer, job, batch, progress, logged)
         writer._execute(
@@ -2792,7 +2915,8 @@ def _control(
     never the source, its path or a row value.
     """
     progress, checkpoint = progress or job.progress, checkpoint or job.checkpoint
-    counts = {name: progress[name] for name in ("imported", "rejected", "duplicates", "batches")}
+    counts = {name: progress[name] for name in (
+        "imported", "rejected", "duplicates", "collapsed_in_source", "restated_existing", "batches")}
     writer.record_control_transition(
         operation,
         {
@@ -2832,6 +2956,7 @@ class _Settlement:
         self.source = (proof.ref, proof.guard)
         self.guards = guards
         self.prepared, self.version = prepared, version
+        self.tally: dict[str, int] | None = None
         self._manifest = (manifest.collection_id, manifest.manifest_version.path, manifest.manifest_version.hash)
         self._source = self.source
         positions = {id(row): index for index, (row, _) in enumerate(batch.rows)}
@@ -2853,6 +2978,11 @@ class _Settlement:
             raise collections.CollectionError(*prepared.refusal)
         return prepared.stored
 
+    def receipt(self, writer, result: dict[str, Any]) -> None:
+        """Put the batch's tally in the receipt the writer is about to store."""
+        self.tally = result["import_batch"] = _batch_tally(
+            writer, self.job, self.batch, self.superseded, result)
+
     def __call__(self, writer, result: Mapping[str, Any]) -> None:
         _authorize(writer, self.job, prove=False)
         _recheck(writer, self.guards)
@@ -2864,7 +2994,7 @@ class _Settlement:
                 writer,
                 self.job,
                 self.batch,
-                fail=(row, first.get("code", "IMPORT_ROW_REJECTED"), "item"),
+                fail=(row, first.get("code", "IMPORT_ROW_REJECTED"), _rejected_at(first)),
             )
         else:
             _record(
@@ -2876,6 +3006,7 @@ class _Settlement:
                 result=result,
                 prepared=self.prepared,
                 version=self.version,
+                tally=self.tally,
             )
 
 
@@ -2903,6 +3034,7 @@ def _settle_alone(root: Path, writer, job: _Job, batch: Batch, guards, **settled
     """Record a batch that writes no rows: a stop fails the job, otherwise its checkpoint advances."""
 
     def settle_alone():
+        _phase(writer, job, "writing")
         _authorize(writer, job, prove=False)
         _recheck(writer, guards)
         if batch.stop is not None:
@@ -2926,9 +3058,10 @@ def _backing_off(writer, job_id: str) -> bool:
 
 
 def _forget(writer, job_id: str) -> None:
-    """Drop a job's host-local proof, open reader and store block once it stops running."""
+    """Drop a job's host-local proof, open reader, store block and activity once it stops running."""
     _proofs(writer).pop(job_id, None)
     _unblock(writer, job_id)
+    writer.handle.import_telemetry.pop(job_id, None)
     reader = writer.handle.import_readers.pop(job_id, None)
     if reader is not None:
         reader.close()
@@ -3005,6 +3138,145 @@ def _authorized_now(writer, job: _Job) -> bool:
         return False
 
 
+@dataclass(frozen=True, slots=True)
+class _Activity:
+    """What this host saw of one running job's batches since it first ran one here; never stored.
+
+    The store thread replaces a job's whole value at each phase (``WriterConnection.import_telemetry``),
+    so status, which reads it off that thread, sees one consistent value. A restarted host starts afresh.
+    Times are ``time.monotonic`` seconds; durations are milliseconds.
+    """
+
+    since: int  # when this host began timing the job, in Unix seconds
+    # The running batch's number, None between batches: a store import's checkpoint sequence, which its
+    # request id and receipt name; a derived import's count of the batches staged before it (``_derived_batch``).
+    batch: int | None = None
+    phase: str | None = None  # reading (authority and source rows), waiting (for the boundary) or writing
+    phase_began: float = 0.0
+    began: float = 0.0  # when the running batch began
+    read_ms: float | None = None  # the running batch's reading, once it waits for the boundary
+    timed: int = 0  # batches timed to their end
+    rows: int = 0  # source rows the timed batches consumed, rejected rows included
+    source_bytes: int = 0
+    # Read, boundary wait and hold, summed; a wait or hold sum is None once any timed batch's is unknown.
+    spent_ms: tuple[float, float | None, float | None] = (0.0, 0.0, 0.0)
+    first_began: float = 0.0
+    last_ended: float = 0.0
+    # (batch, rows, read, wait, hold) of the last timed batch and of the one with the longest hold.
+    last: tuple[int, int, float, float | None, float | None] | None = None
+    longest: tuple[int, int, float, float | None, float | None] | None = None
+
+
+def _phase(writer, job: _Job, phase: str) -> None:
+    """Put the job's running batch in ``phase``; reading begins a batch."""
+    now = time.monotonic()
+    telemetry = writer.handle.import_telemetry
+    current = telemetry.get(job.id) or _Activity(since=_now())
+    if phase == "reading":
+        current = dataclasses.replace(current, batch=job.checkpoint["batch"], began=now, read_ms=None)
+    elif phase == "waiting":
+        current = dataclasses.replace(current, read_ms=(now - current.began) * 1000)
+    telemetry[job.id] = dataclasses.replace(current, phase=phase, phase_began=now)
+
+
+def _holding(writer, job: _Job, method):
+    """``method``, run under the vault boundary, first putting the job's batch in its writing phase."""
+
+    @wraps(method)
+    def held(*args, **kwargs):
+        _phase(writer, job, "writing")
+        return method(*args, **kwargs)
+
+    return held
+
+
+def _timed(writer, job_id: str, batch: Batch, before, after) -> None:
+    """Fold a batch that ran to its end into the job's activity, with its last hold of the vault boundary.
+
+    ``before`` and ``after`` are this thread's latest boundary timing around the batch: the same
+    value means the batch completed no hold, so its wait and hold are unknown.
+    """
+    telemetry = writer.handle.import_telemetry
+    current = telemetry.get(job_id)
+    if current is None or current.phase is None:
+        return
+    now = time.monotonic()
+    wait, hold = (None, None) if after is None or after is before else (after["wait_ms"], after["hold_ms"])
+    read = current.read_ms if current.read_ms is not None else (now - current.began) * 1000
+    entry = (current.batch, len(batch.rows) + len(batch.rejections), read, wait, hold)
+    longest = current.longest
+    if hold is not None and (longest is None or longest[4] is None or hold > longest[4]):
+        longest = entry
+    spent = current.spent_ms
+    telemetry[job_id] = dataclasses.replace(
+        current, batch=None, phase=None, phase_began=now, read_ms=None, timed=current.timed + 1,
+        rows=current.rows + entry[1], source_bytes=current.source_bytes + batch.source_bytes,
+        spent_ms=(spent[0] + read, _sum(spent[1], wait), _sum(spent[2], hold)),
+        first_began=current.first_began if current.timed else current.began, last_ended=now,
+        last=entry, longest=longest,
+    )
+
+
+def _sum(total: float | None, value: float | None) -> float | None:
+    return None if total is None or value is None else total + value
+
+
+def _renumber(writer, job_id: str, batch: int) -> None:
+    """Name the job's running batch ``batch``, once the batch knows its number."""
+    telemetry = writer.handle.import_telemetry
+    current = telemetry.get(job_id)
+    if current is not None and current.phase is not None:
+        telemetry[job_id] = dataclasses.replace(current, batch=batch)
+
+
+def _between(writer, job_id: str) -> None:
+    """End the job's running batch, timed or not, as one that raised or lost its authority ends."""
+    telemetry = writer.handle.import_telemetry
+    current = telemetry.get(job_id)
+    if current is not None and current.phase is not None:
+        telemetry[job_id] = dataclasses.replace(current, batch=None, phase=None, phase_began=time.monotonic(),
+                                                read_ms=None)
+
+
+def _activity(writer, job: _Job, consumed: int, total: int) -> dict[str, Any]:
+    """Status's view of the job's activity on this host: every value null where this host timed nothing."""
+    current = writer.handle.import_telemetry.get(job.id)
+    view = _view(current or _Activity(since=0), consumed, total)
+    return view if current is not None else dict.fromkeys(view)
+
+
+def _view(current: _Activity, consumed: int, total: int) -> dict[str, Any]:
+    # One batch's own rate leaves out the gap before the next batch, so a rate needs two.
+    span = current.last_ended - current.first_began if current.timed >= 2 else 0.0
+    rate = current.rows / span if span > 0 else None
+    pace = current.source_bytes / span if span > 0 else 0.0
+    return {
+        "since": _iso(current.since),
+        "phase": current.phase,
+        "phase_ms": None if current.phase is None else round((time.monotonic() - current.phase_began) * 1000),
+        "batch": current.batch,
+        "timed_batches": current.timed,
+        "timings_ms": dict(zip(("read", "wait", "hold"), (_ms(ms) for ms in current.spent_ms), strict=True))
+        if current.timed else None,
+        "last_batch": _timed_batch(current.last),
+        "longest_hold": _timed_batch(current.longest),
+        "rows_per_second": None if rate is None else round(rate, 1),
+        # Rounded up, so a job with bytes left never reads as done.
+        "eta_seconds": math.ceil(max(total - consumed, 0) / pace * 10) / 10 if pace > 0 else None,
+    }
+
+
+def _timed_batch(entry) -> dict[str, Any] | None:
+    if entry is None:
+        return None
+    sequence, rows, read, wait, hold = entry
+    return {"batch": sequence, "rows": rows, "read_ms": round(read), "wait_ms": _ms(wait), "hold_ms": _ms(hold)}
+
+
+def _ms(value: float | None) -> int | None:
+    return None if value is None else round(value)
+
+
 def _step(root: Path, writer, job_id: str) -> str:
     """Run one batch of one job under its bound principal, or pause it honestly.
 
@@ -3016,7 +3288,10 @@ def _step(root: Path, writer, job_id: str) -> str:
     if _deadline_passed(job):
         return _pause(root, writer, job, "time_cap")
     with principal_module.request_scope(job.principal()):
-        outcome = _batch(root, writer, job)
+        try:
+            outcome = _batch(root, writer, job)
+        finally:
+            _between(writer, job.id)
     if outcome == "authority_lost":
         # An expired authorization session is the only deadline that also fails a batch's grant
         # check; a run window that closed mid-batch keeps the reason at the authority actually lost.
@@ -3040,6 +3315,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
     """One batch as the bound principal: ``batch``, ``paused`` (a stop) or ``authority_lost``."""
     from .preview import _mutate
 
+    _phase(writer, job, "reading")
     try:
         with _snapshot(writer) as conn:
             proof = _authorize(writer, job, prove=True)
@@ -3056,26 +3332,32 @@ def _batch(root: Path, writer, job: _Job) -> str:
         guards = []
         if _streamed(job.binding):
             reader = _live(writer, job, proof, plan)
-            batch = _next_batch(reader, plan, reader.pending, order)
+            batch = _next_batch(reader, plan, reader.pending, order, deadline=time.monotonic() + BATCH_SECONDS)
             batch.members = reader.taken(batch.checkpoint)
             reader.marked = _cursor(batch.checkpoint)
             guards = reader.guards()
         else:
             with _open_source(proof) as handle:
-                batch = _next_batch(_Reader(handle, fmt, job.checkpoint), plan, [], order)
+                reader = _Reader(handle, fmt, job.checkpoint)
+                batch = _next_batch(reader, plan, [], order, deadline=time.monotonic() + BATCH_SECONDS)
     except (_Lost, OSError, vault.PathGuardError):
         return "authority_lost"
     sequence = job.checkpoint["batch"]
     logged = "members" in job.binding["source"]  # an export member's log hashes every row
     kept, superseded, prepared = _collapse(batch.rows, manifest, proof.ref, logged=logged)
     version = manifest.schema.version
+    boundary = writer_lease.active_manager()._mutation_coordinator_for(root)
+    held = mutation_lock.last_mutation_timing(boundary)
+    _phase(writer, job, "waiting")
     try:
         if batch.stop is not None or not kept:
-            return _settle_alone(root, writer, job, batch, guards, superseded=superseded, prepared=prepared,
-                                 version=version)
+            outcome = _settle_alone(root, writer, job, batch, guards, superseded=superseded, prepared=prepared,
+                                    version=version)
+            _timed(writer, job.id, batch, held, mutation_lock.last_mutation_timing(boundary))
+            return outcome
         _mutate(
             root,
-            writer.bulk_upsert_records,
+            _holding(writer, job, writer.bulk_upsert_records),
             job.collection_id,
             rows=[{"item": values} for _, values in kept],
             why=f"import {job.id[:12]} batch {sequence}",
@@ -3085,6 +3367,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
             request_id=f"import:{job.id}:{sequence}",
             _import=_Settlement(job, batch, kept, superseded, plan, proof, guards, prepared, version, manifest=manifest),
         )
+        _timed(writer, job.id, batch, held, mutation_lock.last_mutation_timing(boundary))
         return "batch"
     except _Lost:
         return "authority_lost"
@@ -3113,8 +3396,12 @@ def _derived_items(
         preparation = prepared[position[id(row)]]
         key, stored = preparation.key, preparation.stored
         if stored is None:
-            code = preparation.refusal[0] if preparation.refusal is not None else "IMPORT_ROW_REJECTED"
-            refused.append({"index": index, "outcome": "rejected", "code": code})
+            refusal = preparation.refusal
+            code = refusal[0] if refusal is not None else "IMPORT_ROW_REJECTED"
+            issues = refusal[2].get("issues") if refusal is not None and isinstance(refusal[2], Mapping) else None
+            # The same shape as the writer's rejected outcome, so ``_rejected_at`` reads both.
+            refused.append({"index": index, "outcome": "rejected", "code": code,
+                            **({"fields": issues} if isinstance(issues, list) else {})})
             continue
         if key is None:
             at = row.after
@@ -3143,20 +3430,28 @@ def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: li
     outcomes = derived_rows.apply(conn, goal, items, scope=scope, undo=undo)
     entries = _logged(batch, kept, {"rows": [*outcomes, *refused]}, prepared, manifest.schema.version)
     rejections = [(row.ordinal, row.start, code, at) for row, code, at in batch.rejections] + [
-        (kept[outcome["index"]][0].ordinal, kept[outcome["index"]][0].start, outcome["code"], "item")
+        (kept[outcome["index"]][0].ordinal, kept[outcome["index"]][0].start, outcome["code"], _rejected_at(outcome))
         for outcome in refused
     ]
     return _Applied(outcomes, entries, rejections, superseded)
 
 
-def _with_member(progress: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
-    """A job's counters with a derived member's batches, which reach the job row only at the member's end."""
+def _with_member(progress: dict[str, Any], counts: dict[str, int] | None) -> dict[str, Any]:
+    """A job's counters with a derived member's batches, which reach the job row only at the member's end.
+
+    ``counts`` None is an open member whose progress status could not read: each counter it adds to is unknown.
+    """
+
+    def plus(total: int, *names: str) -> int | None:
+        return None if counts is None else total + sum(counts[name] for name in names)
+
     folded = dict(progress)
     for name in ("inserted", "updated", "unchanged", "rejected", "duplicates", "batches"):
-        folded[name] += counts[name]
-    folded["imported"] += counts["inserted"] + counts["updated"] + counts["unchanged"]
-    folded["members"] = {"read": progress["members"]["read"] + counts["read"],
-                         "skipped": progress["members"]["skipped"] + counts["skipped"]}
+        folded[name] = plus(folded[name], name)
+    # A derived member counts the rows it supersedes within a batch.
+    folded["collapsed_in_source"] = plus(folded["collapsed_in_source"], "duplicates")
+    folded["imported"] = plus(folded["imported"], "inserted", "updated", "unchanged")
+    folded["members"] = {name: plus(progress["members"][name], name) for name in ("read", "skipped")}
     return folded
 
 
@@ -3193,6 +3488,8 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
     record = store.progress(cid)
     if record is not None and record["job"] != job.id:
         return "deferred"
+    # The checkpoint sequence advances once per member, so batches are numbered as ``batches`` counts them.
+    _renumber(writer, job.id, job.progress["batches"] + (0 if record is None else record["counts"]["batches"]))
     if record is not None and record["done"]:
         return _settle_member(root, writer, job, manifest, store, goal, record, [])
     current = job if record is None else dataclasses.replace(
@@ -3219,6 +3516,7 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
     shas = job.binding["source"]["members"]["sha256"]
 
     def work(conn):
+        _phase(writer, job, "writing")
         undo = None if "row_floor" not in record else derived_rows.Undo(record["row_floor"])
         started = time.perf_counter()
         applied = _derived_apply(conn, goal, batch, manifest, proof.ref, shas, scope=store.write_scope, undo=undo)
@@ -3239,10 +3537,16 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
                 "eof": batch.eof, "checkpoint": batch.checkpoint}
         return done, applied.rejections
 
+    boundary = writer_lease.active_manager()._mutation_coordinator_for(root)
+    held = mutation_lock.last_mutation_timing(boundary)
+    _phase(writer, job, "waiting")
     record = store.stage(cid, job.id, work)
     if not record["done"]:
+        _timed(writer, job.id, batch, held, mutation_lock.last_mutation_timing(boundary))
         return "staged"
-    return _settle_member(root, writer, job, manifest, store, goal, record, guards)
+    outcome = _settle_member(root, writer, job, manifest, store, goal, record, guards)
+    _timed(writer, job.id, batch, held, mutation_lock.last_mutation_timing(boundary))
+    return outcome
 
 
 def _settle_member(root: Path, writer, job: _Job, manifest, store, goal, record, guards) -> str:
@@ -3407,10 +3711,13 @@ _PROGRESS = {
     "imported": 0,
     "rejected": 0,
     "duplicates": 0,
+    "collapsed_in_source": 0,
+    "restated_existing": 0,
     "inserted": 0,
     "updated": 0,
     "unchanged": 0,
     "batches": 0,
+    "uncommitted": dict.fromkeys(_BATCH_COUNTS, 0),
     "last_receipt": None,
     "error": None,
 }
@@ -3815,6 +4122,129 @@ def _sampled(sample: _Sample, reader, order: import_time.Fold | None) -> bool:
     return True
 
 
+@contextmanager
+def _row_reader(root: Path, source: Source, members, size: int, fmt: str, rows: _Rows | None):
+    """A fresh reader over the proven source from its first row, closed on exit."""
+    if members or fmt == "json-document":
+        streams = tuple(
+            _Stream(member.sha256, member.bytes, lambda member=member: _open_member(root, member))
+            for member in members
+        ) or (_Stream(None, size, lambda: (_open_source(source), None)),)
+        reader = _Streams(streams, fmt, rows, {"row": 0, "byte": 0, "member": 0, "member_row": 0})
+        try:
+            yield reader
+        finally:
+            reader.close()
+    else:
+        with _open_source(source) as handle:
+            yield _Reader(handle, fmt, _START)
+
+
+# Why a preview counted fewer rows than the source holds.
+_UNREAD_BUDGET, _UNREAD_MAPPING = "time_budget", "no_valid_mapping"
+
+
+class _Survey:
+    """Every row of the source through a batch's own preparation, holding no row: counts, the first
+    coordinates of each rejection code, and one 8-byte digest per natural key."""
+
+    def __init__(self, writer, manifest, source_ref: str, collection_id: str) -> None:
+        self.writer, self.manifest, self.source_ref, self.collection_id = writer, manifest, source_ref, collection_id
+        self.rows = self.inserts = self.matched = self.collapsed = 0
+        self.rejects: dict[str, dict[str, Any]] = {}
+        self.sample_keys: list[dict[str, Any]] = []
+        self.digests: set[int] = set()
+        self.stopped: dict[str, Any] | None = None
+        self.out_of_time = False
+
+    def _reject(self, row: Row, code: str, at: str | None) -> None:
+        found = self.rejects.setdefault(code, {"rows": 0, "first": []})
+        found["rows"] += 1
+        if len(found["first"]) < _LISTED:
+            found["first"].append({"row": row.ordinal, "byte": row.start, "at": at or None})
+
+    def _stored(self, keys: list[str]) -> int:
+        """How many of these item keys the collection already holds, read in its own short snapshot."""
+        with self.writer.read_snapshot():
+            marks = ",".join("?" * len(keys))
+            return self.writer.connection.execute(
+                f"SELECT COUNT(*) FROM items WHERE collection_id=? AND item_key IN ({marks})",
+                (self.collection_id, *keys),
+            ).fetchone()[0]
+
+    def take(self, batch: Batch) -> None:
+        self.rows += len(batch.rows) + len(batch.rejections)
+        for row, code, at in batch.rejections:
+            self._reject(row, code, at)
+        fresh: list[str] = []
+        for row, values in batch.rows:
+            key, _, refusal = _identify(self.manifest, values, self.source_ref)
+            if refusal is not None:
+                self._reject(row, refusal[0], refusal[2].get("field") if isinstance(refusal[2], Mapping) else None)
+            elif key is None:
+                self.inserts += 1  # an incomplete natural key takes a generated identity: always new
+            else:
+                digest = int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "big")
+                if digest in self.digests:
+                    self.collapsed += 1
+                    if len(self.sample_keys) < _LISTED:
+                        self.sample_keys.append({"key": key, "row": row.ordinal, "byte": row.start})
+                else:
+                    self.digests.add(digest)
+                    fresh.append(key)
+        if self.manifest.derived:
+            self.inserts += len(fresh)
+        elif fresh:
+            matched = self._stored(fresh)
+            self.matched += matched
+            self.inserts += len(fresh) - matched
+        if batch.stop is not None:
+            row, code, at = batch.stop
+            self.rows += 1
+            self.stopped = {"row": row.ordinal, "byte": row.start, "code": code, "at": at or None}
+
+
+def _surveyed(survey: _Survey, plan: Plan, reader, deadline: float) -> None:
+    """Read the source as a job running ``on_invalid: skip`` would, writing nothing, until it ends, a row
+    stops the read, or the ``deadline`` passes between two rows."""
+    skipping = dataclasses.replace(plan, on_invalid="skip")
+    order = import_time.Fold() if plan.ordered else None
+    pending = getattr(reader, "pending", [])
+    while True:
+        batch = _next_batch(reader, skipping, pending, order, deadline=deadline)
+        survey.take(batch)
+        if batch.stop is not None or batch.eof:
+            return
+        if time.monotonic() >= deadline:
+            survey.out_of_time = True
+            return
+
+
+def _coverage(survey: _Survey | None, sampled: int, policy: str | None) -> dict[str, Any]:
+    """The preview's whole-source keys. Only a full read carries the source's counts; a read that a row or
+    the budget stopped gives its counts so far apart, as ``partial_counts``."""
+    counts = None if survey is None else {
+        "would_insert": survey.inserts,
+        "would_match_stored": None if survey.manifest.derived else survey.matched,
+        "would_reject": survey.rejects,
+        "would_collapse": {"rows": survey.collapsed, "sample_keys": survey.sample_keys},
+    }
+    full = survey is not None and survey.stopped is None and not survey.out_of_time
+    return {
+        "coverage": "full" if full else "sampled" if survey is None else "partial",
+        "rows_total": survey.rows if full else None,
+        **(counts if full else dict.fromkeys(("would_insert", "would_match_stored", "would_reject", "would_collapse"))),
+        "survey": {
+            "rows_read": sampled if survey is None else survey.rows,
+            "budget_seconds": PREVIEW_HOLD_SECONDS,
+            "on_invalid": policy,
+            "unread": _UNREAD_MAPPING if survey is None else _UNREAD_BUDGET if survey.out_of_time else None,
+            "stopped": None if survey is None else survey.stopped,
+            "partial_counts": None if full else counts,
+        },
+    }
+
+
 def _window_limit(who: principal_module.RequestPrincipal) -> dict[str, Any]:
     """The run limit a job this owner starts would carry, in status's shape (design D3).
 
@@ -3826,6 +4256,7 @@ def _window_limit(who: principal_module.RequestPrincipal) -> dict[str, Any]:
 
 
 def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
+    deadline = time.monotonic() + PREVIEW_HOLD_SECONDS
     with writer.read_snapshot():
         row, manifest, declared = writer._collection(collection, facade_profile="records")
         # Raw shape previews cannot attest to field-only disclosure; a refused recipient asks the owner to preview.
@@ -3855,24 +4286,11 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         order = import_time.Fold() if plan is not None and plan.ordered else None
         if request.format == "json-document" and rows is None:
             complete = False
-        elif members or request.format == "json-document":
-            streams = tuple(
-                _Stream(member.sha256, member.bytes, lambda member=member: _open_member(root, member))
-                for member in members
-            ) or (_Stream(None, size, lambda: (_open_source(source), None)),)
-            reader = _Streams(streams, request.format, rows, {"row": 0, "byte": 0, "member": 0, "member_row": 0})
-            try:
-                complete = _sampled(sample, reader, order) and reader.next() is None
-            except (_Lost, OSError, vault.PathGuardError):
-                _source_not_found()
-            finally:
-                reader.close()
         else:
             try:
-                with _open_source(source) as handle:
-                    reader = _Reader(handle, request.format, _START)
+                with _row_reader(root, source, members, size, request.format, rows) as reader:
                     complete = _sampled(sample, reader, order) and reader.at_end()
-            except (OSError, vault.PathGuardError):
+            except (_Lost, OSError, vault.PathGuardError):
                 _source_not_found()
         encoding = writer.connection.execute(
             "SELECT encoding FROM collections WHERE collection_id=?", (row["collection_id"],)
@@ -3881,6 +4299,15 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
             (row["collection_id"], row["manifest_version"]),
         ).fetchone()[0]
+    # The whole-source pass holds no snapshot of its own; the hold budget bounds how long it reads.
+    survey = None
+    if plan is not None:
+        survey = _Survey(writer, manifest, source.ref, row["collection_id"])
+        try:
+            with _row_reader(root, source, members, size, request.format, rows) as reader:
+                _surveyed(survey, plan, reader, deadline)
+        except (_Lost, OSError, vault.PathGuardError):
+            _source_not_found()
     produced = (
         None
         if plan is None
@@ -3919,6 +4346,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             "invalid": sample.rows - sample.valid,
             "complete": complete,
         },
+        **_coverage(survey, sample.rows, None if plan is None else plan.on_invalid),
         "fields": {path: sorted(kinds) for path, kinds in sample.paths.items()},
         "nested": sample.nested,
         "truncated": sample.truncated,

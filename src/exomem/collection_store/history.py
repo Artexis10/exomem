@@ -47,6 +47,77 @@ class PrefixProofs:
             self.collections.popitem(last=False)
 
 
+def _refuse_unbound_effects(conn, txn):
+    """Fail the first effect, in ordinal order, that does not name its immutable version and predecessor.
+
+    One statement joins every effect of the event to its version and predecessor, and returns only a
+    failure, so a sound event costs one step however many rows it wrote.
+    """
+    moved = txn["operation"] == "view_move"
+    reason = conn.execute(
+        "SELECT reason FROM (SELECT e.ordinal AS ordinal, CASE "
+        "WHEN i.row_id IS NULL OR v.row_id IS NULL OR i.collection_id IS NOT :collection "
+        "OR i.item_key IS NOT e.item_key OR v.payload_hash IS NOT e.hash_after "
+        "OR e.version_after IS NOT CASE WHEN :moved THEN e.version_before "
+        "WHEN e.version_before IS NULL THEN 1 ELSE e.version_before + 1 END "
+        "OR (NOT :moved AND v.txn_id IS NOT :txn) THEN 'effect version binding differs' "
+        "WHEN p.payload_hash IS NOT e.hash_before THEN 'effect predecessor payload differs' END AS reason "
+        "FROM audit_effects e LEFT JOIN items i ON i.row_id=e.row_id "
+        "LEFT JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
+        "LEFT JOIN version_identity p ON p.row_id=e.row_id AND p.row_version=e.version_before "
+        "WHERE e.txn_id=:txn) WHERE reason IS NOT NULL ORDER BY ordinal LIMIT 1",
+        {"collection": txn["collection_id"], "moved": moved, "txn": txn["txn_id"]}).fetchone()
+    if reason is not None:
+        _fail(txn, reason[0])
+
+
+def _effect_material(conn, txn):
+    """Each effect's key, hash and sources, proving its stored version decodes to the hash it names.
+
+    Reads one statement per payload layout that the event's versions use, in ordinal order, never one
+    per effect. Every row's descriptor, epoch and format are read once for the whole event.
+    """
+    groups = conn.execute(
+        "SELECT v.encoding, v.payload_generation, i.collection_id FROM audit_effects e "
+        "JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
+        "JOIN items i ON i.row_id=e.row_id WHERE e.txn_id=? "
+        "GROUP BY v.encoding, v.payload_generation, i.collection_id ORDER BY MIN(e.ordinal)",
+        (txn["txn_id"],)).fetchall()
+    material = {}
+    for encoding, generation, collection_id in groups:
+        if encoding == typed_storage.JSON_V1:
+            layout = metadata = None
+            payload = "LEFT JOIN item_versions t ON t.row_id=v.row_id AND t.row_version=v.row_version"
+            columns = "t.values_json,t.body"
+        else:
+            layout = typed_storage.version_layout(conn, collection_id, generation)
+            metadata = typed_storage.shared_metadata(conn, layout)
+            payload = (f"LEFT JOIN {layout.version_table} t ON t.row_id=v.row_id "  # noqa: S608
+                       "AND t.row_version=v.row_version")
+            columns = f"t.body,{','.join(f't.{name}' for name in (*layout.value_columns, 'r'))},t.row_id"
+        cursor = conn.execute(
+            f"SELECT e.ordinal,e.item_key,e.hash_after,v.payload_hash,v.schema_version,"  # noqa: S608
+            "(SELECT json_group_array(json_array(s.ordinal,s.source_ref)) FROM item_sources s "
+            f"WHERE s.row_id=e.row_id AND s.row_version=e.version_after),{columns} "
+            "FROM audit_effects e JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
+            f"JOIN items i ON i.row_id=e.row_id {payload} "
+            "WHERE e.txn_id=? AND v.encoding=? AND v.payload_generation IS ? AND i.collection_id=? "
+            "ORDER BY e.ordinal", (txn["txn_id"], encoding, generation, collection_id))
+        for ordinal, key, hash_after, payload_hash, schema_version, sources, *stored in cursor.fetchall():
+            if layout is None:
+                values, body = json.loads(stored[0]), stored[1]
+            else:
+                if stored[-1] is None:
+                    raise typed_storage.TypedStorageError("typed version payload is absent")
+                body = stored[0]
+                values = typed_storage.decode_row(layout, stored[1:-1], connection=conn, metadata=metadata)
+            if payload_hash != hash_after or tokens.payload_hash(schema_version, key, values, body) != payload_hash:
+                _fail(txn, "immutable version differs from its audit effect")
+            material[ordinal] = {"key": key, "payload_hash": hash_after,
+                                 "sources": [ref for _, ref in sorted(json.loads(sources))]}
+    return [material[ordinal] for ordinal in sorted(material)]
+
+
 def effects(conn, txn):
     """Reconstruct precisely the native v1 event's effect material."""
     receipt = json.loads(txn["receipt_json"])
@@ -55,40 +126,15 @@ def effects(conn, txn):
     if txn["operation"] == "rebaseline":
         return {name: receipt[name] for name in
                 ("acknowledged_gap_codes", "gap_fingerprint", "checkpoint_snapshot_hash")}
-    found = list(_rows(conn.execute("SELECT * FROM audit_effects WHERE txn_id=? ORDER BY ordinal",
-                                   (txn["txn_id"],))))
-    for effect in found:
-        identity = conn.execute("SELECT i.collection_id,i.item_key,v.payload_hash,v.txn_id FROM items i "
-                                "JOIN version_identity v ON i.row_id=v.row_id WHERE i.row_id=? AND v.row_version=?",
-                                (effect["row_id"], effect["version_after"])).fetchone()
-        before = effect["version_before"]
-        moved = txn["operation"] == "view_move"
-        expected = before if moved else 1 if before is None else before + 1
-        if (identity is None or identity[:3] != (txn["collection_id"], effect["item_key"], effect["hash_after"])
-                or effect["version_after"] != expected or (not moved and identity[3] != txn["txn_id"])):
-            _fail(txn, "effect version binding differs")
-        prior = None if before is None else conn.execute(
-            "SELECT payload_hash FROM version_identity WHERE row_id=? AND row_version=?",
-            (effect["row_id"], before)).fetchone()
-        if (prior[0] if prior is not None else None) != effect["hash_before"]:
-            _fail(txn, "effect predecessor payload differs")
+    _refuse_unbound_effects(conn, txn)
     if txn["operation"] == "view_move":
+        first = conn.execute("SELECT version_before FROM audit_effects WHERE txn_id=? ORDER BY ordinal LIMIT 1",
+                             (txn["txn_id"],)).fetchone()
+        if first is None:
+            raise IndexError("a view move has no effect")
         return {"old_path": receipt["affected_paths"][0], "path": receipt["affected_paths"][1],
-                "generation": txn["generation_before"], "version": found[0]["version_before"]}
-    material = []
-    for effect in found:
-        if effect["row_id"] is None or effect["version_after"] is None:
-            _fail(txn, "native effect has no immutable version")
-        identity = conn.execute("SELECT payload_hash,schema_version FROM version_identity WHERE row_id=? AND row_version=?",
-                                (effect["row_id"], effect["version_after"])).fetchone()
-        values, body = typed_storage.version_values(conn, effect["row_id"], effect["version_after"])
-        if (identity is None or identity[0] != effect["hash_after"]
-                or tokens.payload_hash(identity[1], effect["item_key"], values, body) != identity[0]):
-            _fail(txn, "immutable version differs from its audit effect")
-        material.append({"key": effect["item_key"], "payload_hash": effect["hash_after"],
-                         "sources": [row[0] for row in conn.execute(
-                             "SELECT source_ref FROM item_sources WHERE row_id=? AND row_version=? ORDER BY ordinal",
-                             (effect["row_id"], effect["version_after"]))]})
+                "generation": txn["generation_before"], "version": first[0]}
+    material = _effect_material(conn, txn)
     return material if txn["operation"] == "bulk_upsert" else material[0] if material else None
 
 

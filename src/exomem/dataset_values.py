@@ -42,7 +42,7 @@ from . import (
     source_inspection,
     state_paths,
 )
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_split
 
 if TYPE_CHECKING:
     from .find_types import Hit, ParsedPage
@@ -341,7 +341,7 @@ def _cards_in_scope(
     from . import find as find_module
 
     walk_scope = "vault" if scope == "vault" else "kb"
-    prefix = "" if walk_scope == "vault" else kb_prefix()
+    prefix = "" if walk_scope == "vault" else managed_join("")
     snapshot = find_module.FreshnessSnapshot(vault_root)
     projected = snapshot.recall_paths(walk_scope)
     key = (str(vault_root.resolve()), walk_scope)
@@ -763,7 +763,7 @@ def _hit(vault_root: Path, card: Card, match: _Match, needles: _Needles) -> Hit 
         title=page.title,
         updated=page.updated,
         excerpt=find_results.collapse("\n".join(lines[shown[0] :]))[: find_results.EXCERPT_MAX_LEN],
-        outside_kb=not card.original.startswith(kb_prefix()),
+        outside_kb=managed_split(card.original) is None,
         # No `matched_part`, offset or length: they would point a page read into a rendering
         # that no tool serves. The passage ends in the call that does read the rows.
         passage={"text": "\n\n".join(passage)},

@@ -21,7 +21,7 @@ from typing import Any, NamedTuple
 import yaml
 
 from . import relation_endpoints
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .vocabulary import registry as vocabulary_registry
 
 EXTENSION_SCHEMA_VERSION = 1
@@ -468,7 +468,7 @@ def normalize_relation(label: str) -> str:
 
 
 def extension_registry_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "relation-registry.yaml"
+    return managed_root(Path(vault_root)) / "_Schema" / "relation-registry.yaml"
 
 
 @lru_cache(maxsize=1)
