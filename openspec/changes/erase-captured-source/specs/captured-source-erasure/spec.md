@@ -55,43 +55,34 @@ The system MUST refuse known dependent compiled knowledge, historical versions, 
 
 ### Requirement: Complete retirement includes every managed owner
 
-Complete retirement SHALL include canonical data, owned originals and staging, identifying generated entries, private replay and recovery copies, derived stores, reusable caches and retained projection state. Each required owner SHALL acknowledge its target-qualified cleanup. Deferred or registered cleanup SHALL remain pending.
+Complete retirement SHALL include canonical data, owned originals and staging, the Source's own managed copies, private replay and recovery copies, derived stores, reusable caches and retained projection state. Each required owner SHALL acknowledge its target-qualified cleanup. Deferred or registered cleanup SHALL remain pending.
 
 #### Scenario: Canonical deletion finishes before derived cleanup
 - **WHEN** the page is gone but an owner still retains its managed bytes or unacknowledged work
 - **THEN** the result remains pending and target_retired is false
 
-#### Scenario: Shared log contains another Source
-- **WHEN** cleanup removes an entry that an earlier build recorded as owned from shared or rotated activity data
-- **THEN** it removes only the proved target's entries and preserves unrelated entries
-
 #### Scenario: An enrolled capture left no shared activity
 - **WHEN** the target was captured under custody by a build that keeps enrolled Sources off the shared pages
 - **THEN** cleanup finds no shared navigation or activity entry for the target and needs no shared-page removal
 
-#### Scenario: Trimmed activity copied an older Source
-- **WHEN** another Source's entry contains an owned excerpt from the target's earlier activity
-- **THEN** cleanup removes that target fragment from every managed version while preserving the other Source's record
-
-#### Scenario: A tracked Source follows unattributed legacy activity
+#### Scenario: A tracked Source follows an unattributed legacy image
 - **WHEN** a fresh Source has a qualified producer birth after a retained image's uncertainty horizon
 - **THEN** exact image and copy evidence can prove that Source's ownership while preserving unattributed legacy bytes
 - **AND** the older Sources retain their explicit unknown coverage
 
-#### Scenario: An ownership map disappears after publication
-- **WHEN** a retained image loses its ownership evidence or its bytes no longer match the bound map
+#### Scenario: An image header disappears after publication
+- **WHEN** a retained image loses its ownership evidence or its bytes no longer match its header
 - **THEN** its uncertainty horizon includes existing Source births and its earlier positive associations remain unresolved
-- **AND** lookup includes that image without relying only on surviving fragment membership
+- **AND** lookup includes that image without relying only on surviving recorded membership
 
 #### Scenario: A local ownership index is lost
 - **WHEN** a writer retains valid canonical ownership records but its derived index is unavailable
-- **THEN** it reads the current generated-file binding directly and preserves its ownership map and uncertainty horizon
+- **THEN** it reads image headers and copy records directly and preserves their membership and uncertainty horizon
 - **AND** ordinary capture does not require a whole-catalogue rebuild
 
 #### Scenario: A binary original outlives its private native binding
 - **WHEN** canonical whole-Source image and copy records retain the original but its private binding disappears
 - **THEN** lookup retains the obligation and retirement remains unknown until the native owner resolves it
-- **AND** the binary original needs no UTF-8 fragment map
 
 #### Scenario: Birth coverage is unavailable for a known copy
 - **WHEN** an explicit canonical Source association retains a copy but its birth evidence cannot qualify historical completeness
@@ -107,25 +98,10 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **THEN** it preserves the current file and reports unresolved custody instead of adopting its identity or content
 - **AND** this uncertainty blocks only that copy's cleanup
 
-#### Scenario: A prior generated publisher resumes after takeover
-- **WHEN** another native publication has taken over the current slot with a new revision
-- **THEN** the old forward publication and rollback cannot reuse their cancelled publication right
-- **AND** displaced physical copies remain outstanding until their owners acknowledge them
-
-#### Scenario: Pending native evidence disappears before another write
-- **WHEN** an authorized writer takes over the exact pending slot after the earlier installation evidence becomes unavailable
-- **THEN** it revokes the earlier publication right and preserves every unresolved copy
-- **AND** it binds guarded current input as uncertain instead of choosing an earlier map by matching bytes
-
 #### Scenario: Canonical uncertainty survives loss of its derived index
-- **WHEN** a renderer reads a slot after canonical uncertainty was recorded and its local index became unavailable
+- **WHEN** a writer reads an image after canonical uncertainty was recorded and its local index became unavailable
 - **THEN** it carries the effective image and catalogue horizons from direct canonical records
 - **AND** an absent legacy summary qualifies no zero horizon and requires no history scan before a later writer
-
-#### Scenario: Rollback creates a fresh copy of the before-image
-- **WHEN** an inverse publication restores earlier bytes through a newly created native file
-- **THEN** it binds a fresh copy and publication right instead of reusing the earlier file's identity
-- **AND** an interrupted handoff retains the observed current binding and every unresolved physical obligation
 
 #### Scenario: Store audit retains the target's earlier paths
 - **WHEN** target projection and vector cleanup have finished for an incarnation with exact move lineage

@@ -48,7 +48,7 @@ Publish its enrollment, dependency latch, owned-artifact locators and retirement
 This metadata follows the Source across replicas in both storage modes.
 It contains no duplicate Source bodies or identity catalogue. P4 remains the published identity inventory.
 Keep the manifest bounded by producer families; each opaque locator addresses producer-owned, paged retention evidence.
-Do not embed an ever-growing fragment or version list in the manifest or public progress response.
+Do not embed an ever-growing copy or version list in the manifest or public progress response.
 
 Keep attempt-local pre-reference residue and bounded erase cursors beside the existing private attempt ledger.
 Reuse its protected connections without changing generic mutation replay or its existing tables.
@@ -73,23 +73,24 @@ An invocation-local commit generation cannot qualify canonical dependency covera
 Store reconciliation binds its checkpoint to the physical store instance and canonical revision.
 No new global ledger, scheduler or cell-wide refusal is added.
 
-### D2a. Keep generated ownership durable and its lookup derived
+### D2a. Keep Source-file ownership durable and its lookup derived
 
-Reuse guarded canonical metadata writes, the existing fragment representation and SQLite for indexed local lookup.
-Those mechanisms already supply persistence and indexing; none records exact generated-image and native-copy ownership today.
+Reuse guarded canonical metadata writes and SQLite for indexed local lookup.
+Those mechanisms already supply persistence and indexing; none records exact image and native-copy ownership today.
 Add one producer-owned catalogue rather than a general dependency graph or a second Source inventory.
 Its maintenance cost is one metadata format, bounded reconciliation and exact publication hooks at each surviving-copy boundary.
 The architecture applies the stable-interface principle in [Managed Agents](https://www.anthropic.com/research/managed-agents): durable producer custody survives execution replacement.
 
-Persist bounded canonical image records and copy reservations under the generated-output owner.
-One image map binds exact bytes; byte-identical stage, history and rotation copies reuse its image identifier.
+Persist bounded canonical image records and copy reservations under one catalogue owner.
+An image header binds exact bytes to its Source membership; byte-identical stage and publication copies reuse its image identifier.
+The catalogue holds only files that an enrolled Source owns: its page, originals and Source-owned result payloads.
 Copy reservations bind the image, actual owner, origin ledger, opaque locator and expected version before bytes survive.
 The private owner retains native paths and filesystem identities; canonical locators expose neither.
 Keep only one generated-owner locator in each Source manifest, rather than rewriting every Source manifest for every shared image.
 
-A whole Source page or sealed original uses an immutable `whole_source_ref` on its image header, without textual fragment pages.
+A whole Source page or sealed original uses an immutable `whole_source_ref` on its image header.
 The allocation and sealed original declaration establish that ownership; matching bytes, Markdown markers and nearby paths do not.
-Binary originals therefore reuse image and copy custody without passing through UTF-8 fragment validation.
+Text pages and binary originals therefore share one image and copy custody; neither is parsed.
 The Source manifest retains bounded, immutable original SHA-256 and size declarations before either storage mode publishes capture payloads.
 Missing declarations mean unknown ownership; an explicitly empty declaration means the capture had no originals.
 An undeclared rehydrated payload keeps an opaque image and its finite uncertainty horizon; matching bytes cannot upgrade it to whole-Source ownership.
@@ -98,7 +99,8 @@ It retains exact native custody for partial plaintext, installation and cleanup,
 Acquire and pin required originals outside the collection checkout before admitting effective collection dependencies.
 Commit revalidation opens present originals without hydration; acquisition failure preserves the existing per-row rejection semantics.
 An original can survive a rejected collection row only under its Source copy owner, without a collection dependency admission.
-Opaque result images use explicit producer-declared Source membership in their bounded headers, without textual fragment pages.
+Opaque result images use explicit producer-declared Source membership in their bounded headers.
+Every image has exactly one membership form; an image without one would be invisible to Source lookup.
 Their hashes bind exact serialized payload bytes; membership never comes from parsing or matching those bytes.
 The existing metadata byte bound and positive-membership index also cover this variant.
 One Source-private publication table selects the exact canonical image and Copy; it stores no payload or rollback bytes.
@@ -129,72 +131,60 @@ The publisher requires that same raw version before closing the old handle, then
 No later zero-link observation can replace a missing backend receipt.
 An alias, moved old name or missing native evidence leaves the old copy open; ordinary publication can still succeed.
 An overlapping reader may finish from its borrowed handle without becoming a reusable managed copy.
-Canonical retirement requires the exact saved installed version and matching native allocation, rather than displacement from a slot.
+Canonical retirement requires the exact saved installed version and matching native allocation.
 The command-surface owner-access boundary and transactional-vault-writes pathname-window exclusion still apply.
 Neither a writer lease nor a zero-link observation proves universal exclusion of unobservable direct OS-owner interference.
 This follows [How we contain Claude](https://www.anthropic.com/research/how-we-contain-claude): native capabilities bound destruction while canonical records preserve obligations.
 
-Keep one canonical slot for each generated-file locator and physical owner scope.
-Its deterministic opaque key selects the current copy directly, with at most one pending candidate copy and publication identifier.
-Read its copy records and image headers directly when rendering; a cold local index cannot block capture or erase healthy ownership evidence.
-Pending catalogue metadata retains independently witnessed positive fragments and its uncertainty horizon during read-only planning.
-Before validating a generated commit, recover bounded canonical metadata without requiring derived-index readiness; previews and preparation never recover or allocate custody.
-Reserve the candidate copy and prepare the slot before selecting its private temporary name.
-Each native publication retry prepares a fresh candidate and publication right before selecting its new temporary name.
+Read copy records and image headers directly; a cold local index cannot block capture or erase healthy ownership evidence.
+Before validating a custody commit, recover bounded canonical metadata without requiring derived-index readiness; previews and preparation never recover or allocate custody.
+Reserve the copy before selecting its private temporary name.
+Each native publication retry reserves a fresh copy before selecting its new temporary name.
 Before allocating that name, recheck the open canonical reservation and immutable image content; uncertainty may only increase.
-Normal success settles the slot from the native owner's exact installation witness after the rollback-capable batch finishes.
-Equal content hashes cannot select between different ownership maps without that witness.
-A takeover changes the slot revision and cancels delayed forward or inverse publication rights.
-Displacing a copy does not retire its physical obligation; slot references also pin its image until the owner closes them.
+Normal success acknowledges the copy from the native owner's exact installation witness after the rollback-capable batch finishes.
 Missing canonical custody remains different from a missing derived cache.
-
-An authorized writer can replace an exact pending publication right without proving what its earlier native publication did.
-The takeover preserves every displaced copy and records uncertainty; it grants no ownership, absence or cleanup fact about the earlier allocation.
-The new publisher reads guarded current bytes and receives its own installation witness instead of selecting an earlier map by hash.
 
 Direct reads combine each image's canonical uncertainty horizon with a global floor on the catalogue head.
 The head records the checkpoint through which that summary is complete; recovery folds uncertainty before clearing its pending metadata unit.
 A legacy catalogue without summary coverage starts conservatively at its existing epoch, without scanning history before ordinary capture.
 Repeated observation of the same recorded uncertainty does not raise that finite floor.
 
-An inverse publication creates a fresh native file, even when it restores the before-image bytes.
-First settle the exactly observed installed candidate to consume its forward publication right, without claiming batch success.
-Reserve a fresh restore copy on the before-image, then prepare and install it under a new slot publication right.
-Never bind the earlier before-copy identity to the newly created restore file.
-A crash between these steps retains truthful current custody and every unresolved physical obligation.
+Rolling back a fresh Source removes the exact allocation that the batch installed; it never republishes a before-image.
+A missing allocation witness leaves that copy unresolved instead of removing another file.
 
 Qualify the derived SQLite membership index against the canonical catalogue identity and ordered checkpoint.
 Advance canonical evidence before changing tracked ownership or publishing bytes; interrupted publication remains unresolved.
 Reconciliation is bounded and resumable. A cold or inconsistent index reports its missing coverage instead of scanning history during erasure.
 Warm lookup batches the target's image and copy obligations with an indexed uncertainty query.
-Work grows with returned obligations, rather than unrelated Sources or one SQL request per fragment.
+Work grows with returned obligations, rather than unrelated Sources or one SQL request per copy.
 Trusted producers reserve new copies from directly verified canonical image evidence; collection and historical lookup still require a qualified index.
 
 Commit a capture's catalogue work in durability phases, not as one canonical change for each operation.
-Inside one writer boundary, a unit stages image, page, copy-reservation and Slot-preparation work.
+Inside one writer boundary, a unit stages image and copy-reservation work.
 The first native allocation is a barrier: it commits the staged work as one change before any byte can survive.
 Batch preparation reserves the stage and publication-temporary copies ahead, so they join that first change.
-Settlement and copy acknowledgements record facts that native custody already holds, so they wait for the unit's end.
-They become one closing change. A crash between the two changes leaves reserved copies and a pending Slot.
-That is the earlier honest outstanding state; the next writer settles the Slot from the native installation witness.
-Takeover, birth, uncertainty and collection stay immediate, and each one first commits the work staged before it.
+Copy acknowledgements record facts that native custody already holds, so they wait for the unit's end.
+They become one closing change. A crash between the two changes leaves reserved copies.
+That is an honest outstanding state: each reserved copy remains an erasure obligation, and the capture still succeeds.
+Birth, uncertainty and collection stay immediate, and each one first commits the work staged before it.
 A phase change holds at most `MAX_STEP` objects; a larger phase commits as consecutive changes.
 The Source result journal forgets a closed publication only after its closing change is durable.
 Each commit deletes at most two change records below the retained window, instead of rewriting the head twice for each operation.
 A capture therefore makes a fixed number of canonical commits, whatever the vault size or catalogue age.
 An enrolled capture writes no shared navigation or activity page, so its phases carry only the Source's own copies and result images.
 This keeps a service caller's capture inside its 30-second request timeout.
+A write that involves no enrolled Source opens no unit and makes no catalogue change, so unenrolled capture keeps its earlier cost.
 
 A freshly allocated Source can receive `generated_birth={catalogue_id,birth_epoch}` only before any generated output can survive.
 Issuance requires participation by every relevant managed producer and native-copy hook; configuration alone is insufficient.
 Replay or legacy adoption cannot manufacture a fresh birth witness.
 Each exact image carries `unknown_through_epoch`: ownership may be unknown for Sources born at or before that checkpoint.
 A matching catalogue and a later Source birth can prove target ownership despite unattributed legacy bytes in the same image.
-Exact copies and slices preserve that horizon; joins take the greatest input horizon; tracked insertions preserve it.
+Exact copies preserve that horizon.
 
-Missing maps, hash drift or unexplained publication raise the affected horizon to the current canonical checkpoint.
+Missing headers, hash drift or unexplained publication raise the affected horizon to the current canonical checkpoint.
 Retain earlier positive membership as uncertain until its copies resolve or retire.
-An indexed query includes every retained image whose horizon reaches the target birth, even when its fragment membership disappeared.
+An indexed query includes every retained image whose horizon reaches the target birth, even when its recorded membership became unreadable.
 Global historical uncertainty remains visible, but does not become a permanent refusal for every later Source.
 Do not infer coverage by matching renderer diagnostic strings or inspecting prose.
 
@@ -291,14 +281,11 @@ Dependent writes and deferred publishers check the target's retirement fence bef
 
 ### D4. Keep cleanup with each persistence owner
 
-Owned artifacts include canonical pages and originals, generated navigation and activity entries, capture guidance, replay and recovery records, staging and rollback copies.
+Owned artifacts include canonical pages and originals, Source-owned result payloads, capture guidance, replay and recovery records, staging and rollback copies.
 Owner locators identify exact entries or versions. Cleanup never removes text by matching a title, URL or record identifier globally.
-Enrolled Sources write no shared navigation or activity entries, so this cleanup covers only ownership that earlier builds recorded.
-Shared navigation and rotated logs need ownership-aware removal or regeneration that also retires their retained versions.
-Generated fragments carry exact producer identity through trimming, copying, rotation and batch before-images.
-A dropped activity excerpt copied into another Source's log entry keeps its original fragment ownership.
-Bound both named log segments and bytes processed in each invocation.
-Do not omit existing capture prose as an incidental shortcut.
+Enrolled Sources write no shared navigation or activity entries, so cleanup never edits a shared page.
+The captured-Source inventory lists enrolled Sources instead. Sources outside custody keep their navigation and activity listing and are not erasure targets.
+No release recorded shared-page ownership, so no legacy shared-page cleanup exists.
 
 Store mode also requires page rows, held content, identifying audit material, projection intents/files and recovery copies to retire through its owner.
 Its purge contract and historical-provenance seam require agreement with the canonical store owner before store-owned implementation.

@@ -10,8 +10,8 @@ The captured-Source inventory already lists enrolled Sources for the service cal
 - A Source captured under erasure custody adds no line to the top index, the activity log or the Sources index.
 - The captured-Source inventory stays the listing for those Sources.
 - Sources outside custody, such as Sources that an agent saves, keep their listing on the shared pages.
-- A vault with no shared-page custody writes those pages without generated custody.
-- A vault where an earlier build recorded enrolled lines keeps carrying their ownership, so a later erasure can still find every copy.
+- Writes to those pages make no change to the erasure custody catalogue.
+- The per-line ownership layer for shared pages is removed. No release recorded that ownership.
 
 ## Capabilities
 
@@ -21,6 +21,6 @@ The captured-Source inventory already lists enrolled Sources for the service cal
 
 ## Impact
 
-The change touches Source capture planning, the shared-page renderer and the generated-output producer.
+The change touches Source capture planning and removes the shared-page ownership layer from the custody catalogue.
 Source counts on the shared pages still include enrolled Sources; a count carries no Source text.
-The erasure design keeps its shared-page cleanup only for ownership that earlier builds recorded.
+The erasure design drops shared-page cleanup, because enrolled Sources never reach those pages.

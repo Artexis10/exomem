@@ -154,8 +154,7 @@ The system SHALL NOT add a line for a Source captured under erasure custody to t
 The captured-Source inventory SHALL remain the listing for those Sources.
 Sources outside erasure custody SHALL keep their listing on those pages.
 Source counts on those pages MAY include enrolled Sources, because a count carries no Source text.
-A vault with no recorded shared-page custody SHALL write those pages without generated custody.
-A vault where an earlier build recorded ownership of enrolled lines SHALL keep carrying that ownership through trims, copies and log rotation until erasure retires it.
+A write to those pages SHALL make no change to the erasure custody catalogue.
 
 #### Scenario: A service caller captures an enrolled Source
 
@@ -170,12 +169,6 @@ A vault where an earlier build recorded ownership of enrolled lines SHALL keep c
 
 #### Scenario: An unenrolled write follows enrolled captures
 
-- **WHEN** a vault holds enrolled Sources and no recorded shared-page custody
+- **WHEN** a vault holds enrolled Sources
 - **AND** an unenrolled write changes the shared pages
-- **THEN** the write records no generated custody for those pages
-
-#### Scenario: An earlier build recorded enrolled lines
-
-- **WHEN** a shared page holds an enrolled line whose ownership an earlier build recorded
-- **AND** a later write trims, copies or rotates that line
-- **THEN** the line keeps its recorded ownership in every resulting version
+- **THEN** the write makes no change to the erasure custody catalogue
