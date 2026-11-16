@@ -1615,6 +1615,27 @@ class Rehearsal:
                     wait_for_lease=True,
                 )
                 entry["detail"] = {"preview": preview.get("step"), "status": done.get("status")}
+            if args.release_claim:
+                # A copy of a vault in store mode names the holder's claim, and that holder is not
+                # this run; the product's own remedy releases it as the offline owner.
+                with self.step("release the copy's standing store claim", fatal=True) as entry:
+                    named = rig.store_json("release", "--dry-run", operator=True)
+                    claim = named.get("diagnostics", {}).get("claim")
+                    if named["_exit"] != 0 or not claim:
+                        raise RuntimeError(f"the release dry run named no claim: {named}")
+                    released = rig.store_json(
+                        "release",
+                        "--apply",
+                        "--claim",
+                        claim,
+                        "--why",
+                        "release a vault copy's store claim for a rehearsal",
+                        operator=True,
+                        wait_for_lease=True,
+                    )
+                    if released["_exit"] != 0:
+                        raise RuntimeError(f"the release refused: {released}")
+                    entry["detail"] = {"claim": claim, "status": released.get("status")}
         elif not args.skip_enrol:
             with self.step("enrol the collection store", fatal=True) as entry:
                 manifest = layout.work / "store-enrolment.md"
@@ -1636,7 +1657,11 @@ class Rehearsal:
                 entry["detail"] = done.get("status")
         with self.step("build the sidecars: exomem maintain --reconcile", fatal=True):
             rig.cli_json(
-                "maintain --reconcile", "maintain", "--reconcile", "--json", timeout=LONG_STEP_SECONDS
+                "maintain --reconcile",
+                "maintain",
+                "--reconcile",
+                "--json",
+                timeout=LONG_STEP_SECONDS,
             )
         self.report["vault"] = vault_stats(layout.vault)
         with self.step("store-mode status before the switch", fatal=True) as entry:
@@ -2037,6 +2062,10 @@ def adopt_isolation(rig: Rig) -> None:
 
 
 def run_command(args: argparse.Namespace) -> int:
+    if args.release_claim and not args.adopt_replica:
+        raise SystemExit(
+            "--release-claim releases the claim in an adopted replica: add --adopt-replica"
+        )
     layout = Layout(
         vault=_resolved(args.vault), scratch=_resolved(args.scratch), out=_resolved(args.out)
     )
@@ -2162,6 +2191,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="the copy is of a vault whose collection store lives outside it; adopt the replica "
         "the copy carries, as a new host does, instead of enrolling a new store",
+    )
+    run.add_argument(
+        "--release-claim",
+        action="store_true",
+        help="with --adopt-replica: the copy's replica names a store-mode claim whose holder is "
+        "not this run (a copy of a vault in store mode, or an earlier run that stopped after "
+        "its migrate); release it with `store-mode release` before the file-mode baseline",
     )
     run.set_defaults(handler=run_command)
 
