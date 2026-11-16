@@ -422,12 +422,13 @@ class _Unreadable(Exception):
 
 def _open(vault: Path, row: Row):
     # A pooled filing keeps no file at its logical path: its bytes are the shared pool object, opened behind the binding.
+    # The hash judges every byte, so an object of the wrong size opens and reads as damaged.
     if row.kind == FILE:
         snapshot = originals.pooled(vault, row.path)
         if snapshot is not None:
             from . import media_store
 
-            return media_store._open_local_original(vault, row.path, snapshot)
+            return media_store._open_local_original(vault, row.path, snapshot, check_size=False)
     # A blob or text path came from a walk of the disk, so it opens as spelled there; a sidecar path as bound.
     return reserved_paths.open_generic_binary(vault, row.path, physical=row.kind != FILE)
 
@@ -443,8 +444,8 @@ def _held(vault: Path, row: Row) -> Iterator[reserved_paths.GenericBinarySource]
             raise _Absent from None
         raise _Unreadable(error.code) from None
     except ValueError:
-        # A shared pool object whose size differs from its binding is neither present nor missing.
-        raise _Unreadable("the shared original differs from its binding") from None
+        # An unreadable pool format marker: the row keeps its state until the layout reads again.
+        raise _Unreadable("the shared original pool is unreadable") from None
 
 
 def _parts(row: Row, stream: BinaryIO) -> Iterator[bytes]:
@@ -579,8 +580,8 @@ def _stat(vault: Path, row: Row, shared: bool) -> os.stat_result:
     """The presence check's stat: the row's file, or the shared pool object of a pooled filing that has no file.
 
     A missing file and a missing pool object both raise `FileNotFoundError`. A pool object whose size differs from
-    its binding raises `_Unreadable`: `originals.pooled` reads it as no object, and it must not read as a missing
-    original or a retired binding. Only a pooled archive pays for the second look.
+    its binding is present, and its hash then reads it as damaged. An unreadable pool raises `_Unreadable`, so it
+    reads as neither a missing original nor a retired binding. Only a pooled archive pays for the second look.
     """
     try:
         return os.lstat(vault / row.path)

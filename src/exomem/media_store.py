@@ -1788,8 +1788,13 @@ def moved_originals(vault: Path, rel: str):
 
 
 @contextmanager
-def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot, *, physical: bool = False):
-    """Resolve an authorized logical filing to bytes; private pool addresses stay below this boundary."""
+def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot, *, physical: bool = False,
+                         check_size: bool = True):
+    """Resolve an authorized logical filing to bytes; private pool addresses stay below this boundary.
+
+    A shared object whose size differs from its binding raises `original_pool.ObjectMismatch`, unless the caller
+    hashes every byte itself and passes `check_size=False`.
+    """
     if snapshot.local_path is None:
         with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
             yield source
@@ -1809,7 +1814,8 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
 
     try:
         require_binding()
-        with original_pool.open_object(vault, snapshot.binary_sha256, snapshot.binary_size) as source:
+        size = snapshot.binary_size if check_size else None
+        with original_pool.open_object(vault, snapshot.binary_sha256, size) as source:
             def require_current() -> None:
                 source.require_current()
                 require_binding()
@@ -1835,6 +1841,8 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
 
     `read` marks an owner's playback or viewing; processing and imports record no read.
     """
+    from . import original_pool
+
     vault = Path(vault).resolve()
     target = Path(path)
     if not target.is_absolute():
@@ -1862,7 +1870,11 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
         if snapshot.state == "evicted":
             _hydrate(vault, snapshot, ledger, token)
             snapshot = original_state(vault, target)
-        with _open_local_original(vault, relative, snapshot, physical=physical) as source:
+        with ExitStack() as opened:
+            try:
+                source = opened.enter_context(_open_local_original(vault, relative, snapshot, physical=physical))
+            except original_pool.ObjectMismatch as error:
+                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the shared original differs from its binding") from error
             _bind_pin(ledger, token, snapshot, source, job=job)
             if snapshot.reference is not None and not cache_matches(vault, target, snapshot=snapshot):
                 if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):

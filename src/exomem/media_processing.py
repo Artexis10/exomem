@@ -1617,13 +1617,15 @@ def _read_provenance(
     resolved_binary: Path,
     expected_identity: held_fs.StableIdentity | None = None,
 ) -> _BinaryProvenance:
+    shared = None
     if expected_identity is None:
         try:
             relative = binary.relative_to(vault).as_posix()
             expected_identity = reserved_paths.inspect_generic_file(vault, relative)
         except (ValueError, reserved_paths.ReservedPathLeafError):
             # A shared original has no file to inspect; its object is immutable and opened by `resolved_binary`.
-            if originals.pooled(vault, binary) is None:
+            shared = originals.pooled(vault, binary)
+            if shared is None:
                 raise MediaProcessingError(
                     "MEDIA_NOT_FOUND", "media artifact does not exist"
                 ) from None
@@ -1657,6 +1659,9 @@ def _read_provenance(
             "MEDIA_CHANGED_DURING_RECONCILIATION",
             f"media changed while provenance was being recorded: {binary}",
         )
+    if shared is not None and (digest.hexdigest(), before.st_size) != (shared.binary_sha256, shared.binary_size):
+        # A shared object is named by its digest, so other bytes are damage, never the filing's new content.
+        raise MediaProcessingError("MEDIA_ORIGINAL_UNVERIFIED", "the shared original differs from its binding")
     return _BinaryProvenance(
         relative_path=binary.relative_to(vault).as_posix(),
         original_filename=binary.name,

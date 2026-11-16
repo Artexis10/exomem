@@ -231,9 +231,10 @@ def test_fixity_restores_a_damaged_pool_object_inside_the_pool_from_its_store_co
     assert original_fixity.run_pass(vault).outcomes == {"verified": 1}
 
 
-def test_fixity_names_a_pool_object_of_the_wrong_size_instead_of_retiring_its_row(
+def test_fixity_reports_a_pool_object_of_the_wrong_size_as_damaged_instead_of_retiring_its_row(
         vault: Path, tmp_path: Path, monkeypatch) -> None:
-    """A truncated shared object makes the binding read fail; retiring the row would stop watching the damaged original."""
+    """A truncated shared object read as no pooled original: unreadable each pass and never reported as damaged, and
+    retiring the row would stop watching it altogether."""
     added = _pooled_capture(vault, tmp_path, monkeypatch, "side-a.txt", TRANSCRIPT)
     original_fixity.walk(vault)
     assert original_fixity.run_pass(vault).outcomes == {"verified": 1}
@@ -241,7 +242,7 @@ def test_fixity_names_a_pool_object_of_the_wrong_size_instead_of_retiring_its_ro
     _damage(vault, hashlib.sha256(TRANSCRIPT).hexdigest(), TRANSCRIPT[:-1])
     result = original_fixity.run_pass(vault)
 
-    assert (result.unreadable, result.outcomes) == (1, {})
+    assert (result.unreadable, result.outcomes) == (0, {"corrupt_no_copy": 1})
     assert not (vault / added.artifact_path).exists()
     with contextlib.closing(sqlite3.connect(original_fixity.table_path(vault))) as table:
         assert table.execute("SELECT COUNT(*) FROM originals WHERE path = ?", (added.artifact_path,)).fetchone() == (1,)

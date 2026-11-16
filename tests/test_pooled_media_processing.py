@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 from test_media_store import selected_store as selected_store
 from test_shared_originals import _pooled_capture
 
-from exomem import media_jobs, media_processing, media_worker
+from exomem import media_jobs, media_processing, media_worker, original_pool
 from exomem.vault import parse_frontmatter
 
 
@@ -69,6 +70,27 @@ def test_a_pooled_original_keeps_its_whole_job_pin_while_the_worker_rewrites_its
     assert pins == [1]  # still pinned after the companion took the extraction text
     fields = parse_frontmatter((vault / (added.artifact_path + ".md")).read_text())[0]
     assert fields["extracted_by"] == "text" and bool(fields.get("stored_object")) == store_bound
+    assert not (vault / added.artifact_path).exists()
+
+
+@pytest.mark.parametrize("damaged", [b"the minutes of the quarterly meetinG", b"the minutes"],
+                         ids=["same-size", "truncated"])
+def test_reconcile_refuses_a_damaged_pool_object_and_keeps_its_binding(vault, tmp_path, monkeypatch, damaged):
+    """Reconcile hashed a damaged shared object as the filing's new bytes and rebound the companion to their digest,
+    losing the true one; a truncated object read as no shared original at all and was misreported."""
+    data = b"the minutes of the quarterly meeting"
+    added = _pooled_capture(vault, tmp_path, monkeypatch, "minutes.txt", data)
+    page = vault / (added.artifact_path + ".md")
+    before = page.read_bytes()
+    shared = original_pool.object_path(vault, hashlib.sha256(data).hexdigest())
+    shared.chmod(0o600)
+    shared.write_bytes(damaged)
+
+    with pytest.raises(media_processing.MediaProcessingError) as refused:
+        media_processing.reconcile_media(vault, added.artifact_path)
+
+    assert refused.value.code == "MEDIA_ORIGINAL_UNVERIFIED"
+    assert page.read_bytes() == before
     assert not (vault / added.artifact_path).exists()
 
 

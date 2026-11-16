@@ -103,6 +103,10 @@ class PublicationRace(RuntimeError):
     """Leave the canonical guard, confirm the winner's bytes, then retry publication."""
 
 
+class ObjectMismatch(ValueError):
+    """A shared object whose bytes differ from the binding that names it: damage, never another original."""
+
+
 @dataclass(slots=True)
 class PreparedOriginal:
     """One verified upload stage and an optional verified winner, retained through its filing commit."""
@@ -133,7 +137,7 @@ class PreparedOriginal:
             size += len(chunk)
         source.require_current()
         if digest.hexdigest() != self.digest or size != self.size:
-            raise ValueError("the shared original differs from its canonical binding")
+            raise ObjectMismatch("the shared original differs from its canonical binding")
         source.stream.seek(0)
         self._source = source
         return True
@@ -204,17 +208,20 @@ def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks, *,
 
 
 @contextmanager
-def open_object(vault: Path, digest: str, size: int) -> Iterator[reserved_paths.GenericBinarySource]:
-    """Open bytes after logical authorization; the digest itself grants no public access."""
+def open_object(vault: Path, digest: str, size: int | None) -> Iterator[reserved_paths.GenericBinarySource]:
+    """Open bytes after logical authorization; the digest itself grants no public access.
+
+    A `size` of None opens an object of any size, for a reader that hashes every byte to judge it.
+    """
     with reserved_paths._subsystem_authority_scope(OWNER):
         with reserved_paths._open_owner_binary(vault, object_path(vault, digest), DESCRIPTOR_ID) as source:
-            if source.version.size != size:
-                raise ValueError("the shared original differs from its canonical binding")
+            if size is not None and source.version.size != size:
+                raise ObjectMismatch("the shared original differs from its canonical binding")
             yield source
 
 
 def locally_present(vault: Path, digest: str, size: int) -> bool:
-    """A bounded metadata probe, distinct from full byte verification."""
+    """A bounded metadata probe, distinct from full byte verification; an object of another size raises ObjectMismatch."""
     try:
         with open_object(vault, digest, size):
             return True

@@ -10262,6 +10262,8 @@ def _media_remediation(code: str) -> str:
         return "Wait for the current processing run to end, then ask again."
     if code == "MEDIA_RUNTIME_UNAVAILABLE":
         return "Restore the media runtime, then ask again."
+    if code == "MEDIA_ORIGINAL_UNVERIFIED":
+        return "Restore the original from a verified copy, as an original fixity pass does, then retry processing."
     return "Inspect the media artifact and retry processing."
 
 

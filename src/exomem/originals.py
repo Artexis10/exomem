@@ -287,18 +287,12 @@ def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
     """The filing of an original whose bytes are a shared pool object, which has no file at its logical path.
 
     `local_path` is that immutable object: read its identity or stat from it. A decoder that needs the
-    filename takes `media_store.logical_view`. Any other path, a missing or unsafe one included, is not pooled.
+    filename takes `media_store.logical_view`. A damaged object is still pooled, and each read of it raises
+    `original_pool.ObjectMismatch` or hashes to other bytes. Any other path, a missing or unsafe one included,
+    is not pooled.
     """
-    from . import reserved_paths
-
-    target = Path(path) if Path(path).is_absolute() else Path(vault) / path
-    if target.is_file():
-        return None
-    try:
-        snapshot = original_state(vault, target)
-    except (ValueError, reserved_paths.ReservedPathLeafError):
-        return None
-    return snapshot if snapshot.local_path is not None else None
+    shared = digest_addressed(vault, path)
+    return shared if shared is not None and shared.local_path is not None else None
 
 
 def digest_addressed(vault: Path, path: str | Path, *, snapshot: OriginalSnapshot | None = None) -> OriginalSnapshot | None:
@@ -312,17 +306,23 @@ def digest_addressed(vault: Path, path: str | Path, *, snapshot: OriginalSnapsho
     from . import original_pool, reserved_paths
 
     target = Path(path) if Path(path).is_absolute() else Path(vault) / path
-    if is_note_path(target.as_posix()) or not original_pool.enabled(vault):
+    if is_note_path(target.as_posix()):
         return None
     if snapshot is None:
         if target.is_file():
             return None
         try:
             snapshot = original_state(vault, target)
-        except (ValueError, reserved_paths.ReservedPathLeafError):
+        except reserved_paths.ReservedPathLeafError:
             return None
-    # `local_path` is set only when no ordinary file exists; an evicted original has no local bytes at all.
-    return snapshot if snapshot.local_path is not None or snapshot.state == "evicted" else None
+        except ValueError:
+            original_pool.enabled(vault)  # An unreadable format marker raises: the layout is unknown, not ordinary.
+            return None
+    # `local_path` is set only when no ordinary file exists and the pool holds the object; an evicted original has
+    # no local bytes at all, and only the pool's format marker tells a pooled archive's from a legacy one.
+    if snapshot.local_path is not None:
+        return snapshot
+    return snapshot if snapshot.state == "evicted" and original_pool.enabled(vault) else None
 
 
 def evicted(vault: Path, path: str | Path) -> bool:
@@ -442,8 +442,12 @@ def original_state(
     if not physical and not store_read.serves(vault, relative):
         from . import original_pool
 
-        if (original_pool.enabled(vault) and original_pool.locally_present(
-                vault, binary_binding_value.sha256, binary_binding_value.size)):
+        try:
+            present = original_pool.enabled(vault) and original_pool.locally_present(
+                vault, binary_binding_value.sha256, binary_binding_value.size)
+        except original_pool.ObjectMismatch:
+            present = True  # A damaged object still holds the filing's place; each read of it refuses.
+        if present:
             physical = True
             local_path = original_pool.object_path(vault, binary_binding_value.sha256)
     reference = stored_reference(fields.get("stored_object"))
