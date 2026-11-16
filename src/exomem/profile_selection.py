@@ -23,11 +23,6 @@ SEMANTIC = "semantic"
 LEXICAL = "lexical"
 NONE = "none"
 
-# A resource bound on the chunk rows one restricted vector search returns, not a vault choice. A profile page is
-# a few chunks, so this covers the rows of a vault with hundreds of profile pages; the search clamps it to the
-# rows the pages actually have.
-VECTOR_ROWS_MAX = 2048
-
 
 @dataclass(frozen=True, slots=True)
 class Selection:
@@ -69,8 +64,9 @@ def select(
 def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str, float] | None:
     """The best chunk score of each page the vector reaches, or None when the reading did not run.
 
-    It reads the resident recall matrix against the turn vector the activation pass encoded. It never encodes,
-    never loads a matrix on this thread and never reads a page outside `pages`.
+    It scores the profile pages' rows of the resident recall matrix against the turn vector the activation pass
+    encoded, so its cost follows the profile pages, not the vault. It never encodes and never loads a matrix on
+    this thread.
     """
     if turn_vector is None or os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return None
@@ -93,16 +89,12 @@ def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str,
         query = np.asarray(turn_vector, dtype=np.float32).reshape(-1)
         if not np.all(np.isfinite(query)) or float(np.linalg.norm(query)) == 0.0:
             return None
-        hits = index.select_chunks(query, VECTOR_ROWS_MAX, allowed_paths=pages, defer_cold_load=True)
+        return index.best_scores_for_paths(query, pages)
     except recall_space.CorpusMatrixCold:
         return None
     except Exception:  # noqa: BLE001 - a failed vector reading leaves the lexical one standing, and the evidence says so
         log.debug("profile vector reading unavailable", exc_info=True)
         return None
-    best: dict[str, float] = {}
-    for path, _chunk, _text, score in hits:
-        best[path] = max(float(score), best.get(path, float("-inf")))
-    return best
 
 
 def _lexical_scores(root: Path, pages: set[str], turn: str, *, restricted: bool) -> dict[str, float] | None:

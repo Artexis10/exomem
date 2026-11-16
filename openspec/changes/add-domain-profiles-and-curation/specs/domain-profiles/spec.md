@@ -58,13 +58,14 @@ Each profile entry SHALL carry `domain`, `label`, `generation`, `state`, `lines`
 Selection:
 
 - The product SHALL decide which domains a turn touches by retrieval restricted to the caller's admitted profile pages. A page that is not a profile never touches a domain.
-- A semantic reading SHALL search the embedding index with the turn's vector that the activation pass already holds, and take each page's best chunk score. The response SHALL NOT encode the turn again.
+- A semantic reading SHALL score each profile page's stored chunks against the turn's vector and take the page's best chunk score. The vector is the one the activation pass already encoded: the turn slice's, or the task-context dense lane's when the slice encodes nothing, as on a small catalogue. The response SHALL NOT encode the turn again.
+- The semantic reading SHALL cost in proportion to the number of profile pages, not the size of the vault.
 - A lexical reading SHALL run one bounded keyword query over the same pages.
 - A page SHALL be selected when its semantic score reaches `budgets.profile_semantic_floor` or its keyword score reaches `budgets.profile_lexical_floor`.
 - Selected pages SHALL rank by the sum of their scores, and the response SHALL keep at most `budgets.profile_domains_max` touched domains. Ancestors follow after that cap, so they do not count against it.
 - The three limits are vault-owned activation conventions with shipped defaults of 0.50, 8.5 and 2. The floors accept a number in 0..1 and 0..100, and the cap accepts a whole number in 1..8.
-- `selection` SHALL be `semantic` when the vector reading ran, `lexical` when no turn vector existed and only the keyword reading ran, and `none` when neither reading could run.
-- For a caller who sees only part of the vault, keyword statistics SHALL come from that caller's visible profile pages alone, and the semantic reading SHALL be absent unless the caller may read the vector bands.
+- `selection` SHALL be `semantic` when the vector reading ran, `lexical` when it could not run and only the keyword reading did, and `none` when neither reading could run.
+- A caller who sees only part of the vault SHALL receive the keyword reading alone, with statistics taken over the profile pages that caller can see, so that no hidden page moves a score.
 - It SHALL make no model call.
 - It SHALL hold no list of domains or words, and no limit, in code.
 - A turn that touches no domain with a profile SHALL receive no domain profile.
@@ -104,6 +105,11 @@ Egress and state:
 
 - **WHEN** a turn names none of the words in the games profile, its vector lies near that profile's page, and the turn vector is available
 - **THEN** `selection` is `semantic` and the response serves the games profile and its ancestor
+
+#### Scenario: A small catalogue selects by meaning at the shipped floors
+
+- **WHEN** the catalogue is too small for the turn slice to encode the turn, an encoder is resident, and the turn's vector lies near the games profile's page
+- **THEN** `selection` is `semantic`, the games profile is served, and the vault has not lowered any floor
 
 #### Scenario: Without a turn vector the block reports a keyword-only read
 

@@ -1439,8 +1439,9 @@ def _activation_packet(
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
         if domain_profiles.enabled():
-            # Compiled after the slice, which encodes the turn once; the selection reads that vector. Its own bound
-            # neither reduces `max_chars` nor counts in `used_chars`, so the profiles never cut the map or the leads.
+            # Compiled after the slice and the task context, which encode the turn when they run; the selection
+            # reads the vector either one held. Its own bound neither reduces `max_chars` nor counts in `used_chars`,
+            # so the profiles never cut the map or the leads.
             with find_types.timing_span(timings, "working_set.profiles"):
                 if working_set.budget_exhausted("working_set.profiles"):
                     # The request cannot afford the selection's two reads: the profiles are unknown, not absent.

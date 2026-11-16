@@ -3444,7 +3444,7 @@ def _resident_vector_paths(
     """
     import numpy as np
 
-    from . import embeddings, ranking_config, readiness, recall_space
+    from . import embeddings, ranking_config, readiness, recall_space, working_set_runtime
 
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return [], "off"
@@ -3480,6 +3480,9 @@ def _resident_vector_paths(
         norm = float(np.linalg.norm(query))
         if norm == 0.0:
             return [], "lane_failed"
+        # The slice encodes nothing on a small catalogue, so the profile selection reads this vector instead of
+        # encoding the same turn again.
+        working_set_runtime.remember_turn_vector(text, query)
         stale = resident.stale_paths or ()
         # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing.
         rows = np.fromiter(

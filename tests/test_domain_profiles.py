@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 from conftest import initialize_vault_state_offline
-from test_activation_related_pages import FINGERPRINT, _planted_vault, _random_unit, _toward_turn
+from test_activation_related_pages import AXIS, FINGERPRINT, _passages, _planted_vault, _random_unit, _toward_turn
 from test_context_catalogue import _built, _page, _write
 from test_governance_egress import _external, _reset_caches
 from test_working_set_withheld_twins import _withhold
@@ -30,6 +30,9 @@ from exomem import (
     embeddings,
     lexstore,
     note_types,
+    ranking_config,
+    readiness,
+    recall_space,
     source_taxonomy,
     stance,
     working_set_index,
@@ -183,44 +186,80 @@ def _seed_profiles(root: Path) -> None:
     _profile(root, "global", None, _rule("global"))
     for domain in ("media", "games", "music", "cooking"):
         _profile(root, domain, [domain], _rule(domain))
-    _set_budgets(root)
 
 
 @pytest.fixture
 def profiles_vault(tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _seed_profiles(tmp_path)
+    _set_budgets(tmp_path)
     initialize_vault_state_offline(tmp_path, source="domain profiles fixture")
     _refresh(tmp_path)
     with principal.library_scope():
         yield tmp_path
 
 
-@pytest.fixture
-def semantic_vault(vault, monkeypatch):
-    """Fifty background anchors and a recall index in which the games page's chunk lies near the turn's vector.
+def _encoder_present(monkeypatch) -> None:
+    """A resident activation encoder that maps every turn to the same unit vector, `AXIS`; passages are random."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_activation_passages", _passages)
+    monkeypatch.setattr(embeddings, "embed_activation_passages_if_loaded", _passages)
+    monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: FINGERPRINT)
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda text: AXIS)
+    monkeypatch.setattr(readiness, "should_defer", lambda component: False)
+    monkeypatch.setattr(recall_space, "resident_fingerprint", lambda model: FINGERPRINT)
 
-    The turn vector is planted (a real encoder is out of the loop); the vault, the catalogue, the recall matrix,
-    the lexical index, the anchor lane and egress are real.
+
+def _plant_profile_chunks(root: Path) -> int:
+    """One recall chunk per profile page, the games page's near the turn vector, and every index built.
+
+    Returns the number of anchors that carry a vector, which decides whether the turn slice encodes the turn.
     """
-    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
-    _planted_vault(vault, monkeypatch, {})
-    _seed_profiles(vault)
-    recall = embeddings.get_embedding_index(vault)
+    recall = embeddings.get_embedding_index(root)
     for domain in ("global", "media", "games", "music", "cooking"):
         rel = f"{PROFILES}/{domain}.md"
         chunk = _toward_turn(0.8) if domain == "games" else _random_unit(rel)
         recall.upsert_file(rel, ["profile chunk"], chunk[None, :], 1.0)
     recall.all_vectors()
-    lexstore.ensure_fresh(vault)
-    index = working_set_index.WorkingSetIndex(vault)
+    lexstore.ensure_fresh(root)
+    index = working_set_index.WorkingSetIndex(root)
     index.rebuild()
+    anchors = len(index.vector_matrix(FINGERPRINT)[0])
     index.close()
-    _built(vault).close()
+    _built(root).close()
     _reset_caches()
     working_set_runtime.reset_caches_for_tests()
+    return anchors
+
+
+@pytest.fixture
+def semantic_vault(vault, monkeypatch):
+    """Fifty background anchors, enough for the turn slice to encode, and a games page chunk near the turn's vector.
+
+    The turn vector is planted (a real encoder is out of the loop); the vault, the catalogue, the recall matrix,
+    the lexical index, the anchor lane and egress are real. The vault keeps the shipped selection limits.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _planted_vault(vault, monkeypatch, {})
+    _seed_profiles(vault)
+    assert _plant_profile_chunks(vault) >= ranking_config.DEFAULT_RANKING.working_set_semantic_min_population
     with principal.library_scope():
         yield vault
+
+
+@pytest.fixture
+def small_semantic_vault(tmp_path, monkeypatch):
+    """The same planted encoder over a catalogue under the slice's anchor minimum, so the slice encodes nothing."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    embeddings.clear_embedding_indexes()
+    _encoder_present(monkeypatch)
+    _seed_profiles(tmp_path)
+    initialize_vault_state_offline(tmp_path, source="domain profiles small vault fixture")
+    anchors = _plant_profile_chunks(tmp_path)
+    assert 0 < anchors < ranking_config.DEFAULT_RANKING.working_set_semantic_min_population
+    with principal.library_scope():
+        yield tmp_path
 
 
 def _activate(root: Path, turn: str, *, who=None, **arguments) -> dict:
@@ -465,15 +504,28 @@ def test_a_general_knowledge_turn_selects_no_profile_even_when_both_readings_run
     assert packet["domain_profiles"] == {"state": "empty", "profiles": [], "omitted": [], "selection": "semantic"}
 
 
-def test_selecting_profiles_encodes_the_turn_no_more_often_than_without_them(semantic_vault, monkeypatch) -> None:
+def test_a_small_catalogue_selects_by_meaning_at_the_shipped_floor_from_the_vector_the_task_lane_encoded(
+    small_semantic_vault,
+) -> None:
+    assert activation_conventions.load_conventions(small_semantic_vault).conventions.budget("profile_lexical_floor") == 8.5
+
+    packet = _activate(small_semantic_vault, PARAPHRASE_TURN)
+
+    assert packet["domain_profiles"]["selection"] == "semantic"
+    assert _served(packet) == {"games": [RULE["games"]], "media": [RULE["media"]]}
+
+
+@pytest.mark.parametrize("vault_fixture", ["semantic_vault", "small_semantic_vault"])
+def test_selecting_profiles_encodes_the_turn_no_more_often_than_without_them(request, monkeypatch, vault_fixture) -> None:
+    root = request.getfixturevalue(vault_fixture)
     calls: list[str] = []
     original = embeddings.embed_activation_query_if_loaded
     monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda text: calls.append(text) or original(text))
-    _activate(semantic_vault, PARAPHRASE_TURN)
+    _activate(root, PARAPHRASE_TURN)
     with_profiles = len(calls)
     monkeypatch.setenv("EXOMEM_ACTIVATION_PROFILES", "off")
     calls.clear()
-    _activate(semantic_vault, PARAPHRASE_TURN)
+    _activate(root, PARAPHRASE_TURN)
 
     assert with_profiles == len(calls) > 0
 
@@ -489,7 +541,7 @@ def test_without_a_turn_vector_the_paraphrase_selects_nothing_and_the_block_says
 
 
 def test_a_vault_floor_decides_whether_a_meaning_match_selects(semantic_vault) -> None:
-    _set_budgets(semantic_vault, profile_semantic_floor=0.9)
+    _set_budgets(semantic_vault, profile_semantic_floor=0.9, profile_lexical_floor=8.5)
 
     packet = _activate(semantic_vault, PARAPHRASE_TURN)
 

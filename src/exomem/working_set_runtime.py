@@ -141,33 +141,37 @@ _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
 )
 
 
-#: The turn and vector this activation encoded, held by `turn_vector_scope` so a later stage reads the vector
-#: and never encodes the turn a second time. A box shared by reference, so a stage that runs in a copy of the
-#: request's context still writes where the request reads.
-_TURN_VECTOR: ContextVar[list[tuple[str, Any]] | None] = ContextVar("activation_turn_vector", default=None)
+#: The vectors this activation encoded, by the text each one encodes, held by `turn_vector_scope` so a later stage
+#: reads a vector and never encodes the turn a second time. A box shared by reference, so a stage that runs in a
+#: copy of the request's context still writes where the request reads.
+_TURN_VECTOR: ContextVar[dict[str, Any] | None] = ContextVar("activation_turn_vector", default=None)
 
 
 @contextmanager
 def turn_vector_scope() -> Iterator[None]:
-    """Hold the activation's one turn vector for the stages that run inside this scope."""
-    token = _TURN_VECTOR.set([])
+    """Hold the activation's encoded vectors for the stages that run inside this scope."""
+    token = _TURN_VECTOR.set({})
     try:
         yield
     finally:
         _TURN_VECTOR.reset(token)
 
 
-def remember_turn_vector(turn: str, vector: Any) -> None:
-    """Record the vector the activation encoded for `turn`; a no-op outside `turn_vector_scope`."""
+def remember_turn_vector(text: str, vector: Any) -> None:
+    """Record the vector the activation encoded for `text`; a no-op outside `turn_vector_scope`.
+
+    Two stages encode the same turn (the signature lane and the task-context dense lane) with the same
+    encoder, so the first vector stands.
+    """
     box = _TURN_VECTOR.get()
     if box is not None and vector is not None:
-        box[:] = [(turn, vector)]
+        box.setdefault(text, vector)
 
 
 def remembered_turn_vector(turn: str) -> Any:
-    """The vector the activation encoded for exactly `turn`, or None when it encoded none."""
+    """The vector the activation encoded for exactly `turn`, or None when no stage encoded it."""
     box = _TURN_VECTOR.get()
-    return box[0][1] if box and box[0][0] == turn else None
+    return None if box is None else box.get(turn)
 
 
 #: The vaults whose lexical catalogue a pinned request asked to repair (`pin_lexical_checkpoint`).
