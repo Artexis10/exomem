@@ -31,7 +31,8 @@ reminder under a fixed data header naming it as retrieved memory rather than
 instructions. Current state first, then units, then pointers, each carrying the
 provenance ref that produced it, whole items only under
 `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 4,000) with trailing items dropped
-rather than one cut in half. An `ambiguous` abstention is the one abstention it
+rather than one cut in half. The stance and skills blocks have their own bounds
+beside that ceiling, and each renders whole once a session. An `ambiguous` abstention is the one abstention it
 renders — the competing anchors plus the instruction to call again with
 `anchor` — because otherwise the agent would never see the senses it is the only
 one able to choose between; every other abstention leaves exactly the ordinary
@@ -44,9 +45,9 @@ silence.
 
 `EXOMEM_RETRIEVE_INJECT=mcp` delegates recall for the turn to the admitted native
 MCP: the hook never sends the user's turn. It asks for read_instructions when the
-live contract is absent and for a recall each time the turn opens a subject that
-the held or injected context does not cover, reusing that context rather than
-duplicating it. Where a credentialed REST lane exists it also injects the session
+live contract is absent and for a recall each time the turn opens a subject from
+the user's work or life that the held or injected context does not cover, reusing
+that context rather than duplicating it; general questions need none. Where a credentialed REST lane exists it also injects the session
 context that changed. One `recall_context` call with an empty turn and the persisted
 continuity token (one request to the first credentialed lane, never retried, with
 credential discovery and the answer both inside `SESSION_CONTEXT_BUDGET_SECONDS`)
@@ -2386,8 +2387,13 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
 
 
 def _stance_is_held(block: object, last_generation: str) -> bool:
-    """Whether the caller already holds this stance generation, by the hook's own record."""
-    return isinstance(block, dict) and block.get("state") == "ready" and bool(block.get("generation")) and block["generation"] == last_generation
+    """Whether the caller already holds this stance generation: the service says so (`unchanged`), or the hook's
+    own record names the ready block's generation."""
+    if not isinstance(block, dict):
+        return False
+    if block.get("state") == "unchanged":
+        return True
+    return block.get("state") == "ready" and bool(block.get("generation")) and block["generation"] == last_generation
 
 
 #: The service already bounds the stance to the vault's `budgets.stance_max_chars`; this is the most a vault may set
@@ -2403,18 +2409,19 @@ def _format_stance_block(block: object, last_generation: str = "", max_chars: in
     The stance has its own bound beside the working set's, as the skills block has, so it takes nothing from the
     map's or the turn's room.
     """
-    if not isinstance(block, dict) or block.get("state") != "ready":
-        return "", True
     if _stance_is_held(block, last_generation):
         return _STANCE_HELD, True
+    if not isinstance(block, dict) or block.get("state") != "ready":
+        return "", True
     lines = []
     for item in block.get("items") or ():
         text = str(item.get("text") or "")
         if item.get("review_due"):
             text += f" (review due {item['review_due']})"
         lines.append(_packet_line("stance", text, str(item.get("ref") or "")))
+    # The service's bound covers the lines, not this count, so the count stays outside the cap, as for skills.
     tail = f"- stance: {block['omitted']} more not shown." if block.get("omitted") else ""
-    kept, used = [], len(tail) + (1 if tail else 0)
+    kept, used = [], 0
     for line in lines:
         if used + len(line) + (1 if kept else 0) > max_chars:
             break
