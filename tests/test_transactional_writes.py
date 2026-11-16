@@ -641,7 +641,7 @@ def test_batch_atomic_write_replaces_and_creates_on_windows(
     parent.mkdir(parents=True)
     existing = parent / "existing.md"
     created = parent / "created.md"
-    existing.write_text("old\n", encoding="utf-8")
+    existing.write_bytes(b"old\n")  # text mode would write CRLF on Windows and change the hash
     monkeypatch.setattr("exomem.file_watcher.register_self_write", lambda *_: None)
     monkeypatch.setattr(
         "exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None
@@ -1878,9 +1878,30 @@ def test_held_batch_restore_preserves_an_intervening_owned_edit(
     assert pending.read_bytes() == b"pending-old"
 
 
+@pytest.fixture
+def interference_during_rollback_unlink() -> None:
+    """Skip where the OS blocks the interference these tests make while the rollback holds the leaf."""
+    if os.name == "nt":
+        pytest.skip(
+            "Windows refuses a write or replace of a file while the rollback holds a delete-capable "
+            "handle on it, so the interference this test makes cannot happen there"
+        )
+
+
+@pytest.fixture
+def ancestor_swap_above_a_held_parent() -> None:
+    """Skip where the OS refuses to rename a folder that holds a handle the batch keeps open."""
+    if os.name == "nt":
+        pytest.skip(
+            "Windows refuses to rename a folder above a handle the batch holds, "
+            "so the ancestor swap this test makes cannot happen there"
+        )
+
+
 @pytest.mark.parametrize("intervention", ["reopen", "read"])
 def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, intervention: str,
+    interference_during_rollback_unlink: None,
 ) -> None:
     created = tmp_path / "created.txt"
     pending = tmp_path / "pending.txt"
@@ -1935,6 +1956,7 @@ def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
 
 def test_held_batch_unlink_leaves_a_different_file_that_replaced_the_leaf(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    interference_during_rollback_unlink: None,
 ) -> None:
     """A rollback that removes whichever file sits at the leaf once it has checked the one it created."""
     created = tmp_path / "created.txt"
@@ -1977,6 +1999,7 @@ def test_held_batch_unlink_leaves_a_different_file_that_replaced_the_leaf(
 @pytest.mark.parametrize("guarded", [False, True])
 def test_held_batch_inverse_refuses_a_replaced_ancestor_above_its_retained_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guarded: bool,
+    ancestor_swap_above_a_held_parent: None,
 ) -> None:
     ancestor = tmp_path / "outer"
     target = ancestor / "inner/target.txt"

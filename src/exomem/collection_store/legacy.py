@@ -293,7 +293,8 @@ class LegacyAuditSpool:
         try:
             # A row generator that a reference cycle keeps suspended holds its cursor, and so the file open:
             # Windows cannot delete an open file, so the cursors close here rather than when the cycle is collected.
-            for cursor in self._streaming:
+            # A tuple copy: collecting a cycle during the loop finalizes a generator, which discards its cursor.
+            for cursor in tuple(self._streaming):
                 with suppress(sqlite3.Error):
                     cursor.close()
             self._streaming.clear()

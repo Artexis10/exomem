@@ -1078,9 +1078,16 @@ def test_the_terminal_filter_withholds_a_stored_page_under_each_spelling_whateve
     assert released == {"entries": [{"path": visible}]}
 
 
+@pytest.fixture
+def case_sensitive_volume() -> None:
+    """The test builds folders that differ only in case, which a folding volume merges into one."""
+    if sys.platform in {"win32", "darwin"}:
+        pytest.skip("needs a case-sensitive volume: Windows and default macOS volumes fold case")
+
+
 @pytest.mark.parametrize("store", (False, True), ids=("file", "store"))
 def test_a_spelling_that_two_pages_share_once_case_is_folded_is_released_only_when_both_are(
-    vault, store  # noqa: F811
+    vault, store, case_sensitive_volume  # noqa: F811
 ):
     """The terminal filter decided a case-folded spelling against one matching page, the first in
     the directory's order on disk and in name order in the store. With `secret/Ledger.md` withheld

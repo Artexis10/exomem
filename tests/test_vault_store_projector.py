@@ -38,10 +38,9 @@ from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import mode, projector, read, write
 
-#: The folder-flush and parts-move trials wrap the POSIX filesystem class, which Windows lacks; the
-#: flush trials also name each folder through /proc/self/fd.
+#: The folder-flush trials name each folder through /proc/self/fd, which only Linux has.
 posix_only_spy = pytest.mark.skipif(
-    sys.platform != "linux", reason="the spy wraps the Linux held filesystem"
+    sys.platform != "linux", reason="the spy reads each folder's path from /proc/self/fd"
 )
 
 NOTES = "Knowledge Base/Notes"
@@ -193,14 +192,12 @@ def test_a_grant_revoked_while_a_publication_stages_its_bytes_installs_nothing(
     assert temporaries(stored) == []
 
 
-@posix_only_spy
 def test_a_moved_pages_parts_follow_it_after_the_pass_that_moved_it_met_a_busy_boundary(
     stored, writer, projecting, monkeypatch
 ):
     """A projector that completes a move before it moves the page's parts: a busy boundary at the
     parts then leaves them at the old path with nothing queued to move them, and the moved page
     loses its extracted content for good."""
-    from exomem import _held_fs_posix
     from exomem.extraction_parts import folder_for
 
     commit(writer, **put(MOVE_FROM, b"# Drifter\n"))
@@ -209,7 +206,9 @@ def test_a_moved_pages_parts_follow_it_after_the_pass_that_moved_it_met_a_busy_b
     old_parts.mkdir()
     (old_parts / "part-2.md").write_bytes(b"The rest of the extraction.\n")
     commit(writer, moves=(write.PageMove(MOVE_FROM, MOVE_TO),))
-    rename_directory = _held_fs_posix.PosixHeldFilesystem.rename_directory
+    with held_fs.acquire(stored).require() as filesystem:
+        filesystem_type = type(filesystem)  # the class this platform's vault uses
+    rename_directory = filesystem_type.rename_directory
     busy = []
 
     def busy_when_the_parts_move_first(self, *arguments, **keywords):
@@ -219,9 +218,7 @@ def test_a_moved_pages_parts_follow_it_after_the_pass_that_moved_it_met_a_busy_b
             raise projector.BoundaryBusy("another holder has the vault's mutation boundary")
         return rename_directory(self, *arguments, **keywords)
 
-    monkeypatch.setattr(
-        _held_fs_posix.PosixHeldFilesystem, "rename_directory", busy_when_the_parts_move_first
-    )
+    monkeypatch.setattr(filesystem_type, "rename_directory", busy_when_the_parts_move_first)
 
     assert projecting.run_pass().busy
     projecting.run_pass()
