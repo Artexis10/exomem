@@ -695,6 +695,13 @@ def _hydration_policy_problem(vault_root: Path) -> str | None:
     return None if config is None else media_capacity.hydration_policy_problem(config)
 
 
+# Each ledger file whose full schema this process already set up: its file identity and SQLite schema cookie
+# right after. Request paths build a store per call, and every writable connection repeated the idempotent setup.
+# A later connection skips it while both still match: a replaced file has another identity, and any schema change,
+# by any process, moves the cookie.
+_CURRENT_SCHEMA: dict[str, tuple[int, int, int]] = {}
+
+
 class MediaJobStore:
     def __init__(self, vault_root: Path, *, create: bool = True) -> None:
         self.vault_root = vault_root.resolve()
@@ -744,8 +751,9 @@ class MediaJobStore:
             # not create WAL/SHM merely by negotiating WAL mode.
             conn.execute("BEGIN IMMEDIATE")
             try:
-                self._migrate_offload_columns(conn)
-                self._migrate_eviction_columns(conn)
+                if not self._schema_current(conn):
+                    self._migrate_offload_columns(conn)
+                    self._migrate_eviction_columns(conn)
                 conn.commit()
             except BaseException:
                 conn.rollback()
@@ -763,9 +771,22 @@ class MediaJobStore:
             raise
         return conn
 
+    def _schema_current(self, conn: sqlite3.Connection) -> bool:
+        known = _CURRENT_SCHEMA.get(str(self.path))
+        if known is None:
+            return False
+        try:
+            stat = os.stat(self.path, follow_symlinks=False)
+        except OSError:
+            return False
+        return known == (stat.st_dev, stat.st_ino, conn.execute("PRAGMA schema_version").fetchone()[0])
+
     def _initialize(self) -> None:
         conn = self._connect()
         try:
+            # The schema cookie tracks no rows, so the job key migration, which a row marks, keeps its own check.
+            if self._schema_current(conn) and self._job_keys_current(conn):
+                return
             with conn:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
@@ -909,6 +930,9 @@ class MediaJobStore:
                 from . import media_bindings
 
                 media_bindings.initialize(conn)
+                version = conn.execute("PRAGMA schema_version").fetchone()[0]
+            stat = os.stat(self.path, follow_symlinks=False)
+            _CURRENT_SCHEMA[str(self.path)] = (stat.st_dev, stat.st_ino, version)
         finally:
             conn.close()
 
@@ -1090,6 +1114,13 @@ class MediaJobStore:
         if "target_evidence_version" not in columns:
             conn.execute("ALTER TABLE media_job_results ADD COLUMN target_evidence_version TEXT")
 
+    @staticmethod
+    def _job_keys_current(conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'job_key_version'"
+        ).fetchone()
+        return row is not None and str(row["value"]) == _JOB_KEY_VERSION
+
     def _migrate_job_key(self, conn: sqlite3.Connection) -> None:
         """Re-key existing rows onto (binary_rel, media_type), collapsing duplicates.
 
@@ -1097,10 +1128,7 @@ class MediaJobStore:
         older version keeps its old three-part `job_key` forever and would keep
         minting one row per stray sidecar. Runs once, guarded by a `meta` marker.
         """
-        row = conn.execute(
-            "SELECT value FROM meta WHERE key = 'job_key_version'"
-        ).fetchone()
-        if row is not None and str(row["value"]) == _JOB_KEY_VERSION:
+        if self._job_keys_current(conn):
             return
 
         survivors: dict[str, Any] = {}

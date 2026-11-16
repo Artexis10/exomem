@@ -1978,7 +1978,8 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
             else:
                 if job is not None:
                     source.require_current()
-                    if not MediaJobStore(vault).bind_original(job, relative):
+                    # The claimed job proves the ledger exists, so this store skips the schema setup.
+                    if not MediaJobStore(vault, create=False).bind_original(job, relative):
                         raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the job no longer owns these original bytes")
                 yield source
                 return
