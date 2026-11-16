@@ -126,7 +126,7 @@ The first version renders the commands that the first service already calls:
 | `sources.erase` | captured-Source erasure, when `erase-captured-source` ships |
 | `passages.search` | `search_memory` at the passage result level |
 
-The service profile and the personal profile share one renderer, extracted from `server_rest.py`. They differ in the operation set, the path, the authentication boundary and the version rules. The personal profile's paths, replies and document stay as they are. FastAPI was the closest outside option. It would add a second routing and validation layer beside the registry binding.
+The service profile and the personal profile share one renderer, extracted from `server_rest.py`. They differ in the operation set, the path, the authentication boundary, the version rules and the status overlay (D4). The personal profile's paths, replies, statuses and document stay as they are. FastAPI was the closest outside option. It would add a second routing and validation layer beside the registry binding.
 
 ### D2. One fixed document for each version is the SDK
 
@@ -154,9 +154,15 @@ The schema shapes follow from what generated clients tolerate:
 
 CI runs `oasdiff breaking` between the base branch's committed document and the new one, with `--fail-on ERR`. oasdiff rates a removed required response property, a new required request property and a narrowed request value as `ERR`. Task 1.9 proves the first case.
 
-### D4. Refusals carry codes in fixed status classes from one map
+### D4. Refusals carry codes in fixed status classes from one map and a service overlay
 
-Every refusal carries one string code. Its HTTP status comes from `cli_ops.http_status_for`, the map that the REST facade, edge ingress and transfer routes already use. S1 extends that map, so every HTTP door keeps one map:
+Every refusal carries one string code. Its HTTP status comes from `cli_ops.http_status_for`, the map that the REST facade, edge ingress and transfer routes already use.
+That map sends most codes to 400, including authority refusals such as `GOVERNANCE_AUTHORITY_REQUIRED`. The personal profile keeps the map unchanged.
+The service profile reads the same map through a service overlay. The overlay adds three classes: 401 for credential and proof refusals, 403 for authority refusals and 500 for unexpected failures.
+The overlay lists its codes in `cli_ops`, next to the shared map, so one module holds every code-to-status rule. For any other code, the overlay returns the shared map's status.
+The other option was to change the shared map and declare the `/api` change. The personal facade has local clients and no version, so nothing would warn them of a new status. The spec promises them unchanged replies.
+
+The service profile uses these classes:
 
 | Status | Class | Client action |
 |---|---|---|
@@ -168,7 +174,7 @@ Every refusal carries one string code. Its HTTP status comes from `cli_ops.http_
 | 500 | unexpected failure | treat the outcome as unknown; read state, or repeat with the same identifier when the operation states it is safe |
 | 503 | busy or unavailable | retry after the hint |
 
-The cell refuses some requests before any leaf runs. Their codes are the same for every operation:
+The service renderer refuses some requests before any leaf runs. Their codes are the same for every operation:
 
 | Refusal | Code | Status |
 |---|---|---|
@@ -183,6 +189,7 @@ A busy cell refuses at once with a retry hint and the `Retry-After` header. It d
 An uncertain outcome, such as a pending settlement, is a typed result state, not an error.
 A message can accompany a code for people. A client acts on the code alone.
 The status classes are protocol tokens that this specification fixes. Leaf codes come from the leaves. The renderer owns only the pre-leaf codes in the table above.
+The shared request boundary also refuses before the leaf, for example on a read-only cell, a quiescing cell or a held writer lease. Those refusals keep the codes that the boundary raises on every door.
 
 ### D5. Stage 0 is a requirement of the passage-evidence delivery
 
@@ -277,13 +284,14 @@ A custom Starlette route skips FastMCP's bearer check, and `CloudOriginMiddlewar
 - **Revocation.** The gateway refuses a revoked login session and signs no proof for it. A proof that it already signed expires within its short lifetime. The cell then refuses the request as it does on `/mcp`.
 
 On Cloud, S1 depends on a gateway release that forwards the service prefix and the document path with the same proof. It also depends on a chart change that configures them. The gateway lives in a separate repository, so that release is a dependency of S1, not a task of this repository.
+This change states the forwarding contract that the release implements, as a `hosted-gateway-contract` requirement.
 
 ## Planned deltas for later stages
 
 | Capability | Stage | What changes |
 |---|---|---|
 | `cell-service-identity` | S1, after #2852 merges | The discovery `service_api` section moves from `service-cell-contract` into this capability |
-| `hosted-gateway-contract` | S1, S2, S3 | Forward the service prefix and the document path with the same proof; authenticate service principals and subject assertions into the proof; keep the paying account apart from the owner |
+| `hosted-gateway-contract` | S2, S3 | Authenticate service principals and subject assertions into the proof; keep the paying account apart from the owner. This change adds the S1 forwarding requirement |
 | `governance-kernel` | S2, S3 | Service audiences, custody grants and their default-deny; partitions and the narrowed owner exemption |
 | `cloud-operator-access` | S3 | Operator exports and break-glass access keep member partitions out of reach |
 | `hosted-vault-portability` | S3 | A readable export leaves member partitions out; a transfer keeps them protected |
@@ -341,7 +349,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 ## Risks / Trade-offs
 
 - **Two doors to one leaf can drift.** → One registration and one leaf per operation; the conformance check runs every operation through both doors.
-- **Extracting one renderer can change the personal facade.** → The personal profile's existing tests and document stay unchanged as the acceptance check.
+- **Extracting one renderer can change the personal facade.** → The personal profile's existing tests and document stay unchanged as the acceptance check. A new test pins an authority code's status on both profiles, because no existing REST test pins it (task 1.5).
 - **Typed result models add code to each rendered leaf.** → Seven operations in the first version; the models also replace the consumer's hand-written parsers.
 - **The OpenAPI diff tool can miss a semantic change.** → A meaning change still needs review; the committed document makes every schema change visible.
 - **String codes give up enum checks in clients.** → The known values stay in the document; the conformance run fails on an undeclared code.

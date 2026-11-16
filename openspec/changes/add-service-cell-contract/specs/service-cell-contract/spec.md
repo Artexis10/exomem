@@ -1,3 +1,8 @@
+## Purpose
+
+The service cell contract defines how an outside service, such as a product or an enterprise system, uses an Exomem cell as its governed memory layer.
+It fixes the versioned service API, its published document, its refusal codes and status classes, its change rules and its performance budgets.
+
 ## ADDED Requirements
 
 ### Requirement: The Service API Is Served Only For Enabled Versions
@@ -24,17 +29,18 @@ The service API SHALL use the cell's existing listener. Every operation SHALL ac
 Each service operation SHALL name one command in the command registry and SHALL call that command's leaf.
 An operation MAY fix or narrow the command's arguments. It SHALL NOT add behaviour, state or side effects that the leaf does not have.
 The leaf result SHALL reach the client as data only, without the agent outcome sentence or agent guidance.
-The service profile and the personal REST facade SHALL share one HTTP renderer. The personal facade's paths, replies and document SHALL stay unchanged.
+The personal REST facade's paths, replies, statuses and document SHALL stay unchanged when the cell serves the service API.
 
 #### Scenario: Both doors return the same data
 
 - **WHEN** a conformance run calls one operation through the service API and its command through the MCP door, with equal arguments on equal cell state
 - **THEN** the service result holds the same data as the leaf result of the MCP call, after per-call identifiers and timestamps are removed from both
 
-#### Scenario: The renderer is shared
+#### Scenario: The personal facade keeps its replies
 
-- **WHEN** the personal REST facade's existing tests run after the service profile ships
-- **THEN** they pass without changes to their expected paths, replies or document
+- **WHEN** a client calls the personal REST facade on a cell that serves the service API
+- **THEN** each path returns the reply and status that it returns on a cell without the service API
+- **AND** the facade's document is the same on both cells
 
 ### Requirement: One Fixed Document Describes Each Version
 
@@ -68,8 +74,11 @@ Each operation SHALL state in the document whether a repeat of the same request 
 
 Every refusal SHALL carry one error code. A refusal from a leaf SHALL carry the code that the leaf raises through the MCP door.
 The HTTP status SHALL come from the code-to-status map that every HTTP door of the cell shares.
-The classes SHALL be: 400 invalid request, 401 credential or proof refused, 403 authority refused, 404 resource not found or operation unavailable, 409 conflict or stale precondition, 500 unexpected failure with unknown outcome, and 503 busy or unavailable.
-A refusal before the leaf SHALL carry one of these codes: `CLOUD_PROOF_REQUIRED`, `UNAUTHORIZED`, `OPERATION_UNAVAILABLE`, `INVALID_REQUEST`, or the leaf's existing busy code.
+The service API SHALL read that map through a service overlay that adds the 401, 403 and 500 classes.
+The overlay SHALL NOT change a status that the personal REST facade, edge ingress or a transfer route returns.
+The service classes SHALL be: 400 invalid request, 401 credential or proof refused, 403 authority refused, 404 resource not found or operation unavailable, 409 conflict or stale precondition, 500 unexpected failure with unknown outcome, and 503 busy or unavailable.
+A refusal that the service renderer makes before the leaf SHALL carry one of these codes: `CLOUD_PROOF_REQUIRED`, `UNAUTHORIZED`, `OPERATION_UNAVAILABLE`, `INVALID_REQUEST`, or the leaf's existing busy code.
+A refusal from the shared request boundary SHALL carry the code that the boundary raises on every door. Examples are a read-only cell, a quiescing cell and a held writer lease.
 A leaf code that the operation does not declare SHALL reach the client with its class status, and the cell SHALL count it by operation.
 A 503 refusal SHALL carry a retry hint in its body and in the `Retry-After` header. The cell SHALL NOT queue a request that it refuses as busy.
 A pending or uncertain outcome that the leaf reports as a result state SHALL remain a successful result with that state.
@@ -79,6 +88,12 @@ A pending or uncertain outcome that the leaf reports as a result state SHALL rem
 - **WHEN** the cell refuses a request because its model or mutation capacity is busy
 - **THEN** the response has status 503, the leaf's busy code and a `Retry-After` header
 - **AND** the request is not queued
+
+#### Scenario: An authority refusal keeps its personal status
+
+- **WHEN** a credential without authority for a command calls it through the personal REST facade and through the service API
+- **THEN** the personal REST facade answers with the status that it returned before the service API shipped
+- **AND** the service API answers with status 403 and the same code
 
 #### Scenario: A settlement is still pending
 

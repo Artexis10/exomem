@@ -40,12 +40,13 @@ The service API, and each later stage, is default-off behind host configuration.
 
 - `call-ledger`: a service API call writes exactly one content-free row, which names the service door, the version and the operation.
 - `connector-request-budget`: a service API call carries the same request-scoped deadline as an MCP tool call.
+- `hosted-gateway-contract`: the gateway forwards the service API prefix and the service document path with the same origin proof as the MCP path.
 
-Later stages write their own deltas when they start: `cell-service-identity` after #2852 merges, and `hosted-gateway-contract`, `governance-kernel`, `cloud-operator-access` and `hosted-vault-portability`. The design lists each one.
+Later stages write their own deltas when they start: `cell-service-identity` after #2852 merges, and `governance-kernel`, `cloud-operator-access` and `hosted-vault-portability`. Stages 2 and 3 extend `hosted-gateway-contract`. The design lists each one.
 
 ## Impact
 
-- **Code.** The change touches the command registry and the result models of the rendered leaves. It extracts one HTTP renderer from the personal REST facade and adds the service profile to it. It extends the code-to-status map, the Cloud origin middleware's path match, discovery, the request budget and the call ledger.
+- **Code.** The change touches the command registry and the result models of the rendered leaves. It extracts one HTTP renderer from the personal REST facade and adds the service profile to it. It adds a service overlay to the code-to-status map. It extends the Cloud origin middleware's path match, discovery, the request budget and the call ledger.
 - **Dependencies.**
   - Stage 1 renders the operations of the passage-evidence and captured-source-inventory work (#2852), which is in review, and lands after it merges.
   - Stage 0 is the requirement "Enrolled Sources stay off shared generated pages" of `captured-source-inventory`. #2852 adds it and amends `erase-captured-source` to match. This change relies on it without restating it, and merges after #2852.
