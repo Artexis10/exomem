@@ -676,6 +676,6 @@ def continuity_token(packet: dict[str, Any], *, held: Sequence[Mapping[str, str]
         block["state"] = "partial"
         _add_missing(block, "lane_truncated")
     packet["budget"]["used_chars"] = context_views.packet_chars(
-        packet["map"], packet.get("turn_slice"), block, packet.get("stance"), packet.get("next_action"),
+        packet["map"], packet.get("turn_slice"), block, packet.get("next_action"),
     )
     return token
