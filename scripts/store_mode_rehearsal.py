@@ -419,6 +419,9 @@ def preflight(
 #: How long a served process may take to answer its first request, and an ordinary request.
 START_TIMEOUT = 240.0
 REQUEST_TIMEOUT = 180.0
+#: A step that reads or rebuilds every page of a real vault: a sidecar build, a migrate, a fresh
+#: derivation, a pass of cold finds. Each took about 20 minutes on a 15,000-page copy under load.
+LONG_STEP_SECONDS = 3600.0
 
 
 def _process_table() -> dict[int, int]:
@@ -1263,7 +1266,8 @@ class Rehearsal:
                 "kill_window_seconds": args.kill_window,
                 "drain_seconds": args.drain_seconds,
                 "file_watcher": not args.no_file_watcher,
-                "enrol": not args.skip_enrol,
+                "enrol": not args.skip_enrol and not args.adopt_replica,
+                "adopt_replica": args.adopt_replica,
                 "canary_cases": len(self.cases),
                 "queries": len(self.queries),
             },
@@ -1300,9 +1304,8 @@ class Rehearsal:
             settled = await run_canary(served.client, self.cases)
             stop = await served.stop()
         started = time.monotonic()
-        # Cold finds over a real vault outlast the default; as long as a migrate.
         queries = await asyncio.to_thread(
-            self.rig.child, _QUERY_CHILD, {"queries": self.queries, "limit": 10}, 3600.0
+            self.rig.child, _QUERY_CHILD, {"queries": self.queries, "limit": 10}, LONG_STEP_SECONDS
         )
         queries_seconds = round(time.monotonic() - started, 1)
         return {
@@ -1527,8 +1530,7 @@ class Rehearsal:
             trial["stop"] = await recovered.stop()
         status = self.rig.store_json("status")
         dry_run = self.rig.store_json("rollback", "--dry-run")
-        # A fresh derivation of a real vault takes as long as its sidecar build.
-        verified = await asyncio.to_thread(self.rig.child, _VERIFY_CHILD, None, 3600.0)
+        verified = await asyncio.to_thread(self.rig.child, _VERIFY_CHILD, None, LONG_STEP_SECONDS)
         trial["status"] = {
             key: status.get(key)
             for key in (
@@ -1586,7 +1588,25 @@ class Rehearsal:
         vault = ("--vault", str(layout.vault))
         with self.step("the run's lease coordinator starts", fatal=True):
             rig.start_coordinator()
-        if not args.skip_enrol:
+        if args.adopt_replica:
+            # A copy of an enrolled vault carries its store's replica; a new host adopts it.
+            with self.step("adopt the collection store replica", fatal=True) as entry:
+                why = ("--why", "adopt the vault copy's collection store replica for a rehearsal")
+                preview = rig.cli_json(
+                    "collections adopt-local --dry-run", "collections", "adopt-local", "--dry-run", *why, *vault
+                )
+                done = rig.cli_json(
+                    "collections adopt-local",
+                    "collections",
+                    "adopt-local",
+                    "--preview-id",
+                    preview["preview_id"],
+                    *why,
+                    *vault,
+                    wait_for_lease=True,
+                )
+                entry["detail"] = {"preview": preview.get("step"), "status": done.get("status")}
+        elif not args.skip_enrol:
             with self.step("enrol the collection store", fatal=True) as entry:
                 manifest = layout.work / "store-enrolment.md"
                 manifest.write_text(loop._STORE_ENROLMENT_MANIFEST, encoding="utf-8")
@@ -1606,8 +1626,9 @@ class Rehearsal:
                 )
                 entry["detail"] = done.get("status")
         with self.step("build the sidecars: exomem maintain --reconcile", fatal=True):
-            # A cold build of every sidecar on a real vault outlasts the default; as long as a migrate.
-            rig.cli_json("maintain --reconcile", "maintain", "--reconcile", "--json", timeout=3600.0)
+            rig.cli_json(
+                "maintain --reconcile", "maintain", "--reconcile", "--json", timeout=LONG_STEP_SECONDS
+            )
         self.report["vault"] = vault_stats(layout.vault)
         with self.step("store-mode status before the switch", fatal=True) as entry:
             status = rig.store_json("status")
@@ -1633,7 +1654,7 @@ class Rehearsal:
                 "rehearse the switch on a vault copy",
                 operator=True,
                 wait_for_lease=True,
-                timeout=3600.0,
+                timeout=LONG_STEP_SECONDS,
             )
             entry["detail"] = applied
             if applied.get("status") != "migrated":
@@ -1642,7 +1663,7 @@ class Rehearsal:
             "store mode: the whole-table diff and the store's size", fatal=True
         ) as entry:
             checked = self.report["after_migrate"] = await asyncio.to_thread(
-                rig.child, _VERIFY_CHILD
+                rig.child, _VERIFY_CHILD, None, LONG_STEP_SECONDS
             )
             entry["detail"] = checked
             entry["ok"] = not checked["differences"] and checked["integrity"] == "ok"
@@ -1701,7 +1722,7 @@ class Rehearsal:
                 "rehearse the way back on a vault copy",
                 operator=True,
                 wait_for_lease=True,
-                timeout=3600.0,
+                timeout=LONG_STEP_SECONDS,
             )
             entry["detail"] = applied
             self.report["rollback_apply"] = applied
@@ -2125,7 +2146,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--skip-enrol",
         action="store_true",
-        help="the vault copy already holds the collection store",
+        help="the run's state root already holds the vault's collection store",
+    )
+    run.add_argument(
+        "--adopt-replica",
+        action="store_true",
+        help="the copy is of a vault whose collection store lives outside it; adopt the replica "
+        "the copy carries, as a new host does, instead of enrolling a new store",
     )
     run.set_defaults(handler=run_command)
 
