@@ -83,7 +83,7 @@ ACCESS: dict[str, VaultAccess] = {
     "governance-schema downmigrate": VaultAccess.NONE,
     # Reads the local graph snapshot when the service does not answer.
     "relations": VaultAccess.PAGES,
-    # The unsubcommanded `collections` names are filled in below by what each one does.
+    # `collections` is one parser whose subcommands differ in what they touch, so each declares its own access.
     "collections backup": VaultAccess.NONE,
     "collections adopt-local": VaultAccess.PAGES,
     "collections create": VaultAccess.PAGES,
