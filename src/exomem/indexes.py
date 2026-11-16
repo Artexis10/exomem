@@ -349,6 +349,19 @@ def _notes_owners(home_set: homes.HomeSet | None) -> tuple[_NotesOwner, ...]:
     return tuple(owners)
 
 
+def compiled_area_folders(vault_root: Path) -> tuple[str, ...]:
+    """The outermost folder of each compiled area, relative to the managed root.
+
+    These are the shipped compiled types' areas and the vault's homes, each below the compiled parent
+    of the layout (`Notes/` in `nested`, none in `root`). A caller that counts or lists the compiled
+    pages of a vault reads them here instead of spelling a parent folder.
+    """
+    parent = note_types.compiled_parent()
+    return tuple(dict.fromkeys(
+        "/".join((*parent, owner.parts[0])) for owner in _notes_owners(homes.load(vault_root))
+    ))
+
+
 def _owner_of(owners: tuple[_NotesOwner, ...], parts: tuple[str, ...]) -> _NotesOwner | None:
     """The deepest owner whose folder holds `parts`, so a nested home counts its own pages."""
     folded = tuple(part.casefold() for part in parts)
@@ -1030,7 +1043,11 @@ def compute_subindex_writes(
     }
 
     sources_dir = kb / "Sources"
-    notes_dir = kb / "Notes"
+    compiled_parent = note_types.compiled_parent()
+    notes_dir = kb.joinpath(*compiled_parent)
+    # The Notes hub (`Notes/index.md` and its per-folder sections) exists only below the `Notes/` parent of a
+    # `nested` vault. In `root` the compiled areas sit at the managed root, beside the top index.
+    has_notes_hub = bool(compiled_parent)
     entities_dir = kb / "Entities"
     entity_registry = load_entity_types(vault_root)
 
@@ -1043,7 +1060,7 @@ def compute_subindex_writes(
     notes_owners = _notes_owners(home_set)
     notes_counts = _count_notes(notes_dir, home_set=home_set)
     entities_counts = _count_entities(entities_dir, registry=entity_registry)
-    notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
+    notes_by_subfolder = _count_notes_by_subfolder(notes_dir) if has_notes_hub else {}
 
     # Virtually count each pending path so the index shows post-write state.
     for raw_path in pending_paths or []:
@@ -1057,20 +1074,21 @@ def compute_subindex_writes(
             source_folder = parts[1]
             if not source_folder.startswith("_"):
                 sources_counts[source_folder] = sources_counts.get(source_folder, 0) + 1
-        elif head == "Notes" and len(parts) >= 3:
-            type_folder = parts[1]
-            owner = _owner_of(notes_owners, tuple(parts[1:-1]))
-            if owner is not None:
-                notes_counts[owner.token] = notes_counts.get(owner.token, 0) + 1
-            # A folder with sub-folders counts a page under its own; a flat one under "".
-            inner = notes_by_subfolder.setdefault(type_folder, {})
-            sub = parts[2] if len(parts) >= 4 else ""
-            inner[sub] = inner.get(sub, 0) + 1
         elif head == "Entities" and len(parts) >= 3:
             ent_folder = parts[1]
             definition = entity_registry.by_folder.get(ent_folder.casefold())
             if definition is not None:
                 entities_counts[definition.id] = entities_counts.get(definition.id, 0) + 1
+        elif tuple(parts[: len(compiled_parent)]) == compiled_parent and len(parts) >= len(compiled_parent) + 2:
+            below = parts[len(compiled_parent):]
+            owner = _owner_of(notes_owners, tuple(below[:-1]))
+            if owner is not None:
+                notes_counts[owner.token] = notes_counts.get(owner.token, 0) + 1
+            if has_notes_hub:
+                # A folder with sub-folders counts a page under its own; a flat folder under "".
+                inner = notes_by_subfolder.setdefault(below[0], {})
+                sub = below[1] if len(below) >= 3 else ""
+                inner[sub] = inner.get(sub, 0) + 1
 
     # Top index counts refresh (Sources + Notes + Entities rows).
     new_top_text: str | None = None
@@ -1118,7 +1136,11 @@ def compute_subindex_writes(
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
-    if store_read.page_exists(vault_root, notes_index.relative_to(vault_root).as_posix()) and admitted(notes_index):
+    if (
+        has_notes_hub
+        and store_read.page_exists(vault_root, notes_index.relative_to(vault_root).as_posix())
+        and admitted(notes_index)
+    ):
         try:
             current, guard = read_guarded_text(vault_root, notes_index)
         except OSError:

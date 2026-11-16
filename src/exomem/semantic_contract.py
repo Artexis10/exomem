@@ -46,7 +46,7 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError, relation_review_stable_id_remediation
-from .kbdir import Layout, managed_join, managed_split_parts
+from .kbdir import Layout, is_in_managed_root, managed_join, managed_split_parts, managed_splitter
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
@@ -162,10 +162,9 @@ def _reference_only_entries(root: Path) -> tuple[StableIdentityEntry, ...]:
     if _store_census_owns(root) is not None:
         from .vault_store import read
 
-        kb_prefix = kb.relative_to(root).as_posix() + "/"
         with read.snapshot(root) as view:
             for name in _reference_only_directory_names():
-                rels = [meta.path for meta in view.pages(f"{kb_prefix}{name}/")]
+                rels = [meta.path for meta in view.pages(managed_join(f"{name}/"))]
                 for start in range(0, len(rels), read.KEYS_PER_QUERY):
                     chunk = rels[start : start + read.KEYS_PER_QUERY]
                     bodies = view.bodies(chunk)
@@ -2647,12 +2646,16 @@ def _without_store_revision(entries: tuple) -> tuple:
     return tuple(entry for entry in entries if entry[0] != _STORE_CENSUS_MARKER)
 
 
-def _stored_identity_member(kb_prefix: str, rel: str) -> bool:
+def _stored_identity_member(split: Callable[[str], str | None], rel: str) -> bool:
     """Whether the identity census admits the stored page at ``rel``: a Knowledge Base Markdown page
-    that the walk's name rules, applied to each of its folder and file names, do not prune."""
-    if not rel.startswith(kb_prefix) or PurePosixPath(rel).suffix.casefold() != ".md":
+    that the walk's name rules, applied to each of its folder and file names, do not prune.
+
+    ``split`` is ``managed_splitter()``, read once by a caller that judges many pages.
+    """
+    below = split(rel)
+    if below is None or PurePosixPath(rel).suffix.casefold() != ".md":
         return False
-    folder, _, name = rel[len(kb_prefix):].rpartition("/")
+    folder, _, name = below.rpartition("/")
     return not _pruned_identity_folder(folder) and not _prune_identity_census_name(
         name, at_kb_root=not folder
     )
@@ -2671,10 +2674,10 @@ def _pruned_identity_folder(folder: str) -> bool:
     )
 
 
-def _stored_page_is_input(kb_prefix: str, rel: str) -> bool:
+def _stored_page_is_input(split: Callable[[str], str | None], rel: str) -> bool:
     """Whether a cold build reads the stored page at ``rel``: as an identity, as a page of the vault
     corpus, or as the owner of a reference."""
-    if _stored_identity_member(kb_prefix, rel) or _is_reference_only_path(rel):
+    if _stored_identity_member(split, rel) or _is_reference_only_path(rel):
         return True
     from .vault_store import read
 
@@ -2687,11 +2690,11 @@ def _stored_page_entry(meta: Any) -> tuple[str, str, int, int]:
 
 def _stored_page_census(root: Path, view: Any) -> list[tuple[str, str, int, int]]:
     """The census entry of each stored page that a cold build reads, from one store snapshot."""
-    kb_prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
+    split = managed_splitter()
     entries = []
     for meta in view.pages():
         request_budget.checkpoint()
-        if _stored_page_is_input(kb_prefix, meta.path):
+        if _stored_page_is_input(split, meta.path):
             entries.append(_stored_page_entry(meta))
     return entries
 
@@ -2781,12 +2784,12 @@ def _patch_markdown_census(
 
         # The store's row, as the walk gives it; the revision entry stays, because these events
         # name only some of the commits that may have moved it.
-        kb_prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
+        split = managed_splitter()
         with read.snapshot(root) as view:
             metas = view.page_metas(stored)
         for rel_path in stored:
             meta = metas.get(rel_path)
-            if meta is None or not _stored_page_is_input(kb_prefix, rel_path):
+            if meta is None or not _stored_page_is_input(split, rel_path):
                 entries.pop(rel_path, None)
             else:
                 entries[rel_path] = _stored_page_entry(meta)
@@ -2966,7 +2969,7 @@ def _reconcile_markdown_delta(
         entry.path: entry for entry in context.identity_census.reference_only_entries
     }
     reference_only = dict(previous_reference_only)
-    kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
+    split = managed_splitter()
     owned = _store_census_owns(root)
     stored = tuple(rel for rel in changed_paths if owned is not None and owned(rel))
     stored_bodies: Mapping[str, bytes] = {}
@@ -2993,11 +2996,11 @@ def _reconcile_markdown_delta(
             else:
                 reference_only[rel_path] = StableIdentityEntry(rel_path, owner)
         source_path = root / rel_path
-        in_kb = rel_path == kb_rel or rel_path.startswith(kb_rel + "/")
+        in_kb = is_in_managed_root(rel_path)
         if rel_path in stored:
             # The cold build parses a stored page only when the identity census admits it, and
             # keeps its state when the vault corpus holds it too.
-            identity_member = _stored_identity_member(kb_rel + "/", rel_path)
+            identity_member = _stored_identity_member(split, rel_path)
             included = identity_member and read.corpus_member(rel_path, "vault")
             raw = stored_bodies.get(rel_path) if identity_member else None
             try:
@@ -4181,10 +4184,10 @@ def _build_corpus_context_uncached(
             )
 
     identity_census, _ = _build_identity_census(root, consume=consume)
-    kb_prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
+    split = managed_splitter()
     for rel_path, disk_path in eligible.items():
         request_budget.checkpoint()
-        if rel_path.startswith(kb_prefix):
+        if split(rel_path) is not None:
             continue
         try:
             source = _read_corpus_source(root, disk_path)

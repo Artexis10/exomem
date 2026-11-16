@@ -497,6 +497,7 @@ class ContextCatalogue:
         by_project = {carrier.match: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_PROJECT)}
         by_folder = {carrier.folder_parts: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_FOLDER)}
         by_tag = {carrier.match: carrier for carrier in carrier_set.of_kind(topic_carriers.KIND_TAG)}
+        parent = tuple(part.casefold() for part in note_types.compiled_parent())
         hits = dict.fromkeys(carrier_topics, 0)
         project_topics: dict[str, vocabulary_resolution.TopicResolution] = {}
 
@@ -524,8 +525,9 @@ class ContextCatalogue:
             for carrier in reached:
                 keys.update(carrier_topics[carrier.key].resolved)
                 hits[carrier.key] += 1
-            # A home is the placement rule of the Notes folder it names, so its folder is searched below the Notes root.
-            home = home_set.containing(folder[1:]) if folder[:1] == (note_types.NOTES_FOLDER.casefold(),) else None
+            # A home is the placement rule of the compiled folder it names, so its folder is searched below the
+            # compiled parent (`Notes/` in `nested`, the managed root in `root`).
+            home = home_set.containing(folder[len(parent):]) if folder[: len(parent)] == parent else None
             if home is not None:
                 keys.update(home_topics[home.key].resolved)
             own[entry.entry_id] = frozenset(keys)

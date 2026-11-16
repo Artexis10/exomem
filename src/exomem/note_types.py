@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from . import kbdir
 from .cli_ops import OpError
 from .vocabulary import registry
 
@@ -63,6 +64,15 @@ def folder_below_notes(folder: str) -> tuple[str, ...]:
     """
     parts = PurePosixPath(folder).parts
     return parts[1:] if parts[:1] == (NOTES_FOLDER,) else parts
+
+
+def compiled_parent(layout: kbdir.Layout | str | None = None) -> tuple[str, ...]:
+    """The folders that hold the compiled areas, below the managed root: the `Notes/` parent in `nested`, none in `root`.
+
+    Without `layout` it reads the managed root that the process is bound to.
+    """
+    chosen = kbdir.bound().layout if layout is None else kbdir.Layout(layout)
+    return (NOTES_FOLDER,) if chosen is kbdir.Layout.NESTED else ()
 
 
 def nested_folder(folder: str) -> str:

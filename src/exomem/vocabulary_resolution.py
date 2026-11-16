@@ -372,7 +372,9 @@ class SourceDomainBinding:
             "family": "domain",
             "requested": self.domain.raw,
             "canonical": self.domain.key,
-            "destination": self.destination_folder,
+            # A `root` vault files a source by its kind alone, so the domain projection folder is not
+            # where it lands: the receipt names the kind folder instead.
+            "destination": "/".join(self.segments) if self.flat else self.destination_folder,
             "match_kind": self.match_kind,
             "snapshot": self.snapshot,
         }

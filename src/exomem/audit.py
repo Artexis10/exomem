@@ -3298,7 +3298,9 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
 
     # Actual counts.
     sources = indexes._count_sources(kb / "Sources")
-    notes = indexes._count_notes(kb / "Notes", home_set=homes.load(vault_root))
+    notes = indexes._count_notes(
+        kb.joinpath(*note_types.compiled_parent()), home_set=homes.load(vault_root)
+    )
     entities = indexes._count_entities(kb / "Entities")
     actual: dict[str, int] = {
         "sources": sum(sources.values()),

@@ -59,7 +59,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import access, find_corpus, foreground_priority, indexes, temporal
+from . import access, find_corpus, foreground_priority, indexes, note_types, temporal
 from . import audit as audit_module
 from . import find as find_module
 from .vault import (
@@ -643,7 +643,8 @@ def _apply_whole(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: A
     index_pages = {
         _page_key(vault_root, kb / "index.md"),
         _page_key(vault_root, kb / "Sources" / "index.md"),
-        _page_key(vault_root, kb / "Notes" / "index.md"),
+        # The Notes hub exists only below the `Notes/` parent of a `nested` vault; in `root` this is the top index.
+        _page_key(vault_root, kb.joinpath(*note_types.compiled_parent(), "index.md")),
         _page_key(vault_root, kb / "Entities" / "index.md"),
     }
     planned_index_writes = {

@@ -16,6 +16,7 @@ from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
 from . import indexes, memory_refs, note_types, source_taxonomy, vault
+from .kbdir import managed_join
 
 
 class SourceIdentity(TypedDict):
@@ -164,7 +165,7 @@ def canonical_pages(root: Path, *, join_request: bool = True) -> CanonicalCaptur
             metadata = {}
             with read.snapshot(root, join_request=join_request) as view:
                 for lane in vault.APPEND_ONLY_KB_SUBPATHS:
-                    prefix = (vault.kb_root(root) / lane).relative_to(root).as_posix() + "/"
+                    prefix = managed_join(f"{lane}/")
                     lane_metadata = {item.path: item for item in view.pages(prefix) if Path(item.path).suffix.lower() == ".md"}
                     bodies = view.bodies(lane_metadata)
                     if bodies.keys() != lane_metadata.keys():

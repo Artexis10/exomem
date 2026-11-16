@@ -483,7 +483,7 @@ class ExomemBackend:
         """
         if self._vault is None:
             return {"notes": 0, "sources": 0, "known": False}
-        from .. import find_corpus
+        from .. import find_corpus, indexes, note_types
         from ..vault_store import mode as store_mode
 
         root = Path(self._vault)
@@ -509,7 +509,10 @@ class ExomemBackend:
         def count(name: str) -> int:
             return sum(1 for path in files(kb / name) if path.name != "index.md")
 
-        return {"notes": count("Notes"), "sources": count("Sources"), "known": True}
+        # The compiled areas sit below a `Notes/` parent in `nested` and at the managed root in `root`.
+        parent = "/".join(note_types.compiled_parent())
+        areas = (parent,) if parent else indexes.compiled_area_folders(root)
+        return {"notes": sum(count(area) for area in areas), "sources": count("Sources"), "known": True}
 
     def mode(self) -> dict:
         from .. import mode as mode_module

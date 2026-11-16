@@ -14,7 +14,7 @@ import pytest
 from exomem import commands, layout, reclassify_source, semantic_contract
 from exomem.governance.principal import library_scope
 from exomem.vault_store import ownership
-from tests.conftest import FIXTURE_VAULT, initialize_vault_state_offline
+from tests.conftest import FIXTURE_VAULT, bind_root_vault, initialize_vault_state_offline
 
 KB = "Knowledge Base"
 UNIT = "## Observations\n\n- [finding] The runbook lists the restart order.\n"
@@ -32,9 +32,7 @@ def root_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The fixture's managed folder as the vault root, with a record that says `layout: root`."""
     dest = tmp_path / "rootvault"
     shutil.copytree(FIXTURE_VAULT / KB, dest)
-    _write(dest, f"_Schema/{layout.RECORD_NAME}", "layout: root\n")
-    _write(dest, ".exomem/schema/SKILL.md", "---\nname: exomem\n---\n")
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(dest))
+    bind_root_vault(dest, monkeypatch)
     initialize_vault_state_offline(dest, source="root layout fixture")
     return dest
 
