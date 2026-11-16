@@ -1756,13 +1756,11 @@ def capture_source_artifacts(
                 # Every file shares one domain request; the first commit's
                 # record is the one that chose the destination.
                 resolution = resolution or payload.get("vocabulary_resolution")
-                # `stored_path` and `media_id` are required by the bounded
-                # artifact-receipt projection a compact terminal applies; a row
-                # missing either is replaced wholesale with
-                # INVALID_ARTIFACT_RECEIPT. That projection also drops any key
-                # outside its allowlist, so `page` and `ref` survive only in a
-                # full terminal — which costs nothing, because citation resolves
-                # from the artifact path and the page is `<stored_path>.md`.
+                # A compact terminal reads `stored_path`, `media_id` and the other
+                # receipt fields through a bounded projection. A committed row
+                # whose field does not read keeps its state, loses that field and
+                # names it in `unverified_fields`; it never becomes a failure.
+                # The projection keeps `path`, `page` and `ref` beside them.
                 stored_path = payload.get("artifact_path")
                 outcomes[index] = {
                     "file_id": artifact.file_id,

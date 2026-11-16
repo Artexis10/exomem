@@ -915,10 +915,12 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                     row[field] = item[field]
             if "warnings" in item:
                 # Advisory, like a structure suggestion: trimmed to the bound, never a reason to drop the row.
-                listed = item["warnings"] if isinstance(item["warnings"], list) else []
-                row["warnings"] = _bounded_warnings(listed)
-                if len(listed) > _MAX_WARNINGS:
-                    row["warnings_omitted"] = len(listed) - _MAX_WARNINGS
+                if isinstance(item["warnings"], list):
+                    row["warnings"] = _bounded_warnings(item["warnings"])
+                    if len(item["warnings"]) > _MAX_WARNINGS:
+                        row["warnings_omitted"] = len(item["warnings"]) - _MAX_WARNINGS
+                else:
+                    unverified.append("warnings")
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
@@ -2189,20 +2191,28 @@ def _batch_rows(
 ) -> list[tuple[str, str]]:
     """One (state, path) pair per attempted file of a batch, read from the projected rows.
 
-    The projections, never the raw leaf: a malformed row is already a `failed` row there, so the
-    sentence cannot claim more than the rows the agent reads. `replayed` is a file an earlier call
-    committed, so it counts with `already_stored`. `unselected` files were never attempted.
+    The projections, never the raw leaf: a row whose receipt did not read keeps its state there and
+    names the fields in `unverified_fields`, so the sentence cannot claim more than the rows the agent
+    reads. A stored row whose path did not read is named by its `file_id`. `replayed` is a file an
+    earlier call committed, so it counts with `already_stored`. `unselected` files were never attempted.
     A media row is `failed` or it was accepted; the media contract has no duplicate state.
     One file written alone has no rows; its stored leaf says `already_stored` when the bytes were
     already there, and names the earlier copy it resolved to.
     """
-    rows = []
+    named: list[tuple[str, str]] = []
+    unnamed: list[tuple[str, str]] = []
     for item in artifact_receipt.get("files", ()):
         state = _artifact_state(item)
         state = "already_stored" if state == "replayed" else state
         if state in _ARTIFACT_STATES:
-            # A row whose path did not read still names the file by the id the caller gave it.
-            rows.append((state, item.get("stored_path") or item.get("file_id", "")))
+            # A row whose path did not read still names the file by the id the caller gave it. Those rows
+            # follow the rows with a path, in their own order, so a sentence leads with a path whatever
+            # the order of the files.
+            if item.get("stored_path"):
+                named.append((state, item["stored_path"]))
+            else:
+                unnamed.append((state, item.get("file_id", "")))
+    rows = named + unnamed
     for item in media.get("media_results", ()):
         rows.append(("failed" if item["outcome"] == "failed" else "stored", item["path"]))
     if (
@@ -2281,6 +2291,12 @@ def _user_summary(
         names = [item for item in paths if isinstance(item, str)]
     else:
         names = []
+    # A stored row whose path did not read is in the batch rows, named by its `file_id`, but not in `paths`.
+    # The sentence counts the files the rows say were stored, so it never reads as fewer than `summary.stored`.
+    # `_batch_rows` lists the rows with a path first, so the ids of the unnamed files follow the paths.
+    stored_rows = [name for state, name in batch if state == "stored"]
+    if len(stored_rows) > len(names):
+        names = stored_rows
     if not names:
         return head
     if verb == "moved" and len(names) == 2:

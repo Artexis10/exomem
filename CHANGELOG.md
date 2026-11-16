@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.184.1](https://github.com/Artexis10/exomem/compare/v0.184.0...v0.184.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **artifacts:** never report a committed file as failed ([#2872](https://github.com/Artexis10/exomem/issues/2872)) ([730d91e](https://github.com/Artexis10/exomem/commit/730d91e428aa98bd2feba8af4453f35095ea627c))
+* **vault-store:** run the store-mode suites on native Windows, fix six Windows defects and add the rehearsal driver ([#2861](https://github.com/Artexis10/exomem/issues/2861)) ([570259a](https://github.com/Artexis10/exomem/commit/570259af2dd6c854e459dcc7732a56a81ccd386a))
+
 ## [0.184.0](https://github.com/Artexis10/exomem/compare/v0.183.0...v0.184.0) (2026-11-16)
 
 

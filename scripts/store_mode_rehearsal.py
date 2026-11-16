@@ -90,7 +90,10 @@ GUARDED_PREFIXES = ("EXOMEM_", "KB_MCP_", "XDG_")
 GUARDED_NAMES = ("HOME", "TMPDIR", "PYTHONPATH")
 LEASE_VAULT_ID = "store-rehearsal"
 LEASE_REPLICA_ID = "rehearsal-service"
-LEASE_TTL = loop._LEASE_TTL
+#: The run's lease term: a service's default (`writer_lease.LeaseConfig`), not the journey's short
+#: test lease, which one operation on a real vault under load outlasts. A copy, because this
+#: process builds the run's environment before it may import product code (see "Isolation").
+LEASE_TTL = 30.0
 
 
 class Refusal(Exception):
@@ -420,7 +423,8 @@ def preflight(
 START_TIMEOUT = 240.0
 REQUEST_TIMEOUT = 180.0
 #: A step that reads or rebuilds every page of a real vault: a sidecar build, a migrate, a fresh
-#: derivation, a pass of cold finds. Each took about 20 minutes on a 15,000-page copy under load.
+#: derivation, a pass of cold finds. Each took about 20 minutes on a 15,000-page copy under load,
+#: and over an hour on a loaded host; `--long-step-seconds` raises it for such a host.
 LONG_STEP_SECONDS = 3600.0
 
 
@@ -823,7 +827,9 @@ store = connection.store_path(vault)
 with tempfile.TemporaryDirectory() as scratch:
     expected = Path(scratch) / "expected.sqlite"
     verify.derive_expected(vault, expected)
-    conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+    # The product's reader registers the SQL functions that a collection's expression indexes call,
+    # so the integrity check can evaluate them.
+    conn = connection.open_reader(store)
     drift = 0
     try:
         stored = dict(conn.execute("SELECT path, mtime_ns FROM pages"))
@@ -1305,7 +1311,10 @@ class Rehearsal:
             stop = await served.stop()
         started = time.monotonic()
         queries = await asyncio.to_thread(
-            self.rig.child, _QUERY_CHILD, {"queries": self.queries, "limit": 10}, LONG_STEP_SECONDS
+            self.rig.child,
+            _QUERY_CHILD,
+            {"queries": self.queries, "limit": 10},
+            self.args.long_step_seconds,
         )
         queries_seconds = round(time.monotonic() - started, 1)
         return {
@@ -1530,7 +1539,9 @@ class Rehearsal:
             trial["stop"] = await recovered.stop()
         status = self.rig.store_json("status")
         dry_run = self.rig.store_json("rollback", "--dry-run")
-        verified = await asyncio.to_thread(self.rig.child, _VERIFY_CHILD, None, LONG_STEP_SECONDS)
+        verified = await asyncio.to_thread(
+            self.rig.child, _VERIFY_CHILD, None, self.args.long_step_seconds
+        )
         trial["status"] = {
             key: status.get(key)
             for key in (
@@ -1613,6 +1624,27 @@ class Rehearsal:
                     wait_for_lease=True,
                 )
                 entry["detail"] = {"preview": preview.get("step"), "status": done.get("status")}
+            if args.release_claim:
+                # A copy of a vault in store mode names the holder's claim, and that holder is not
+                # this run; the product's own remedy releases it as the offline owner.
+                with self.step("release the copy's standing store claim", fatal=True) as entry:
+                    named = rig.store_json("release", "--dry-run", operator=True)
+                    claim = named.get("diagnostics", {}).get("claim")
+                    if named["_exit"] != 0 or not claim:
+                        raise RuntimeError(f"the release dry run named no claim: {named}")
+                    released = rig.store_json(
+                        "release",
+                        "--apply",
+                        "--claim",
+                        claim,
+                        "--why",
+                        "release a vault copy's store claim for a rehearsal",
+                        operator=True,
+                        wait_for_lease=True,
+                    )
+                    if released["_exit"] != 0:
+                        raise RuntimeError(f"the release refused: {released}")
+                    entry["detail"] = {"claim": claim, "status": released.get("status")}
         elif not args.skip_enrol:
             with self.step("enrol the collection store", fatal=True) as entry:
                 manifest = layout.work / "store-enrolment.md"
@@ -1634,7 +1666,11 @@ class Rehearsal:
                 entry["detail"] = done.get("status")
         with self.step("build the sidecars: exomem maintain --reconcile", fatal=True):
             rig.cli_json(
-                "maintain --reconcile", "maintain", "--reconcile", "--json", timeout=LONG_STEP_SECONDS
+                "maintain --reconcile",
+                "maintain",
+                "--reconcile",
+                "--json",
+                timeout=self.args.long_step_seconds,
             )
         self.report["vault"] = vault_stats(layout.vault)
         with self.step("store-mode status before the switch", fatal=True) as entry:
@@ -1661,7 +1697,7 @@ class Rehearsal:
                 "rehearse the switch on a vault copy",
                 operator=True,
                 wait_for_lease=True,
-                timeout=LONG_STEP_SECONDS,
+                timeout=self.args.long_step_seconds,
             )
             entry["detail"] = applied
             if applied.get("status") != "migrated":
@@ -1670,7 +1706,7 @@ class Rehearsal:
             "store mode: the whole-table diff and the store's size", fatal=True
         ) as entry:
             checked = self.report["after_migrate"] = await asyncio.to_thread(
-                rig.child, _VERIFY_CHILD, None, LONG_STEP_SECONDS
+                rig.child, _VERIFY_CHILD, None, self.args.long_step_seconds
             )
             entry["detail"] = checked
             entry["ok"] = not checked["differences"] and checked["integrity"] == "ok"
@@ -1729,7 +1765,7 @@ class Rehearsal:
                 "rehearse the way back on a vault copy",
                 operator=True,
                 wait_for_lease=True,
-                timeout=LONG_STEP_SECONDS,
+                timeout=self.args.long_step_seconds,
             )
             entry["detail"] = applied
             self.report["rollback_apply"] = applied
@@ -2035,6 +2071,10 @@ def adopt_isolation(rig: Rig) -> None:
 
 
 def run_command(args: argparse.Namespace) -> int:
+    if args.release_claim and not args.adopt_replica:
+        raise SystemExit(
+            "--release-claim releases the claim in an adopted replica: add --adopt-replica"
+        )
     layout = Layout(
         vault=_resolved(args.vault), scratch=_resolved(args.scratch), out=_resolved(args.out)
     )
@@ -2124,6 +2164,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--ops", type=int, default=40, help="writes in the first stream (default 40)")
     run.add_argument("--seed", type=int, default=7, help="seeds the stream and the kill moments")
     run.add_argument(
+        "--long-step-seconds",
+        type=at_least(60),
+        default=LONG_STEP_SECONDS,
+        metavar="SECONDS",
+        help="the bound on a step that reads or rebuilds the whole vault (default "
+        f"{LONG_STEP_SECONDS:.0f})",
+    )
+    run.add_argument(
         "--kill-window",
         type=float,
         default=None,
@@ -2160,6 +2208,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="the copy is of a vault whose collection store lives outside it; adopt the replica "
         "the copy carries, as a new host does, instead of enrolling a new store",
+    )
+    run.add_argument(
+        "--release-claim",
+        action="store_true",
+        help="with --adopt-replica: the copy's replica names a store-mode claim whose holder is "
+        "not this run (a copy of a vault in store mode, or an earlier run that stopped after "
+        "its migrate); release it with `store-mode release` before the file-mode baseline",
     )
     run.set_defaults(handler=run_command)
 
