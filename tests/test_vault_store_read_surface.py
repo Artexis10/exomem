@@ -228,6 +228,10 @@ SAMPLES = {
         "operation": "append", "validate_only": True, "path": CLAIM,
         "content": "\nThe keeper adds oil at dusk.\n",
     },
+    "manage_memory_file:move": {
+        "operation": "move", "validate_only": True, "old_path": CLAIM,
+        "new_path": "Knowledge Base/Notes/Archive/Lantern Claim.md",
+    },
     "manage_memory_file:trash-list": {"operation": "trash-list"},
     "manage_memory_file:propose-reclassification": {
         "operation": "propose-reclassification", "path": SOURCE, "source_kind": "article",
@@ -582,6 +586,12 @@ STORE_READ_GAPS = {
         "audit", "browse_memory", "list_directory", "maintain_memory:audit", "maintain_memory:fix",
         "manage_memory_file:list", "review_memory:audit",
     ), HELD_LISTING_PROBES),
+    "manage_memory_file:move": (
+        "the store-mode move preview runs the move's own checks, which stat the moved page and walk "
+        "its linkers on disk (store_targets.resolve_existing, store_targets.inbound_links, "
+        "move_file.plan_inbound_rewrites); the answer is the store's",
+        frozenset({"page filesystem read"}),
+    ),
 }
 
 

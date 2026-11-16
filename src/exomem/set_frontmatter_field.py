@@ -3,8 +3,10 @@
 For when `edit` is overkill (it rewrites whole body or tags). This patches
 exactly one key, leaves the body alone, and always bumps `updated:`.
 
-Refuses Sources/ and Evidence/. Curated trees need `allow_curated=true`.
-`why` is required — lands in the log entry.
+Refuses Sources/ and Evidence/, except for a field that the `page-fields` registry
+declares a pointer: that correction goes through the governed pointer write, which
+patches the value span alone and sets no `updated`. Curated trees need
+`allow_curated=true`. `why` is required — lands in the log entry.
 """
 
 from __future__ import annotations
@@ -16,7 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import page_ids, project_keys, semantic_writes, temporal, vocabulary_resolution
+from . import (
+    page_fields,
+    page_ids,
+    pointer_write,
+    project_keys,
+    semantic_writes,
+    temporal,
+    vocabulary_resolution,
+)
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     EXCLUDED_FIELD_CODE,
@@ -51,6 +61,8 @@ class SetFrontmatterResult:
     new_value: Any
     warnings: list[str]
     semantic: dict | None = None
+    #: The record of a pointer write to an append-only page, which its revert names.
+    pointer_write: str | None = None
 
     def as_dict(self) -> dict:
         result = {
@@ -62,6 +74,8 @@ class SetFrontmatterResult:
         }
         if self.semantic is not None:
             result["semantic"] = self.semantic
+        if self.pointer_write is not None:
+            result["pointer_write"] = self.pointer_write
         return result
 
 
@@ -142,6 +156,12 @@ def set_frontmatter_field(
         raise SetFrontmatterError(code=e.code, reason=e.reason) from e
 
     append_only = in_append_only_tree(rel_path)
+    if append_only and field in page_fields.pointer_fields(vault_root):
+        return _set_pointer_field(
+            vault_root, abs_path, rel_path, field=field, value=value, why=why,
+            expected_hash=expected_hash, today=today, validate_only=validate_only,
+            semantic_transition_token=semantic_transition_token,
+        )
     if append_only:
         raise SetFrontmatterError(
             code="APPEND_ONLY",
@@ -314,6 +334,119 @@ def set_frontmatter_field(
         new_value=value,
         warnings=warnings,
         semantic=committed.as_dict(),
+    )
+
+
+def _set_pointer_field(
+    vault_root: Path,
+    abs_path: Path,
+    rel_path: str,
+    *,
+    field: str,
+    value: Any,
+    why: str,
+    expected_hash: str | None,
+    today: dt.date | None,
+    validate_only: bool,
+    semantic_transition_token: str | None,
+) -> SetFrontmatterResult | SetFrontmatterValidation:
+    """Correct a pointer field of an append-only page through the governed pointer write.
+
+    The value span is patched where the YAML parser places it and every other byte, line
+    endings included, is kept: `updated` is not a pointer, so the write's span proof would
+    refuse it. The call names the page, so it approves the write; the preview returns the
+    old and new value, and the commit leaves a pointer-write record that a revert can use.
+    """
+    from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+    try:
+        text, guard = read_guarded_text(vault_root, abs_path)
+    except (OSError, UnicodeError) as error:
+        raise SetFrontmatterError(
+            code="UNREADABLE", reason=f"could not safely read {rel_path}"
+        ) from error
+    front, _body, block = parse_frontmatter(text)
+    if block is None:
+        raise SetFrontmatterError(
+            code="FRONTMATTER_REQUIRED",
+            reason=f"{rel_path} has no frontmatter block; a pointer correction never synthesizes one.",
+        )
+    old_value = front.get(field)
+    value = _governed_enum_value(field, value, page_type=front.get("type"), page=(vault_root, rel_path, front))
+    project_plan = _plan_project_keys(vault_root, field, value)
+    try:
+        after = splice_markdown_frontmatter(text, {field: value})
+        write = pointer_write.plan(
+            vault_root, rel_path, text, after, pointer_write.Declared(fields={field}),
+            reason=why.strip(),
+        )
+    except (FrontmatterSpliceError, pointer_write.PointerWriteError) as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    now = today or temporal.now()
+    try:
+        date_iso = semantic_writes.resolve_reviewed_date_iso(semantic_transition_token, now)
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    by_id = expected_hash is not None and page_ids.is_page_id(expected_hash)
+    try:
+        preflight = semantic_writes.preflight_existing(
+            vault_root,
+            path=rel_path,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=guard.expected_content_hash
+            if by_id
+            else expected_hash or guard.expected_content_hash,
+            transition_token=semantic_transition_token,
+            stamp=date_iso,
+            validate_only=validate_only,
+        )
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    if by_id and not page_ids.guard_matches(str(expected_hash), guard.expected_content_hash or ""):
+        raise SetFrontmatterError(
+            code="STALE_EDIT",
+            reason=(
+                f"{rel_path} changed on disk since you read it (expected_hash mismatch). "
+                "Re-read the page with `get` and retry the edit against the current content."
+            ),
+        )
+    if validate_only:
+        return SetFrontmatterValidation(
+            path=rel_path, field=field, old_value=old_value, new_value=value,
+            validate_only=True, semantic=preflight.as_dict(),
+        )
+    rel_no_ext = rel_path.removesuffix(".md")
+    record_id = pointer_write.record(vault_root, write)
+    try:
+        log_plan = plan_log_writes(
+            vault_root,
+            date_iso=date_iso,
+            op="set_frontmatter_field",
+            rel_path_no_ext=rel_no_ext,
+            body=(
+                f"set_frontmatter_field via exomem (pointer write {record_id}). {why.strip()} "
+                f"Field: {field!r}. Old: {old_value!r}. New: {value!r}."
+            ),
+            operation_token=preflight.transition_token,
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise SetFrontmatterError(
+            "LOG_PLAN_CONFLICT", "frontmatter log update could not be planned safely"
+        ) from error
+    warnings = [note for note in (log_plan.warning, log_plan.rotation_note) if note is not None]
+    try:
+        committed = semantic_writes.commit_existing(
+            vault_root,
+            preflight=preflight,
+            auxiliary_writes=(*project_plan, *log_plan.writes),
+            derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
+        )
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    return SetFrontmatterResult(
+        path=rel_path, field=field, old_value=old_value, new_value=value,
+        warnings=warnings, semantic=committed.as_dict(), pointer_write=record_id,
     )
 
 

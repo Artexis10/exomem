@@ -372,7 +372,9 @@ def test_stable_id_move_prepares_exact_lifecycle_and_indexes_each_path_once(
 
     moved = tmp_path / new_path
     assert not old.exists()
-    assert moved.read_text(encoding="utf-8") == source
+    assert moved.read_text(encoding="utf-8") == source.replace(
+        "---\n\n", f"moved_from:\n- path: {old_path}\n---\n\n", 1
+    )
     state = semantic_contract.build_page_state(tmp_path, new_path, source)
     assert state.identity == _ID
     prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
@@ -533,8 +535,8 @@ def test_move_blocks_append_only_inbound_rewrite_before_any_mutation(
             new_path=new_path,
         )
 
-    assert blocked.value.code == "APPEND_ONLY"
-    assert "update_wikilinks=false" in blocked.value.reason
+    assert blocked.value.code == "POINTER_PREVIEW_REQUIRED"
+    assert "preview_digest" in blocked.value.reason
     assert old.read_bytes() == target.encode()
     assert referrer_file.read_bytes() == referrer.encode()
     assert not (tmp_path / new_path).exists()
@@ -594,7 +596,9 @@ def test_move_without_rewrites_still_runs_final_corpus_for_append_only_referrer(
     assert referrer_file.read_bytes() == referrer.encode()
     assert result.semantic is not None
     assert not (tmp_path / _PAGE).exists()
-    assert (tmp_path / new_path).read_text(encoding="utf-8") == target
+    assert (tmp_path / new_path).read_text(encoding="utf-8") == target.replace(
+        "---\n\n", f"moved_from:\n- path: {_PAGE}\n---\n\n", 1
+    )
 
 
 def test_intra_append_only_move_never_rewrites_moved_source_bytes(
@@ -855,7 +859,9 @@ def test_move_preserves_grandfathered_missing_unit_debt(tmp_path: Path) -> None:
     )
 
     assert not page.exists()
-    assert (tmp_path / _OTHER_PAGE).read_bytes() == original
+    assert (tmp_path / _OTHER_PAGE).read_bytes() == original.replace(
+        b"---\n\n", f"moved_from:\n- path: {_PAGE}\n---\n\n".encode(), 1
+    )
     assert result.semantic is not None
     contract = result.semantic["contract_results"][_ID]
     finding = next(
@@ -3123,7 +3129,8 @@ def test_set_frontmatter_preliminary_block_does_not_register_project(
             why="must remain inert",
         )
 
-    assert exc.value.code == "APPEND_ONLY"
+    # `project` is a pointer an append-only page may correct, so the semantic contract blocks.
+    assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
     assert not registry_path.exists()
 
 

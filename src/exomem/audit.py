@@ -3727,6 +3727,41 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
             meta=item,
             )
         )
+    findings.extend(_prior_path_findings(vault_root))
+    return findings
+
+
+def _prior_path_findings(vault_root: Path) -> list[AuditFinding]:
+    """A prior path two live pages claim, and a page without an identity at a claimed prior path."""
+    from . import prior_claims
+
+    findings: list[AuditFinding] = []
+    for item in prior_claims.issues(vault_root):
+        request_budget.checkpoint()
+        paths = [str(path) for path in item["paths"]]  # type: ignore[union-attr]
+        if item["kind"] == "prior_path_conflict":
+            detail = (
+                f"prior_path_conflict: {item['path']} is claimed by {', '.join(paths)}; "
+                "links to it stay unresolved"
+            )
+            fix = "Repoint the links to the page they mean, then move or correct the other claimant."
+        else:
+            detail = (
+                f"reserved_path_occupied: {item['path']} has no exomem_id and sits where "
+                f"{', '.join(paths)} moved from; links to it resolve to the moved page"
+            )
+            fix = "Move or remove the file at the reserved path, or give it its own name."
+        findings.append(
+            AuditFinding(
+                category="reference_identity",
+                severity="warn",
+                path=str(item["path"]),
+                detail=detail,
+                proposed_fix=fix,
+                paths=paths,
+                meta={"kind": item["kind"], "path": item["path"], "claimants": paths},
+            )
+        )
     return findings
 
 

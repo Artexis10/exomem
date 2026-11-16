@@ -1,0 +1,30 @@
+schema_version: 1
+registry: page-fields
+# Frontmatter fields with a governed role. A `pointer` field names where a page belongs
+# or which file it describes, so a governed pointer write may change it on a page in an
+# append-only tree. Every other field there keeps its captured bytes.
+entries:
+  project:
+    label: Project
+    attributes: {field: project, role: pointer}
+  projects:
+    label: Projects
+    attributes: {field: projects, role: pointer}
+  domain:
+    label: Domain
+    attributes: {field: domain, role: pointer}
+  source-type:
+    label: Source type
+    attributes: {field: source_type, role: pointer}
+  ingested-into:
+    label: Ingested into
+    attributes: {field: ingested_into, role: pointer}
+  evidence-file:
+    label: Evidence file
+    attributes: {field: evidence_file, role: pointer}
+  data-file:
+    label: Data file
+    attributes: {field: data_file, role: pointer}
+  artifact-path:
+    label: Artifact path
+    attributes: {field: artifact_path, role: pointer}

@@ -311,9 +311,10 @@ def test_the_correction_records_its_reason_and_previous_path(
     )
     after = _front(vault, result.new_path)
     assert str(after["reclassified"]) == TODAY.isoformat()
-    assert after["reclassified_from"] == [
+    assert after["moved_from"] == [
         {"path": captured.path, "kind": "unclassified", "domain": "travel"}
     ]
+    assert "reclassified_from" not in after
     assert after["reclassified_reason"] == "it is a written investigation"
 
 
@@ -328,7 +329,7 @@ def test_a_correction_that_does_not_relocate_records_no_previous_path(
         vault, path=captured.path, source_kind="invoice-receipt",
         reason="confirmed on review", today=TODAY,
     )
-    assert "reclassified_from" not in _front(vault, result.new_path)
+    assert "moved_from" not in _front(vault, result.new_path)
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +788,7 @@ def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_opera
         command, vault, operation="reclassify", path=first["path"],
         source_kind="research-report", reason="the table is an appendix of a survey",
     )
-    history = _front(vault, second["path"])["reclassified_from"]
+    history = _front(vault, second["path"])["moved_from"]
     note_after_moves = note.read_text(encoding="utf-8")
     back_once = writer_lease.invoke_command(
         command, vault, operation="revert-reclassification", path=second["path"],
@@ -801,6 +802,7 @@ def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_opera
     assert preview["destination"] == first["path"]
     assert preview["referrers"] == {
         "rewritten": [f"{KB}/Notes/Insights/tide-note.md"],
+        "pointer_repointed": [],
         "append_only_unchanged": {"basename": [f"{KB}/Evidence/Harbor/tide-proof.md"]},
     }
     assert preview["refusals"] == []
@@ -819,6 +821,8 @@ def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_opera
     # Only the correction record remains; every original byte is kept in place.
     for line in original.split("---\n", 2)[1].splitlines():
         assert line in front_lines
+    # Each revert removed the entry it restored, so no entry names a path the source left.
+    assert "moved_from" not in _front(vault, source)
     assert "reclassified_from" not in _front(vault, source)
     released = commands.op_get(vault, path=source, frontmatter_only=True)
     journal = released["frontmatter"]["classification_history"]
@@ -865,6 +869,8 @@ def test_an_evidence_path_link_refuses_the_move_and_nothing_changes(vault: Path)
 
 
 def test_a_legacy_previous_path_is_kept_but_never_reverted_by_guessing(vault: Path) -> None:
+    """A move that rewrites a legacy `reclassified_from` value instead of keeping its bytes, or a
+    revert that guesses the classification a path-only entry left out."""
     source = _legacy_source(vault)
     page = vault / source
     legacy_path = f"{KB}/Sources/Unclassified/2026-01-02-tide-table.md"
@@ -885,13 +891,15 @@ def test_a_legacy_previous_path_is_kept_but_never_reverted_by_guessing(vault: Pa
         vault, path=source, source_kind="dataset", domain="travel",
         reason="a table of measurements", today=TODAY,
     )
-    assert _front(vault, moved.new_path)["reclassified_from"] == [
-        {"path": legacy_path},
+    legacy_line = f"reclassified_from: {legacy_path}\n"
+    assert legacy_line in (vault / moved.new_path).read_text(encoding="utf-8")
+    assert _front(vault, moved.new_path)["moved_from"] == [
         {"path": source, "kind": "other", "domain": None},
     ]
     reverted = rc.revert(vault, path=moved.new_path, reason="undo", today=TODAY)
     assert reverted.new_path == source
-    assert _front(vault, source)["reclassified_from"] == [{"path": legacy_path}]
+    assert legacy_line in page.read_text(encoding="utf-8")
+    assert "moved_from" not in _front(vault, source)
 
 
 def test_a_revert_refuses_a_previous_location_another_page_now_occupies(

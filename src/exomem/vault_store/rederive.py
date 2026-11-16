@@ -42,7 +42,8 @@ OWNER_SCHEMA = "vault_store_owner_schema"
 # Inbound rows were complete at v1; later owners must not invalidate that readiness proof.
 LINK_ROWS_VERSION = 1
 # v3 rederives payload hashes that older builds omitted from legacy Evidence pages.
-OWNER_SCHEMA_VERSION = 3
+# v4 derives the prior-path rows of every page's lineage.
+OWNER_SCHEMA_VERSION = 4
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
@@ -287,8 +288,8 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
     tx.executemany(
         "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
     )
-    if "page_admission" in created:
-        # Earlier batches wrote no page facts, so an older cursor cannot skip those pages.
+    if "page_admission" in created or "prior_paths" in created:
+        # Earlier batches wrote no page facts or prior paths, so an older cursor cannot skip those pages.
         tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))

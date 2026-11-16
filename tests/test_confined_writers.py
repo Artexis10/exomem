@@ -27,7 +27,7 @@ from test_connector_boundary import (
 
 from granted_writer import grant_writer
 
-from exomem import commands, delete_file, find, lexstore, recover_from_trash, state_migration, writer_lease
+from exomem import commands, delete_file, find, lexstore, pointer_write, recover_from_trash, state_migration, writer_lease
 from exomem import schema as schema_module
 from exomem.governance import connector_boundary, egress, membership, policy, principal
 
@@ -1104,10 +1104,11 @@ def test_a_move_skips_the_linkers_the_writer_may_not_write_and_names_only_the_re
     find.clear_cache()
     lexstore.ensure_fresh(vault)
 
-    def move(name: str) -> Any:
+    def move(name: str, **preview: Any) -> Any:
         return _call(vault, writer, "manage_memory_file", operation="move",
-                     old_path=f"{NOTES_INBOX}/{name}.md", new_path=f"{NOTES_INBOX}/Archive/{name}.md")
+                     old_path=f"{NOTES_INBOX}/{name}.md", new_path=f"{NOTES_INBOX}/Archive/{name}.md", **preview)
 
+    previews = {name: move(name, validate_only=True) for name in ("moved-a", "moved-b", "moved-c")}
     with_visible, with_hidden, with_none = move("moved-a"), move("moved-b"), move("moved-c")
 
     assert all("__error__" not in answer for answer in (with_visible, with_hidden, with_none)), (
@@ -1119,6 +1120,13 @@ def test_a_move_skips_the_linkers_the_writer_may_not_write_and_names_only_the_re
 
     assert shape(with_hidden, "moved-b") == shape(with_none, "moved-c")
     assert (visible.read_bytes(), hidden.read_bytes()) == (visible_before, hidden_before)
+    # A preview names the same pages, and its digest binds no repoint of a withheld page.
+    assert previews["moved-a"]["referrers"] == [
+        {"path": "Knowledge Base/Notes/visible-linker.md", "outcome": "unchanged: keeps the old path"}]
+    digests = {name: previews[name].pop("preview_digest") for name in ("moved-b", "moved-c")}
+    assert shape(previews["moved-b"], "moved-b") == shape(previews["moved-c"], "moved-c")
+    assert digests["moved-b"] == pointer_write.preview_digest(
+        {f"{NOTES_INBOX}/moved-b.md": f"{NOTES_INBOX}/Archive/moved-b.md"}, ())
 
 
 def _trash(vault: Path, page: str) -> tuple[str, str]:

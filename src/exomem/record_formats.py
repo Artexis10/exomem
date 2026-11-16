@@ -1533,19 +1533,11 @@ def _final_line_ending(yaml_text: str, newline: str) -> str:
     return _span_terminator(yaml_text, (0, len(yaml_text))) or newline
 
 
-def splice_frontmatter_fields(
-    yaml_text: str,
-    changes: Mapping[str, Any],
-    *,
-    delete_fields: tuple[str, ...] = (),
-    newline: str = "\n",
-) -> str:
-    """Patch top-level fields at the spans the YAML parser reports for them.
+def frontmatter_entry_spans(yaml_text: str) -> dict[str, tuple[int, int]]:
+    """Each top-level key of a frontmatter block, mapped to the span the YAML parser reports.
 
-    `yaml_text` is the block between the fences, its last line terminated.
-    Every byte outside a changed field's span is kept, existing keys keep their
-    order, and new keys are appended in `changes` order. A result that does not
-    hold exactly the requested field set is refused.
+    A span runs from the key's first byte to its value's end mark. A block-style value's
+    span covers its own line ending; a plain, flow or quoted scalar's stops at its last byte.
     """
     try:
         document = vault.yaml.compose(yaml_text)
@@ -1562,6 +1554,24 @@ def splice_frontmatter_fields(
                 "DUPLICATE_FRONTMATTER_KEY", "frontmatter key is duplicated"
             )
         spans[key_node.value] = (key_node.start_mark.index, value_node.end_mark.index)
+    return spans
+
+
+def splice_frontmatter_fields(
+    yaml_text: str,
+    changes: Mapping[str, Any],
+    *,
+    delete_fields: tuple[str, ...] = (),
+    newline: str = "\n",
+) -> str:
+    """Patch top-level fields at the spans the YAML parser reports for them.
+
+    `yaml_text` is the block between the fences, its last line terminated.
+    Every byte outside a changed field's span is kept, existing keys keep their
+    order, and new keys are appended in `changes` order. A result that does not
+    hold exactly the requested field set is refused.
+    """
+    spans = frontmatter_entry_spans(yaml_text)
     # Everything appended below lands after the final frontmatter line, so it
     # takes that line's ending.
     trailing = _final_line_ending(yaml_text, newline)

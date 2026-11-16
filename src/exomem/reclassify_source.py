@@ -16,8 +16,9 @@ record the correction, patching each where the YAML parser places it, proves
 the body byte-identical before anything is written, and reuses `move_file` for
 the relocation and inbound-reference rewriting instead of reimplementing either.
 
-Every correction appends where the source was and how it was classified to
-`reclassified_from`, oldest first, so `revert` can restore it. The separate
+Every correction appends where the source was and how it was classified to its
+lineage, `moved_from`, oldest first, so `revert` can restore it; a legacy
+`reclassified_from` value reads as older entries and keeps its bytes. The separate
 `classification_history` keeps events and reasons even after a reversal.
 
 It never decides a classification. `propose` reports what is deterministically
@@ -33,12 +34,15 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from . import move_file as move_file_module
 from . import (
     originals,
+    page_lineage,
     path_mentions,
+    pointer_write,
     record_formats,
     semantic_writes,
     source_pointers,
@@ -67,9 +71,10 @@ CLASSIFICATION_FIELDS = ("source_type", "domain")
 RECORD_FIELDS = (
     "reclassified", "reclassified_from", "reclassified_reason", "classification_history",
 )
-#: Each entry records `path`, `kind` and `domain`, oldest first. The field and
-#: its entry keys are fixed by the source page format, not by any vocabulary.
-HISTORY_FIELD = "reclassified_from"
+#: The legacy history key. Its entries record `path`, `kind` and `domain`, oldest
+#: first, and read as lineage older than every `moved_from` entry (`page_lineage`).
+#: The field and its entry keys are fixed by the source page format, not by any vocabulary.
+HISTORY_FIELD = page_lineage.LEGACY_FIELD
 #: These fields and event actions are closed Source-format tokens, not vocabulary.
 EVENTS_FIELD = "classification_history"
 #: The optional history-entry and event key that records the pointer fields a repair
@@ -114,14 +119,19 @@ class ReclassifyProposal:
     #: Pages the caller may see that the move would rewrite: mutable pages
     #: whose links or prose name the source by its path.
     rewritten: tuple[str, ...] = ()
-    #: Append-only pages the caller may see that the move leaves byte-identical,
-    #: grouped by the link form they use (`basename` or `path`), or `mention` when the page
-    #: only cites the source's path in prose.
+    #: Append-only pages the caller may see whose links to the source the move repoints
+    #: through the governed pointer write; the commit passes `preview_digest` to approve them.
+    pointer_repointed: tuple[str, ...] = ()
+    #: Pages the caller may see that the move leaves byte-identical, grouped by the link form
+    #: they use (`basename` or `path`), or `mention` when the page only cites the source's path
+    #: in prose: append-only pages, and Records rows, which the source's lineage resolves.
     append_only_unchanged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #: Why the move would be refused, each naming only a page the caller may see.
     refusals: tuple[Mapping[str, str], ...] = ()
     #: What the preview could not check, such as path mentions the catalogue could not answer.
     warnings: tuple[str, ...] = ()
+    #: The digest a correction that repoints append-only pages passes; None when it would refuse.
+    preview_digest: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -137,6 +147,7 @@ class ReclassifyProposal:
             "references": self.references,
             "referrers": {
                 "rewritten": list(self.rewritten),
+                "pointer_repointed": list(self.pointer_repointed),
                 "append_only_unchanged": {
                     form: list(paths) for form, paths in self.append_only_unchanged.items()
                 },
@@ -144,6 +155,7 @@ class ReclassifyProposal:
             "refusals": [dict(refusal) for refusal in self.refusals],
             **({"refusal_scope": _REFUSAL_SCOPE} if self.destination is not None else {}),
             **({"warnings": list(self.warnings)} if self.warnings else {}),
+            **({"preview_digest": self.preview_digest} if self.preview_digest else {}),
         }
 
 
@@ -246,23 +258,26 @@ def _body_of(text: str) -> str:
 
 
 def _history(front: Mapping[str, Any]) -> list[Any]:
-    """The source's recorded history as list entries, oldest first.
+    """The source's lineage entries, oldest first: legacy `reclassified_from`, then `moved_from`.
 
     A legacy scalar recorded only the latest previous path, so it reads as one
     entry whose kind and domain are unknown.
     """
-    value = front.get(HISTORY_FIELD)
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [{"path": value}] if value.strip() else []
-    if isinstance(value, list):
-        return list(value)
-    raise ReclassifyError(
-        "INVALID_HISTORY",
-        f"`{HISTORY_FIELD}` is neither a previous path nor a list of entries; "
-        "correct the field before reclassifying this source.",
-    )
+    legacy = front.get(HISTORY_FIELD)
+    if legacy is not None and not isinstance(legacy, (str, list)):
+        raise ReclassifyError(
+            "INVALID_HISTORY",
+            f"`{HISTORY_FIELD}` is neither a previous path nor a list of entries; "
+            "correct the field before reclassifying this source.",
+        )
+    moved = front.get(page_lineage.LINEAGE_FIELD)
+    if moved is not None and not isinstance(moved, list):
+        raise ReclassifyError(
+            "INVALID_HISTORY",
+            f"`{page_lineage.LINEAGE_FIELD}` is not a list of entries; "
+            "correct the field before reclassifying this source.",
+        )
+    return page_lineage.entries(front)
 
 
 def _restorable(entry: Any) -> tuple[str, str | None, str | None]:
@@ -278,9 +293,9 @@ def _restorable(entry: Any) -> tuple[str, str | None, str | None]:
                 return entry["path"], kind or None, domain or None
     raise ReclassifyError(
         "HISTORY_CLASSIFICATION_UNKNOWN",
-        "the latest history entry records a previous path but not its kind and "
-        "domain, as an entry carried over from a legacy `reclassified_from` "
-        "path does; reclassify the source explicitly instead.",
+        "the latest lineage entry records a previous path but not its kind and "
+        "domain, as a plain move or a legacy `reclassified_from` path records it; "
+        "reclassify the source explicitly instead.",
     )
 
 
@@ -343,11 +358,11 @@ def _rewrite_classification(
     *,
     kind: str | None,
     domain: str | None,
-    history: list[Any] | None,
     classification_events: dict[str, Any],
     reason: str,
     today: dt.date,
     pointer: Mapping[str, str | None] | None = None,
+    lineage: Callable[[str], str] | None = None,
 ) -> str:
     """Return `text` with only the classification and record fields changed.
 
@@ -355,12 +370,17 @@ def _rewrite_classification(
     of the page is kept, and the body is proven unchanged before anything is
     written. A kind or domain equal to the one the page states is left as it is. A
     None kind or domain removes the field, which is how a revert restores a source
-    that recorded none. `history=None` leaves the history
-    as it is; an empty history removes the field. `pointer` sets each pointer field to
-    its path, or removes it where the path is None.
+    that recorded none. A legacy `reclassified_from` keeps its bytes. `pointer` sets
+    each pointer field to its path, or removes it where the path is None. `lineage`
+    first appends or removes the page's own lineage entry, for a correction in place.
     """
     changes: dict[str, Any] = {}
     deletes: list[str] = []
+    if lineage is not None:
+        try:
+            text = lineage(text)
+        except page_lineage.LineageError as error:
+            raise ReclassifyError(error.code, error.reason) from error
     front, _, _ = parse_frontmatter(text)
     for key, value in (("source_type", kind), ("domain", domain)):
         if value == _recorded(front, key):
@@ -376,10 +396,6 @@ def _rewrite_classification(
         else:
             changes[key] = value
     changes["reclassified"] = today.isoformat()
-    if history:
-        changes[HISTORY_FIELD] = history
-    elif history is not None:
-        deletes.append(HISTORY_FIELD)
     changes["reclassified_reason"] = reason
     changes[EVENTS_FIELD] = classification_events
     try:
@@ -669,15 +685,29 @@ def propose(
         relocation_required=relocation_required,
         references=len(inbound),
         rewritten=outcome.rewritten,
+        pointer_repointed=outcome.repointed,
         append_only_unchanged=outcome.append_only_unchanged,
         refusals=outcome.refusals,
         warnings=() if outcome.mentions_checked else (path_mentions.NOT_CHECKED,),
+        preview_digest=(
+            pointer_write.preview_digest({rel: destination}, outcome.repoints)
+            if destination is not None and destination != rel and not outcome.refusals
+            else None
+        ),
     )
+
+
+#: The `manage_memory_file` call whose digest approves a correction's repoints of append-only
+#: referrers.
+_PREVIEW_CALL = MappingProxyType({"operation": "propose-reclassification"})
 
 
 @dataclass(frozen=True)
 class _ReferrerOutcome:
     rewritten: tuple[str, ...] = ()
+    repointed: tuple[str, ...] = ()
+    #: The pointer writes behind `repointed`, which the preview digest binds.
+    repoints: tuple[Any, ...] = ()
     append_only_unchanged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     refusals: tuple[Mapping[str, str], ...] = ()
     #: False when the catalogue could not say which pages cite the source's path in prose.
@@ -703,7 +733,7 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     visible = egress.visible_page_filter(vault_root)
     return [
         hit
-        for hit in find_inbound_wikilinks(vault_root, rel, visible=visible)
+        for hit in find_inbound_wikilinks(vault_root, rel, visible=visible, lineage=False)
         if visible is None or visible(hit.path)
     ]
 
@@ -723,12 +753,15 @@ def _referrer_outcome(
     text: str,
     destination: str,
     inbound: list[InboundLink],
+    *,
+    undo: bool = False,
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
     It reads the outcome from the same plan the move executes. `inbound` is the
     caller's view, so every page named here is one the caller may see, and the
-    report matches a vault without the pages withheld from it.
+    report matches a vault without the pages withheld from it. An `undo` is a revert's
+    move, which restores append-only pages from their records.
     """
     from .governance import connector_boundary, egress
 
@@ -750,10 +783,12 @@ def _referrer_outcome(
     for hit in inbound:
         forms.setdefault(hit.path, set()).add(_link_form(hit.raw_target))
     rewritten: list[str] = []
+    repointed: list[str] = []
+    repoints: list[Any] = []
     unchanged: dict[str, list[str]] = {}
     refusals: list[dict[str, str]] = []
     plans = move_file_module.plan_inbound_rewrites(
-        vault_root, rel, destination, inbound, named_in=named_in, paired=paired
+        vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
     )
     for item in plans:
         if not writable_page(item.path):
@@ -762,19 +797,15 @@ def _referrer_outcome(
         if relocating and item.left_mentions:
             # A prose mention in an immutable body keeps its bytes; it never refuses the move.
             unchanged.setdefault(MENTION_FORM, []).append(item.path)
-        if changes and item.append_only:
-            refusals.append({
-                "code": "APPEND_ONLY",
-                "path": item.path,
-                "reason": (
-                    f"{item.path} in append-only {item.append_only}/ links the source "
-                    "by its path, and that link would dangle; the source has to stay "
-                    "where it is until history-aware resolution exists"
-                ),
-            })
-        elif changes or item.mentions:
+        if changes and item.refusal is not None:
+            code, reason = item.refusal
+            refusals.append({"code": code, "path": item.path, "reason": reason})
+        elif changes and item.repoint is not None:
+            repointed.append(item.path)
+            repoints.append(item.repoint)
+        elif (changes or item.mentions) and not item.kept:
             rewritten.append(item.path)
-        elif item.append_only:
+        elif item.append_only or item.kept:
             for form in sorted(forms.get(item.path, ())):
                 unchanged.setdefault(form, []).append(item.path)
     if relocating:
@@ -793,6 +824,8 @@ def _referrer_outcome(
             })
     return _ReferrerOutcome(
         rewritten=tuple(rewritten),
+        repointed=tuple(repointed),
+        repoints=tuple(repoints),
         append_only_unchanged={form: tuple(paths) for form, paths in sorted(unchanged.items())},
         refusals=tuple(refusals),
         mentions_checked=lookup is None or lookup.complete,
@@ -811,12 +844,19 @@ def _write_correction(
     today: dt.date,
     extra_writes: tuple[PlannedWrite, ...] = (),
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    lineage_entry: Mapping[str, Any] | None = None,
+    undo_lineage: bool = False,
+    preview_digest: str | None = None,
 ) -> _Written:
     """Commit a correction and return where the source is and what the relocation rewrote.
 
     A relocation goes through `move_file`, which moves the source, its companion
-    and every reference in one transaction. The preview's refusals are raised
-    first, so a correction refuses for exactly the reasons its preview gave.
+    and every reference in one transaction, and appends `lineage_entry` to the
+    source's lineage or, with `undo_lineage`, removes the entry naming the
+    destination. The preview's refusals are raised first, so a correction
+    refuses for exactly the reasons its preview gave. The move repoints append-only
+    referrers only with the preview's `preview_digest`, and lists their pointer-write
+    records in the lineage entry; an undo restores each of them from its record.
     """
     if destination == rel:
         batch_atomic_write(
@@ -829,7 +869,7 @@ def _write_correction(
         )
         return _Written(rel)
     outcome = _referrer_outcome(
-        vault_root, rel, text, destination, _visible_inbound(vault_root, rel)
+        vault_root, rel, text, destination, _visible_inbound(vault_root, rel), undo=undo_lineage
     )
     if outcome.refusals:
         refusal = outcome.refusals[0]
@@ -853,6 +893,11 @@ def _write_correction(
             content_transform=bound_transform,
             extra_writes=extra_writes,
             _validate_prepared_bindings=_validate_prepared_bindings,
+            lineage_entry=lineage_entry,
+            undo_lineage=undo_lineage,
+            preview_digest=preview_digest,
+            record_repoints=not undo_lineage,
+            _preview_call=_PREVIEW_CALL,
         )
     except move_file_module.MoveFileError as error:
         raise ReclassifyError(error.code, error.reason) from error
@@ -872,11 +917,13 @@ def reclassify(
     artifact_path: str | None = None,
     reason: str | None = None,
     today: dt.date | None = None,
+    preview_digest: str | None = None,
 ) -> ReclassifyResult:
     """Correct a captured source's classification and relocate it to match.
 
     The source's location, kind and domain before the correction are appended
-    to its history, unless the correction changes none of them.
+    to its history, unless the correction changes none of them. A relocation that
+    repoints append-only referrers needs the `preview_digest` of `propose`.
 
     `artifact_path` repairs the pointer to the source's raw file in the same step. It
     must name an existing file that fits the identity the source records, and the
@@ -899,7 +946,7 @@ def reclassify(
     text, source_guard = read_guarded_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
     current_kind, current_domain = _current_classification(text)
-    history = _history(front)
+    _history(front)  # a malformed lineage refuses before anything is planned
 
     pointer_changes, pointer_previous = (
         _plan_pointer(vault_root, rel, front, artifact_path)
@@ -955,16 +1002,25 @@ def reclassify(
         pointer={"before": pointer_previous, "after": pointer_changes} if pointer_changes else None,
     )
 
+    # The lineage entry records where the source was and how it was classified. A relocation's
+    # move appends it; a correction in place appends it here, naming the path it keeps.
+    entry_extra = {key: value for key, value in previous.items() if key != page_lineage.PATH_KEY}
+    in_place_entry = (
+        page_lineage.append_transform(rel, entry_extra)
+        if changed and destination == rel
+        else None
+    )
+
     def transform(current: str) -> str:
         return _rewrite_classification(
             current,
             kind=kind_key,
             domain=corrected_domain,
-            history=[*history, previous] if changed else None,
             classification_events=events,
             reason=clean_reason,
             today=today,
             pointer=pointer_changes,
+            lineage=in_place_entry,
         )
 
     written = _write_correction(
@@ -980,6 +1036,8 @@ def reclassify(
         _validate_prepared_bindings=(
             (lambda: plan.recheck_bindings(vault_root)) if plan else None
         ),
+        lineage_entry=entry_extra if changed and destination != rel else None,
+        preview_digest=preview_digest,
     )
     return ReclassifyResult(
         old_path=rel,
@@ -1026,10 +1084,11 @@ def revert(
     """Restore the source's latest recorded location, kind and domain.
 
     The revert runs through the same guarded relocation as a correction and
-    removes the history entry it restores. It restores a recorded `other`
+    removes the lineage entry it restores. It restores a recorded `other`
     kind, because the entry states what the source was rather than choosing a
-    new kind. It refuses an entry that records no kind and domain, and a
-    previous location that another page now occupies.
+    new kind. It refuses an entry that records no kind and domain, such as a
+    later plain move's or a legacy path-only entry, and a previous location
+    that another page now occupies.
     """
     vault_root = Path(vault_root)
     rel, absolute = _require_source(vault_root, path)
@@ -1068,20 +1127,21 @@ def revert(
     )
 
     def transform(current: str) -> str:
+        # An undo removes the entry it restores and appends none; a relocation's move removes it.
         return _rewrite_classification(
             current,
             kind=kind,
             domain=domain,
-            history=history[:-1],
             classification_events=events,
             reason=clean_reason,
             today=today,
             pointer=restored_pointer,
+            lineage=page_lineage.undo_transform(rel) if destination == rel else None,
         )
 
     written = _write_correction(
         vault_root, rel, absolute, text, destination, transform,
-        today=today, source_guard=source_guard,
+        today=today, source_guard=source_guard, undo_lineage=destination != rel,
     )
     return ReclassifyResult(
         old_path=rel,
