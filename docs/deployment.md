@@ -1945,6 +1945,31 @@ its page, so links, references and grants do not change. Filings with
 identical bytes share one copy. Notes, datasets and Trash entries keep
 ordinary files.
 
+### Layout and copies
+
+The file `_Originals/format.json` in the Knowledge Base marks an archive that
+uses shared storage.
+Each shared copy is a file named after the SHA-256 digest of its bytes:
+`_Originals/sha256/<first two digest characters>/<digest>.blob`. A filing's
+page records its path, digest and size, and the filing has no file at its own
+path. Exomem tools take the filing's path and read the shared copy, so a
+preview, download, move or export works as before. A program that reads the
+folder directly finds the page but not the original. An archive can hold
+ordinary files and shared copies together, for example while a conversion
+runs.
+
+Three kinds of copy exist:
+
+- The format marker and each `.blob` file are canonical copies. They are part
+  of the archive. Back them up with it, and never edit or delete them by hand.
+  A backup without `_Originals/` loses the bytes of every shared original.
+- Exomem writes a staging copy under `_Originals/` while it publishes or
+  fetches a shared copy. A staging copy is not part of the archive, and
+  exports leave it out.
+- A backup copy is an export or another copy of the archive. A whole-archive
+  export carries the canonical copies as they are. A compatibility export
+  carries an ordinary file at each filing's path instead.
+
 ### New archives
 
 A new archive starts in shared storage only when the process that creates it
@@ -1972,7 +1997,8 @@ Before you convert:
   describes.
 - Keep a backup from before the conversion if you may need an older release.
   An older release refuses a converted archive, and the conversion has no
-  in-place undo.
+  in-place undo. A compatibility export, described below, gives an older
+  release an ordinary copy of the converted archive.
 - Keep free space for the four largest originals together. The job converts
   four filings per batch, and it copies their bytes into shared storage before
   it removes their ordinary files.
@@ -2002,6 +2028,124 @@ what remains and continues from there.
 original keeps both copies until a later run converts it. To finish them,
 preview and start the conversion again. A start with an old `plan_id` returns
 `STALE_MAINTENANCE_PLAN`, and you must preview again.
+
+### Export for a release without shared storage
+
+A release without shared storage cannot read a shared copy. A compatibility
+export writes a separate archive for such a release, with each original as an
+ordinary file at its filing's path. The export reads the source archive and
+changes nothing in it. Exomem 0.182.0 is the declared release without shared
+storage: its own restore reads a compatibility export byte for byte.
+
+The export does these things:
+
+- It checks each original against its page's digest and size, and each page
+  against the bytes that Exomem read for it.
+- It fetches an original whose only copy is a stored Cloud version from the
+  configured store.
+- It leaves out `_Originals/`, so the export records no shared-storage
+  requirement.
+- It removes the retirement record from each Trash entry's metadata, because
+  only the source archive can confirm it. Every page keeps its bytes.
+
+The export folder needs free space for the full size of all originals. Filings
+that share one copy in the archive each get their own file in the export.
+
+To make a compatibility export:
+
+1. Stop the Exomem service on every host that serves the archive.
+2. Choose an export folder outside the archive, on a volume with enough free space.
+3. In the service's environment, run the script below with the Python interpreter of the Exomem installation.
+4. If the script prints a path, keep that archive. Its name is `exomem-compatible-export-<digest>.zip`.
+5. If the script prints a code, fix the member that it names, then run step 3 again.
+
+```python
+from datetime import datetime, timezone
+
+from exomem import vault_portability
+
+context = vault_portability.PortabilityContext(
+    cell_id="local", vault_id="archive-1", operation_id="compatible-export-1",
+    created_at=datetime.now(timezone.utc).isoformat(), operator_authorized=True,
+    lifecycle_state="quiesced", routing_stopped=True, active_mutations=0,
+    background_writers_stopped=True, reads_allowed=True)
+try:
+    result = vault_portability.export_compatible_vault(
+        "/path/to/vault", "/path/to/export-folder", context=context)
+except vault_portability.PortabilityError as error:
+    raise SystemExit(f"{error.code} at {error.member or 'the archive'}: {error.reason}")
+print(result.archive_path)
+```
+
+Replace both paths. `vault_id` names the archive inside the export, and the
+restore must give the same value.
+
+A failed export publishes no archive and leaves the source archive unchanged.
+It names one of these codes:
+
+- `DIGEST_MISMATCH`: an original differs from its page's digest or size.
+- `ORIGINAL_UNAVAILABLE`: Exomem could not read or fetch an original.
+- `ORIGINAL_RETIREMENT_UNCONFIRMED`: Exomem cannot confirm a Trash entry's
+  retirement. Empty or restore that Trash entry first.
+- `SOURCE_CHANGED_DURING_EXPORT`: the archive changed during the export. Stop
+  every writer, then export again.
+
+An original that the configured store cannot return stops the export with a
+media-store error, such as `MEDIA_ORIGINAL_UNVERIFIED`, instead of a code above.
+
+### Restore a whole-archive export
+
+A whole-archive export, such as one that
+`vault_portability.export_quiesced_vault` writes, carries `_Originals/` as it
+is. When the restore of this release or a later one publishes such an
+export, it records the
+shared-storage requirement in the restored archive's state first. An earlier
+release then refuses the restored archive, so it never serves pages without
+their originals.
+
+To restore an export:
+
+1. Stop the Exomem service that will serve the restored archive.
+2. Choose a new restore folder whose path does not exist yet.
+3. In the service's environment, run the script below with the Python interpreter of the Exomem installation.
+4. If the script prints `published`, point the service at the restore folder, then start it.
+
+```python
+from datetime import datetime, timezone
+
+from exomem import vault_portability
+
+context = vault_portability.PortabilityContext(
+    cell_id="local", vault_id="archive-1", operation_id="restore-1",
+    created_at=datetime.now(timezone.utc).isoformat(), operator_authorized=True,
+    lifecycle_state="restore-staging", routing_stopped=True, active_mutations=0,
+    background_writers_stopped=True, reads_allowed=True)
+prepared = vault_portability.prepare_restore(
+    "/path/to/export.zip", "/path/to/staging-folder", context=context)
+print(vault_portability.publish_prepared_restore(prepared, "/path/to/restore-folder").state)
+```
+
+Replace the three paths, and give the `vault_id` that the export used. The
+staging folder must not exist yet either. The restore never writes over an
+existing folder.
+
+A copy of the folder made in another way does not record the requirement. Do
+not start a release without shared storage on such a copy, because that
+release serves the pages without their originals. Make a compatibility export
+for that release.
+
+### Downgrade to a release without shared storage
+
+An earlier release refuses an archive that records shared storage, and the
+conversion has no in-place undo. To move an archive to such a release:
+
+1. With the current release, make a compatibility export.
+2. With the earlier release, restore the export as "Restore a whole-archive export" describes.
+3. Point the earlier release's service at the restored folder, then start it.
+4. Download a few originals, and check that each one matches its source.
+
+The earlier release serves every original from an ordinary file. Keep the
+shared-storage archive until you no longer need it.
 
 ## Deploying a new version
 
