@@ -154,6 +154,7 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
     import json
 
     from .vault import PlannedWrite, content_hash, parse_frontmatter
+    from .vault_store import read as store_read
 
     writes = list(writes)
     incoming = {write.path.relative_to(vault).as_posix(): write for write in writes if write.path.is_relative_to(vault)}
@@ -164,52 +165,55 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
         if not path.lower().endswith(".md") and not is_trash_path(path):
             companions.update(originals.companion_paths(path))
     updates: dict[str, PlannedWrite] = {}
-    for path in sorted(companions):
-        try:
-            before = reserved_paths.read_generic_bytes(vault, path).data.decode("utf-8")
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code != "MISSING":
-                raise
-            before = None
-        except UnicodeError:
-            before = None  # A malformed prior companion cannot prove retirement.
-        after_write = incoming.get(path)
-        after = before if after_write is None else after_write.content
-        if not isinstance(after, str):
-            after = None
-        before_fields, after_fields = _companion_fields(before), _companion_fields(after)
-        for metadata in dict.fromkeys(link for image in (before_fields, after_fields) if (link := _backlink(image)) is not None):
-            fields, text, _version = _document(vault, metadata)
-            value = fields.get("original_retirement")
-            if value is None:
-                continue  # A retired proof remains invalid even if its backlink survives.
-            proof = _retirement(value, root=metadata[:-len(METADATA_SUFFIX)], origin=fields.get("original_path"))
-            if path != proof.companion:
-                continue  # A forged locator never supplies mutation authority over another filing.
+    # One store snapshot reads every prior companion in a few queries, so a batch's cost does not grow per page.
+    with store_read.request_snapshot(vault):
+        store_read.prefetch_pages(vault, companions)
+        for path in sorted(companions):
+            try:
+                before = reserved_paths.read_generic_bytes(vault, path).data.decode("utf-8")
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code != "MISSING":
+                    raise
+                before = None
+            except UnicodeError:
+                before = None  # A malformed prior companion cannot prove retirement.
+            after_write = incoming.get(path)
+            after = before if after_write is None else after_write.content
+            if not isinstance(after, str):
+                after = None
+            before_fields, after_fields = _companion_fields(before), _companion_fields(after)
+            for metadata in dict.fromkeys(link for image in (before_fields, after_fields) if (link := _backlink(image)) is not None):
+                fields, text, _version = _document(vault, metadata)
+                value = fields.get("original_retirement")
+                if value is None:
+                    continue  # A retired proof remains invalid even if its backlink survives.
+                proof = _retirement(value, root=metadata[:-len(METADATA_SUFFIX)], origin=fields.get("original_path"))
+                if path != proof.companion:
+                    continue  # A forged locator never supplies mutation authority over another filing.
 
-            old_match = _matches_retirement(before, before_fields, metadata, proof)
-            new_match = _matches_retirement(after, after_fields, metadata, proof)
-            if not old_match and not new_match:
-                continue
-            trash = reference_companion(vault, proof.trash.path)
-            if trash is None:
-                raise ValueError("Trash retirement lost its recovery companion")
-            trash_fields = parse_frontmatter(trash[1].data.decode("utf-8"), custody=True)[0]
-            if (originals.binary_binding(trash_fields) != proof.trash
-                    or originals.stored_reference(trash_fields.get("stored_object")) != proof.reference):
-                raise ValueError("Trash retirement lost its exact recovery binding")
-            if _completing.get() == (metadata, proof.before, proof.after) and new_match and proof.source.path not in incoming:
-                continue  # The deletion owns this one prepared reference-removal transition.
-            if (proof.source.path not in incoming and old_match and _backlink(after_fields) == metadata
-                    and originals.binary_binding(after_fields) == proof.source and "stored_object" not in after_fields):
-                if content_hash(after) == proof.after:
+                old_match = _matches_retirement(before, before_fields, metadata, proof)
+                new_match = _matches_retirement(after, after_fields, metadata, proof)
+                if not old_match and not new_match:
                     continue
-                value["after"] = content_hash(after)
-            else:
-                fields.pop("original_retirement")
-            if metadata in incoming or metadata in updates:
-                raise ValueError("one batch contains conflicting Trash placement changes")
-            updates[metadata] = PlannedWrite(vault / metadata, json.dumps(fields, indent=2), expected_hash=content_hash(text))
+                trash = reference_companion(vault, proof.trash.path)
+                if trash is None:
+                    raise ValueError("Trash retirement lost its recovery companion")
+                trash_fields = parse_frontmatter(trash[1].data.decode("utf-8"), custody=True)[0]
+                if (originals.binary_binding(trash_fields) != proof.trash
+                        or originals.stored_reference(trash_fields.get("stored_object")) != proof.reference):
+                    raise ValueError("Trash retirement lost its exact recovery binding")
+                if _completing.get() == (metadata, proof.before, proof.after) and new_match and proof.source.path not in incoming:
+                    continue  # The deletion owns this one prepared reference-removal transition.
+                if (proof.source.path not in incoming and old_match and _backlink(after_fields) == metadata
+                        and originals.binary_binding(after_fields) == proof.source and "stored_object" not in after_fields):
+                    if content_hash(after) == proof.after:
+                        continue
+                    value["after"] = content_hash(after)
+                else:
+                    fields.pop("original_retirement")
+                if metadata in incoming or metadata in updates:
+                    raise ValueError("one batch contains conflicting Trash placement changes")
+                updates[metadata] = PlannedWrite(vault / metadata, json.dumps(fields, indent=2), expected_hash=content_hash(text))
     return [*updates.values(), *writes]  # New-original invalidation lands before any new binary bytes.
 
 
