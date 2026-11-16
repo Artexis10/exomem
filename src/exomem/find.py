@@ -741,9 +741,10 @@ class FreshnessSnapshot:
         self, scope: str, admit_path: Callable[[str], bool],
         *, page_of: Callable[[str], ParsedPage | None] | None,
     ) -> set[str]:
+        split = managed_splitter()
         candidates = {
             path for path in self.recall_paths(scope)
-            if scope == "vault" or managed_split(path) is not None
+            if scope == "vault" or split(path) is not None
         }
         paths = self._published_admitted_paths(scope, admit_path, candidates)
         if paths is None:
@@ -7380,8 +7381,9 @@ def _find_outside_kb(
             else None
         )
         post_eligibility = eligible_paths
+        split = managed_splitter()
         allowed_outside = (
-            {path for path in eligible_paths or () if managed_split(path) is None}
+            {path for path in eligible_paths or () if split(path) is None}
             if eligible_paths is not None
             else None
         )
@@ -7389,7 +7391,8 @@ def _find_outside_kb(
     if admit_path is not None:
         with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
             admitted_paths = snapshot.admitted_paths("vault", admit_path)
-        admitted_outside = {path for path in admitted_paths if managed_split(path) is None}
+        split = managed_splitter()
+        admitted_outside = {path for path in admitted_paths if split(path) is None}
         allowed_outside = admitted_outside if allowed_outside is None else allowed_outside & admitted_outside
         post_eligibility = allowed_outside
     # A structured filter ranks the EXACT outside-KB eligible set, so no

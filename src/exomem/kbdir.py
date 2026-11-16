@@ -52,7 +52,8 @@ def managed_split(vault_rel: str, *, key: Callable[[str], str] | None = None) ->
     if key is not None:
         head, separator, tail = vault_rel.partition("/")
         return tail if separator and key(head) == key(kb_dirname()) else None
-    return managed_splitter()(vault_rel)
+    prefix = kb_prefix()
+    return vault_rel[len(prefix):] if vault_rel.startswith(prefix) else None
 
 
 def managed_splitter() -> Callable[[str], str | None]:
@@ -87,7 +88,8 @@ def is_managed_root_name(segment: str, *, key: Callable[[str], str] | None = Non
 
 def is_in_managed_root(vault_rel: str) -> bool:
     """Whether ``vault_rel`` is the managed root itself or lies below it."""
-    return is_managed_root_name(vault_rel) or managed_split(vault_rel) is not None
+    name = kb_dirname()
+    return vault_rel == name or vault_rel.startswith(name + "/")
 
 
 def managed_form(path: str) -> str:

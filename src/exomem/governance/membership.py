@@ -119,6 +119,7 @@ class MetadataSubject:
 
 @lru_cache(maxsize=128)
 def _normalized_refs(values: tuple[str, ...], dirname: str) -> frozenset[str]:
+    # `dirname` is unused in the body; it keys the cache, so a renamed root normalizes afresh.
     # Cache only configured selector data; current subject and authorization decisions stay fresh.
     normalized: set[str] = set()
     for v in values:
