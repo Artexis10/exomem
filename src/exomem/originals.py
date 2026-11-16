@@ -291,6 +291,7 @@ def available(vault: Path, path: str | Path) -> bool:
     target = Path(path) if Path(path).is_absolute() else Path(vault) / path
     if target.is_file():
         return True
+    # nosemgrep: ep-word-membership -- the closed `OriginalState.state` literal; every state but "missing" holds bytes.
     return original_state(vault, target).state in {"local", "cached", "evicted"}
 
 

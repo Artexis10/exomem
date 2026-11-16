@@ -160,7 +160,7 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
 
     writes = list(writes)
     incoming = {write.path.relative_to(vault).as_posix(): write for write in writes if write.path.is_relative_to(vault)}
-    relevant = {path for path in incoming if path.startswith(kb_dirname() + "/")
+    relevant = {path for path in incoming if managed_split(path) is not None
                 and not reserved_paths.classify_logical(path).blocked}
     companions = {path for path in relevant if path.lower().endswith(".md")}
     for path in relevant:

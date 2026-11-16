@@ -478,24 +478,24 @@ def follow_store(vault: Path, *, batch: int = 256) -> bool:
 def _pages(vault: Path):
     from contextlib import nullcontext
 
-    from .kbdir import kb_dirname
+    from .kbdir import managed_join, managed_root_rel
     from .vault_store import mode, read
 
     with (read.snapshot(vault, join_request=False) if mode.store_mode_for_reads(vault) else nullcontext(None)) as view:
         if view is not None:
             # Authoritative store pages include companions not projected to disk yet.
             # One streaming query avoids a body lookup per companion in a large archive.
-            prefix = kb_dirname() + "/"
+            prefix = managed_join("")
             yield from view.connection.execute(
                 "SELECT path, body FROM store_pages WHERE path >= ? AND path < ? ORDER BY path",
                 (prefix, prefix + "\U0010ffff"))
             return  # Every ordinary companion is a store-owned page; disk is only its projection.
         with reserved_paths.open_generic_tree(
-            vault, kb_dirname(), require_complete=True,
+            vault, managed_root_rel(), require_complete=True,
             select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and rel.lower().endswith(".md")),
         ) as entries:
             for entry in entries:
-                rel = kb_dirname() + "/" + entry.relative_path
+                rel = managed_join(entry.relative_path)
                 if not read.serves(vault, rel):
                     yield rel, reserved_paths.read_generic_bytes(vault, rel).data
 
@@ -666,10 +666,10 @@ def _fill_displaced(conn: sqlite3.Connection) -> None:
 
 def _retire_census(vault: Path, conn: sqlite3.Connection, placements: trash_metadata.PlacementCensus) -> None:
     """Exclude only a completed, version-witnessed transfer to a current Trash binding."""
-    from .kbdir import kb_dirname
+    from .kbdir import managed_join
 
     conn.execute("CREATE TEMP TABLE retired_census (binary_rel TEXT PRIMARY KEY, companion_rel TEXT NOT NULL)")
-    prefix = kb_dirname() + "/" + trash_metadata.TRASH_SUBPATH + "/"
+    prefix = managed_join(f"{trash_metadata.TRASH_SUBPATH}/")
     for row in conn.execute("SELECT * FROM binding_census WHERE binary_rel >= ? AND binary_rel < ? "
                             "AND reference IS NOT NULL ORDER BY binary_rel", (prefix, prefix + "\U0010ffff")):
         retirement = placements.retirement(row["binary_rel"])

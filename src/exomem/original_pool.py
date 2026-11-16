@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import artifact_lifecycle, held_fs, originals, reserved_paths, state_migration
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root
 
 DESCRIPTOR_ID = reserved_paths.ORIGINAL_POOL_DESCRIPTOR_ID
 OWNER = reserved_paths.ORIGINAL_POOL_OWNER
@@ -21,7 +21,7 @@ _MARKER_BYTES = (json.dumps({"schema": 1, "format": state_migration.SHARED_ORIGI
 
 
 def pool_root(vault: Path) -> Path:
-    return Path(vault) / kb_dirname() / reserved_paths.ORIGINAL_POOL_DIRNAME
+    return managed_root(Path(vault)) / reserved_paths.ORIGINAL_POOL_DIRNAME
 
 
 def _object_relative(digest: str) -> PurePosixPath:
@@ -40,7 +40,7 @@ def is_canonical_member(path: str) -> bool:
     if candidate.as_posix() != path:
         return False
     try:
-        relative = candidate.relative_to(PurePosixPath(kb_dirname()) / reserved_paths.ORIGINAL_POOL_DIRNAME)
+        relative = candidate.relative_to(PurePosixPath(managed_join(reserved_paths.ORIGINAL_POOL_DIRNAME)))
     except ValueError:
         return False
     if relative == PurePosixPath(_MARKER_NAME):
