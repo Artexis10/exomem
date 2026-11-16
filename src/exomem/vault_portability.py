@@ -822,6 +822,97 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
     return snapshots
 
 
+def _unverified(path: str, reason: str) -> PortabilityError:
+    return PortabilityError("DIGEST_MISMATCH", f"{reason}, so the export is incomplete", member=path)
+
+
+def _bytes_writer(data: bytes) -> Callable[[BinaryIO], tuple[int, str]]:
+    def write(output: BinaryIO) -> tuple[int, str]:
+        output.write(data)
+        return len(data), _sha256_bytes(data)
+    return write
+
+
+def _shared_original_writer(vault: Path, path: str, digest: str, size: int) -> Callable[[BinaryIO], tuple[int, str]]:
+    """Stream one filing's shared object to the archive through pool-owner custody, verifying its binding."""
+    from . import held_fs, original_pool
+
+    def write(output: BinaryIO) -> tuple[int, str]:
+        hasher = hashlib.sha256()
+        written = 0
+        try:
+            with original_pool.open_object(vault, digest, size) as source:
+                while chunk := source.stream.read(1024 * 1024):
+                    output.write(chunk)
+                    hasher.update(chunk)
+                    written += len(chunk)
+                source.require_current()
+        except original_pool.ObjectMismatch:
+            raise _unverified(path, "the shared original differs from its filing's binding") from None
+        except held_fs.HeldFsError as error:
+            raise PortabilityError("ORIGINAL_UNAVAILABLE", f"the shared original could not be read ({error.code}), "
+                                   "so the export is incomplete", member=path) from None
+        if (written, hasher.hexdigest()) != (size, digest):
+            raise _unverified(path, "the shared original differs from its filing's binding")
+        return written, digest
+    return write
+
+
+def _enumerate_compatible(vault_root: Path, limits: PortabilityLimits) -> list[_SourceSnapshot]:
+    """The archive as ordinary files: each original at its logical path, without the shared pool or its marker.
+
+    Every bound original's bytes must equal its binding and every companion its bound bytes. A placement's
+    retirement witness is invalidated, because the older reader that this copy serves keeps no witness current.
+    """
+    from . import original_pool, trash_metadata
+    from .media_store import bound_originals
+
+    vault = vault_root.resolve()
+    bindings = {snapshot.path.relative_to(vault).as_posix(): snapshot for snapshot in bound_originals(vault)}
+    companions = {snapshot.sidecar_path.relative_to(vault).as_posix(): snapshot.sidecar_hash
+                  for snapshot in bindings.values()}
+    snapshots: list[_SourceSnapshot] = []
+    total_bytes = 0
+
+    def admit(snapshot: _SourceSnapshot) -> None:
+        nonlocal total_bytes
+        total_bytes += snapshot.size
+        check_member_limits(len(snapshots) + 1, snapshot.size, total_bytes, limits)
+        snapshots.append(snapshot)
+
+    for member in iter_archive_members(vault_root):
+        if original_pool.is_canonical_member(member.path):
+            continue  # The ordinary files below carry these bytes; an older reader knows no pool.
+        listed = _safe_lstat(member.source_path).st_size
+        check_member_limits(len(snapshots) + 1, listed, total_bytes + listed, limits)
+        if trash_metadata.is_trash_path(member.path) and member.path.endswith(trash_metadata.METADATA_SUFFIX):
+            rewritten = trash_metadata.without_retirement(vault, member.path)
+            if rewritten is not None:
+                admit(_SourceSnapshot(member.path, member.source_path, len(rewritten), _sha256_bytes(rewritten),
+                                      member.classification, None, _bytes_writer(rewritten)))
+                continue
+        size, digest, signature = _digest_regular_source(member.source_path)
+        bound = bindings.get(member.path)
+        if bound is not None and (size, digest) != (bound.binary_size, bound.binary_sha256):
+            raise _unverified(member.path, "the original differs from its filing's binding")
+        if member.path in companions and digest != companions[member.path]:
+            _fail("SOURCE_CHANGED_DURING_EXPORT", "a page changed during export")
+        admit(_SourceSnapshot(member.path, member.source_path, size, digest, member.classification, signature))
+    for path, bound in bindings.items():
+        if bound.state == "evicted":
+            raise PortabilityError("ORIGINAL_UNAVAILABLE", "an original stored off this archive was not fetched, "
+                                   "so the export is incomplete", member=path)
+        if bound.local_path is None:
+            continue  # An ordinary file carried it above, or the archive holds no bytes for it.
+        assert bound.binary_sha256 is not None and bound.binary_size is not None
+        admit(_SourceSnapshot(path, bound.local_path, bound.binary_size, bound.binary_sha256,
+                              classify_artifact(path).artifact_class.value, None,
+                              _shared_original_writer(vault, path, bound.binary_sha256, bound.binary_size)))
+    snapshots.sort(key=lambda snapshot: snapshot.path)
+    check_path_collisions(snapshot.path for snapshot in snapshots)
+    return snapshots
+
+
 def _zip_info(path: str) -> zipfile.ZipInfo:
     info = zipfile.ZipInfo(path, date_time=_ZIP_TIMESTAMP)
     info.create_system = 3
@@ -950,7 +1041,42 @@ def export_quiesced_vault(
     mutation_guard: AbstractContextManager[Any] | None = None,
 ) -> ExportResult:
     """Create, self-verify, and publish a deterministic canonical vault archive."""
+    return _publish_export(vault_root, artifact_root, context=context, exomem_release=exomem_release, limits=limits,
+                           mutation_guard=mutation_guard, enumerate_members=_enumerate_source,
+                           artifact_prefix="exomem-export")
 
+
+def export_compatible_vault(
+    vault_root: Path | str,
+    artifact_root: Path | str,
+    *,
+    context: PortabilityContext,
+    exomem_release: str | None = None,
+    limits: PortabilityLimits | None = None,
+    mutation_guard: AbstractContextManager[Any] | None = None,
+) -> ExportResult:
+    """Publish a separate archive that keeps every original as an ordinary file, for a reader without shared storage.
+
+    Each shared original is written at its filing's logical path and verified against its binding; the pool and
+    its format marker stay out. The artifact root needs free space for the logical size of every original.
+    A failed export publishes nothing and leaves the source as it was.
+    """
+    return _publish_export(vault_root, artifact_root, context=context, exomem_release=exomem_release, limits=limits,
+                           mutation_guard=mutation_guard, enumerate_members=_enumerate_compatible,
+                           artifact_prefix="exomem-compatible-export")
+
+
+def _publish_export(
+    vault_root: Path | str,
+    artifact_root: Path | str,
+    *,
+    context: PortabilityContext,
+    exomem_release: str | None,
+    limits: PortabilityLimits | None,
+    mutation_guard: AbstractContextManager[Any] | None,
+    enumerate_members: Callable[[Path, PortabilityLimits], list[_SourceSnapshot]],
+    artifact_prefix: str,
+) -> ExportResult:
     _validate_context(context, allowed_states={"quiesced"})
     release = __version__ if exomem_release is None else exomem_release
     if not isinstance(release, str) or not release or len(release) > 128:
@@ -978,7 +1104,7 @@ def export_quiesced_vault(
         armed_requirement = connector_boundary.read_requirement(source_root)
         if connector_boundary.snapshot(source_root) is not None:
             state_migration.require_vault_state_ready(source_root)
-        snapshots = _enumerate_source(source_root, effective_limits)
+        snapshots = enumerate_members(source_root, effective_limits)
         manifest = _build_manifest(snapshots, context, release, armed_requirement)
         output_root.mkdir(parents=True, exist_ok=True)
         descriptor, pending_name = tempfile.mkstemp(
@@ -995,7 +1121,7 @@ def export_quiesced_vault(
 
             # Re-read the source after archive construction.  A caller claiming
             # quiescence while bytes or membership change never receives success.
-            repeated = _enumerate_source(source_root, effective_limits)
+            repeated = enumerate_members(source_root, effective_limits)
             original_records = [(item.path, item.size, item.sha256) for item in snapshots]
             repeated_records = [(item.path, item.size, item.sha256) for item in repeated]
             if original_records != repeated_records:
@@ -1007,7 +1133,7 @@ def export_quiesced_vault(
                 expected_vault_id=context.vault_id,
                 limits=effective_limits,
             )
-            final_path = output_root / f"exomem-export-{verified.archive_sha256}.zip"
+            final_path = output_root / f"{artifact_prefix}-{verified.archive_sha256}.zip"
             try:
                 os.link(pending, final_path)
                 artifact_ready = True
@@ -2181,6 +2307,7 @@ __all__ = [
     "VerifiedArchive",
     "classification_registry",
     "classify_artifact",
+    "export_compatible_vault",
     "export_quiesced_vault",
     "prepare_restore",
     "publish_prepared_restore",

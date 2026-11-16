@@ -219,6 +219,24 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
     return [*updates.values(), *writes]  # New-original invalidation lands before any new binary bytes.
 
 
+def without_retirement(vault: Path, path: str) -> bytes | None:
+    """The placement metadata at `path` with its retirement witness invalidated, or None if it holds none.
+
+    A copy for a reader that keeps no witness current invalidates it as a binding change does, so a later
+    runtime cannot honour a witness that the reader's writes made stale.
+    """
+    import json
+
+    try:
+        fields, _text, _version = _document(vault, path)
+    except ValueError:
+        return None  # Metadata that does not parse confers no retirement, so its bytes go unchanged.
+    if "original_retirement" not in fields:
+        return None
+    fields.pop("original_retirement")
+    return json.dumps(fields, indent=2).encode("utf-8")
+
+
 def is_trash_path(path: str) -> bool:
     below = managed_split_parts(PurePosixPath(path).parts)
     return below is not None and below[:1] == (TRASH_SUBPATH,)

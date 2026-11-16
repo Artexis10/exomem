@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from test_document_containers import container_bytes
+from test_pooled_conversion import INVOICE, RECEIPT, _convert, _file
 from test_upload_sessions import TUS
 from test_upload_sessions import _client as upload_client
 from test_vault_portability import _context
@@ -36,6 +37,7 @@ from exomem import (
     original_pool,
     originals,
     preserve,
+    state_migration,
     vault_portability,
 )
 from exomem.governance.principal import library_scope
@@ -371,4 +373,130 @@ def test_explicit_container_processing_refuses_a_pooled_member_whose_bytes_chang
 
     assert refused.value.code == "CONTAINER_CONFLICT"
     assert not member.exists()
+
+
+def _converted_filings(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    """Two filings of one receipt and one protected invoice after conversion, as their originals' and pages' bytes."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    filed = [(*_file(vault, "receipts", "receipt.png", RECEIPT), RECEIPT),
+             (*_file(vault, "expenses", "receipt-copy.png", RECEIPT), RECEIPT),
+             (*_file(vault, "contracts", "letter.pdf", INVOICE, protected=True), INVOICE)]
+    preview = _convert(vault)
+    _convert(vault, dry_run=False, plan_id=preview["plan_id"])
+    assert not any((vault / original).exists() for original, _page, _data in filed)
+    return ({original: data for original, _page, data in filed},
+            {page: (vault / page).read_bytes() for _original, page, _data in filed})
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_a_compatibility_export_writes_each_pooled_original_as_an_ordinary_file_at_its_logical_path(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches a compatibility export that ships the shared pool or its format marker instead of ordinary files, leaves
+    a filing without bytes at its path, or alters a page, so a pre-feature reader finds pages that name nothing."""
+    originals_bytes, pages = _converted_filings(vault, monkeypatch)
+    assert len(list(original_pool.pool_root(vault).rglob("*.blob"))) == 2
+    source = _tree(vault)
+
+    exported = vault_portability.export_compatible_vault(vault, tmp_path / "exports", context=_context())
+
+    pool = original_pool.pool_root(vault).relative_to(vault).as_posix()
+    with zipfile.ZipFile(exported.archive_path) as archive:
+        assert {path: archive.read(path) for path in originals_bytes} == originals_bytes
+        assert {page: archive.read(page) for page in pages} == pages
+        assert not [name for name in archive.namelist() if name.startswith(f"{pool}/")]
+        marker = state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID.encode()
+        assert not [name for name in archive.namelist() if marker in archive.read(name)]
+    assert _tree(vault) == source
+
+
+class _PoolReadFailure:
+    """A shared object whose disk returns its bytes once, then fails the next read, as a failing disk does."""
+
+    def __init__(self, source) -> None:
+        self._source = source
+        self._reads = 0
+
+    def __getattr__(self, name):
+        return getattr(self._source, name)
+
+    @property
+    def stream(self):
+        return self
+
+    def read(self, size: int = -1) -> bytes:
+        self._reads += 1
+        if self._reads > 1:
+            raise OSError(5, "the pool disk failed a read")
+        return self._source.stream.read(size)
+
+
+def test_an_interrupted_compatibility_export_leaves_the_source_unchanged_and_publishes_nothing(
+        vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """Catches an export that, stopped part-way through writing originals, publishes the partial archive as complete
+    or changes the pooled source; a rerun must then produce the complete archive."""
+    originals_bytes, _pages = _converted_filings(vault, monkeypatch)
+    source = _tree(vault)
+    exports = tmp_path / "exports"
+    real_open = original_pool.open_object
+
+    @contextlib.contextmanager
+    def failing_open(*args, **kwargs):
+        with real_open(*args, **kwargs) as opened:
+            yield _PoolReadFailure(opened)
+
+    monkeypatch.setattr(original_pool, "open_object", failing_open)
+    with pytest.raises(OSError):
+        vault_portability.export_compatible_vault(vault, exports, context=_context())
+
+    assert _tree(vault) == source
+    assert sorted(path.name for path in exports.iterdir()) == []
+    monkeypatch.setattr(original_pool, "open_object", real_open)
+    exported = vault_portability.export_compatible_vault(vault, exports, context=_context())
+    with zipfile.ZipFile(exported.archive_path) as archive:
+        assert {path: archive.read(path) for path in originals_bytes} == originals_bytes
+
+
+def test_a_whole_vault_export_carries_a_page_that_a_trash_retirement_left_without_bytes(
+        vault: Path, selected_store, tmp_path: Path) -> None:  # noqa: F811
+    """Catches an export that opens the original of a page that a Trash retirement left at its path, and so fails
+    every whole-vault export of an archive in which an offloaded filing was deleted."""
+    from test_pooled_move_trash import LOOSE
+    from test_vault_store_media import offloaded
+
+    from exomem import delete_file
+
+    offloaded(vault, LOOSE)
+    delete_file.delete_file(vault, path=LOOSE, confirm=True)
+    page = (vault / f"{LOOSE}.md").read_bytes()
+
+    exported = vault_portability.export_quiesced_vault(vault, tmp_path / "exports", context=_context())
+
+    with zipfile.ZipFile(exported.archive_path) as archive:
+        assert archive.read(f"{LOOSE}.md") == page
+        assert LOOSE not in archive.namelist()
+
+def test_a_compatibility_export_invalidates_a_trash_retirement_and_keeps_its_pages(
+        vault: Path, selected_store, tmp_path: Path, monkeypatch) -> None:  # noqa: F811
+    """Catches a compatibility export that hands a retirement witness to a reader that keeps none current, so a
+    capable runtime that later reads the archive honours a witness the reader's edits made stale."""
+    from test_pooled_move_trash import LOOSE, _evicted_in_trash
+
+    from exomem import trash_metadata
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+    metadata = trashed.trash_path + trash_metadata.METADATA_SUFFIX
+    placement = json.loads((vault / metadata).read_bytes())
+    pages = {page: (vault / page).read_bytes() for page in (f"{LOOSE}.md", f"{trashed.trash_path}.md")}
+    assert "original_retirement" in placement
+
+    exported = vault_portability.export_compatible_vault(vault, tmp_path / "exports", context=_context())
+
+    with zipfile.ZipFile(exported.archive_path) as archive:
+        assert json.loads(archive.read(metadata)) == {key: value for key, value in placement.items()
+                                                      if key != "original_retirement"}
+        assert {page: archive.read(page) for page in pages} == pages
+    assert json.loads((vault / metadata).read_bytes()) == placement
 

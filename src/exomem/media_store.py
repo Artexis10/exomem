@@ -1748,6 +1748,16 @@ def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
             yield chunk
 
 
+def _retired(vault: Path, snapshot: OriginalSnapshot) -> bool:
+    """Whether canonical Trash metadata retired the companion that binds a missing original.
+
+    Raises `originals.RetirementUnconfirmed` when a witness names the companion but no longer confirms it.
+    """
+    found = originals.bound_companion(vault, snapshot.path.relative_to(vault).as_posix())
+    return found is not None and trash_metadata.retired_companion(
+        vault, found[0], found[1], hashlib.sha256(found[2]).hexdigest())
+
+
 @contextmanager
 def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = False):
     """Materialize selected original bindings and pin them through a local operation.
@@ -1783,6 +1793,10 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
             if snapshot.path in seen:
                 continue
             seen.add(snapshot.path)
+            if snapshot.state == "missing" and _retired(root, snapshot):
+                # A companion retired to Trash stays at its path with no bytes and no reference: nothing to fetch
+                # or pin, so the operation carries the page as it is. Any other missing original still refuses.
+                continue
             relative = snapshot.path.relative_to(root).as_posix()
             ledger, token = stack.enter_context(_pin(root, snapshot.path, read=read))
             current = original_state(root, snapshot.path)
