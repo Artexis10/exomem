@@ -12027,9 +12027,13 @@ class LexicalStore:
         if self._reads_store():
             from .vault_store import rederive
 
-            # Old store rows stay incomplete until the owner's background pass finishes.
+            # Old store rows stay incomplete until the owner's background pass finishes. Duplicate
+            # lookup reads payload hashes only, so a store that holds them keeps answering while a
+            # later projection generation fills.
             with self._store_connection() as conn:
-                return conn is not None and not rederive.owner_schema_behind(conn)
+                return conn is not None and not rederive.owner_schema_behind(
+                    conn, required_version=rederive.PAYLOAD_HASHES_OWNER_VERSION
+                )
         from .vocabulary.registry import RegistryError
 
         if self._sidecar_unreadable():
