@@ -818,26 +818,25 @@ def _plain(sink: BinaryIO) -> Iterator[BinaryIO]:
 def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, result: PassResult,
             reads: _Reads) -> None:
     """Restore a damaged original from the first copy that verifies, or record that none does."""
+    copies = _copies(vault, row, reads)
+    install = _install
     if row.kind == FILE and originals.pooled(vault, row.path) is not None:
-        # The damaged bytes are the shared pool object, and a restore would write an ordinary file at a logical path
-        # that keeps none. Another pooled filing of these bytes shares the damage, so it is no copy.
-        route = [copy for copy in _copies(vault, row, reads)
-                 if copy["source"] != STORED_ORIGINAL or originals.pooled(vault, copy["path"]) is None]
-        _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, route=route, verified=True)
-        _count(result, CORRUPT_NO_COPY)
-        return
+        # The damaged bytes are the shared pool object, which the pool's owner replaces; the logical path keeps no file.
+        # Another pooled filing of these bytes shares the damage, so it is no copy.
+        copies = [copy for copy in copies if copy["source"] != STORED_ORIGINAL or originals.pooled(vault, copy["path"]) is None]
+        install = _install_pooled
     kept = _kept_trash(vault, row, hashed)
-    for copy in _copies(vault, row, reads):
+    for copy in copies:
         staged = _stage(vault, row, copy, pace)
         if staged is None:
             continue
         trashed: list[str] = []
         try:
-            identity = _install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
+            identity = install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
         except (_Changed, OpError):
             result.rescheduled += 1  # The next pass hashes the file again and decides afresh.
             return
-        except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
             # The copy verified but could not be put in place. The row keeps its last identity and
             # verification time, so the next pass finds it changed or due, and tries again.
             code = getattr(error, "code", None) or type(error).__name__
@@ -895,11 +894,8 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
     `trashed` receives the vault path of a new Trash copy.
     """
     from . import media_store
-    from .delete_file import free_trash_path, planned_trash_path
 
     target = PurePosixPath(row.path)
-    now = dt.datetime.now()
-    planned = Path(planned_trash_path(vault, row.path, now))
     damaged_name, restored_name = held_fs.publish_temporary_name(), held_fs.publish_temporary_name()
     noted = [[row.path, damaged_name], [row.path, restored_name]]
     _note_temporaries(vault, noted, [])
@@ -932,19 +928,8 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
                         raise _Changed
                     unchanged()
                     if kept is None:
-                        with filesystem.parent(planned.parent.as_posix(), create=True,
-                                               access="mutate").require() as folder:
-                            leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
-                            metadata = {
-                                "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
-                                "reason": "original_fixity", "cause": cause,
-                                "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
-                            }
-                            held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
-                                                  json.dumps(metadata, indent=2).encode("utf-8")).require()
-                            _rename(filesystem, parent, damaged_name, written, folder, leaf)
-                            filesystem.flush_directory(folder).require()
-                        trashed.append((planned.parent / leaf).as_posix())
+                        trashed.append(_trash_changed(vault, filesystem, parent, damaged_name, written, row, hashed,
+                                                      cause))
                     unchanged()  # A write outside Exomem since the first check keeps its bytes.
                     _rename(filesystem, parent, restored_name, written, parent, target.name, replace=True)
                     filesystem.flush_directory(parent).require()
@@ -960,6 +945,87 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
                                     filesystem.unlink(residue).require()
     finally:
         _note_temporaries(vault, [], noted)
+
+
+def _install_pooled(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *, kept: str | None,
+                    trashed: list[str]) -> Identity:
+    """Put the verified bytes in place of a damaged shared pool object, and the changed bytes in Trash.
+
+    As in `_install`, the changed bytes are copied beside the filing's companion under a noted name, read through
+    the filing's binding. The pool's owner stages the verified bytes inside the pool, outside the vault guard.
+    Under the guard the binding and the object are checked again, the changed bytes move to Trash, and the owner
+    replaces that exact object version. Returns the restored object's stat identity.
+    """
+    from . import media_store, original_pool
+
+    shared = originals.pooled(vault, row.path)
+    if shared is None or shared.binary_size is None:
+        raise _Changed
+    target = PurePosixPath(row.path)
+    damaged_name = held_fs.publish_temporary_name()
+    noted = [[row.path, damaged_name]]
+    _note_temporaries(vault, noted, [])
+    written: dict[str, held_fs.StableIdentity] = {}
+    try:
+        with held_fs.acquire(vault).require() as filesystem, \
+                filesystem.parent(target.parent.as_posix(), access="mutate").require() as parent:
+            try:
+                if kept is None:
+                    with _held(vault, row) as damaged, filesystem.file(parent, damaged_name, access="write",
+                                                                        create=True, exclusive=True).require() as copy:
+                        written[damaged_name] = copy.identity  # known before the write, so a failed one is removed
+                        if damaged.version != hashed.version:
+                            raise _Changed
+                        filesystem.write(copy, held_fs.Chunks(open=lambda: _stream_parts(damaged.stream))).require()
+                        damaged.require_current()
+                with original_pool.prepare(vault, row.sha256, shared.binary_size,
+                                           held_fs.Chunks(open=lambda: _file_parts(staged)), replacing=True) as fresh:
+                    with media_store._guard(vault, "original_fixity_restore"):
+                        if not _still_bound(vault, row) or _version(vault, row) != hashed.version:
+                            raise _Changed
+                        if kept is None:
+                            trashed.append(_trash_changed(vault, filesystem, parent, damaged_name, written, row,
+                                                          hashed, cause))
+                        fresh.replace(hashed.version)
+                        return Identity.of(os.fstat(fresh.source.stream.fileno()))
+            except (_Absent, _Unreadable, original_pool.PublicationRace):
+                raise _Changed from None  # The object changed or went since the hash; the next pass decides.
+            finally:
+                for name, identity in written.items():
+                    with suppress(held_fs.HeldFsError, OSError):
+                        leftover = filesystem.file(parent, name, access="mutate")
+                        if leftover.ok:
+                            with leftover.require() as residue:
+                                if residue.identity == identity:
+                                    filesystem.unlink(residue).require()
+    finally:
+        _note_temporaries(vault, [], noted)
+
+
+def _trash_changed(vault: Path, filesystem, parent, damaged_name: str, written: dict[str, held_fs.StableIdentity],
+                   row: Row, hashed: _Hashed, cause: str) -> str:
+    """Under the vault guard, move the changed bytes' copy to Trash with its metadata; returns its vault path."""
+    from .delete_file import free_trash_path, planned_trash_path
+
+    now = dt.datetime.now()
+    planned = Path(planned_trash_path(vault, row.path, now))
+    with filesystem.parent(planned.parent.as_posix(), create=True, access="mutate").require() as folder:
+        leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
+        metadata = {
+            "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
+            "reason": "original_fixity", "cause": cause,
+            "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
+        }
+        held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
+                              json.dumps(metadata, indent=2).encode("utf-8")).require()
+        _rename(filesystem, parent, damaged_name, written, folder, leaf)
+        filesystem.flush_directory(folder).require()
+    return (planned.parent / leaf).as_posix()
+
+
+def _stream_parts(stream: BinaryIO) -> Iterator[bytes]:
+    stream.seek(0)
+    return iter(lambda: stream.read(_CHUNK), b"")
 
 
 def _identity_of(filesystem, parent, name: str) -> held_fs.StableIdentity:

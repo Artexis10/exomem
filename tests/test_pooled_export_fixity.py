@@ -210,6 +210,27 @@ def test_fixity_reports_a_damaged_pool_object_and_writes_no_logical_file(
     assert original_fixity.readiness(vault) == {"state": "measured", "unresolved": 1}
 
 
+def test_fixity_restores_a_damaged_pool_object_inside_the_pool_from_its_store_copy(
+        vault: Path, selected_store, monkeypatch) -> None:  # noqa: F811
+    """A damaged shared object stayed corrupt_no_copy although the media store held verified bytes: the repair never
+    put them back into the pool, and writing them at the logical path would leave an ordinary file beside the pool."""
+    path = _stored(vault, "cached", 300)
+    digest = _pool(vault, monkeypatch, path)
+    original_fixity.walk(vault)
+    assert original_fixity.run_pass(vault).outcomes == {"verified": 1}
+
+    _damage(vault, digest, b"y" * 300)
+    result = original_fixity.run_pass(vault)
+
+    assert result.outcomes == {"restored": 1}
+    assert original_pool.object_path(vault, digest).read_bytes() == b"x" * 300
+    assert not path.exists()
+    trash = vault / "Knowledge Base" / "_trash"
+    kept = [found.read_bytes() for found in trash.rglob(f"*{path.name}") if found.is_file()]
+    assert kept == [b"y" * 300]  # the changed bytes, kept as a fixity repair keeps them
+    assert original_fixity.run_pass(vault).outcomes == {"verified": 1}
+
+
 def test_fixity_names_a_pool_object_of_the_wrong_size_instead_of_retiring_its_row(
         vault: Path, tmp_path: Path, monkeypatch) -> None:
     """A truncated shared object makes the binding read fail; retiring the row would stop watching the damaged original."""

@@ -154,6 +154,15 @@ class PreparedOriginal:
         self._published = True
         self.require_current()
 
+    def replace(self, damaged: held_fs.FileVersion) -> None:
+        """Remove one exact damaged object version, then publish the staged bytes in its place.
+
+        Runs under the filing's canonical guard, after the caller moved the damaged bytes to Trash.
+        """
+        reserved_paths._remove_owner_file(self.vault, object_path(self.vault, self.digest), DESCRIPTOR_ID,
+                                         expected_version=damaged)
+        self.publish()
+
     def require_current(self) -> None:
         if not self._published or self._source is None:
             raise RuntimeError("the original must be published before its filing commits")
@@ -170,8 +179,12 @@ class PreparedOriginal:
 @contextmanager
 def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks, *,
             temporary_name: str | None = None,
-            on_created: Callable[[held_fs.StableIdentity], None] | None = None) -> Iterator[PreparedOriginal]:
-    """Stage every supplied byte before examining physical reuse; retain custody through commit."""
+            on_created: Callable[[held_fs.StableIdentity], None] | None = None,
+            replacing: bool = False) -> Iterator[PreparedOriginal]:
+    """Stage every supplied byte before examining physical reuse; retain custody through commit.
+
+    `replacing` stages a repair of a damaged object, which `PreparedOriginal.replace` swaps out.
+    """
     if not enabled(vault):
         raise ValueError("shared originals require explicit format activation")
     from .media_store import _pin
@@ -185,7 +198,8 @@ def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks, *,
             # outside winner handles so confirmation retries cannot release it.
             with _pin(vault, target, object_key=target.relative_to(vault).as_posix()), ExitStack() as handles:
                 prepared = PreparedOriginal(vault, digest, size, staged, handles)
-                prepared.confirm_existing()
+                if not replacing:  # A damaged object is no winner to confirm; the repair replaces it.
+                    prepared.confirm_existing()
                 yield prepared
 
 
