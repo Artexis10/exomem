@@ -25,7 +25,7 @@
   - `changed_since` per principal;
   - `missing` and `related`.
   - a hub that cites more Sources than a step reads still serves every linked note, and `missing` carries no count of 0 beside `exact: false`.
-- [ ] 3.2 Record cold and warm timings on a generated store at the load target, within the budgets. The budgets are not met on this store; see the last item.
+- [x] 3.2 Record cold and warm timings on a generated store at the load target against the budgets. The owner's budgets hold. The restricted caller's budgets are missed in file mode, and the owner accepted that miss on 2026-11-16 until the store switch; see the last item.
   - Store: 20,402 pages in folders of 200, 180,404 graph nodes, 423,133 edges, in file mode. It holds a compiled note that links 10,000 pages from its body, an entity page that 10,000 pages link, and a compiled hub with 1,500 spokes of which 1,495 are withheld from the restricted caller. One request at a time on one machine, as the owner and as a caller that cannot read 10 percent of the pages. Cold reads clear the compiled-brief cache and the walk memo; steady warm reads are the second pass on. Another session's workers kept the machine at a load average of 12 to 13 on 20 cores for both runs, so a p95 moves by up to a factor of two between runs.
   - Before the bounded walk, restricted caller: each of the five shapes that reach the compiled hub made 10,642 to 10,708 release decisions and took 9.4 to 11.4 s. Owner cold p95 was 1,414 to 1,529 ms.
   - The two runs below read the same store, one after the other: the code before the per-role row bound (`probe-r1-before.log`) and the final code (`probe-r1-after.log`). Shapes of n=19 to 120 give the p95 ranges.
@@ -36,6 +36,7 @@
   - The compiled hub with 1,500 spokes, 1,495 withheld: 1,771 one-by-one decisions and 90 batched, before and after. Restricted cold 1,448 ms before and 1,246 ms after (n=1); warm p95 1,728 ms before and 1,657 ms after (n=7). Owner warm p95 54 and 60 ms.
   - A restricted caller is not memoized (design, D4), so each warm read pays its decisions, about 0.6 ms each in file mode.
   - Open: restricted cold p95 is above the 1,000 ms cold budget in every shape, restricted warm p95 is above its 1,000 ms budget in three of the four larger shapes after (two before) under this load, and the hub with withheld spokes is the slowest at 1.2 to 1.7 s. The budget is not relaxed, and no scan cap counts withheld rows. Store mode decides rows in batches and is not measured here.
+  - Decision (owner, 2026-11-16): ship with the restricted caller's miss recorded. It holds until the switch to store mode (`make-vault-store-canonical`). The one-by-one release decisions belong to the shared graph reader's file-mode path, which predates this change, and are tracked as debt there. Production records the brief's latency in `exomem_brief_read_duration_ms`.
   - Commands: the generated-store probe through the request dispatcher, run once per code state with the workspace `src` or the pre-change `src` on `PYTHONPATH`. Logs: `probe-r1-before.log` and `probe-r1-after.log`, with `uptime` before and after each run, kept outside this repository.
 
 ## 4. Release and acceptance
