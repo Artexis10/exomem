@@ -373,6 +373,30 @@ class PlacementCensus:
                 source.require_current()
 
 
+def retired_companion(vault: Path, companion: str, fields: dict[str, object], digest: str) -> bool:
+    """Whether a companion was retired to Trash, as the reciprocal witness in canonical Trash metadata confirms.
+
+    ``digest`` is the companion's content hash. The read is bounded: the placement metadata that the backlink
+    names, then that entry's reference companion. False when no witness names this companion: deletion wrote
+    none, or a new original at its path withdrew it. Raises `originals.RetirementUnconfirmed` when a witness
+    names it but the metadata, the companion or the Trash entry no longer confirms it.
+    """
+    metadata = _backlink(fields)
+    if metadata is None:
+        return False
+    census = PlacementCensus(vault)
+    try:
+        proof = census.retirement(metadata[:-len(METADATA_SUFFIX)])
+        if proof is None or proof.companion != companion:
+            return False
+        confirmed = census.retired_source(companion, fields, digest)
+    except (ValueError, reserved_paths.ReservedPathLeafError) as error:
+        raise originals.RetirementUnconfirmed(companion) from error
+    if not confirmed:
+        raise originals.RetirementUnconfirmed(companion)
+    return True
+
+
 def reference_companion(vault: Path, binary_path: str) -> tuple[str, reserved_paths.GenericFileSnapshot] | None:
     """Acquire the exact reference-only companion that recovery may retire."""
     from .vault import parse_frontmatter

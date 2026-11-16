@@ -148,6 +148,17 @@ def is_reference_only_companion(fields: dict[str, object], body: str) -> bool:
     return binary is not None and reference is not None and not body.strip() and fields == reference_companion_fields(binary, reference)
 
 
+class RetirementUnconfirmed(ValueError):
+    """A companion whose Trash retirement witness names it, but no longer confirms it.
+
+    Its original is neither live nor absent, so each read refuses (`trash_metadata.retired_companion`).
+    """
+
+    def __init__(self, companion: str) -> None:
+        super().__init__("the companion's retirement to Trash is unconfirmed")
+        self.companion = companion
+
+
 class DisplacedReference(ValueError):
     """A well-formed reference in a page that is not at its original's companion path.
 
@@ -327,6 +338,8 @@ def digest_addressed(vault: Path, path: str | Path, *, snapshot: OriginalSnapsho
             snapshot = original_state(vault, target)
         except reserved_paths.ReservedPathLeafError:
             return None
+        except RetirementUnconfirmed:
+            raise  # Neither a filing nor absent: the caller refuses.
         except ValueError:
             original_pool.enabled(vault)  # An unreadable format marker raises: the layout is unknown, not ordinary.
             return None
@@ -459,6 +472,12 @@ def original_state(
                 vault, binary_binding_value.sha256, binary_binding_value.size)
         except original_pool.ObjectMismatch:
             present = True  # A damaged object still holds the filing's place; each read of it refuses.
+        if present:
+            from .trash_metadata import retired_companion
+
+            # A companion retired to Trash stays at its path, but it files nothing: equal bytes that another
+            # filing pools are not its own.
+            present = not retired_companion(vault, companion, fields, hashlib.sha256(data).hexdigest())
         if present:
             physical = True
             local_path = original_pool.object_path(vault, binary_binding_value.sha256)

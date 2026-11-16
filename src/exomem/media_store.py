@@ -1839,6 +1839,14 @@ def pooled_head(vault: Path, relative: str, snapshot: OriginalSnapshot) -> Objec
     return head
 
 
+def _read_state(vault: Path, target: Path) -> OriginalSnapshot:
+    """The state that a read acts on; a retirement that its witness no longer confirms refuses as unverified."""
+    try:
+        return original_state(vault, target)
+    except originals.RetirementUnconfirmed as error:
+        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original's retirement to Trash is unconfirmed") from error
+
+
 @contextmanager
 def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False,
                   job: MediaJob | None = None, deadline: float | None = None):
@@ -1861,7 +1869,7 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
             except reserved_paths.ReservedPathLeafError as error:
                 if error.code != "MISSING":
                     raise
-                snapshot = original_state(vault, target)
+                snapshot = _read_state(vault, target)
                 if snapshot.local_path is None:
                     raise error
             else:
@@ -1872,10 +1880,10 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
                 yield source
                 return
     with _pin(vault, target, read=read) as (ledger, token):
-        snapshot = original_state(vault, target)
+        snapshot = _read_state(vault, target)
         if snapshot.state == "evicted":
             _hydrate(vault, snapshot, ledger, token)
-            snapshot = original_state(vault, target)
+            snapshot = _read_state(vault, target)
         with ExitStack() as opened:
             try:
                 source = opened.enter_context(_open_local_original(vault, relative, snapshot, physical=physical))

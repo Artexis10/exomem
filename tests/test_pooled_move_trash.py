@@ -222,6 +222,42 @@ def test_an_original_evicted_in_trash_before_pooling_recovers_by_its_trash_path_
     assert not original_pool.object_path(vault, hashlib.sha256(ORIGINAL_BYTES).hexdigest()).exists()
 
 
+def test_a_companion_retired_to_trash_is_no_filing_of_the_bytes_another_filing_pools(
+        vault, selected_store, monkeypatch):
+    """Catches an archive that reads the companion left at a trashed original's path as a live filing once another
+    filing pools identical bytes: the trashed path resolves again and serves that filing's object."""
+    from test_vault_store_media import ORIGINAL_BYTES
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+    other, _page = _filing(vault, "other.bin", ORIGINAL_BYTES)
+    shared = _pool(vault, monkeypatch, other, ORIGINAL_BYTES)
+
+    assert originals.original_state(vault, LOOSE).state == "missing"
+    assert originals.digest_addressed(vault, LOOSE) is None
+    recovered = recover_from_trash.recover_from_trash(vault, trash_path=trashed.trash_path)
+
+    assert recovered.restored_path == LOOSE and (vault / LOOSE).read_bytes() == ORIGINAL_BYTES
+    assert shared.read_bytes() == ORIGINAL_BYTES
+    assert media_store.read_original_bytes(vault, other).data == ORIGINAL_BYTES
+
+
+def test_a_companion_whose_trash_retirement_is_unconfirmed_refuses_reads(vault, selected_store, monkeypatch):
+    """Catches a damaged Trash entry that lets the companion at a trashed original's path read as a live filing of
+    the bytes another filing pools, or as a path with nothing at it."""
+    from test_vault_store_media import ORIGINAL_BYTES
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+    other, _page = _filing(vault, "other.bin", ORIGINAL_BYTES)
+    _pool(vault, monkeypatch, other, ORIGINAL_BYTES)
+    (vault / f"{trashed.trash_path}.md").unlink()  # A partly emptied Trash keeps the entry's placement metadata.
+
+    with pytest.raises(media_store.MediaStoreError) as refused, media_store.open_original(vault, vault / LOOSE):
+        pass
+    assert refused.value.code == "MEDIA_ORIGINAL_UNVERIFIED"
+    with pytest.raises(originals.RetirementUnconfirmed):
+        originals.digest_addressed(vault, LOOSE)
+
+
 def test_an_archive_without_shared_storage_still_moves_its_ordinary_bytes(vault):
     """Catches the shared-storage path leaking into an unconverted archive, whose bytes must move with the page."""
     binary, page = _filing(vault)
