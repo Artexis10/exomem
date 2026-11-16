@@ -12,18 +12,22 @@ Every other byte must be identical, or the write refuses with `APPEND_ONLY`. The
 what changed: the frontmatter through the YAML composer, the links through the wikilink grammar
 (`vault.iter_body_wikilinks`), never a pattern over the page.
 
-Each write leaves one create-only, owner-only record of its reason, its before and after hashes
-and each span's location and bytes. A revert applies only while the page holds the recorded
-after hash, and its result must hash to the recorded before hash.
+Each committed write leaves one create-only, owner-only record of its reason, its before and
+after hashes and each span's location and bytes. The record is written pending before the commit
+and published after it, so a write that never commits leaves no record (`recording`). A revert
+applies only while the page holds the recorded after hash, and its result must hash to the
+recorded before hash.
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
+import os
 import uuid
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -102,6 +106,11 @@ class PointerWrite:
     @property
     def after_hash(self) -> str:
         return vault.content_hash(self.after)
+
+    def reported(self) -> dict[str, str]:
+        """The page as a receipt names it: its display title first, then its path."""
+        front, body, _block = vault.parse_frontmatter(self.after)
+        return {"title": vault.resolve_display_title(front, body, self.path), "path": self.path}
 
 
 # --------------------------------------------------------------------------- proof
@@ -371,53 +380,113 @@ def require_preview(
 # --------------------------------------------------------------------------- records
 
 
+#: The stem suffix of a record written before its commit and not yet published.
+_PENDING = ".pending"
+
+
 def new_record_id() -> str:
     return uuid.uuid4().hex
 
 
-def record(vault_root: Path, write: PointerWrite, record_id: str | None = None) -> str:
-    """Create the write's owner-only record before its commit, and return the record id.
+@contextlib.contextmanager
+def recording(
+    vault_root: Path, writes: Sequence[tuple[PointerWrite, str]]
+) -> Iterator[list[str]]:
+    """Record each write, under its id, around the commit that makes it; yield the ids.
 
-    A caller that must name the record before the commit passes an id from `new_record_id`.
-    A record whose write never commits names an after hash that the page never holds, so its
-    revert refuses; a committed write always has its record.
+    Each record is flushed pending before the block runs, so a crash after the commit keeps it,
+    and published when the block returns. When the block raises, a record is published only
+    while its page holds the write's after hash: a write that never committed leaves no record.
+    A caller names the ids before the commit (`new_record_id`) when a page must list them.
     """
     store = private_state.store(vault_root, STORE)
-    record_id = record_id or new_record_id()
-    private_state.write_record(
-        store,
-        record_id,
-        {
-            "schema_version": _SCHEMA_VERSION,
-            "id": record_id,
-            "page": write.path,
-            "reason": write.reason,
-            "at": dt.datetime.now(dt.UTC).isoformat(),
-            "before_hash": write.before_hash,
-            "after_hash": write.after_hash,
-            "spans": [span.as_dict() for span in write.spans],
-        },
-        temp_suffix=".tmp",
-        durable=True,
-        create_only=True,
-    )
-    private_state.sync_directory(store)
-    return record_id
+    for write, record_id in writes:
+        private_state.write_record(
+            store,
+            record_id + _PENDING,
+            {
+                "schema_version": _SCHEMA_VERSION,
+                "id": record_id,
+                "page": write.path,
+                "reason": write.reason,
+                "at": dt.datetime.now(dt.UTC).isoformat(),
+                "before_hash": write.before_hash,
+                "after_hash": write.after_hash,
+                "spans": [span.as_dict() for span in write.spans],
+            },
+            temp_suffix=".tmp",
+            durable=True,
+            create_only=True,
+        )
+    if writes:
+        private_state.sync_directory(store)
+    try:
+        yield [record_id for _write, record_id in writes]
+    except BaseException:
+        for write, record_id in writes:
+            if _holds(vault_root, write.path, write.after_hash):
+                _publish(store, record_id)
+            else:
+                private_state.remove(store / f"{record_id}{_PENDING}.json")
+        if writes:
+            private_state.sync_directory(store)
+        raise
+    for _write, record_id in writes:
+        _publish(store, record_id)
+    if writes:
+        private_state.sync_directory(store)
+
+
+def _holds(vault_root: Path, rel: str, content_hash: Any) -> bool:
+    """Whether the page at `rel`, as the vault serves it, hashes to `content_hash`."""
+    raw = vault.served_page_bytes(vault_root, rel)
+    if raw is None:
+        return False
+    return vault.content_hash(raw.decode("utf-8", errors="replace")) == content_hash
+
+
+def _publish(store: Path, record_id: str) -> None:
+    """Give a pending record its final name; the folder entry is the caller's to flush."""
+    pending = store / f"{record_id}{_PENDING}.json"
+    try:
+        os.link(pending, store / f"{record_id}.json")
+    except FileExistsError:
+        pass
+    private_state.remove(pending)
 
 
 def load_record(vault_root: Path, record_id: str) -> dict[str, Any]:
+    """The published record `record_id`.
+
+    A pending record, which a stop between a commit and its publication leaves, is published
+    here when its page holds its after hash; otherwise its write never committed.
+    """
     if not record_id or not all(char in "0123456789abcdef" for char in record_id):
         raise PointerWriteError("POINTER_RECORD_UNKNOWN", "no pointer-write record has that id")
-    path = private_state.store(vault_root, STORE) / f"{record_id}.json"
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise PointerWriteError(
-            "POINTER_RECORD_UNKNOWN", "no pointer-write record has that id"
-        ) from error
-    if not isinstance(loaded, dict) or loaded.get("schema_version") != _SCHEMA_VERSION:
+    store = private_state.store(vault_root, STORE)
+    path = store / f"{record_id}.json"
+    pending = store / f"{record_id}{_PENDING}.json"
+    if not path.exists() and pending.exists():
+        loaded = _read_record(pending)
+        if loaded is not None and _holds(
+            vault_root, str(loaded.get("page")), loaded.get("after_hash")
+        ):
+            _publish(store, record_id)
+            private_state.sync_directory(store)
+    loaded = _read_record(path)
+    if loaded is None:
+        raise PointerWriteError("POINTER_RECORD_UNKNOWN", "no pointer-write record has that id")
+    if loaded.get("schema_version") != _SCHEMA_VERSION:
         raise PointerWriteError("POINTER_RECORD_UNKNOWN", "the pointer-write record is unreadable")
     return loaded
+
+
+def _read_record(path: Path) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def reverted_text(loaded: Mapping[str, Any], current: str) -> str:
@@ -467,8 +536,8 @@ def revert(vault_root: Path, record_id: str) -> PointerWrite:
             for span in loaded.get("spans") or ()
         ),
     )
-    record(root, write)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(path=absolute, content=before, guard=guard)], vault_root=root
-    )
+    with recording(root, [(write, new_record_id())]):
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(path=absolute, content=before, guard=guard)], vault_root=root
+        )
     return write

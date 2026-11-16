@@ -30,6 +30,7 @@ from . import (
     metrics,
     note_types,
     origin_bindings,
+    prior_claims,
     promotions,
     provenance,
     relation_barrier,
@@ -3465,12 +3466,25 @@ def _move_state_map(
     casefold_paths = vault.vault_casefolds(root)
     for state in changed.values():
         identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
+    # A link that still names the old path resolves by the lineage the move writes, before
+    # the index has refreshed.
+    claims = prior_claims.current(root).with_pages(
+        {
+            old_path: None,
+            new_path: moved_source.encode("utf-8"),
+            **{
+                write.path.relative_to(root).as_posix(): str(write.content).encode("utf-8")
+                for write in rewrites
+            },
+        }
+    )
     return (
         semantic_contract.SemanticCorpusContext.from_states(
             root,
             states.values(),
             registry=registry,
             identity_census=identity_census,
+            prior_claims=claims,
         ),
         changed,
     )
@@ -3606,12 +3620,8 @@ def _move_evaluation_pairs(
     resolvers: dict[str, vault.WikilinkResolver | None] = {"before": None, "after": None}
     if visible is not None:
         resolvers = {
-            "before": vault.WikilinkResolver.from_entries(
-                before_corpus.vault_root, before_corpus.resolver_entries
-            ),
-            "after": vault.WikilinkResolver.from_entries(
-                after_corpus.vault_root, after_corpus.resolver_entries
-            ),
+            "before": before_corpus.link_resolver(),
+            "after": after_corpus.link_resolver(),
         }
     candidates = after_corpus.eligible_compiled_paths | after_corpus.status_unavailable_paths
     for _ in range(len(after_corpus.pages) + 1):

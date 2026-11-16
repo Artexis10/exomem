@@ -116,6 +116,18 @@ def test_a_page_without_frontmatter_moves_without_lineage(vault: Path) -> None:
     ) == "Only prose here.\n"
 
 
+def test_a_page_with_an_empty_frontmatter_block_moves_with_lineage(vault: Path) -> None:
+    """A move that refuses a page whose frontmatter block is empty, or moves it without the entry
+    that resolves its old path."""
+    empty = "Knowledge Base/Notes/empty-block.md"
+    _write(vault, empty, "---\n---\nOnly prose here.\n")
+
+    _move(vault, empty, "Knowledge Base/Notes/empty-block-moved.md")
+
+    entries = _frontmatter(vault, "Knowledge Base/Notes/empty-block-moved.md")
+    assert [entry["path"] for entry in entries[page_lineage.LINEAGE_FIELD]] == [empty]
+
+
 def test_a_relayout_old_path_resolves_after_a_later_move_and_a_rebuild(vault: Path) -> None:
     """A relayout row the refill ignores, or a reverted relayout that still claims its paths."""
     from exomem import relayout_record
@@ -199,6 +211,36 @@ def test_a_create_at_a_reserved_path_refuses_and_a_move_back_commits(moved: Path
     assert _resolve(moved, B) == (A.removesuffix(".md"), None)
 
 
+@pytest.mark.parametrize(
+    ("moved_from", "spelling"),
+    [
+        (A, A.replace(STEM, STEM.title())),
+        (
+            "Knowledge Base/Notes/Insights/caf\u00e9-ledger.md",
+            "Knowledge Base/Notes/Insights/cafe\u0301-ledger.md",
+        ),
+    ],
+    ids=["case", "unicode-form"],
+)
+def test_a_create_at_another_spelling_of_a_reserved_path_refuses(
+    vault: Path, moved_from: str, spelling: str
+) -> None:
+    """A reservation keyed by exact bytes, which a case or Unicode-form variant walks around."""
+    moved_to = "Knowledge Base/Notes/Insights/Databases/ledger.md"
+    _with_identity(vault, moved_from)
+    if moved_from != A:
+        (vault / A).unlink()
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    (vault / moved_to).parent.mkdir(parents=True, exist_ok=True)
+    _move(vault, moved_from, moved_to)
+
+    with pytest.raises(create_file.CreateFileError) as refused:
+        create_file.create_file(vault, path=spelling, content=_note("Squatter"), today=TODAY)
+
+    assert refused.value.code == "FILE_EXISTS"
+    assert moved_to in refused.value.reason
+
+
 def test_a_new_note_named_like_a_reserved_path_takes_the_next_free_name(moved: Path) -> None:
     """`unique_path` handing out a name that a moved page's links still resolve to."""
     picked = vault_module.unique_path((moved / A).parent, STEM, vault_root=moved)
@@ -235,3 +277,36 @@ def test_a_delete_check_finds_a_link_to_a_prior_path_while_the_index_is_stale(
     hits = vault_module.find_inbound_wikilinks(moved, C)
 
     assert [hit.path for hit in hits] == [linker]
+
+
+def test_a_move_judges_and_indexes_a_link_to_the_old_path_as_a_link_to_the_new_one(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A move judged before its lineage is indexed, so the page loses the facts linking to it."""
+    from exomem import epistemic_graph, semantic_writes
+
+    linker = "Knowledge Base/Notes/Insights/harbour-log.md"
+    _with_identity(vault, A)
+    _write(vault, linker, _note("Harbour log", body=f"- supports [[{A.removesuffix('.md')}]]\n"))
+    (vault / B).parent.mkdir(parents=True, exist_ok=True)
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    judged = []
+    commit = semantic_writes.commit_move
+
+    def spy(vault_root, *, preflight, mutate):
+        judged.append(preflight.after_corpus)
+        return commit(vault_root, preflight=preflight, mutate=mutate)
+
+    monkeypatch.setattr(semantic_writes, "commit_move", spy)
+
+    _move(vault, A, B)
+
+    assert [(fact.authored_path, fact.resolved_target_path) for fact in judged[0].inbound[B]] == [
+        (linker, B)
+    ]
+    with closing(sqlite3.connect(epistemic_graph.sidecar_path(vault))) as conn:
+        edges = conn.execute(
+            "SELECT DISTINCT dst_key FROM graph_edges WHERE source_path = ?", (linker,)
+        ).fetchall()
+    assert edges == [(f"file:{B}",)]

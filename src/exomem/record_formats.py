@@ -1543,6 +1543,8 @@ def frontmatter_entry_spans(yaml_text: str) -> dict[str, tuple[int, int]]:
         document = vault.yaml.compose(yaml_text)
     except vault.yaml.YAMLError as error:
         raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid") from error
+    if document is None:
+        return {}  # an empty block, or one of comments only, holds no field (`parse_frontmatter`)
     if not isinstance(document, vault.yaml.nodes.MappingNode):
         raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid")
     spans: dict[str, tuple[int, int]] = {}
@@ -1672,7 +1674,7 @@ def splice_markdown_frontmatter(
         raise FrontmatterSpliceError("NO_FRONTMATTER", "the page has no frontmatter block")
     start = match.start(1)
     # The splice reads the block with its final line terminated. An empty block has no
-    # line break before its closing fence, so its slice is empty and the splice refuses it.
+    # line break before its closing fence, so its slice is empty and new fields open it.
     end = match.end(1) + len(vault.frontmatter_line_break(text, match))
     patched = splice_frontmatter_fields(
         text[start:end],

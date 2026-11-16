@@ -21,7 +21,7 @@
 
 ## 3. `move_file`
 
-- [x] 3.1 Give each referrer one preview outcome and return a digest of the outcomes and bindings; list only pages a restricted mover may see. Test: a preview lists a writable note, a Source and a Records row with their three outcomes.
+- [x] 3.1 Give each referrer one preview outcome and return a digest of the outcomes and bindings; list only pages a restricted mover may see. Test: a preview lists a writable note and a Records row as rewritten and a Source as repointed; a move rewrites a Records row and a Planning item.
 - [x] 3.2 Repoint append-only referrers of a page with an `exomem_id` through the pointer write in the move's batch; keep `APPEND_ONLY` for a page without one; move the `ingested_into` case onto the pointer write. Test: an Evidence body link names the new path and every other byte is unchanged.
 - [x] 3.3 Add the optional preview digest to the `manage_memory_file` move and reclassification, and update the pinned tool schemas. Test: a move that repoints a Source referrer without the digest refuses with `POINTER_PREVIEW_REQUIRED`, and a promotion that repoints nothing commits without one.
 - [x] 3.4 Make reclassification repoint its append-only referrers through the pointer write and make its revert restore them from their records. Test: a Source linked by path from an Evidence page reclassifies with only the link span changed, and a revert restores the Evidence page's exact bytes.

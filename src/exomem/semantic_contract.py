@@ -1214,6 +1214,9 @@ class SemanticCorpusContext:
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
     writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
+    #: The prior-path claims its links resolved against when those are not the index's current
+    #: ones: a move's after corpus binds the claims its commit leaves (`PriorClaims.with_pages`).
+    prior_claims: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1264,6 +1267,7 @@ class SemanticCorpusContext:
         *,
         registry: relation_registry.RelationRegistry,
         identity_census: StableIdentityCensus,
+        prior_claims: Any = None,
     ) -> SemanticCorpusContext:
         by_path: dict[str, SemanticPageState] = {}
         for state in states:
@@ -1278,7 +1282,14 @@ class SemanticCorpusContext:
                 tuple(identity_census.entries), identity_census.reference_only_entries
             ),
             writer_visibility=vault.writer_link_visibility(Path(vault_root)),
+            prior_claims=prior_claims,
         )
+
+    def link_resolver(self) -> vault.WikilinkResolver:
+        """A resolver over these pages that resolves prior paths by the claims the corpus holds."""
+        resolver = vault.WikilinkResolver.from_entries(self.vault_root, self.resolver_entries)
+        resolver.bound_claims = self.prior_claims
+        return resolver
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
         pages = dict(self.pages)
@@ -4382,11 +4393,13 @@ def _context_from_state_map(
     identity_census: StableIdentityCensus,
     *,
     writer_visibility: Any = _DECIDE,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext:
     request_budget.checkpoint()
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
     resolver = vault.WikilinkResolver.from_entries(root, entries)
+    resolver.bound_claims = prior_claims
     facts = _derive_relation_facts(root, ordered_pages, resolver, registry)
     return _context_from_resolved_state(
         root,
@@ -4397,6 +4410,7 @@ def _context_from_state_map(
         resolver=resolver,
         facts=facts,
         writer_visibility=writer_visibility,
+        prior_claims=prior_claims,
     )
 
 
@@ -4647,6 +4661,7 @@ def _context_from_resolved_state(
     facts: tuple[RelationFact, ...],
     writer_visibility: Any = _DECIDE,
     validated_census: activation_manifest.ActivationCensus | None = None,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
@@ -4704,6 +4719,7 @@ def _context_from_resolved_state(
         identity_census=identity_census,
         registry=registry,
         writer_visibility=writer_visibility,
+        prior_claims=prior_claims,
     )
 
 
@@ -5194,6 +5210,8 @@ class _WikilinkResolverView:
     stems: Mapping[str, tuple[str, ...]]
     titles: Mapping[str, tuple[str, ...]]
     candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
+    #: The corpus's own prior-path claims, when it binds any (`SemanticCorpusContext.prior_claims`).
+    bound_claims: Any = None
 
 
 def _qualifying_body_wikilink_targets(
@@ -5208,6 +5226,7 @@ def _qualifying_body_wikilink_targets(
         stems=corpus.resolver_stems,
         titles=corpus.resolver_titles,
         candidates_by_key=corpus.resolver_candidates_by_key,
+        bound_claims=corpus.prior_claims,
     )
     targets: list[str] = []
     for raw_target, _line in page.body_wikilinks:
@@ -5291,7 +5310,7 @@ def writer_view_relations(
     if visible is None or not callable(visible) or not visible(page.path):
         return outbound, inbound, None
     if resolver is None:
-        resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+        resolver = corpus.link_resolver()
     own = _derive_relation_facts(
         corpus.vault_root,
         {page.path: page},
@@ -5347,7 +5366,7 @@ def writer_authored_facts(
         visible = vault.writer_link_visibility(corpus.vault_root)
     if visible is None or not visible(page.path):
         return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
-    resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    resolver = corpus.link_resolver()
     return tuple(
         sorted(
             _derive_relation_facts(

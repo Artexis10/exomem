@@ -383,7 +383,8 @@ with its exact before hash and its rewritten bytes. A referrer that an earlier
 `move` step writes SHALL be bound at that step's sealed after hash. The step
 SHALL give each referrer exactly one outcome, as a move preview does:
 `rewritten`, `pointer-repointed (append-only page)`,
-`unchanged: resolves via prior path`, or `refused`. A `refused` outcome SHALL
+`unchanged: resolves via prior path`, `unchanged: keeps the old path`, or
+`refused`. A `refused` outcome SHALL
 refuse the plan at proposal.
 
 At execution, the step SHALL write every rewritten page and every pointer

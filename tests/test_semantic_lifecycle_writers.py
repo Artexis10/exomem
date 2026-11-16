@@ -438,9 +438,11 @@ def test_existing_preflight_refuses_newline_only_drift_from_the_callers_hash(tmp
     assert path.read_bytes() == changed
 
 
-def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus(
+def test_move_without_wikilink_updates_keeps_an_unchanged_referrer_resolving_through_lineage(
     tmp_path: Path,
 ) -> None:
+    """A final-corpus check that judges a kept link to the old path as dangling and blocks the
+    move, although the moved page's lineage resolves that link to it."""
     new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
     anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
     target = _source("Target", page_id=_ID).replace(
@@ -457,24 +459,22 @@ def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus
         "Anchor", page_id="00000000-0000-4000-8000-000000000063"
     )
     old = _write(tmp_path, _PAGE, target)
-    _write(tmp_path, _OTHER_PAGE, referrer)
+    kept = _write(tmp_path, _OTHER_PAGE, referrer)
     _write(tmp_path, anchor_path, anchor)
     before_corpus = semantic_contract.build_corpus_context(tmp_path)
     activation_manifest.ensure_manifest(
         tmp_path, census=before_corpus.activation_census
     )
 
-    with pytest.raises(move_module.MoveFileError) as blocked:
-        move_module.move_file(
-            tmp_path,
-            old_path=_PAGE,
-            new_path=new_path,
-            update_wikilinks=False,
-        )
+    move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=new_path,
+        update_wikilinks=False,
+    )
 
-    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
-    assert old.read_text(encoding="utf-8") == target
-    assert not (tmp_path / new_path).exists()
+    assert not old.exists() and (tmp_path / new_path).is_file()
+    assert kept.read_text(encoding="utf-8") == referrer
 
 
 @pytest.mark.parametrize("append_tree", ["Sources", "Evidence"])

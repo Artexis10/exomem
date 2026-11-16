@@ -8700,14 +8700,20 @@ def lineage_link_targets(vault_root: Path, target_rel_path: str) -> tuple[str, .
 
 
 def _merge_inbound(found: Iterable[list[InboundLink]]) -> list[InboundLink]:
-    """The links of several lookups, each link once, in lookup order."""
-    seen: set[tuple[str, int, str]] = set()
+    """The links of several lookups, in lookup order, each link once.
+
+    Two lookups may list one link, while one lookup lists two links on one line as two rows, so a
+    row counts once for each time a single lookup lists it.
+    """
+    emitted: dict[tuple[str, int, str], int] = {}
     merged: list[InboundLink] = []
     for links in found:
+        listed: dict[tuple[str, int, str], int] = {}
         for link in links:
             key = (link.path, link.line_number, link.raw_target)
-            if key not in seen:
-                seen.add(key)
+            listed[key] = listed.get(key, 0) + 1
+            if listed[key] > emitted.get(key, 0):
+                emitted[key] = listed[key]
                 merged.append(link)
     return merged
 
@@ -8755,6 +8761,8 @@ def find_inbound_wikilinks(
     priors = lineage_link_targets(vault_root, target_rel_path) if lineage else ()
     stored = _store_inbound(vault_root, (target_rel_path, *priors), visible)
     if stored is not None:
+        if not priors:
+            return stored[target_rel_path]
         return _merge_inbound(stored[target] for target in (target_rel_path, *priors))
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
@@ -9526,6 +9534,82 @@ def wikilink_page_key(page: str) -> str:
     return page.removesuffix(".md").strip().strip("/")
 
 
+def _current_claims(resolver: Any, vault_root: Path) -> Any:
+    """The prior-path claims a derivation binds on `resolver`, else the index's current ones."""
+    bound = getattr(resolver, "bound_claims", None)
+    if bound is not None:
+        return bound
+    from . import prior_claims
+
+    return prior_claims.current(vault_root)
+
+
+def _kept_claims(resolver: Any, vault_root: Path) -> Any:
+    """The claims kept beside the resolver's maps; a read-only corpus view keeps none."""
+    keeper = getattr(resolver, "prior_claims", None)
+    return keeper() if keeper is not None else _current_claims(resolver, vault_root)
+
+
+def _live_claimants(
+    paths: Iterable[str],
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The live pages among `paths` that the caller may see, counted after that filter."""
+    wanted = set(paths)
+    if not wanted:
+        return []
+    if targeted:
+        # A targeted caller has no visibility filter; namespace membership proves liveness.
+        return [
+            WikilinkCandidate(path, None)
+            for path in sorted(wanted)
+            if contains(_wikilink_path_key(path))
+        ]
+    return [
+        candidate
+        for candidate in wikilink_candidates(
+            resolver.candidates_by_key,
+            {_wikilink_path_key(path) for path in wanted},
+            visible=visible,
+        )
+        if candidate.path in wanted
+    ]
+
+
+def _squatter_claimants(
+    key: str,
+    vault_root: Path,
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The lineage claimants that keep `key` from a file without an `exomem_id` sitting there."""
+    claims = _current_claims(resolver, vault_root)
+    claimants = claims.claimants(key)
+    if not claimants:
+        return []
+    held = (
+        [key + ".md"]
+        if targeted
+        else [
+            match.path
+            for match in wikilink_candidates(resolver.candidates_by_key, (key,), visible=visible)
+        ]
+    )
+    if any(claims.has_identity(path) for path in held):
+        return []  # a page with an identity at its own path is a live name
+    return _live_claimants(
+        (path for path in claimants if path not in held),
+        resolver, contains, targeted=targeted, visible=visible,
+    )
+
+
 def _normalize_wikilink(
     target: str,
     vault_root: Path,
@@ -9581,54 +9665,17 @@ def _normalize_wikilink(
             f"by {kind}; left unchanged. Files: {paths}"
         ), None
 
-    def _claimants(paths: Iterable[str]) -> list[WikilinkCandidate]:
-        """The live pages among `paths` that the caller may see, counted after that filter."""
-        wanted = set(paths)
-        if targeted:
-            # A targeted caller has no visibility filter; namespace membership proves liveness.
-            return [
-                WikilinkCandidate(path, None)
-                for path in sorted(wanted)
-                if contains(_wikilink_path_key(path))
-            ]
-        return [
-            candidate
-            for candidate in _matches({_wikilink_path_key(path) for path in wanted})
-            if candidate.path in wanted
-        ]
-
-    def _claims() -> Any:
-        from . import prior_claims
-
-        bound = getattr(resolver, "bound_claims", None)
-        return bound if bound is not None else prior_claims.current(vault_root)
-
-    def _squatter_guard(key: str) -> list[WikilinkCandidate]:
-        """The lineage claimants that keep `key` from a file without an `exomem_id` sitting there.
-
-        The resolver's kept claims answer the common case, a path that no page left, without a
-        read; a path that they list is checked against the current index.
-        """
-        # A read-only resolver view (a corpus snapshot) keeps no claims; it reads the current ones.
-        keeper = getattr(resolver, "prior_claims", None)
-        kept = keeper() if keeper is not None else _claims()
-        if not kept.claimants(key):
-            return []
-        claims = _claims()
-        claimants = claims.claimants(key)
-        if not claimants:
-            return []
-        held = [key + ".md"] if targeted else [match.path for match in _matches((key,))]
-        if any(claims.has_identity(path) for path in held):
-            return []  # a page with an identity at its own path is a live name
-        return _claimants(path for path in claimants if path not in held)
-
     # Full paths take precedence over Knowledge-Base-relative paths.
     for key in (cleaned, managed_join(cleaned)):
         if contains(key):
-            claimed = _squatter_guard(key)
-            if claimed:
-                return _selected(claimed, "prior path")
+            # The resolver's kept claims answer the common case, a path that no page left,
+            # with one lookup; only a path that they list is checked against the index.
+            if _kept_claims(resolver, vault_root).claimants(key):
+                claimed = _squatter_claimants(
+                    key, vault_root, resolver, contains, targeted=targeted, visible=visible
+                )
+                if claimed:
+                    return _selected(claimed, "prior path")
             if targeted:
                 return key + anchor, None, None
             matches = _matches((key,))
@@ -9637,9 +9684,11 @@ def _normalize_wikilink(
 
     # A path that a moved page left names that page while exactly one visible live page claims it.
     if "/" in cleaned:
-        claims = _claims()
+        claims = _current_claims(resolver, vault_root)
         for key in (cleaned, managed_join(cleaned)):
-            claimed = _claimants(claims.claimants(key))
+            claimed = _live_claimants(
+                claims.claimants(key), resolver, contains, targeted=targeted, visible=visible
+            )
             if claimed:
                 return _selected(claimed, "prior path")
 
@@ -9666,7 +9715,10 @@ def _normalize_wikilink(
         )
         if title_matches:
             return _selected(title_matches, "title")
-        stem_claimed = _claimants(_claims().stem_claimants(cleaned))
+        stem_claimed = _live_claimants(
+            _current_claims(resolver, vault_root).stem_claimants(cleaned),
+            resolver, contains, targeted=targeted, visible=visible,
+        )
         if stem_claimed:
             return _selected(stem_claimed, "prior stem")
 

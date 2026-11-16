@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from lifecycle_fixtures import PLANNING_PATH, planning_manifest
 from test_records_recall_policy import _manifest
 
 from exomem import call_ledger, commands, move_file, pointer_write, writer_lease
 from exomem import server as server_module
-from exomem import vault as vault_module
 
 NOTE = "Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md"
 MOVED_NOTE = "Knowledge Base/Notes/Insights/Postgres/autovacuum-thresholds-prevent-table-bloat.md"
@@ -24,6 +24,7 @@ SOURCE = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
 EVIDENCE = "Knowledge Base/Evidence/Tuning/vacuum-measurements.md"
 WRITABLE = "Knowledge Base/Notes/Insights/tuning-log.md"
 ROW = "Knowledge Base/Records/Measurements/items/first-reading.md"
+PLAN_ITEM = "Knowledge Base/Planning/Delivery/Items/tune-autovacuum.md"
 MANAGE = next(c for c in commands.PRODUCT_COMMANDS if c.name == "manage_memory_file")
 
 
@@ -64,8 +65,7 @@ def _move(vault: Path, **kwargs):
 
 
 def test_a_preview_gives_each_referrer_one_outcome_and_writes_nothing(vault: Path) -> None:
-    """A preview that labels a repointed Source as rewritten, rewrites a collection's row instead
-    of leaving it to the lineage, or writes any page."""
+    """A preview that labels a repointed Source as rewritten, or writes any page."""
     _with_identity(vault, NOTE)
     pages = [
         _write(vault, WRITABLE, f"---\ntype: note\n---\nSee {_link(NOTE)}.\n"),
@@ -79,7 +79,7 @@ def test_a_preview_gives_each_referrer_one_outcome_and_writes_nothing(vault: Pat
 
     assert sorted((item["path"], item["outcome"]) for item in preview["referrers"]) == [
         (WRITABLE, "rewritten"),
-        (ROW, "unchanged: resolves via prior path"),
+        (ROW, "rewritten"),
         (SOURCE, "pointer-repointed (append-only page)"),
     ]
     assert preview["preview_digest"]
@@ -112,20 +112,46 @@ def test_a_committed_move_repoints_an_evidence_body_link_and_records_the_old_one
     ]
 
 
-def test_a_records_row_keeps_its_bytes_and_its_link_follows_the_moved_note(vault: Path) -> None:
-    """A move that rewrites a row its collection's writer owns, or that leaves the row's link
-    dangling."""
+def test_a_move_whose_commit_fails_leaves_no_pointer_record(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record created before a commit that then fails: it names a write that never happened."""
+    from exomem import private_state, semantic_writes
+
     _with_identity(vault, NOTE)
-    row = _records_row_linking(vault, NOTE)
-    before = row.read_bytes()
+    evidence = _write(vault, EVIDENCE, f"---\ntype: evidence\n---\n\nMeasured in {_link(NOTE)}.\n")
+    before = evidence.read_bytes()
+    preview = move_file.move_file(vault, old_path=NOTE, new_path=MOVED_NOTE, preview=True)
+
+    def fail(*_args, **_kwargs):
+        raise semantic_writes.SemanticWriteError("SOURCE_CHANGED", "the source changed")
+
+    monkeypatch.setattr(semantic_writes, "commit_move", fail)
+    with pytest.raises(move_file.MoveFileError):
+        move_file.move_file(
+            vault, old_path=NOTE, new_path=MOVED_NOTE, preview_digest=preview.preview_digest
+        )
+
+    assert evidence.read_bytes() == before
+    assert list(private_state.store(vault, pointer_write.STORE).iterdir()) == []
+
+
+def test_a_move_rewrites_the_moved_path_in_a_records_row_and_a_planning_item(vault: Path) -> None:
+    """A move that leaves a Records row or a Planning item on the old path, so it reaches the moved
+    note only through the lineage, which is the fallback for references Exomem cannot rewrite."""
+    _with_identity(vault, NOTE)
+    _write(vault, PLANNING_PATH, planning_manifest())
+    pages = [
+        _records_row_linking(vault, NOTE),
+        _write(vault, PLAN_ITEM, f"---\ntitle: Tune autovacuum\n---\nFollows {_link(NOTE)}.\n"),
+    ]
+    before = [page.read_text(encoding="utf-8") for page in pages]
 
     _move(vault)
 
-    assert row.read_bytes() == before
-    assert vault_module.normalize_wikilink(NOTE.removesuffix(".md"), vault) == (
-        MOVED_NOTE.removesuffix(".md"),
-        None,
-    )
+    assert [page.read_text(encoding="utf-8") for page in pages] == [
+        text.replace(_link(NOTE), _link(MOVED_NOTE)) for text in before
+    ]
 
 
 @pytest.fixture
@@ -177,6 +203,22 @@ def test_a_move_that_repoints_a_source_commits_only_with_a_current_preview_diges
     assert source.read_text(encoding="utf-8") == captured.replace(_link(NOTE), _link(MOVED_NOTE))
 
 
+def test_a_committed_move_names_the_append_only_pages_it_repointed(vault: Path, connector) -> None:
+    """A receipt that reports only the moved page, so the agent and the person never learn that
+    the move also changed a Source the call did not name."""
+    _with_identity(vault, NOTE)
+    _source_linking(vault, NOTE)
+    move = {"old_path": NOTE, "new_path": MOVED_NOTE}
+    preview = connector("inspect_memory", "files.move", move)
+
+    done = connector(
+        "manage_memory", "files.move", {**move, "preview_digest": preview["preview_digest"]}
+    )
+
+    assert "Repointed the links to it in 1 append-only page" in done["user_summary"]
+    assert done["pointer_repointed"] == ["Source: Best EGCG and Vitamin C Supplements"]
+
+
 def test_a_promotion_that_repoints_no_other_captured_page_commits_without_a_digest(
     vault: Path,
 ) -> None:
@@ -218,5 +260,6 @@ def test_a_reclassification_repoints_an_evidence_link_and_its_revert_restores_th
     )
 
     assert proposal["referrers"]["pointer_repointed"] == [EVIDENCE]
+    assert moved["pointer_repointed"] == ["vacuum measurements"]
     assert repointed == original.replace(_link(SOURCE), _link(moved["path"]))
     assert evidence.read_text(encoding="utf-8") == original

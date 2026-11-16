@@ -6353,8 +6353,8 @@ def op_move_file(
     and leaves a Source or Evidence page that cites it as captured (a
     warning counts those). A link in a Source or Evidence page is repointed
     through the governed pointer write when the moved page has an
-    `exomem_id`; a Records row keeps its reference, which the moved page's
-    lineage resolves.
+    `exomem_id`. A link that the move cannot rewrite still resolves through
+    the moved page's lineage.
 
     `validate_only=true` previews the move: one outcome per referrer you may
     see and a `preview_digest`. A move that repoints a Source or Evidence page

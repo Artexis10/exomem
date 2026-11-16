@@ -225,6 +225,8 @@ _OPERATIONAL_KEYS = frozenset(
         "graph_sync_checkpoint",
         "graph_sync_remediation",
         "vocabulary_sync",
+        # The paths of the append-only pages a move repointed; the reply names them by title.
+        "pointer_repointed_paths",
     }
 )
 
@@ -251,6 +253,8 @@ _MAX_WARNING_CHARS = 300
 _MAX_RELATION_ADVISORY_LABELS = 8
 _MAX_RELATION_ADVISORY_EXAMPLES = 5
 _MAX_RELATION_ADVISORY_LABEL_CHARS = 128
+#: How many repointed append-only pages compact names; the summary's count covers the rest.
+_MAX_REPOINTED_PAGES = 8
 
 
 def _operation_id(result: Any) -> str | None:
@@ -2270,6 +2274,19 @@ def _user_summary(
     return _lead(head, names)
 
 
+def _pointer_repointed(leaf: Any) -> list[Mapping[str, Any]]:
+    """The append-only pages whose links a move or reclassification repointed, title first."""
+    pages = leaf.get("pointer_repointed") if isinstance(leaf, Mapping) else None
+    if not isinstance(pages, list):
+        return []
+    return [
+        page for page in pages
+        if isinstance(page, Mapping)
+        and isinstance(page.get("title"), str)
+        and isinstance(page.get("path"), str)
+    ]
+
+
 def _stated_outcome(leaf: Any) -> str | None:
     """The sentence an approval leaf states itself.
 
@@ -2356,6 +2373,18 @@ def project_terminal(
             leaf.get("outcome"), str
         ):
             compact["user_summary"] += f". {leaf['outcome']}"
+    repointed = _pointer_repointed(leaf)
+    if repointed:
+        # An append-only page changed only in its links; the person hears it, the agent sees which.
+        if "user_summary" in compact:
+            pages = "page" if len(repointed) == 1 else "pages"
+            compact["user_summary"] += (
+                f". Repointed the links to it in {len(repointed)} append-only {pages}"
+            )
+        compact["pointer_repointed"] = [
+            page["title"] for page in repointed[:_MAX_REPOINTED_PAGES]
+        ]
+        compact["pointer_repointed_paths"] = [page["path"] for page in repointed]
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]

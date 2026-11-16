@@ -50,7 +50,6 @@ from .kbdir import managed_split_parts
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
-    FrontmatterError,
     InboundLink,
     LogWritePlan,
     PathGuard,
@@ -91,6 +90,8 @@ class MoveFileResult:
     path_mentions_updated: int = 0
     #: The pointer-write records of the append-only referrers the move changed.
     pointer_writes: list[str] = field(default_factory=list)
+    #: Those referrers, title and path, in record order: the pages whose links the move repointed.
+    pointer_repointed: list[dict[str, str]] = field(default_factory=list)
     #: A preview's one outcome per referrer the caller may see; None for a commit.
     referrers: list[dict[str, str]] | None = None
     #: The digest a commit that repoints append-only referrers passes; None when it cannot commit.
@@ -109,6 +110,7 @@ class MoveFileResult:
         }
         if self.pointer_writes:
             answer["pointer_writes"] = self.pointer_writes
+            answer["pointer_repointed"] = self.pointer_repointed
         if self.referrers is not None:
             answer["referrers"] = self.referrers
             answer["preview_digest"] = self.preview_digest
@@ -301,9 +303,9 @@ def _repoint_artifact(old_binary: str, new_binary: str):
         if block is None:
             return text
         changes: dict[str, Any] = {}
-        for field in originals.SCALAR_POINTERS:
-            if frontmatter.get(field) == old_binary:
-                changes[field] = new_binary
+        for pointer in originals.SCALAR_POINTERS:
+            if frontmatter.get(pointer) == old_binary:
+                changes[pointer] = new_binary
         path_key = originals.NESTED_PATH_KEY
         descriptor = frontmatter.get(originals.GOVERNANCE_COMPANION)
         if isinstance(descriptor, dict) and descriptor.get(path_key) == old_binary:
@@ -428,8 +430,6 @@ class InboundRewrite:
     restored: bool = False
     #: The code and reason that refuse the change to an append-only page.
     refusal: tuple[str, str] | None = None
-    #: A reference the move does not write, such as a Records row; the page's lineage resolves it.
-    kept: bool = False
 
 
 #: The outcome a move preview gives each referrer; the command-surface specification fixes the set.
@@ -466,12 +466,9 @@ def plan_inbound_rewrites(
     A page in an append-only tree changes only through the governed pointer write: its links
     follow the move when they name a page with an `exomem_id`, and its registry pointer fields
     may change. An `undo` returns each append-only page to the before bytes of the record
-    that the move it undoes left on it, and refuses one that move did not change. When the
-    moved page records the move in its lineage, a Records or Planning row keeps its reference,
-    which the lineage resolves, because those rows belong to their collection's writer.
+    that the move it undoes left on it, and refuses one that move did not change.
     """
     from . import page_fields, pointer_write
-    from .recall_policy import is_structured_only_path
 
     plans: list[InboundRewrite] = []
     pages = sorted({hit.path for hit in inbound} | set(named_in))
@@ -479,7 +476,6 @@ def plan_inbound_rewrites(
         vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
     ) if pages else ()
     pointers = page_fields.pointer_fields(vault_root) if pages else frozenset()
-    keeps_lineage = bool(pages) and records_lineage(vault_root, old_rel, new_rel, undo=undo)
     restore = _undo_records(vault_root, old_rel) if pages and undo else {}
     identified = (
         bool(pages)
@@ -509,12 +505,9 @@ def plan_inbound_rewrites(
         body_immutable = append_tree is not None and not generated_index
         if generated_index:
             append_tree = None
-        kept = keeps_lineage and is_structured_only_path(vault_root, rel)
         repoint = refusal = None
         restored = False
-        if kept:
-            new_text = text
-        elif append_tree is not None and n_changed:
+        if append_tree is not None and n_changed:
             record = restore.get(rel)
             try:
                 if undo and record is None:
@@ -553,14 +546,14 @@ def plan_inbound_rewrites(
         # A prose mention in an immutable body can never be rewritten, by this move or any
         # other, so refusing would block every later move of the file; it is left and reported.
         new_text, n_mentions = path_mentions.rewrite(
-            new_text, moves, apply=not (body_immutable or kept)
+            new_text, moves, apply=not body_immutable
         )
         left = n_mentions if body_immutable else 0
         plans.append(
             InboundRewrite(
                 rel, abs_file, append_tree, n_changed, new_text, guard,
-                mentions=0 if body_immutable or kept else n_mentions, left_mentions=left,
-                repoint=repoint, restored=restored, refusal=refusal, kept=kept,
+                mentions=0 if body_immutable else n_mentions, left_mentions=left,
+                repoint=repoint, restored=restored, refusal=refusal,
             )
         )
     return plans
@@ -1174,8 +1167,8 @@ def _move_file_local(
             unchanged = KEPT if keeps_lineage else KEPT_DANGLING
             if item.left_mentions and shown:
                 kept_mentions += 1
-            if item.kept or not (item.changes or item.mentions):
-                if shown and (item.kept or item.left_mentions):
+            if not (item.changes or item.mentions):
+                if shown and item.left_mentions:
                     referrers.append({"path": rel, "outcome": unchanged})
                 continue
             if not writable_page(rel):
@@ -1243,8 +1236,9 @@ def _move_file_local(
         }
 
     def record_pointer_writes() -> list[str]:
-        """Create each pointer write's record before the commit that makes it."""
-        return [pointer_write.record(vault_root, write, record_id) for write, record_id in pointer_records]
+        """Record each pointer write around the commit: its record outlives the move only when
+        its page holds the write (`pointer_write.recording`)."""
+        return mutation_context.enter_context(pointer_write.recording(vault_root, pointer_records))
 
     if kept_mentions:
         # Captured pages cannot change; the page count carries no path, so a restricted caller keeps it.
@@ -1864,6 +1858,7 @@ def _move_file_local(
             warnings=warnings,
             semantic=semantic,
             pointer_writes=pointer_writes,
+            pointer_repointed=[write.reported() for write, _record_id in pointer_records],
             # A bound store filters every caller, so the caller decides who reads the row report,
             # as file mode decides it: the paths it names may include pages withheld from others.
             index=(
@@ -2002,6 +1997,7 @@ def _move_file_local(
         warnings=warnings,
         semantic=semantic,
         pointer_writes=pointer_writes,
+        pointer_repointed=[write.reported() for write, _record_id in pointer_records],
         # The index outcome covers every rewritten page, so a mover other
         # than the owner receives none.
         index=None if restricted else index_feedback,

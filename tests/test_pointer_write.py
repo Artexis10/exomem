@@ -83,13 +83,16 @@ def test_a_repointed_source_link_is_the_only_span_that_differs(vault: Path) -> N
                      id="link-to-another-page"),
         pytest.param(lambda text: text.replace("source_type: article", "source_type: report"),
                      id="undeclared-field"),
+        pytest.param(lambda text: text.replace("captured: 2026-05-04", "captured: 2026-05-05"),
+                     id="declared-field-that-is-not-a-pointer"),
         pytest.param(lambda text: text.replace("300–400 mg/day", "300–500 mg/day"),
                      id="body-text"),
     ],
 )
 def test_a_crafted_change_outside_a_declared_span_refuses(vault: Path, change) -> None:
-    """A pointer write that lets a caller repoint a link to another page, edit a field that is
-    not a declared pointer, or change captured body text."""
+    """A pointer write that lets a caller repoint a link to another page, edit a field it did not
+    declare, edit a declared field that the registry does not hold as a pointer, or change
+    captured body text."""
     _with_identity(vault, NOTE)
     _with_identity(vault, OTHER_NOTE, title="Vacuum freeze ages")
     before = _source_linking(vault, NOTE)
@@ -97,7 +100,7 @@ def test_a_crafted_change_outside_a_declared_span_refuses(vault: Path, change) -
     with pytest.raises(pointer_write.PointerWriteError) as refused:
         pointer_write.plan(
             vault, SOURCE, before, change(before),
-            pointer_write.Declared(fields={"project"}, moves={NOTE: MOVED_NOTE}),
+            pointer_write.Declared(fields={"project", "captured"}, moves={NOTE: MOVED_NOTE}),
             reason="crafted",
         )
 
@@ -163,3 +166,24 @@ def test_a_revert_restores_the_exact_before_bytes_and_refuses_after_later_work(
 
     assert refused.value.code == "POINTER_REVERT_STALE"
     assert path.read_text(encoding="utf-8") == later
+
+
+def test_a_stop_between_the_commit_and_the_record_keeps_the_record(vault: Path) -> None:
+    """A stop after the page changed that loses the record its revert needs, or a stop before
+    it that leaves a record of a write the page never received."""
+    path = vault / SOURCE
+    before = path.read_text(encoding="utf-8")
+    after = before.replace("---\n", "---\nproject: coastal-survey\n", 1)
+    write = pointer_write.PointerWrite(SOURCE, "file it", before, after, ())
+    committed, never = pointer_write.new_record_id(), pointer_write.new_record_id()
+
+    # The block never exits, as when the process stops inside it; the reference keeps it open.
+    stopped = pointer_write.recording(vault, [(write, committed), (write, never)])
+    stopped.__enter__()
+    path.write_text(after, encoding="utf-8")
+
+    assert pointer_write.load_record(vault, committed)["after_hash"] == write.after_hash
+    path.write_text(before, encoding="utf-8")
+    with pytest.raises(pointer_write.PointerWriteError) as unknown:
+        pointer_write.load_record(vault, never)
+    assert unknown.value.code == "POINTER_RECORD_UNKNOWN"

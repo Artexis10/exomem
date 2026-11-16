@@ -177,11 +177,15 @@ For a page with an `exomem_id`, an append-only referrer no longer refuses the
 move. The move repoints it through the pointer write in the same batch. The
 preview gives each referrer exactly one outcome:
 
-- `rewritten` for a writable page;
+- `rewritten` for a page the mover may write, including a Records row or a
+  Planning item;
 - `pointer-repointed (append-only page)`;
-- `unchanged: resolves via prior path` for a page the mover may not write or
-  see, and for references Exomem does not own, such as Records rows, planning
-  items, Evidence JSON and other clients' memories;
+- `unchanged: resolves via prior path` for a reference the move does not
+  write, such as a link in a page the mover may not write or a prose path in a
+  captured page, when the moved page records the move in its lineage;
+- `unchanged: keeps the old path` for such a reference when the moved file
+  records no lineage, such as a binary file or a page without a frontmatter
+  block, so the reference dangles and the owner's audit reports it;
 - `refused`, with its cause.
 
 A commit that repoints an append-only page must carry the digest of the
@@ -283,6 +287,12 @@ target does.
   claimant releases nothing: the owner renames the new page instead.
 - Lineage grows with each move. Entries are short paths, and pages rarely move
   more than a few times.
+- A create checks the reservation before its commit, not inside it, in file
+  and store mode. The commit cannot tell that create from importer, recovery,
+  init and log writes that also expect an absent path, so a recheck there would
+  refuse writers that claim no reservation. A create that races a move onto
+  the move's old path can therefore commit within that one-write window. The
+  new page then takes the address, and the owner moves it to release the path.
 
 ## Coordination
 

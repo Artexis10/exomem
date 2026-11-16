@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TypeVar
 
@@ -85,6 +85,21 @@ def _read(
         conn.close()
 
 
+def _name_key(path: str) -> str:
+    from .held_fs import vault_name_key
+
+    return vault_name_key(path.replace("\\", "/").strip("/"))
+
+
+def reservation_key(rel: str) -> str:
+    """The key under which a path is reserved: the vault's name identity, without `.md`.
+
+    Two spellings that differ only in case or Unicode form name one file on Windows and macOS,
+    so a reservation holds for every spelling (`held_fs.vault_name_key`).
+    """
+    return _name_key(rel).removesuffix(".md")
+
+
 class PriorClaims:
     """Which pages claim each prior path and prior stem, at one state of the index."""
 
@@ -98,6 +113,7 @@ class PriorClaims:
         self.root = Path(vault_root)
         self._stored = stored
         self._connection = connection
+        self._rows = rows
         by_key: dict[str, list[str]] = {}
         by_stem: dict[str, list[str]] = {}
         for prior, path, stem in rows:
@@ -106,19 +122,38 @@ class PriorClaims:
         self._by_key = {key: tuple(dict.fromkeys(value)) for key, value in by_key.items()}
         self._by_stem = {key: tuple(dict.fromkeys(value)) for key, value in by_stem.items()}
         self._identified: dict[str, bool] = {}
+        self._reserved: dict[str, tuple[str, ...]] | None = None
         self._names: dict[str, frozenset[str]] | None = None
 
-    def names_in(self, folder: str) -> frozenset[str]:
-        """The case-folded file names of the prior paths claimed directly in `folder`."""
-        from . import vault
+    def with_pages(self, pages: Mapping[str, bytes | None]) -> PriorClaims:
+        """These claims once each page in `pages` holds its bytes, or is gone where they are None.
 
+        A derivation of the state a commit will leave binds them before the index has refreshed,
+        as a store commit binds its own transaction's claims (`from_connection`).
+        """
+        from . import memory_refs, relayout_record
+
+        relayout = relayout_record.load(self.root)
+        rows = [row for row in self._rows if row[1] not in pages]
+        for rel, raw in pages.items():
+            if raw is not None:
+                rows.extend(memory_refs.prior_path_rows(rel, raw, relayout))
+        claims = PriorClaims(self.root, self._stored, rows, self._connection)
+        claims._identified.update(self._identified)
+        for rel, raw in pages.items():
+            row = None if raw is None else memory_refs.identity_row(self.root, rel, raw)
+            claims._identified[rel] = row is not None and row[4] == "valid"
+        return claims
+
+    def names_in(self, folder: str) -> frozenset[str]:
+        """The name keys (`reservation_key`) of the prior paths claimed directly in `folder`."""
         if self._names is None:
             names: dict[str, set[str]] = {}
-            for key in self._by_key:
+            for key in self._reservations():
                 parent, _, leaf = key.rpartition("/")
-                names.setdefault(parent, set()).add(vault.vault_name_key(leaf + ".md"))
+                names.setdefault(parent, set()).add(leaf + ".md")
             self._names = {parent: frozenset(leaves) for parent, leaves in names.items()}
-        return self._names.get(folder, frozenset())
+        return self._names.get(_name_key(folder), frozenset())
 
     def __bool__(self) -> bool:
         return bool(self._by_key)
@@ -129,6 +164,18 @@ class PriorClaims:
         A link key is a vault-relative path without `.md`, as the resolver keys paths.
         """
         return self._by_key.get(key, ())
+
+    def reserving(self, rel: str) -> tuple[str, ...]:
+        """The pages that claim `rel` in any spelling of its name (`reservation_key`)."""
+        return self._reservations().get(reservation_key(rel), ())
+
+    def _reservations(self) -> dict[str, tuple[str, ...]]:
+        if self._reserved is None:
+            reserved: dict[str, list[str]] = {}
+            for key, paths in self._by_key.items():
+                reserved.setdefault(reservation_key(key), []).extend(paths)
+            self._reserved = {key: tuple(dict.fromkeys(value)) for key, value in reserved.items()}
+        return self._reserved
 
     def stem_claimants(self, stem: str) -> tuple[str, ...]:
         """The pages that claim a prior path whose file name is `stem`."""
@@ -213,13 +260,15 @@ def _live(vault_root: Path, rel: str) -> bool:
 def reserved_claimants(
     vault_root: Path, rel: str, *, own: str | None = None, newest: bool = False
 ) -> tuple[str, ...]:
-    """The live pages that claim `rel` as a prior path; none when `own` is one of them.
+    """The live pages that claim `rel`, in any spelling of its name, as a prior path.
 
-    `own` is the current path of a page that moves to `rel`: a move back into the page's own
-    lineage takes the path it left.
+    None when `own` is one of them: `own` is the current path of a page that moves to `rel`, and
+    a move back into the page's own lineage takes the path it left.
     """
-    claimants = current(vault_root, newest=newest).claimants(rel.replace("\\", "/").lstrip("/").removesuffix(".md"))
-    if not claimants or (own is not None and own in claimants):
+    claimants = current(vault_root, newest=newest).reserving(rel)
+    if not claimants or (
+        own is not None and reservation_key(own) in {reservation_key(path) for path in claimants}
+    ):
         return ()
     return tuple(path for path in claimants if _live(vault_root, path))
 
@@ -259,9 +308,11 @@ def require_unreserved(
 
 
 def reserved_names(vault_root: Path, folder_rel: str) -> frozenset[str]:
-    """The file names in `folder_rel` that a live page claims as prior paths, for `unique_path`."""
-    folder = folder_rel.replace("\\", "/").strip("/")
-    return current(vault_root).names_in(folder)
+    """The name keys (`reservation_key` plus `.md`) of claimed prior paths in `folder_rel`.
+
+    `unique_path` compares a candidate file name by the same key.
+    """
+    return current(vault_root).names_in(folder_rel)
 
 
 def issues(vault_root: Path) -> list[dict[str, object]]:

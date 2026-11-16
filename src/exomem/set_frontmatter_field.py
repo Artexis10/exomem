@@ -417,7 +417,7 @@ def _set_pointer_field(
             validate_only=True, semantic=preflight.as_dict(),
         )
     rel_no_ext = rel_path.removesuffix(".md")
-    record_id = pointer_write.record(vault_root, write)
+    record_id = pointer_write.new_record_id()
     try:
         log_plan = plan_log_writes(
             vault_root,
@@ -436,12 +436,15 @@ def _set_pointer_field(
         ) from error
     warnings = [note for note in (log_plan.warning, log_plan.rotation_note) if note is not None]
     try:
-        committed = semantic_writes.commit_existing(
-            vault_root,
-            preflight=preflight,
-            auxiliary_writes=(*project_plan, *log_plan.writes),
-            derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
-        )
+        with pointer_write.recording(vault_root, [(write, record_id)]):
+            committed = semantic_writes.commit_existing(
+                vault_root,
+                preflight=preflight,
+                auxiliary_writes=(*project_plan, *log_plan.writes),
+                derived_auxiliary_writes=tuple(
+                    ("operation-log", write) for write in log_plan.writes
+                ),
+            )
     except semantic_writes.SemanticWriteError as error:
         raise SetFrontmatterError(error.code, error.reason) from error
     return SetFrontmatterResult(

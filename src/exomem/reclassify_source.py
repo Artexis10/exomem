@@ -122,9 +122,9 @@ class ReclassifyProposal:
     #: Append-only pages the caller may see whose links to the source the move repoints
     #: through the governed pointer write; the commit passes `preview_digest` to approve them.
     pointer_repointed: tuple[str, ...] = ()
-    #: Pages the caller may see that the move leaves byte-identical, grouped by the link form
-    #: they use (`basename` or `path`), or `mention` when the page only cites the source's path
-    #: in prose: append-only pages, and Records rows, which the source's lineage resolves.
+    #: Append-only pages the caller may see that the move leaves byte-identical,
+    #: grouped by the link form they use (`basename` or `path`), or `mention` when the page
+    #: only cites the source's path in prose.
     append_only_unchanged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #: Why the move would be refused, each naming only a page the caller may see.
     refusals: tuple[Mapping[str, str], ...] = ()
@@ -176,6 +176,9 @@ class ReclassifyResult:
     vocabulary_receipt: tuple[str, ...] = field(default_factory=tuple)
     #: The pointer fields this correction set or restored.
     repointed: tuple[str, ...] = field(default_factory=tuple)
+    #: The append-only pages, title and path, whose links to the source its relocation
+    #: repointed or restored.
+    pointer_repointed: tuple[Mapping[str, str], ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict:
         value: dict[str, object] = {
@@ -195,6 +198,8 @@ class ReclassifyResult:
             value["vocabulary_receipt"] = list(self.vocabulary_receipt)
         if self.repointed:
             value["repointed"] = list(self.repointed)
+        if self.pointer_repointed:
+            value["pointer_repointed"] = [dict(page) for page in self.pointer_repointed]
         return value
 
 
@@ -722,6 +727,7 @@ class _Written:
     references_updated: int = 0
     path_mentions_updated: int = 0
     warnings: tuple[str, ...] = ()
+    pointer_repointed: tuple[Mapping[str, str], ...] = ()
 
 
 def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
@@ -803,9 +809,9 @@ def _referrer_outcome(
         elif changes and item.repoint is not None:
             repointed.append(item.path)
             repoints.append(item.repoint)
-        elif (changes or item.mentions) and not item.kept:
+        elif changes or item.mentions:
             rewritten.append(item.path)
-        elif item.append_only or item.kept:
+        elif item.append_only:
             for form in sorted(forms.get(item.path, ())):
                 unchanged.setdefault(form, []).append(item.path)
     if relocating:
@@ -904,7 +910,7 @@ def _write_correction(
     # The move's warnings carry the append-only mentions it kept and a lookup it could not make.
     return _Written(
         result.new_path, result.wikilinks_updated, result.path_mentions_updated,
-        tuple(result.warnings),
+        tuple(result.warnings), tuple(result.pointer_repointed),
     )
 
 
@@ -1048,6 +1054,7 @@ def reclassify(
         relocated=destination != rel,
         references_updated=written.references_updated,
         path_mentions_updated=written.path_mentions_updated,
+        pointer_repointed=written.pointer_repointed,
         warnings=(*(_introduction_warnings(plan) if plan else ()), *written.warnings),
         vocabulary_receipt=tuple(plan.receipt()) if plan else (),
         repointed=tuple(pointer_changes),
@@ -1152,6 +1159,7 @@ def revert(
         relocated=destination != rel,
         references_updated=written.references_updated,
         path_mentions_updated=written.path_mentions_updated,
+        pointer_repointed=written.pointer_repointed,
         warnings=written.warnings,
         repointed=tuple(restored_pointer),
     )

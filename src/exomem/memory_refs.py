@@ -1792,7 +1792,7 @@ PriorRow = tuple[str, str, str]
 
 
 def derive_identities(vault_root: Path, conn: sqlite3.Connection) -> None:
-    """Fill the empty ``identities`` and ``prior_paths`` tables from the files, as a full sidecar rebuild does."""
+    """Fill the empty ``identities`` and ``prior_paths`` tables from the files, as rebuilds do."""
     identities, priors = _scan_rows(vault_root)
     conn.executemany(
         "INSERT INTO identities(path, exomem_id, raw_id, source_hash, status) "
@@ -1846,8 +1846,7 @@ _UNREADABLE = "unreadable"
 
 
 def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, str, str] | None:
-    row = _identity_or_unreadable(vault_root, path)
-    return None if row is not None and row[4] == _UNREADABLE else row
+    return _identity_and_bytes(vault_root, path)[0]
 
 
 def _identity_or_unreadable(
@@ -1857,19 +1856,26 @@ def _identity_or_unreadable(
     `_UNREADABLE` instead of None. None still means the scan reads no identity
     here: the page is not a member, or it is gone.
     """
+    return _observed_page(vault_root, path)[0]
+
+
+def _observed_page(
+    vault_root: Path, path: Path
+) -> tuple[tuple[str, str | None, str, str, str] | None, bytes | None]:
+    """The identity row of one page (`_identity_or_unreadable`) and the bytes it was read from."""
     rel = _relative_markdown(vault_root, path)
     if rel is None:
-        return None
+        return None, None
     # Read first instead of checking `exists()`: from Python 3.14 `exists()`
     # returns False on PermissionError, which would turn an unreadable page
     # into a gone one.
     try:
         raw = path.read_bytes()
     except (FileNotFoundError, NotADirectoryError):
-        return None
+        return None, None
     except OSError:
-        return rel, None, "", "", _UNREADABLE
-    return _identity_from_bytes(rel, raw)
+        return (rel, None, "", "", _UNREADABLE), None
+    return _identity_from_bytes(rel, raw), raw
 
 
 def _identity_from_bytes(rel: str, raw: bytes) -> tuple[str, str | None, str, str, str]:
@@ -1953,15 +1959,8 @@ def _identity_and_bytes(
     vault_root: Path, path: Path
 ) -> tuple[tuple[str, str | None, str, str, str] | None, bytes | None]:
     """`_read_identity` and the bytes it read, so the prior-path rows need no second read."""
-    rel = _relative_markdown(vault_root, path)
-    if rel is None:
-        return None, None
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return None, None
-    row = _identity_from_bytes(rel, raw)
-    return (None, None) if row[4] == _UNREADABLE else (row, raw)
+    row, raw = _observed_page(vault_root, path)
+    return (None, None) if row is None or row[4] == _UNREADABLE else (row, raw)
 
 
 def _scan_directory(
