@@ -217,7 +217,9 @@
 ## 7. Acceptance and switch
 
 - [ ] 7.1 Rehearse on a disposable copy of a real vault: the replayed write stream, hard kills, the recall canary cases and the graph-lane cases.
+  - Progress (2026-11-16): on a copy of about 14,500 pages, `store-mode migrate` applied and the whole-table check against a fresh derivation found 0 differences across 15 tables, with integrity `ok`. No run has yet reached the store-mode answers, the kills or the rollback. Those runs led to the driver's replica adoption, its release of a copy's standing store claim, its 30 s lease term and its `--long-step-seconds` bound.
 - [ ] 7.2 Run the installed-wheel product journey in store mode.
+  - Progress (2026-11-16): the store arm passed 84 of its 85 steps. The failing step found a profile that omitted a page saved earlier in the session while it reported itself current: the activation index and the context catalogue listed pages from their projected files, which lag a commit. They now list a store-mode vault's pages from the store. A rerun on a wheel with that fix is pending.
 - [ ] 7.3 Run the outcome evaluation's planted-error, canonicity and graph on/off cases against the store-mode build before the switch, and again before stage 2 ships, comparing case by case with the file-mode build.
 - [ ] 7.4 Owner decision on switch timing; then migrate the owner's vault, then Cloud cells.
 

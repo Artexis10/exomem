@@ -422,7 +422,8 @@ def preflight(
 START_TIMEOUT = 240.0
 REQUEST_TIMEOUT = 180.0
 #: A step that reads or rebuilds every page of a real vault: a sidecar build, a migrate, a fresh
-#: derivation, a pass of cold finds. Each took about 20 minutes on a 15,000-page copy under load.
+#: derivation, a pass of cold finds. Each took about 20 minutes on a 15,000-page copy under load,
+#: and over an hour on a loaded host; `--long-step-seconds` raises it for such a host.
 LONG_STEP_SECONDS = 3600.0
 
 
@@ -1309,7 +1310,10 @@ class Rehearsal:
             stop = await served.stop()
         started = time.monotonic()
         queries = await asyncio.to_thread(
-            self.rig.child, _QUERY_CHILD, {"queries": self.queries, "limit": 10}, LONG_STEP_SECONDS
+            self.rig.child,
+            _QUERY_CHILD,
+            {"queries": self.queries, "limit": 10},
+            self.args.long_step_seconds,
         )
         queries_seconds = round(time.monotonic() - started, 1)
         return {
@@ -1534,7 +1538,9 @@ class Rehearsal:
             trial["stop"] = await recovered.stop()
         status = self.rig.store_json("status")
         dry_run = self.rig.store_json("rollback", "--dry-run")
-        verified = await asyncio.to_thread(self.rig.child, _VERIFY_CHILD, None, LONG_STEP_SECONDS)
+        verified = await asyncio.to_thread(
+            self.rig.child, _VERIFY_CHILD, None, self.args.long_step_seconds
+        )
         trial["status"] = {
             key: status.get(key)
             for key in (
@@ -1663,7 +1669,7 @@ class Rehearsal:
                 "maintain",
                 "--reconcile",
                 "--json",
-                timeout=LONG_STEP_SECONDS,
+                timeout=self.args.long_step_seconds,
             )
         self.report["vault"] = vault_stats(layout.vault)
         with self.step("store-mode status before the switch", fatal=True) as entry:
@@ -1690,7 +1696,7 @@ class Rehearsal:
                 "rehearse the switch on a vault copy",
                 operator=True,
                 wait_for_lease=True,
-                timeout=LONG_STEP_SECONDS,
+                timeout=self.args.long_step_seconds,
             )
             entry["detail"] = applied
             if applied.get("status") != "migrated":
@@ -1699,7 +1705,7 @@ class Rehearsal:
             "store mode: the whole-table diff and the store's size", fatal=True
         ) as entry:
             checked = self.report["after_migrate"] = await asyncio.to_thread(
-                rig.child, _VERIFY_CHILD, None, LONG_STEP_SECONDS
+                rig.child, _VERIFY_CHILD, None, self.args.long_step_seconds
             )
             entry["detail"] = checked
             entry["ok"] = not checked["differences"] and checked["integrity"] == "ok"
@@ -1758,7 +1764,7 @@ class Rehearsal:
                 "rehearse the way back on a vault copy",
                 operator=True,
                 wait_for_lease=True,
-                timeout=LONG_STEP_SECONDS,
+                timeout=self.args.long_step_seconds,
             )
             entry["detail"] = applied
             self.report["rollback_apply"] = applied
@@ -2156,6 +2162,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--ops", type=int, default=40, help="writes in the first stream (default 40)")
     run.add_argument("--seed", type=int, default=7, help="seeds the stream and the kill moments")
+    run.add_argument(
+        "--long-step-seconds",
+        type=at_least(60),
+        default=LONG_STEP_SECONDS,
+        metavar="SECONDS",
+        help="the bound on a step that reads or rebuilds the whole vault (default "
+        f"{LONG_STEP_SECONDS:.0f})",
+    )
     run.add_argument(
         "--kill-window",
         type=float,
