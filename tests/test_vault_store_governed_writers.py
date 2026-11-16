@@ -38,6 +38,7 @@ from exomem.governance import (
     authorization_custody,
     catalog_publication,
     companion_backfill,
+    companions,
     lifecycle,
     projection_store,
     receipts,
@@ -458,6 +459,55 @@ def test_a_backfill_that_the_store_refuses_records_nothing_and_the_next_commit_l
     assert events_after_refusal == []
     assert [row["phase"] for row in receipts.event_records(served)] == ["intent", "committed"]
     assert b"governance_companion:" in read.owned_bytes(served, SECRET_PAGE)
+
+
+DATASET = "Knowledge Base/Data/private.json"
+DATASET_BYTES = b'[{"secret":true}]\n'
+DATASET_CARD = "Knowledge Base/Notes/Datasets/private.md"
+DATASET_CARD_TEXT = (
+    "---\ntype: dataset\ntitle: Private data\n"
+    f"data_file: {DATASET}\nformat: json\ntags: [page-only]\n---\n\nExisting dataset notes.\n"
+)
+
+
+@pytest.mark.parametrize("projected", [False, True])
+def test_a_dataset_backfill_finds_its_card_in_the_store_whether_or_not_a_file_projects_it(
+    served, projected
+):
+    """A dataset backfill that lists its card from the files: a card that only the store holds is
+    missing, and a card that a file projects reads as a binding that changed after review."""
+    (served / DATASET).parent.mkdir(parents=True, exist_ok=True)
+    (served / DATASET).write_bytes(DATASET_BYTES)
+    vault_module.batch_atomic_write(
+        [planned(served, DATASET_CARD, DATASET_CARD_TEXT, create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    if projected:
+        (served / DATASET_CARD).parent.mkdir(parents=True, exist_ok=True)
+        (served / DATASET_CARD).write_text(DATASET_CARD_TEXT, encoding="utf-8")
+    payload = {
+        "version": 1,
+        "artifact_class": "dataset",
+        "artifact_path": DATASET,
+        "expected_artifact_sha256": hashlib.sha256(DATASET_BYTES).hexdigest(),
+        "expected_artifact_size": len(DATASET_BYTES),
+        "expected_companion_path": DATASET_CARD,
+        "expected_companion_sha256": hashlib.sha256(DATASET_CARD_TEXT.encode()).hexdigest(),
+        "format": "json",
+        "semantics": {
+            "projects": ["client-a"],
+            "tags": ["confidential"],
+            "types": ["source"],
+            "classes": ["pii"],
+        },
+    }
+
+    preview = backfill(served, "preview", payload, now=300.0)
+    backfill(served, "commit", payload, proposal_id=preview["proposal_id"], now=301.0)
+
+    assert b"governance_companion:" in read.owned_bytes(served, DATASET_CARD)
+    assert companions.classify(served, DATASET).tags == ("confidential",)
 
 
 def test_a_backfill_planned_before_the_companion_changed_in_the_store_refuses_as_stale(served):
