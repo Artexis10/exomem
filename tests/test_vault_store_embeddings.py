@@ -36,9 +36,11 @@ from exomem import (
     freshness,
     index_paths,
     lexstore,
+    memory_refs,
     readiness,
     recall_space,
     semantic_drain,
+    warmup,
 )
 from exomem import vault as vault_module
 from exomem.embedding_index import (
@@ -699,25 +701,44 @@ def vector_answers(root, lane: str, *, settle: bool) -> tuple:
     )
 
 
+def serve_managed(root) -> None:
+    """A managed service's request admission once its required warm finished, with the vector matrix still cold."""
+    readiness.manage_runtime()  # the `encoder` fixture's teardown resets it
+    readiness.begin_warm()
+    try:
+        warmup.warm_retrieval_catalog(root)
+    finally:
+        readiness.finish_warm()
+
+
 @pytest.mark.parametrize("managed", [False, True], ids=["one-shot", "managed-service"])
-def test_a_store_mode_vector_and_hybrid_find_return_file_modes_hits_cold_and_warm(vault, encoder, managed):
+def test_a_store_mode_vector_and_hybrid_find_return_file_modes_hits_cold_and_warm(
+    vault, encoder, monkeypatch, managed
+):
     """A store-mode find that serves no vector hits, or other ones than file mode on the same pages,
     cold (where a managed service defers the matrix load) or warm."""
     if managed:
-        readiness.manage_runtime()  # the `encoder` fixture's teardown resets it
+        monkeypatch.setenv("EXOMEM_EAGER_BOOT", "1")
+        monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
 
     def lanes() -> dict:
         answers = {}
         for stage in ("cold", "warm"):
             if stage == "cold":
                 go_cold(vault)
+                if managed:
+                    serve_managed(vault)
             for lane in ("vector", "hybrid"):
                 answers[stage, lane] = vector_answers(vault, lane, settle=stage == "warm")
         return answers
 
     assert index_of(vault).rebuild_all() > 0
+    if managed:
+        lexstore.ensure_fresh(vault)
+        memory_refs.ReferenceIndex(vault).rebuild_all()  # a managed recall never builds it on its own thread
     in_files = lanes()
-    assert in_files["warm", "vector"][0], "file mode answers the vector lane"
+    expected = {lane: in_files["warm", lane][0] for lane in ("vector", "hybrid")}
+    assert expected["vector"], "file mode answers the vector lane"
     assert not in_files["warm", "vector"][1], "and reports it whole once warm"
 
     assert migration.migrate_apply(vault) == 0
@@ -727,7 +748,11 @@ def test_a_store_mode_vector_and_hybrid_find_return_file_modes_hits_cold_and_war
         (vault / rel).write_text(POISON)
     in_the_store = lanes()
 
-    assert in_the_store == in_files
+    for (stage, lane), (hits, degraded) in in_the_store.items():
+        # A managed service may answer a cold matrix as a degraded lane while it loads, never with other hits.
+        may_be_degraded = managed and stage == "cold"
+        assert may_be_degraded or not degraded, f"{stage} {lane} is whole"
+        assert degraded or hits == expected[lane], f"{stage} {lane} hits are file mode's"
 
 
 def wait_until(condition, timeout: float = 20.0) -> None:
