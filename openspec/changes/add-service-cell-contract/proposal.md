@@ -48,7 +48,7 @@ Later stages write their own deltas when they start: `cell-service-identity` aft
 - **Code.** The change touches the command registry and the result models of the rendered leaves. It extracts one HTTP renderer from the personal REST facade and adds the service profile to it. It extends the code-to-status map, the Cloud origin middleware's path match, discovery, the request budget and the call ledger.
 - **Dependencies.**
   - Stage 1 renders the operations of the passage-evidence and captured-source-inventory work (#2852), which is in review, and lands after it merges.
-  - Stage 0 keeps service captures off the shared summary pages. It waits on #2852, which adds that requirement and amends `erase-captured-source` to match.
+  - Stage 0 is the requirement "Enrolled Sources stay off shared generated pages" of `captured-source-inventory`. #2852 adds it and amends `erase-captured-source` to match. This change relies on it without restating it, and merges after #2852.
   - The erase operation joins the first version when `erase-captured-source` ships.
   - Stage 1 follows the proof migration of `contain-cloud-controller-compromise` on the service path.
   - Stage 3 stores subject partitions; its storage follows `make-vault-store-canonical`.

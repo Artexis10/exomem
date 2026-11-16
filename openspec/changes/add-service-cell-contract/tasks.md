@@ -1,6 +1,6 @@
 # Tasks
 
-Stage 1 starts after the passage-evidence and captured-source-inventory work (#2852) merges to `main`. Stage 0 waits on that delivery (design D5). No task here changes its contract.
+Stage 1 starts after the passage-evidence and captured-source-inventory work (#2852) merges to `main`. That delivery adds the Stage 0 requirement, "Enrolled Sources stay off shared generated pages" (design D5). No task here changes its contract.
 
 ## 1. Stage 1: typed service API, first version
 

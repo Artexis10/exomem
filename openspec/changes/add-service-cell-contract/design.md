@@ -184,11 +184,12 @@ An uncertain outcome, such as a pending settlement, is a typed result state, not
 A message can accompany a code for people. A client acts on the code alone.
 The status classes are protocol tokens that this specification fixes. Leaf codes come from the leaves. The renderer owns only the pre-leaf codes in the table above.
 
-### D5. Stage 0 waits on the passage-evidence delivery
+### D5. Stage 0 is a requirement of the passage-evidence delivery
 
-Stage 0 keeps attempt-bound captures off the Sources catalog, the top-level index and the activity log. It depends on the passage-evidence delivery (#2852): that delivery adds the requirement and amends `erase-captured-source` to match. This design cites the requirement by name when it lands.
-Until then `_derived_index_writes` in `src/exomem/add.py` writes all three pages for every capture, on `main` and on #2852's current head. `erase-captured-source` still expects navigation and activity entries.
-Stage 1 does not depend on Stage 0. The service API renders capture as the leaf behaves.
+Stage 0 is the requirement "Enrolled Sources stay off shared generated pages" of the `captured-source-inventory` capability. The passage-evidence delivery (#2852) adds it, with its code.
+A Source captured under erasure custody, through an issued reservation or an erasure-enabled identity system, gets no line on the top index, the activity log or the Sources index. The captured-Source inventory is its listing.
+The same delivery amends `erase-captured-source` to match. As a consequence of the requirement, erasing an enrolled Source leaves no line on those pages to remove.
+This change does not restate the requirement, and it merges after #2852. Stage 1 does not depend on Stage 0. The service API renders capture as the leaf behaves.
 
 ### D6. Service authority has three layers (Stage 2)
 
@@ -308,7 +309,7 @@ Today transcription and segmentation live in the consumer, and embedding lives i
 
 | Stage | Outcome | Host setting, default off | Proof | Depends on |
 |---|---|---|---|---|
-| S0 | Service captures stay off shared summaries | none | Proven in the passage-evidence delivery (D5) | #2852 adds the requirement |
+| S0 | Enrolled Sources stay off shared generated pages | none | Proven in the passage-evidence delivery (D5) | #2852 |
 | S1 | Typed service API, first version | `EXOMEM_SERVICE_API` | Each operation returns equal data through both doors on one disposable cell; every response validates against the document; the Cloud boundary refuses as on `/mcp`; passage bars hold at the service door | #2852 merged; the gateway release and chart change (D13) |
 | S2 | Service principals under the tenant's grant (D6, D11) | `EXOMEM_SERVICE_PRINCIPALS` | Two principals on one cell cannot reach each other's Sources through any operation or argument; a principal without a committed grant reaches nothing; a narrowed or revoked grant refuses the next request; the tenant's own agents and the product reach only their own scopes; existing audiences' decisions are unchanged | S1; containment D1 in force on Cloud |
 | S3 | Subject-bound requests and private member partitions (D7, D12) | `EXOMEM_SERVICE_SUBJECTS` | Two subjects cannot read each other's partitioned items through any read door, including hostile filters and references; the owner reads a partition only under a grant, and each such read writes a receipt; without a grant the owner receives aggregates only | S2; the partition fact of the single store |
@@ -319,7 +320,7 @@ Each stage after S1 writes its requirements into a successor change before its c
 
 ## Dependencies on in-flight work
 
-- **Passage evidence and inventory (in review, #2852).** S1 renders their operations and lands after the merge. Stage 0 waits on that delivery (D5). This change edits none of their specs.
+- **Passage evidence and inventory (in review, #2852).** S1 renders their operations and lands after the merge. That delivery adds the Stage 0 requirement (D5). This change merges after #2852. This change edits none of their specs.
 - **`erase-captured-source`.** `sources.erase` joins the first version when it ships. Discovery omits it until then. S5 reuses its owner acknowledgements.
 - **`contain-cloud-controller-compromise`.** S1 follows its proof migration on the service prefix (D13). S2 relies on its proof-only requests on Cloud.
 - **The Cloud gateway.** S1 on Cloud needs a gateway release from its separate repository and a chart change (D13).
