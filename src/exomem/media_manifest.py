@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"the media manifest is unknown: {unknown}", file=sys.stderr)
         manifest = None
     except cli_fence.StoreFenceRefusal as refused:
-        # A store-mode vault keeps its references in the store, so the manifest is unknown and nothing is condemned.
+        # An unknown manifest releases nothing: any fault here writes the unknown manifest, as the case below does.
         print(f"the media manifest is unknown: {refused}", file=sys.stderr)
         manifest, status = None, 1
     except Exception as error:  # noqa: BLE001 -- any fault still writes the unknown manifest, never an empty file

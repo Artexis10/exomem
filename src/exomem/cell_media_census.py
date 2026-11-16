@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
         cli_fence.require("cell-media-census", args.vault)
         line = media_drain_record.read(args.vault)
     except (media_drain_record.RecordUnreadable, cli_fence.StoreFenceRefusal) as error:
-        # A store-mode vault drains media through the store, so the file-mode record that this reads is not its count.
+        # A refused store-mode vault reports the same unknown count as an unreadable record: it reports no number.
         print("unknown unknown")
         print(error, file=sys.stderr)
         return 1
