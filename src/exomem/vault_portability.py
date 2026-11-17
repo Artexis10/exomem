@@ -47,12 +47,14 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 class PortabilityError(RuntimeError):
     """Stable, content-free portability failure. On RESOURCE_LIMIT_EXCEEDED,
-    `limit` names the PortabilityLimits field that was exceeded."""
+    `limit` names the PortabilityLimits field that was exceeded. `member` names, for an in-process
+    caller only, the vault-relative member that left the export incomplete; it never enters the message."""
 
-    def __init__(self, code: str, reason: str, *, limit: str | None = None) -> None:
+    def __init__(self, code: str, reason: str, *, limit: str | None = None, member: str | None = None) -> None:
         self.code = code
         self.reason = reason
         self.limit = limit
+        self.member = member
         super().__init__(f"{code}: {reason}")
 
 
@@ -157,6 +159,10 @@ def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
     if not parts or not is_managed_root_name(parts[0], key=str.casefold):
         return False
     classification = reserved_paths.classify_logical(path)
+    if classification.descriptor_id == reserved_paths.ORIGINAL_POOL_DESCRIPTOR_ID:
+        from . import original_pool
+
+        return not original_pool.is_canonical_member(path)
     if classification.descriptor_id == "compiled-history":
         from . import compiled_history
 
@@ -456,6 +462,24 @@ class _SourceSnapshot:
 
 def _fail(code: str, reason: str, *, limit: str | None = None) -> None:
     raise PortabilityError(code, reason, limit=limit)
+
+
+@contextmanager
+def exported_originals(vault: Path) -> Iterator[None]:
+    """Fetch and pin every original that a whole-vault export reads, until the export returns.
+
+    An original whose state is unknown fails the export with the page that names it as `member`.
+    """
+    from . import originals
+    from .media_store import local_originals
+
+    try:
+        with local_originals(vault, (managed_root_rel(),)):
+            yield
+    except originals.RetirementUnconfirmed as error:
+        raise PortabilityError(
+            error.code, "an original's Trash retirement could not be confirmed, so the export is incomplete; "
+            "empty or restore the Trash entry of the page that `member` names", member=error.companion) from None
 
 
 def _validate_identifier(value: str, field: str) -> None:
@@ -798,6 +822,102 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
     return snapshots
 
 
+def _unverified(path: str, reason: str) -> PortabilityError:
+    return PortabilityError("DIGEST_MISMATCH", f"{reason}, so the export is incomplete", member=path)
+
+
+def _bytes_writer(data: bytes) -> Callable[[BinaryIO], tuple[int, str]]:
+    def write(output: BinaryIO) -> tuple[int, str]:
+        output.write(data)
+        return len(data), _sha256_bytes(data)
+    return write
+
+
+def _shared_original_writer(vault: Path, path: str, digest: str, size: int) -> Callable[[BinaryIO], tuple[int, str]]:
+    """Stream one filing's shared object to the archive through pool-owner custody, verifying its binding."""
+    from . import held_fs, original_pool
+
+    def write(output: BinaryIO) -> tuple[int, str]:
+        hasher = hashlib.sha256()
+        written = 0
+        try:
+            with original_pool.open_object(vault, digest, size) as source:
+                while chunk := source.stream.read(1024 * 1024):
+                    output.write(chunk)
+                    hasher.update(chunk)
+                    written += len(chunk)
+                source.require_current()
+        except original_pool.ObjectMismatch:
+            raise _unverified(path, "the shared original differs from its filing's binding") from None
+        except held_fs.HeldFsError as error:
+            raise PortabilityError("ORIGINAL_UNAVAILABLE", f"the shared original could not be read ({error.code}), "
+                                   "so the export is incomplete", member=path) from None
+        if (written, hasher.hexdigest()) != (size, digest):
+            raise _unverified(path, "the shared original differs from its filing's binding")
+        return written, digest
+    return write
+
+
+def _enumerate_compatible(vault_root: Path, limits: PortabilityLimits) -> list[_SourceSnapshot]:
+    """The archive as ordinary files: each original at its logical path, without the shared pool or its marker.
+
+    Every bound original's bytes must equal its binding and every companion its bound bytes. A placement's
+    retirement witness is invalidated, because the older reader that this copy serves keeps no witness current.
+    """
+    from . import original_pool, trash_metadata
+    from .media_store import _retired, bound_originals
+
+    vault = vault_root.resolve()
+    bindings = {snapshot.path.relative_to(vault).as_posix(): snapshot for snapshot in bound_originals(vault)}
+    companions = {snapshot.sidecar_path.relative_to(vault).as_posix(): snapshot.sidecar_hash
+                  for snapshot in bindings.values()}
+    snapshots: list[_SourceSnapshot] = []
+    total_bytes = 0
+
+    def admit(snapshot: _SourceSnapshot) -> None:
+        nonlocal total_bytes
+        total_bytes += snapshot.size
+        check_member_limits(len(snapshots) + 1, snapshot.size, total_bytes, limits)
+        snapshots.append(snapshot)
+
+    for member in iter_archive_members(vault_root):
+        if original_pool.is_canonical_member(member.path):
+            continue  # The ordinary files below carry these bytes; an older reader knows no pool.
+        listed = _safe_lstat(member.source_path).st_size
+        check_member_limits(len(snapshots) + 1, listed, total_bytes + listed, limits)
+        if trash_metadata.is_trash_path(member.path) and member.path.endswith(trash_metadata.METADATA_SUFFIX):
+            rewritten = trash_metadata.without_retirement(vault, member.path)
+            if rewritten is not None:
+                admit(_SourceSnapshot(member.path, member.source_path, len(rewritten), _sha256_bytes(rewritten),
+                                      member.classification, None, _bytes_writer(rewritten)))
+                continue
+        size, digest, signature = _digest_regular_source(member.source_path)
+        bound = bindings.get(member.path)
+        if bound is not None and (size, digest) != (bound.binary_size, bound.binary_sha256):
+            raise _unverified(member.path, "the original differs from its filing's binding")
+        if member.path in companions and digest != companions[member.path]:
+            _fail("SOURCE_CHANGED_DURING_EXPORT", "a page changed during export")
+        admit(_SourceSnapshot(member.path, member.source_path, size, digest, member.classification, signature))
+    for path, bound in bindings.items():
+        if bound.state == "evicted":
+            raise PortabilityError("ORIGINAL_UNAVAILABLE", "an original stored off this archive was not fetched, "
+                                   "so the export is incomplete", member=path)
+        if bound.state == "missing" and not _retired(vault, bound):
+            raise PortabilityError(
+                "ORIGINAL_UNAVAILABLE", "this filing's original has no bytes in this archive and no stored copy, "
+                "so the export is incomplete. Restore the original or repair it with the fixity check, or retire "
+                "the filing and empty its Trash entry. Then export again", member=path)
+        if bound.local_path is None:
+            continue  # An ordinary file carried it above, or Trash retired the filing and no original remains.
+        assert bound.binary_sha256 is not None and bound.binary_size is not None
+        admit(_SourceSnapshot(path, bound.local_path, bound.binary_size, bound.binary_sha256,
+                              classify_artifact(path).artifact_class.value, None,
+                              _shared_original_writer(vault, path, bound.binary_sha256, bound.binary_size)))
+    snapshots.sort(key=lambda snapshot: snapshot.path)
+    check_path_collisions(snapshot.path for snapshot in snapshots)
+    return snapshots
+
+
 def _zip_info(path: str) -> zipfile.ZipInfo:
     info = zipfile.ZipInfo(path, date_time=_ZIP_TIMESTAMP)
     info.create_system = 3
@@ -926,7 +1046,42 @@ def export_quiesced_vault(
     mutation_guard: AbstractContextManager[Any] | None = None,
 ) -> ExportResult:
     """Create, self-verify, and publish a deterministic canonical vault archive."""
+    return _publish_export(vault_root, artifact_root, context=context, exomem_release=exomem_release, limits=limits,
+                           mutation_guard=mutation_guard, enumerate_members=_enumerate_source,
+                           artifact_prefix="exomem-export")
 
+
+def export_compatible_vault(
+    vault_root: Path | str,
+    artifact_root: Path | str,
+    *,
+    context: PortabilityContext,
+    exomem_release: str | None = None,
+    limits: PortabilityLimits | None = None,
+    mutation_guard: AbstractContextManager[Any] | None = None,
+) -> ExportResult:
+    """Publish a separate archive that keeps every original as an ordinary file, for a reader without shared storage.
+
+    Each shared original is written at its filing's logical path and verified against its binding; the pool and
+    its format marker stay out. The artifact root needs free space for the logical size of every original.
+    A failed export publishes nothing and leaves the source as it was.
+    """
+    return _publish_export(vault_root, artifact_root, context=context, exomem_release=exomem_release, limits=limits,
+                           mutation_guard=mutation_guard, enumerate_members=_enumerate_compatible,
+                           artifact_prefix="exomem-compatible-export")
+
+
+def _publish_export(
+    vault_root: Path | str,
+    artifact_root: Path | str,
+    *,
+    context: PortabilityContext,
+    exomem_release: str | None,
+    limits: PortabilityLimits | None,
+    mutation_guard: AbstractContextManager[Any] | None,
+    enumerate_members: Callable[[Path, PortabilityLimits], list[_SourceSnapshot]],
+    artifact_prefix: str,
+) -> ExportResult:
     _validate_context(context, allowed_states={"quiesced"})
     release = __version__ if exomem_release is None else exomem_release
     if not isinstance(release, str) or not release or len(release) > 128:
@@ -949,14 +1104,12 @@ def export_quiesced_vault(
             _fail("UNSAFE_ARTIFACT_ROOT", "artifact root must be a regular directory")
 
     _flush_collection_replica(source_root)
-    from .media_store import local_originals
-
     guard = mutation_guard if mutation_guard is not None else nullcontext()
-    with guard, local_originals(source_root, (managed_root_rel(),)):
+    with guard, exported_originals(source_root):
         armed_requirement = connector_boundary.read_requirement(source_root)
         if connector_boundary.snapshot(source_root) is not None:
             state_migration.require_vault_state_ready(source_root)
-        snapshots = _enumerate_source(source_root, effective_limits)
+        snapshots = enumerate_members(source_root, effective_limits)
         manifest = _build_manifest(snapshots, context, release, armed_requirement)
         output_root.mkdir(parents=True, exist_ok=True)
         descriptor, pending_name = tempfile.mkstemp(
@@ -973,7 +1126,7 @@ def export_quiesced_vault(
 
             # Re-read the source after archive construction.  A caller claiming
             # quiescence while bytes or membership change never receives success.
-            repeated = _enumerate_source(source_root, effective_limits)
+            repeated = enumerate_members(source_root, effective_limits)
             original_records = [(item.path, item.size, item.sha256) for item in snapshots]
             repeated_records = [(item.path, item.size, item.sha256) for item in repeated]
             if original_records != repeated_records:
@@ -985,7 +1138,7 @@ def export_quiesced_vault(
                 expected_vault_id=context.vault_id,
                 limits=effective_limits,
             )
-            final_path = output_root / f"exomem-export-{verified.archive_sha256}.zip"
+            final_path = output_root / f"{artifact_prefix}-{verified.archive_sha256}.zip"
             try:
                 os.link(pending, final_path)
                 artifact_ready = True
@@ -1035,9 +1188,7 @@ def stream_quiesced_vault(
     _validate_limits(effective_limits)
     source_root = Path(vault_root).absolute()
     armed_requirement = prepare_quiesced_export(source_root)
-    from .media_store import local_originals
-
-    with local_originals(source_root, (managed_root_rel(),)):
+    with exported_originals(source_root):
         snapshots = _enumerate_source(source_root, effective_limits)
         manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
         _write_export_archive(sink, snapshots, manifest)
@@ -2044,6 +2195,29 @@ def publish_prepared_restore(
             _fail("RESTORE_JOURNAL_CONFLICT", "restore continuation cannot be verified")
 
 
+def _relocated_by_failed_attempt(staging: Path, live: Path, manifest: Mapping[str, Any]) -> bool:
+    """Whether a failed attempt of this restore left the archive's portable state where its migration put it.
+
+    An unarmed pooled restore migrates state after it publishes. A failure after that rolls the tree back to
+    staging but leaves the external state, which now holds the archive's portable members. A complete manifest
+    and those members' exact bytes bind the state to this archive, so a retry publishes over it as it stands.
+    """
+    if not any(record["classification"] == ArtifactClass.PORTABLE_DERIVED.value for record in manifest["files"]):
+        return False  # Nothing in this archive moves to external state, so no earlier attempt explains a mismatch.
+    state_dir = state_paths.vault_state_dir(live)
+    try:
+        earlier = state_migration._load_manifest(state_dir, vault_root=live)
+    except state_migration.StateMigrationManifestError:
+        return False
+    if earlier is None or earlier.get("state") != "complete":
+        return False
+    try:
+        _verify_migrated_archive(staging, manifest, state_dir)
+    except PortabilityError:
+        return False
+    return True
+
+
 def _publish_prepared_restore(
     prepared: PreparedRestore,
     live_root: Path | str,
@@ -2071,6 +2245,7 @@ def _publish_prepared_restore(
     physical = live if resumed_live else staging
     if not physical.is_dir() or physical.is_symlink():
         _fail("STAGING_ROOT_UNAVAILABLE", "prepared restore root is unavailable")
+    retried = False
     migrated = state_migration._load_manifest(state_paths.vault_state_dir(live), vault_root=live) if resumed_live else None
     if migrated is not None and migrated.get("state") == "complete":
         _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
@@ -2081,21 +2256,37 @@ def _publish_prepared_restore(
             or os.path.lexists(live.joinpath(*PurePosixPath(record["path"]).parts))]}
         _verify_staged_files(live, present_manifest, recovery=recovery)
     else:
-        _verify_staged_files(physical, prepared.manifest, recovery=recovery)
+        try:
+            _verify_staged_files(physical, prepared.manifest, recovery=recovery)
+        except PortabilityError:
+            if recovery is not None or not _relocated_by_failed_attempt(staging, live, prepared.manifest):
+                raise
+            retried = True
     live.parent.mkdir(parents=True, exist_ok=True)
     publisher = publish or os.replace
+    relocated = False
     try:
         if not resumed_live:
             publisher(staging, live)
         if not live.is_dir() or live.is_symlink():
             _fail("PUBLICATION_FAILED", "publication did not produce a live vault")
-        if not resumed_live:
+        if retried:
+            _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live))
+        elif not resumed_live:
             _verify_staged_files(live, prepared.manifest, recovery=recovery)
-        if prepared.manifest["schema_version"] == ARMED_MANIFEST_SCHEMA_VERSION:
+        from . import original_pool
+
+        # The archive carries the canonical pool marker but no state manifest; the format is recorded before
+        # anything serves the restored archive.
+        pooled = original_pool.enabled(live)
+        if prepared.manifest["schema_version"] == ARMED_MANIFEST_SCHEMA_VERSION or pooled:
             authority = state_migration.assert_offline_migration_authority(
                 source="validated stopped portability restore",
             )
             state_migration.migrate_vault_state_offline(live, authority=authority, protection_recovery=recovery)
+            if pooled:
+                state_migration.restore_shared_originals_offline(live, authority=authority)
+            relocated = True
             _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
         if os.path.lexists(staging):
             _remove_tree(staging)
@@ -2105,6 +2296,10 @@ def _publish_prepared_restore(
             _rollback_failed_publication(staging, live)
         if isinstance(exc, PortabilityError) and exc.code == "PUBLICATION_FAILED":
             raise
+        if recovery is None and isinstance(exc, state_migration.StatePlacementConflict):
+            _fail("PUBLICATION_FAILED", "machine-local state for this restore folder already exists outside it, as "
+                  "an earlier failed attempt leaves it; prepare the restore again into a new staging folder and "
+                  "publish it into a new restore folder")
         _fail("PUBLICATION_FAILED", "prepared restore could not be published atomically")
 
     if rebuild_derived is None:
@@ -2115,7 +2310,7 @@ def _publish_prepared_restore(
     except Exception:  # noqa: BLE001 - optional rebuild failures degrade after integrity checks
         rebuild_failed = True
     try:
-        if recovery is not None:
+        if relocated:
             _verify_migrated_archive(live, prepared.manifest, state_paths.vault_state_dir(live), recovery=recovery)
         else:
             _verify_staged_files(live, prepared.manifest, allow_derived_extras=True)
@@ -2124,7 +2319,8 @@ def _publish_prepared_restore(
             # Destination protection and custody own these bytes; archive repair cannot replace them.
             _fail("CANONICAL_INTEGRITY_VIOLATION", "derived rebuild changed protected restore bytes; evidence was retained")
         try:
-            _repair_canonical_from_archive(prepared, live)
+            _repair_canonical_from_archive(
+                prepared, live, portable_state_root=state_paths.vault_state_dir(live) if relocated else None)
         except Exception as repair_error:
             raise PortabilityError(
                 "CANONICAL_INTEGRITY_VIOLATION",
@@ -2161,6 +2357,7 @@ __all__ = [
     "VerifiedArchive",
     "classification_registry",
     "classify_artifact",
+    "export_compatible_vault",
     "export_quiesced_vault",
     "prepare_restore",
     "publish_prepared_restore",

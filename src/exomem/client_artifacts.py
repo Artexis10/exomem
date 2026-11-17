@@ -1057,14 +1057,36 @@ def _validate_receipt(
 def _verify_canonical_artifact(
     vault_root: Path, receipt: Mapping[str, object]
 ) -> None:
+    from . import held_fs, media_store, originals, reserved_paths
+
+    stored_path = str(receipt["stored_path"])
     try:
-        content, _guard = read_bounded_guarded_bytes(
-            vault_root,
-            str(receipt["stored_path"]),
-            limit=int(receipt["size"]),
-            expected_hash=str(receipt["hash"]),
-        )
-    except (FileNotFoundError, OSError, PathGuardError, ValueError) as error:
+        try:
+            content, _guard = read_bounded_guarded_bytes(
+                vault_root,
+                stored_path,
+                limit=int(receipt["size"]),
+                expected_hash=str(receipt["hash"]),
+            )
+        except (FileNotFoundError, PathGuardError):
+            # A shared original keeps no file at its path; its filing binds the object that holds the bytes.
+            # `pooled` answers only where no file holds the path, so a file that differs still fails below.
+            filing = originals.pooled(vault_root, stored_path)
+            if filing is None:
+                raise
+            head = media_store.pooled_head(vault_root, stored_path, filing)
+            if (head.size, head.sha256) != (receipt["size"], receipt["hash"]):
+                raise ValueError("stored adoption artifact differs from its receipt") from None
+            return
+    except (
+        FileNotFoundError,
+        OSError,
+        PathGuardError,
+        ValueError,
+        media_store.MediaStoreError,
+        held_fs.HeldFsError,
+        reserved_paths.ReservedPathLeafError,
+    ) as error:
         raise _receipt_error(
             "ADOPTION_REPLAY_UNVERIFIABLE",
             "stored adoption artifact could not be reverified",

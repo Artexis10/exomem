@@ -36,6 +36,7 @@ from .vault import (
     PreparedBinaryContent,
     batch_atomic_write,
     content_hash,
+    read_guarded_bytes,
     read_guarded_text,
 )
 
@@ -300,6 +301,16 @@ def _content_guard(
     relative: str,
 ) -> tuple[str, PathGuard, PathGuard]:
     """Hash one parent and return cheap identity plus completion guards."""
+    from . import originals
+
+    shared = originals.pooled(vault_root, vault_root / relative)
+    if shared is not None:
+        # A shared original has no file at its path. Its identity is the immutable pool object
+        # that its filing binds, and the exact bytes of that filing guard the binding.
+        raw, guard = read_guarded_bytes(vault_root, shared.sidecar_path)
+        if shared.binary_sha256 is None or hashlib.sha256(raw).hexdigest() != shared.sidecar_hash:
+            raise ValueError("the filing of a shared original changed while it was read")
+        return shared.binary_sha256, guard, guard
     stable = PathGuard.capture(vault_root, relative, leaf_policy="stable")
     digest = hashlib.sha256()
     size = 0

@@ -847,6 +847,7 @@ def _maintenance_rows():
             _row("collections-cutover", "check_memory", ())]
     for action, field, default, write_extra in (("fix", "dry_run", True, ("rebuild_embeddings",)),
                                                 ("backfill-ids", "dry_run", True, ()),
+                                                ("convert-originals", "dry_run", True, ()),
                                                 ("reconcile", "dry_run", False, ("rebuild_graph",))):
         fields = ("categories", "dry_run", "rebuild_embeddings", "rebuild_graph", "detail", "legacy_sample_limit")
         for value in (True, False, None):

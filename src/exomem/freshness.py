@@ -2184,7 +2184,7 @@ class CustodyAudit:
 
 
 #: Modules that own a substrate cache, in the order their seams report.
-_CUSTODY_SEAM_MODULES = ("find_corpus", "lexstore", "memory_refs")
+_CUSTODY_SEAM_MODULES = ("find_corpus", "lexstore", "memory_refs", "media_store")
 _CUSTODY_REPORT_HISTORY = 64
 
 _custody_lock = threading.RLock()

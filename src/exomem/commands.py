@@ -10384,6 +10384,8 @@ def _media_remediation(code: str) -> str:
         return "Wait for the current processing run to end, then ask again."
     if code == "MEDIA_RUNTIME_UNAVAILABLE":
         return "Restore the media runtime, then ask again."
+    if code == "MEDIA_ORIGINAL_UNVERIFIED":
+        return "Restore the original from a verified copy, as an original fixity pass does, then retry processing."
     return "Inspect the media artifact and retry processing."
 
 
@@ -12282,6 +12284,7 @@ def op_maintain_memory(
         "fix",
         "reconcile",
         "backfill-ids",
+        "convert-originals",
         "structured-files",
         "curation",
         "tag-variants",
@@ -12334,8 +12337,8 @@ def op_maintain_memory(
 ) -> dict:
     """Maintain vault health; several modes write.
 
-    Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    A remote fix, backfill-ids or reconcile runs as a maintenance job and returns a run_id.
+    Audit is read-only; fix/backfill-ids/convert-originals default dry-run; reconcile writes.
+    A remote fix, backfill-ids, convert-originals or reconcile runs as a maintenance job and returns a run_id.
     The owner's preview (dry_run=true) is a job: its receipt holds the plan_id. Then repeat
     with dry_run=false, that plan_id and a why to write.
     maintenance-job reads one job's state and receipt (run_id) or lists them; the receipt's
@@ -12347,6 +12350,7 @@ def op_maintain_memory(
     the owner applies its plan_id with `exomem collections cutover` on the host.
     held-resolve settles one held item that mode held of review_memory lists: path, choice keep-mine or
     keep-store, that item's item_version and why.
+    convert-originals moves an existing archive's ordinary originals into shared original storage; owner only.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -12354,7 +12358,7 @@ def op_maintain_memory(
     Args:
         mode: Maintenance mode.
         categories: Audit category filter.
-        dry_run: Report without writing. Default true for fix/backfill-ids,
+        dry_run: Report without writing. Default true for fix/backfill-ids/convert-originals,
             false for reconcile.
         rebuild_embeddings: fix only.
         rebuild_graph: reconcile only; quarantine unavailable derived graph lineage and
@@ -12766,9 +12770,14 @@ def op_maintain_memory(
                 raise
             _apply_batch_deltas(vault_root, list(report.get("updated") or []))
         return _carrying_batch_advisories(vault_root, report)
+    if mode == "convert-originals":
+        from . import original_conversion
+
+        _require_job_plan_arguments(mode, dry_run, plan_id, why)
+        return original_conversion.convert(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
+        "backfill-ids, convert-originals, structured-files, curation, tag-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
         "collections-store-export, collections-cutover, or held-resolve"
     )

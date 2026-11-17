@@ -37,6 +37,7 @@ from . import (
     capabilities,
     find_policy,
     find_results,
+    media_store,
     query_data,
     reserved_paths,
     source_inspection,
@@ -376,7 +377,7 @@ def _read_original(vault_root: Path, card: Card) -> bytes | None:
     except OSError:
         return None
     try:
-        data = reserved_paths.read_generic_bytes(vault_root, card.original).data
+        data = media_store.read_original_bytes(vault_root, card.original, max_bytes=source_inspection.VALUE_DATASET_BYTES).data
     except (reserved_paths.ReservedPathLeafError, OSError):
         return None
     if len(data) > source_inspection.VALUE_DATASET_BYTES:

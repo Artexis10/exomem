@@ -474,14 +474,17 @@ def reconcile_media(
                 job.id if job else None,
                 attached=attached,
             )
-    try:
-        retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code not in {"MISSING", "RESERVED_PATH"}:
-            _confine_to_knowledge_base(vault, binary)
-        raise MediaProcessingError(
-            "MEDIA_NOT_FOUND", "media artifact does not exist"
-        ) from None
+    # A shared original has no file at its path; its pool object is immutable and read directly.
+    retained_identity = None
+    if stored is None or stored.local_path is None:
+        try:
+            retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code not in {"MISSING", "RESERVED_PATH"}:
+                _confine_to_knowledge_base(vault, binary)
+            raise MediaProcessingError(
+                "MEDIA_NOT_FOUND", "media artifact does not exist"
+            ) from None
     resolved_binary = _confine_to_knowledge_base(vault, binary)
     tier = access.access_tier(vault, rel_binary)
     if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
@@ -622,7 +625,7 @@ def reconcile_media(
                 f"media path is {commit_tier} under _access.yaml: {rel_binary}",
             )
         _confine_sidecar(vault, sidecar)
-        _verify_binary_identity(binary, resolved_binary, provenance)
+        _verify_binary_identity(vault, binary, resolved_binary, provenance)
         current = _read_sidecar_text(vault, sidecar)
         if current != original:
             if (
@@ -649,7 +652,7 @@ def reconcile_media(
                         expected_hash=content_hash(original),
                     )
                 )
-            _verify_binary_identity(binary, resolved_binary, provenance)
+            _verify_binary_identity(vault, binary, resolved_binary, provenance)
             _retire_completed_ocr(vault, binary, sidecar, media_type)
             result = ReconcileResult(media_type, "completed", sidecar, None)
         else:
@@ -668,7 +671,7 @@ def reconcile_media(
                     )
                 )
 
-            _verify_binary_identity(binary, resolved_binary, provenance)
+            _verify_binary_identity(vault, binary, resolved_binary, provenance)
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
             attached = False
@@ -856,14 +859,22 @@ def _iter_rotating_governed_media(
             break
 
 
+def unplaced_originals(vault: Path):
+    """Each bound original that holds no ordinary file: an evicted copy (`local_path` is None) or a shared pool object."""
+    from . import media_store, original_pool
+
+    if originals.binding_for(vault) is None and not original_pool.enabled(vault):
+        return
+    for stored in media_store.bound_originals(vault, unconfirmed=media_store.skip_unknown_original):
+        if stored.state == "evicted" or stored.local_path is not None:
+            yield stored
+
+
 def _iter_governed_media(vault: Path, kb_root: Path):
     """Yield supported binaries from a deterministic, hidden/pruned KB walk."""
-    if originals.binding_for(vault) is not None:
-        from . import media_store
-
-        for stored in media_store.bound_originals(vault):
-            if stored.state == "evicted" and classify_media(stored.path):
-                yield stored.path
+    for stored in unplaced_originals(vault):
+        if classify_media(stored.path):
+            yield stored.path
     stack = [kb_root]
     while stack:
         directory = stack.pop()
@@ -1028,7 +1039,7 @@ def _is_completed_sidecar_shape(
     if not all(present):
         return False
     stored = originals.original_state(vault, binary)
-    if stored.state == "evicted":
+    if stored.state == "evicted" or stored.local_path is not None:
         current_size = stored.binary_size
     else:
         try:
@@ -1199,7 +1210,7 @@ def _retry_ambiguous_batch_failure(
             return _block_ambiguous_retry(store, durable, sidecar)
 
         try:
-            _verify_binary_identity(binary, resolved_binary, provenance)
+            _verify_binary_identity(vault, binary, resolved_binary, provenance)
             current, _guard = read_guarded_text(vault, sidecar)
         except (OSError, UnicodeError, MediaProcessingError, PathGuardError):
             return _block_ambiguous_retry(store, durable, sidecar)
@@ -1535,10 +1546,16 @@ def _retire_completed_ocr(
     media_jobs.MediaJobStore(vault, create=False).retire_ocr(binary, media_type)
 
 
+def held_path(vault: Path, binary: Path) -> Path:
+    """Where the bytes of `binary` are: its own file, or the immutable pool object of a shared original."""
+    shared = originals.pooled(vault, binary)
+    return shared.local_path if shared is not None else binary
+
+
 def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
     try:
         binary.relative_to(managed_root(vault))
-        resolved = binary.resolve(strict=True)
+        resolved = held_path(vault, binary).resolve(strict=True)
         resolved.relative_to(managed_root(vault).resolve(strict=True))
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
@@ -1600,21 +1617,25 @@ def _read_provenance(
     resolved_binary: Path,
     expected_identity: held_fs.StableIdentity | None = None,
 ) -> _BinaryProvenance:
+    shared = None
     if expected_identity is None:
         try:
             relative = binary.relative_to(vault).as_posix()
             expected_identity = reserved_paths.inspect_generic_file(vault, relative)
         except (ValueError, reserved_paths.ReservedPathLeafError):
-            raise MediaProcessingError(
-                "MEDIA_NOT_FOUND", "media artifact does not exist"
-            ) from None
+            # A shared original has no file to inspect; its object is immutable and opened by `resolved_binary`.
+            shared = originals.pooled(vault, binary)
+            if shared is None:
+                raise MediaProcessingError(
+                    "MEDIA_NOT_FOUND", "media artifact does not exist"
+                ) from None
     digest = hashlib.sha256()
     try:
         with resolved_binary.open("rb") as stream:
             before = os.fstat(stream.fileno())
             if (
-                before.st_dev != expected_identity.device
-                or before.st_ino != expected_identity.inode
+                (expected_identity is not None
+                 and (before.st_dev != expected_identity.device or before.st_ino != expected_identity.inode))
                 or not stat.S_ISREG(before.st_mode)
                 or before.st_nlink != 1
             ):
@@ -1638,6 +1659,9 @@ def _read_provenance(
             "MEDIA_CHANGED_DURING_RECONCILIATION",
             f"media changed while provenance was being recorded: {binary}",
         )
+    if shared is not None and (digest.hexdigest(), before.st_size) != (shared.binary_sha256, shared.binary_size):
+        # A shared object is named by its digest, so other bytes are damage, never the filing's new content.
+        raise MediaProcessingError("MEDIA_ORIGINAL_UNVERIFIED", "the shared original differs from its binding")
     return _BinaryProvenance(
         relative_path=binary.relative_to(vault).as_posix(),
         original_filename=binary.name,
@@ -1666,10 +1690,14 @@ def read_timestamp_hints(binary: Path) -> tuple[int, int] | None:
 
 
 def _verify_binary_identity(
-    binary: Path, resolved_binary: Path, provenance: _BinaryProvenance
+    vault: Path, binary: Path, resolved_binary: Path, provenance: _BinaryProvenance
 ) -> None:
     try:
-        if binary.resolve(strict=True) != resolved_binary:
+        try:
+            target = binary.resolve(strict=True)
+        except FileNotFoundError:
+            target = held_path(vault, binary).resolve(strict=True)  # a shared original's pool object
+        if target != resolved_binary:
             raise OSError("media path target changed")
         # Keep the identity source consistent with _read_provenance. On Windows,
         # stat(path) and fstat(open_handle) can report different st_ctime_ns

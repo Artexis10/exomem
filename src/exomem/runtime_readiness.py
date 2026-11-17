@@ -453,11 +453,16 @@ def build_runtime_readiness(
     retrieval: Mapping[str, Any] | None = None,
     cutover: Mapping[str, Any] | None = None,
     originals: Mapping[str, Any] | None = None,
+    original_storage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state.
 
     ``originals`` is the fixity count (`verify-stored-originals` D9). It never gates
     ``status``: cellctl alerts on it, and one damaged file must not take a cell out.
+
+    ``original_storage`` is present only while this process holds a new archive's
+    shared storage, and names the action. It never gates ``status`` either: the
+    archive serves from ordinary storage meanwhile.
 
     ``cutover`` is the standby/promotion component set (`seamless-managed-worker-handoff`
     D9).  It never gates the serving ``status``: a standby answers its own probe
@@ -561,6 +566,8 @@ def build_runtime_readiness(
         payload["traffic"] = dict(traffic)
     if originals is not None:
         payload["originals"] = _public_originals(originals)
+    if original_storage is not None:
+        payload["original_storage"] = dict(original_storage)
     return payload
 
 
@@ -810,7 +817,7 @@ def runtime_readiness(
     traffic: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
-    from . import readiness, service_standby
+    from . import original_pool, readiness, service_standby
     from .session_validation_cache import session_store_readiness
     from .writer_lease import _coordination_readiness_status
 
@@ -870,6 +877,7 @@ def runtime_readiness(
         retrieval=retrieval,
         cutover=service_standby.readiness_payload(),
         originals=_measure_originals(configured_vault),
+        original_storage=original_pool.held_activation(),
     )
 
 

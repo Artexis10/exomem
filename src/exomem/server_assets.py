@@ -458,9 +458,18 @@ def register_asset_routes(
                     status_code=400,
                     headers={"Cache-Control": "no-store"},
                 )
+            from . import original_pool
+
             try:
                 record = service_standby.promote(
                     vault_root, migrated=migrated, request_seconds=request_seconds
+                )
+            except original_pool.LauncherUpdateRequired as refused:
+                # Same status as every refusal, so the supervisor's handling is unchanged; the body names the fix.
+                return JSONResponse(
+                    {"ok": False, "code": refused.code, "error": str(refused)},
+                    status_code=409,
+                    headers={"Cache-Control": "no-store"},
                 )
             except RuntimeError:
                 return JSONResponse(

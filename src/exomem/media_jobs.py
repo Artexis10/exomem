@@ -620,7 +620,7 @@ _FRESH = "NOT EXISTS (SELECT 1 FROM speech_progress WHERE speech_progress.job_id
 # The cache flag only orders the claim; the hydration itself reads the original's real state.
 # A pinned job's original stayed on the volume, so it never needs a hydration.
 _NEEDS_HYDRATION = (
-    "(pinned = 0 AND EXISTS (SELECT 1 FROM media_cache WHERE media_cache.binary_rel = jobs.binary_rel "
+    "(pinned = 0 AND EXISTS (SELECT 1 FROM media_cache WHERE media_cache.binary_rel = {key} "
     "AND media_cache.evicted = 1))"
 )
 # Claimed but unfinished jobs whose original the worker hydrated at the claim.
@@ -654,9 +654,13 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, m
     if not migrated:
         claimable, needs_hydration, groups, parameters = "state = 'pending'", "0", [_FRESH, "1"], skipped
     else:
+        physical = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone()
+        key = ("COALESCE((SELECT object_key FROM media_bindings WHERE binary_rel = jobs.binary_rel), jobs.binary_rel)"
+               if physical else "jobs.binary_rel")
+        hydration = _NEEDS_HYDRATION.format(key=key)
         # Placeholders bind in text order: the retry time in `_CLAIMABLE`, then the skipped media types.
-        claimable, needs_hydration, parameters = _CLAIMABLE, _NEEDS_HYDRATION, (time.time(), *skipped)
-        groups = ["do_offload = 1", f"NOT {_NEEDS_HYDRATION} AND {_FRESH}", f"NOT {_NEEDS_HYDRATION}"]
+        claimable, needs_hydration, parameters = _CLAIMABLE, hydration, (time.time(), *skipped)
+        groups = ["do_offload = 1", f"NOT {hydration} AND {_FRESH}", f"NOT {hydration}"]
         if max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations:
             groups += [_FRESH, "1"]
     for group in groups:
@@ -689,6 +693,13 @@ def _hydration_policy_problem(vault_root: Path) -> str | None:
         # The exception's type only: its text can name a cell's configuration path.
         return f"the media store configuration is unreadable ({type(exc).__name__})"
     return None if config is None else media_capacity.hydration_policy_problem(config)
+
+
+# Each ledger file whose full schema this process already set up: its file identity and SQLite schema cookie
+# right after. Request paths build a store per call, and every writable connection repeated the idempotent setup.
+# A later connection skips it while both still match: a replaced file has another identity, and any schema change,
+# by any process, moves the cookie.
+_CURRENT_SCHEMA: dict[str, tuple[int, int, int]] = {}
 
 
 class MediaJobStore:
@@ -740,8 +751,9 @@ class MediaJobStore:
             # not create WAL/SHM merely by negotiating WAL mode.
             conn.execute("BEGIN IMMEDIATE")
             try:
-                self._migrate_offload_columns(conn)
-                self._migrate_eviction_columns(conn)
+                if not self._schema_current(conn):
+                    self._migrate_offload_columns(conn)
+                    self._migrate_eviction_columns(conn)
                 conn.commit()
             except BaseException:
                 conn.rollback()
@@ -759,9 +771,22 @@ class MediaJobStore:
             raise
         return conn
 
+    def _schema_current(self, conn: sqlite3.Connection) -> bool:
+        known = _CURRENT_SCHEMA.get(str(self.path))
+        if known is None:
+            return False
+        try:
+            stat = os.stat(self.path, follow_symlinks=False)
+        except OSError:
+            return False
+        return known == (stat.st_dev, stat.st_ino, conn.execute("PRAGMA schema_version").fetchone()[0])
+
     def _initialize(self) -> None:
         conn = self._connect()
         try:
+            # The schema cookie tracks no rows, so the job key migration, which a row marks, keeps its own check.
+            if self._schema_current(conn) and self._job_keys_current(conn):
+                return
             with conn:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
@@ -834,6 +859,13 @@ class MediaJobStore:
                              "evicted INTEGER, bytes INTEGER, captured_at TEXT, "
                              "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL, "
                              "attempt_failed INTEGER NOT NULL DEFAULT 0, waiting TEXT, blocked_by TEXT)")
+                if "proof_version" not in {row[1] for row in conn.execute("PRAGMA table_info(media_drain)")}:
+                    from . import media_drain_record
+
+                    # A legacy reference-only zero cannot release custody of unbacked/shared originals.
+                    media_drain_record.remove(self.vault_root)
+                    conn.execute("ALTER TABLE media_drain ADD COLUMN proof_version INTEGER NOT NULL DEFAULT 0")
+                    conn.execute("DELETE FROM media_drain")
                 # No query reads this index (design D3, query plans): a ledger from an older release loses it.
                 conn.execute("DROP INDEX IF EXISTS media_access_hydrating")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
@@ -895,6 +927,12 @@ class MediaJobStore:
                     """
                 )
                 self._migrate_job_key(conn)
+                from . import media_bindings
+
+                media_bindings.initialize(conn)
+                version = conn.execute("PRAGMA schema_version").fetchone()[0]
+            stat = os.stat(self.path, follow_symlinks=False)
+            _CURRENT_SCHEMA[str(self.path)] = (stat.st_dev, stat.st_ino, version)
         finally:
             conn.close()
 
@@ -960,6 +998,12 @@ class MediaJobStore:
             conn.execute("ALTER TABLE media_access ADD COLUMN pid_start TEXT")
         if "temporary_name" not in access:
             conn.execute("ALTER TABLE media_access ADD COLUMN temporary_name TEXT")
+        if "hydration_key" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN hydration_key TEXT")
+        if "temporary_identity" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN temporary_identity TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydration_key ON media_access(hydration_key) "
+                     "WHERE temporary_name IS NOT NULL")
         if "source_custody_json" not in access:
             conn.execute("ALTER TABLE media_access ADD COLUMN source_custody_json TEXT "
                          "CHECK(source_custody_json IS NULL OR json_valid(source_custody_json))")
@@ -973,6 +1017,8 @@ class MediaJobStore:
         if "returns" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN returns INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS jobs_hydrated_claims ON jobs(pinned) WHERE hydrated = 1")
+        # A pin check reads only the claimed jobs, so a backlog of pending jobs never enters an eviction decision.
+        conn.execute("CREATE INDEX IF NOT EXISTS jobs_pins ON jobs(pinned) WHERE pinned = 1")
         # One rule for every path that fails or blocks a job, including engine waits and stop limits.
         conn.execute("CREATE TRIGGER IF NOT EXISTS jobs_release_pin AFTER UPDATE OF state ON jobs "
                      "WHEN NEW.state IN ('failed', 'blocked') "
@@ -1071,6 +1117,13 @@ class MediaJobStore:
         if "target_evidence_version" not in columns:
             conn.execute("ALTER TABLE media_job_results ADD COLUMN target_evidence_version TEXT")
 
+    @staticmethod
+    def _job_keys_current(conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'job_key_version'"
+        ).fetchone()
+        return row is not None and str(row["value"]) == _JOB_KEY_VERSION
+
     def _migrate_job_key(self, conn: sqlite3.Connection) -> None:
         """Re-key existing rows onto (binary_rel, media_type), collapsing duplicates.
 
@@ -1078,10 +1131,7 @@ class MediaJobStore:
         older version keeps its old three-part `job_key` forever and would keep
         minting one row per stray sidecar. Runs once, guarded by a `meta` marker.
         """
-        row = conn.execute(
-            "SELECT value FROM meta WHERE key = 'job_key_version'"
-        ).fetchone()
-        if row is not None and str(row["value"]) == _JOB_KEY_VERSION:
+        if self._job_keys_current(conn):
             return
 
         survivors: dict[str, Any] = {}
@@ -1366,6 +1416,7 @@ class MediaJobStore:
                 SET state = 'running', attempts = attempts + 1,
                     claim_revision = claim_revision + 1,
                     hydrated = CASE WHEN pinned = 1 THEN hydrated ELSE ? END, pinned = 1,
+                    object_key = CASE WHEN pinned = 1 THEN object_key ELSE NULL END,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
@@ -1385,6 +1436,21 @@ class MediaJobStore:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def bind_original(self, job: MediaJob, object_key: str) -> bool:
+        """Bind a current claim to its first acquired bytes, retaining that key across slices."""
+        if job.id is None:
+            return True  # In-memory jobs have no durable claim to narrow.
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET object_key = ? WHERE id = ? AND claim_revision = ? "
+                    "AND state = 'running' AND pinned = 1 AND (object_key IS NULL OR object_key = ?)",
+                    (object_key, job.id, job.claim_revision, object_key),
+                ).rowcount == 1
         finally:
             conn.close()
 

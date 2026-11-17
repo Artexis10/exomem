@@ -145,6 +145,10 @@ def _read_artifact(vault_root, rel_path: str) -> reserved_paths.GenericFileSnaps
             stored = originals.original_state(vault_root, rel_path)
             if stored.state == "evicted":
                 return stored
+            if stored.local_path is not None:
+                from .. import media_store
+
+                return media_store.read_original_bytes(vault_root, rel_path)
         raise CompanionClassificationError("artifact_unsafe") from error
 
 

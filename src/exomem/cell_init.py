@@ -66,6 +66,7 @@ class CellInitError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class CellInitResult:
     vault_created: bool
+    original_storage: dict[str, str] | None = None  # The new-archive layout outcome; None for an existing vault.
 
 
 def account_home() -> Path:
@@ -254,4 +255,11 @@ def run_cell_init(
         ) from error
     vault_created = _ensure_vault(root, backed_up=backed_up)
     _ensure_state_migrated(root)
-    return CellInitResult(vault_created=vault_created)
+    original_storage = None
+    if vault_created:
+        from . import original_pool
+
+        # A new cell's archive follows the new-archive rule once its state binds the final path.
+        original_storage = original_pool.activate_new(
+            root, authority=state_migration.assert_offline_migration_authority(source="exomem cell-init"))
+    return CellInitResult(vault_created=vault_created, original_storage=original_storage)

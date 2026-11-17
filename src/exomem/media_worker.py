@@ -387,15 +387,30 @@ def _stat_identity(path: Path) -> tuple[int, int, int, int, int] | None:
 
 def _binary_identity(
     path: Path,
+    *,
+    vault_root: Path | None = None,
 ) -> tuple[tuple[int, int, int, int, int], str | None] | None:
-    """Stable media identity: bounded content hash, stat fallback for large files."""
+    """Stable media identity: bounded content hash, stat fallback for large files.
+
+    A shared original has no file at its logical path: with `vault_root`, its identity is its immutable
+    pool object, whose digest the filing's binding already records.
+    """
+    held, digest = path, None
     before = _stat_identity(path)
+    if before is None and vault_root is not None:
+        from . import originals
+
+        shared = originals.pooled(vault_root, path)
+        if shared is None:
+            return None
+        held, digest = shared.local_path, shared.binary_sha256
+        before = _stat_identity(held)
     if before is None:
         return None
     if before[2] > _MAX_IDENTITY_HASH_BYTES:
         return (before, None)
-    digest = _content_digest(path)
-    if digest is None or _stat_identity(path) != before:
+    digest = digest or _content_digest(held)
+    if digest is None or _stat_identity(held) != before:
         return None
     return (before, digest)
 
@@ -552,6 +567,9 @@ class MediaWorker:
         else:
             self._q.put(job)
 
+    def _identity(self, job: _Job) -> tuple[tuple[int, int, int, int, int], str | None] | None:
+        return _binary_identity(job.binary_path, vault_root=self._vault_root)
+
     def _is_automatic_media_sidecar(self, sidecar: Path) -> bool:
         """Gate automatic work without opening a structured-only sidecar."""
         if not recall_policy.is_structured_only_path(self._vault_root, sidecar):
@@ -618,14 +636,14 @@ class MediaWorker:
         # A store outage leaves its generation pending while extraction continues.
         if job.do_offload:
             try:
-                media_store.offload(self._vault_root, job.binary_path, batch=self._offload_batch)
+                media_store.offload(self._vault_root, job.binary_path, batch=self._offload_batch, job=job)
             except (media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, OSError) as error:
                 offload_error = error
             else:
                 if self._store is not None:
                     self._store.complete_offload(job)
         admitted = self._is_recall_admitted_media_sidecar(job.sidecar_path)
-        if not admitted and job.binary_path.exists():  # a removal's transcript went with it, in the deletion fan-out
+        if not admitted and originals.available(self._vault_root, job.binary_path):  # a removal's transcript went with it, in the deletion fan-out
             self._discard_speech_progress(job)
         if not admitted and not job.do_offload:
             if self._store is not None:
@@ -636,8 +654,11 @@ class MediaWorker:
             # The read pin spans all processing, including child result capture.
             # Re-embedding reads only the sidecar and needs no original bytes.
             if job.do_ocr or job.do_clip:
-                original = (media_store.open_original(self._vault_root, job.binary_path)
-                            if originals.binding_for(self._vault_root) is not None else contextlib.nullcontext())
+                # A shared original is pinned too: its pool object outlives any one filing only while held.
+                pinned = (originals.binding_for(self._vault_root) is not None
+                          or originals.pooled(self._vault_root, job.binary_path) is not None)
+                original = (media_store.open_original(self._vault_root, job.binary_path, job=job)
+                            if pinned else contextlib.nullcontext())
                 with contextlib.ExitStack() as held:
                     try:
                         held.enter_context(original)
@@ -710,10 +731,12 @@ class MediaWorker:
         """How many audio samples of a speech job's original the engine transcribed, else None."""
         if not _speech_job(job):
             return None
-        from . import onnx_asr_runtime
+        from . import media_processing, onnx_asr_runtime
 
         # The engine's own key for the original: the offset is read from the record it names.
-        rel = onnx_asr_runtime.binary_rel(self._vault_root, job.binary_path)
+        # The engine resolves a shared original's view to its pool object, so the key names that object.
+        held = media_processing.held_path(self._vault_root, job.binary_path)
+        rel = onnx_asr_runtime.binary_rel(self._vault_root, held)
         return None if rel is None else onnx_asr_runtime.progress_offset(self._vault_root, rel)
 
     def _discard_speech_progress(self, job: _Job) -> None:
@@ -724,9 +747,11 @@ class MediaWorker:
         """
         if not _speech_job(job):
             return
-        from . import onnx_asr_runtime
+        from . import media_processing, onnx_asr_runtime
 
-        rel = onnx_asr_runtime.binary_rel(self._vault_root, job.binary_path)
+        rel = onnx_asr_runtime.binary_rel(
+            self._vault_root, media_processing.held_path(self._vault_root, job.binary_path)
+        )
         if rel is not None:
             with contextlib.suppress(OSError):
                 onnx_asr_runtime.discard_progress(self._vault_root, rel)
@@ -735,7 +760,7 @@ class MediaWorker:
         # A startup/watcher race may complete the transcript after this job was
         # queued or even claimed. Re-read before ASR; the final commit repeats
         # this check under mutation authority to close the compute-window race.
-        from . import media_processing
+        from . import media_processing, media_store
 
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return _ProcessOutcome(_COMPLETE)
@@ -758,7 +783,7 @@ class MediaWorker:
             language, multilingual = preserve.asr_language_pin(claimed_content)
         expected_sidecar = guard.expected_content_hash
         expected_evidence_version = _evidence_version_or_none(claimed_content)
-        expected_binary = _binary_identity(job.binary_path)
+        expected_binary = self._identity(job)
         if expected_sidecar is None or expected_binary is None:
             log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
             return _ProcessOutcome(_STALE, "input identity unavailable")
@@ -784,7 +809,8 @@ class MediaWorker:
                 kwargs["language"] = language
             if multilingual:
                 kwargs["multilingual"] = True
-            result = extract.extract_text(job.binary_path, **kwargs)
+            with media_store.logical_view(self._vault_root, job.binary_path) as view:
+                result = extract.extract_text(view, **kwargs)
         except extract.TimestampRenderingUnavailable as e:
             error = f"{type(e).__name__}: {e}"
             log.warning("timestamp rendering unavailable for %s: %s", job.binary_path.name, e)
@@ -922,7 +948,7 @@ class MediaWorker:
                 latest, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
             except (OSError, UnicodeError, PathGuardError):
                 break
-            if _binary_identity(job.binary_path) != expected_binary or not basis_holds(latest):
+            if self._identity(job) != expected_binary or not basis_holds(latest):
                 break
             if commit_attempt < 2:
                 time.sleep(0.02)
@@ -934,7 +960,7 @@ class MediaWorker:
                 sidecar_changed = True
             else:
                 sidecar_changed = not basis_holds(latest)
-            binary_changed = _binary_identity(job.binary_path) != expected_binary
+            binary_changed = self._identity(job) != expected_binary
             if binary_changed and reprocessing:
                 # The request named a file that has since been replaced. The sidecar keeps
                 # its text; reconciliation processes the new file in the ordinary way.
@@ -948,7 +974,7 @@ class MediaWorker:
                 stale_parts.append("media identity changed")
             if binary_changed and not sidecar_changed:
                 if self._store is not None:
-                    current_identity = _binary_identity(job.binary_path)
+                    current_identity = self._identity(job)
                     if current_identity is not None and self._store.record_result(
                         job,
                         kind="pending",
@@ -962,7 +988,7 @@ class MediaWorker:
                     ):
                         return _ProcessOutcome(_HANDOFF)
                 if self._store is None:
-                    current_identity = _binary_identity(job.binary_path)
+                    current_identity = self._identity(job)
                     if current_identity is not None:
                         self._commit_processing_failure(
                             job,
@@ -1023,7 +1049,7 @@ class MediaWorker:
         except (OSError, UnicodeError, PathGuardError):
             return False
         expected_sidecar = guard.expected_content_hash
-        expected_binary = _binary_identity(job.binary_path)
+        expected_binary = self._identity(job)
         if expected_sidecar is None or expected_binary is None:
             return False
         return self._block_compute_runtime_failure(
@@ -1041,7 +1067,7 @@ class MediaWorker:
         `media_brakes.timeout_context` for a file that outran the watchdog).
         """
         expected_sidecar = _content_digest(job.sidecar_path)
-        expected_binary = _binary_identity(job.binary_path)
+        expected_binary = self._identity(job)
         if expected_sidecar is None or expected_binary is None:
             return False
         return self._commit_processing_failure(
@@ -1393,7 +1419,7 @@ class MediaWorker:
             from . import media_processing
 
             if (
-                _binary_identity(job.binary_path) != expected_binary
+                self._identity(job) != expected_binary
                 or not _result_basis_holds(
                     before,
                     media_type=job.media_type,
@@ -1479,7 +1505,9 @@ class MediaWorker:
             asr=asr,
             ocr=ocr,
             # Both callers have just revalidated the original; a page stored with it records these.
-            binary_hints=media_processing.read_timestamp_hints(job.binary_path),
+            binary_hints=media_processing.read_timestamp_hints(
+                media_processing.held_path(self._vault_root, job.binary_path)
+            ),
         )
         if not reprocessing:
             plan, write = preserve.sidecar_extraction_writes(
@@ -1590,7 +1618,7 @@ class MediaWorker:
                 from . import media_processing
 
                 if (
-                    _binary_identity(job.binary_path) != expected_binary
+                    self._identity(job) != expected_binary
                     or not _sidecar_input_matches(before, expected_sidecar, expected_evidence_version)
                 ):
                     log.warning("processing failure stale for %s; newer canonical input preserved", job.sidecar_path.name)
@@ -1788,23 +1816,26 @@ class MediaWorker:
             return
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return
+        from . import media_processing, media_store
+
         is_video = job.media_type == "video"
         scene_pairs: list | None = None
         parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None
-        expected_binary = _binary_identity(job.binary_path)
+        expected_binary = self._identity(job)
         if expected_binary is None:
             log.warning("CLIP skip %s: media identity unavailable", job.binary_path.name)
             return
         try:
-            if is_video and scene_frames.scene_frames_enabled():
-                # One decode pass yields both the per-scene vectors AND the full-res
-                # representative images to persist (EXOMEM_VIDEO_SCENE_FRAMES).
-                frames, scene_pairs = embeddings.embed_video_scenes(job.binary_path)
-                parent_clip_samples = scene_frames.projection_clip_samples(frames)
-            elif is_video:
-                frames = embeddings.embed_video_frames(job.binary_path)
-            else:
-                vec = embeddings.embed_image(job.binary_path)
+            with media_store.logical_view(self._vault_root, job.binary_path) as view:
+                if is_video and scene_frames.scene_frames_enabled():
+                    # One decode pass yields both the per-scene vectors AND the full-res
+                    # representative images to persist (EXOMEM_VIDEO_SCENE_FRAMES).
+                    frames, scene_pairs = embeddings.embed_video_scenes(view)
+                    parent_clip_samples = scene_frames.projection_clip_samples(frames)
+                elif is_video:
+                    frames = embeddings.embed_video_frames(view)
+                else:
+                    vec = embeddings.embed_image(view)
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
             return
@@ -1822,7 +1853,7 @@ class MediaWorker:
         with clip_guard:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return
-            if _binary_identity(job.binary_path) != expected_binary:
+            if self._identity(job) != expected_binary:
                 log.warning(
                     "CLIP result stale for %s; changed media was not indexed",
                     job.binary_path.name,
@@ -1830,7 +1861,7 @@ class MediaWorker:
                 return
             try:
                 rel = job.binary_path.resolve().relative_to(self._vault_root.resolve()).as_posix()
-                mtime = job.binary_path.stat().st_mtime
+                mtime = media_processing.held_path(self._vault_root, job.binary_path).stat().st_mtime
             except (ValueError, OSError) as e:
                 log.warning("CLIP skip %s: %s", job.binary_path.name, e)
                 return
@@ -1867,7 +1898,7 @@ class MediaWorker:
         def persist():
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return None
-            if expected_binary is not None and _binary_identity(job.binary_path) != expected_binary:
+            if expected_binary is not None and self._identity(job) != expected_binary:
                 log.warning(
                     "scene-frame result stale for %s; changed media was not persisted",
                     job.binary_path.name,
@@ -2349,7 +2380,7 @@ class MediaWorker:
             # it cannot starve the new work indefinitely.
             self._store.discard_result(result)
             return
-        current_binary = _binary_identity(job.binary_path)
+        current_binary = self._identity(job)
         try:
             current_content, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
         except (OSError, UnicodeError, PathGuardError):
@@ -2485,7 +2516,7 @@ class MediaWorker:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return _STOPPED
             before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
-            if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
+            if _result_binary_identity(self._identity(job) or ((-1,) * 5, None)) != result.binary_identity:
                 return _STOPPED
             if not basis_holds(before):
                 return _STOPPED
@@ -2591,7 +2622,7 @@ class MediaWorker:
         """End a result whose prepared sidecar is already published and fanned out."""
         job = result.job
         pending_target = _sidecar_is_pending(job.sidecar_path)
-        current_binary = _binary_identity(job.binary_path)
+        current_binary = self._identity(job)
         binary_changed = (
             current_binary is None
             or _result_binary_identity(current_binary) != result.binary_identity
@@ -2720,7 +2751,7 @@ class MediaWorker:
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
             if not media_engines.stage_enabled(media_type):
                 continue  # the engine is off: the sidecar waits without a job
-            if media_type and (binary.exists() or originals.evicted(self._vault_root, binary)):
+            if media_type and originals.available(self._vault_root, binary):
                 existing = (
                     self._store.get_by_binary(binary)
                     if self._store is not None
@@ -2739,7 +2770,7 @@ class MediaWorker:
             for parent_rel in pending_parents:
                 parent_sidecar = self._vault_root / (parent_rel + ".md")
                 parent_binary = self._vault_root / parent_rel
-                if parent_sidecar.exists() and (parent_binary.exists() or originals.evicted(self._vault_root, parent_binary)):
+                if parent_sidecar.exists() and originals.available(self._vault_root, parent_binary):
                     self.enqueue(
                         binary_path=parent_binary,
                         sidecar_path=parent_sidecar,
@@ -2774,11 +2805,10 @@ class MediaWorker:
         n = 0
         from itertools import chain
 
-        from . import media_store, originals
+        from . import media_processing
 
-        evicted = (item.path for item in media_store.bound_originals(self._vault_root)
-                   if item.state == "evicted") if originals.binding_for(self._vault_root) else ()
-        for f in chain(iter_kb_files(kb), evicted):
+        unplaced = (item.path for item in media_processing.unplaced_originals(self._vault_root))
+        for f in chain(iter_kb_files(kb), unplaced):
             mt = extract.media_type_for(f)
             if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
                 continue

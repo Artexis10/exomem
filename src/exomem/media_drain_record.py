@@ -1,7 +1,8 @@
-"""The drain record: the last complete census of a draining cell's evicted originals (D12).
+"""The drain record: a complete census of a draining cell's evicted physical originals (D12).
 
 The cell writes one line beside its media ledger, `<count> <bytes> <census time>`. The nightly backup Job copies
-that line into its termination message and cellctl reads it from there. The Job mounts the volume read-only, so
+that line into its termination message and cellctl reads it from there. Shared filings count once per object.
+The Job mounts the volume read-only, so
 the reader opens one file and needs no store, lease or database. This module imports only the state paths.
 """
 
