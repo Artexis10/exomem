@@ -392,7 +392,11 @@ def _take_reader() -> subprocess.Popen:
 def _retire_spare() -> None:
     if _spare is not None and _spare.poll() is None:
         _spare.kill()
-        _spare.wait()
+        # A killed child exits at once; the budget keeps interpreter exit from waiting on a stuck reap.
+        try:
+            _spare.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _evidence_from_child(returncode: int, output: bytes) -> PdfEvidence:
