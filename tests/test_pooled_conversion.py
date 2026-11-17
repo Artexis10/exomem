@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import test_media_store
 
 from exomem import (
     artifact_lifecycle,
@@ -24,6 +25,9 @@ from exomem import (
 )
 from exomem.cli_ops import OpError
 from exomem.governance.principal import library_scope
+
+# A configured media store, for the cases that offload an original.
+selected_store = test_media_store.selected_store
 
 RECEIPT = b"\x89PNG\r\n\x1a\n" + b"one receipt, filed twice" * 64
 INVOICE = b"%PDF-1.7\n" + b"an invoice the owner filed once" * 64
@@ -236,3 +240,35 @@ def test_a_pinned_original_is_never_retired(vault, supported, holder):
         assert (vault / original).read_bytes() == RECEIPT
 
     assert _convert(vault, dry_run=False)["converted"] == 1
+
+
+def test_a_filing_restored_by_hand_while_its_page_names_an_emptied_trash_entry_keeps_its_ordinary_file(
+        vault, selected_store, supported):
+    """Catches a conversion that pools a filing whose page still names an emptied Trash entry: once its file is
+    gone, reads take it for the deleted original, so the conversion reports success and the original reads missing."""
+    from test_vault_store_media import ORIGINAL_BYTES, offloaded
+
+    from exomem import delete_file, set_frontmatter_field
+
+    original = "Knowledge Base/Notes/Media/loose.txt"
+    offloaded(vault, original)
+    trashed = delete_file.delete_file(vault, path=original, confirm=True)
+    (vault / trashed.trash_path).rename(vault / original)
+    (vault / f"{trashed.trash_path}.md").unlink()
+    (vault / f"{trashed.trash_path}.meta.json").unlink()
+    assert media_store.read_original_bytes(vault, original).data == ORIGINAL_BYTES
+
+    report = _convert(vault, dry_run=False)
+
+    assert report["converted"] == 0
+    assert [entry["path"] for entry in report["unreadable"]] == [original]
+    assert "original_retirement_meta" in report["unreadable"][0]["reason"]
+    assert (vault / original).read_bytes() == ORIGINAL_BYTES
+    assert media_store.read_original_bytes(vault, original).data == ORIGINAL_BYTES
+
+    # The remedy that the reason names lets the next conversion pool the filing.
+    with library_scope():
+        set_frontmatter_field.set_frontmatter_field(
+            vault, path=f"{original}.md", field="original_retirement_meta", value=None, why="restored by hand")
+    assert _convert(vault, dry_run=False)["converted"] == 1
+    assert media_store.read_original_bytes(vault, original).data == ORIGINAL_BYTES

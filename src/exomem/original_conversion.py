@@ -171,8 +171,16 @@ def _read_inventory(vault: Path) -> _Inventory:
         if originals.is_note_path(binary.path) or "data_file" in fields:
             continue  # Notes and datasets stay ordinary files (design D1), as new filings do.
         digest = hashlib.sha256(data).hexdigest()
-        if census.retired_source(rel, fields, digest):
-            continue
+        # The verdict that reads take once no file holds the original, so the conversion never pools a filing that
+        # reads would then take for deleted.
+        try:
+            retired, unconfirmed = trash_metadata.retired_companion(vault, rel, fields, digest, census=census), None
+        except originals.RetirementUnconfirmed as error:
+            retired, unconfirmed = True, error.reason
+        if retired:
+            if (reason := _kept_reason(vault, rel, fields, binary.path, unconfirmed)) is not None:
+                inventory.unreadable.append({"path": binary.path, "reason": reason})
+            continue  # A deleted original files nothing, so the conversion leaves its page be.
         filing = _Filing(binary.path, rel, digest, binary.sha256, binary.size)
         try:
             with reserved_paths.open_generic_binary(vault, binary.path) as source:
@@ -209,6 +217,19 @@ def _read_inventory(vault: Path) -> _Inventory:
         else:
             inventory.shared += 1
     return inventory
+
+
+def _kept_reason(vault: Path, page: str, fields: dict, original: str, unconfirmed: str | None) -> str | None:
+    """Why a filing that reads take for deleted, or refuse, keeps its ordinary file; None for a deleted original."""
+    try:
+        reserved_paths.inspect_generic_path(vault, original)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            return f"the original cannot be read ({error.code})"
+        if originals.stored_reference(fields.get("stored_object")) is None:
+            return unconfirmed  # No file and no stored version: only a refused Trash entry is left to name.
+    return (f"its page {page} still names the Trash entry of an earlier delete, which reads would follow once the "
+            "original is shared: remove the page's original_retirement_meta field, then convert again")
 
 
 def _store_records(vault: Path, originals_paths: Sequence[str]) -> dict:

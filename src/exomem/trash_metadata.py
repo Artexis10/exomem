@@ -485,24 +485,30 @@ class PlacementCensus:
                 source.require_current()
 
 
-def retired_companion(vault: Path, companion: str, fields: dict[str, object], digest: str) -> bool:
+def retired_companion(vault: Path, companion: str, fields: dict[str, object], digest: str,
+                      *, census: PlacementCensus | None = None) -> bool:
     """Whether a companion was retired to Trash, as the reciprocal witness in canonical Trash metadata confirms.
+
+    The one verdict for a filing that no file at its path holds: reads and the conversion that pools such files
+    both take it, so the conversion never pools a filing that reads would then take for deleted.
 
     ``digest`` is the companion's content hash. The read is bounded: the placement metadata that the backlink
     names, then that entry's reference companion. True as well when that metadata is gone: the owner emptied the
     entry. False when no witness names this companion: deletion wrote none, or a new original at its path withdrew
     it. Raises `originals.RetirementUnconfirmed` when a witness names it but the metadata, the companion or the
-    Trash entry no longer confirms it.
+    Trash entry no longer confirms it. ``census`` lets a caller that reads many pages share one.
     """
     metadata = _backlink(fields)
     if metadata is None:
         return False
-    census = PlacementCensus(vault)
+    census = PlacementCensus(vault) if census is None else census
     try:
         if census._placement(metadata[:-len(METADATA_SUFFIX)]) is None:
             # Recovery and a new original withdraw the backlink, so one that names missing metadata is a deleted
             # original whose Trash entry was emptied: it stays deleted, and equal bytes elsewhere are not its own.
-            return True
+            # A delete takes the stored-copy reference off the page, so a page that holds one was offloaded again
+            # after a restore that left the backlink behind, and files a live original.
+            return "stored_object" not in fields
         proof = census.retirement(metadata[:-len(METADATA_SUFFIX)])
         if proof is None or proof.companion != companion:
             return False

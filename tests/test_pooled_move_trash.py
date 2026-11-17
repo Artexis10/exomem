@@ -281,6 +281,28 @@ def test_a_filing_recovered_from_trash_reads_its_shared_bytes_once_pooled_and_it
     assert media_store.read_original_bytes(vault, LOOSE).data == ORIGINAL_BYTES
 
 
+def test_an_evicted_filing_whose_page_names_an_emptied_trash_entry_reads_once_it_hydrates_into_the_pool(
+        vault, selected_store, monkeypatch):
+    """Catches a hydration that publishes into the pool an original offloaded again after a restore by hand: reads
+    take its page's stale Trash backlink for the deleted original, so the owner's read fails after the download."""
+    from test_vault_store_media import ORIGINAL_BYTES, offloaded
+
+    offloaded(vault, LOOSE)
+    trashed = delete_file.delete_file(vault, path=LOOSE, confirm=True)
+    (vault / trashed.trash_path).rename(vault / LOOSE)
+    (vault / f"{trashed.trash_path}.md").unlink()
+    (vault / f"{trashed.trash_path}.meta.json").unlink()
+    test_media_store._offload(vault, vault / LOOSE)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    with media_store.open_original(vault, vault / LOOSE):
+        pass  # a read records the cache binding that an eviction needs
+    assert media_store.evict(vault, vault / LOOSE)
+
+    assert media_store.read_original_bytes(vault, LOOSE).data == ORIGINAL_BYTES
+    assert originals.pooled(vault, LOOSE).local_path.read_bytes() == ORIGINAL_BYTES
+
+
 def _unconfirmed_retirement(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A companion at `LOOSE` whose Trash entry was partly emptied after another filing pooled the same bytes."""
     from test_vault_store_media import ORIGINAL_BYTES
