@@ -367,10 +367,12 @@ def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max
     # The server's native MCP activation mode: the hooks route through the tools, not inject text.
     env = {**claude_env()[0], **hook_env(root), "EXOMEM_RETRIEVE_INJECT": "mcp"}
     if http:
-        # What the documented handoff needs from a client: a digest, a descriptor file, and `exomem attach`.
+        # What the documented handoff needs from a client: a digest, a descriptor file, and a send. The upload
+        # reply names a multipart POST as the send, so `curl` is allowed beside `exomem attach`; the server is
+        # loopback and its bearer dies with the run.
         tools += ["Bash", "Write"]
         # An `Edit` rule covers the Write tool, and the descriptor goes into the work directory.
-        allowed += ["Bash(exomem attach:*)", "Bash(sha256sum:*)", "Edit(./**)"]
+        allowed += ["Bash(exomem attach:*)", "Bash(sha256sum:*)", "Bash(curl:*)", "Edit(./**)"]
         env["PATH"] = f"{lay_exomem_command(root, arm)}{os.pathsep}{env['PATH']}"
     actor = Arm(
         arm_id="incident",
