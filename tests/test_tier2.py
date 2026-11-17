@@ -422,7 +422,10 @@ def test_promoting_a_source_into_evidence_carries_bytes_verbatim(vault: Path) ->
     )
 
     assert result is not None
-    assert (vault / dst_rel).read_text(encoding="utf-8") == before
+    # The lineage entry naming the path the page left is its only byte change.
+    head, fence, body = before.partition("\n---\n")
+    lineage = f"\nmoved_from:\n- path: {_SOURCE_REL}"
+    assert (vault / dst_rel).read_text(encoding="utf-8") == head + lineage + fence + body
     assert not (vault / _SOURCE_REL).exists()
     log = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
     assert "supports the warranty claim opened 2026-05" in log
@@ -523,11 +526,19 @@ def test_move_repoints_an_evidence_back_reference_and_keeps_every_other_byte(
     )
     sidecar.write_text(before, encoding="utf-8")
 
+    preview = move_module.move_file(
+        vault,
+        old_path=note_rel,
+        new_path="Knowledge Base/Notes/garden/trial.md",
+        today=TODAY,
+        preview=True,
+    )
     result = move_module.move_file(
         vault,
         old_path=note_rel,
         new_path="Knowledge Base/Notes/garden/trial.md",
         today=TODAY,
+        preview_digest=preview.preview_digest,
     )
 
     assert captured.sidecar_path in result.files_touched

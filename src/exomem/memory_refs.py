@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # Cached negative rows must rebuild when frontmatter recognition changes.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
 _REFERENCE_REBUILD_LOCK = threading.Lock()
@@ -506,11 +506,16 @@ class ReferenceIndex:
         # A full corpus scan. Exact receipts exist so an ordinary governed
         # write never moves this counter.
         freshness.note_custody_rebuild(_CUSTODY_SEAM)
-        entries = _scan_pages(self.vault_root)
+        entries, priors = _scan_rows(self.vault_root)
         conn = self._connect()
         try:
             with conn:
                 conn.execute("DELETE FROM identities")
+                conn.execute("DELETE FROM prior_paths")
+                conn.executemany(
+                    "INSERT INTO prior_paths(prior_path, path, prior_stem) VALUES (?, ?, ?)",
+                    priors,
+                )
                 conn.execute(
                     "INSERT OR REPLACE INTO ref_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
@@ -539,6 +544,9 @@ class ReferenceIndex:
         if not self.available():
             self.rebuild_all()
             return
+        from . import relayout_record
+
+        relayout = relayout_record.load(self.vault_root)
         conn = self._connect()
         try:
             with conn:
@@ -547,7 +555,8 @@ class ReferenceIndex:
                     if rel is None:
                         continue
                     conn.execute("DELETE FROM identities WHERE path = ?", (rel,))
-                    row = _read_identity(self.vault_root, path)
+                    # An unreadable or missing page keeps no row, as `_read_identity` decides.
+                    row, raw = _identity_and_bytes(self.vault_root, path)
                     if row is not None:
                         conn.execute(
                             "INSERT INTO identities("
@@ -555,6 +564,11 @@ class ReferenceIndex:
                             ") VALUES (?, ?, ?, ?, ?)",
                             row,
                         )
+                    replace_prior_rows(
+                        conn,
+                        rel,
+                        prior_path_rows(rel, raw, relayout) if raw is not None else (),
+                    )
         finally:
             conn.close()
 
@@ -582,6 +596,9 @@ class ReferenceIndex:
             with conn:
                 conn.executemany(
                     "DELETE FROM identities WHERE path = ?", [(p,) for p in targets]
+                )
+                conn.executemany(
+                    "DELETE FROM prior_paths WHERE path = ?", [(p,) for p in targets]
                 )
         finally:
             conn.close()
@@ -1768,14 +1785,64 @@ def create_identity_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_identities_exomem_id ON identities(exomem_id)"
     )
+    # Each prior path a live page claims, from its lineage and the relayout record. The stem
+    # column serves the resolver's prior-stem step; both lookups are indexed point reads.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS prior_paths ("
+        "prior_path TEXT NOT NULL, path TEXT NOT NULL, prior_stem TEXT NOT NULL, "
+        "PRIMARY KEY (prior_path, path))"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prior_paths_path ON prior_paths(path)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prior_paths_stem ON prior_paths(prior_stem)")
+
+
+#: A derived prior-path row: the prior path, the page that claims it, and the prior path's stem.
+PriorRow = tuple[str, str, str]
 
 
 def derive_identities(vault_root: Path, conn: sqlite3.Connection) -> None:
-    """Fill the empty ``identities`` table from the files, as a full sidecar rebuild does."""
+    """Fill the empty ``identities`` and ``prior_paths`` tables from the files, as rebuilds do."""
+    identities, priors = _scan_rows(vault_root)
     conn.executemany(
         "INSERT INTO identities(path, exomem_id, raw_id, source_hash, status) "
         "VALUES (?, ?, ?, ?, ?)",
-        _scan_pages(vault_root),
+        identities,
+    )
+    conn.executemany(
+        "INSERT INTO prior_paths(prior_path, path, prior_stem) VALUES (?, ?, ?)", priors
+    )
+
+
+def prior_stem(prior_path: str) -> str:
+    """The stem a bare link names a prior path by: its file name without `.md`."""
+    return vault_module.wikilink_page_key(prior_path.rsplit("/", 1)[-1])
+
+
+def prior_path_rows(rel: str, raw: bytes, relayout: Any | None) -> list[PriorRow]:
+    """The prior-path rows one page's bytes claim, with the relayout rows that claim for it.
+
+    A page the reference scan does not read, or whose bytes are not text, claims nothing.
+    """
+    from . import page_lineage
+
+    if not is_scanned_page(rel):
+        return []
+    # Without a relayout row, only the page's own lineage claims, so most pages skip the parse.
+    if not relayout and not page_lineage.may_hold_lineage(raw):
+        return []
+    fm, has_block = page_lineage.read_front_of_bytes(raw)
+    if not has_block and not relayout:
+        return []
+    claimed = page_lineage.iter_claims(rel, fm, normalize_id(fm.get(ID_FIELD)), relayout)
+    return [(prior, rel, prior_stem(prior)) for prior in claimed]
+
+
+def replace_prior_rows(conn: sqlite3.Connection, rel: str, rows: Iterable[PriorRow]) -> None:
+    """Replace the prior-path rows that ``rel`` claims; the caller owns the transaction."""
+    conn.execute("DELETE FROM prior_paths WHERE path = ?", (rel,))
+    conn.executemany(
+        "INSERT OR IGNORE INTO prior_paths(prior_path, path, prior_stem) VALUES (?, ?, ?)",
+        list(rows),
     )
 
 
@@ -1784,8 +1851,7 @@ _UNREADABLE = "unreadable"
 
 
 def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, str, str] | None:
-    row = _identity_or_unreadable(vault_root, path)
-    return None if row is not None and row[4] == _UNREADABLE else row
+    return _identity_and_bytes(vault_root, path)[0]
 
 
 def _identity_or_unreadable(
@@ -1795,19 +1861,26 @@ def _identity_or_unreadable(
     `_UNREADABLE` instead of None. None still means the scan reads no identity
     here: the page is not a member, or it is gone.
     """
+    return _observed_page(vault_root, path)[0]
+
+
+def _observed_page(
+    vault_root: Path, path: Path
+) -> tuple[tuple[str, str | None, str, str, str] | None, bytes | None]:
+    """The identity row of one page (`_identity_or_unreadable`) and the bytes it was read from."""
     rel = _relative_markdown(vault_root, path)
     if rel is None:
-        return None
+        return None, None
     # Read first instead of checking `exists()`: from Python 3.14 `exists()`
     # returns False on PermissionError, which would turn an unreadable page
     # into a gone one.
     try:
         raw = path.read_bytes()
     except (FileNotFoundError, NotADirectoryError):
-        return None
+        return None, None
     except OSError:
-        return rel, None, "", "", _UNREADABLE
-    return _identity_from_bytes(rel, raw)
+        return (rel, None, "", "", _UNREADABLE), None
+    return _identity_from_bytes(rel, raw), raw
 
 
 def _identity_from_bytes(rel: str, raw: bytes) -> tuple[str, str | None, str, str, str]:
@@ -1861,6 +1934,38 @@ def replace_identity_row(
 
 def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]:
     return _scan_directory(vault_root, managed_root(Path(vault_root)))
+
+
+def _scan_rows(
+    vault_root: Path,
+) -> tuple[list[tuple[str, str | None, str, str, str]], list[PriorRow]]:
+    """The identity and prior-path rows of every scanned page.
+
+    The identity rows come from `_scan_pages`, the one corpus census. The prior rows read each
+    page again; `prior_path_rows` parses only a page that may hold a lineage key
+    (`page_lineage.may_hold_lineage`), unless the vault holds a relayout record.
+    """
+    from . import relayout_record
+
+    root = Path(vault_root)
+    identities = _scan_pages(root)
+    relayout = relayout_record.load(root)
+    priors: list[PriorRow] = []
+    for row in identities:
+        try:
+            raw = (root / row[0]).read_bytes()
+        except OSError:
+            continue
+        priors.extend(prior_path_rows(row[0], raw, relayout))
+    return identities, priors
+
+
+def _identity_and_bytes(
+    vault_root: Path, path: Path
+) -> tuple[tuple[str, str | None, str, str, str] | None, bytes | None]:
+    """`_read_identity` and the bytes it read, so the prior-path rows need no second read."""
+    row, raw = _observed_page(vault_root, path)
+    return (None, None) if row is None or row[4] == _UNREADABLE else (row, raw)
 
 
 def _scan_directory(

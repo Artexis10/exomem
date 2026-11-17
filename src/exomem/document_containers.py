@@ -191,6 +191,16 @@ class Plan:
         return {**self.inspection.metadata(), "payloads": list(self.children)}
 
 
+def _require_unclaimed(vault_root: Path, page: str) -> None:
+    """Refuse a member page at a path that a moved member page still claims (`prior_claims`)."""
+    from . import prior_claims
+
+    try:
+        prior_claims.require_unreserved(vault_root, page)
+    except prior_claims.ReservedPathError as error:
+        raise ValueError(f"CONTAINER_CONFLICT: {error.reason}") from None
+
+
 @contextmanager
 def plan(
     vault_root: Path, *, parent: str, parent_page: str, digest: str, size: int,
@@ -252,6 +262,7 @@ def plan(
                 if previous is None:
                     result.writes.append(PlannedWrite(page_path, annotate(before, "container_member", binding), expected_hash=content_hash(before)))
             else:
+                _require_unclaimed(vault_root, page)
                 result.writes.append(PlannedWrite(page_path, rendered, create_only=True, expected_hash=MISSING_CONTENT_HASH))
             result.children.append(artifact)
         yield result

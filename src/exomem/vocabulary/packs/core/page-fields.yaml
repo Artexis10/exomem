@@ -1,0 +1,34 @@
+schema_version: 1
+registry: page-fields
+# Frontmatter fields with a governed role. A `pointer` field names where a page belongs
+# or which file it describes, so a governed pointer write may change it on a page in an
+# append-only tree. Every other field there keeps its captured bytes. A field with a
+# `writer` changes on such a page only through that operation: `reclassify` relocates the
+# source and records its classification history, `custody` checks the raw file's identity,
+# and `closure` writes the back-reference when a compiled page cites the source. This pack
+# is the only source of a role: a vault overlay may retire an entry and nothing else.
+entries:
+  project:
+    label: Project
+    attributes: {field: project, role: pointer}
+  projects:
+    label: Projects
+    attributes: {field: projects, role: pointer}
+  domain:
+    label: Domain
+    attributes: {field: domain, role: pointer, writer: reclassify}
+  source-type:
+    label: Source type
+    attributes: {field: source_type, role: pointer, writer: reclassify}
+  ingested-into:
+    label: Ingested into
+    attributes: {field: ingested_into, role: pointer, writer: closure}
+  evidence-file:
+    label: Evidence file
+    attributes: {field: evidence_file, role: pointer, writer: custody}
+  data-file:
+    label: Data file
+    attributes: {field: data_file, role: pointer, writer: custody}
+  artifact-path:
+    label: Artifact path
+    attributes: {field: artifact_path, role: pointer, writer: custody}

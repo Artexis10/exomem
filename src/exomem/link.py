@@ -259,6 +259,18 @@ def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
     )
 
 
+def _refuse_reserved(vault_root: Path, rel_entity: str, *, newest: bool) -> None:
+    """Refuse an entity path that a live page's lineage still claims (`prior_claims`)."""
+    from . import prior_claims
+
+    try:
+        prior_claims.require_unreserved(vault_root, rel_entity, newest=newest)
+    except prior_claims.ReservedPathError as error:
+        code = "ENTITY_EXISTS" if error.code == "FILE_EXISTS" else error.code
+        # The caller sent the name; another name is the remedy, not a missing field.
+        raise LinkError(code, [], error.reason) from None
+
+
 def _occupant_name(vault_root: Path, rel_entity: str) -> str:
     """How the refusal names the page that holds the name: by title for an agent on the public tool shape.
 
@@ -911,6 +923,7 @@ def link(
         if accepted_decision is not None:
             reason += " A distinct identity needs its own `slug`."
         raise LinkError("ENTITY_EXISTS", ["name"], reason)
+    _refuse_reserved(vault_root, rel_entity, newest=not validate_only)
     # The writer snapshot that this write builds for its links also answers which titles are taken. It
     # is acquired here, after every refusal above, so a refused write pays nothing new.
     resolver = find_module.writer_resolver_snapshot(vault_root)

@@ -70,6 +70,7 @@ _KIND_NAMES: dict[tuple[str, str], str] = {  # nosemgrep: ep-word-dict -- the cl
     ("manage_memory_file", "files"): "list", ("manage_memory_file", "trash-list"): "trash",
     ("manage_memory_file", "propose-reclassification"): "reclassify",
     ("manage_memory_file", "validate-create"): "create", ("manage_memory_file", "validate-append"): "append",
+    ("manage_memory_file", "validate-move"): "move",
     ("adopt_vault", "scan-only"): "scan",
     ("maintain_memory", "collections-store"): "collections", ("maintain_memory", "collections-cutover"): "cutover",
     ("maintain_memory", "maintenance-job"): "job", ("maintain_memory", "maintenance-job-cancel"): "cancel_job",
@@ -498,6 +499,16 @@ _FILE_GUIDE = (
 _GUIDES = {"upload_files": f"{_FILE_GUIDE}{_IMPORT_GUIDE}", "imports.file": _IMPORT_GUIDE}
 
 
+def _curation_examples() -> list[dict[str, Any]]:
+    from .curation_examples import examples
+
+    return examples()
+
+
+#: Worked examples that read_instructions adds to an operation whose argument is a whole plan.
+_EXAMPLES = {"curation.propose": _curation_examples}
+
+
 def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
     """The arguments and one example of a tool, a door or one door operation, from the tables that route it."""
     from .cli_ops import OpError
@@ -562,6 +573,8 @@ def _door_help(surface: PublicSurface, op: DoorOp, commands: Sequence[Any]) -> d
     result["example"] = {"operation": op.name, "arguments": {key: f"<{key}>" for key in required}}
     if op.name in _GUIDES:
         result["guide"] = _GUIDES[op.name]
+    if op.name in _EXAMPLES:
+        result["examples"] = _EXAMPLES[op.name]()
     return result
 
 

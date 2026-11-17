@@ -32,13 +32,18 @@ def test_project_edge_membership_is_proven_before_and_after(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content)
 
-    refs = sqlite3.connect(":memory:")
+    # Each reader opens and closes its own connection, as the real index hands out one per call.
+    shared = f"file:refs-{tmp_path.name}?mode=memory&cache=shared"
+    refs = sqlite3.connect(shared, uri=True)
     refs.execute("CREATE TABLE identities (exomem_id TEXT, path TEXT, status TEXT)")
     refs.executemany("INSERT INTO identities VALUES (?, ?, 'valid')", [(source_id, source), (target_id, target)])
     refs.commit()
     monkeypatch.setattr(evidence.freshness, "live_recall_checkpoint", lambda *args: "current")
     monkeypatch.setattr(evidence.epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", lambda self: sqlite3.connect(":memory:"))
-    monkeypatch.setattr(evidence.memory_refs.ReferenceIndex, "_current_readonly_connection", lambda self: refs)
+    monkeypatch.setattr(
+        evidence.memory_refs.ReferenceIndex, "_current_readonly_connection",
+        lambda self: sqlite3.connect(shared, uri=True),
+    )
     monkeypatch.setattr(evidence.memory_refs, "_pending_reference_projection", lambda root: None)
     resolver = evidence.vault.WikilinkResolver.from_entries(tmp_path, [(source, "Source"), (target, "Target")])
     monkeypatch.setattr(evidence.find, "recall_resolver_snapshot_at_checkpoint", lambda *args: resolver)
