@@ -3,7 +3,7 @@
 ## Why
 
 People record their own positions in their notes: a working attribution of cause, an interpretation they prefer, a constraint on how something should be framed.
-Such a unit often sits late in a long page. It is dated and qualified, for example "his working hypothesis, not proven".
+Such a unit often sits late in a long page. It is dated and qualified, for example "her working guess, not yet tested".
 When a later turn brings new evidence on the same subject, the agent should keep that position in view, attributed to the person, and judge the evidence against it.
 
 In a dated incident in November 2026 it did neither, twice in one conversation.

@@ -22,7 +22,7 @@ from exomem import (
     working_set,
 )
 from exomem._hooks import exomem_retrieve_nudge as hook
-from exomem.governance import principal
+from exomem.governance import egress, principal
 from exomem.semantic_language_registry import validate_proposal
 
 TURN = "Which glaze firing schedule suits the kiln this week?"
@@ -307,6 +307,36 @@ def test_a_long_position_is_served_whole_beside_a_short_one_within_the_shipped_b
     assert len(long_view) > working_set.MAX_UNIT_HARD_CHARS
     assert sorted(item["text"] for item in block["items"]) == sorted([long_view, short_view])
     assert block["overflow_refs"] == []
+
+
+def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guest whose ceiling serves a page as a 600-character excerpt was handed a 1,792-character unit of it whole."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    long_view = (
+        "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. "
+        + "The same recipe fired on the slow schedule in March showed no crazing, and the crazed pieces sat nearest the vent. " * 12
+        + "This is my working view from the spring firings, not yet tested."
+    )
+    short_view = "I prefer cone 6 for the stoneware body"
+    _lead, excerpted = _lead_linking_to_a_long_page(
+        vault, f"- [preference] {long_view} (2026-03-02) ^crazing\n\n- [preference] {short_view} (2026-03-01) ^cone-six\n",
+    )
+    _withhold(vault, excerpted, ceiling=egress.LEVEL_EXCERPT)
+    _ready(vault)
+    # This fixture's guest task context serves no leads, so the page joins the reach as a served lead's link would.
+    compile_block = positions.compile_block
+    monkeypatch.setattr(
+        positions, "compile_block",
+        lambda root, caller, *, reach, **kwargs: compile_block(root, caller, reach={*reach, excerpted}, **kwargs),
+    )
+
+    owner = _activate(vault, turn=TURN, max_chars=8000)["positions"]
+    guest = _activate(vault, _external(), turn=TURN, max_chars=8000)["positions"]
+
+    assert len(long_view) > 1_500 > egress.PAGE_EXCERPT_MAX
+    assert sorted(item["text"] for item in owner["items"]) == sorted([long_view, short_view])
+    assert [item["text"] for item in guest["items"]] == [short_view]
+    assert [ref.rpartition("/")[2] for ref in guest["overflow_refs"]] == ["studio-equipment-log.md#crazing"]
 
 
 def test_the_positions_block_ends_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

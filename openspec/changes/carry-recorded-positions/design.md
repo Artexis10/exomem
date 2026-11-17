@@ -60,6 +60,7 @@ It attributes each unit as the unit's text does, not wholesale to the person, be
 - **Few position units.** A vault with few declared categories serves an empty block. The capture guidance and the agent-proposed declarations address that, and an empty block costs nothing.
 - **Agreement drift.** Framing could push the agent toward the person's view. The held-out set includes controls in which the saved position is wrong, withdrawn or contradicted by an outside fact. The decision run fails the change if those controls regress.
 - **Self-echo.** An agent's own conclusion, saved by capture under a position category, could come back next session as the person's view, and the agent would then agree with itself. Categories that agents mostly write, such as a core category a vault marks, widen that path. The framing attributes each unit as its text does, so an unnamed conclusion reads as one the notes record, and the capture guidance puts the agent's own analysis under a category without the trait and has a position name its holder.
+- **Excerpt-level callers.** A caller served a page only as an excerpt gets a longer unit of that page as a reference, using the excerpt bound that page reads use. The stance and domain profile blocks still serve such a caller a whole long unit; they remain as old debt.
 - **Latency.** The change adds one query. The latency task proves its cost before release.
 
 ## Alternatives considered

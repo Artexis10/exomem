@@ -58,11 +58,15 @@ The `positions` block SHALL state, in one passage, that its units are positions 
 - **THEN** both units appear, newest first by date, and the framing asks the agent to judge rather than adopt either
 
 ### Requirement: A Position Is Served Whole When It Fits The Block's Bound
-The `positions` block SHALL serve a position unit whole whenever its line fits the block's remaining bound, whatever the unit's length. No per-unit length cap SHALL turn a unit into a reference. A unit that does not fit SHALL become a reference, never a cut unit. The shipped `positions_max_chars` SHALL leave room for one long position and a short one.
+The `positions` block SHALL serve a position unit whole whenever its line fits the block's remaining bound, whatever the unit's length. No per-unit length cap SHALL turn a unit into a reference, except that for a caller whose release ceiling serves the unit's page as an excerpt, a unit longer than that excerpt's bound SHALL become a reference. A unit that does not fit SHALL become a reference, never a cut unit. The shipped `positions_max_chars` SHALL leave room for one long position and a short one.
 
 #### Scenario: A long causal attribution is served whole
 - **WHEN** a turn reaches a position unit of about 1,500 characters and a short position unit, under the shipped bound
 - **THEN** the block carries both units whole, and lists neither as a reference
+
+#### Scenario: A caller served page excerpts gets a long position as a reference
+- **WHEN** a caller whose release ceiling serves the position's page as an excerpt reaches a position unit longer than that excerpt's bound, and a short position unit on the same page
+- **THEN** the block lists the long unit as a reference, never cut, and carries the short unit whole
 
 ### Requirement: The Positions Block Ends The Maps Response And Leads With Its Framing
 A maps response SHALL carry the `positions` block as its last field, after every other field it carries, including the fields that terminal egress adds. The block's framing passage `about` SHALL be its first field, followed by `state`, `items`, `overflow_refs`, `omitted` and, where present, `reason`. A client that renders the block SHALL render the framing passage before the items.

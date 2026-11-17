@@ -134,7 +134,8 @@ def _compile(
         ) if clause is not None
     )
     # A caller that reads raw sources passes its reach as released; any other has the store apply its release filter.
-    released = parents if context_task.full_source_access(root, caller) else None
+    full_access = context_task.full_source_access(root, caller)
+    released = parents if full_access else None
     with lexstore.stopping_at_budget():
         # The rows only name the pages that hold a position; the pages' own bytes decide every unit below.
         result = lexstore.get_store(root).search_semantic_units_result(
@@ -171,6 +172,10 @@ def _compile(
         return _empty("unavailable", "currency"), []
     order = {item.ref: index for index, item in enumerate(admitted)}
     current = session_units.current(admitted, basis, today=today)
+    # A caller served excerpts of a page reads no more of its units than `read_page` would show of that page.
+    page_bounds = {} if full_access else egress.page_text_bounds(
+        root, {item.path for item, _review_due in current.items}, purpose=caller.purpose,
+    )
     block = _empty()
     served: list[dict[str, Any]] = []
     leftover: list[working_set.LaneItem] = []
@@ -180,9 +185,11 @@ def _compile(
             line["date"] = item.updated
         if review_due:
             line["review_due"] = review_due
-        # Overflow is a reference, never a cut unit. The block's own bound is the only size test: a careful position
-        # runs long, and the working set's per-unit cap would turn exactly those into references.
-        if chars({"items": [*block["items"], line]}) <= limit:
+        # Overflow is a reference, never a cut unit. Beyond the excerpt bound of the unit's page, the block's own bound
+        # is the only size test: a careful position runs long, and the working set's per-unit cap would turn exactly
+        # those into references.
+        page_bound = page_bounds.get(item.path)
+        if (page_bound is None or len(item.text) <= page_bound) and chars({"items": [*block["items"], line]}) <= limit:
             block["items"].append(line)
             served.append(working_set._served_unit(item))  # noqa: SLF001 - the shape admission decided
         else:
