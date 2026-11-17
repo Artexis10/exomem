@@ -14,11 +14,15 @@ writer, sends one user turn to Claude Code in print mode, and checks the outcome
   files by the SHA-256 of the stored original. ``current_source`` compares stored frontmatter fields
   exactly (``contains``, ``not_contains``, ``eq``, ``ne``; case-insensitive) on the Sources that no
   correction receipt supersedes; ``if_none`` is what it settles to when no such Source exists (false
-  by default, because a case that expects a Source has failed when none is kept).
+  by default, because a case that expects a Source has failed when none is kept). ``sources_added``
+  counts the Sources the session added on top of ``sources_before`` (``{"equals": n}``), whatever
+  their bytes — an edited copy of a case file counts too.
 
 A case may declare ``files`` (built into the work directory at unit time, see ``fixtures.py``),
-``seed_sources`` (captured as Sources before the session) and ``"transport": "http"``, which serves the
-arm over loopback HTTP so the agent can send a file's bytes (``server.py``). Stdio is the default.
+``seed_sources`` (captured as Sources before the session), ``"transport": "http"``, which serves the
+arm over loopback HTTP so the agent can send a file's bytes (``server.py``), and ``"git": true``,
+which makes the work directory a repository with every fixture committed, so a case can ask the agent
+to work on a repository file without that counting as a handed file. Stdio is the default.
 
 An arm is a checkout: its ``src`` runs the MCP server, its ``plugins/claude-code`` supplies the skill
 and hooks, and its own docs and code supply the guidance text, in native MCP activation mode. Every
@@ -91,7 +95,7 @@ INDEX_WARMING = "index_warming"
 JUDGE_TIMEOUT_SECONDS = 300
 SOURCE_CHECKS = ("source_saved", "source_count", "current_source", "compiled_with_backlinks")
 #: The checks this runner implements; a case's `pass` names a subset.
-CHECKS = ("seed_corrected", "called_any", "judge", *SOURCE_CHECKS)
+CHECKS = ("seed_corrected", "called_any", "judge", "sources_added", *SOURCE_CHECKS)
 TRANSPORTS = ("stdio", "http")
 #: The comparisons of a `current_source` condition: the check's own closed set, not a vocabulary.
 CONDITIONS = {
@@ -160,6 +164,10 @@ def validate_case(case: dict) -> None:
             )
     if "source_count" in rule and type(rule["source_count"].get("equals")) is not int:
         raise SystemExit(f"case {case['id']}: source_count needs an integer `equals`")
+    if "sources_added" in rule and type(rule["sources_added"].get("equals")) is not int:
+        raise SystemExit(f"case {case['id']}: sources_added needs an integer `equals`")
+    if "git" in case and type(case["git"]) is not bool:
+        raise SystemExit(f"case {case['id']}: `git` must be true or false")
 
 
 def load_cases(selected: list[str] | None, cases_dir: Path | None = None) -> list[dict]:
@@ -247,6 +255,14 @@ def current_source(facts: dict, fixtures: dict[str, str], spec: dict) -> bool | 
     if not current:
         return spec.get("if_none", False)
     return all(condition_holds(row["frontmatter"], c) for row in current for c in spec["where"])
+
+
+def sources_added(facts: dict, before: list[str], spec: dict) -> bool:
+    """The Sources the session added — rows not in ``sources_before`` — number exactly ``equals``.
+
+    Every added Source counts whatever its bytes: an edited copy of a case file is still a Source.
+    """
+    return len([row for row in facts["sources"] if row["path"] not in before]) == spec["equals"]
 
 
 def compiled_with_backlinks(facts: dict, fixtures: dict[str, str], names: list[str]) -> bool | None:
@@ -343,8 +359,10 @@ def init_event(stdout: str) -> dict:
 def reads_sources(case: dict) -> bool:
     """Whether the case's checks need the vault's Sources, before and after the session."""
     rule = case["pass"]
-    return any(name in rule for name in SOURCE_CHECKS) or bool(
-        rule.get("judge", {}).get("include_sources")
+    return (
+        "sources_added" in rule
+        or any(name in rule for name in SOURCE_CHECKS)
+        or bool(rule.get("judge", {}).get("include_sources"))
     )
 
 
@@ -441,6 +459,36 @@ def transcript_index_warming(stdout: str) -> bool:
     return False
 
 
+def init_repo(work: Path) -> None:
+    """Make the unit's work directory a git repository with every fixture committed.
+
+    ``GIT_CONFIG_GLOBAL=/dev/null`` and ``GIT_CONFIG_NOSYSTEM=1`` keep a developer's own config and
+    hooks out; the commit's identity comes from ``-c`` flags, not config.
+    """
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(work),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    for argv in (
+        ["git", "init", "-q"],
+        ["git", "-c", "user.name=bench", "-c", "user.email=bench@invalid", "add", "-A"],
+        [
+            "git",
+            "-c",
+            "user.name=bench",
+            "-c",
+            "user.email=bench@invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixtures",
+        ],
+    ):
+        subprocess.run(argv, cwd=work, env=env, check=True, capture_output=True)  # noqa: S603 - fixed argv
+
+
 def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max_turns: int):
     """Seed the arm's vault and guidance, then run one session. Returns (seeded note, finished process, record).
 
@@ -456,6 +504,9 @@ def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max
         "transport": "http" if http else "stdio",
         "fixtures": build_files(case.get("files", {}), work),
     }
+    if case.get("git"):
+        init_repo(work)
+        record["git"] = True
     seeded = run_arm_side(
         arm, root, "seed", str(vault), str(work), stdin=json.dumps(case.get("seed"))
     )
@@ -597,6 +648,10 @@ def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> d
         facts = run_arm_side(arm, root, "sources", vault)
         saved = session_sources(facts, record["sources_before"])
         extra["session_sources"] = saved
+        if "sources_added" in rule:
+            checks["sources_added"] = sources_added(
+                facts, record["sources_before"], rule["sources_added"]
+            )
         for name in SOURCE_CHECKS:
             if name in rule:
                 checks[name] = SOURCE_CHECK_FUNCTIONS[name](facts, record["fixtures"], rule[name])

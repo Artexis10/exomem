@@ -1,0 +1,50 @@
+{
+  "incident": "2026-11-17: agents answered about a file the user handed them and did not keep it as a Source. These cases check that custody stays scoped: a repository file the agent is asked to fix, and a file the user names but says to ignore, are not kept.",
+  "library": {
+    "retry_settings.py": {
+      "kind": "text",
+      "text": "\"\"\"Retry settings for the station uploader.\"\"\"\n\n# The uploader's backoff loop reads RETRY_DELAY in milliseconds.\nRETRY_DELAY = 5\nMAX_RETRIES = 4\n\n\ndef next_delay(attempt: int) -> int:\n    \"\"\"Delay before the given retry attempt, doubling each time.\"\"\"\n    return RETRY_DELAY * (2 ** attempt)\n"
+    },
+    "thaw-log.txt": {
+      "kind": "text",
+      "text": "Spring thaw log, upland stations\n\nStation Harrowmere: first sustained thaw 14 April, ice-out on the tarn 22 April.\nStation Kelderby Ridge: first sustained thaw 9 April, ice-out not observed (logger fault 18-25 April).\nStation Owlsgate: first sustained thaw 17 April, ice-out 26 April.\n\nNote from the Kelderby crew: the 9 April reading followed two days of rain on snow, so the date may run early.\n"
+    },
+    "thaw-log-old-draft.txt": {
+      "kind": "text",
+      "text": "DRAFT, superseded\n\nSpring thaw log, upland stations (first pass, before logger checks)\n\nStation Harrowmere: first thaw 11 April.\nStation Kelderby Ridge: first thaw 15 April.\nStation Owlsgate: first thaw 12 April.\n"
+    }
+  },
+  "cases": [
+    {
+      "id": "repository-file-to-fix",
+      "about": "The work directory is a git repository and the user asks the agent to fix a tracked file. Working on a repository file is not handing it over, so no Source may be written.",
+      "transport": "http",
+      "git": true,
+      "files": [
+        "retry_settings.py"
+      ],
+      "prompt": "retry_settings.py in this repo sets RETRY_DELAY to 5, but the uploader reads it in milliseconds and we want five seconds. Please fix it.",
+      "pass": {
+        "sources_added": {
+          "equals": 0
+        }
+      }
+    },
+    {
+      "id": "named-file-to-ignore",
+      "about": "The user names two files and says to ignore one of them. The ignored file must not be kept as a Source.",
+      "transport": "http",
+      "files": [
+        "thaw-log.txt",
+        "thaw-log-old-draft.txt"
+      ],
+      "prompt": "Ignore thaw-log-old-draft.txt in this folder, it's an outdated first pass. Going by thaw-log.txt, which station thawed first, and how much should I trust that date?",
+      "pass": {
+        "source_count": {
+          "file": "thaw-log-old-draft.txt",
+          "equals": 0
+        }
+      }
+    }
+  ]
+}
