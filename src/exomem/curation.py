@@ -1681,6 +1681,16 @@ class _Chain:
         return source
 
 
+def _require_lifecycle_settled(vault_root: Path, pages: Mapping[str, str]) -> None:
+    """Refuse a relocation step, at proposal, on a page whose lifecycle record it cannot carry."""
+    from . import semantic_writes
+
+    try:
+        semantic_writes.require_lifecycle_settled(vault_root, pages)
+    except semantic_writes.SemanticWriteError as error:
+        raise _error(error.code, error.reason) from error
+
+
 def _move_call(vault_root: Path, args: Mapping[str, Any]) -> dict[str, Any]:
     """The move leaf's arguments for a curation `move` step.
 
@@ -2153,6 +2163,9 @@ def _prepare_step(
                 )
             path = normalize_target_path(validation.result.old_path, field="old_path")
             destination = normalize_target_path(validation.result.new_path, field="new_path")
+            if path not in chain.pages:
+                # An earlier step of the plan carries the record of a page it leaves.
+                _require_lifecycle_settled(vault_root, {path: chain.text(vault_root, path)})
             if kind == "move":
                 preimage, before_hash = _read_target(vault_root, path)
                 after_text = validation.after_text
@@ -2214,6 +2227,14 @@ def _prepare_step(
                 normalize_target_path(row.get("path"), field="pages.path", allow_append_only=True)
             restored = repoint_links.restorations(
                 vault_root, material, lambda page: chain.text(vault_root, page)
+            )
+            _require_lifecycle_settled(
+                vault_root,
+                {
+                    page: current
+                    for page, current, _before, revert in restored
+                    if revert is None and page not in chain.pages
+                },
             )
             exact = {page: before for page, _current, before, _revert in restored}
             path = str(rows[0]["path"])
@@ -3477,7 +3498,14 @@ def _verify_live_postcondition(
     step: Mapping[str, Any] | None = None,
     binding: Mapping[str, Any] | None = None,
     accepted: Mapping[str, frozenset[str]] | None = None,
+    drift: str = "CURATION_OUTCOME_UNCERTAIN",
 ) -> None:
+    """Refuse unless each page the witness names holds its sealed postcondition.
+
+    `drift` is the code for a readable page that differs. A step's own recovery cannot tell
+    whose bytes those are, so it reports uncertain. Compensation reads a witness that matched
+    when its step committed, so a difference there is later work and it passes the stale code.
+    """
     if step is not None and step.get("kind") in PRESERVATION_STEP_KINDS:
         from dataclasses import replace
 
@@ -3525,21 +3553,35 @@ def _verify_live_postcondition(
                     "CURATION_OUTCOME_UNCERTAIN", "witness target path is unsafe"
                 ) from error
             if not absent:
-                raise _error("CURATION_OUTCOME_UNCERTAIN", "witness says absent but target exists")
+                raise _error(drift, f"{relative!r} exists where the step left it absent")
             continue
         expected = item.get("content_hash")
         if expected is not None:
             try:
                 actual = _guarded_digest(vault_root, relative, stale=True)
             except CurationError as error:
+                if error.code == "CURATION_BINDING_STALE":
+                    raise _error(drift, f"{relative!r} is gone from where the step left it") from error
                 raise _error(
                     "CURATION_OUTCOME_UNCERTAIN", "witness target is unreadable"
                 ) from error
             # A page that a later step of the same plan rewrote again holds one of its chained hashes.
             if actual != expected and actual not in (accepted or {}).get(relative, ()):
-                raise _error(
-                    "CURATION_OUTCOME_UNCERTAIN", "witness and live postcondition disagree"
-                )
+                raise _error(drift, f"{relative!r} changed after the step wrote it")
+
+
+def _retryable_failure(error: Exception) -> bool:
+    """Whether a step that wrote nothing may run again on `resume`.
+
+    An I/O fault may clear. So may the server's own "not now", such as a busy vault or a
+    warm-up that has not finished: that refusal declares itself retryable and uncommitted, and
+    the step's committed-witness check has already ruled out a write.
+    """
+    from .cli_ops import OpError
+
+    if isinstance(error, OpError):
+        return error.details.get("status") == "retryable" and not error.details.get("committed")
+    return isinstance(error, OSError)
 
 
 def _dispatch_step(
@@ -4839,8 +4881,9 @@ def _execute_next(
         if not isinstance(stable_code, str) and ":" in str(error):
             candidate = str(error).split(":", 1)[0]
             stable_code = candidate if re.fullmatch(r"[A-Z][A-Z0-9_]+", candidate) else None
+        retryable = _retryable_failure(error)
         code = stable_code or (
-            "CURATION_RETRYABLE_FAILURE" if isinstance(error, OSError) else "CURATION_STEP_FAILED"
+            "CURATION_RETRYABLE_FAILURE" if retryable else "CURATION_STEP_FAILED"
         )
         _record_failed_attempt(
             store,
@@ -4849,7 +4892,7 @@ def _execute_next(
             step_id=step["step_id"],
             operation_identity=operation_identity,
             code=code,
-            retryable=isinstance(error, OSError),
+            retryable=retryable,
         )
         raise _error(code, str(error)) from error
     _fault_barrier("after-compensation-leaf-witness" if compensation else "after-leaf-witness")
@@ -5340,9 +5383,7 @@ class CurationStore:
             "phase": "proposed",
             "active_step": None,
         }
-        if not self.state_path(run_identity).exists():
-            self._write_json(self.state_path(run_identity), projection, create_only=True)
-        return {**projection, "plan": sealed}
+        return {**_sealed_run(self, run_identity, projection), "plan": sealed}
 
     def load_plan(self, run_identity: str) -> dict[str, Any]:
         plan = _validate_sealed_plan(self._read_json(self.plan_path(run_identity)))
@@ -5711,7 +5752,8 @@ class CurationStore:
         if len(ordered_committed) == len(steps):
             phase = "completed"
             next_action = None
-        elif failed:
+        elif failed_step is not None:
+            # A failed attempt that a later retry committed no longer holds the run back.
             phase = "partial" if committed else "failed"
             next_action = "resume" if retryable else ("propose-compensation" if committed else None)
         elif approval is None:
@@ -5751,6 +5793,32 @@ class CurationStore:
             "receipts": receipts,
             "next_action": None,
         }
+
+
+def _sealed_run(
+    store: CurationStore, run_identity: str, projection: dict[str, Any]
+) -> dict[str, Any]:
+    """The run a sealed plan names: new and proposed, or the one that plan already has.
+
+    A plan's identity names its run, so sealing the same plan again finds that run, which may
+    have started, failed or finished since. It answers in the run's own phase and next action.
+    """
+    if not store.state_path(run_identity).exists():
+        store._write_json(store.state_path(run_identity), projection, create_only=True)
+        return projection
+    state = store.reconstruct(run_identity)
+    if state["phase"] == "proposed":
+        return projection
+    return {
+        **projection,
+        **{
+            key: state[key]
+            for key in (
+                "phase", "committed_steps", "failed_step", "retryable", "error_code", "next_action"
+            )
+            if key in state
+        },
+    }
 
 
 class CompensationStore(CurationStore):
@@ -6026,6 +6094,7 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                 **_later_states(forward_plan, committed, ordinal),
                 **(_chained_states(forward_step, binding) or {}),
             },
+            drift="CURATION_BINDING_STALE",
         )
         derived = _compensation_args(forward_step, binding, receipt, operation_identity)
         if derived is None:
@@ -6078,9 +6147,7 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
         "phase": "proposed",
         "active_step": None,
     }
-    if not store.state_path(run_id).exists():
-        store._write_json(store.state_path(run_id), projection, create_only=True)
-    return {**projection, "plan": sealed}
+    return {**_sealed_run(store, run_id, projection), "plan": sealed}
 
 
 def apply_compensation(

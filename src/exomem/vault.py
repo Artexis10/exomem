@@ -9619,6 +9619,49 @@ def _squatter_claimants(
     )
 
 
+def _prior_path_claimants(
+    cleaned: str,
+    vault_root: Path,
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The visible live pages that left the path `cleaned`, as written or under Knowledge Base."""
+    claims = _current_claims(resolver, vault_root)
+    for key in (cleaned, managed_join(cleaned)):
+        claimed = _live_claimants(
+            claims.claimants(key), resolver, contains, targeted=targeted, visible=visible
+        )
+        if claimed:
+            return claimed
+    return []
+
+
+def prior_path_pages(
+    vault_root: Path,
+    value: str,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> list[str]:
+    """The live pages whose lineage names the path `value`, as a link to that path resolves it.
+
+    A page that `visible` hides counts for nothing, so a hidden page reads as no page.
+    """
+    cleaned = wikilink_page_key(split_wikilink_target(value)[0])
+    if "/" not in cleaned:
+        return []
+    return [
+        candidate.path
+        for candidate in _prior_path_claimants(
+            cleaned, vault_root, resolver, resolver.full_paths.__contains__,
+            targeted=False, visible=visible,
+        )
+    ]
+
+
 def _normalize_wikilink(
     target: str,
     vault_root: Path,
@@ -9693,13 +9736,11 @@ def _normalize_wikilink(
 
     # A path that a moved page left names that page while exactly one visible live page claims it.
     if "/" in cleaned:
-        claims = _current_claims(resolver, vault_root)
-        for key in (cleaned, managed_join(cleaned)):
-            claimed = _live_claimants(
-                claims.claimants(key), resolver, contains, targeted=targeted, visible=visible
-            )
-            if claimed:
-                return _selected(claimed, "prior path")
+        claimed = _prior_path_claimants(
+            cleaned, vault_root, resolver, contains, targeted=targeted, visible=visible
+        )
+        if claimed:
+            return _selected(claimed, "prior path")
 
     # A path that a converted collection retired names its stored row. A strict
     # caller needs a file, which that path no longer has.

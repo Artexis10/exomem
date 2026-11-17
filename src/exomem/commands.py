@@ -6374,7 +6374,8 @@ def op_move_file(
 
     Returns: {old_path, new_path, wikilinks_updated, path_mentions_updated,
     files_touched, warnings[, pointer_writes]}; a preview adds referrers and
-    preview_digest.
+    preview_digest, and store_rows, the one outcome of the rows the collection
+    store keeps without a page, when the vault keeps collections in the store.
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
             POINTER_PREVIEW_REQUIRED; CURATED_PROTECTED;
             PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH (either end is a

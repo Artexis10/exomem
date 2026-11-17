@@ -433,13 +433,18 @@ compiled page's `sources:` citation writes that back-reference.
 A move preview SHALL give each referrer exactly one outcome: `rewritten`,
 `pointer-repointed (append-only page)`, `unchanged: resolves via prior path`,
 `unchanged: keeps the old path`, or `refused` with its cause. A Records row or
-a Planning item that names the moved path SHALL be `rewritten`, as any page
-the mover may write is. A reference that the move does not write, such as a
-link in a page the mover may not write or a prose path in an append-only page,
-SHALL be `unchanged: resolves via prior path` when the moved page records the
-move in its lineage. It SHALL be `unchanged: keeps the old path` when the moved
-file records no lineage, such as a binary file or a page without a frontmatter
-block; that reference dangles, and the owner's audit reports it. A restricted mover's preview SHALL list
+a Planning item that a page holds and that names the moved path SHALL be
+`rewritten`, as any page the mover may write is. A reference that the move does
+not write, such as a link in a page the mover may not write or a prose path in
+an append-only page, SHALL be `unchanged: resolves via prior path` when the
+moved page records the move in its lineage. It SHALL be `unchanged: keeps the
+old path` when the moved file records no lineage, such as a binary file or a
+page without a frontmatter block; that reference dangles, and the owner's audit
+reports it. A move writes no row that the collection store keeps without a
+page, and no index maps a row's values to the pages they name. When the vault
+keeps collections in the store, the preview SHALL therefore give those rows one
+shared outcome in `store_rows`, by the same lineage rule, and a stored row's
+link or path value SHALL resolve through that lineage. A restricted mover's preview SHALL list
 only pages it may see, and its answer SHALL match a vault without the withheld
 pages. The preview SHALL return a digest of its outcomes and bindings. A move
 that repoints an append-only page SHALL commit only with that digest, under
@@ -451,6 +456,14 @@ the approval rule of the governed pointer write.
   Records row reference by path
 - **THEN** the preview lists the writable note and the Records row as
   `rewritten` and the Source as `pointer-repointed (append-only page)`
+
+#### Scenario: A preview names the outcome of stored rows
+
+- **WHEN** a caller previews moving a note in a vault whose collection store
+  keeps a Records row without a page, and that row names the note's path
+- **THEN** the preview's `store_rows` is `unchanged: resolves via prior path`
+- **AND** after the move the row keeps the old path, a query still shows it,
+  and a read of that path returns the moved note
 
 #### Scenario: A move rewrites collection rows
 

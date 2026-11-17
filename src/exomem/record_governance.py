@@ -1375,12 +1375,14 @@ class _LinkProjector:
                         inner.split("|", 1)[0].strip(),
                         self.root,
                         resolver=resolver,
+                        targeted_namespace_contains=self._names_file,
                         strict=True,
                         visible=visible,
                     )
                 except vault.UnresolvedWikilinkError:
                     canonical, _warning = vault.normalize_wikilink(
                         inner.split("|", 1)[0].strip(), self.root, resolver=resolver,
+                        targeted_namespace_contains=self._names_file,
                         visible=visible, retired=self._retired_target,
                     )
                 except vault.WikilinkError:
@@ -1388,7 +1390,8 @@ class _LinkProjector:
                 target = canonical.split("#", 1)[0] + ".md"
             elif "/" in raw and not raw.startswith(("/", "\\")):
                 canonical, _warning = vault.normalize_wikilink(
-                    raw, self.root, resolver=self.resolver, retired=self._retired_target
+                    raw, self.root, resolver=self.resolver,
+                    targeted_namespace_contains=self._names_file, retired=self._retired_target,
                 )
                 if not canonical or "#" in canonical:
                     return False
@@ -1425,6 +1428,18 @@ class _LinkProjector:
             allowed = (self.authorize_path(relative) if self.authorize_path is not None
                        else _authorize(self.root, relative, receipt=True, policy=self.policy))
         return self._remember(relative, allowed)
+
+    def _names_file(self, key: str) -> bool:
+        """Whether the explicit link key `key` names a Markdown file, as the target check reads it.
+
+        A path-shaped link resolves without the index. This lets the resolver follow a path that a
+        moved page left to the live page whose lineage records it.
+        """
+        try:
+            vault.resolve_under_vault(self.root, f"{key}.md", must_exist=True, must_be_file=True)
+        except vault.VaultPathError:
+            return False
+        return True
 
     def _remember(self, target: str, allowed: bool) -> bool:
         if target in self.verdicts:

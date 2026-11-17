@@ -132,7 +132,8 @@ def test_compensation_proposal_refuses_drift_from_forward_witness(vault: Path) -
         encoding="utf-8",
     )
 
-    with pytest.raises(curation.CurationError, match="CURATION_OUTCOME_UNCERTAIN"):
+    # Work after the step is no uncertain outcome: the step's effect is known, and the page moved on.
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
         curation.propose_compensation(vault, run_id=proposed["run_id"])
 
     assert "changed later" in target.read_text(encoding="utf-8")

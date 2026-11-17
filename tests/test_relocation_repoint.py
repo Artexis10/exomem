@@ -13,10 +13,16 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 from lifecycle_fixtures import PLANNING_PATH, planning_manifest
+from test_collection_store_conversion import convert, serve, settled
+from test_collection_store_migration import WORK, env, legacy_vault, migrate  # noqa: F401 - env fixture
+from test_collection_store_s1_gate import _until
+from test_collection_store_service import OWNER, call
+from test_collection_store_writer import CID
 from test_records_recall_policy import _manifest
 
-from exomem import call_ledger, commands, move_file, pointer_write, writer_lease
+from exomem import call_ledger, commands, move_file, pointer_write, repoint_links, writer_lease
 from exomem import server as server_module
+from exomem.governance.principal import request_scope
 
 NOTE = "Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md"
 MOVED_NOTE = "Knowledge Base/Notes/Insights/Postgres/autovacuum-thresholds-prevent-table-bloat.md"
@@ -173,6 +179,46 @@ def test_a_move_rewrites_the_moved_path_in_a_records_row_and_a_planning_item(vau
     assert [page.read_text(encoding="utf-8") for page in pages] == [
         text.replace(_link(NOTE), _link(MOVED_NOTE)) for text in before
     ]
+
+
+def test_a_preview_names_the_outcome_of_rows_the_collection_store_keeps(env, monkeypatch):  # noqa: F811
+    """A preview that lists only pages where the collection store keeps rows without one, so the
+    mover reads the listed referrers as all of them; or a stored row whose link to the old path
+    no longer reaches the note once the note moves."""
+    root = legacy_vault(env, relationships=True)
+    assert migrate(root, "apply") == 0
+    service = serve(root, monkeypatch)
+    try:
+        # The first page bootstraps the vault's relation review; the moved note links to it.
+        first = call(root, "remember", content="# Bloat\n\n- [operating constraint] Bloat slows scans.\n",
+                     title="Bloat", slug="bloat", suggestions=False)["path"]
+        old = call(root, "remember", title="Thresholds", slug="thresholds", suggestions=False,
+                   content=f"# Thresholds\n\n- [operating constraint] They bound {_link(first)}.\n")["path"]
+        folder, name = old.rsplit("/", 1)
+        new = f"{folder}/Tuning/{name}"
+        work = call(root, "record_memory", action="query", collection=WORK)
+        row = next(row for row in work["rows"] if row["title"] == "One")
+        # A plain path under the knowledge-base folder, as a row an agent wrote may hold it.
+        link = old.removeprefix("Knowledge Base/")
+        call(root, "record_memory", action="update", collection=WORK, item_key=row["record_id"],
+             changes={"related": link}, why="link the note",
+             expected_container_hash=work["snapshot"], expected_item_version=row["item_version"])
+        _until(lambda: settled(root, CID), 30)
+        # The row now lives only in the store: no page holds it for a preview to find.
+        convert(root, WORK)
+
+        preview = call(root, "manage_memory_file", operation="move", old_path=old, new_path=new,
+                       validate_only=True)
+        with request_scope(OWNER):
+            sealed = repoint_links.prepare(root, [(old, new)], {})
+        call(root, "manage_memory_file", operation="move", old_path=old, new_path=new)
+
+        assert preview["store_rows"] == sealed["store_rows"] == move_file.KEPT
+        rows = call(root, "record_memory", action="query", collection=WORK)["rows"]
+        assert next(row for row in rows if row["title"] == "One").get("related") == link
+        assert call(root, "read_memory", path=link)["path"] == new
+    finally:
+        service.stop()
 
 
 @pytest.fixture

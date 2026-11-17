@@ -94,6 +94,8 @@ class MoveFileResult:
     pointer_repointed: list[dict[str, str]] = field(default_factory=list)
     #: A preview's one outcome per referrer the caller may see; None for a commit.
     referrers: list[dict[str, str]] | None = None
+    #: A preview's outcome for the rows the collection store keeps (`store_rows_outcome`).
+    store_rows: str | None = None
     #: The digest a commit that repoints append-only referrers passes; None when it cannot commit.
     preview_digest: str | None = None
 
@@ -114,6 +116,8 @@ class MoveFileResult:
         if self.referrers is not None:
             answer["referrers"] = self.referrers
             answer["preview_digest"] = self.preview_digest
+        if self.store_rows is not None:
+            answer["store_rows"] = self.store_rows
         return answer
 
 
@@ -504,6 +508,19 @@ KEPT = "unchanged: resolves via prior path"
 REFUSED = "refused"
 #: A reference a move leaves while the moved file records no lineage, so nothing resolves it.
 KEPT_DANGLING = "unchanged: keeps the old path"
+
+
+def store_rows_outcome(vault_root: Path, unchanged: str) -> str | None:
+    """The preview outcome of the rows that the vault's collection store keeps without a page.
+
+    A move writes no such row, and no index maps a row's values to the pages they name, so a
+    preview cannot list the rows that name the moved path. They share `unchanged`, the outcome of
+    every reference the move leaves. None when the vault keeps every collection in files.
+    """
+    from .collection_store import ownership
+
+    return None if ownership.file_only(vault_root) else unchanged
+
 #: The `manage_memory_file` call whose preview digest approves a move's repoints of append-only
 #: referrers; a refusal spells it for the surface that serves the call.
 _MOVE_PREVIEW = MappingProxyType({"operation": "move", "validate_only": True})
@@ -1233,6 +1250,9 @@ def _move_file_local(
     keeps_lineage = records_lineage(
         vault_root, old_rel, new_rel, undo=undo_lineage and not keep_vacated
     )
+    store_rows = (
+        store_rows_outcome(vault_root, KEPT if keeps_lineage else KEPT_DANGLING) if preview else None
+    )
     # One outcome per referrer the mover may see, and the pointer writes the move makes to
     # append-only pages: those it restores from the records of the move it undoes, and the
     # others, which the call does not name and the preview digest approves.
@@ -1301,6 +1321,7 @@ def _move_file_local(
             warnings=list(warnings),
             path_mentions_updated=reported_mentions,
             referrers=referrers,
+            store_rows=store_rows,
         )
     if not validate_only:
         try:
@@ -1369,6 +1390,7 @@ def _move_file_local(
                 path_mentions_updated=reported_mentions,
                 referrers=referrers if preview else None,
                 preview_digest=digest if preview else None,
+                store_rows=store_rows,
             ),
             tuple(before),
             tuple(after),

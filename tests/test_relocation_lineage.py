@@ -405,3 +405,51 @@ def test_a_move_judges_and_indexes_a_link_to_the_old_path_as_a_link_to_the_new_o
             "SELECT DISTINCT dst_key FROM graph_edges WHERE source_path = ?", (linker,)
         ).fetchall()
     assert edges == [(f"file:{B}",)]
+
+
+def test_reading_a_moved_page_by_a_path_it_left_finds_it_and_a_hidden_one_reads_as_missing(
+    moved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read of an old path that answers NOT_FOUND while a link to the same path finds the page,
+    or that finds a page the caller may not see and so tells them it exists."""
+    from exomem import commands
+    from exomem.governance import egress
+
+    assert commands.read_memory_stored(moved, A)["path"] == C
+    assert commands.read_memory_stored(moved, A.removesuffix(".md"))["path"] == C
+
+    monkeypatch.setattr(egress, "caller_restricted", lambda _root, **_kw: True)
+    monkeypatch.setattr(
+        egress, "restricted_release_filter", lambda _root, **_kw: lambda path: path != C
+    )
+    with pytest.raises(ValueError) as hidden:
+        commands.read_memory_stored(moved, A)
+    with pytest.raises(ValueError) as absent:
+        commands.read_memory_stored(moved, "Knowledge Base/Notes/Insights/never-there.md")
+    assert str(hidden.value).split(":", 1)[0] == str(absent.value).split(":", 1)[0]
+
+
+def _link_findings(vault: Path, linker: str) -> list[str]:
+    report = audit.audit(vault, categories=["broken_wikilink", "forward_reference"])
+    return [finding.category for finding in report.findings if finding.path == linker]
+
+
+def test_a_link_to_a_path_a_page_left_is_no_forward_reference_unless_the_page_is_hidden(
+    moved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An audit that calls a link to a moved page's old path a link to a page not yet written,
+    while the resolver follows it; or that drops the finding for a caller who may not see the page,
+    and so tells them a hidden page exists."""
+    from exomem.governance import egress
+
+    linker = "Knowledge Base/Notes/Insights/linker.md"
+    _write(moved, linker, _note("Linker", body=f"See [[{A.removesuffix('.md')}]].\n"))
+    memory_refs.ReferenceIndex(moved).rebuild_all()
+
+    assert _link_findings(moved, linker) == []
+
+    monkeypatch.setattr(egress, "caller_restricted", lambda _root, **_kw: True)
+    monkeypatch.setattr(
+        egress, "restricted_release_filter", lambda _root, **_kw: lambda path: path != C
+    )
+    assert _link_findings(moved, linker) == ["forward_reference"]

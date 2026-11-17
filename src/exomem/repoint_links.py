@@ -14,7 +14,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import fold_leaf, move_file, page_fields, path_mentions, pointer_write, vault
+from . import fold_leaf, move_file, page_fields, path_mentions, pointer_write, semantic_writes, vault
 from .semantic_writes import rewrite_wikilinks_for_move
 
 #: The call a refusal names as the one whose approval covers the repoints: the plan approval.
@@ -96,6 +96,8 @@ def prepare(
     referrers: list[dict[str, str]] = []
     repoints: list[pointer_write.PointerWrite] = []
     refused: list[pointer_write.PointerWriteError] = []
+    # Each live page the step rewrites in place, whose lifecycle record the step carries.
+    carried: dict[str, str] = {}
     for rel in sorted({location.get(rel, rel) for rel in found}):
         if rel in projected:
             text = projected[rel]
@@ -129,9 +131,16 @@ def prepare(
         if not append_only:
             # The writable page's own undo; an append-only page reverts from its pointer record.
             row["restore"] = _delta(text, after)
+            if rel not in projected:
+                carried[rel] = text
         pages[rel] = row
     if refused:
         raise fold_leaf.refuse(refused[0].code, refused[0].reason)
+    try:
+        semantic_writes.require_lifecycle_settled(root, carried)
+    except semantic_writes.SemanticWriteError as error:
+        raise fold_leaf.refuse(error.code, error.reason) from error
+    store_rows = move_file.store_rows_outcome(root, unchanged)
     # Each moved page is bound as the plan leaves it, rewritten or not, so the witness always
     # states where the plan's pages stand.
     for _old_rel, new_rel in moves:
@@ -147,6 +156,7 @@ def prepare(
         "renames": [[rename.old, rename.new, list(rename.longer)] for rename in renames],
         "pages": [pages[rel] for rel in sorted(pages)],
         "referrers": referrers,
+        **({"store_rows": store_rows} if store_rows is not None else {}),
         "preview_digest": pointer_write.preview_digest(location, repoints),
         **({"mentions_unchecked": True} if not mentions.complete else {}),
     }
@@ -340,19 +350,47 @@ def _sealed_text(root: Path, rel: str, expected: str) -> tuple[str, Any]:
 
 
 def _commit(root: Path, writes: Collection[vault.PlannedWrite]) -> None:
-    """Commit the writes in one batch with the step's witness, or the witness alone."""
+    """Commit the writes in one batch with the step's witness, or the witness alone.
+
+    Each rewritten page's relation-review lifecycle record moves with its bytes in the same
+    batch, as a move's own link rewrites do, so the page's next governed write finds the record
+    binding it and any reviewed-none decision still in force.
+    """
     from . import add, preserve
 
     if not writes:
         fold_leaf.commit_witness(root)
         return
+    pages = tuple(writes)
     intents: list[object] = []
-    try:
-        committed = preserve.commit_media_sidecar_writes(
-            root, tuple(writes), post_commit_fanout=False, publication_intents_out=intents
+    committed: list[Path] = []
+
+    def mutate(lifecycle: tuple[vault.PlannedWrite, ...], guards: tuple[Any, ...]) -> None:
+        written = preserve.commit_media_sidecar_writes(
+            root,
+            (*lifecycle, *pages),
+            post_commit_fanout=False,
+            publication_intents_out=intents,
+            required_guards=guards,
         )
-    except vault.ContentHashMismatchError as error:
+        assert isinstance(written, list)  # no deferred graph completion was asked for
+        committed.extend(written)
+
+    try:
+        semantic_writes.commit_rewrites(
+            root, preflight=semantic_writes.preflight_rewrites(root, pages), mutate=mutate
+        )
+    except (vault.ContentHashMismatchError, vault.PathGuardError) as error:
         raise fold_leaf.refuse(
             "CURATION_BINDING_STALE", "a page changed while the step wrote it"
         ) from error
-    add.deferred_fanout(root, list(committed), created_paths=[], publication_intents=intents)
+    except semantic_writes.SemanticWriteError as error:
+        code = "CURATION_BINDING_STALE" if error.code == "STALE_SEMANTIC_WRITE" else error.code
+        raise fold_leaf.refuse(code, error.reason) from error
+    written = {write.path for write in pages}
+    add.deferred_fanout(
+        root,
+        [path for path in committed if path in written],
+        created_paths=[],
+        publication_intents=intents,
+    )

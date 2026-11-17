@@ -2781,6 +2781,23 @@ def _check_wikilinks(
         if isinstance(title, str) and title.strip():
             titles_to_paths.setdefault(vault_module.title_key(title), []).append(no_ext)
 
+    from .governance import egress
+
+    # A path that a moved page left resolves to that page, as the resolver's own step decides,
+    # among the pages the caller may see.
+    visible = (
+        egress.restricted_release_filter(vault_root)
+        if egress.caller_restricted(vault_root)
+        else None
+    )
+    resolver: vault_module.WikilinkResolver | None = None
+
+    def prior_claimants(target: str) -> list[str]:
+        nonlocal resolver
+        if resolver is None:
+            resolver = find_module.shared_resolver(vault_root)
+        return vault_module.prior_path_pages(vault_root, target, resolver, visible=visible)
+
     for page in pages:
         # Skip wikilinks inside fenced code blocks and inline code spans —
         # `[[:space:]]` and similar regex/bash snippets aren't real links.
@@ -2803,6 +2820,9 @@ def _check_wikilinks(
             if target_for_resolve.lstrip("/") in full_paths:
                 continue
             if "/" in target_for_resolve and retired_link_target(vault_root, target_for_resolve):
+                continue
+            moved_claimants = prior_claimants(target_for_resolve) if "/" in target_for_resolve else []
+            if len(moved_claimants) == 1:
                 continue
             # Bare-name lookup: Obsidian resolves [[name]] by filename anywhere
             # in the vault. Only attempt if no path separator.
@@ -2842,6 +2862,7 @@ def _check_wikilinks(
                 or ambiguous_stem
                 or ambiguous_title
                 or non_markdown_collision
+                or moved_claimants
             )
             category = "broken_wikilink" if broken else "forward_reference"
             if category not in selected:
