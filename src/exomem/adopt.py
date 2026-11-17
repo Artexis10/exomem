@@ -969,7 +969,9 @@ def commit_import_items(
 
         sources_dir = kb / "Sources"
         pre_counts = (
-            indexes._count_sources(sources_dir) if reconcile or source_counts is None else dict(source_counts)
+            indexes._count_sources(sources_dir, vault_root=root)
+            if reconcile or source_counts is None
+            else dict(source_counts)
         )
         post_counts = dict(pre_counts)
         folders: list[str] = []

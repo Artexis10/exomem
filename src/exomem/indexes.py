@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
-from .kbdir import is_managed_root_name, managed_join, managed_relative
+from .kbdir import is_managed_root_name, managed_join, managed_relative, managed_splitter
 from .vault import (
     PathGuard,
     PlannedWrite,
@@ -134,7 +134,7 @@ def compute_updates(
     if not log_file.exists():
         raise FileNotFoundError(f"log.md missing: {log_file}")
 
-    counts = _count_sources(sources_dir) if source_counts is None else dict(source_counts)
+    counts = _count_sources(sources_dir, vault_root=vault_root) if source_counts is None else dict(source_counts)
     sources_index_text, sources_index_guard = read_guarded_universal_text(vault_root, sources_index)
     top_index_text, top_index_guard = read_guarded_universal_text(vault_root, top_index)
     log_text, log_guard = read_guarded_universal_text(vault_root, log_file)
@@ -218,26 +218,45 @@ def _count_markdown_pages(
 
 
 def _stored_index_listing(
-    directory: Path, *, on_error: Callable[[OSError], None] | None = None
+    directory: Path,
+    *,
+    on_error: Callable[[OSError], None] | None = None,
+    vault_root: Path | None = None,
+    only: tuple[str, ...] | None = None,
 ):
-    """Stored count inputs plus the same unowned directory entries the file counters see."""
+    """Stored count inputs plus the same unowned directory entries the file counters see.
+
+    ``vault_root`` is the vault that holds ``directory``. A caller that has no vault leaves it out, and
+    a `nested` layout then finds it from the path: ``directory`` sits in the wrapper folder. A `root`
+    layout has no wrapper to find it by, so such a caller reads files.
+
+    ``only`` narrows the listing to those folders of ``directory`` (names relative to it). A caller
+    whose ``directory`` is the managed root of a `root` vault, which holds every area, asks for its own.
+    """
     from .vault_store import mode, ownership, read
 
-    if not is_managed_root_name(directory.parent.name):
-        return None  # Standalone directory counters have no vault whose mode they can inspect.
-    root = directory.parents[1]
+    if vault_root is None:
+        if not is_managed_root_name(directory.parent.name):
+            return None  # Standalone directory counters have no vault whose mode they can inspect.
+        vault_root = directory.parents[1]
+    root = vault_root
     if not mode.store_mode_for_reads(root):
         return None
-    prefix = directory.relative_to(root).as_posix() + "/"
+    below = directory.relative_to(root).as_posix()
+    prefix = "" if below == "." else below + "/"
+    starts = [prefix] if only is None else [f"{prefix}{name}/" for name in only]
     with read.snapshot(root) as view:
-        pages = {meta.path[len(prefix):] for meta in view.pages(prefix)}
+        pages = {meta.path[len(prefix):] for start in starts for meta in view.pages(start)}
     folders = {
         "/".join(parts[:depth])
         for path in pages
         for parts in [path.split("/")]
         for depth in range(1, len(parts))
     }
-    pending = [directory]
+    pending = [directory] if only is None else [directory / name for name in only]
+    if only is not None:
+        # The scan below reports what each folder holds, not the folder: an existing folder on disk is a folder.
+        folders.update(name for name in only if (directory / name).is_dir())
     while pending:
         current = pending.pop()
         try:
@@ -264,10 +283,13 @@ def _stored_index_listing(
 
 
 def _count_sources(
-    sources_dir: Path, *, on_error: Callable[[OSError], None] | None = None
+    sources_dir: Path,
+    *,
+    on_error: Callable[[OSError], None] | None = None,
+    vault_root: Path | None = None,
 ) -> dict[str, int]:
     """Per top-level source-type count, including themed nested folders."""
-    stored = _stored_index_listing(sources_dir, on_error=on_error)
+    stored = _stored_index_listing(sources_dir, on_error=on_error, vault_root=vault_root)
     if stored is not None:
         out = {
             name: 0 for name in stored.folders
@@ -373,15 +395,23 @@ def _owner_of(owners: tuple[_NotesOwner, ...], parts: tuple[str, ...]) -> _Notes
     return best
 
 
-def _count_notes(notes_dir: Path, *, home_set: homes.HomeSet | None = None) -> dict[str, int]:
+def _count_notes(
+    notes_dir: Path, *, home_set: homes.HomeSet | None = None, vault_root: Path | None = None
+) -> dict[str, int]:
     """Per-folder compiled-note count, recursing into project/domain/medium subfolders.
 
     Returns a dict keyed by the token of each folder's `index.md` Counts row: the type's
     row for a shipped type folder (e.g. "research", "insight", "production-log") and the
     home's key for a home. A page counts once, under the deepest folder that owns it.
     Excludes index.md files and any folder starting with "_".
+
+    ``notes_dir`` is the compiled parent. A layout with no compiled parent (`root`) passes the managed
+    root, which holds every area, so the stored listing is narrowed to the compiled areas.
     """
-    stored = _stored_index_listing(notes_dir)
+    only = None if note_types.compiled_parent() else tuple(
+        dict.fromkeys(owner.parts[0] for owner in _notes_owners(home_set))
+    )
+    stored = _stored_index_listing(notes_dir, vault_root=vault_root, only=only)
     if stored is not None:
         owners = tuple(
             owner for owner in _notes_owners(home_set)
@@ -626,15 +656,17 @@ def _count_entities(
     entities_dir: Path,
     *,
     registry: EntityTypeRegistry | None = None,
+    vault_root: Path | None = None,
 ) -> dict[str, int]:
     """Per-entity-type count, mirrors `_count_sources` shape.
 
     Returns a dict keyed by registered entity-type ID. Excludes index.md and
-    `_*` folders.
+    `_*` folders. ``vault_root`` is the vault that holds ``entities_dir``; without it a `nested`
+    vault is found from the path.
     """
-    stored = _stored_index_listing(entities_dir)
+    stored = _stored_index_listing(entities_dir, vault_root=vault_root)
     if stored is not None:
-        registry = registry or load_entity_types(entities_dir.parents[1])
+        registry = registry or load_entity_types(vault_root or entities_dir.parents[1])
         out = {
             definition.id: 0 for folder in stored.folders
             if "/" not in folder and not folder.startswith("_")
@@ -648,7 +680,7 @@ def _count_entities(
     out: dict[str, int] = {}
     if not entities_dir.is_dir():
         return out
-    registry = registry or load_entity_types(entities_dir.parents[1])
+    registry = registry or load_entity_types(vault_root or entities_dir.parents[1])
     for sub in entities_dir.iterdir():
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
@@ -748,6 +780,8 @@ _NOTES_H3_COUNT = re.compile(
 
 # Subfolder bullet in Notes/index.md:
 # `- [[<KB>/Notes/Research/Project Alpha/|Project Alpha]] (2) — desc`
+# Only the `nested` hub has a `Notes/index.md` (`refresh_subindexes` builds it behind `has_notes_hub`), so
+# the `Notes/` in this pattern is that hub's parent folder and a `root` vault never reaches it.
 @cache
 def _notes_subfolder_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
     return re.compile(
@@ -1053,13 +1087,13 @@ def compute_subindex_writes(
 
     if sources_counts is None:
         with call_spans.span("indexes.source_census"):
-            sources_counts = _count_sources(sources_dir)
+            sources_counts = _count_sources(sources_dir, vault_root=vault_root)
     else:
         sources_counts = dict(sources_counts)
     home_set = homes.load(vault_root)
     notes_owners = _notes_owners(home_set)
-    notes_counts = _count_notes(notes_dir, home_set=home_set)
-    entities_counts = _count_entities(entities_dir, registry=entity_registry)
+    notes_counts = _count_notes(notes_dir, home_set=home_set, vault_root=vault_root)
+    entities_counts = _count_entities(entities_dir, registry=entity_registry, vault_root=vault_root)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir) if has_notes_hub else {}
 
     # Virtually count each pending path so the index shows post-write state.

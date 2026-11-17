@@ -762,7 +762,7 @@ def add(
     count_errors: list[OSError] = []
     with call_spans.span("source.counts"):
         pre_counts = indexes._count_sources(
-            kb_root(vault_root) / "Sources", on_error=count_errors.append
+            kb_root(vault_root) / "Sources", on_error=count_errors.append, vault_root=vault_root
         )
     post_counts = dict(pre_counts)
     if in_sources:

@@ -1045,6 +1045,15 @@ def _check_bridge_review(
     )
 
 
+def _compiled_area_prefixes(vault_root: Path) -> tuple[str, ...]:
+    """The vault-relative prefix of each compiled area, for `str.startswith`.
+
+    The areas come from the registry (`indexes.compiled_area_folders`), so the prefixes hold in both
+    layouts: below the `Notes/` parent in `nested`, at the managed root in `root`.
+    """
+    return tuple(managed_join(f"{area}/") for area in indexes.compiled_area_folders(vault_root))
+
+
 @call_spans.timed("audit.path_variants")
 def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     """Report sibling names that one portable filesystem would hold as a single entry.
@@ -3297,11 +3306,11 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
         declared[key] = count
 
     # Actual counts.
-    sources = indexes._count_sources(kb / "Sources")
+    sources = indexes._count_sources(kb / "Sources", vault_root=vault_root)
     notes = indexes._count_notes(
-        kb.joinpath(*note_types.compiled_parent()), home_set=homes.load(vault_root)
+        kb.joinpath(*note_types.compiled_parent()), home_set=homes.load(vault_root), vault_root=vault_root
     )
-    entities = indexes._count_entities(kb / "Entities")
+    entities = indexes._count_entities(kb / "Entities", vault_root=vault_root)
     actual: dict[str, int] = {
         "sources": sum(sources.values()),
         "notes": sum(notes.values()),
@@ -5717,10 +5726,11 @@ def _check_unreflected_observations(
     prefilter_targets = [
         (target, collection_claims.normalize_terms(target.claims)) for target in targets
     ]
+    compiled_prefixes = _compiled_area_prefixes(root)
     for page in sorted(pages, key=lambda page: page.rel_path):
         request_budget.checkpoint()
         if not (
-            page.rel_path.startswith(managed_join("Notes/"))
+            page.rel_path.startswith(compiled_prefixes)
             or page.rel_path.startswith(managed_join("Evidence/"))
         ):
             continue
@@ -5992,11 +6002,10 @@ def _check_collection_candidate(
     language = semantic_language_registry.load_registry(root)
     relations = relation_registry.load_registry(root)
     rows: list[dict[str, Any]] = []
+    compiled_prefixes = _compiled_area_prefixes(root)
     for page in pages:
         request_budget.checkpoint()
-        if not page.rel_path.startswith(managed_join("Notes/")) or not authorize(
-            page.rel_path
-        ):
+        if not page.rel_path.startswith(compiled_prefixes) or not authorize(page.rel_path):
             continue
         if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
             continue
