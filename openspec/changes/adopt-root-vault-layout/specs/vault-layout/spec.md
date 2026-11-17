@@ -128,7 +128,7 @@ In `root` layout, a page path SHALL hold an area, the group folders that the pag
 - **AND** its metadata records the new domain
 
 ### Requirement: Derived names are unique across the vault
-A page name derived under `title` style in a `root` vault, whether a writer gives it to a new page or the relayout gives it to an existing page, SHALL be unique among the Markdown pages that Exomem owns, across the whole vault and not per folder, compared after NFC normalisation and casefolding. On a collision the writer SHALL append ` (2)`, ` (3)` and so on, taking the lowest number that no page holds. The suffix SHALL count toward the filename length cap. A derived name SHALL yield to fixed names whatever the path order. A relayout SHALL resolve collisions among derived names in ascending order of the pages' current paths, so that the same plan input gives the same names. A slug name, and a `title` name in a `nested` vault, SHALL keep the collision contract of `add-readable-note-filenames`.
+A page name derived under `title` style in a `root` vault, whether a writer gives it to a new page or the relayout gives it to an existing page, SHALL be unique among the Markdown pages that Exomem owns, across the whole vault and not per folder, compared after NFC normalisation and casefolding. On a collision the writer SHALL append ` (2)`, ` (3)` and so on, taking the lowest number that no page holds. The suffix SHALL count toward the filename length cap. A derived name SHALL yield to fixed names whatever the path order. A relayout SHALL resolve collisions among derived names in ascending order of the pages' current paths, so that the same plan input gives the same names. A slug name, and a `title` name in a `nested` vault, SHALL keep the collision contract of the `vault-file-naming` requirement "Case-Insensitive Collision Detection".
 
 #### Scenario: Two pages with the same title get distinct names
 - **WHEN** a second page is created in a `root` vault with a title whose derived name an existing page already holds
@@ -156,12 +156,12 @@ A page name derived under `title` style in a `root` vault, whether a writer give
 
 #### Scenario: A slug name in a nested vault keeps its contract
 - **WHEN** a page with a colliding slug name is created in a `nested` vault
-- **THEN** the writer disambiguates it as `add-readable-note-filenames` defines
+- **THEN** the writer disambiguates it as the `vault-file-naming` capability defines
 
 ### Requirement: A page name is derived or fixed
 A name SHALL be derived when the page's note type names its files from the page's frontmatter `title`, as a title stem with or without a date prefix. `title` means the frontmatter value only: an H1 or a filename stem SHALL NOT stand in for it, and a page with no frontmatter title SHALL keep its name. Every other name SHALL be fixed: an Evidence original, a Records or Planning recipe name, a generated navigation page (`index.md`, `log.md`, `hub.md`), a page named after the file it describes, and any page whose type has no title rule or that sits outside every registry area. The class SHALL follow the page's note type. A fixed name SHALL never be renamed after creation, and a new write whose fixed name collides inside a single folder SHALL keep today's disambiguation.
 
-A retitle SHALL NOT rename a file. After a governed write or an outside edit changes a page's title, the page SHALL keep its name and no link SHALL be repointed, as in every vault today. A change of filename style SHALL rename nothing in either layout. Only the relayout gives an existing derived name the form of the vault's resolved filename style. No record tells a name that a caller chose from a derived name, so the relayout treats every title-named page as derived.
+Whether a retitle or a style change renames a file is stated once, in the `vault-file-naming` requirement "No Existing File Is Renamed": neither does, and only the relayout gives an existing derived name the form of the vault's resolved filename style. No record tells a name that a caller chose from a derived name, so the relayout treats every title-named page as derived.
 
 #### Scenario: A name is fixed when the type has no title rule
 - **WHEN** a governed write creates an Evidence page or a generated navigation page
@@ -171,20 +171,6 @@ A retitle SHALL NOT rename a file. After a governed write or an outside edit cha
 #### Scenario: A page without a frontmatter title keeps its name
 - **WHEN** a relayout plans a page whose frontmatter has no `title`, though its body starts with a heading
 - **THEN** the page keeps its filename
-
-#### Scenario: A retitle keeps the file name
-- **WHEN** a governed write changes the title of a page with a derived name, in a `root` vault or a `nested` vault
-- **THEN** the page keeps its path
-- **AND** no link is repointed
-
-#### Scenario: An outside edit to a title keeps the file name
-- **WHEN** a person edits a page's title in an editor and the outside-edit import records the edit as a governed write
-- **THEN** the page keeps its path
-
-#### Scenario: A style change renames nothing
-- **WHEN** the filename style of a vault of either layout changes and a governed write then edits a page whose name was derived under the earlier style
-- **THEN** the page keeps its path
-- **AND** no link is repointed
 
 ### Requirement: Links use the shortest trailing path that resolves to a single file
 In a `root` vault, a writer SHALL emit the shortest trailing path of the target page, cut at a folder boundary, that resolves to exactly a single file for both Exomem and Obsidian. That path SHALL be `[[Name]]` when no other file that Obsidian sees has that name. When no trailing path singles the target out, the writer SHALL emit the target's full vault path. Graph rows SHALL keep the resolved vault path of the target. A link repoint SHALL change only the link's target text, and the repointed link SHALL resolve to the page it resolved to before. A writer in a `nested` vault SHALL keep today's link form.
