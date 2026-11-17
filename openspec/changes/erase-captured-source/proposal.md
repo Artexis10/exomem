@@ -32,7 +32,8 @@ The explicit operation grants no creator activation or production write authorit
 
 The change touches canonical capture custody, private retention producers, derived-data cleanup and the shared governed command registry.
 P4 remains the identity inventory; the custody evidence is not a second Source catalogue or watcher.
-Store integration needs the canonical store owner's purge and historical-provenance contract before its implementation.
+This change covers file-mode vaults. A store-mode vault refuses erasure until `erase-captured-source-in-store` ships its purge and provenance integration.
+cellctl and the platform chart gain a per-cell policy selection, so the operator enables erasure one cell at a time.
 Q retains each issued retirement intent until that exact Source incarnation finishes cleanup, then may capture a fresh incarnation.
 
 The guarantee excludes earlier backups, downloaded exports, caller-held copies, external synchronization history and forensic storage remnants.

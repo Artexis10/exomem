@@ -22,13 +22,15 @@ Restoring those copies can reintroduce the Source. Erasure does not infer semant
 
 ### D1. Bind one operation to one incarnation
 
-Expose `erase_captured_source` through the shared command registry as `sources.erase_capture`.
+Expose `erase_captured_source` through the shared command registry as `sources.erase`, in the `service` listing tier (D4a).
 Accept `operation_id`, `source_identity`, `expected_source_ref` and `expected_source_hash`.
 Require the existing whole-namespace content authority before lookup, replay or disclosure, and recheck authority at commit and terminal release.
 Host configuration explicitly enables identity systems; its default enables none.
 The policy is configuration data, without a product-specific vocabulary in code.
 `EXOMEM_SOURCE_ERASURE_POLICY` is a typed JSON object whose `enabled_systems` array defaults empty.
 Disabling admission does not stop already-admitted cleanup or custody tracking for enrolled Sources.
+On Cloud, cellctl renders the policy into each cell that the platform chart value `cellctl.sourceErasureCellIds` lists.
+The chart-wide model environment refuses that variable, so no fleet default can enable erasure for every cell.
 
 Validate identity, immutable reference and current hash under the actual canonical writer boundary.
 An operation identifier binds that target permanently for its retained lifetime; retries cannot substitute another reference or hash.
@@ -40,6 +42,8 @@ Return `target_source_ref`, `status` and `target_retired`, with bounded componen
 Statuses are `complete`, `pending`, `failed` and `unknown`. Only complete acknowledged retirement returns `target_retired=true`.
 No path or logical identity lookup can redirect delayed cleanup to a replacement Source.
 Fresh capture uses a fresh reference. Completed cleanup needs no permanent identity tombstone.
+The retired manifest stays as a content-free completion record: a reference, hashes and opaque owner locators, with no body, title or path.
+A repeat call, also under a new operation identifier, answers `complete` from that record without repeating cleanup.
 
 ### D2. Retain canonical custody before bytes can survive
 
@@ -182,6 +186,10 @@ Each exact image carries `unknown_through_epoch`: ownership may be unknown for S
 A matching catalogue and a later Source birth can prove target ownership despite unattributed legacy bytes in the same image.
 Exact copies preserve that horizon.
 
+Fresh enrollment issues the birth. Payload custody issues it while the allocation is unpublished and has no registered producer.
+At that point the payload, result and native-copy hooks all record the capture, so the birth also marks coverage complete.
+An allocation that already registered a producer or published can hold earlier copies, so it receives no birth and stays out of coverage.
+
 Missing headers, hash drift or unexplained publication raise the affected horizon to the current canonical checkpoint.
 Retain earlier positive membership as uncertain until its copies resolve or retire.
 An indexed query includes every retained image whose horizon reaches the target birth, even when its recorded membership became unreadable.
@@ -195,6 +203,10 @@ Before the first dependent knowledge commit, reserve an uncertain latch under th
 Successful publication marks it present. Proven no-effect or complete rollback restores its previous state.
 Interrupted publication stays uncertain until existing producer recovery resolves the exact publication identity.
 Resolving one no-effect reservation cannot clear another unresolved publication; any successful dependency makes present sticky.
+
+A wikilink from another page is a dependency that no producer latch records.
+Before its cutoff, erasure therefore refuses a target whose canonical page has an inbound link, through the maintained inbound-link index.
+An unreadable index answers unknown. A cold index costs one pass over current pages, once per operation, before the cutoff.
 
 Use one recovery epoch per Source and producer family for collection writers.
 Concurrent operations join that epoch; exact operations remain in existing audit, version and import records.
@@ -287,9 +299,12 @@ Enrolled Sources write no shared navigation or activity entries, so cleanup neve
 The captured-Source inventory lists enrolled Sources instead. Sources outside custody keep their navigation and activity listing and are not erasure targets.
 No release recorded shared-page ownership, so no legacy shared-page cleanup exists.
 
-Store mode also requires page rows, held content, identifying audit material, projection intents/files and recovery copies to retire through its owner.
-Its purge contract and historical-provenance seam require agreement with the canonical store owner before store-owned implementation.
-File-mode custody and producer work can proceed independently. Store completeness remains unproved until that integration finishes.
+Process logs are a host-owned copy. A host with content-private logging acknowledges `host_logs`.
+Any other host reports `host_logs` as unknown, because no owner can prove that its logs omit the page.
+
+This change covers file mode. A store-mode vault refuses erasure with `SOURCE_ERASURE_MODE_UNSUPPORTED` before any lookup.
+Its policy read reports erasure disabled, so a consumer does not register against it.
+Change `erase-captured-source-in-store` owns the store purge and its historical-provenance integration.
 
 Reuse index-removal fan-out, but obtain completion acknowledgements from every required component.
 Registered, accepted or deferred work is pending. It is not a purge acknowledgement.
@@ -297,37 +312,6 @@ Fence deferred publishers by Source reference and expected incarnation at public
 Each derived owner compares its retained identity, hash or generation inside the same transaction that deletes its rows.
 A canonical path check before dispatch cannot authorize a later path-only delete.
 Each owner checks its bounded target set; database work does not grow with unrelated Sources.
-
-### D4b. Preserve store sequencing while retiring identifying material
-
-The store owner retains existing store, projection, rollback and replica-publication modules.
-This change owns the new `vault_store/purge.py` after the merged projector baseline.
-Its only existing store-schema edit narrows the audit trigger through one migration, reviewed by the schema owner.
-The integration uses existing guarded store commits: compare the target revision and hash inside the delete transaction.
-Store-wide monotonic revisions distinguish a replacement page even when its path or bytes match an earlier incarnation.
-Resolve only held rows proved to belong to the target; an unrelated person's edit is not erasure authority.
-
-After target-qualified projection and vector cleanup finish, redact identifying audit fields rather than deleting audit rows.
-Replace `path`, and `from_path` when set, with one opaque token per target life and original path.
-Never reuse a token across lives or targets. Both move halves use the same token for the same original path.
-Require `reserved_paths.classify_logical` to block each token and `ownership.classify` to classify it as something other than a page.
-Keep a null `from_path` null: audit readers use that distinction to identify move halves.
-Never make `path` null: vector readers interpret that value as a vault-wide reset.
-Set `sha256` null and replace the unstructured `reason` with fixed redaction text.
-Retain `seq`, `revision`, `operation`, the closed origin token and timestamp so existing cursors keep their order.
-Follow exact move lineage for the target's life; do not redact a replacement incarnation's later life at a reused path.
-The schema migration permits only this qualified redaction update, with sequencing fields unchanged, null move origins preserved and `sha256` cleared.
-It refuses all other audit updates and every audit deletion.
-
-Managed reusable store snapshots and published replicas must retire or replace versions older than the purge revision.
-The component receipt binds the physical store and purge revision, including held content, projection and replica publication acknowledgements.
-Collection transaction sequence alone cannot prove freshness because page commits advance the store revision separately.
-An active overlapping reader may finish; a managed snapshot must not later republish the retired data.
-
-The guarantee excludes forensic remnants in SQLite free pages and WAL storage, as it excludes filesystem free blocks.
-Do not add `secure_delete`, checkpoint or vacuum work to claim physical erasure that this contract does not promise.
-The store owner has agreed this contract; implementation still requires the merged projector baseline.
-Run the projector, migration and served-store suites before delivery because each reads this audit trail.
 
 ### D4a. Qualify configured erasure policy separately from discovery
 
@@ -370,6 +354,7 @@ It declares withdrawal complete only after every target and residue acknowledges
 Keep uncertain current capture visible until the caller chooses recovery or withdrawal; ordinary settlement never destroys its preserved original.
 P2 collection retains the last recovery link while residue or retention reservations remain unresolved.
 After producer acknowledgements, normal bounded receipt retention can collect the attempt.
+No capture producer reserves pre-reference residue yet; `erase-captured-source-in-store` wires those producers.
 
 ### D7. Reuse bounded caller-driven progress
 
@@ -377,9 +362,12 @@ Persist a target-qualified operation and component cursors before the first dest
 Each invocation performs a bounded unit through the existing writer and owner APIs, then returns progress.
 The caller's existing durable job queue retries pending work. Add no daemon, workflow engine or global sweep.
 Never hold a database connection while waiting on another component or network operation.
+The copy component keeps a sweep cursor across calls, so copies that no owner can close never starve later copies.
+A finished sweep's unknown copies stay reported until a later sweep closes them.
 
-Use the repository's 20,000-Source generated reference and existing public warm-call budget: p95 below one second for a bounded progress invocation.
-Record terminal failures and pending outcomes, component work bounds, query count, lock contention and resources with the maintained instrument.
+Each progress call closes at most a fixed number of copies and reads a fixed number of catalogue pages.
+Prove that bound by cost: a progress call runs the same statement and step counts at 2 copies, at 200 copies and with 20,000 unrelated Sources.
+The p95 run on the 20,000-Source generated reference, against the public warm-call budget, moves to `erase-captured-source-in-store`.
 Whole-retirement duration is a separate observed value. A new operation has no earlier latency baseline or measured improvement claim.
 
 [Writing effective tools](https://www.anthropic.com/research/writing-tools-for-agents) supports one operation that exposes useful progress.
@@ -397,8 +385,9 @@ These principles require no additional agent machinery or human approval gate.
 ## Migration Plan
 
 1. Ship the reviewed operation with identity-system policy disabled; verify ordinary capture and deletion remain available.
-2. Prove generated capture, lost-response recovery, dependency refusal and complete managed cleanup in isolated file and store cells.
+2. Prove generated capture, lost-response recovery, dependency refusal and complete managed cleanup in isolated file cells.
 3. Qualify bounded public progress and new-reader absence on the delivered candidate; retain target and component receipts.
-4. Enable a cell only under its existing operational authority; stop new erasure admission to roll back policy.
+4. Enable a cell only under its existing operational authority, by adding it to `cellctl.sourceErasureCellIds`.
+5. Roll back policy by removing the cell from that value; cellctl restarts only that cell, and new erasure admission stops.
 
 Policy rollback cannot restore erased bytes. Restoration requires separately authorized retained backups and can reintroduce the Source.

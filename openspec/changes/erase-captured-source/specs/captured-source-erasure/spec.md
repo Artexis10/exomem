@@ -21,6 +21,11 @@ The system SHALL expose one erasure operation across the shared governed surface
 - **THEN** an authenticated policy read proves its current enabled state separately from static operation discovery
 - **AND** unavailable configuration remains unknown rather than enabled or disabled
 
+#### Scenario: Vault storage mode lacks erasure support
+- **WHEN** a caller requests erasure on a vault whose storage mode has no erasure implementation
+- **THEN** the request refuses with an unsupported-mode result before any target lookup or stored-data change
+- **AND** the authenticated policy read reports erasure disabled for that vault
+
 ### Requirement: Every erasure targets one immutable incarnation
 
 The operation SHALL accept an operation identifier, Source identity, immutable Source reference and expected hash. Every retry and deferred effect SHALL retain that target. Hash drift SHALL return a stale precondition. A missing page SHALL be eligible only when retained custody proves its allocation; missing proof SHALL remain unknown.
@@ -37,13 +42,14 @@ The operation SHALL accept an operation identifier, Source identity, immutable S
 
 The system MUST refuse known dependent compiled knowledge, historical versions, origin-bound interpretations, collection versions and either endpoint of a correction chain. Incomplete dependency coverage or unresolved publication SHALL remain unknown or pending. Removing a current citation MUST NOT erase retained historical dependence.
 
+#### Scenario: Another page links to the Source
+- **WHEN** another page holds a wikilink that resolves to the target's canonical page
+- **THEN** erasure refuses before its cutoff and the Source remains
+- **AND** an unreadable link index answers unknown instead of admitting the cutoff
+
 #### Scenario: Restricted writer skipped a Source back-reference
 - **WHEN** retained compiled history cites a Source whose back-reference the writer could not update
 - **THEN** erasure refuses that Source using retained dependency evidence
-
-#### Scenario: Dependency write fails before publication
-- **WHEN** a reserved dependency publication proves no effect or complete rollback
-- **THEN** its reservation does not become a permanent invented dependency
 
 #### Scenario: Another replica publishes restricted knowledge
 - **WHEN** a different replica commits dependent knowledge while skipping the Source back-reference
@@ -60,6 +66,11 @@ Complete retirement SHALL include canonical data, owned originals and staging, t
 #### Scenario: Canonical deletion finishes before derived cleanup
 - **WHEN** the page is gone but an owner still retains its managed bytes or unacknowledged work
 - **THEN** the result remains pending and target_retired is false
+
+#### Scenario: Generic lifecycle operations meet an enrolled Source
+- **WHEN** a caller deletes or moves an enrolled Source through the generic file and directory operations
+- **THEN** the request refuses and names the erasure operation
+- **AND** no trash or moved copy exists outside the copy census
 
 #### Scenario: An enrolled capture left no shared activity
 - **WHEN** the target was captured under custody by a build that keeps enrolled Sources off the shared pages
@@ -103,18 +114,6 @@ Complete retirement SHALL include canonical data, owned originals and staging, t
 - **THEN** it carries the effective image and catalogue horizons from direct canonical records
 - **AND** an absent legacy summary qualifies no zero horizon and requires no history scan before a later writer
 
-#### Scenario: Store audit retains the target's earlier paths
-- **WHEN** target projection and vector cleanup have finished for an incarnation with exact move lineage
-- **THEN** cleanup redacts its identifying audit fields while retaining sequence, revision and operation facts
-- **AND** it preserves a replacement incarnation's audit facts at a reused path
-- **AND** path fields use non-path opaque tokens, preserving existing null move origins without producing a null path
-- **AND** one token per target life and original path preserves replay across both move halves without reuse across targets
-
-#### Scenario: Managed store replica predates retirement
-- **WHEN** a managed reusable snapshot or published replica contains state older than the purge revision
-- **THEN** retirement remains pending until its owner replaces or retires that copy
-- **AND** an unrelated collection transaction sequence cannot substitute for the store revision acknowledgement
-
 ### Requirement: Retirement exposes honest resumable progress
 
 The result SHALL name the target reference, status and target_retired. Status SHALL be complete, pending, failed or unknown. Only complete acknowledged cleanup SHALL set target_retired true. Progress SHALL survive restart and remain bounded per invocation. Missing reads and partial owner evidence MUST NOT become empty success.
@@ -123,10 +122,14 @@ The result SHALL name the target reference, status and target_retired. Status SH
 - **WHEN** the caller retries its retained operation after restart
 - **THEN** cleanup resumes for the same incarnation and reports actual component progress
 
-#### Scenario: Custody moves to another replica
-- **WHEN** canonical Source custody moves through supported replica handoff
-- **THEN** the next owner can reconcile that incarnation without relying on an old local clear latch
-- **AND** unavailable attempt-local residue ownership remains unknown rather than absent
+#### Scenario: A copy reservation never received its native binding
+- **WHEN** the catalogue reserved a copy whose native binding was never written
+- **THEN** cleanup closes that copy as having no effect and can still report complete
+
+#### Scenario: Earlier copies cannot close
+- **WHEN** more copies than one invocation closes precede the target's own copy and no owner can close them
+- **THEN** later invocations still reach and close the remaining copies
+- **AND** the unclosable copies stay reported unknown and the result is never complete
 
 ### Requirement: Snapshot readers cannot republish retired data
 
@@ -139,10 +142,6 @@ Reads overlapping retirement SHALL be allowed to finish from their existing snap
 ### Requirement: Attempt cleanup covers pre-reference residue
 
 Capture custody SHALL identify owned artifacts before surviving writes and distinguish new allocations from reused Sources. Settlement SHALL report custody separately from capture outcome. Explicit residue cleanup SHALL require closed admission. Collection MUST preserve the last recovery link while owned residue remains unresolved.
-
-#### Scenario: Protected staging fails before Source allocation
-- **WHEN** a capture leaves owned staging bytes without allocating a Source reference
-- **THEN** settlement reports that residue and explicit cleanup continues until its producer acknowledges removal
 
 #### Scenario: Attempt reused another successful capture
 - **WHEN** an attempt observed a reused Source rather than allocating it
