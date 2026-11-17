@@ -108,13 +108,14 @@ def test_a_new_profile_needs_its_preview_hash(vault: Path, owner_scope: None) ->
     assert created.read_text(encoding="utf-8").endswith(CHEAP)
 
 
-def test_a_profile_is_not_replaced_by_another_page_without_a_preview(pages: Path) -> None:
+def test_a_profile_is_not_replaced_by_another_page_even_with_a_preview(pages: Path) -> None:
+    # A successor page would not keep the profile's domain and would become the global profile.
     before = _bytes(pages, PROFILE)
+    page = {"content": "Games now live in the games log.", "note_type": "insight", "title": "Games log two"}
 
-    with pytest.raises(ValueError, match="PROFILE_PREVIEW_REQUIRED"):
+    with pytest.raises(ValueError, match="PROFILE_SUPERSESSION_REFUSED.*edit_note"):
         commands.op_replace(
-            pages, old_path=PROFILE, content="Games now live in the games log.", note_type="insight", title="Games log two",
-            reason="fold the profile into a note",
+            pages, old_path=PROFILE, reason="fold the profile into a note", validate_only=True, **page,
         )
 
     assert _bytes(pages, PROFILE) == before
@@ -188,3 +189,14 @@ def test_a_connected_agent_creates_a_profile_with_the_review_its_preview_returne
 
     (created,) = (vault / KB / "Notes" / "Profiles").glob("*.md")
     assert created.read_text(encoding="utf-8").endswith(CHEAP)
+
+
+def test_a_connected_agent_cannot_promote_a_note_to_a_profile_by_superseding_it(pages: Path, mcp) -> None:
+    # The successor would carry no reviewed domain; a new profile starts from create_note.
+    before = _bytes(pages, NOTE)
+    page = {"note": NOTE, "title": "Games", "content": CHEAP, "type": "profile", "why": "make it the profile"}
+
+    refusal = _public(mcp, "supersede_note", **page, preview=True)["error"]
+
+    assert refusal["code"] == "PROFILE_SUPERSESSION_REFUSED"
+    assert _bytes(pages, NOTE) == before

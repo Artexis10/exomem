@@ -28,7 +28,7 @@ without this table.
 |---|---|
 | Start a profile for a domain, or for all domains | "Seed a profile" below; the `profile` section of [page-types](page-types.md); [vocabulary](vocabulary.md) to register the domain |
 | An upkeep item says "A profile may be out of date" | "Curate a profile" below; read the item's `context_route` first |
-| One profile line is wrong, replaced or past its date | "Change a line" below; [supersession](supersession.md) |
+| One profile line is wrong, replaced or past its date | "Change a line" below |
 | The vault has its own preference categories | "Categories that count as preferences" below |
 | The owner asks what Exomem holds about their preferences | Read the profile pages with `read_page`; do not summarize from memory |
 
@@ -70,8 +70,11 @@ refused with `PROFILE_PREVIEW_REQUIRED` and changes nothing.
 
 To remove a line, preview an `edit_note` change that deletes it. `remove_observation` has no preview,
 so it is refused on a profile page. To replace a line the owner changed their mind about, use
-same-page unit supersession. Editing the profile file directly in the vault needs no preview.
-The next activation serves the edited lines.
+same-page unit supersession through `edit_note`: preview `action="edit_observation"` on the line's
+id from `read_page(part="units")`. `supersede_note` refuses a profile, as predecessor or successor,
+with `PROFILE_SUPERSESSION_REFUSED`. Change a profile in place, or start a new one with `create_note`.
+Editing the profile file directly in the vault needs no preview. The next activation serves the
+edited lines.
 
 ## Categories that count as preferences
 

@@ -1864,7 +1864,7 @@ def require_profile_preview(vault_root: Path, *page_types: object, previewed: bo
 
     `previewed` is whether the write carries what its own preview returned: the transition token
     for an in-place change (bound to the exact before and after bytes), the draft hash for a
-    creation or a supersession. Every governed write path calls this one check.
+    creation. Every governed write path calls this one check.
     """
     # A one-call profile rewrite the owner never saw is what this stops; a wrong firing costs the agent one preview call.
     if not previewed and _is_profile(vault_root, *page_types):
@@ -1873,7 +1873,25 @@ def require_profile_preview(vault_root: Path, *page_types: object, previewed: bo
             "a profile page changes only from a reviewed preview: preview this exact change first "
             "(preview=true), show the owner the resulting lines, then send the same call with `review` "
             "set to the preview's transition_token, or to its draft_id, draft_hash and draft_token when "
-            "creating or superseding a page. To remove a line, preview an edit_note change that deletes it.",
+            "creating a page. To remove a line, preview an edit_note change that deletes it.",
+        )
+
+
+PROFILE_SUPERSESSION_REFUSED = "PROFILE_SUPERSESSION_REFUSED"
+
+
+def refuse_profile_supersession(vault_root: Path, *page_types: object) -> None:
+    """Refuse a page supersession whose predecessor or successor is a profile, at its first call.
+
+    Only the page types matter, so a preview is refused as early as a commit.
+    """
+    # Stops a successor that loses its domain and becomes the global profile; a wrong firing costs the agent one
+    # different call, and the agent pays it.
+    if _is_profile(vault_root, *page_types):
+        raise SemanticWriteError(
+            PROFILE_SUPERSESSION_REFUSED,
+            "a profile is not superseded by another page. To change a profile, preview an edit_note change "
+            "of it in place (replace_body replaces the whole body). To start a new profile, use create_note.",
         )
 
 

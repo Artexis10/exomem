@@ -606,7 +606,6 @@ class SupersedeNote(Wire):
     fields: dict[str, Any] | None = None
     unlinked_reason: str | None = _UNLINKED
     vocabulary_decision: VocabularyDecision | None = None
-    review: Review | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
@@ -617,7 +616,7 @@ def _supersede_note(wire: dict[str, Any], ctx: Context) -> Translated:
         "reason": wire["why"], "note_type": wire.get("type"), "project": wire.get("project"),
         "projects": wire.get("projects"), "sources": wire.get("sources"), "tags": wire.get("tags"),
         "validate_only": wire.get("preview"), "response_detail": wire.get("detail"),
-        **_unlinked(wire), **_vocabulary(wire), **_NO_SLUG, **_creation_review(wire),
+        **_unlinked(wire), **_vocabulary(wire), **_NO_SLUG, **dict.fromkeys(_DRAFT_FIELDS),
     }
     return "replace_memory", _leaf_call(wire, "fields", ctx, "replace_memory", "supersede_note", leaf)
 

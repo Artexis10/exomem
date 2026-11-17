@@ -541,6 +541,10 @@ def replace(
     )
     if old_parsed is None:
         raise ReplaceError("UNREADABLE", ["old_path"], "old page is unreadable")
+    try:
+        semantic_writes.refuse_profile_supersession(root, old_parsed.frontmatter.get("type"), note_type)
+    except semantic_writes.SemanticWriteError as error:
+        raise ReplaceError(error.code, ["old_path"], error.reason) from error
 
     status_basis = lifecycle_statuses.Basis(root)
     predecessor_class = status_basis.classify(
@@ -594,14 +598,6 @@ def replace(
             )
 
     old_link_target = render_wikilink_target(rel_old_no_ext, root)
-    if not validate_only:
-        # The successor's own type is checked in `note`; this covers a profile replaced by another type.
-        try:
-            semantic_writes.require_profile_preview(
-                root, old_parsed.frontmatter.get("type"), previewed=draft_hash is not None
-            )
-        except semantic_writes.SemanticWriteError as error:
-            raise ReplaceError(error.code, ["old_path"], error.reason) from error
     try:
         prepared = note_module.note(
             root,
