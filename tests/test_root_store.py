@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, state_migration
+from exomem import audit, commands, state_migration
 from exomem import schema as schema_module
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
@@ -144,3 +144,13 @@ def test_index_counts_come_from_the_store_in_a_root_vault(stored_root: Path) -> 
         top_index = view.page("index.md").body.decode()
     assert "|Articles]] — captured web/PDF content (4)" in sources_index
     assert "- Sources: 6 (articles: 4, books: 1, sessions: 1)" in top_index
+
+
+def test_the_index_drift_check_counts_from_the_store_in_a_root_vault(stored_root: Path) -> None:
+    """The audit compared the index rows with a count of the folders, so a stored note read as drift."""
+    with library_scope():
+        commands.op_remember(
+            stored_root, content=UNIT, status="draft", title="Why churn rose", note_type="insight"
+        )
+    mismatches = [f.detail for f in audit._check_index_drift(stored_root) if "actual is" in f.detail]
+    assert mismatches == []
