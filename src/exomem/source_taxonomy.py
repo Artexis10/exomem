@@ -451,15 +451,17 @@ class SourceTaxonomy:
     def domain_ancestors(self, key: str) -> tuple[str, ...]:
         """The domains above `key`, nearest first. The one resolver for a domain's parent chain.
 
-        A deprecated parent is replaced by its `replaced_by` when it has one. The walk stops at an unknown key or
-        a repeat, so a registry that was hand-edited into a cycle cannot loop it.
+        A deprecated parent is replaced by its `replaced_by` when it has one. The walk stops at an
+        unknown key or a repeat, so a registry that was hand-edited into a cycle cannot loop it.
         """
         ancestors: list[str] = []
         current = self.domains.get(key)
         while current is not None and current.parent is not None:
             parent = self.domains.get(current.parent)
-            if parent is not None and parent.status == "deprecated" and parent.replaced_by in self.domains:
-                parent = self.domains[parent.replaced_by]
+            deprecated = parent is not None and parent.status == "deprecated"
+            replacement = parent.replaced_by if deprecated and parent is not None else None
+            if replacement is not None and replacement in self.domains:
+                parent = self.domains[replacement]
             if parent is None or parent.key == key or parent.key in ancestors:
                 break
             ancestors.append(parent.key)
@@ -669,14 +671,15 @@ def _validate_parents(
 ) -> dict[str, Definition]:
     """Drop a parent that names no registered domain or that closes a cycle, and say which.
 
-    The read stays lenient: an entry with a bad parent is a root, so no resolver loops or serves a stranger.
+    The read stays lenient: an entry with a bad parent is a root, so no resolver loops or serves a
+    stranger.
     """
     valid = dict(domains)
     for key, definition in sorted(domains.items()):
         if definition.parent is not None and definition.parent not in domains:
             findings.append(
-                f"domain {key!r} has parent {definition.parent!r}, which is not a registered domain; "
-                f"register {definition.parent!r} or remove the parent of {key!r}"
+                f"domain {key!r} has parent {definition.parent!r}, which is not a registered "
+                f"domain; register {definition.parent!r} or remove the parent of {key!r}"
             )
             valid[key] = replace(definition, parent=None)
     cycled: set[str] = set()
