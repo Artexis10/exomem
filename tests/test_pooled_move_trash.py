@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from contextlib import closing
 from pathlib import Path
@@ -263,6 +264,67 @@ def test_a_trashed_filing_stays_unreadable_after_its_trash_entry_is_emptied_whil
     with pytest.raises(get_page.GetError) as missing:
         get_page.get_page(vault, path=LOOSE)
     assert missing.value.code == "NOT_FOUND"
+
+
+def test_a_trashed_filing_stays_unreadable_after_an_export_strips_its_witness_while_another_filing_pools_its_bytes(
+        vault, selected_store, monkeypatch):
+    """Catches Trash metadata whose witness a compatibility export stripped turning the companion left at a deleted
+    original's path back into a live filing, which then serves the bytes that another filing pools."""
+    from test_vault_store_media import ORIGINAL_BYTES
+
+    from exomem import get_page, reserved_paths, trash_metadata
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+    other, _page = _filing(vault, "other.bin", ORIGINAL_BYTES)
+    _pool(vault, monkeypatch, other, ORIGINAL_BYTES)
+    metadata = trashed.trash_path + trash_metadata.METADATA_SUFFIX
+    (vault / metadata).write_bytes(trash_metadata.without_retirement(vault, metadata))
+
+    state = originals.original_state(vault, LOOSE)
+    assert state.state == "missing" and state.local_path is None
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
+        media_store.read_original_bytes(vault, LOOSE)
+    assert refused.value.code == "MISSING"
+    with pytest.raises(get_page.GetError) as missing:
+        get_page.get_page(vault, path=LOOSE)
+    assert missing.value.code == "NOT_FOUND"
+    assert media_store.read_original_bytes(vault, other).data == ORIGINAL_BYTES
+
+
+def test_a_new_original_written_with_its_page_after_an_export_strips_the_witness_reads_live_once_pooled(
+        vault, selected_store, monkeypatch):
+    """Catches a new original, written with its page at a deleted original's path after a compatibility export
+    stripped the witness, keeping the old backlink: once its bytes pool, reads take it for the deleted original."""
+    from exomem import trash_metadata
+    from exomem.vault import (
+        MISSING_CONTENT_HASH,
+        PlannedWrite,
+        PreparedBinaryContent,
+        batch_atomic_write,
+        content_hash,
+    )
+
+    trashed = _evicted_in_trash(vault, monkeypatch)
+    metadata = trashed.trash_path + trash_metadata.METADATA_SUFFIX
+    (vault / metadata).write_bytes(trash_metadata.without_retirement(vault, metadata))
+    data = b"a new original filed at the same path"
+    digest = hashlib.sha256(data).hexdigest()
+    page = vault / f"{LOOSE}.md"
+    before = page.read_text(encoding="utf-8")
+    fields, body, _block = vault_module.parse_frontmatter(before)
+    fields.update(binary_sha256=digest, binary_size=len(data))  # A writer that rebinds the page keeps its other fields.
+    after = vault_module.render_frontmatter_document(vault_module.serialize_frontmatter(fields), body)
+
+    batch_atomic_write([
+        PlannedWrite(vault / LOOSE, PreparedBinaryContent(io.BytesIO(data), len(data), digest),
+                     create_only=True, expected_hash=MISSING_CONTENT_HASH),
+        PlannedWrite(page, after, expected_hash=content_hash(before)),
+    ], vault_root=vault)
+    _pool(vault, monkeypatch, LOOSE, data)
+
+    assert "original_retirement_meta" not in vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))[0]
+    assert originals.original_state(vault, LOOSE).local_path is not None
+    assert media_store.read_original_bytes(vault, LOOSE).data == data
 
 
 def test_a_filing_recovered_from_trash_reads_its_shared_bytes_once_pooled_and_its_page_names_no_trash_entry(
