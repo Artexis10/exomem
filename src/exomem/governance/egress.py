@@ -7474,12 +7474,13 @@ class _ArtifactReferenceGate:
         self.purpose = _declared_purpose(self.vault_root, self.who, purpose)
         self.verdicts: dict[str, bool] = {}
         self.census = artifact_census.CensusView.empty()
+        self.filings = self.census.filings
         self.tombstone_paths: Mapping[str, tuple[str, ...]] = {}
         self.tombstone_literals = artifact_census.LiteralAliases()
         # Path-shaped tokens that the census lacked, checked on disk once each.
         self._directly: dict[str, tuple[str, ...]] = {}
-        # Bare names with no file, checked once each against the companion pages that might bind them.
-        self._filings: dict[str, tuple[str, ...]] = {}
+        # Originals that the census lists no file for, each judged once on what its page binds; see `_filing`.
+        self._filed: dict[str, tuple[str, ...] | None] = {}
         # One gate pass shares one lifecycle view, as the release walk does.
         with call_spans.span("egress.artifact_gate.tombstones"):
             self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
@@ -7506,13 +7507,15 @@ class _ArtifactReferenceGate:
     def _index(self) -> None:
         self._index_entered = True
         self.census = artifact_census.request_census(self.vault_root)
+        self.filings = self.census.filings
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
             self.tombstones, managed_root_rel()
         )
 
-    def _paths_for(self, alias: str) -> tuple[str, ...]:
+    def _paths_for(self, alias: str) -> tuple[str, ...] | None:
         key = alias.casefold()
-        return tuple(sorted({*self.census.paths(key), *self.tombstone_paths.get(key, ())}))
+        found = (*self.census.paths(key), *self.tombstone_paths.get(key, ()))
+        return self._with_filings(found, self.filings.paths(key))
 
     def _directly_named(self, token: str) -> tuple[str, ...]:
         found = self._directly.get(token)
@@ -7520,24 +7523,40 @@ class _ArtifactReferenceGate:
             found = self._directly[token] = artifact_census.direct_paths(self.vault_root, token)
         return found
 
-    def _filings_named(self, token: str) -> tuple[str, ...]:
-        """The companion pages that bind an original named `token`, which has no file at its path.
+    def _filing(self, logical: str) -> tuple[str, ...] | None:
+        """The path that a reference to the original at `logical`, a path the census lists no file at, is judged on.
 
-        A shared original keeps no file, so the census holds its companion `<token>.md` alone. A page by that
-        name that binds no original, such as a note with a dot in its name, is no filing of `token`.
+        The page `<logical>.md` proposed it. A pooled filing keeps no file at its path, and that path is decided as
+        an ordinary file's is, from the shared object's held metadata, as its download is. An original that the page
+        binds but whose bytes are elsewhere, such as an evicted one, is judged on the page. A page that binds no
+        original, such as a note with a dot in its name, gives no path, and an unreadable page gives `None`.
         """
-        found = self._filings.get(token)
-        if found is None:
-            filings = []
-            for companion in self.census.names(f"{token}.md".casefold()):
-                try:
-                    bound = originals.bound_companion(self.vault_root, companion.removesuffix(".md"))
-                except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
-                    bound = (companion,)  # An unreadable page cannot prove it binds nothing, and a mention is cheap to withhold.
-                if bound is not None and bound[0] == companion:
-                    filings.append(companion)
-            found = self._filings[token] = tuple(sorted(filings))
-        return found
+        if logical not in self._filed:
+            companion = f"{logical}.md"
+            try:
+                bound = originals.bound_companion(self.vault_root, logical)
+                if bound is None or bound[0] != companion:
+                    self._filed[logical] = ()
+                else:
+                    pooled = originals.pooled(self.vault_root, logical) is not None
+                    self._filed[logical] = (logical if pooled else companion,)
+            except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+                self._filed[logical] = None  # An unreadable page cannot prove it binds nothing; withhold the mention.
+        return self._filed[logical]
+
+    def _with_filings(self, found: Iterable[str], proposed: tuple[str, ...]) -> tuple[str, ...] | None:
+        """`found`, and the originals among the census's `proposed` filings that their pages bind.
+
+        A proposed original that an ordinary file holds is in `found` already. `None` means one page was unreadable.
+        """
+        judged = set(found)
+        for logical in proposed:
+            if logical not in judged:
+                filed = self._filing(logical)
+                if filed is None:
+                    return None
+                judged.update(filed)
+        return tuple(sorted(judged))
 
     @staticmethod
     def _unwrap(value: str) -> tuple[str, bool]:
@@ -7579,25 +7598,23 @@ class _ArtifactReferenceGate:
         token = unquote(token).replace("\\", "/").strip().strip("/")
         if not token:
             return ()
-        direct = self._paths_for(token)
-        if direct:
+        # Each lookup also takes the originals that a pooled archive keeps no file for, so that a reference to one
+        # resolves to the same paths as a reference to an ordinary file would. `None` withholds the reference.
+        if (direct := self._paths_for(token)) != ():
             return direct
         sibling = None
         if directory is not None and "/" not in token:
             sibling = f"{directory.rstrip('/')}/{token}" if directory else token
-            direct = self._paths_for(sibling)
-            if direct:
+            if (direct := self._paths_for(sibling)) != ():
                 return direct
         if "/" not in token:
-            named = self.census.names(token.casefold())
-            if named:
-                return tuple(sorted(named))
-            if filings := self._filings_named(token):
-                return filings
+            key = token.casefold()
+            if (named := self._with_filings(self.census.names(key), self.filings.names(key))) != ():
+                return named
             if wikilink or "." not in token:
-                stemmed = self.census.stems(Path(token).stem.casefold())
-                if stemmed:
-                    return tuple(sorted(stemmed))
+                key = Path(token).stem.casefold()
+                if (stemmed := self._with_filings(self.census.stems(key), self.filings.stems(key))) != ():
+                    return stemmed
         if self.census.published:
             # A published census lists no directory, so a file created a moment
             # ago may be missing from it. A token with the shape of a vault path
