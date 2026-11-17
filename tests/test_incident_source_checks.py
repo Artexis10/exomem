@@ -39,6 +39,22 @@ def arm_side(root: Path, *args: str, stdin: object = None) -> dict:
     return incidents.run_arm_side(ARM, root, *args, stdin=json.dumps(stdin))
 
 
+SHARED_ORIGINALS = """
+import sys
+from pathlib import Path
+from exomem import artifact_lifecycle, original_pool, state_migration
+artifact_lifecycle._supported = frozenset(artifact_lifecycle.LIFECYCLE_IDS)
+vault = Path(sys.argv[1])
+authority = state_migration.assert_offline_migration_authority(
+    source="incident arm-side shared-originals fixture"
+)
+state_migration.migrate_vault_state_offline(vault, authority=authority)
+state_migration.require_vault_state_ready(vault)
+original_pool.enable(vault)
+assert original_pool.enabled(vault)
+"""
+
+
 def test_fixtures_have_one_set_of_bytes_and_say_what_the_spec_says(tmp_path: Path) -> None:
     """A clock or version in the bytes would give every unit its own digest; a lost DOI would blind the case."""
     pymupdf = pytest.importorskip("pymupdf")  # the media extra builds the fixtures
@@ -228,6 +244,50 @@ def test_seeded_sources_and_a_citing_page_are_read_back_through_the_arms_own_cod
     )
     facts = arm_side(root, "sources", str(root / "vault"))
     assert incidents.compiled_with_backlinks(facts, digests, ["note.txt"]) is True
+
+
+@pytest.mark.parametrize("shared", [False, True], ids=["local", "shared"])
+def test_sources_reports_a_stored_originals_digest_in_either_storage(
+    tmp_path: Path, shared: bool
+) -> None:
+    """arm_side `sources` hashes the original through the storage-aware opener.
+
+    Shared original storage keeps the bytes in the content-addressed pool and no file at the
+    frontmatter's ``evidence_file`` path; a logical-path read would crash the whole listing.
+    """
+    pytest.importorskip("pymupdf")  # the media extra builds the fixtures
+    root, work = tmp_path / "unit", tmp_path / "unit" / "work"
+    fresh_vault(root, ARM)
+    work.mkdir()
+    digest = build_files({"paper.pdf": SPECS["paper.pdf"]}, work)["paper.pdf"]
+    if shared:
+        enabled = subprocess.run(  # noqa: S603 - fixed argv
+            [sys.executable, "-c", SHARED_ORIGINALS, str(root / "vault")],
+            env=child_env(root, ARM),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if enabled.returncode != 0:
+            pytest.skip(f"shared original storage unavailable: {enabled.stderr.strip()[-200:]}")
+    arm_side(
+        root,
+        "seed_sources",
+        str(root / "vault"),
+        str(work),
+        stdin=[
+            {
+                "file": "paper.pdf",
+                "title": "Pooled paper",
+                "source_kind": "paper",
+                "url": "https://doi.org/10.5555/x.1",
+            }
+        ],
+    )
+    [row] = arm_side(root, "sources", str(root / "vault"))["sources"]
+    assert row["original_sha256"] == digest
+    if shared:
+        assert not (root / "vault" / row["frontmatter"]["evidence_file"]).exists()
 
 
 def test_an_http_unit_sends_a_files_bytes_and_the_stored_original_has_its_digest(

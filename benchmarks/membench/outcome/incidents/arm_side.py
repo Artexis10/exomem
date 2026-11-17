@@ -125,7 +125,7 @@ def sources(vault: Path) -> dict:
     status is live (None when the arm's status registry cannot classify it). Page keys are the arm's own
     link resolution: a wikilink and the page it names have the same key.
     """
-    from exomem import lifecycle_statuses, source_corrections
+    from exomem import lifecycle_statuses, media_store, reserved_paths, source_corrections
     from exomem.vault import (
         kb_root,
         parse_frontmatter,
@@ -140,6 +140,21 @@ def sources(vault: Path) -> dict:
             for link in links or ()
             if isinstance(link, str)
         ]
+
+    def original_digest(relative: str | None) -> str | None:
+        """The stored original's SHA-256, or None when it stores no readable original.
+
+        Shared original storage keeps the bytes in the content-addressed pool and no file at the
+        logical path, so the hash goes through the storage-aware opener; a missing or unreadable
+        original is a check failure the row reports, not a crash.
+        """
+        if not relative:
+            return None
+        try:
+            with media_store.open_original(vault, relative) as original:
+                return hashlib.sha256(original.stream.read()).hexdigest()
+        except (OSError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError):
+            return None
 
     basis, sources_dir = lifecycle_statuses.Basis(vault), kb_root(vault) / "Sources"
     source_rows, citing_rows = [], []
@@ -159,11 +174,7 @@ def sources(vault: Path) -> dict:
                     "path": relative,
                     "key": wikilink_page_key(relative),
                     "frontmatter": frontmatter,
-                    "original_sha256": (
-                        hashlib.sha256((vault / original).read_bytes()).hexdigest()
-                        if original
-                        else None
-                    ),
+                    "original_sha256": original_digest(original),
                     "corrected": corrected,
                     "ingested_into": keys(frontmatter.get("ingested_into")),
                 }
