@@ -983,6 +983,8 @@ class CreationPreflight:
     #: A profile page's creation needs no relation review while it is a draft, so its preview names the
     #: exact source it would write instead of a review draft; see `require_profile_preview`.
     profile_source_hash: str | None = None
+    #: Whether the page is a profile, so its preview says when its proof may be used.
+    profile: bool = False
 
     @property
     def draft_hash(self) -> str | None:
@@ -1020,6 +1022,8 @@ class CreationPreflight:
             value["placement"] = self.placement
         if fields := self.review_fields.as_dict():
             value["relation_review_fields"] = fields
+        if self.profile:
+            value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
         return value
 
 
@@ -4965,6 +4969,7 @@ def _preflight_creation(
                 relation_review.review_applies(validation.relation_disposition),
             ),
             draft_bound=draft_bound,
+            profile=_is_profile(root, state.page_type),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4988,6 +4993,7 @@ def _preflight_creation(
         ),
         definitions=semantic_contract.page_definitions_witnesses(state),
     )
+    profile = _is_profile(root, state.page_type)
     return CreationPreflight(
         applicability,
         path,
@@ -5008,7 +5014,8 @@ def _preflight_creation(
         ) if vocabulary_binding is not None else (),
         origin_inputs,
         review_fields=relation_review.check_review_fields(supplied_review_fields, False),
-        profile_source_hash=vault.content_hash(source) if _is_profile(root, state.page_type) else None,
+        profile_source_hash=vault.content_hash(source) if profile else None,
+        profile=profile,
     )
 
 

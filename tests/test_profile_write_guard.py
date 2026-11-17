@@ -182,6 +182,7 @@ def test_a_connected_agent_creates_a_profile_with_the_review_its_preview_returne
     }
     assert _public(mcp, "create_note", **page)["error"]["code"] == "PROFILE_PREVIEW_REQUIRED"
     preview = _public(mcp, "create_note", **page, preview=True)
+    assert preview["next_action"] == semantic_writes.PROFILE_PREVIEW_NEXT_ACTION
 
     _public(mcp, "create_note", **page, review={key: preview[key] for key in ("draft_id", "draft_hash", "draft_token")})
 
