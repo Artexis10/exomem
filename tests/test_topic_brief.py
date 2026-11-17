@@ -19,13 +19,23 @@ from typing import Any
 import pytest
 from conftest import initialize_vault_state_offline
 from test_activate_context_surface import _surface_server
+from test_activation_related_pages import AXIS, FINGERPRINT, _toward_turn
 from test_connector_boundary import configured_boundary as configured_boundary
 from test_governance_egress import _external, _reset_caches, write_rule
 from test_graph_deferred_queue import _seed_live_freshness
 from test_private_vocabulary_instances import private_instances as private_instances
 from test_working_set_withheld_twins import _withhold
 
-from exomem import commands, epistemic_graph, index_sync, lexstore, topic_brief
+from exomem import (
+    commands,
+    embeddings,
+    epistemic_graph,
+    index_sync,
+    lexstore,
+    readiness,
+    recall_space,
+    topic_brief,
+)
 from exomem import find as find_module
 from exomem.governance import egress, principal
 
@@ -256,6 +266,74 @@ def test_a_walk_stops_two_hops_from_the_seed(tmp_path, monkeypatch) -> None:
 
     assert {item["path"] for item in brief["items"] if item["kind"] == "note"} == {f"{NOTES}/post-{n}.md" for n in range(3)}
     assert "related" not in brief  # a page subject runs no search
+
+
+def _survey_world(vault: Path) -> list[str]:
+    """A lagoon note linking one survey note that links eight spokes: the spokes are the lagoon's second hop.
+
+    The newest spokes are the furthest from the lagoon in meaning, so similarity and recency keep different ones.
+    """
+    _note(vault, "lagoon", "Surveyed in [[survey]].\n\n## Claim\n\nThe lagoon silts up each spring.\n")
+    _note(vault, "survey", " ".join(f"[[spoke-{n}]]" for n in range(8)) + "\n\n## Claim\n\nThe survey covers eight sites.\n")
+    for n in range(8):
+        _note(vault, f"spoke-{n}", f"## Claim\n\nSite {n} was measured.\n", updated=f"2026-09-0{n + 1}")
+    _index(vault)
+    return [f"{NOTES}/spoke-{n}.md" for n in range(8)]
+
+
+def _plant_vectors(vault: Path, monkeypatch: pytest.MonkeyPatch, vectors: dict[str, Any]) -> None:
+    """One resident recall chunk per page: the sidecar and the matrix are real, the encoder is out of the loop."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(readiness, "should_defer", lambda component: False)
+    monkeypatch.setattr(recall_space, "resident_fingerprint", lambda model: FINGERPRINT)
+    recall = embeddings.get_embedding_index(vault)
+    for rel, vector in vectors.items():
+        recall.upsert_file(rel, [f"chunk of {rel}"], vector[None, :], 1.0)
+    recall.all_vectors()
+
+
+def test_a_second_hop_keeps_the_notes_nearest_the_seed_and_counts_the_rest(tmp_path, monkeypatch) -> None:
+    """A broad member links many notes; only the second-hop notes nearest the seed join, whatever their age."""
+    vault = _vault(tmp_path, monkeypatch)
+    spokes = _survey_world(vault)
+    _plant_vectors(vault, monkeypatch, {
+        f"{NOTES}/lagoon.md": AXIS, f"{NOTES}/survey.md": _toward_turn(0.5),
+        **{spoke: _toward_turn(0.9 - 0.1 * n) for n, spoke in enumerate(spokes)},
+    })
+
+    brief = _read(vault, f"{NOTES}/lagoon.md")
+
+    notes = [item["path"] for item in brief["items"] if item["kind"] == "note"]
+    assert notes == [f"{NOTES}/lagoon.md", f"{NOTES}/survey.md", *spokes[:topic_brief.SECOND_HOP_CAP]]  # nearest first
+    assert brief["ranked_by"] == "similarity"
+    (cut,) = brief["missing"]
+    assert (cut["role"], cut["reason"], cut["count"]) == ("compiled_note", "cap", 8 - topic_brief.SECOND_HOP_CAP)
+
+
+def test_a_note_embedded_after_the_last_read_takes_its_place_on_the_next_read(tmp_path, monkeypatch) -> None:
+    """A write is embedded after the graph has it; the owner's kept walk must not keep the order from before."""
+    vault = _vault(tmp_path, monkeypatch)
+    spokes = _survey_world(vault)
+    _plant_vectors(vault, monkeypatch, {
+        f"{NOTES}/lagoon.md": AXIS, **{spoke: _toward_turn(0.9 - 0.1 * n) for n, spoke in enumerate(spokes[:-1])},
+    })
+    assert spokes[-1] not in {item["path"] for item in _read(vault, f"{NOTES}/lagoon.md")["items"]}
+
+    _plant_vectors(vault, monkeypatch, {spokes[-1]: _toward_turn(0.95)})
+
+    notes = [item["path"] for item in _read(vault, f"{NOTES}/lagoon.md")["items"] if item["kind"] == "note"]
+    assert notes[2] == spokes[-1]  # now the nearest second-hop note
+
+
+def test_with_no_vector_reading_the_second_hop_keeps_the_newest_and_says_so(tmp_path, monkeypatch) -> None:
+    vault = _vault(tmp_path, monkeypatch)
+    spokes = _survey_world(vault)
+
+    brief = _read(vault, f"{NOTES}/lagoon.md")
+
+    kept = {item["path"] for item in brief["items"] if item["kind"] == "note"} - {f"{NOTES}/lagoon.md", f"{NOTES}/survey.md"}
+    assert kept == set(spokes[-topic_brief.SECOND_HOP_CAP:])
+    assert brief["ranked_by"] == "recency"
 
 
 def test_a_topic_read_names_the_hits_it_did_not_walk_as_related(tmp_path, monkeypatch) -> None:

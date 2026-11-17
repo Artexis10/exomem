@@ -12,6 +12,7 @@ import copy
 import functools
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -51,6 +52,8 @@ from .context_views import INDEX_WARMING, READY, UNAVAILABLE
 from .governance import connector_boundary, egress, principal
 from .vocabulary import registry as vocabulary_registry
 
+log = logging.getLogger(__name__)
+
 #: The shipped traversal profile whose relation families the member walk follows.
 PROFILE = "brief"
 #: The brief's own metric series. A brief read is also a `read_page` call that `exomem_tool_*` already counts, so a series
@@ -61,6 +64,9 @@ DURATION = "exomem_brief_read_duration_ms"
 
 #: Resource bounds of the brief contract (spec: "Brief members are bounded"), not vault vocabulary.
 MAX_HOPS = 2
+#: Second-hop notes a walk keeps, nearest the seed first. The second hop is what the seed's own links link to, and a broad
+#: note that many pages cite fills it with other subjects' notes, so only the nearest few join (design D2).
+SECOND_HOP_CAP = 5
 NOTE_CAP = 40
 SOURCE_CAP = 40
 RELATED_CAP = 10
@@ -83,6 +89,10 @@ COUNT_BOUND = 40
 #: Bound parameters per statement, well under SQLite's variable limit.
 _CHUNK = 400
 CACHE_SIZE = 128
+
+#: The `ranked_by` values of the response schema: what ordered the candidates that the caps chose among.
+BY_SIMILARITY = "similarity"
+BY_RECENCY = "recency"
 
 # The response schema of the brief fixes these section names (spec: "A brief has conclusions, sources and open questions").
 CONCLUSIONS = "conclusions"
@@ -361,6 +371,9 @@ class _Walk:
     notes: tuple[tuple[_Node, int], ...]
     sources: tuple[_Node, ...]
     missing: tuple[dict[str, Any], ...]
+    ranked_by: str
+    #: Whether a similarity reading that should have run did not, so the walk holds only for this read.
+    unread: bool = False
 
 
 def _find_seed(
@@ -408,13 +421,76 @@ def _newest_first(nodes: Sequence[_Node]) -> list[_Node]:
     return ordered
 
 
-def _walk(graph: _Graph, seed: _Node) -> _Walk:
+def _seed_vector(root: Path, path: str) -> Any | None:
+    """The normalised mean of the seed's stored chunk vectors, or None when it has none.
+
+    It reads the seed's rows of the recall sidecar and encodes nothing, so the vector is in the sidecar's own space.
+    """
+    try:
+        import numpy as np
+
+        from . import embeddings
+
+        index = embeddings.peek_embedding_index(root)
+        if index is None:
+            return None
+        chunks, _units = index.stored_text_vectors(path)
+        if not chunks:
+            return None
+        centre = np.mean(np.stack(list(chunks.values())), axis=0)
+        norm = float(np.linalg.norm(centre))
+        return centre / norm if norm > 0.0 and np.all(np.isfinite(centre)) else None
+    except Exception:  # noqa: BLE001 - a seed with no readable vector is ranked by recency, and the response says so
+        log.debug("seed vector unavailable", exc_info=True)
+        return None
+
+
+class _Nearness:
+    """How near each candidate is to the seed: the best score of its chunks against the mean of the seed's.
+
+    Only a page's own vectors score it, never a population: a withheld page moves no other page's score or place.
+    """
+
+    def __init__(self, root: Path, seed: str) -> None:
+        self.root, self.seed = root, seed
+        self.vector = _seed_vector(root, seed)
+        self.scores: dict[str, float] = {}
+        #: Some candidates were ordered newest first because no similarity reading served them.
+        self.fell_back = False
+        self.unread = False
+
+    def rank(self, nodes: Sequence[_Node]) -> list[_Node]:
+        """`nodes` nearest the seed first, then pages with no score, newest first; all newest first with no reading."""
+        ordered = _newest_first(nodes)
+        if not ordered:
+            return ordered
+        from . import embeddings
+
+        scores = None if self.vector is None else embeddings.resident_page_scores(
+            self.root, [self.seed, *(node.path for node in ordered)], self.vector,
+        )
+        self.unread = self.unread or (self.vector is not None and scores is None)
+        # A matrix that does not vouch for the seed (withheld from recall, or changed since) cannot say what is near it.
+        if scores is None or self.seed not in scores:
+            self.fell_back = True
+            return ordered
+        self.scores.update(scores)
+        return self.order(ordered)
+
+    def order(self, nodes: Sequence[_Node]) -> list[_Node]:
+        """`nodes` by the scores already read: nearest first, then the unscored in their given order."""
+        return sorted(nodes, key=lambda node: -self.scores.get(node.path, float("-inf")))
+
+
+def _walk(root: Path, graph: _Graph, seed: _Node) -> _Walk:
     """The members of the seed's brief, over the caller's view, from the seed alone.
 
     Compiled notes within `MAX_HOPS` of the seed through the profile's families, passing only through compiled
-    notes; the Sources they attach. A candidate is filtered by what the caller sees before anything counts it.
-    Each page's edges are read once for each role, and a page's neighbours are checked for visibility only as far as a cap needs.
+    notes, with at most `SECOND_HOP_CAP` past the seed's own links, nearest the seed first; the Sources they attach.
+    A candidate is filtered by what the caller sees before anything counts it. Each page's edges are read once for
+    each role, and a page's neighbours are checked for visibility only as far as a cap needs.
     """
+    nearness = _Nearness(root, seed.path)
     compiled = graph.types.selects(seed.page_type, note_types.compiled)
     distance: dict[str, int] = {seed.path: 0}
     notes: list[_Node] = [seed] if compiled else []
@@ -439,11 +515,14 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
         touches = expand(frontier)
         exact = exact and COMPILED_NOTE not in row_cut
         found = graph.nodes([path for path in touches if path not in distance])
-        candidates = _newest_first([
+        candidates = nearness.rank([
             node for node in found.values() if graph.types.selects(node.page_type, note_types.compiled)
         ])
+        room = NOTE_CAP - len(notes)
+        if hop > 1:
+            room = min(room, SECOND_HOP_CAP)
         # A page with no stable id has no ref to serve its items under: counted, never silently left out.
-        taken, left, unnamed, complete = graph.admit(candidates, max(0, NOTE_CAP - len(notes)))
+        taken, left, unnamed, complete = graph.admit(candidates, max(0, room))
         unnamed_notes += unnamed
         cut += left
         # Pages behind a cut page are never examined, so the count then holds at least what was cut.
@@ -480,9 +559,21 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
     for role, count in ((COMPILED_NOTE, unnamed_notes), (SOURCE, unnamed_sources)):
         if count:
             missing.append({"role": role, "reason": "unreferenced", "count": count})
-    ranked = _newest_first(notes)
+    ranked = nearness.order(_newest_first(notes))
     ranked.sort(key=lambda node: distance[node.path])
-    return _Walk(seed, tuple((node, distance[node.path]) for node in ranked), tuple(sources), tuple(missing))
+    return _Walk(
+        seed, tuple((node, distance[node.path]) for node in ranked), tuple(sources), tuple(missing),
+        BY_RECENCY if nearness.fell_back else BY_SIMILARITY, nearness.unread,
+    )
+
+
+def _vector_token(root: Path) -> tuple[int, int, int] | None:
+    """The write token of the resident recall matrix, or None when none is resident; read without waiting."""
+    from . import embeddings
+
+    index = embeddings.peek_embedding_index(root)
+    resident = None if index is None else index.resident_matrix()
+    return None if resident is None else (resident.epoch, resident.generation, resident.instance)
 
 
 def _members(
@@ -492,11 +583,13 @@ def _members(
 
     Only an owner's walk is kept. A restricted caller's release decision reads the governance policy, the tombstones
     and its authorization live, and no graph token names them, so that walk is made afresh on every read. For the
-    owner the walk reads the graph's rows and the recall policy, both of which the key names.
+    owner the walk reads the graph's rows, the recall policy and the resident recall matrix that ranks the second hop,
+    all of which the key names. A walk whose similarity reading did not run is not kept, so the next read ranks it.
     """
     token = None if caller.restricted else graph.token()
     key = None if token is None else (
         str(root), caller.binding, seed.path, token, recall_policy.recall_policy_identity(root), registries,
+        _vector_token(root),
     )
     if key is not None:
         with _LOCK:
@@ -504,9 +597,9 @@ def _members(
             if held is not None:
                 _WALKS.move_to_end(key)
                 return held
-    walk = _walk(graph, seed)
+    walk = _walk(root, graph, seed)
     made = (walk, graph.closing([node.path for node, _distance in walk.notes]))
-    if key is not None:
+    if key is not None and not walk.unread:
         with _LOCK:
             _WALKS[key] = made
             _WALKS.move_to_end(key)
@@ -746,7 +839,10 @@ def _compiled(
     sources = [(node.id, node.content_hash, node.lifecycle, node.path) for node in walk.sources]
     key = (
         str(root), caller.binding,
-        _digest([walk.seed.path, members, sources, list(closing), registries, [PROFILE, MAX_HOPS, NOTE_CAP, SOURCE_CAP]]),
+        _digest([
+            walk.seed.path, members, sources, list(closing), registries,
+            [PROFILE, MAX_HOPS, SECOND_HOP_CAP, NOTE_CAP, SOURCE_CAP],
+        ]),
     )
     with _LOCK:
         held = _CACHE.get(key)
@@ -973,6 +1069,7 @@ def _serve(root: Path, subject: str, continuation: str | None, purpose: str | No
         "seed": {"ref": seed.ref, "path": seed.path, "title": _unlinked(seed.title)},
         # A copy: the walk is shared across reads, and a response is the caller's to change.
         "missing": [dict(entry) for entry in walk.missing],
+        "ranked_by": walk.ranked_by,
     }
     generation = _digest([list(compiled.items), shown])
     offset = 0

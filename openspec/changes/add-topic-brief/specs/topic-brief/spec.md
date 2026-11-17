@@ -20,7 +20,7 @@
 
 ### Requirement: Brief members are bounded and gaps stay visible
 The brief SHALL gather members deterministically from the seed alone over the caller's view, so that a read of the brief ref serves the same members as the read that minted it:
-- compiled notes reached from the seed within two hops through the relation families of the shipped traversal profile `brief`, walking only through compiled notes, ordered by distance and then most recent first;
+- compiled notes reached from the seed within two hops through the relation families of the shipped traversal profile `brief`, walking only through compiled notes: every note one hop from the seed, and at most five notes at the second hop, those nearest the seed first. A note's nearness is the best similarity of its stored recall vectors to the mean of the seed's, and a page is scored only by its own vectors. When that reading cannot run, the candidates are ordered most recent first and the response carries `ranked_by: "recency"`; otherwise it carries `ranked_by: "similarity"`;
 - Source pages that a member cites through its `sources` field, a citation or provenance relation, or an episode's `ingested_into` field.
 The brief SHALL cap compiled-note members at 40 and Source members at 40. A candidate cut by a cap SHALL be counted in `missing` with reason `cap`. A member that has no stable ref to serve its items under SHALL be counted in `missing` with reason `unreferenced`, never left out silently. Search hits SHALL never add members; on a topic-text read they appear only in `related`. The member walk SHALL take its relation families from the traversal-profile registry, never from a list in code.
 
@@ -42,13 +42,17 @@ The edge rows that one walk step reads SHALL be bounded for each role that a far
 - **WHEN** a caller reads the brief of a hub note that links to four sister notes, each citing one Source
 - **THEN** the brief has five compiled-note members and four Source members
 
+#### Scenario: A broad note one hop from the seed
+- **WHEN** the seed links one note that links eight other notes
+- **THEN** the five of those eight nearest the seed are members, and `missing` counts the other three with reason `cap`
+
 #### Scenario: An unlinked related note
 - **WHEN** a compiled-note search hit for the topic text is not within two hops of the seed
 - **THEN** it appears in `related` and not among the members
 
 ### Requirement: A brief has conclusions, sources and open questions
 The brief SHALL serve these sections. Every item SHALL carry its `ref`, `path` and `updated`:
-- `conclusions`: per compiled-note member, its title and summary or question, then its whole units whose kind carries the `assertion` trait, and its categorised observations. Members are ordered seed first, then by link distance, then most recent first. A superseded or closed unit SHALL be left out and counted per member.
+- `conclusions`: per compiled-note member, its title and summary or question, then its whole units whose kind carries the `assertion` trait, and its categorised observations. Members are ordered seed first, then by link distance, then nearest the seed first, or most recent first when `ranked_by` is `recency`. A superseded or closed unit SHALL be left out and counted per member.
 - `sources`: Source members with title, source kind and capture date, and external links found in member bodies by the Markdown link parser, deduplicated by target.
 - `open_questions`: units whose kind carries the `question` trait and that nothing closes. Only a kind that carries the `closable` trait can be closed. A unit is closed by its own `verdict`, by a relation that the unit authors and that bears on it, or by an inbound relation of a family that settles or bears on it from a page the caller may see. The registry names those families and the closing relation reaches the unit by its fragment.
 The brief SHALL select units by kind traits from the kinds registry, never by matching words in headings or text.

@@ -1758,6 +1758,36 @@ def peek_embedding_index(vault_root: Path) -> EmbeddingIndex | None:
     return index
 
 
+def resident_page_scores(vault_root: Path, pages: Iterable[str], vector: Any) -> dict[str, float] | None:
+    """The best chunk score of each of `pages` against `vector`, or None when the reading did not run.
+
+    It scores only those pages' rows of the resident recall matrix, so its cost follows `pages`, not the vault. It never
+    encodes and never loads a matrix on this thread: a one-shot process never loads one, so a cold matrix there reads
+    None, and a service whose matrix is cold starts its one background load and reads None. A page the matrix does not
+    vouch for (withheld from recall, or changed since the matrix) has no score. `vector` must be in the sidecar's space:
+    a caller that encoded it checks the encoder's fingerprint against the sidecar's first.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    from . import readiness
+
+    try:
+        index = peek_embedding_index(vault_root)
+        if index is None or readiness.should_defer("embeddings"):
+            return None
+        if not readiness.runtime_managed() and index.resident_matrix() is None:
+            return None
+        query = np.asarray(vector, dtype=np.float32).reshape(-1)
+        if not np.all(np.isfinite(query)) or float(np.linalg.norm(query)) == 0.0:
+            return None
+        return index.best_scores_for_paths(query, set(pages))
+    except recall_space.CorpusMatrixCold:
+        return None
+    except Exception:  # noqa: BLE001 - a failed reading is one that did not run; the caller reports that state
+        log.debug("resident page scores unavailable", exc_info=True)
+        return None
+
+
 def get_embedding_index(vault_root: Path, *, path: Path | None = None) -> EmbeddingIndex:
     """Return the process-shared `EmbeddingIndex` for this vault.
 

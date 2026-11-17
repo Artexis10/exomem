@@ -15,6 +15,7 @@
 - [x] 2.6 Add the watermark sidecar and `changed_since` (D5).
 - [x] 2.7 Record brief-read latency and errors in metric series of their own. Teach the call in the scaffold operations reference.
 - [x] 2.8 Keep an owner's member walk under the graph snapshot's token (D4). A warm owner read of an unchanged graph reads no edge.
+- [x] 2.9 Keep at most five second-hop notes, nearest the seed first, and report `ranked_by` (D2). Key the owner's walk memo on the resident recall matrix's write token. Tests: the second hop keeps the nearest notes and counts the rest; with no vector reading it keeps the newest and says so; a note embedded after a read takes its place on the next read.
 
 ## 3. Proof
 

@@ -33,7 +33,19 @@ A registry domain is much wider than one researched subject. A seed page fixes t
 
 ### D2. Members come from the seed alone
 
-The walk follows the relation families of the shipped traversal profile `brief`, up to two hops. It walks only through compiled notes, so an entity or a domain page with thousands of links cannot pull the whole store in. Cited Sources attach as leaves. Search hits never add members, so a read of `exomem://brief/<id>` serves exactly the members that the minting read served. Members are ordered by distance and then by recency, with caps of 40 notes and 40 Sources. A capped candidate is counted in `missing`.
+The walk follows the relation families of the shipped traversal profile `brief`, up to two hops. It walks only through compiled notes, so an entity or a domain page with thousands of links cannot pull the whole store in. Every note one hop from the seed joins. At most five second-hop notes join, nearest the seed first. Cited Sources attach as leaves. Search hits never add members, so a read of `exomem://brief/<id>` serves exactly the members that the minting read served. Members are ordered by distance and then by nearness, with caps of 40 notes and 40 Sources. A capped candidate is counted in `missing`.
+
+Nearness is the best similarity of a candidate's stored recall vectors to the mean of the seed's, read from the resident recall matrix for the candidates' rows only (`embeddings.resident_page_scores`). The seed's vectors come from the same sidecar, so nothing is encoded. A page is scored by its own vectors, never against a population, so a withheld page moves no other page's score or place, and a restricted caller gets the same rule. When the reading cannot run (no resident matrix, the seed has no vectors, or the matrix does not vouch for the seed), the candidates are ordered newest first and the response says `ranked_by: "recency"`.
+
+The second hop is what the seed's own links link to. A real-client read on 2026-11-17 showed why it needs a bound: one broad first-hop note, such as a note on method that many pages cite, filled the second hop with other subjects' notes, and the newest-first cut at 40 kept those over the subject's own. Scored against the independent keys of the evaluation's development subjects whose seed is a key member (four of five), as mean core-member recall and mean notes per brief:
+- the uncut two-hop walk: 1.00, with 63 notes, 56 of them outside the key;
+- the cut at 40 (its order rebuilt from link order, not read from the service): 0.85, with 40 notes, 35 outside the key;
+- the first hop alone: 0.67, with 7 notes, 3 outside the key;
+- the first hop plus the five second-hop notes nearest the seed: 0.92, with 12 notes, 6 outside the key.
+
+The fifth subject's topic text resolved to a seed outside its key, which no member rule repairs.
+
+A hybrid search on the seed's title reached the same core recall, but it would cost a search on every read, at a p50 above two seconds on the personal service.
 
 The relation families live in `traversal-profiles.yaml`. The profile takes the plain-link family and the provenance families, and a vault can extend it in its overlay. Code holds no relation list (C4).
 
@@ -57,7 +69,7 @@ The registry digest covers every registry instance, the private instances' defin
 
 The member walk reads content hashes from the index, so a cache hit reads no page.
 
-The walk itself is kept for the owner, in a second LRU of 128 entries that holds the walk and its closing edges. Its key is the root, the caller binding, the seed path, the graph snapshot's token, the recall policy identity and the registry digest. The token is `(schema_version, extension_registry_hash, generation, instance)`, read in the walk's own read transaction. Every write of graph rows bumps `generation` in the transaction that writes them, and a full rebuild replaces `instance`, so any edit, however small, ends the entry. An owner's warm read of an unchanged graph reads no edge. A restricted caller's release decision reads governance policy, tombstones and authorization that no graph token names, so its walk is made again on every read.
+The walk itself is kept for the owner, in a second LRU of 128 entries that holds the walk and its closing edges. Its key is the root, the caller binding, the seed path, the graph snapshot's token, the recall policy identity, the registry digest and the resident recall matrix's write token. A page is often embedded after the graph holds it, so the matrix token, not the graph token, is what makes that page's nearness count on the next read. A walk whose nearness reading should have run and did not is not kept. The token is `(schema_version, extension_registry_hash, generation, instance)`, read in the walk's own read transaction. Every write of graph rows bumps `generation` in the transaction that writes them, and a full rebuild replaces `instance`, so any edit, however small, ends the entry. An owner's warm read of an unchanged graph reads no edge. A restricted caller's release decision reads governance policy, tombstones and authorization that no graph token names, so its walk is made again on every read.
 
 A recorded precedent declined a build cache for topic profiles, because no key could cover every input that the build reads. The brief's inputs are closed:
 - The member texts are covered by their hashes.
