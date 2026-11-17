@@ -1477,6 +1477,9 @@ def _with_catalog_scope(function):
             # Direct store readers pin the same host constants as dispatched read commands.
             state_paths.resolution_scope() if lexstore.store_catalogue() else ExitStack(),
         ):
+            # Passage selection owns its published view; generic pending hydration opens unselected Sources.
+            if kwargs.get("result_level") == "passage":
+                return function(vault_root, *args, **kwargs)
             if (
                 not _managed_reader() or not freshness.event_indexes_enabled()
                 or lexstore.backend() == "python"
@@ -1642,7 +1645,7 @@ def find(
     _cache_probe: bool = False,
     _prepared_queries: find_candidates.PreparedQueryInputs | None = None,
     _defer_finish: bool = False,
-) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
+) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit] | dict[str, Any]:
     """Search the vault. Returns up to `limit` hits.
 
     `degraded_out`: optional caller-owned list. While the background warm-up
@@ -1766,6 +1769,10 @@ def find(
     ranked, classified or counted. Omitted, it is `caller_admission`, so a
     restricted caller's find can never run unadmitted.
     """
+    if result_level == "passage":
+        from . import passage_evidence
+
+        return passage_evidence.find(vault_root, locals())
     if admit_path is None:
         admit_path = caller_admission(vault_root)
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -4935,6 +4942,7 @@ def _resolve_relation_filter(
     relation_direction: str,
     snapshot: FreshnessSnapshot,
     keep: Callable[[str], bool] | None = None,
+    anchor_visible: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
     plus per-path provenance and advisory findings. `keep` is the request's content
@@ -4943,6 +4951,8 @@ def _resolve_relation_filter(
     would hold them. A caller with such a view re-derives the links that resolve
     differently for it, with the resolver of the request's `snapshot`.
     A withheld anchor yields an authoritative empty before registry selection.
+    `anchor_visible` can supply an existing namespace-authority check without
+    opening an unselected anchor. It does not replace graph freshness or release.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -4959,7 +4969,12 @@ def _resolve_relation_filter(
 
     if relation_of:
         relation_of = epistemic_graph._page_rel(relation_of)
-        if not egress.quick_page_visible(vault_root, relation_of):
+        visible = (
+            anchor_visible(relation_of)
+            if anchor_visible is not None
+            else egress.quick_page_visible(vault_root, relation_of)
+        )
+        if not visible:
             return frozenset(), {}, ()
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     # An anchored filter inherits its anchor page's instance; otherwise public.

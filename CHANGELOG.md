@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.185.0](https://github.com/Artexis10/exomem/compare/v0.184.1...v0.185.0) (2026-11-16)
+
+
+### Features
+
+* **brief:** read the brief of a researched subject through read_page ([#2879](https://github.com/Artexis10/exomem/issues/2879)) ([14385db](https://github.com/Artexis10/exomem/commit/14385db21c077bcc7d35851055b654cefbfd9212))
+* **cloud:** size the catalogue build from the rehearsal's measurements ([#2877](https://github.com/Artexis10/exomem/issues/2877)) ([5dc2d08](https://github.com/Artexis10/exomem/commit/5dc2d08a8cf08760e75c581db7c5d3143db0d11b))
+* **layout:** report the vault layout in status and doctor without refusing ([#2881](https://github.com/Artexis10/exomem/issues/2881)) ([d4ca590](https://github.com/Artexis10/exomem/commit/d4ca590cc9031b0c61ce2dfcc120c0bc8965f1ee))
+* **relayout:** plan the move to the root vault layout without writing ([#2876](https://github.com/Artexis10/exomem/issues/2876)) ([dd9484d](https://github.com/Artexis10/exomem/commit/dd9484dca1bd66af34f36be5da6e8082f63dfe0d))
+
+
+### Bug Fixes
+
+* **artifacts:** name every unread receipt field and count every saved file ([#2875](https://github.com/Artexis10/exomem/issues/2875)) ([a924b14](https://github.com/Artexis10/exomem/commit/a924b14debc5f3af6fb70141a359fd9eac44324a))
+* **auth:** refuse credential writes when the working-directory .env swaps an exported store ([#2880](https://github.com/Artexis10/exomem/issues/2880)) ([1e51740](https://github.com/Artexis10/exomem/commit/1e51740ac302e47fbaa70f1f49db460813a0812e))
+* **relayout:** keep sidecar names and plan links to .md.md pages correctly ([#2884](https://github.com/Artexis10/exomem/issues/2884)) ([5112892](https://github.com/Artexis10/exomem/commit/5112892e3ffb736115115f812436a066a78b16ba))
+* **vault-store:** list just-saved pages at once in store mode and harden the real-vault rehearsal ([#2882](https://github.com/Artexis10/exomem/issues/2882)) ([cffdb5e](https://github.com/Artexis10/exomem/commit/cffdb5e6b0230741faacf44f407407c7e8372612))
+
+## [0.184.1](https://github.com/Artexis10/exomem/compare/v0.184.0...v0.184.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **artifacts:** never report a committed file as failed ([#2872](https://github.com/Artexis10/exomem/issues/2872)) ([730d91e](https://github.com/Artexis10/exomem/commit/730d91e428aa98bd2feba8af4453f35095ea627c))
+* **vault-store:** run the store-mode suites on native Windows, fix six Windows defects and add the rehearsal driver ([#2861](https://github.com/Artexis10/exomem/issues/2861)) ([570259a](https://github.com/Artexis10/exomem/commit/570259af2dd6c854e459dcc7732a56a81ccd386a))
+
 ## [0.184.0](https://github.com/Artexis10/exomem/compare/v0.183.0...v0.184.0) (2026-11-16)
 
 

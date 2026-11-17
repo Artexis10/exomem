@@ -71,7 +71,23 @@ def test_explicit_slug_rejects_non_ascii_kebab_case(vault: Path, slug: str) -> N
     assert exc.value.code == "INVALID_SLUG"
 
 
-def test_automatic_non_ascii_slug_warns_but_preserves_title(vault: Path) -> None:
+def test_default_title_name_keeps_non_ascii_text_without_a_lossy_warning(vault: Path) -> None:
+    result = note_module.note(
+        vault,
+        content="本文。",
+        note_type="insight",
+        title="睡眠",
+        status="draft",
+        today=TODAY,
+    )
+    assert Path(result.path).name == "睡眠.md"
+    assert not any("lossy" in warning.lower() for warning in result.warnings)
+
+
+def test_automatic_non_ascii_slug_warns_but_preserves_title(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
     result = note_module.note(
         vault,
         content="本文。",

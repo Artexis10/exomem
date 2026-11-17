@@ -533,6 +533,7 @@ class Source:
     path: Path
     guard: vault.PathGuard
     members: tuple[_Member, ...] = ()
+    canonical_ref: str | None = None
 
 
 def resolve_source(
@@ -568,6 +569,17 @@ def resolve_source(
         if not operation.allows_file(relative, content_sha256=prove):
             return False
         prove()
+        from .. import memory_refs
+
+        try:
+            with _open_source(source) as stream:
+                header = vault.read_frontmatter_header(stream, 64 * 1024)
+            canonical_ref = memory_refs.ref_from_markdown(header.decode("utf-8"))
+        except (UnicodeDecodeError, vault.FrontmatterError):
+            # A legacy or binary input stays importable; it cannot supply incarnation coverage.
+            canonical_ref = None
+        source = dataclasses.replace(source, canonical_ref=canonical_ref)
+        source.guard.recheck(root)
         found.append((source, *proved[0]))
         return True
 
@@ -2508,7 +2520,7 @@ def _prove(writer, job: _Job, operation) -> Source:
             members = _export(writer.root, source.ref, sha256, bound["members"]["select"])
             if [member.sha256 for member in members] != bound["members"]["sha256"]:
                 raise _Lost
-            source = Source(source.ref, source.path, source.guard, members)
+            source = dataclasses.replace(source, members=members)
     except collections.CollectionError as error:
         raise _Lost from error
     _proofs(writer)[job.id] = source
@@ -2953,7 +2965,7 @@ class _Settlement:
             superseded,
             plan,
         )
-        self.source = (proof.ref, proof.guard)
+        self.source = records.ResolvedSource(proof.ref, proof.guard, proof.canonical_ref)
         self.guards = guards
         self.prepared, self.version = prepared, version
         self.tally: dict[str, int] | None = None
@@ -2966,7 +2978,7 @@ class _Settlement:
     def prepared_row(self, index, manifest, reference, source, item):
         """Reuse only the same declaration, source proof, kept position and exact mapped content."""
         if ((manifest.collection_id, manifest.manifest_version.path, manifest.manifest_version.hash) != self._manifest
-                or reference != self._source[0] or source != self._source
+                or reference != self._source.path or source != self._source
                 or not 0 <= index < len(self._kept_prepared)):
             return None
         position, prepared = self._kept_prepared[index]
@@ -3805,7 +3817,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
             source, sha256, size = resolve_source(root, operation, request.source_ref)
             if request.members is not None:
                 members = _export(root, source.ref, sha256, request.members)
-                source = Source(source.ref, source.path, source.guard, members)
+                source = dataclasses.replace(source, members=members)
         finally:
             operation.close()
     binding = {

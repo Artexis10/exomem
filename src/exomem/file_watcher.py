@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import (
+    capture_inventory,
     freshness,
     index_sync,
     media_processing,
@@ -754,6 +755,15 @@ def _prune_locked(now: float) -> None:
             _SELF_DELETES.pop(k, None)
 
 
+def _semantic_markdown(root: Path, path: Path) -> bool:
+    from . import vault
+
+    relative = capture_inventory.raw_event_path(root, path)
+    spelling = relative if relative is not None else _rel_posix(root, path)
+    # Sync-conflict filenames are excluded by the maintained Markdown scan contract.
+    return spelling is not None and not vault.in_excluded_scan_dir(spelling) and ".sync-conflict-" not in path.name
+
+
 def _publish_registry_change(
     vault_root: Path, changed: list[Path], deleted_rels: list[str]
 ) -> bool:
@@ -764,15 +774,27 @@ def _publish_registry_change(
     see it, or `find` would serve stale results for that file until the next
     reconcile. A live registry is patched immediately; an in-flight replacement
     seed retains the target state for its final swap (guards inside)."""
+    witness = capture_inventory.raw_witness(vault_root)
+    if witness is not None:
+        for path in (*changed, *(vault_root / rel for rel in deleted_rels)):
+            relative = capture_inventory.raw_event_path(vault_root, path)
+            if relative is not None:
+                witness.observe(relative)
     if not freshness.event_indexes_enabled():
         # Kill switch on: don't even pay the resolve() syscalls in _rel_posix.
         return False
     corpus_published = index_sync.publish_corpus_delta(
         vault_root,
-        changed=changed,
-        deleted=deleted_rels,
+        changed=[path for path in changed if _semantic_markdown(vault_root, path)],
+        deleted=[rel for rel in deleted_rels if _semantic_markdown(vault_root, vault_root / rel)],
         attempts=2,
     )
+    if witness is not None:
+        with _WATCHERS_LOCK:
+            publishers = tuple(watcher for watcher in _WATCHERS.get(_canon_root(vault_root), ()) if watcher._raw_witness is witness)
+        for publisher in publishers:
+            publisher._wake.set()
+            publisher._flush_raw()
     changed_rels = [r for r in (_rel_posix(vault_root, p) for p in changed) if r]
     try:
         from . import vault as vault_module
@@ -1129,6 +1151,7 @@ class FileWatcher:
         from .writer_lease import active_manager
 
         self._vault_root = vault_root
+        self._raw_witness = capture_inventory.new_raw_witness(vault_root)
         # Retain the invoking manager: background threads do not inherit its
         # ContextVar, and publication must contend with that same writer.
         self._freshness_manager = active_manager()
@@ -1191,6 +1214,43 @@ class FileWatcher:
 
     # ---- change recording (called by the watchdog handler AND by tests) ----
 
+    def _record_raw(self, path: Path, *, directory: bool = False) -> bool:
+        if self._importer is not None:
+            return False
+        relative = capture_inventory.raw_event_path(self._vault_root, path, directory=directory)
+        if relative is None:
+            return False
+        self._raw_witness.observe(relative)
+        with self._lock:
+            self._last_change = time.monotonic()
+        self._wake.set()
+        return True
+
+    def _flush_raw(self, *, census: bool = False) -> bool:
+        if self._importer is not None:
+            return True
+        _epoch, pending, _seeded = self._raw_witness.snapshot()
+        # A directory event also covers active child publications; child events are not guaranteed.
+        with _SUPPRESS_LOCK:
+            active = tuple((key[1], intent) for key, intent in _PUBLICATION_INTENTS.items()
+                           if key[0] == _canon_root(self._vault_root) and intent.disposition == "active")
+        for path, intent in active:
+            if capture_inventory.raw_path(self._vault_root, path) and (census or any(
+                not prefix or path == prefix or path.startswith(prefix + "/") for prefix in pending
+            )):
+                if path not in pending:
+                    self._record_raw(self._vault_root / path)
+                self._hold_publication_intent(self._vault_root / path, intent)
+        _epoch, pending, _seeded = self._raw_witness.snapshot()
+        for path in pending:
+            if capture_inventory.raw_path(self._vault_root, path):
+                disposition, intent = _observe_publication_intent(self._vault_root, self._vault_root / path, watcher=self)
+                if disposition == "held" and intent is not None:
+                    self._hold_publication_intent(self._vault_root / path, intent)
+        with self._lock:
+            held = frozenset(filter(None, (self._rel(path) for path in self._pending_publication_intents)))
+        return semantic_contract.publish_capture_inventory(self._vault_root, self._raw_witness, census=census, excluded=held)
+
     def _record_external_locked(self, path: Path, *, deleted: bool) -> None:
         if deleted:
             self._pending_upsert.discard(path)
@@ -1214,20 +1274,25 @@ class FileWatcher:
         self, path: Path, intent: _PublicationIntent, disposition: str
     ) -> None:
         """Resolve or fence an observed publication as its transaction closes."""
+        if disposition != "succeeded":
+            self._record_raw(path)
         with self._lock:
             if self._pending_publication_intents.get(path) is not intent:
                 if disposition == "succeeded":
                     return
             else:
                 self._pending_publication_intents.pop(path, None)
-            if disposition != "succeeded":
+            if disposition != "succeeded" and _semantic_markdown(self._vault_root, path):
                 self._record_external_locked(path, deleted=False)
         self._wake.set()
 
     def _replay_publication_remnant(self, path: Path) -> None:
         """Fence a failed transaction even if watchdog never delivered its echo."""
+        self._record_raw(path)
         with self._lock:
             self._pending_publication_intents.pop(path, None)
+            if not _semantic_markdown(self._vault_root, path):
+                return
             if path in self._pending_upsert or path in self._pending_delete:
                 return
             self._record_external_locked(path, deleted=False)
@@ -1285,6 +1350,8 @@ class FileWatcher:
 
     def _note_directories(self, *paths: str | bytes) -> None:
         """Name directories that an event touched, for the next census rebuild."""
+        for path in paths:
+            self._record_raw(Path(os.fsdecode(path)), directory=True)
         from .governance import artifact_census
 
         rels = [rel for rel in (self._rel(Path(os.fsdecode(path))) for path in paths) if rel]
@@ -1327,6 +1394,7 @@ class FileWatcher:
         """Record a Markdown or supported-media change, coalesced by path."""
         from .vault import in_excluded_scan_dir
 
+        raw_observed = self._record_raw(path)
         owned_rel = self._import_target(path)
         if self._importer is None and path.suffix.lower() != ".md" and self._is_kb(path):
             from . import media_store
@@ -1376,7 +1444,11 @@ class FileWatcher:
             invalidate_vocabulary(self._vault_root, path=rel)
         if self._importer is not None:
             return  # the importer settles it from the store's records, not the file-mode machinery
-        if rel is not None and in_excluded_scan_dir(rel):
+        if rel is not None and (in_excluded_scan_dir(rel) or ".sync-conflict-" in path.name):
+            if raw_observed and not deleted:
+                disposition, intent = _observe_publication_intent(self._vault_root, path, watcher=self)
+                if disposition == "held" and intent is not None:
+                    self._hold_publication_intent(path, intent)
             # _trash/_archive/_Schema/…: every full walk skips these, so the
             # event path must too — else a delete's move-to-trash re-embeds
             # the trashed note under its trash path.
@@ -1446,6 +1518,7 @@ class FileWatcher:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
         self._resolve_held_publication_intents()
+        self._flush_raw()
         if self._importer is not None:
             self._import_pending()
         with self._lock:
@@ -1612,6 +1685,10 @@ class FileWatcher:
         re-embed the whole vault)."""
         if self._importer is not None:
             return self._sweep_store()
+        if seed and not self._stop.is_set():
+            self._raw_witness.activate()
+            self._raw_witness.withdraw()
+        self._flush_raw(census=True)
         changed_union: dict[str, None] = {}  # insertion-ordered dedupe across scopes
         deleted_union: dict[str, None] = {}
         drifted = False
@@ -2495,6 +2572,7 @@ class FileWatcher:
         if publish_corpus_change and publication_current:
             try:
                 semantic_contract.populate_cold_corpus_context(self._vault_root)
+                self._flush_raw()
             except Exception:  # noqa: BLE001 - a cold corpus is built by its next reader
                 log.exception("file watcher: corpus warm after the batch failed")
         if semantic_kb_ups:
@@ -2530,9 +2608,10 @@ class FileWatcher:
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
             try:
-                from . import served_context
+                from . import brief_watermarks, served_context
 
                 served_context.sweep(self._vault_root)
+                brief_watermarks.sweep(self._vault_root)
             except Exception:  # noqa: BLE001 - private-record retention never stops watcher convergence
                 log.debug("served context retention unavailable")
 
@@ -2577,6 +2656,7 @@ class FileWatcher:
         # Hosted quiesce/resume deliberately reuses the watcher instance. A
         # stopped threading.Event is sticky, so reset both loop controls before
         # recreating the dispatch/observer threads.
+        self._raw_witness = capture_inventory.new_raw_witness(self._vault_root)
         self._stop.clear()
         self._wake.clear()
         self._seed_published.clear()
@@ -2685,6 +2765,7 @@ class FileWatcher:
         return True
 
     def stop(self) -> None:
+        self._raw_witness.withdraw(stopped=True)
         self._stop.set()
         self._wake.set()
         self._seed_published.set()

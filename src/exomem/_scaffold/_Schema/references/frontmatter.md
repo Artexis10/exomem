@@ -12,7 +12,7 @@ These appear on every page type:
 | Field | Required | Type | Notes |
 |---|---|---|---|
 | `exomem_id` | new pages | UUID | immutable identity assigned by Exomem; legacy pages gain one only through explicit ID backfill |
-| `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `procedure`, `experiment`, `production-log`, `entity` |
+| `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `procedure`, `profile`, `experiment`, `production-log`, `entity` |
 | `title` | new pages | Unicode string | exact human-facing display title; independent of the filename slug |
 | `status` | yes | enum | `draft`, `active`, `superseded`, `archived` (production-logs use a richer status set — see below) |
 | `created` | yes | ISO instant or date | `YYYY-MM-DDTHH:MM:SSZ`, set on creation, never edited |
@@ -103,6 +103,16 @@ the page to its kind's folder and rewrites every link to it.
 | `sources` | optional | list of wikilinks |
 | `projects` | optional | list of project keys this applies to |
 | `supersedes`, `superseded_by` | optional | as above |
+
+### profile
+
+| Field | Required | Notes |
+|---|---|---|
+| `topics` | domain profile | exactly one registered domain key; omit it for the global profile |
+| `supersedes`, `superseded_by` | optional | as above |
+
+A page with more than one topic is refused, and a topic that no registered domain resolves makes a
+page that supplies nothing. See [profiles](profiles.md).
 
 ### experiment
 

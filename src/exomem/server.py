@@ -1087,6 +1087,11 @@ def build_server(
             for exclusion in commands_module.cloud_surface_exclusions(upload_bridge=upload_bridge)
         ) if cloud else (),
     )
+    if cloud:
+        from .cell_identity import register_identity_route
+
+        register_identity_route(mcp, cell_id=credentials.cell_id, vault_root=runtime.vault_root,
+                                surface=surface_descriptor)
     for cmd in product_commands:
         if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
             continue
@@ -1435,7 +1440,10 @@ def run(
         # sets a context variable, and FastMCP sets its own again per request.
         uvicorn_config: dict[str, object] = {"reset_contextvars": True}
         if worker_socket is not None:
+            from .service_ingress import WORKER_KEEP_ALIVE_SECONDS
+
             uvicorn_config["uds"] = str(worker_socket)
+            uvicorn_config["timeout_keep_alive"] = WORKER_KEEP_ALIVE_SECONDS
         worker_options = {"uvicorn_config": uvicorn_config}
         # Only this process answers /download, so only the short links it mints can resolve.
         from . import download_links

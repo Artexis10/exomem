@@ -27,10 +27,10 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 - [ ] 3.1 Preview the `Sources/Other` drain on the personal vault after installation; record how many Sources the preview holds back for path-form append-only referrers.
 - [ ] 3.2 Apply cleared moves in reviewed batches through governed reclassification and check references after each batch.
 
-## 4. Phase 2, only if 3.1 holds any Source back
+## 4. Phase 2, delivered by `add-curation-relocation-protocol`
 
-- [ ] 4.1 Update this design for history-aware read resolution under the Decision 5 constraints, choose the history store, and obtain review before implementation.
-- [ ] 4.2 Archive this change with shipped evidence, or withdraw Phase 2 with the 3.1 count as its reason.
+- [ ] 4.1 After `add-curation-relocation-protocol` ships, prove that a reclassification writes `moved_from`, that a Source linked by path from an Evidence page moves with only that page's link span changed, and that a revert restores the Evidence page's exact bytes.
+- [ ] 4.2 Archive this change with `openspec archive` after `add-curation-relocation-protocol` is archived, with shipped evidence.
 
 ## 5. Source pointer custody
 

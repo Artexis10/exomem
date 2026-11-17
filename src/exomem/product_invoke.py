@@ -54,7 +54,7 @@ def cli_surface_descriptor(*, expose_tier2: bool | None = None):
         surface="cli",
         profile="product",
         tier2_enabled=tier2,
-        product_commands=tuple(command.public_name for command in registered),
+        product_commands=tuple(command.public_name for command in registered if command.agent_listed),
         compatibility_commands=tuple(command.name for command in registered if command.preferred_name),
         exported_aliases=commands_module.simple_action_names(),
     )

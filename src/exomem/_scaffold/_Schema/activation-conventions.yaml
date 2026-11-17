@@ -43,6 +43,11 @@
 #     stance_max_chars: 2400                       # global stance lines, 0..8000
 #     skills_max_chars: 5000                       # skills catalogue, 0..8000
 #     skill_summary_max_chars: 300                 # one skill's summary, 40..1000
+#     domain_profile_max_chars: 1200               # one domain's profile lines, 0..8000
+#     profiles_max_chars: 2400                     # all profiles served in one response, 0..8000
+#     profile_semantic_floor: 0.5                  # a profile page's best chunk score that selects it, 0..1
+#     profile_lexical_floor: 8.5                   # a profile page's keyword score that selects it, 0..100
+#     profile_domains_max: 2                       # domains whose profile one turn selects, 1..8
 #   referential:
 #     # Words that make a turn point back at recent work ("continue", "where
 #     # were we") in YOUR language. A turn is referential only when it speaks
@@ -119,12 +124,21 @@ resolution:
 # Response budgets: how many characters a block may spend. `stance_max_chars` caps the
 # global stance lines every maps response carries (0..8000). `skills_max_chars` caps the
 # skills catalogue sent once per conversation (0..8000), and `skill_summary_max_chars` the
-# summary of each skill in it (40..1000). Override any of them with
-# `budgets: {stance_max_chars: 2400}`.
+# summary of each skill in it (40..1000). `domain_profile_max_chars` caps one domain's profile lines
+# (0..8000) and `profiles_max_chars` all the profiles that one response serves (0..8000).
+# A turn selects a domain's profile page when its best chunk scores at least `profile_semantic_floor`
+# against the turn (0..1) or its keyword score reaches `profile_lexical_floor` (0..100). At most
+# `profile_domains_max` domains (1..8) are selected, and each is followed by its parent domains.
+# Override any of them with `budgets: {stance_max_chars: 2400}`.
 budgets:
   stance_max_chars: 1600
   skills_max_chars: 3500
   skill_summary_max_chars: 200
+  domain_profile_max_chars: 1200
+  profiles_max_chars: 2400
+  profile_semantic_floor: 0.5
+  profile_lexical_floor: 8.5
+  profile_domains_max: 2
 
 # The shipped referential seed: what makes a turn point back at recent work.
 # A cue is matched on whole words, never inside a longer one. The filler

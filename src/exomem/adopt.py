@@ -234,6 +234,13 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
         rel = target.relative_to(root).as_posix()
     elif target.exists():
         raise AdoptError("MANIFEST_EXISTS", f"manifest already exists: {rel}")
+    else:
+        from . import prior_claims
+
+        try:
+            prior_claims.require_unreserved(root, rel)
+        except prior_claims.ReservedPathError as error:
+            raise AdoptError(error.code, error.reason) from None
     return target, rel
 
 
@@ -543,6 +550,7 @@ def _draft_arguments(
         "note_type": note["note_type"],
         "title": note["title"],
         "slug": note.get("slug"),
+        "_name_number": note.get("name_number"),
         "project": note.get("project"),
         "domain": note.get("domain"),
         "tags": list(planned.get("tags") or []),

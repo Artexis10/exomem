@@ -112,6 +112,8 @@ class NoteType:
     #: The token of the type's row in the top index Counts. Rows written before the pack named
     #: the research type `research-note` use `research`.
     index_row: str = ""
+    #: Whether the type's pages are the owner's preference profiles. Only the shipped pack sets it.
+    profile: bool = False
 
 
 def _note_type(entry: registry.Entry) -> NoteType:
@@ -132,6 +134,7 @@ def _note_type(entry: registry.Entry) -> NoteType:
         partition=partition,
         stem=stem,
         index_row=str(attributes.get("index_row") or entry.key),
+        profile=bool(attributes.get("profile", False)),
     )
 
 
@@ -190,8 +193,13 @@ def captured_source(note_type: NoteType) -> bool:
     return note_type.role == "source"
 
 
+def profile(note_type: NoteType) -> bool:
+    """Set K: preference profiles, one domain each or the global one, served as session context."""
+    return note_type.profile
+
+
 def entity(note_type: NoteType) -> bool:
-    """Set K: entity pages, whose type groups live below the entity area."""
+    """Set L: entity pages, whose type groups live below the entity area."""
     return note_type.role == "entity"
 
 
@@ -246,6 +254,10 @@ def _check_attributes(entry: registry.Entry) -> None:
     if not isinstance(attributes.get("time_bounded", False), bool):
         raise registry.RegistryError(
             f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} time_bounded must be true or false"
+        )
+    if not isinstance(attributes.get("profile", False), bool):
+        raise registry.RegistryError(
+            f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} profile must be true or false"
         )
     if attributes.get("sources", "optional") not in SOURCES_VALUES:
         raise registry.RegistryError(

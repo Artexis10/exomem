@@ -84,7 +84,8 @@ _WITHHELD_OPENER_RE = re.compile(r"<!--(?=\s*exomem-origin)", re.IGNORECASE)
 _ORIGIN_PAYLOAD_RE = re.compile(r"^\s*exomem-origin:v1\s+(.+?)\s*$", re.DOTALL)
 
 
-@dataclass(frozen=True)
+# Not frozen: contextlib assigns __traceback__ when an exception leaves a generator context manager.
+@dataclass(eq=False)
 class OriginError(ValueError):
     code: str
     reason: str

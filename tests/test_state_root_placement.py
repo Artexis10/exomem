@@ -34,10 +34,12 @@ def _constructor_map():
     store's constructor pins the scratch location too.
     """
     from exomem import (
+        brief_watermarks,
         claims,
         deferred_index,
         due_state,
         epistemic_graph,
+        generated_fragment_store,
         graph_sync,
         index_paths,
         lexstore,
@@ -90,11 +92,13 @@ def _constructor_map():
         ),
         "clip-store": (index_paths.clip_sidecar_path,),
         "refs-store": (memory_refs.sidecar_path,),
+        "generated-fragments-index": (generated_fragment_store.cache_path,),
         "maintenance-jobs-store": (maintenance_jobs.store_path,),
         "media-jobs-store": (media_jobs.job_store_path, media_jobs.worker_lock_path),
         "governance-store": (index_paths.governance_sidecar_path,),
         "due-state": (due_state.state_path,),
         "review-state": (review_state.state_path,),
+        "brief-watermarks": (brief_watermarks.sidecar_path,),
         "served-context": (served_context.sidecar_path,),
         "voice-profile-store": (voice_profiles.voice_profiles_path,),
         "authorization-projections": (
@@ -135,6 +139,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "due-state",
     "embeddings-store",
     "freshness-store",
+    "generated-fragments-index",
     "governance-store",
     "graph-coordination",
     "graph-handoff",
@@ -155,6 +160,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "review-state",
     "served-context",
     "voice-profile-store",
+    "brief-watermarks",
 }
 
 _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
@@ -173,8 +179,10 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "collection-replica",
     "consolidation-tree",
     "governance-tree",
+    "generated-fragments",
     "procedure-approvals",
     "source-corrections",
+    "source-custody",
 }
 
 #: Canonical data outside the vault: under the state root, but never rebuilt,

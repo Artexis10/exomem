@@ -289,6 +289,45 @@ def local_links(text: str) -> tuple[LocalLink, ...]:
     return tuple(links)
 
 
+@dataclass(frozen=True, slots=True)
+class ExternalLink:
+    """A CommonMark link whose destination is a network location, as written."""
+
+    url: str
+    label: str  # the link's visible text
+
+
+def external_links(text: str) -> tuple[ExternalLink, ...]:
+    """Links in `text` that name a network location, in source order and first-seen per URL.
+
+    markdown-it owns what is a link, so code spans, reference definitions and escapes follow
+    CommonMark. A destination with a scheme and a network location is external; a file path, a
+    bare `#fragment` and an image are not.
+    """
+    found: dict[str, str] = {}
+
+    def visit(tokens) -> None:  # noqa: ANN001
+        url: str | None = None
+        label: list[str] = []
+        for token in tokens:
+            if token.type == "link_open":
+                href = token.attrGet("href")
+                parts = urlsplit(href) if isinstance(href, str) and href else None
+                url = href if parts is not None and parts.scheme and parts.netloc else None
+                label = []
+            elif token.type == "link_close":
+                if url is not None:
+                    found.setdefault(url, "".join(label).strip())
+                url = None
+            elif url is not None and token.type in {"text", "code_inline"}:  # nosemgrep: ep-word-set -- markdown-it's own token types, fixed by the parser
+                label.append(token.content)
+            if token.children:
+                visit(token.children)
+
+    visit(_LINK_PARSER.parse(text))
+    return tuple(ExternalLink(url, label) for url, label in found.items())
+
+
 # Obsidian's inline tag token: `#` opened at a line start or after whitespace, then
 # letters, digits, `_`, `-` and `/`. This checks a token's shape inside text the
 # CommonMark scan has already cleared of code and comments; it reads no meaning.

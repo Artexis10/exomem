@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import call_spans, memory_refs, query_data, record_item_cache, vault
+from .governance import egress
 from . import structured_collections as collections
 from .collection_profiles import profile_for
 from .query_compat import DEFAULT_DATE_COLUMN
@@ -1443,13 +1444,18 @@ def presentation_relationship_resolver(
         if relative is None:
             try:
                 target = memory_refs.resolve_identifier_read_only(root, raw)
-                canonical, _warning = vault.normalize_wikilink(
-                    target,
-                    root,
-                    resolver_factory=get_wikilinks,
-                    targeted_namespace_contains=targeted_namespace_contains,
-                    strict=True,
-                )
+                # The reader's filter runs before candidates are counted, so a page it may not
+                # see never makes a name ambiguous or takes a path another page left. Counting
+                # releases nothing, so it records no receipt; the target's own check below does.
+                with egress.decide_without_receipt():
+                    canonical, _warning = vault.normalize_wikilink(
+                        target,
+                        root,
+                        resolver_factory=get_wikilinks,
+                        targeted_namespace_contains=targeted_namespace_contains,
+                        visible=authorize_path,
+                        strict=True,
+                    )
                 relative = canonical.split("#", 1)[0] + ".md"
             except (memory_refs.ReferenceError, vault.WikilinkError):
                 return None
@@ -1533,6 +1539,68 @@ def _final_line_ending(yaml_text: str, newline: str) -> str:
     return _span_terminator(yaml_text, (0, len(yaml_text))) or newline
 
 
+def _line_end(yaml_text: str, at: int) -> int:
+    """`at` when it starts a line, else the start of the line after the one holding `at`."""
+    if not at or yaml_text[at - 1] == "\n":
+        return at
+    stop = yaml_text.find("\n", at)
+    return len(yaml_text) if stop == -1 else stop + 1
+
+
+def _value_end(yaml_text: str, node: Any) -> int:
+    """Where a value's own bytes end.
+
+    The parser ends a block collection where the next token starts, past any comment and blank
+    line that follow it, and a literal or folded scalar past the blank lines that follow it. A
+    block collection ends instead with its last item, taking that line's break only when no
+    comment follows the item on it. A block scalar ends with its last line that holds text.
+    Every comment and blank line after a value then stays outside its span.
+    """
+    if (
+        isinstance(node, (vault.yaml.nodes.SequenceNode, vault.yaml.nodes.MappingNode))
+        and not node.flow_style
+        and node.value
+    ):
+        last = node.value[-1]
+        end = _value_end(yaml_text, last[1] if isinstance(last, tuple) else last)
+        stop = _line_end(yaml_text, end)
+        return stop if not yaml_text[end:stop].strip() else end
+    end = node.end_mark.index
+    if isinstance(node, vault.yaml.nodes.ScalarNode) and node.style in ("|", ">"):
+        # A blank line after the text is a separator, not the value's bytes, even when a keep
+        # chomping indicator reads it into the value: a field rewritten at this span keeps it.
+        return min(end, _line_end(yaml_text, len(yaml_text[:end].rstrip())))
+    return end
+
+
+def frontmatter_entry_spans(yaml_text: str) -> dict[str, tuple[int, int]]:
+    """Each top-level key of a frontmatter block, mapped to the span of its own bytes.
+
+    A span runs from the key's first byte to its value's end (`_value_end`), so a comment or
+    blank line after a value stays outside every span. A block-style value's span covers its
+    own line ending unless a comment follows its last item on that line. A plain, flow or
+    quoted scalar's span stops at its last byte.
+    """
+    try:
+        document = vault.yaml.compose(yaml_text)
+    except vault.yaml.YAMLError as error:
+        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid") from error
+    if document is None:
+        return {}  # an empty block, or one of comments only, holds no field (`parse_frontmatter`)
+    if not isinstance(document, vault.yaml.nodes.MappingNode):
+        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid")
+    spans: dict[str, tuple[int, int]] = {}
+    for key_node, value_node in document.value:
+        if not isinstance(key_node, vault.yaml.nodes.ScalarNode):
+            raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid")
+        if key_node.value in spans:
+            raise FrontmatterSpliceError(
+                "DUPLICATE_FRONTMATTER_KEY", "frontmatter key is duplicated"
+            )
+        spans[key_node.value] = (key_node.start_mark.index, _value_end(yaml_text, value_node))
+    return spans
+
+
 def splice_frontmatter_fields(
     yaml_text: str,
     changes: Mapping[str, Any],
@@ -1547,21 +1615,7 @@ def splice_frontmatter_fields(
     order, and new keys are appended in `changes` order. A result that does not
     hold exactly the requested field set is refused.
     """
-    try:
-        document = vault.yaml.compose(yaml_text)
-    except vault.yaml.YAMLError as error:
-        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid") from error
-    if not isinstance(document, vault.yaml.nodes.MappingNode):
-        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid")
-    spans: dict[str, tuple[int, int]] = {}
-    for key_node, value_node in document.value:
-        if not isinstance(key_node, vault.yaml.nodes.ScalarNode):
-            raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid")
-        if key_node.value in spans:
-            raise FrontmatterSpliceError(
-                "DUPLICATE_FRONTMATTER_KEY", "frontmatter key is duplicated"
-            )
-        spans[key_node.value] = (key_node.start_mark.index, value_node.end_mark.index)
+    spans = frontmatter_entry_spans(yaml_text)
     # Everything appended below lands after the final frontmatter line, so it
     # takes that line's ending.
     trailing = _final_line_ending(yaml_text, newline)
@@ -1662,7 +1716,7 @@ def splice_markdown_frontmatter(
         raise FrontmatterSpliceError("NO_FRONTMATTER", "the page has no frontmatter block")
     start = match.start(1)
     # The splice reads the block with its final line terminated. An empty block has no
-    # line break before its closing fence, so its slice is empty and the splice refuses it.
+    # line break before its closing fence, so its slice is empty and new fields open it.
     end = match.end(1) + len(vault.frontmatter_line_break(text, match))
     patched = splice_frontmatter_fields(
         text[start:end],
@@ -1670,6 +1724,85 @@ def splice_markdown_frontmatter(
         delete_fields=delete_fields,
         newline=vault.document_newline(text),
     )
+    return text[:start] + patched + text[end:]
+
+
+def _block_sequence(text: str, key: str) -> tuple[int, int, str, Any, Any] | None:
+    """The frontmatter block's offsets and text, its parsed fields and the node at `key`, when
+    `key` holds a non-empty block sequence; None otherwise."""
+    match = vault._FM_PATTERN.match(text)
+    if match is None:
+        raise FrontmatterSpliceError("NO_FRONTMATTER", "the page has no frontmatter block")
+    start = match.start(1)
+    end = match.end(1) + len(vault.frontmatter_line_break(text, match))
+    yaml_text = text[start:end]
+    try:
+        document = vault.yaml.compose(yaml_text)
+        fields = vault.yaml.safe_load(yaml_text)
+    except vault.yaml.YAMLError as error:
+        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "frontmatter is invalid") from error
+    if not isinstance(document, vault.yaml.nodes.MappingNode):
+        return None
+    node = next((value for name, value in document.value if name.value == key), None)
+    if not (
+        isinstance(node, vault.yaml.nodes.SequenceNode) and not node.flow_style and node.value
+    ):
+        return None
+    return start, end, yaml_text, fields, node
+
+
+def _reparsed(yaml_text: str, expected: Any, key: str) -> None:
+    try:
+        parsed = vault.yaml.safe_load(yaml_text)
+    except vault.yaml.YAMLError as error:
+        raise FrontmatterSpliceError(
+            "INVALID_FRONTMATTER", "spliced frontmatter is not valid YAML"
+        ) from error
+    if parsed != expected:
+        raise FrontmatterSpliceError(
+            "INVALID_FRONTMATTER", f"the change to `{key}` did not leave exactly the asked items"
+        )
+
+
+def append_markdown_sequence_item(text: str, key: str, item: Any) -> str | None:
+    """`text` with `item` appended to the block sequence at top-level `key`, every other byte kept.
+
+    The new item lands after the sequence's last item's line, at its items' indent, so the bytes
+    before it stay a prefix of the new value. None when `key` holds no non-empty block sequence:
+    the caller then splices the whole value.
+    """
+    found = _block_sequence(text, key)
+    if found is None:
+        return None
+    start, end, yaml_text, before, node = found
+    # The new item starts the line after the last item's, past any comment that ends that line.
+    at = _line_end(yaml_text, _value_end(yaml_text, node))
+    newline = _span_terminator(yaml_text, (0, at)) or vault.document_newline(text)
+    indent = " " * node.start_mark.column
+    # The serializer renders `key:` and then the one item at column 0.
+    lines = vault.serialize_frontmatter({key: [item]}).split("\n")[1:]
+    rendered = "".join(indent + line + newline for line in lines)
+    patched = yaml_text[:at] + rendered + yaml_text[at:]
+    _reparsed(patched, {**before, key: [*before[key], item]}, key)
+    return text[:start] + patched + text[end:]
+
+
+def remove_last_markdown_sequence_item(text: str, key: str) -> str | None:
+    """`text` without the last item of the block sequence at top-level `key`, every other byte
+    kept: the reverse of `append_markdown_sequence_item`.
+
+    None when `key` holds fewer than two block items or its last item does not start its own
+    line; the caller then splices the whole value.
+    """
+    found = _block_sequence(text, key)
+    if found is None or len(found[4].value) < 2:
+        return None
+    start, end, yaml_text, before, node = found
+    first = yaml_text.rfind("\n", 0, node.value[-1].start_mark.index) + 1
+    if not yaml_text[first : node.value[-1].start_mark.index].lstrip().startswith("-"):
+        return None
+    patched = yaml_text[:first] + yaml_text[_line_end(yaml_text, _value_end(yaml_text, node)) :]
+    _reparsed(patched, {**before, key: before[key][:-1]}, key)
     return text[:start] + patched + text[end:]
 
 

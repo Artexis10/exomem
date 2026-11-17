@@ -621,6 +621,39 @@ def test_pages_sharing_an_id_keep_the_fact_identities_a_full_build_gives(
     assert enriched.as_dict() == full_enriched.as_dict()
 
 
+def test_a_page_that_comes_to_claim_a_path_takes_the_links_naming_it_as_a_full_build_would(
+    tmp_path: Path,
+) -> None:
+    # Failure caught: a link names a path no page holds, and a changed page now claims it, yet
+    # the patched corpus keeps the link's stale fact, so a plan is judged on a link it misses.
+    from exomem import prior_claims
+
+    _linked_vault(tmp_path)
+    gone = f"{_INSIGHTS}/gone"
+    _write(tmp_path, "namer.md", title="namer", body=f"## Relations\n- supports [[{gone}]]\n")
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    rel = f"{_INSIGHTS}/target.md"
+    text = (
+        f"---\ntitle: Target\ntype: insight\nstatus: active\nproject: atlas\n"
+        f"moved_from:\n  - path: {gone}.md\n---\n\n## Observations\n\n- [claim] Wording ^claim\n"
+    )
+    state = semantic_contract.build_page_state(tmp_path, rel, text)
+    claims = prior_claims.current(tmp_path).with_pages({rel: text.encode("utf-8")})
+
+    patched = corpus.with_pages({rel: state}, prior_claims=claims)
+    full = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        {**corpus.pages, rel: state}.values(),
+        registry=corpus.registry,
+        identity_census=corpus.identity_census.with_page(state),
+        prior_claims=claims,
+    )
+
+    [named] = [fact for fact in full.relation_facts if fact.authored_path.endswith("namer.md")]
+    assert named.resolved_target_path == rel
+    assert patched.relation_facts == full.relation_facts
+
+
 @pytest.mark.parametrize("direction", ["delete", "create"])
 def test_a_link_with_a_blank_before_md_follows_its_page_like_a_full_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direction: str

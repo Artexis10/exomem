@@ -1467,19 +1467,34 @@ def list_lifecycle_prepared_identities(vault_root: Path) -> tuple[str, ...]:
     return tuple(identities)
 
 
-def _safe_trash_original_path(value: object) -> bool:
+def _trash_original_parts(value: object) -> tuple[str, ...] | None:
+    """The parts of a well-formed relative POSIX ``original_path``, else ``None``."""
     if type(value) is not str:
-        return False
+        return None
     posix = PurePosixPath(value)
-    return bool(
+    if not (
         value
         and "\\" not in value
         and "\0" not in value
         and posix.as_posix() == value
         and not posix.is_absolute()
+        and posix.parts
         and not any(part in {"", ".", ".."} for part in posix.parts)
-        and managed_split_parts(posix.parts) is not None
-    )
+    ):
+        return None
+    return posix.parts
+
+
+def _safe_trash_original_path(value: object) -> bool:
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts) is not None
+
+
+def _trash_original_outside_managed_root(value: object) -> bool:
+    # The casefold comparison keeps a root spelled in other letter case failing closed: on a
+    # case-insensitive filesystem that spelling can still name a real managed page.
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts, key=str.casefold) is None
 
 
 def _read_bounded_lifecycle_sidecar_bytes(
@@ -1749,7 +1764,10 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             source = raw.decode("utf-8", errors="strict")
             metadata = parse_exact_json_object(source)
             original = metadata.get("original_path")
-            if not _safe_trash_original_path(original):
+            # Prepared paths are managed paths, so a sidecar outside the managed root can never
+            # prove one.
+            unrelated = _trash_original_outside_managed_root(original)
+            if not unrelated and not _safe_trash_original_path(original):
                 raise ValueError("trash sidecar original_path is invalid")
             guard = _capture_bounded_lifecycle_sidecar_guard(
                 root,
@@ -1767,6 +1785,8 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             ) from error
         aggregate_sidecar_bytes += len(raw)
         content_guards.append(guard)
+        if unrelated:
+            continue
         assert isinstance(original, str)
         trash_root = relative.removesuffix(".meta.json")
         target_kind: Literal["file", "directory", "missing"] = "missing"
