@@ -78,6 +78,45 @@ def test_only_a_caller_who_can_write_the_receipt_is_offered_a_correction(vault, 
         assert not source_corrections.can_record(vault, saved["ref"])
 
 
+def test_a_caller_who_cannot_record_the_receipt_is_not_offered_the_correction_call(
+    vault, source_schema, tmp_path, monkeypatch, owner_scope
+) -> None:
+    # A restricted writer who finds a conflict must tell the person which value is wrong; offering
+    # it the correction call sends it into a commit the receipt write refuses. `can_record` answers
+    # under the writer's own request scope, so every check of it — the row's `correctable`, the
+    # correction guard — is the writer's real permission, not a stub.
+    from conftest import initialize_vault_state_offline
+    from granted_writer import grant_writer
+
+    from exomem.governance import principal
+
+    initialize_vault_state_offline(vault, source="restricted correction")
+    writer = grant_writer(vault, tmp_path, monkeypatch, writable_paths=["Sources/Inbox/writer/**"],
+                          capture_paths=["Knowledge Base/Sources/Inbox/writer"])("external")
+    can_record = source_corrections.can_record
+
+    def as_writer(root, ref):
+        with principal.request_scope(writer):
+            return can_record(root, ref)
+
+    monkeypatch.setattr(source_corrections, "can_record", as_writer)
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+
+    reply = _save_pdf(vault, source_schema, url=CLAIM)
+
+    row = reply["files"][0]
+    assert row["identity"]["state"] == "conflict"
+    assert row["correctable"] is False
+    assert reply["next_action"] == "Compare the opening text with the url, then tell the person which one is wrong."
+    assert "correct the Source" not in reply["next_action"]
+
+    with pytest.raises(ValueError, match="SOURCE_CORRECTION_NOT_PERMITTED"):
+        _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa",
+                  correction=_correction(vault, row))
+
+    assert not list(source_corrections.receipt_root(vault).glob("*.json"))
+
+
 def test_a_source_in_shared_original_storage_is_corrected_without_re_upload(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:
     # A new archive keeps originals in the content-addressed pool, where no file holds the logical path.
     from conftest import initialize_vault_state_offline
