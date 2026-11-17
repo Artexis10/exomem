@@ -519,6 +519,35 @@ _DELTAS = {
 }
 
 
+def test_a_page_delta_resolves_a_trailing_path_link_that_only_the_obsidian_rule_reaches(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Failure caught: `Sub/arrival` matches no key a page holds but its basename, so a delta that
+    # adds the page would leave the link's fact unresolved while a full build resolves it.
+    notes = vault / _INSIGHTS
+    (notes / "linker.md").write_text(
+        _page(title="Linker", body="## Relations\n- supports [[Sub/arrival]]\n"), encoding="utf-8"
+    )
+    before = _shared_context(vault)
+    assert [fact.resolved_target_path for fact in before.relation_facts] == [None]
+    (notes / "Sub").mkdir()
+    (notes / "Sub" / "arrival.md").write_text(_page(title="Arrival"), encoding="utf-8")
+
+    def refuse_rebuild(*args, **kwargs):
+        raise AssertionError("the page delta must patch the corpus, not rebuild it")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(semantic_contract, "_context_from_state_map", refuse_rebuild)
+        incremental = _shared_context(vault)
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert [fact.resolved_target_path for fact in rebuilt.relation_facts] == [f"{_INSIGHTS}/Sub/arrival.md"]
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
 @pytest.mark.parametrize("delta", sorted(_DELTAS))
 def test_a_page_delta_yields_the_corpus_a_full_build_would(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delta: str

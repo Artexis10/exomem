@@ -279,6 +279,7 @@ def _corpus(
         resolver_stems=resolver.stems,
         resolver_titles=resolver.titles,
         resolver_candidates_by_key=resolver.candidates_by_key,
+        obsidian_rule=[],
     )
 
 

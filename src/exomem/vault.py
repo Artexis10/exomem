@@ -45,6 +45,8 @@ from . import (
     call_spans,
     freshness,
     held_fs,
+    kbdir,
+    obsidian_links,
     privacy_log,
     request_budget,
     reserved_paths,
@@ -62,6 +64,7 @@ from .kbdir import (
     managed_relative,
     managed_respell,
     managed_root,
+    managed_root_key,
     managed_split,
     managed_split_parts,
     managed_state,
@@ -8981,6 +8984,153 @@ def _keyed_title(title: object) -> tuple[str | None, str | None]:
     return title_key(str(title)), str(title).strip()
 
 
+#: The folders that Obsidian shows and the resolver's corpus skips: a name of `CORPUS_EXCLUDED_DIR_NAMES` with
+#: no leading dot, because Obsidian hides a dot-named folder.
+_MACHINERY_FOLDER_NAMES = tuple(
+    sorted(name for name in CORPUS_EXCLUDED_DIR_NAMES if not name.startswith("."))
+)
+#: The basename index of the machinery folders' loose Markdown files, by vault root. A walk of a trash or archive
+#: folder grows with use, so a writer reads it once and keeps it. Managed-page patches never change it, because a
+#: patch adds or drops a page of the corpus, which skips these folders. It is dropped when a resolver is built from
+#: disk, when an Exomem writer places or removes a file below such a folder (`machinery_changed`, called by
+#: the lifecycle move and the generic file writer in `reserved_paths` and by `find.on_resolver_files_changed`), and
+#: on an event gap. An edit made outside Exomem below such a folder is seen at the next such drop only: the
+#: file watcher passes the resolver no event for these folders. The cost of the delay is a short link that Obsidian
+#: may resolve to the trashed file, while Exomem resolves the same link to the managed page.
+_MACHINERY_ON_DISK: dict[Path, dict[str, list[str]]] = {}
+
+
+def machinery_changed(vault_root: Path, rels: Iterable[str] | None = None) -> None:
+    """Drop the kept listing of the machinery folders of `vault_root`.
+
+    With `rels`, the vault-relative paths a writer placed or removed, the listing is dropped only when any of them
+    lies below a machinery folder of the managed root; without `rels` it is dropped unconditionally.
+    """
+    root = Path(vault_root)
+    if rels is not None and not any(_below_machinery(rel) for rel in rels):
+        return
+    _MACHINERY_ON_DISK.pop(root, None)
+
+
+def _below_machinery(rel: str) -> bool:
+    below = managed_split_parts(str(rel).replace("\\", "/").split("/"))
+    return bool(below) and below[0] in _MACHINERY_FOLDER_NAMES
+
+
+def _machinery_stored(vault_root: Path) -> list[str]:
+    """The Markdown pages that a store-mode vault holds below a machinery folder, from the store's path index."""
+    from . import find_corpus
+
+    if not find_corpus.store_serves(vault_root):
+        return []
+    from .vault_store import read
+
+    key = managed_root_key()
+    with read.snapshot(vault_root) as view:
+        return [
+            meta.path
+            for name in _MACHINERY_FOLDER_NAMES
+            for meta in view.pages(f"{key}/{name}/" if key else f"{name}/")
+            if meta.path.lower().endswith(obsidian_links.MARKDOWN_SUFFIX)
+        ]
+
+
+def _machinery_markdown(vault_root: Path) -> list[str]:
+    """The Markdown files on disk below a machinery folder of the managed root, which Obsidian shows.
+
+    A machinery folder below a content folder is not read: finding it would take a walk of every folder.
+    """
+    root = Path(vault_root)
+    base = managed_root(root)
+    found: list[str] = []
+    pending = [
+        base / name
+        for name in _MACHINERY_FOLDER_NAMES
+        if (base / name).is_dir() and not (base / name).is_symlink()
+    ]
+    while pending:
+        folder = pending.pop()
+        try:
+            with os.scandir(folder) as entries:
+                children = sorted(entries, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in children:
+            # Obsidian's documented behaviour: it hides a file or folder whose name starts with a dot.
+            if entry.name.startswith(".") or entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(Path(entry.path))
+            elif (
+                entry.name.lower().endswith(obsidian_links.MARKDOWN_SUFFIX)
+                and ".sync-conflict-" not in entry.name
+            ):
+                found.append(relative_posix(Path(entry.path), root))
+    return found
+
+
+def _machinery_index(vault_root: Path) -> Mapping[str, list[str]]:
+    """The basename index of every Markdown file below a machinery folder: the kept listing of the disk, and in a
+    store-mode vault the stored pages too, read from the store's path index each time because a store commit
+    changes them with no writer hook. Obsidian lists a stored page's file as well, so the two lists are joined."""
+    root = Path(vault_root)
+    on_disk = _MACHINERY_ON_DISK.get(root)
+    if on_disk is None:
+        on_disk = _MACHINERY_ON_DISK[root] = obsidian_links.build_index(_machinery_markdown(root))
+    stored = _machinery_stored(root)
+    if not stored:
+        return on_disk
+    merged = {key: list(paths) for key, paths in on_disk.items()}
+    for key, paths in obsidian_links.build_index(stored).items():
+        merged[key] = list(dict.fromkeys([*merged.get(key, ()), *paths]))
+    return merged
+
+
+class _LinkNames:
+    """Obsidian's link index of a single resolver state: the pages it holds, the rule over them, and the machinery files.
+
+    The machinery files are read when a writer first asks for a short link, which only a `root` vault does.
+    """
+
+    __slots__ = ("_machinery", "_vault_root", "index", "rule")
+
+    def __init__(self, vault_root: Path, paths: Iterable[str]) -> None:
+        self._vault_root = vault_root
+        self._machinery: Mapping[str, list[str]] | None = None
+        self.index = obsidian_links.build_index(paths)
+        self.rule = obsidian_links.IndexResolver(self.index)
+
+    @property
+    def machinery(self) -> Mapping[str, list[str]]:
+        """The basename index of the machinery folders' Markdown files, outside the resolver's corpus."""
+        found = self._machinery
+        if found is None:
+            found = self._machinery = _machinery_index(self._vault_root)
+        return found
+
+
+def obsidian_candidate(
+    rule: obsidian_links.IndexResolver,
+    candidates_by_key: Mapping[str, tuple[WikilinkCandidate, ...]],
+    page: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+) -> WikilinkCandidate | None:
+    """The single page that Obsidian's rule over `rule`'s index names for the page part of a link, or None.
+
+    The rule is closed, because Obsidian's behaviour fixes it (`obsidian_links`). A text that two files satisfy
+    names none. `visible` limits the files to those a writer may see, as the earlier steps of the resolver do.
+    The resolver and the semantic contract's snapshot call this, so a writer and a guard agree on what resolves.
+    """
+    paths = [path for path in rule.resolve(page).paths if visible is None or visible(path)]
+    if len(paths) != 1:
+        return None
+    for candidate in candidates_by_key.get(_wikilink_path_key(paths[0]), ()):
+        if candidate.path == paths[0]:
+            return candidate
+    return None
+
+
 class WikilinkResolver:
     """In-memory index of vault paths + frontmatter titles for wikilink resolution.
 
@@ -9003,6 +9153,10 @@ class WikilinkResolver:
     #: The token of the resident publication whose maps these are, so a reader may keep what it
     #: derives from them beside that token. Every patch drops it; only the publisher sets it.
     publication: object | None = None
+    #: Obsidian's link index of the pages this resolver holds. Built on the first step-6 lookup or short-form
+    #: request, and dropped by every patch, so a copy made by `from_maps` starts with none. The machinery
+    #: folders' files are kept apart (`_MACHINERY_ON_DISK`), so a patch does not drop them.
+    _link_names: _LinkNames | None = None
 
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
@@ -9039,6 +9193,7 @@ class WikilinkResolver:
         from .vault_store import ownership, read
 
         root = self.vault_root
+        machinery_changed(root)
         # A store-mode vault's corpus holds the store's pages and the files that it does not own.
         corpus = find_corpus.corpus_paths(
             root, "vault", lambda **walk: walk_vault_md(root, **walk)
@@ -9119,6 +9274,49 @@ class WikilinkResolver:
                 return candidate.title_key
         return None
 
+    def link_names(self) -> _LinkNames:
+        """Obsidian's link index of the pages this resolver holds.
+
+        The resolver's corpus skips the machinery folders, so those files are not in the index and a link into
+        them stays unresolved. The index is built once per resolver state: every patch drops it.
+        """
+        names = self._link_names
+        if names is None:
+            names = self._link_names = _LinkNames(
+                self.vault_root,
+                (candidate.path for group in self.candidates_by_key.values() for candidate in group),
+            )
+        return names
+
+    def obsidian_match(
+        self, page: str, *, visible: Callable[[str], bool] | None = None
+    ) -> WikilinkCandidate | None:
+        """The single page that Obsidian's rule names for the page part of a link, or None.
+
+        Step 6 of the resolver's order, which only a link that no earlier step resolved reaches.
+        """
+        return obsidian_candidate(
+            self.link_names().rule, self.candidates_by_key, page, visible=visible
+        )
+
+    def short_link(self, page: str) -> str | None:
+        """The shortest link text that names the page at `page` (no `.md`) alone, for a writer in a `root` vault.
+
+        `Name` when no other file Obsidian shows has that basename, else the shortest trailing path that no
+        other file ends with, else the full vault path (`obsidian_links.link_form`). The files counted are every
+        Markdown file Obsidian shows: the indexed pages and the machinery folders, which the index leaves out.
+        None for a text that names no page this resolver holds: a stale link, a link that is short already, or
+        a page that the writer has not registered with `add_pending`. The writer keeps the text it has.
+        """
+        held = self.candidates_by_key.get(page)
+        if not held:
+            return None
+        names = self.link_names()
+        target = held[0].path
+        key = obsidian_links.basename_key(target)
+        group = list(dict.fromkeys([*names.index.get(key, ()), *names.machinery.get(key, ())]))
+        return obsidian_links.link_form(target, {key: group}).text
+
     # ---- shared add/remove primitives -------------------------------------
     # The full build AND the incremental patch both go through these, so a
     # patched resolver's maps are byte-identical to a fresh rebuild's for the
@@ -9138,6 +9336,7 @@ class WikilinkResolver:
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
         self.publication = None
+        self._link_names = None
         self.candidates_by_key[no_ext] = tuple(
             sorted(
                 (
@@ -9160,6 +9359,7 @@ class WikilinkResolver:
         if not any(candidate.path == rel_path for candidate in previous):
             return
         self.publication = None
+        self._link_names = None
         remaining = tuple(candidate for candidate in previous if candidate.path != rel_path)
         if remaining:
             self.candidates_by_key[no_ext] = remaining
@@ -9316,26 +9516,73 @@ def obsidian_uses_kb_root(vault_root: Path) -> bool:
     return (kb_root(vault_root) / ".obsidian").is_dir()
 
 
-def render_wikilink_target(target: str, vault_root: Path) -> str:
-    """Render a canonical target for the detected Obsidian vault root."""
+def _names_a_page(target: str) -> bool:
+    """Whether a canonical target has a page part to shorten: a folder hub or an anchor alone names no page."""
+    page = target.partition("#")[0]
+    return bool(page) and not page.endswith("/")
+
+
+def render_wikilink_target(
+    target: str, vault_root: Path, *, resolver: WikilinkResolver | None = None
+) -> str:
+    """Render a canonical target for the detected Obsidian vault root.
+
+    A `root` vault gets the shortest text that names the page alone (`WikilinkResolver.short_link`); a
+    `nested` vault keeps its vault-rooted or KB-relative form. `resolver` is the writer's own, which holds the
+    pages it is about to write; a `root` vault without it reads the process-shared resolver.
+    """
+    if kbdir.bound().layout is Layout.ROOT:
+        if not _names_a_page(target):
+            return target
+        page, separator, anchor = target.partition("#")
+        if resolver is None:
+            from . import find
+
+            resolver = find.shared_resolver(vault_root)
+        short = resolver.short_link(page)
+        return target if short is None else short + separator + anchor
     if obsidian_uses_kb_root(vault_root) and managed_split(target) is not None:
         return managed_relative(target)
     return target
 
 
-def render_wikilinks_for_vault(text: str, vault_root: Path) -> str:
+def written_link_target(
+    target: str, vault_root: Path, *, resolver: WikilinkResolver | None = None
+) -> str:
+    """The text a writer puts in a link: the shortest unique form in a `root` vault, the canonical target in a `nested` vault.
+
+    `render_wikilink_target` also rewrites to the KB-relative display form of a `nested` vault; a writer that
+    never did that keeps its output by calling this instead.
+    """
+    if kbdir.bound().layout is not Layout.ROOT:
+        return target
+    return render_wikilink_target(target, vault_root, resolver=resolver)
+
+
+def render_wikilinks_for_vault(
+    text: str, vault_root: Path, *, resolver: WikilinkResolver | None = None
+) -> str:
     """Render canonical wikilinks in generated Markdown for this vault root.
 
-    Unlike :func:`normalize_body_wikilinks`, this does not resolve targets. It
-    only converts already-canonical ``Knowledge Base/...`` targets to their
-    KB-relative display form when Obsidian opens the managed directory itself.
+    Unlike :func:`normalize_body_wikilinks`, this does not resolve targets. It only rewrites a target that is
+    already canonical (`render_wikilink_target`): to its KB-relative display form when Obsidian opens the managed
+    directory itself, and to its shortest unique text in a `root` vault, where the shared resolver is read once
+    for the text, and only when a link names a page.
     """
     new_text = text
     for match in reversed(_rewritable_wikilinks(text)):
         full = match.group(0)
         inner = full[2:-2]
         target, separator, alias = inner.partition("|")
-        rendered = render_wikilink_target(target.strip(), vault_root)
+        if (
+            resolver is None
+            and kbdir.bound().layout is Layout.ROOT
+            and _names_a_page(target.strip())
+        ):
+            from . import find
+
+            resolver = find.shared_resolver(vault_root)
+        rendered = render_wikilink_target(target.strip(), vault_root, resolver=resolver)
         if rendered == target.strip():
             continue
         replacement = f"[[{rendered}|{alias}]]" if separator else f"[[{rendered}]]"
@@ -9495,6 +9742,14 @@ def _normalize_wikilink(
         if found is not None:
             return _wikilink_path_key(found) + anchor, None, None
 
+    # 6. Obsidian's rule over the link index: the case-insensitive basename or the trailing path, when a
+    # single file satisfies it. It runs last, so only a link that resolves nowhere else changes. A targeted
+    # caller asked for no resolver, and its explicit path stays a namespace question.
+    if resolver is not None:
+        found_candidate = resolver.obsidian_match(cleaned, visible=visible)
+        if found_candidate is not None:
+            return _selected([found_candidate], "obsidian rule")
+
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result
     # directly without prefix manipulation:
@@ -9652,7 +9907,7 @@ def normalize_body_wikilinks(
         if warning:
             warnings.append(warning)
             continue
-        rendered = render_wikilink_target(canonical, vault_root)
+        rendered = render_wikilink_target(canonical, vault_root, resolver=resolver)
         if rendered == target_only:
             continue  # already canonical
         replacement = f"[[{rendered}|{alias}]]" if alias is not None else f"[[{rendered}]]"

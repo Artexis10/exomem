@@ -751,7 +751,6 @@ def _legacy_note(
         create_parents=_planned_writes is None,
     )
     rel_note_no_ext = note_path.relative_to(vault_root).with_suffix("").as_posix()
-    new_note_wikilink = f"[[{render_wikilink_target(rel_note_no_ext, vault_root)}]]"
 
     # Resolver: the process-shared, freshness-checked instance (find's graph-
     # lane cache) — a fresh build reads + YAML-parses the whole vault per
@@ -762,6 +761,7 @@ def _legacy_note(
 
     resolver = find_module.shared_resolver(vault_root)
     resolver.add_pending(rel_note_no_ext, title=title)
+    new_note_wikilink = f"[[{render_wikilink_target(rel_note_no_ext, vault_root, resolver=resolver)}]]"
 
     sources_norm, source_warnings = _normalize_sources(
         sources, vault_root=vault_root, resolver=resolver
@@ -852,7 +852,7 @@ def _legacy_note(
         projects=projects,
         status=status,
         date_iso=stamp_iso,
-        sources=[render_wikilink_target(source, vault_root) for source in sources_norm],
+        sources=[render_wikilink_target(source, vault_root, resolver=resolver) for source in sources_norm],
         tags=tags_clean,
         content=body_clean,
         severity=severity,
@@ -2156,7 +2156,7 @@ def note(
         projects=projects,
         status=status,
         date_iso=stamp_iso,
-        sources=[render_wikilink_target(item, root) for item in sources_norm],
+        sources=[render_wikilink_target(item, root, resolver=resolver) for item in sources_norm],
         tags=tags_clean,
         content=body_clean,
         severity=severity,

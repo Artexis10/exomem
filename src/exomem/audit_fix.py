@@ -157,7 +157,7 @@ def _normalize_frontmatter_wikilinks(
         if warning:
             warnings.append(warning)
             continue
-        rendered = render_wikilink_target(canonical, vault_root)
+        rendered = render_wikilink_target(canonical, vault_root, resolver=resolver)
         if rendered == target and not alias:
             continue
         replacement = f"[[{rendered}{alias}]]" if alias else f"[[{rendered}]]"

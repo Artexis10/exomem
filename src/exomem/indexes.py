@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
-from . import call_spans, homes, markdown_relations, note_types
+from . import call_spans, homes, kbdir, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import is_managed_root_name, managed_join, managed_relative
 from .vault import (
@@ -91,6 +91,20 @@ def read_guarded_universal_text(vault_root: Path, path: Path) -> tuple[str, Path
     """Guarded text with universal newlines, the text `Path.read_text` returns."""
     text, guard = read_guarded_text(vault_root, path)
     return text.replace("\r\n", "\n").replace("\r", "\n"), guard
+
+
+def _landing_resolver(vault_root: Path, landing: str):
+    """A writer's resolver that holds the page about to land, so a `root` vault links it in its shortest form.
+
+    A `nested` vault renders no shorter form and needs none.
+    """
+    if kbdir.bound().layout is not kbdir.Layout.ROOT:
+        return None
+    from . import find
+
+    resolver = find.writer_resolver_snapshot(vault_root)
+    resolver.add_pending(landing)
+    return resolver
 
 
 def compute_updates(
@@ -164,10 +178,11 @@ def compute_updates(
         + (f"\n\n{trim_note}" if trim_note else ""),
     )
 
+    resolver = _landing_resolver(vault_root, rel_source_path)
     return IndexUpdate(
-        sources_index_content=render_wikilinks_for_vault(sources_index_new, vault_root),
-        top_index_content=render_wikilinks_for_vault(top_index_new, vault_root),
-        log_content=render_wikilinks_for_vault(log_new, vault_root),
+        sources_index_content=render_wikilinks_for_vault(sources_index_new, vault_root, resolver=resolver),
+        top_index_content=render_wikilinks_for_vault(top_index_new, vault_root, resolver=resolver),
+        log_content=render_wikilinks_for_vault(log_new, vault_root, resolver=resolver),
         trim_note=trim_note,
         sources_index_guard=sources_index_guard,
         top_index_guard=top_index_guard,
