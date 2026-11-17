@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import shlex
 from dataclasses import replace
 from io import BytesIO
-from pathlib import Path
 
 import httpx
 import pytest
+from _curl_send import curl_request
 from fastmcp import FastMCP
 
 from exomem import auth_sessions, held_uploads, server_auth, server_transfer
@@ -675,39 +674,34 @@ def test_an_operator_can_finish_cancellations_without_a_launcher_deadline(upload
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
 
 
-def test_a_source_reply_names_the_send_that_holds_the_file(upload_env, tmp_path):
+def test_a_source_reply_names_the_send_that_holds_the_file(upload_env, tmp_path, monkeypatch):
     # An agent that ran a send without the ticket's form fields got a 400 and lost the ticket.
-    descriptor = _prepare(upload_env)
+    from fastmcp import Client
+
+    from exomem import server
+    _, who, *_, receiver = upload_env
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(principal, "resolve_mcp_principal", lambda: who)
     original = tmp_path / "original.txt"
     original.write_bytes(b"exact original\n")
-    send, save = descriptor["next"]
-    words = iter(shlex.split(send["shell"].replace("<file>", str(original))))
-    assert next(words) == "curl"
-    headers: dict[str, str] = {}
-    fields: dict[str, str] = {}
-    files: dict[str, tuple[str, bytes, str]] = {}
-    url = ""
-    for word in words:
-        if word == "-H":
-            name, _, value = next(words).partition(": ")
-            headers[name] = value
-        elif word == "-F":
-            name, _, value = next(words).partition("=")
-            if value.startswith("@"):
-                files[name] = (original.name, Path(value[1:]).read_bytes(), "text/plain")
-            else:
-                fields[name] = value
-        elif word != "-sS":
-            url = word
+    digest = hashlib.sha256(original.read_bytes()).hexdigest()
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=upload_env[-1])) as client:
-            return await client.post(url, headers=headers, data=fields, files=files)
+        async with Client(server.build_server(require_auth=False)) as client:
+            reply = (await client.call_tool(
+                "upload_files", {"lane": "source", "expected_sha256": digest})).structured_content
+            send, save = reply["next"]
+            url, request = curl_request(send["shell"], token=reply["token"], file=str(original))
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=receiver)) as http:
+                sent = await http.post(url, **request)
+            assert sent.status_code == 201, sent.text
+            # The save step names a tool that this surface lists.
+            saved = await client.call_tool(save["tool"], {
+                "title": "Exact original", "source_kind": "session", "files": [sent.json()["file"]]})
+            return saved.structured_content
 
-    response = asyncio.run(run())
-    assert response.status_code == 201, response.text
-    assert response.json()["state"] == "held"
-    assert save["tool"] == "save_source"
+    [receipt] = asyncio.run(run())["files"]
+    assert receipt["outcome"] == "stored" and receipt["hash"] == digest
 
 
 def test_a_refused_send_says_a_retry_needs_a_new_upload(upload_env):
