@@ -1047,6 +1047,21 @@ def _drain_background_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -
 
 
 @pytest.fixture(autouse=True)
+def _launcher_support_ends_with_its_test():
+    """No test hands its launcher-support claim to the next.
+
+    A standalone server start claims support for every lifecycle format for the rest of its process. In the
+    suite, that claim would let a later test's new vault start shared storage, which records a format that a
+    managed upgrade then requires.
+    """
+    from exomem import artifact_lifecycle
+
+    claimed = artifact_lifecycle._supported
+    yield
+    artifact_lifecycle._supported = claimed
+
+
+@pytest.fixture(autouse=True)
 def _quiesce_graph_rebuilds():
     """Let no graph rebuild outlive the test that started it.
 
