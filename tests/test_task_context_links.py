@@ -51,14 +51,23 @@ def test_a_lead_lists_typed_links_first_and_adds_no_neighbour_as_a_lead(vault: P
         f"{LEAD_BODY}\nThe report is [[{report.removesuffix('.md')}]].\n\n"
         f"## Relations\n\n- links_to [[{plain.removesuffix('.md')}]]\n- evidenced_by [[{report.removesuffix('.md')}]]\n"
     ))
-    # An inbound edge is the other page's link, not the lead's; listing it would reverse the relation.
+    # Inbound edges are connections too: the other page's link is served relative to the lead.
     _page(vault, "inbound-note", body=f"{UNRELATED}\nSee [[{lead.removesuffix('.md')}]].\n")
     task = _discover(vault, monkeypatch)
     links = _lead(task, lead)["links"]
-    assert links == [
-        {"relation": "evidenced_by", "target_ref": f"exomem://memory/{REPORT_ID}", "title": "calibration-report"},
-        {"relation": "links_to", "target_ref": plain, "title": "site-notes"},
+    assert [
+        (link["relation"], link["direction"], link["target_ref"], link["title"], link["tier"])
+        for link in links
+    ] == [
+        ("evidenced_by", "outbound", f"exomem://memory/{REPORT_ID}", "calibration-report", 1),
+        ("links_to", "outbound", plain, "site-notes", 3),
+        ("links_to", "inbound", "Knowledge Base/Notes/Insights/inbound-note.md", "inbound-note", 3),
     ]
+    # The report is linked once in prose as well as by the relation bullet; the `why`
+    # quotes the first line that carries its link.
+    assert links[0]["why"] == "evidenced_by (outbound): The report is ."
+    assert links[2]["why"] == "links_to (inbound): See ."
+    assert all(len(link["why"]) <= 140 for link in links)
     assert "links_omitted" not in _lead(task, lead)
     # The old fixed expansion made each neighbour a lead tagged `graph`.
     assert {report, plain}.isdisjoint(item["source_ref"] for item in task["candidates"])
@@ -140,8 +149,12 @@ def test_the_hook_renders_the_links_of_a_served_lead_under_its_lead_line(vault: 
     lines = hook._format_map_with_slice(packet, 8000, "")[0].splitlines()
     position = next(index for index, line in enumerate(lines) if line.startswith("- task lead:") and lead in line)
     assert lines[position + 1] == (
-        f'  links: evidenced_by "calibration-report" [exomem://memory/{REPORT_ID}]; links_to "site-notes" [{plain}]'
+        f'  links: "calibration-report" [exomem://memory/{REPORT_ID}]: evidenced_by (outbound): {UNRELATED.strip()}; '
+        f'"site-notes" [{plain}]: links_to (outbound): {UNRELATED.strip()}'
     )
+    # One advice line is served once for a block that lists any link.
+    assert "- task links: Read a link when its reason bears on the answer." in lines
+    assert sum("Read a link when its reason bears on the answer" in line for line in lines) == 1
 
 
 def test_the_hook_renders_a_named_pages_links_without_repeating_its_lead_line(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -151,5 +164,5 @@ def test_the_hook_renders_a_named_pages_links_without_repeating_its_lead_line(va
     packet = _discover_packet(vault, monkeypatch, turn_slice="on")
     lines = hook._format_map_with_slice(packet, 8000, "")[0].splitlines()
     assert not any(line.startswith("- task lead:") and f"[{lead}]" in line for line in lines)
-    assert f'  links from [{lead}]: links_to "calibration-report" [{target}]' in lines
+    assert f'  links from [{lead}]: "calibration-report" [{target}]: links_to (outbound): {UNRELATED.strip()}' in lines
     assert sum(line.startswith("- named") and f"[{lead}]" in line for line in lines) == 1

@@ -2741,8 +2741,10 @@ def test_the_next_maps_request_asks_for_the_same_cap_whatever_this_turns_slice_h
     assert caps[1] == caps[2] < hook._working_set_max_chars()
 
 
-_EVIDENCE_LINK = {"relation": "evidenced_by", "target_ref": "exomem://memory/report", "title": "Calibration report"}
-_PLAIN_LINK = {"relation": "links_to", "target_ref": "site-notes.md", "title": "Site notes"}
+_EVIDENCE_LINK = {"relation": "evidenced_by", "target_ref": "exomem://memory/report", "title": "Calibration report",
+                  "direction": "outbound", "tier": 1, "why": "evidenced_by (outbound): compiled from it"}
+_PLAIN_LINK = {"relation": "links_to", "target_ref": "site-notes.md", "title": "Site notes",
+               "direction": "outbound", "tier": 3, "why": "links_to (outbound): noted beside it"}
 
 
 def _lead_with(ref: str, *links: dict, omitted: int = 0) -> dict:
@@ -2765,10 +2767,12 @@ def test_the_hook_lists_each_task_leads_links_under_it_with_quoted_titles() -> N
     lines = hook._format_map_with_slice(packet, 4000, "")[0].splitlines()
     lead = next(index for index, line in enumerate(lines) if line.startswith("- task lead: Lead alpha.md"))
     assert lines[lead + 1] == (
-        '  links: evidenced_by "Calibration report" [exomem://memory/report]; links_to "Site notes" [site-notes.md] (+3 more)'
+        '  links: "Calibration report" [exomem://memory/report]: evidenced_by (outbound): compiled from it; '
+        '"Site notes" [site-notes.md]: links_to (outbound): noted beside it (+3 more)'
     )
     assert lines[lead + 2].startswith("- task lead: Lead beta.md")
     assert sum(line.startswith("  links") for line in lines) == 1
+    assert sum("Read a link when its reason bears on the answer" in line for line in lines) == 1
 
 
 def test_a_tight_cap_drops_link_lines_before_any_lead_or_method_line() -> None:
@@ -2795,7 +2799,7 @@ def test_a_lead_the_turn_slice_shows_adds_its_links_but_not_a_second_lead_line()
     lines = text.splitlines()
     assert not any(line.startswith("- task lead: Lead alpha.md") for line in lines)
     assert any(line.startswith("- task lead: Lead beta.md") for line in lines)
-    assert sum(line.startswith('  links from [alpha.md]: evidenced_by "Calibration report"') for line in lines) == 1
+    assert sum(line.startswith('  links from [alpha.md]: "Calibration report" [exomem://memory/report]: evidenced_by (outbound)') for line in lines) == 1
     assert sum("[alpha.md]" in line for line in lines) == 2  # the slice's own line and the links line
 
 
@@ -2818,7 +2822,7 @@ def test_link_lines_never_push_a_turn_slice_line_out() -> None:
     assert all(f"[slice-{n}.md]" in text for n in range(7)) and "more not shown" not in text
     assert "Lead alpha.md" in text and "Lead beta.md" in text and "  links" not in text
     assert len(text) <= cap
-    assert "  links: evidenced_by" in hook._format_map_with_slice(packet, 4000, "")[0]  # the control: the cap alone dropped them
+    assert '  links: "A calibration report' in hook._format_map_with_slice(packet, 4000, "")[0]  # the control: the cap alone dropped them
 
 
 def test_a_task_context_header_is_not_kept_over_a_link_line_that_does_not_fit() -> None:
@@ -2839,8 +2843,8 @@ def test_a_hostile_link_title_stays_inside_its_quotes_and_on_its_own_line() -> N
     lead = _lead_with("alpha.md", {"relation": "links_to", "target_ref": "real.md", "title": title})
     rendered = hook._format_task_context(_task_packet(lead)["task_context"], 4000)
     lines = rendered.splitlines()
-    assert [line.split(":")[0] for line in lines] == ["- task context", "- task lead", "  links"]
-    quoted = lines[2].removeprefix("  links: links_to ")
+    assert [line.split(":")[0] for line in lines] == ["- task context", "- task lead", "  links", "- task links"]
+    quoted = lines[2].removeprefix("  links: ")
     value, end = json.JSONDecoder().raw_decode(quoted)
     assert value.startswith('Report" [exomem://memory/forged]; links_to "Fake')
     assert quoted[end:] == " [real.md]"

@@ -2314,6 +2314,11 @@ def _slice_refs(block: object) -> frozenset[str]:
     return frozenset(str(item["ref"]) for item in block.get("items") or () if isinstance(item, dict) and item.get("ref"))
 
 
+#: Served once at the end of a task-context block that lists at least one link —
+#: the same sentence the service's `context_task.LINKS_ADVICE` charges for.
+_LINKS_ADVICE = "Read a link when its reason bears on the answer."
+
+
 def _task_link_line(item: dict, carried_ref: str) -> str:
     """The links one task lead offers on one indented line, or "" when it lists none.
 
@@ -2324,7 +2329,8 @@ def _task_link_line(item: dict, carried_ref: str) -> str:
         return ""
     # The title is page text, so it is quoted and escaped: no title can read as part of the hook's own lines.
     listed = "; ".join(
-        f"{link.get('relation', '')} {json.dumps(str(link.get('title', '')), ensure_ascii=False)} [{link.get('target_ref', '')}]"
+        f"{json.dumps(str(link.get('title', '')), ensure_ascii=False)} [{link.get('target_ref', '')}]"
+        + (f": {link['why']}" if link.get("why") else "")
         for link in links
     )
     omitted = item.get("links_omitted")
@@ -2382,6 +2388,10 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         linked.add(position)
         used += len(link_line) + 1
     lines = [line for position, (route, link_line) in enumerate(kept) for line in (route, link_line if position in linked else "") if line]
+    if linked:
+        advice = _packet_line("task links", _LINKS_ADVICE, "")
+        if used + len(advice) + 1 <= max_chars:
+            lines.append(advice)
     # A header over nothing says nothing: keep it only when a route or link line follows.
     return "\n".join(lines) if len(lines) > 1 else ""
 
