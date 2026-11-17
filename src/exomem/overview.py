@@ -30,7 +30,7 @@ from pathlib import Path
 from . import access, reserved_paths
 from .collection_store.ownership import reader
 from .governance.policy import GOVERNANCE_DIRNAME, is_governance_path
-from .kbdir import managed_root_key, managed_root_rel
+from .kbdir import managed_root_key, managed_root_label, managed_root_rel
 from .vault_store import directory as store_directory
 from .vault_store import mode as store_mode
 from .vault_store import read as store_read
@@ -61,11 +61,13 @@ _MD_LINK = re.compile(r"(?<!\[)\[[^\]\[]*\]\([^)]+\)")
 _CONFLICT_NAME = re.compile(r"^(?P<base>.+) \d+(?P<ext>\.[^.]+)$")
 _CONFLICT_TOKENS = ("conflicted copy", "sync-conflict")
 
-SCOPE_NOTE = (
-    "exomem writes only under the managed root. Everything else in the vault "
-    "is read-only input — never modified, still searchable via find "
-    "scope=\"vault\"."
-)
+def scope_note() -> str:
+    """The write boundary, phrased for the bound layout."""
+    return (
+        f"exomem writes only under {managed_root_label()}. Anything else in the vault "
+        "is read-only input — never modified, still searchable via find "
+        "scope=\"vault\"."
+    )
 
 
 class OverviewError(Exception):
@@ -470,7 +472,7 @@ def overview(
             (st.depth for rp, st in dirstats.items() if rp not in absent), default=0
         )
     return {
-        "scope_note": SCOPE_NOTE,
+        "scope_note": scope_note(),
         "root": rel,
         "totals": {
             "files": root_stat.files_rec,

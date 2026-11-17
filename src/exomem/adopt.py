@@ -1439,7 +1439,7 @@ def adopt(
         "mode": mode,
         "implemented_modes": list(SUPPORTED_MODES),
         "planned_modes": list(PLANNED_MODES),
-        "scope_note": overview_module.SCOPE_NOTE,
+        "scope_note": overview_module.scope_note(),
         "write_contract": (
             "Default adoption is read-only. Originals stay where they are. "
             f"Governed Exomem writes happen only under {managed_root_label()} after an "
