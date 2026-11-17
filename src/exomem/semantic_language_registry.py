@@ -291,6 +291,9 @@ class SemanticLanguageRegistry:
     # The labels a vault wrote under a shipped kind's key, which carry nothing else: key to its
     # (language tag, label) pairs. A vault kind keeps its labels in its own definition.
     kind_label_entries: Mapping[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+    # The traits a vault wrote under a core category's key, which carry nothing else. They add to the
+    # core category's traits; its definition, aliases and description stay code-owned.
+    category_trait_entries: Mapping[str, frozenset[str]] = field(default_factory=dict)
     # Each label registry's effective entries and its folded-spelling index, built on first
     # use. The registry is immutable and one instance serves a whole pass, so a unit row
     # resolves by one lookup instead of a rebuild. The kinds are one more entry under
@@ -310,6 +313,7 @@ class SemanticLanguageRegistry:
             "core_categories",
             "core_category_aliases",
             "kind_label_entries",
+            "category_trait_entries",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
         for name in ("core_label_entries", "label_entries"):
@@ -357,16 +361,30 @@ class SemanticLanguageRegistry:
         """Every core category and every vault category that has `trait`, whatever its status or scope.
 
         The keys are canonical. A unit written under an alias resolves to its category's key, so the
-        alias carries the category's traits. A vault category that shadows a core key is inert, so it
-        adds nothing. A name outside `KIND_TRAITS` raises instead of answering with an empty set."""
+        alias carries the category's traits. A core category has its own traits and those the vault
+        adds to it (`added_category_traits`); a vault category that shadows a core key adds nothing
+        else. A name outside `KIND_TRAITS` raises instead of answering with an empty set."""
         semantic_kinds.require_trait(trait)
+        added = self.added_category_traits()
         return frozenset(
-            key
-            for definitions in (self.core_categories, self.categories)
-            for key, definition in definitions.items()
-            if trait in definition.traits
-            and (definitions is self.core_categories or key not in _all_core_category_labels())
+            key for key, definition in self.core_categories.items()
+            if trait in definition.traits or trait in added.get(key, ())
+        ) | frozenset(
+            key for key, definition in self.categories.items()
+            if trait in definition.traits and key not in _all_core_category_labels()
         )
+
+    def added_category_traits(self) -> dict[str, frozenset[str]]:
+        """The traits the vault adds to core categories, by canonical key.
+
+        They come from an entry under a core key that carries only `traits`, and from the `traits` of
+        a core-key entry whose other fields stay inert. They apply as a vault category's traits do.
+        """
+        added = dict(self.category_trait_entries)
+        for key, definition in self.categories.items():
+            if key in self.core_categories and definition.traits:
+                added[key] = added.get(key, frozenset()) | definition.traits
+        return added
 
     def label_definitions(self, registry: LabelRegistry) -> dict[str, LabelDefinition]:
         """The entries of `registry` a reader may use, by key: the shipped ones, then the vault's.
@@ -474,6 +492,9 @@ class SemanticLanguageRegistry:
             "kinds": {key: self.kinds[key].as_dict() for key in sorted(self.kinds)},
             "kind_label_entries": {
                 key: dict(labels) for key, labels in sorted(self.kind_label_entries.items())
+            },
+            "category_trait_entries": {
+                key: sorted(traits) for key, traits in sorted(self.category_trait_entries.items())
             },
             "category_aliases": dict(sorted(self.category_aliases.items())),
             "kind_aliases": dict(sorted(self.kind_aliases.items())),
@@ -824,10 +845,10 @@ def registry_proposal(registry: SemanticLanguageRegistry) -> dict[str, Any]:
     }
     proposal: dict[str, Any] = {
         "schema_version": registry.schema_version,
-        "categories": {
-            key: _definition_proposal(registry.categories[key])
-            for key in sorted(registry.categories)
-        },
+        "categories": dict(sorted({
+            **{key: _definition_proposal(definition) for key, definition in registry.categories.items()},
+            **{key: {"traits": sorted(traits)} for key, traits in registry.category_trait_entries.items()},
+        }.items())),
         "kinds": dict(sorted(kinds.items())),
     }
     for labels in semantic_labels.REGISTRIES:
@@ -1015,6 +1036,7 @@ def _parse_registry_data(
             findings,
         )
 
+    category_trait_entries, raw_categories = _split_category_traits(raw_categories, findings)
     categories = _parse_definitions(
         raw_categories, "categories", CategoryDefinition, _CATEGORY_DEFINITION_FIELDS, findings
     )
@@ -1068,7 +1090,26 @@ def _parse_registry_data(
         core_label_entries=core.core_label_entries,
         label_entries=label_entries,
         kind_label_entries=kind_label_entries,
+        category_trait_entries=category_trait_entries,
     )
+
+
+def _split_category_traits(
+    raw_categories: dict[Any, Any], findings: list[RegistryFinding],
+) -> tuple[dict[str, frozenset[str]], dict[Any, Any]]:
+    """The traits a vault wrote under a core category's key, and the other category entries.
+
+    An entry under a core key that carries anything but `traits` stays among the others, which
+    report it as shadowing the core category, as they always did; its traits still apply.
+    """
+    traits: dict[str, frozenset[str]] = {}
+    others: dict[Any, Any] = {}
+    for raw_key, value in raw_categories.items():
+        if raw_key in _core_categories() and isinstance(value, dict) and set(value) == {"traits"}:
+            traits[raw_key] = _traits(value["traits"], f"categories.{raw_key}", findings)
+        else:
+            others[raw_key] = value
+    return traits, others
 
 
 def _split_kind_labels(
@@ -1914,11 +1955,13 @@ def _core_category_shadow_findings(
     for key in sorted(categories):
         definition = categories[key]
         if key in core_labels:
+            applies = key in _core_categories() and definition.traits
             findings.append(
                 _finding(
                     "core_category_shadowed",
                     f"categories.{key}",
-                    f"category {key!r} shadows a built-in core category and is ignored",
+                    f"category {key!r} shadows a built-in core category; "
+                    + ("only its traits apply" if applies else "it is ignored"),
                     severity="warning",
                 )
             )
@@ -1981,6 +2024,7 @@ class _CategoryAdapter:
 
     def entries(self, typed: SemanticLanguageRegistry) -> dict[str, vocabulary_registry.Entry]:
         out: dict[str, vocabulary_registry.Entry] = {}
+        added = typed.added_category_traits()
         for origin, definitions in (("pack", typed.core_categories), ("vault", typed.categories)):
             for key, definition in definitions.items():
                 scope = {
@@ -1989,8 +2033,9 @@ class _CategoryAdapter:
                     if getattr(definition, name)
                 }
                 attributes: dict[str, Any] = {"scope": scope} if scope else {}
-                if definition.traits:
-                    attributes["traits"] = sorted(definition.traits)
+                traits = definition.traits | (added.get(key, frozenset()) if origin == "pack" else frozenset())
+                if traits:
+                    attributes["traits"] = sorted(traits)
                 out[key] = vocabulary_registry.Entry(
                     key=key,
                     description=definition.description,
@@ -2034,10 +2079,10 @@ class _CategoryAdapter:
         *,
         existing: bool,
     ) -> None:
-        if key in _core_categories():
-            raise vocabulary_registry.RegistryError(
-                f"PACK_ENTRY_FIXED: {key!r} is a core semantic category"
-            )
+        core = _core_categories().get(key)
+        if core is not None:
+            self._put_core_traits(document, core, entry)
+            return
         row: dict[str, Any] = {"description": entry.description}
         if entry.aliases:
             row["aliases"] = sorted(normalize_label(alias) for alias in entry.aliases)
@@ -2053,6 +2098,35 @@ class _CategoryAdapter:
             # A malformed value is written as given, so the parse names it instead of this writer.
             row["traits"] = sorted(traits) if isinstance(traits, list | tuple) else traits
         document["categories"][key] = row
+
+    @staticmethod
+    def _put_core_traits(
+        document: dict[str, Any], core: CategoryDefinition, entry: vocabulary_registry.Entry
+    ) -> None:
+        """Write the traits a save adds to a core category; the rest of it stays code-owned."""
+        key = core.key
+        traits = entry.attributes.get("traits") or []
+        fixed = (
+            entry.description != core.description
+            or set(entry.aliases) != set(core.aliases)
+            or entry.status != core.status
+            or entry.replaced_by != core.replaced_by
+            or entry.attributes.get("scope")
+            or (isinstance(traits, list | tuple) and not core.traits <= set(traits))
+        )
+        if fixed:
+            raise vocabulary_registry.RegistryError(
+                f"PACK_ENTRY_FIXED: {key!r} is a core semantic category; a save may only add traits"
+            )
+        if not isinstance(traits, list | tuple):
+            # A malformed value is written as given, so the parse names it instead of this writer.
+            document["categories"][key] = {"traits": traits}
+            return
+        added = sorted(set(traits) - core.traits)
+        if added:
+            document["categories"][key] = {"traits": added}
+        else:
+            document["categories"].pop(key, None)
 
     def remove(self, document: dict[str, Any], key: str) -> None:
         document["categories"].pop(key, None)

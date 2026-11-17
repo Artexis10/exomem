@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+import yaml
 from test_activate_context_maps import _activate
 from test_context_catalogue import _built, _page, _write
 from test_context_views import OWNER
@@ -13,6 +14,7 @@ from test_working_set_withheld_twins import _withhold
 
 from exomem import (
     activation_conventions,
+    commands,
     lexstore,
     positions,
     semantic_language_registry,
@@ -315,6 +317,56 @@ def test_an_unknown_category_trait_is_refused_with_a_named_finding() -> None:
     })
 
     assert [(item["code"], item["path"]) for item in findings] == [("unknown_trait", "categories.working_hypothesis.traits")]
+
+
+def test_a_vault_adds_the_position_trait_to_a_core_category_through_the_governed_save(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A vault whose positions sit under the core `insight` category could not mark it: the entry was inert and refused."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    reading = "My reading is that the crawling comes from glaze applied too thick, not from dust; not proven"
+    _lead_linking_to_a_long_page(vault, f"- [insights] {reading} (2026-03-02) ^crawling\n")
+    with principal.library_scope():
+        current = commands.op_schema_memory(vault, subject="categories", operation="inspect")
+        saved = commands.op_schema_memory(
+            vault, subject="categories", operation="save",
+            proposal={"upsert": {"insight": {"attributes": {"traits": ["position"]}}}},
+            expected_hash=current["content_hash"], why="my own readings are recorded as insights",
+        )
+    _ready(vault)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert saved.get("findings", []) == []
+    written = yaml.safe_load((vault / "Knowledge Base/_Schema/semantic-language-registry.yaml").read_text(encoding="utf-8"))
+    assert written["categories"] == {"insight": {"traits": ["position"]}}
+    registry = semantic_language_registry.load_registry(vault)
+    assert registry.findings == ()
+    assert registry.categories_with("position") == {"preference", "insight"}
+    assert registry.core_categories["insight"].description == "A non-obvious realization or interpretation."
+    assert [(item["ref"].rpartition("/")[2], item["text"]) for item in packet["positions"]["items"]] == [
+        ("studio-equipment-log.md#crawling", reading),
+    ]
+
+
+def test_a_core_category_entry_that_redefines_more_than_traits_keeps_the_rest_inert() -> None:
+    """A hand edit must not rewrite a code-owned category's meaning, but the trait it adds still applies."""
+    registry = semantic_language_registry.load_registry(proposal={
+        "schema_version": 1,
+        "categories": {"insight": {"description": "Anything I happen to think.", "traits": ["position"]}},
+        "kinds": {},
+    })
+
+    assert [(item.code, item.path, item.severity) for item in registry.findings] == [
+        ("core_category_shadowed", "categories.insight", "warning"),
+    ]
+    assert registry.resolve_category("insight").definition.description == "A non-obvious realization or interpretation."
+    assert registry.categories_with("position") == {"preference", "insight"}
+
+
+def test_an_unknown_trait_on_a_core_category_is_refused_with_a_named_finding() -> None:
+    """A misspelt trait under a core key would otherwise save cleanly and silently select nothing."""
+    findings = validate_proposal({"schema_version": 1, "categories": {"insight": {"traits": ["positon"]}}, "kinds": {}})
+
+    assert [(item["code"], item["path"]) for item in findings] == [("unknown_trait", "categories.insight.traits")]
 
 
 def test_the_served_record_names_the_positions_it_served_and_no_text(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

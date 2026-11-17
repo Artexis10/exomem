@@ -21,6 +21,7 @@ The registry already gives kinds a closed `traits` set that code branches on. Th
 A vault declares its own position categories through the existing reviewed save. The connected agent can propose those declarations from the category profile in `schema_memory(subject="categories")`. The agent is the sensor, and the owner confirms.
 
 The shipped pack declares `position` only on `preference`. The shipped `constraint` and `decision` categories also cover technical limits and project choices, so declaring them would flood the block with units that are not the person's position.
+A vault whose own positions sit under another core category, such as `insight`, adds the trait there with an entry that carries only `traits`; the core definition, aliases and description stay code-owned.
 
 ### Reach one hop from the served leads
 
