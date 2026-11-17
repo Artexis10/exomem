@@ -102,9 +102,15 @@ def clean_families():
     return pages
 
 
+#: The tree that `ACCESS_POLICY` excludes: a page in it is no recall candidate, so a child that names
+#: one as its parent is reported as itself although the catalogue groups it under that parent.
+EXCLUDED = "Notes/Hidden"
+ACCESS_POLICY = {"Knowledge Base/_access.yaml": f"excluded:\n  - {EXCLUDED}/\n".encode()}
+
+
 def hostile_families():
-    """A parent outside the knowledge base and a parent in a directory that the vault walk skips."""
-    outside, archived = "Elsewhere/Clip-Three.mp4", "Knowledge Base/_archive/Clip-Five.mp4"
+    """A parent outside the knowledge base and a parent in a tree that the access policy excludes."""
+    outside, excluded = "Elsewhere/Clip-Three.mp4", f"Knowledge Base/{EXCLUDED}/Clip-Five.mp4"
     return dict(
         [
             video(outside, "2026-03-03"),
@@ -115,13 +121,13 @@ def hostile_families():
                 "2026-03-02",
                 parent_media=outside,
             ),
-            video(archived, "2026-03-03"),
+            video(excluded, "2026-03-03"),
             frame(
                 f"{NOTES}/Clip-Five.mp4",
                 "scene-000-004.000",
                 4.0,
                 "2026-03-02",
-                parent_media=archived,
+                parent_media=excluded,
             ),
         ]
     )
@@ -292,15 +298,18 @@ def test_the_window_answers_as_the_exhaustive_browse_and_file_mode_do(world, rou
 
 
 def test_a_hostile_parent_answers_as_exhaustive(vault, configured_boundary, routes, monkeypatch):  # noqa: F811
-    """A parent outside the knowledge base, or in a skipped directory, is reported where the
-    exhaustive browse reports it, whichever route answers."""
-    families = {**clean_families(), **hostile_families()}
-    world = build_world(vault, configured_boundary[1], "few withheld", families)
+    """A parent outside the knowledge base, or in a tree that the access policy excludes, is
+    reported where the exhaustive browse reports it, whichever route answers. The owner reads it,
+    so that no withheld parent hides the case."""
+    families = {**clean_families(), **hostile_families(), **ACCESS_POLICY}
+    world = build_world(vault, configured_boundary[1], "owner", families)
     windowed = answers(world.root, world.caller)
     declined_window(monkeypatch)
     exhaustive = answers(world.root, world.caller)
     assert windowed == exhaustive
     assert all(windowed[(100, name)] for name in CELLS)
+    everything = json.dumps(windowed[(100, "no filter")])
+    assert "Clip-Three.mp4" in everything and "Clip-Five.mp4" in everything
 
 
 def test_a_page_that_fails_to_hydrate_is_replaced_by_the_next_one(world, monkeypatch):
