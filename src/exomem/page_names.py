@@ -88,7 +88,7 @@ def read_identity(root: Path, rel_path: str) -> PageIdentity | None:
 
 
 class AmbiguousTitle(OpError):
-    """Several pages the caller may see share a title; the refusal lists up to `MAX_CANDIDATES`."""
+    """Several pages the caller may see answer one name; the refusal lists up to `MAX_CANDIDATES`."""
 
 
 def resolve_reference(root: Path, value: str, *, serve_stale: bool = False) -> str:
@@ -181,10 +181,9 @@ def _carries_head(root: Path, rel_path: str, head: str) -> bool:
     return found is not None and found.id.split(".", 1)[0] == head
 
 
-def _ambiguous(
-    root: Path, shown: str, paths: list[str], field: str, *, by_id: bool
-) -> AmbiguousTitle:
-    """The refusal for several visible pages that one title or id head names."""
+def _ambiguous(root: Path, paths: list[str], field: str, *, named: str) -> AmbiguousTitle:
+    """The refusal for several visible pages that one value names; `named` says what they share,
+    by the step that matched them (`resolve_page`)."""
     identities = [
         found
         for found in (read_identity(root, path) for path in paths[:_MAX_CANDIDATES_READ])
@@ -197,7 +196,6 @@ def _ambiguous(
     candidates = [
         {**found.row(), "path": found.path} if twins else found.row() for found in shown_pages
     ]
-    named = f"match the id {shown}" if by_id else f"are titled \u201c{shown}\u201d"
     return AmbiguousTitle(
         "AMBIGUOUS_REFERENCE",
         f"{len(paths)} pages {named}.",
@@ -250,22 +248,26 @@ def resolve_page(
                 if (found := read_identity(root, path)) is not None and found.id == raw
             ] or paths
         if len(paths) > 1:
-            raise _ambiguous(root, raw, paths, field, by_id=True)
+            raise _ambiguous(root, paths, field, named=f"match the id {raw}")
         if paths:
             return resolve_reference(root, paths[0])
         # No page holds that id: the value may still be a title of the same shape.
     resolver = find.shared_resolver(root)
     moved: list[str] = []
+    # The resolver's own lineage steps. A short id has already won; a live stem or title wins
+    # over a prior stem inside `prior_stem_pages`.
+    lineage, left = (
+        (vault.prior_path_pages, f"once lived at \u201c{raw}\u201d")
+        if "/" in raw
+        else (vault.prior_stem_pages, f"once had the file name \u201c{raw}\u201d")
+    )
     if writer_lease.invocation_reads():
-        # The resolver's own lineage steps. A short id has already won; a live stem or title wins
-        # over a prior stem inside `prior_stem_pages`.
-        lineage = vault.prior_path_pages if "/" in raw else vault.prior_stem_pages
         with egress.decide_without_receipt():
             moved = lineage(root, raw, resolver, visible=visible)
     if len(moved) > 1 and prefer is not None:
         moved = [path for path in moved if prefer(path)] or moved
     if len(moved) > 1:
-        raise _ambiguous(root, raw, moved, field, by_id=False)
+        raise _ambiguous(root, moved, field, named=left)
     if moved:
         return resolve_reference(root, moved[0], serve_stale=serve_stale)
     key = vault.title_key(raw)
@@ -283,7 +285,7 @@ def resolve_page(
     if len(paths) > 1 and prefer is not None:
         paths = [path for path in paths if prefer(path)] or paths
     if len(paths) > 1:
-        raise _ambiguous(root, raw, paths, field, by_id=False)
+        raise _ambiguous(root, paths, field, named=f"are titled \u201c{raw}\u201d")
     return resolve_reference(root, paths[0] if paths else raw)
 
 

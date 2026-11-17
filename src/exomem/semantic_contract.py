@@ -473,6 +473,34 @@ class StableIdentityCensus:
             (*filter(other, self.entries), replacement), self.reference_only_entries
         )
 
+    def with_pages(
+        self,
+        pages: Mapping[str, SemanticPageState | None],
+        *,
+        casefold_paths: bool = False,
+    ) -> StableIdentityCensus:
+        """`with_page` for each page in `pages` at once, dropping the entry where it is None.
+
+        One census for the batch: a census per page re-sorts every entry once per page.
+        """
+        def key(path: str) -> str:
+            return path.casefold() if casefold_paths else path
+
+        replaced = {key(path) for path in pages}
+        entries = [entry for entry in self.entries if key(entry.path) not in replaced]
+        reference_only = [
+            entry for entry in self.reference_only_entries if key(entry.path) not in replaced
+        ]
+        for page in pages.values():
+            if page is None:
+                continue
+            replacement = StableIdentityEntry(
+                page.path,
+                page.identity if page.identity_kind == "exomem_id" else None,
+            )
+            (reference_only if _is_reference_only_path(page.path) else entries).append(replacement)
+        return StableIdentityCensus(tuple(entries), tuple(reference_only))
+
     @classmethod
     def from_states(
         cls,
@@ -1314,6 +1342,43 @@ class SemanticCorpusContext:
                 state, casefold_paths=vault.vault_casefolds(self.vault_root)
             ),
             writer_visibility=self.writer_visibility,
+        )
+
+    def with_pages(
+        self, pages: Mapping[str, SemanticPageState | None], *, prior_claims: Any
+    ) -> SemanticCorpusContext:
+        """This corpus once each page in `pages` holds its state, or is gone where it is None.
+
+        Its links resolve prior paths by `prior_claims`, the claims those pages leave. Only what
+        the change reaches is derived again where that is provable, else the whole corpus is.
+        """
+        states = dict(self.pages)
+        for path, state in pages.items():
+            if state is None:
+                states.pop(path, None)
+            else:
+                states[path] = state
+        census = self.identity_census.with_pages(
+            pages, casefold_paths=vault.vault_casefolds(self.vault_root)
+        )
+        patched = _context_with_page_delta(
+            self,
+            states,
+            tuple(pages),
+            registry=self.registry,
+            identity_census=census,
+            writer_visibility=self.writer_visibility,
+            prior_claims=prior_claims,
+        )
+        if patched is not None:
+            return patched
+        return _context_from_state_map(
+            self.vault_root,
+            states,
+            self.registry,
+            census,
+            writer_visibility=self.writer_visibility,
+            prior_claims=prior_claims,
         )
 
     def registry_for(self, path: str) -> relation_registry.RelationRegistry:
@@ -4716,13 +4781,15 @@ def _context_with_page_delta(
     writer_visibility: Any,
     resolver_source: SemanticCorpusContext | None = None,
     activation_census: activation_manifest.ActivationCensus | None = None,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext | None:
     """The corpus of `pages` from `base` by re-deriving only what `delta` reaches.
 
     `delta` lists the paths whose state was added, replaced or removed.
     `resolver_source` is a context that already holds the resolver of `pages`;
-    without it the resolver is patched from `base`. Returns None, and the
-    caller derives the whole corpus, whenever locality is not provable.
+    without it the resolver is patched from `base`. `prior_claims`, when given,
+    are the claims the links of `pages` resolve prior paths by. Returns None, and
+    the caller derives the whole corpus, whenever locality is not provable.
     """
     old = base.pages
     delta = tuple(path for path in delta if old.get(path) is not pages.get(path))
@@ -4751,6 +4818,7 @@ def _context_with_page_delta(
             stems=resolver_source.resolver_stems,
             titles=resolver_source.resolver_titles,
             candidates_by_key=resolver_source.resolver_candidates_by_key,
+            bound_claims=prior_claims,
         )
     elif any(
         path not in old or path not in pages or old[path].title != pages[path].title
@@ -4769,6 +4837,7 @@ def _context_with_page_delta(
             candidates_by_key=base.resolver_candidates_by_key,
         )
         resolver.on_entries_changed(updated.items(), removed)
+        resolver.bound_claims = prior_claims
     else:
         entries = base.resolver_entries
         resolver = _WikilinkResolverView(
@@ -4777,6 +4846,7 @@ def _context_with_page_delta(
             stems=base.resolver_stems,
             titles=base.resolver_titles,
             candidates_by_key=base.resolver_candidates_by_key,
+            bound_claims=prior_claims,
         )
 
     # A link resolves differently only through a key one of these pages held or
@@ -4786,6 +4856,19 @@ def _context_with_page_delta(
         for page in (old.get(path), pages.get(path)):
             if page is not None:
                 keys |= _resolver_dependency_keys(base.vault_root, page.path, page.title)
+    if prior_claims is not None:
+        from . import prior_claims as claims_module
+
+        # A link names a prior path by the claims, so each one whose claimants change, or that
+        # a changed page claims, reaches the links that name it.
+        before = (
+            base.prior_claims if base.prior_claims is not None
+            else claims_module.current(base.vault_root)
+        )
+        for prior in claims_module.changed_priors(before, prior_claims, delta):
+            keys |= _resolver_dependency_keys(
+                base.vault_root, prior.removesuffix(".md") + ".md", ""
+            )
     dependent = {
         identity
         for key in keys
@@ -4851,6 +4934,7 @@ def _context_with_page_delta(
         facts=facts,
         writer_visibility=writer_visibility,
         validated_census=census,
+        prior_claims=prior_claims,
     )
 
 

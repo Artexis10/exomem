@@ -466,6 +466,37 @@ def test_reading_an_old_stem_that_two_pages_claim_picks_neither(vault: Path) -> 
     assert unresolved.value.code == "AMBIGUOUS_REFERENCE"
 
 
+@pytest.mark.parametrize(
+    ("value", "shared"),
+    [
+        pytest.param(
+            "Knowledge Base/Notes/Insights/retired-page.md",
+            "once lived at \u201cKnowledge Base/Notes/Insights/retired-page.md\u201d",
+            id="prior-path",
+        ),
+        pytest.param(
+            "retired-page", "once had the file name \u201cretired-page\u201d", id="prior-stem"
+        ),
+    ],
+)
+def test_a_read_by_an_old_name_two_pages_claim_says_which_name_they_share(
+    vault: Path, value: str, shared: str
+) -> None:
+    """A refusal of a read by an old path or file name that says the pages share a title, so the
+    reader looks for a title clash that is not there."""
+    from exomem import page_names
+
+    old = "Knowledge Base/Notes/Insights/retired-page.md"
+    _write(vault, "Knowledge Base/Notes/first-claimant.md", _claiming(old, "First"))
+    _write(vault, "Knowledge Base/Notes/second-claimant.md", _claiming(old, "Second"))
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+
+    with pytest.raises(page_names.AmbiguousTitle) as refused:
+        _dispatch(vault, "read_memory", path=value)
+
+    assert refused.value.message == f"2 pages {shared}."
+
+
 #: Write commands, and previews of writes, that name their target by a path: each keeps it literal,
 #: so a preview names the page its commit acts on.
 EDIT = {"why": "retag", "operation": {"kind": "replace_tags", "tags": ["moved"]}}

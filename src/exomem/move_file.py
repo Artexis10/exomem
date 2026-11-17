@@ -694,7 +694,7 @@ def move_file(
     bytes, with no lineage entry added or removed: curation's guarded inverse restores sealed bytes.
     `_caller_judges_contract` leaves a validation's contract to its caller, which judges the move
     from another state: curation's inverse move, from what the plan's earlier steps leave
-    (`semantic_writes.refuse_blocked_projected_move`). Its commit judges the vault as it is then.
+    (`semantic_writes.ProjectedMoves`). Its commit judges the vault as it is then.
     """
     manager = writer_lease.active_manager()
     validate_only = validate_only or preview

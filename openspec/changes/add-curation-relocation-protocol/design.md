@@ -336,6 +336,13 @@ target does. The proposal judges each inverse move's contract from the state
 that the compensation's earlier steps leave: by then a referrer names the
 page's old path again.
 
+A compensation proposal prepares like a forward proposal: it reads without
+the vault mutation boundary. It builds the vault's corpus once and patches it
+with the pages each earlier step changes, so its cost grows with the plan, not
+with the plan times the vault. It takes the boundary only to seal. Under the
+boundary it refuses with `CURATION_BINDING_STALE` when the forward run
+committed another step meanwhile, or when a binding or a registry changed.
+
 ## Risks / Trade-offs
 
 - A stale `prior_paths` row can miss a claim after an outside edit. The link

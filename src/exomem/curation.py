@@ -1667,12 +1667,14 @@ class _Chain:
 
     `pages` holds each page an earlier step leaves at exact bytes, by path, with that step's id
     and hash; `vacated` holds each path an earlier step removes and no later one writes; `moves`
-    holds the plan's forward moves in order.
+    holds the plan's forward moves in order. `inverse_moves` judges the plan's inverse moves
+    against that state (`semantic_writes.ProjectedMoves`), made on the first one.
     """
 
     moves: list[tuple[str, str]] = field(default_factory=list)
     pages: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     vacated: set[str] = field(default_factory=set)
+    inverse_moves: Any = None
 
     def text(self, vault_root: Path, path: str) -> str:
         """The page's text as the earlier steps leave it, else as the vault holds it now."""
@@ -2210,8 +2212,9 @@ def _prepare_step(
                     )
                 # An undo restores the links before it moves the pages back, so a page that linked
                 # this one names its old path again by then.
-                semantic_writes.refuse_blocked_projected_move(
-                    vault_root,
+                if chain.inverse_moves is None:
+                    chain.inverse_moves = semantic_writes.ProjectedMoves(vault_root)
+                chain.inverse_moves.refuse_blocked(
                     old_path=path,
                     new_path=destination,
                     source=current,
@@ -6073,6 +6076,15 @@ def _later_states(
 
 
 def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
+    """Derive and seal the plan that undoes a forward run's committed steps.
+
+    Like a forward proposal, it prepares without the vault mutation boundary (the dispatcher
+    narrows it to the writer fence), then takes the boundary to seal. The seal refuses a plan
+    whose forward run committed another step, or whose bound pages or registries changed, since
+    preparation. Under an outer boundary it takes no second guard (`seal_proposal`).
+    """
+    from . import writer_lease
+
     root = Path(vault_root)
     forward_store = CurationStore(root)
     forward_plan = forward_store.load_plan(run_id)
@@ -6156,7 +6168,6 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
     }
     identity = plan_id(sealed)
     store = CompensationStore(root, run_id, identity)
-    store._create_plan_at(store.plan_path(run_id), sealed)
     fingerprint = plan_fingerprint(
         {
             key: value
@@ -6175,7 +6186,28 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
         "phase": "proposed",
         "active_step": None,
     }
-    return {**_sealed_run(store, run_id, projection), "plan": sealed}
+    manager = writer_lease.active_manager()
+    with (
+        nullcontext()
+        if manager.holds_mutation_boundary(root)
+        else manager.mutation_guard(
+            root,
+            request_id=writer_lease.active_mutation_request_id(),
+            operation="curation_compensation_propose_commit",
+            holder_kind="command",
+        )
+    ):
+        if _committed_step_ids(forward_store.reconstruct(run_id)) != committed:
+            raise _error(
+                "CURATION_BINDING_STALE",
+                "the forward run committed another step while its undo was prepared; propose again",
+            )
+        blockers = _binding_blockers(root, sealed, plan_registry_identities(root, sealed))
+        if blockers:
+            raise _error(blockers[0]["code"], blockers[0]["reason"])
+        store._create_plan_at(store.plan_path(run_id), sealed)
+        run = _sealed_run(store, run_id, projection)
+    return {**run, "plan": sealed}
 
 
 def apply_compensation(

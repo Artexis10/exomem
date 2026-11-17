@@ -3495,13 +3495,9 @@ def _corpus_with_pages(
         )
         states[rel] = state
         changed[rel] = state
-    identity_census = semantic_contract.StableIdentityCensus(
-        tuple(entry for entry in corpus.identity_census.entries if entry.path not in pages),
-        corpus.identity_census.reference_only_entries,
+    identity_census = corpus.identity_census.with_pages(
+        {rel: changed.get(rel) for rel in pages}, casefold_paths=vault.vault_casefolds(root)
     )
-    casefold_paths = vault.vault_casefolds(root)
-    for state in changed.values():
-        identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
     claims = prior_claims.current(root).with_pages(
         {rel: None if text is None else text.encode("utf-8") for rel, text in pages.items()}
     )
@@ -4159,59 +4155,117 @@ def _refuse_blocked_evaluations(evaluations: Sequence[MovePageEvaluation]) -> No
         )
 
 
-def refuse_blocked_projected_move(
-    vault_root: Path,
-    *,
-    old_path: str,
-    new_path: str,
-    source: str,
-    moved_source: str,
-    projection: Mapping[str, str | None],
-) -> None:
-    """Refuse a move whose contract blocks once a plan's earlier steps have run.
+class ProjectedMoves:
+    """Judges a plan's inverse moves against the vault as the plan's earlier steps leave it.
 
-    `projection` maps each page those steps leave to its text, or to None where they remove
-    it, and the move takes `old_path` at `source` to `new_path` at `moved_source` from there.
     An undo's inverse move runs after its link restore, so a page that linked the moved page
     names its old path again by then; judged against the vault as it is, that link names the
-    path the inverse move vacates and seems lost.
+    path the inverse move vacates and seems lost. One instance serves one plan's preparation:
+    it reads the corpus, registries, contracts and activation boundary once, and patches its
+    projected corpus by the pages that changed since its last judgement, never the whole plan
+    again per step.
     """
-    root = Path(vault_root)
-    status_basis = lifecycle_statuses.Basis(root)
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
-    disk = semantic_contract.build_corpus_context(
-        root, registry=registry, language_registry=language, status_basis=status_basis
-    )
-    before_corpus, _held = _corpus_with_pages(
-        root, disk, {**projection, old_path: source},
-        registry=registry, language=language, status_basis=status_basis,
-    )
-    after_corpus, held = _corpus_with_pages(
-        root, disk, {**projection, old_path: None, new_path: moved_source},
-        registry=registry, language=language, status_basis=status_basis,
-    )
-    boundary = activation_manifest.plan_activation_boundary(
-        disk.activation_census, manifest=activation_manifest.load_manifest(root), vault_root=root
-    )
-    _refuse_blocked_evaluations(_evaluate_relocation(
-        root,
-        pairs=_move_evaluation_pairs(
-            old_path=old_path,
-            new_path=new_path,
-            changed={new_path: held[new_path]},
+
+    def __init__(self, vault_root: Path) -> None:
+        root = Path(vault_root)
+        self._root = root
+        self._status_basis = lifecycle_statuses.Basis(root)
+        self._registry = relation_registry.load_registry(root)
+        self._language = semantic_language_registry.load_registry(root)
+        self._disk = semantic_contract.build_corpus_context(
+            root,
+            registry=self._registry,
+            language_registry=self._language,
+            status_basis=self._status_basis,
+        )
+        self._disk_claims = prior_claims.current(root)
+        self._contracts = memory_schema.load_saved_contracts(root)
+        self._manifest = activation_manifest.plan_activation_boundary(
+            self._disk.activation_census,
+            manifest=activation_manifest.load_manifest(root),
+            vault_root=root,
+        ).manifest
+        # The corpus last judged, its claims, and the text of each page it holds apart from the
+        # vault's.
+        self._corpus = self._disk
+        self._claims = self._disk_claims
+        self._texts: dict[str, str | None] = {}
+
+    def refuse_blocked(
+        self,
+        *,
+        old_path: str,
+        new_path: str,
+        source: str,
+        moved_source: str,
+        projection: Mapping[str, str | None],
+    ) -> None:
+        """Refuse the move of `old_path` at `source` to `new_path` at `moved_source` when its
+        contract blocks once the earlier steps have run.
+
+        `projection` maps each page those steps leave to its text, or to None where they
+        remove it.
+        """
+        before_corpus, _held = self._at({**projection, old_path: source})
+        after_corpus, held = self._at({**projection, old_path: None, new_path: moved_source})
+        _refuse_blocked_evaluations(_evaluate_relocation(
+            self._root,
+            pairs=_move_evaluation_pairs(
+                old_path=old_path,
+                new_path=new_path,
+                changed={new_path: held[new_path]},
+                before_corpus=before_corpus,
+                after_corpus=after_corpus,
+            ),
+            moved_path=old_path,
+            pure_path_rewrites=set(),
             before_corpus=before_corpus,
             after_corpus=after_corpus,
-        ),
-        moved_path=old_path,
-        pure_path_rewrites=set(),
-        before_corpus=before_corpus,
-        after_corpus=after_corpus,
-        loaded_contracts=memory_schema.load_saved_contracts(root),
-        language=language,
-        manifest=boundary.manifest,
-        status_basis=status_basis,
-    ))
+            loaded_contracts=self._contracts,
+            language=self._language,
+            manifest=self._manifest,
+            status_basis=self._status_basis,
+        ))
+
+    def _at(
+        self, pages: Mapping[str, str | None]
+    ) -> tuple[
+        semantic_contract.SemanticCorpusContext,
+        dict[str, semantic_contract.SemanticPageState],
+    ]:
+        """The corpus once each page in `pages` holds its text, or is gone where it is None, and
+        the state of each page that holds text."""
+        if not self._texts.keys() <= pages.keys():
+            # A page the plan no longer changes is the vault's again, census entry and all.
+            self._corpus, self._claims, self._texts = self._disk, self._disk_claims, {}
+        changed: dict[str, semantic_contract.SemanticPageState | None] = {}
+        held: dict[str, semantic_contract.SemanticPageState] = {}
+        for rel, text in pages.items():
+            if rel in self._texts and self._texts[rel] == text:
+                if text is not None:
+                    held[rel] = self._corpus.pages[rel]
+                continue
+            current = None if rel in self._texts else self._disk.pages.get(rel)
+            if text is None:
+                changed[rel] = None
+            elif current is not None and current.source_hash == vault.content_hash(text):
+                held[rel] = current
+                changed[rel] = current
+            else:
+                held[rel] = changed[rel] = semantic_contract.build_page_state(
+                    self._root,
+                    rel,
+                    text,
+                    relation_registry=self._registry,
+                    language_registry=self._language,
+                    status_basis=self._status_basis,
+                )
+        self._claims = self._claims.with_pages({
+            rel: None if pages[rel] is None else str(pages[rel]).encode("utf-8") for rel in changed
+        })
+        self._corpus = self._corpus.with_pages(changed, prior_claims=self._claims)
+        self._texts = dict(pages)
+        return self._corpus, held
 
 
 def commit_move(

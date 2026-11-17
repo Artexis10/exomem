@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TypeVar
 
@@ -200,6 +200,16 @@ class PriorClaims:
 
 
 _ROWS_QUERY = "SELECT prior_path, path, prior_stem FROM prior_paths ORDER BY prior_path, path"
+
+
+def changed_priors(before: PriorClaims, after: PriorClaims, paths: Iterable[str]) -> set[str]:
+    """The prior paths claimed differently in `after` than in `before`, with each prior path a
+    page at one of `paths` claims in either: a link that names one of them may resolve anew."""
+    pages = set(paths)
+    before_rows, after_rows = set(before._rows), set(after._rows)
+    return {prior for prior, _path, _stem in before_rows ^ after_rows} | {
+        prior for prior, path, _stem in before_rows | after_rows if path in pages
+    }
 
 
 def from_connection(vault_root: Path, conn: sqlite3.Connection) -> PriorClaims:
