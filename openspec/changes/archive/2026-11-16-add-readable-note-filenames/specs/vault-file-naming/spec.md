@@ -22,9 +22,13 @@ A configured style that Exomem cannot use SHALL refuse the write with
 `INVALID_SLUG`, naming the source, and SHALL NOT fall back to the default,
 because the default would silently name pages in a style that the vault did not
 choose. A style value that is not one of the known styles, is not a string, or is
-empty, and a `project-keys.yaml` that cannot be read or is not a mapping of keys,
-all refuse. Only a missing file, or a file with no style key, means "no style
-set". The environment value, when set, applies without reading the file.
+empty, and a `project-keys.yaml` that cannot be opened or is not a mapping of keys,
+all refuse. A `project-keys.yaml` whose text cannot be parsed SHALL NOT refuse a
+write, because capturing a note or a Source matters more than a name in the vault's
+own style: the write names the page in the default style and SHALL carry one
+`FILENAME_STYLE_UNPARSEABLE` warning that names the file and the parse error. Only a
+missing file, or a file with no style key, means "no style set". The environment
+value, when set, applies without reading the file.
 
 #### Scenario: A vault with no configuration names a new note by its title
 
@@ -70,13 +74,21 @@ set". The environment value, when set, applies without reading the file.
 - **THEN** the file is named `quarterly-review.md`
 - **AND** a non-kebab explicit slug is still rejected as invalid
 
-#### Scenario: A style key that cannot be read refuses instead of taking the default
+#### Scenario: A style key that is no valid style refuses instead of taking the default
 
-- **GIVEN** a vault whose `project-keys.yaml` sets `filename_style` to a list, a number or an empty value, or cannot be parsed
+- **GIVEN** a vault whose `project-keys.yaml` sets `filename_style` to a list, a number or an empty value, or holds a document that is no mapping
 - **WHEN** a note is written with no explicit `slug`
 - **THEN** the write is refused with `INVALID_SLUG`
-- **AND** the reason names `project-keys.yaml` and the value or the read failure
+- **AND** the reason names `project-keys.yaml` and the value
 - **AND** a vault with no `project-keys.yaml`, or one without the key, still takes the default
+
+#### Scenario: A project-keys file that cannot be parsed names the page in the default style and says so
+
+- **GIVEN** a vault whose `project-keys.yaml` is not valid YAML
+- **WHEN** a note is written, or a Source is captured, with no explicit `slug`
+- **THEN** the write succeeds and names the page in the default style
+- **AND** the write carries one `FILENAME_STYLE_UNPARSEABLE` warning that names `project-keys.yaml` and the parse error
+- **AND** the `vault.filename_style` doctor check fails
 
 #### Scenario: Environment overrides the vault key
 
@@ -131,9 +143,10 @@ Exomem SHALL store the title exactly as given. When the file name that a write
 finally uses differs from the title (in NFC), the write SHALL carry one
 `FILENAME_ADJUSTED` warning. The warning SHALL be built where the final name is
 known, after any collision number is added, and SHALL name that name: it is the
-stem that a link resolves by. It SHALL say whether characters were changed, the
-name was cut, or a number was added. It SHALL name the file by its name, never by
-a storage path.
+stem that a link resolves by. It SHALL say whether characters were changed, a
+trailing dot or space was removed, the name was cut, or a number was added. The
+name counts as cut only when the length cap shortened it. It SHALL name the file
+by its name, never by a storage path.
 
 #### Scenario: A link character is replaced and the write says so
 
@@ -157,6 +170,13 @@ a storage path.
 - **THEN** the file is named `Plan 3 draft-2.md`
 - **AND** its `FILENAME_ADJUSTED` warning names `Plan 3 draft-2` and says that a number was added
 - **AND** a wikilink to `Plan 3 draft-2` resolves to the second page
+
+#### Scenario: A removed trailing dot is not reported as a cut
+
+- **WHEN** a note titled `Quarterly plan.` is written
+- **THEN** the file is named `Quarterly plan.md`
+- **AND** the `FILENAME_ADJUSTED` warning says that a trailing dot or space was removed
+- **AND** the warning does not say that the name was shortened
 
 #### Scenario: A very long title is cut under the byte cap
 
@@ -186,8 +206,8 @@ a storage path.
 
 `exomem doctor` SHALL report the filename style in force and its source: the
 environment, the vault's `project-keys.yaml`, or the default. A configured value
-that Exomem cannot use SHALL appear as a failed check that names the source, not
-as an error from the command.
+that Exomem cannot use, and a `project-keys.yaml` that cannot be parsed, SHALL
+appear as a failed check that names the source, not as an error from the command.
 
 #### Scenario: The report names the style and where it came from
 
@@ -221,8 +241,8 @@ never silently overwrites an unrelated note.
 A stem match beats a title match when a bare wikilink resolves. In `title` style,
 a page whose file is named by its old slug still holds its title, so a new page
 named by the same title would take over every bare link to that title. When a new
-page's name is chosen, Exomem SHALL count a live page's title (in NFC, case
-folded) as taking that stem, and the new page SHALL take the collision number, so
+page's name is chosen, Exomem SHALL count a live page's title (in NFC, stripped and
+lower-cased) as taking that stem, and the new page SHALL take the collision number, so
 that a bare link finds no stem match and reaches the title step, which reports the
 duplicate as ambiguous. The lookup SHALL NOT add a vault scan to a write. It
 SHALL read the writer snapshot that the write builds for its own links, when it
@@ -237,7 +257,11 @@ file but is another page's title takes the collision number, and an entity file
 that already exists still refuses with `ENTITY_EXISTS`. An explicit per-call
 `slug`, a vault in the `slug` style, and a note whose name a draft token or an
 adoption plan froze SHALL NOT be moved by a live title and SHALL NOT carry the
-warning.
+warning. A title SHALL count only when the page that holds it is visible to the
+writer, by the filter that the writer's own links resolve over, so a restricted
+writer names its page as if the withheld pages were absent. In a mixed vault, a
+restricted writer's new page can therefore take the stem of a withheld, slug-named
+page's title, and the owner's bare title link to that page then moves.
 
 #### Scenario: A new page does not take over a link to an older page with its title
 
@@ -284,6 +308,13 @@ warning.
 - **THEN** the entity file is named `Brûlerie Ötzberg-2.md`
 - **AND** the write carries no `title_check_unavailable` warning
 - **AND** a bare link to `Brûlerie Ötzberg` is reported as matching two files by title
+
+#### Scenario: A restricted writer names its page as if a withheld title were absent
+
+- **GIVEN** a page titled `Hidden Plan` that a policy withholds from the writer
+- **WHEN** the restricted writer writes a note with a link, or creates an entity, named `Hidden Plan`
+- **THEN** the file is named `Hidden Plan.md`, with the same warnings as in a vault without the withheld page
+- **AND** the owner who writes the same name gets `Hidden Plan-2.md`
 
 #### Scenario: A refused entity write builds no writer snapshot
 

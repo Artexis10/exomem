@@ -645,15 +645,31 @@ def _check_vault_layout(vault_root: Path | None) -> list[DoctorCheck]:
 def _check_filename_style(vault_root: Path | None) -> list[DoctorCheck]:
     """Report the filename style new pages are named in, and where that choice came from.
 
-    An unrecognised value refuses every write that derives a name, so it is a failure here
-    rather than something to read out of a write error.
+    An unrecognised value refuses every write that derives a name, and an unparseable file makes
+    each such write take the default style with a warning, so both are failures here rather than
+    something to read out of a write result.
     """
     if vault_root is None:
         return []
-    from .vault import FILENAME_STYLES, InvalidSlugError, filename_style_source
+    from .vault import (
+        FILENAME_STYLES,
+        InvalidSlugError,
+        UnparseableFilenameStyleError,
+        filename_style_source,
+    )
 
     try:
         style, source = filename_style_source(vault_root)
+    except UnparseableFilenameStyleError as error:
+        return [
+            _check(
+                "vault.filename_style",
+                "fail",
+                f"{error}.",
+                "Fix the YAML in `_Schema/project-keys.yaml`. Until then each write that derives a "
+                "name takes the default style and carries a `FILENAME_STYLE_UNPARSEABLE` warning.",
+            )
+        ]
     except InvalidSlugError as error:
         return [
             _check(

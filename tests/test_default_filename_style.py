@@ -483,12 +483,11 @@ def test_a_missing_project_keys_file_takes_the_default(vault: Path) -> None:
         ("filename_style: 7\n", "7"),
         ("filename_style:\n", "None"),
         ("filename_style: ''\n", "''"),
-        ("filename_style: slug: [\n", "cannot be read"),
         ("- filename_style\n- slug\n", "not a mapping"),
     ],
-    ids=["list", "number", "empty-value", "empty-string", "unparseable", "not-a-mapping"],
+    ids=["list", "number", "empty-value", "empty-string", "not-a-mapping"],
 )
-def test_a_style_key_that_cannot_be_read_refuses_instead_of_taking_the_default(
+def test_a_style_key_that_is_no_valid_style_refuses_instead_of_taking_the_default(
     vault: Path, text: str, named: str
 ) -> None:
     _write_project_keys(vault, text)
@@ -501,6 +500,57 @@ def test_a_style_key_that_cannot_be_read_refuses_instead_of_taking_the_default(
     assert write.value.code == "INVALID_SLUG"
     check = _style_check(vault)
     assert check.status == "fail" and "project-keys.yaml" in check.message
+
+
+_UNPARSEABLE = "filename_style: slug: [\n"
+
+
+def test_an_unparseable_project_keys_file_writes_in_the_default_style_and_says_why(vault: Path) -> None:
+    _write_project_keys(vault, _UNPARSEABLE)
+
+    result = _insight(vault, "Brûlerie Ötzberg")
+
+    assert Path(result.path).name == "Brûlerie Ötzberg.md"
+    (warned,) = [warning for warning in result.warnings if warning.startswith("FILENAME_STYLE_UNPARSEABLE")]
+    assert "project-keys.yaml" in warned and "mapping values" in warned
+    check = _style_check(vault)
+    assert check.status == "fail" and "project-keys.yaml" in check.message
+
+
+def test_an_unparseable_project_keys_file_does_not_stop_a_source_capture(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    _write_project_keys(vault, _UNPARSEABLE)
+
+    result = add_module.add(
+        vault,
+        source_schema,
+        content="An invented article body.",
+        source_type="article",
+        title="Brûlerie Ötzberg notes",
+        url="https://example.com/roastery",
+        today=TODAY,
+    )
+
+    assert (vault / result.path).is_file()
+    assert [warning for warning in result.warnings if warning.startswith("FILENAME_STYLE_UNPARSEABLE")]
+
+
+@pytest.mark.parametrize(
+    ("title", "says", "does_not_say"),
+    [
+        ("Quarterly plan.", "a trailing dot or space was removed", "shortened"),
+        ("Quarterly plan?", "cannot hold", "shortened"),
+        (("Lantern " * 40).strip(), "shortened to fit the length limit", "cannot hold"),
+    ],
+    ids=["trailing-dot", "trailing-reserved-character", "over-the-byte-cap"],
+)
+def test_the_adjusted_warning_says_what_happened_to_the_title(
+    vault: Path, title: str, says: str, does_not_say: str
+) -> None:
+    (adjusted,) = _adjusted(_insight(vault, title))
+
+    assert says in adjusted and does_not_say not in adjusted
 
 
 def test_a_project_keys_file_that_cannot_be_opened_refuses_instead_of_taking_the_default(vault: Path) -> None:

@@ -11,7 +11,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import find, readiness
-from .vault import WikilinkResolver, derives_title_name, title_key
+from .vault import (
+    WikilinkResolver,
+    derives_title_name,
+    title_key,
+    wikilink_candidates,
+    writer_link_visibility,
+)
 
 #: The warning a write carries when no title index could answer. Same shape as
 #: `duplicates.unavailable_warning`: a code, then what could not run and what the write did instead.
@@ -36,6 +42,11 @@ class TitleCheck:
        one-shot command never does, because its process ends before the build would.
 
     A write that neither source could answer names the page from its folder alone, and `warning` says so.
+
+    A title counts only when its page is visible to the writer, by the filter that the writer's own
+    links resolve over (`writer_link_visibility`), so a restricted writer names its page as if the
+    withheld pages were absent. A title anywhere in the vault is a wider answer than a same-folder
+    file name, and a numbered name must not tell a restricted writer that a withheld title exists.
     """
 
     def __init__(
@@ -51,15 +62,19 @@ class TitleCheck:
         self._source = resolver
         self._asked = False
         self._answerer: WikilinkResolver | None = None
+        self._visible: Callable[[str], bool] | None = None
 
     def _resolver(self) -> WikilinkResolver | None:
         if not self._asked:
             self._asked = True
+            self._visible = writer_link_visibility(self._root)
             if self._source is not None:
                 self._answerer = self._source()
             else:
+                # Given the writer's view, a resident index that lags only by withheld pages still answers,
+                # so a withheld write never decides whether this write carries the warning.
                 self._answerer = find.borrow_query_resolver(
-                    self._root, schedule_rebuild=readiness.runtime_managed()
+                    self._root, self._visible, schedule_rebuild=readiness.runtime_managed()
                 )
         return self._answerer
 
@@ -67,7 +82,14 @@ class TitleCheck:
         if not self._applies:
             return False
         resolver = self._resolver()
-        return resolver is not None and bool(resolver.titles.get(title_key(stem)))
+        if resolver is None:
+            return False
+        key = title_key(stem)
+        return bool(
+            wikilink_candidates(
+                resolver.candidates_by_key, resolver.titles.get(key, ()), title_key=key, visible=self._visible
+            )
+        )
 
     @property
     def warning(self) -> str | None:

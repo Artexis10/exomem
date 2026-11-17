@@ -32,6 +32,7 @@ from .vault import (
     InvalidSlugError,
     PathGuard,
     PlannedWrite,
+    UnparseableFilenameStyleError,
     batch_atomic_write,
     kb_root,
     read_bytes_without_pinning,
@@ -163,9 +164,11 @@ def filename_style(vault_root: Path) -> str | None:
     registry on any failure, which is right for project keys (a vault with none still has to
     route writes somewhere) and wrong here. No file, an empty file and a file without the key
     set no style, so the caller takes the default. Anything else that cannot be read as a style
-    name raises `InvalidSlugError` with the file named: an unreadable or unparseable file, a
-    document that is no mapping, and a key whose value is empty or no string. The vault may have
-    chosen `slug`, and the default would silently name its new pages in another style.
+    name raises `InvalidSlugError` with the file named: a file that cannot be opened, a document
+    that is no mapping, and a key whose value is empty or no string. Text that does not parse
+    raises its subclass `UnparseableFilenameStyleError`, which a write answers with the default
+    style and a warning (`vault.derived_filename_style`). The vault may have chosen `slug`, and
+    the default would silently name its new pages in another style, so none of these is silent.
 
     Returns the raw string; `vault.filename_style_source` checks it against the known styles,
     so an unrecognised name is refused there with the source named.
@@ -178,7 +181,14 @@ def filename_style(vault_root: Path) -> str | None:
         return None
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         reason = (str(error).splitlines() or [type(error).__name__])[0]
-        raise InvalidSlugError(f"filename style cannot be read from {where}: {reason}") from error
+        # Text that does not parse is told apart from a file that cannot be opened: a write goes on
+        # in the default style for the first, and refuses for the second, whose content is unknown.
+        refusal = (
+            UnparseableFilenameStyleError
+            if isinstance(error, (UnicodeError, yaml.YAMLError))
+            else InvalidSlugError
+        )
+        raise refusal(f"filename style cannot be read from {where}: {reason}") from error
     if data is None:
         return None
     if not isinstance(data, dict):

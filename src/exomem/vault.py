@@ -127,6 +127,13 @@ class InvalidSlugError(ValueError):
     """An explicit filename slug violated the portable ASCII contract."""
 
 
+class UnparseableFilenameStyleError(InvalidSlugError):
+    """`project-keys.yaml` is not parseable, so the style the vault chose is unknown.
+
+    A write does not refuse for it (`derived_filename_style`); doctor fails.
+    """
+
+
 # Legacy hardcoded curated-tree list — now EMPTY by default. Curated /
 # read-only protection is governed per-subtree by `Knowledge Base/_access.yaml`
 # (`readonly:` / `excluded:`), not by a hardcoded folder list: mark any subtree
@@ -749,15 +756,29 @@ def slugify_with_truncation_check(
     return slug, None
 
 
-def _derived_style(vault_root: Path | None, dated: bool) -> str:
-    """The style that derives a new page's name: the vault's, except that a dated Source keeps `slug` by default."""
-    style, source = filename_style_source(vault_root)
-    return "slug" if dated and source == FILENAME_STYLE_FROM_DEFAULT else style
+def derived_filename_style(vault_root: Path | None, *, dated: bool = False) -> tuple[str, str | None]:
+    """The style that derives a new page's name, and a warning when the vault's own choice was unreadable.
+
+    The vault's style, except that a dated Source keeps `slug` by default. A `project-keys.yaml`
+    that cannot be parsed does not stop the write: capture matters more than a name in the vault's
+    style, so the write takes the default style and carries a warning that names the parse error.
+    A file that parses but holds no valid style still refuses, as `filename_style_source` does.
+    """
+    warning = None
+    try:
+        style, source = filename_style_source(vault_root)
+    except UnparseableFilenameStyleError as error:
+        style, source = DEFAULT_FILENAME_STYLE, FILENAME_STYLE_FROM_DEFAULT
+        warning = (
+            f"FILENAME_STYLE_UNPARSEABLE: {error}; this page was named in the default style. "
+            "Fix the file, then run doctor."
+        )
+    return ("slug" if dated and source == FILENAME_STYLE_FROM_DEFAULT else style), warning
 
 
 def derives_title_name(slug: str | None, vault_root: Path | None = None, *, dated: bool = False) -> bool:
     """Whether a page without a caller-chosen `slug` is named by its title in this vault."""
-    return slug is None and _derived_style(vault_root, dated) == "title"
+    return slug is None and derived_filename_style(vault_root, dated=dated)[0] == "title"
 
 
 def filename_adjusted_warning(
@@ -783,16 +804,28 @@ def filename_adjusted_warning(
     if final == date_prefix + given:
         return None
     name = corrected_title_name(title).name
+    # Two caps can cut a name, and each says so itself: `fit_filename` at the byte cap, and the
+    # sanitiser at its character cap, which it applies unless it is given none.
+    fitted = fit_filename(name, date_prefix=date_prefix) if name else None
+    cut = (fitted is not None and fitted[1]) or (
+        sanitize_title_filename(title) != sanitize_title_filename(title, max_length=0)
+    )
     reasons = []
     if not name:
         reasons.append("no part of the title can name a file, so the name comes from its slug")
-    elif not given.startswith(name):
-        reasons.append("characters that a file name or a link cannot hold were changed")
+    elif name != given:
+        removed = given[len(name):] if given.startswith(name) else None
+        # A dot or space at the end is the one removal that the rule names apart from the unsafe characters.
+        if cut and removed is not None:
+            pass  # what follows the name is what the cut dropped, and the cut reason below says so
+        elif removed is not None and not removed.strip(". "):
+            reasons.append("a trailing dot or space was removed")
+        else:
+            reasons.append("characters that a file name or a link cannot hold were changed")
     numbered = final != planned
     # `unique_path` shortens the stem when its number would pass the byte cap.
     shortened_for_number = numbered and not final.startswith(f"{planned}-")
-    cut = name != given and given.startswith(name) or planned != date_prefix + name
-    if (name and cut) or shortened_for_number:
+    if cut or shortened_for_number:
         reasons.append("the name was shortened to fit the length limit")
     if numbered:
         reasons.append("a number was added because another page already holds that name or title")
@@ -836,7 +869,9 @@ def resolve_filename_slug(
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
-    if derives_title_name(None, vault_root, dated=dated):
+    style, style_warning = derived_filename_style(vault_root, dated=dated)
+    style_warnings = [style_warning] if style_warning else []
+    if style == "title":
         corrected = corrected_title_name(title)
         fitted = fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
         if fitted is not None:
@@ -845,14 +880,14 @@ def resolve_filename_slug(
             # and this path is what a vault sets to stop paying that cost. A name
             # that differs from its title is reported by `filename_adjusted_warning`,
             # once the final name is known.
-            return fitted[0].removeprefix(date_prefix), []
+            return fitted[0].removeprefix(date_prefix), style_warnings
         # A title with no usable name (all reserved characters, or no bytes left
         # under the cap) has no readable form, so fall through to the slug path
         # rather than failing the write. One note named the old way beats a
         # refused write.
 
     resolved, truncation_warning = slugify_with_truncation_check(title)
-    warnings = [truncation_warning] if truncation_warning else []
+    warnings = [*style_warnings, *([truncation_warning] if truncation_warning else [])]
     if any(ord(char) > 127 for char in title):
         warnings.append(
             "automatic filename slug used lossy, language-blind ASCII "

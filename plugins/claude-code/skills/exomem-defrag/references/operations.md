@@ -432,6 +432,9 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
    `title_check_unavailable` means no title index could answer, so the name came
    from its folder alone. Another page with the same title may exist, and a bare
    link to that title then reaches this note. Link to this note by its file name.
+   A reply warning `FILENAME_STYLE_UNPARSEABLE` means `_Schema/project-keys.yaml`
+   could not be parsed, so the page took the default style. Tell the person to
+   fix that file.
    Under the `slug` style the name is a lowercase ASCII slug that may use
    language-blind transliteration; for a non-Latin title, prefer an explicit
    meaningful ASCII slug. The real title is always stored in frontmatter and the H1.

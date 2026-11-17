@@ -157,12 +157,27 @@ they froze their target and must land there. A plan checks titles when it is mad
 and has no per-note warning channel, so a plan made in a cold process is
 unchecked without a warning.
 
-### A style that cannot be read refuses
+### A style key that holds no style refuses; an unparseable file warns
 
-A key that is present but unusable is a vault setting that Exomem cannot honour.
-Falling back to `title` would flip a vault that meant `slug`, so the write refuses
-and the doctor check fails with the reason. Only a missing file or key means the
-default.
+A key that is present but holds no valid style (a list, a number, an empty value, a
+document that is no mapping) is a vault setting that Exomem cannot honour. Falling
+back to `title` would flip a vault that meant `slug`, so the write refuses and the
+doctor check fails with the reason. A file whose text does not parse states no
+setting at all, and refusing would stop every capture, Sources included, for one
+typo. That write names the page in the default style and carries a
+`FILENAME_STYLE_UNPARSEABLE` warning with the parse error, and the doctor check
+fails. A file that cannot be opened keeps the refusal, because its content is
+unknown. Only a missing file or key means the default.
+
+### A restricted writer's title check reads only its own view
+
+A title anywhere in the vault is a wider answer than a same-folder file name. If
+the check read every page, a number added to a restricted writer's name would tell
+it that a withheld page holds that title. The check therefore counts only the pages
+that the writer's own link resolution may see (`writer_link_visibility`), through
+the same candidate selection. The accepted cost: in a mixed vault, a restricted
+writer's page can take the stem of a withheld, slug-named page's title, so the
+owner's bare title link to that page moves. The owner's check is unchanged.
 
 ## Risks / Trade-offs
 
