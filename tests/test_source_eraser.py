@@ -500,7 +500,7 @@ def test_service_erases_a_captured_source_with_passages_until_every_owner_acknow
     from fastmcp import Client
     from test_vault_store_embeddings import install_encoder
 
-    from exomem import readiness, server
+    from exomem import freshness, readiness, server
 
     monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
     monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
@@ -553,6 +553,10 @@ def test_service_erases_a_captured_source_with_passages_until_every_owner_acknow
             last = {}
 
             async def settled():
+                # The service's worker start drops a recall projection that no watcher maintains, at a time the
+                # test does not control. The graph drain's per-path repair needs it, so the warm-up stands in.
+                if not freshness.recall_is_live(vault, "vault"):
+                    published(vault)
                 last.update(await call("manage_memory", {"operation": "sources.erase", "arguments": request}))
                 return dict(last) if last.get("settled") else None
 
