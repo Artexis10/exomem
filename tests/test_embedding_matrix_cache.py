@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from exomem import call_spans, embeddings, sidecar_store
+from exomem.vault_store.vectors import Withheld
 
 
 @pytest.fixture(autouse=True)
@@ -233,6 +234,33 @@ def test_search_ranks_only_the_allowed_parent_set(tmp_path):
     hits = idx.search(_pad([1, 0]), k=1, allowed_paths={"allowed.md"})
 
     assert [hit[0] for hit in hits] == ["allowed.md"]
+
+
+def test_scoring_a_few_paths_matches_the_masked_whole_matrix_search_and_skips_a_withheld_path(tmp_path, monkeypatch):
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    idx.upsert_file("a.md", ["a1", "a2"], _mat([1, 0], [0.6, 0.8]), 1.0)
+    idx.upsert_file("b.md", ["b1"], _mat([0.9, 0.1]), 1.0)
+    idx.upsert_file("c.md", ["c1", "c2", "c3"], _mat([0, 1], [0.3, 0.3], [-1, 0]), 1.0)
+    idx.upsert_file("d.md", ["d1"], _mat([1, 0]), 1.0)
+    idx.all_vectors()
+    query = _pad([0.8, 0.6])
+    asked = {"a.md", "b.md", "c.md", "no-rows.md"}
+
+    def masked_search() -> dict[str, float]:
+        best: dict[str, float] = {}
+        for path, _chunk, _text, score in idx.select_chunks(query, 100, allowed_paths=asked, defer_cold_load=True):
+            best[path] = max(score, best.get(path, score))
+        return best
+
+    scored = idx.best_scores_for_paths(query, asked)
+
+    assert scored == pytest.approx(masked_search())
+    assert set(scored) == {"a.md", "b.md", "c.md"}
+
+    monkeypatch.setattr(idx, "_withheld", lambda: Withheld(paths=frozenset({"b.md"})))
+
+    assert "b.md" not in idx.best_scores_for_paths(query, asked)
+    assert idx.best_scores_for_paths(query, asked) == pytest.approx(masked_search())
 
 
 def test_delete_to_empty_keeps_zero_row_shape(tmp_path):
