@@ -80,13 +80,13 @@ Two facts make it tractable anyway:
   and `fit_filename`: the characters `# [ ] ^ |` that break a wikilink become
   spaces, leading dots are dropped, and the name is cut under the byte cap. The
   title is stored as given. When the name differs from the title, the write
-  carries one `FILENAME_ADJUSTED` warning that names the corrections and whether
+  carries one `FILENAME_ADJUSTED` warning that names the final file name and whether
   the name was cut.
 - **`exomem doctor` shows the filename style** and where it came from
   (environment, `project-keys.yaml` or the default).
 - **A public page read and a resolve-entity candidate lead with the title.** The
   reply carries the title and the handle (`id` and `ref`) that every tool accepts;
-  the path moves under `diagnostics`.
+  the path stays at the top level, where clients read it.
 - **Entity creation uses the vault naming path.** An entity filename is derived
   by `resolve_filename_slug`, as a compiled note's is, so it keeps the name as
   written: diacritics, case and punctuation. It no longer passes through a
@@ -96,11 +96,11 @@ Two facts make it tractable anyway:
   its entities that way.
 - Existing files are **never renamed** by this change. The style governs
   derivation of new names only, so no link that resolves today stops resolving.
-- Cap derived names on a word boundary at a configurable length, defaulting to
-  the current 100 so behaviour is unchanged unless asked for. #598 suggests 60;
-  that is offered, not imposed, because truncation is exactly what produces the
-  non-re-derivable slug the warning above describes — shortening the cap makes
-  that warning fire more often, so it is a tradeoff rather than free.
+- Keep the derived-name cap at 100 characters, cut on a word boundary, and keep
+  the whole file name within 200 bytes. #598 suggests 60; that is not adopted,
+  because truncation is exactly what produces the non-re-derivable slug the
+  warning above describes — shortening the cap makes that warning fire more
+  often, so it is a tradeoff rather than free. Neither cap is a vault setting.
 - Collision handling is style-independent: a derived name that already exists
   gets the existing disambiguation, and two titles differing only by case collide
   on case-insensitive filesystems and must be detected before the write, not

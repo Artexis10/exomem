@@ -59,6 +59,7 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
+    filename_adjusted_warning,
     kb_root,
     parse_frontmatter,
     read_guarded_text,
@@ -653,9 +654,8 @@ def add(
         project_plan = replace(project_plan, writes=(), introductions=())
 
     supersede_targets = _supersede_targets(vault_root, folder_path, supersede)
-    stem = f"{date_iso}-{filename_slug}"
-    if raw_protection:
-        stem = raw_guard.PREFIX + stem
+    name_prefix = (raw_guard.PREFIX if raw_protection else "") + f"{date_iso}-"
+    stem = name_prefix + filename_slug
     # No directory is created here: the batch creates the folder with the page
     # and removes it again if the commit is refused.
     if artifact is None:
@@ -833,7 +833,16 @@ def add(
             new_path=source_path.relative_to(vault_root).as_posix(), timestamp=stamp_iso,
         ))
 
-    warnings: list[str] = list(slug_warnings) + tag_warnings + identity_warnings
+    adjusted = filename_adjusted_warning(
+        title,
+        slug,
+        planned=stem,
+        final=source_path.stem,
+        vault_root=vault_root,
+        dated=True,
+        date_prefix=name_prefix,
+    )
+    warnings: list[str] = list(slug_warnings) + ([adjusted] if adjusted else []) + tag_warnings + identity_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
     # "registered 'field-notebook'" reports what the write did, so routing it
     # through the suppression channel would let a dismissal hide a fact.

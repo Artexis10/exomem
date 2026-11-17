@@ -18,8 +18,8 @@ from exomem import call_ledger, find, freshness, writer_lease
 from exomem import server as server_module
 from exomem.vault import walk_vault_md
 
-ENTITY_NAME = "Jäne Exämple"
-ENTITY_PATH_FORM = "Knowledge Base/Entities/People/Jäne Exämple"
+ENTITY_NAME = "Brûlerie Ötzberg"
+ENTITY_PATH_FORM = "Knowledge Base/Entities/Organizations/Brûlerie Ötzberg"
 
 
 @pytest.fixture
@@ -55,16 +55,16 @@ def _write_page(vault: Path, rel: str, title: str, page_type: str, body: str) ->
     path.write_text(f'---\ntitle: "{title}"\ntype: {page_type}\n---\n\n# {title}\n\n{body}\n', encoding="utf-8")
 
 
-def _create_entity(client: Client, name: str = ENTITY_NAME) -> Any:
+def _create_entity(client: Client, name: str = ENTITY_NAME, **extra: Any) -> Any:
     operation = {
-        "kind": "create-entity", "entity_type": "person", "name": name,
-        "summary": "An invented person for naming checks.",
+        "kind": "create-entity", "entity_type": "organization", "name": name,
+        "summary": "An invented café for naming checks.", **extra,
     }
     return _call(client, "change_connections", {"operation": operation})
 
 
 def test_search_hits_show_links_in_their_excerpt_by_title(build, vault: Path) -> None:
-    _write_page(vault, f"{ENTITY_PATH_FORM}.md", ENTITY_NAME, "entity", "An invented person for naming checks.")
+    _write_page(vault, f"{ENTITY_PATH_FORM}.md", ENTITY_NAME, "entity", "An invented café for naming checks.")
     _write_page(
         vault, "Knowledge Base/Notes/Insights/retry-policy.md", "Retry policy", "insight",
         f"- [operating constraint] Keep retries bounded for [[{ENTITY_PATH_FORM}]] #reliability",
@@ -133,8 +133,8 @@ def test_read_page_leads_with_the_title_and_its_id_opens_the_page(build) -> None
             read = await _call(client, "read_page", {"page": ENTITY_NAME})
 
             assert next(iter(read)) == "title" and read["title"] == ENTITY_NAME
-            assert "path" not in read
-            assert read["diagnostics"]["path"].endswith("Jäne Exämple.md")
+            # Clients read the path from a page read, so the title leads and the path stays.
+            assert read["path"].endswith("Brûlerie Ötzberg.md")
             # The handle in the reply opens the same page in a follow-up call.
             for handle in (read["id"], read["ref"]):
                 again = await _call(client, "read_page", {"page": handle})
@@ -154,10 +154,52 @@ def test_resolve_entity_candidates_lead_with_the_title_and_their_handle_works(bu
 
             candidate = answer["candidates"][0]
             assert next(iter(candidate)) == "title" and candidate["title"] == ENTITY_NAME
-            assert "path" not in candidate
-            assert candidate["diagnostics"]["path"].endswith("Jäne Exämple.md")
+            assert candidate["path"].endswith("Brûlerie Ötzberg.md")
             for handle in (candidate["id"], candidate["ref"]):
                 opened = await _call(client, "read_page", {"page": handle})
                 assert opened["title"] == ENTITY_NAME
+
+    asyncio.run(run())
+
+
+def test_alias_claim_refusal_names_the_holder_by_title_and_id(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            await _create_entity(client, aliases=["Vexa"])
+
+            refused = (await _create_entity(client, "Other Roastery", aliases=["Vexa"]))["error"]
+
+            assert refused["code"] == "ENTITY_EXISTS"
+            assert "Knowledge Base/" not in refused["message"]
+            # The holder is named by its title and an id that opens it, not only by the alias.
+            assert f"'title': '{ENTITY_NAME}'" in refused["message"]
+            handle = refused["message"].split("'id': '", 1)[1].split("'", 1)[0]
+            opened = await _call(client, "read_page", {"page": handle})
+            assert opened["title"] == ENTITY_NAME
+
+    asyncio.run(run())
+
+
+def test_title_match_refusal_names_a_page_without_an_exomem_id_by_title_and_id(
+    build, vault: Path
+) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            # A page from before ids and title names: no `exomem_id`, and a different file name.
+            old_page = vault / "Knowledge Base/Entities/Organizations/brulerie-otzberg.md"
+            old_page.parent.mkdir(parents=True, exist_ok=True)
+            old_page.write_text(
+                f'---\ntitle: "{ENTITY_NAME}"\ntype: entity\nentity_type: organization\n'
+                f"status: active\n---\n\n# {ENTITY_NAME}\n\nWritten by hand.\n",
+                encoding="utf-8",
+            )
+
+            refused = (await _create_entity(client))["error"]
+
+            assert refused["code"] == "ENTITY_EXISTS"
+            assert "Knowledge Base/" not in refused["message"]
+            handle = refused["message"].split("'id': '", 1)[1].split("'", 1)[0]
+            opened = await _call(client, "read_page", {"page": handle})
+            assert opened["title"] == ENTITY_NAME
 
     asyncio.run(run())

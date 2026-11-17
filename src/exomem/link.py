@@ -50,6 +50,7 @@ from .vault import (
     WikilinkResolver,
     canonical_vault_rel,
     escape_wikilinks_for_log,
+    filename_adjusted_warning,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
@@ -1025,8 +1026,12 @@ def link(
         )
     except semantic_writes.SemanticWriteError as error:
         raise LinkError(error.code, list(error.missing), error.reason) from error
+    adjusted = filename_adjusted_warning(
+        name, slug, planned=filename_slug, final=entity_path.stem, vault_root=vault_root
+    )
     warnings = (
         list(slug_warnings)
+        + ([adjusted] if adjusted else [])
         + list(connection_warnings)
         + list(summary_warnings)
         + list(why_warnings)

@@ -749,6 +749,54 @@ def slugify_with_truncation_check(
     return slug, None
 
 
+def _derived_style(vault_root: Path | None, dated: bool) -> str:
+    """The style that derives a new page's name: the vault's, except that a dated Source keeps `slug` by default."""
+    style, source = filename_style_source(vault_root)
+    return "slug" if dated and source == FILENAME_STYLE_FROM_DEFAULT else style
+
+
+def filename_adjusted_warning(
+    title: str,
+    slug: str | None,
+    *,
+    planned: str,
+    final: str,
+    vault_root: Path | None = None,
+    dated: bool = False,
+    date_prefix: str = "",
+) -> str | None:
+    """The one warning for a title-derived file name that is not its title, or None.
+
+    It is built where the name is final, after `unique_path` has added a number, so it names
+    the stem that the page is linked by. `planned` is the stem that `resolve_filename_slug`
+    gave, date prefix included, and `final` is the stem that was written. A caller-chosen
+    `slug` and a slug-style vault are not title names and carry their own slug warnings.
+    """
+    if slug is not None or _derived_style(vault_root, dated) != "title":
+        return None
+    given = unicodedata.normalize("NFC", title).strip()
+    if final == date_prefix + given:
+        return None
+    name = corrected_title_name(title).name
+    reasons = []
+    if not name:
+        reasons.append("no part of the title can name a file, so the name comes from its slug")
+    elif not given.startswith(name):
+        reasons.append("characters that a file name or a link cannot hold were changed")
+    numbered = final != planned
+    # `unique_path` shortens the stem when its number would pass the byte cap.
+    shortened_for_number = numbered and not final.startswith(f"{planned}-")
+    cut = name != given and given.startswith(name) or planned != date_prefix + name
+    if (name and cut) or shortened_for_number:
+        reasons.append("the name was shortened to fit the length limit")
+    if numbered:
+        reasons.append("a number was added because a page already has that name")
+    return (
+        f"FILENAME_ADJUSTED: the file name is {final!r} ({'; '.join(reasons)}); "
+        "the title is stored as given. Link to this note by that name."
+    )
+
+
 def resolve_filename_slug(
     title: str,
     slug: str | None = None,
@@ -783,36 +831,16 @@ def resolve_filename_slug(
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
-    style, source = filename_style_source(vault_root)
-    if dated and source == FILENAME_STYLE_FROM_DEFAULT:
-        style = "slug"
-    if style == "title":
+    if _derived_style(vault_root, dated) == "title":
         corrected = corrected_title_name(title)
         fitted = fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
         if fitted is not None:
-            stem, cut_to_fit = fitted
-            readable = stem.removeprefix(date_prefix)
             # No transliteration warning here: nothing was transliterated. That
             # warning exists because the slug path is lossy for non-ASCII text,
-            # and this path is what a vault sets to stop paying that cost.
-            # The sanitiser's own word-boundary cap is the other way a name is cut.
-            cut = cut_to_fit or sanitize_title_filename(title) != sanitize_title_filename(
-                title, max_length=0
-            )
-            changes = []
-            if CORRECTION_LINK_CHARACTERS in corrected.corrections:
-                changes.append("link characters replaced by spaces")
-            if CORRECTION_LEADING_DOTS in corrected.corrections:
-                changes.append("leading dots dropped")
-            if cut:
-                changes.append("name shortened")
-            warnings = []
-            if changes:
-                warnings.append(
-                    f"FILENAME_ADJUSTED: the file name is {stem!r} ({'; '.join(changes)}); "
-                    "the title is stored as given. Link to this note by that name."
-                )
-            return readable, warnings
+            # and this path is what a vault sets to stop paying that cost. A name
+            # that differs from its title is reported by `filename_adjusted_warning`,
+            # once the final name is known.
+            return fitted[0].removeprefix(date_prefix), []
         # A title with no usable name (all reserved characters, or no bytes left
         # under the cap) has no readable form, so fall through to the slug path
         # rather than failing the write. One note named the old way beats a
@@ -910,6 +938,8 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
 
     Listing the directory costs one syscall on a write path, against a data-loss
     class that only appears after a sync to another machine.
+
+    A number added to a long name shortens the name, so the file keeps the byte cap.
     """
     if vault_root is not None:
         from .governance import connector_boundary
@@ -931,10 +961,21 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
         candidate = directory / f"{stem}{suffix}"
         i = 2
         while candidate.exists():
-            candidate = directory / f"{stem}-{i}{suffix}"
+            candidate = directory / _numbered_name(stem, i, suffix)
             i += 1
         return candidate
     return directory / _first_free_name(stem, suffix, taken)
+
+
+def _numbered_name(stem: str, number: int, suffix: str) -> str:
+    """``stem-<number>`` and the extension, with the stem cut so that the whole name keeps the byte cap.
+
+    This is the one place a collision number is added. `fit_filename` does the cut: its
+    `extension` counts the number and the real extension, at a code point.
+    """
+    tail = f"-{number}{suffix}"
+    fitted = fit_filename(stem, extension=tail)
+    return f"{fitted[0] if fitted else stem}{tail}"
 
 
 def _first_free_name(stem: str, suffix: str, taken: set[str]) -> str:
@@ -942,7 +983,7 @@ def _first_free_name(stem: str, suffix: str, taken: set[str]) -> str:
     candidate = f"{stem}{suffix}"
     i = 2
     while vault_name_key(candidate) in taken:
-        candidate = f"{stem}-{i}{suffix}"
+        candidate = _numbered_name(stem, i, suffix)
         i += 1
     return candidate
 

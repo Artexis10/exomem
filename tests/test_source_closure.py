@@ -181,7 +181,7 @@ def test_cite_before_capture_refuses_without_partial_state(vault: Path) -> None:
         "unresolved_source_count": 1,
         "unresolved_sources_truncated": False,
     }
-    assert not (vault / "Knowledge Base/Notes/Insights/cite-before-capture.md").exists()
+    assert not (vault / "Knowledge Base/Notes/Insights/Cite before capture.md").exists()
 
 
 def test_mixed_create_refuses_without_touching_resolved_source(vault: Path) -> None:
@@ -202,7 +202,7 @@ def test_mixed_create_refuses_without_touching_resolved_source(vault: Path) -> N
 
     assert caught.value.code == "UNRESOLVED_SOURCE_CITATION"
     assert source_path.read_bytes() == before
-    assert not (vault / "Knowledge Base/Notes/Insights/mixed-provenance.md").exists()
+    assert not (vault / "Knowledge Base/Notes/Insights/Mixed provenance.md").exists()
 
 
 def test_capture_then_cite_updates_both_sides(vault: Path) -> None:
@@ -415,8 +415,8 @@ def test_concurrent_source_change_refuses_without_half_publishing(
 
     assert caught.value.code == "STALE_SEMANTIC_WRITE"
     assert "Concurrent capture metadata" in source_path.read_text(encoding="utf-8")
-    assert "concurrent-source" not in source_path.read_text(encoding="utf-8")
-    assert not (vault / "Knowledge Base/Notes/Insights/concurrent-source.md").exists()
+    assert "Concurrent source" not in source_path.read_text(encoding="utf-8")
+    assert not (vault / "Knowledge Base/Notes/Insights/Concurrent source.md").exists()
 
 
 def test_capture_preserves_external_origin_then_governed_citation_closes(
@@ -593,7 +593,7 @@ def test_end_to_end_provenance_fixture_never_promotes_a_partial_derivative(
             sources=[missing_original],
         )
     assert before_capture.value.code == "UNRESOLVED_SOURCE_CITATION"
-    assert not (vault / "Knowledge Base/Notes/Insights/cite-the-absent-original.md").exists()
+    assert not (vault / "Knowledge Base/Notes/Insights/Cite the absent original.md").exists()
 
     with pytest.raises(note_module.NoteError) as partial_attempt:
         _remember(

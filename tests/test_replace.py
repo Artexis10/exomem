@@ -553,13 +553,13 @@ def test_concurrent_replace_has_exactly_one_winner(
         / "Knowledge Base"
         / "Notes"
         / "Insights"
-        / f"concurrent-successor-{loser_label.lower()}.md"
+        / f"Concurrent Successor {loser_label}.md"
     )
     assert not loser_path.exists()
     log_text = _read(vault / "Knowledge Base" / "log.md")
     winner_log_target = winner.new_path.removeprefix("Knowledge Base/").removesuffix(".md")
     assert winner_log_target in log_text
-    assert f"concurrent-successor-{loser_label.lower()}" not in log_text
+    assert f"Concurrent Successor {loser_label}" not in log_text
 
 
 def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
@@ -596,7 +596,7 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
 
     assert _markdown_snapshot(vault) == before
     resolver = replace_module.find_module._get_query_resolver(vault)
-    assert "Knowledge Base/Notes/Insights/atomic-successor" not in resolver.full_paths
+    assert "Knowledge Base/Notes/Insights/Atomic Successor" not in resolver.full_paths
 
 
 @pytest.mark.parametrize("registry_existed", [False, True])

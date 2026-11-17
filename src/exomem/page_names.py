@@ -395,45 +395,52 @@ def _name_hit(
     return named
 
 
-def _name_candidate(root: Path, candidate: Any, *, keep_path: bool) -> Any:
-    """A candidate page with its title first and its short id in place of its path.
+def name_candidate(root: Path, candidate: Any) -> Any:
+    """A candidate page with its title first, then its short id, beside its `ref` and its path.
 
-    A candidate that carries a `ref` keeps it: a ref and an id are both handles that every tool
-    takes. The path moves under `diagnostics`; `keep_path` (`detail="full"`) keeps it in place and
-    adds the id. A candidate whose bytes cannot be read has no id to offer, so it keeps its path.
+    The title is the candidate's own or, for an alias or title match that has none, the page's.
+    Clients read `path` from a candidate, so it stays. A candidate whose bytes cannot be read has no
+    id to offer and comes back as it was.
     """
     if not isinstance(candidate, Mapping) or not isinstance(candidate.get("path"), str):
         return candidate
     found = read_identity(root, candidate["path"])
     if found is None:
         return candidate
-    if keep_path:
-        return {**candidate, "id": found.id}
-    rest = {key: value for key, value in candidate.items() if key not in ("path", "title", "diagnostics")}
-    diagnostics = candidate.get("diagnostics")
-    return {
-        "title": candidate.get("title") or found.title,
-        **rest,
-        "id": found.id,
-        "diagnostics": {**(diagnostics if isinstance(diagnostics, Mapping) else {}), "path": candidate["path"]},
-    }
+    rest = {key: value for key, value in candidate.items() if key not in ("title", "id")}
+    return {"title": candidate.get("title") or found.title, "id": found.id, **rest}
+
+
+def candidates_by_handle(root: Path, candidates: list[dict[str, str]]) -> list[Any]:
+    """Candidates for a refusal message: each by its title and id (and `ref`), with no path.
+
+    An agent reads a message as text, and the id is the handle that every tool takes, so the path
+    stays out. A candidate whose page cannot be read has no handle to offer and keeps its path.
+    """
+    out: list[Any] = []
+    for item in candidates:
+        named = name_candidate(root, item)
+        out.append(named if named is item else {key: value for key, value in named.items() if key != "path"})
+    return out
+
+
+def _is_page_read(reply: Mapping[str, Any]) -> bool:
+    """Whether `reply` reads a Markdown page: it carries the page's content hash and frontmatter."""
+    return isinstance(reply.get("content_hash"), str) and isinstance(reply.get("frontmatter"), Mapping)
 
 
 def _name_read(reply: dict[str, Any]) -> dict[str, Any]:
-    """A page read with its title in place of its path, the path kept under `diagnostics`.
+    """A page read with its `title` first, then its `id` and `ref`; `path` stays where clients read it.
 
-    The reply's `id` (and `ref`, when the page has one) is the handle for the next call. A reply
-    with no `id` is not a Markdown page read: it has no handle to offer, so it keeps its path.
+    A reply with no `id` is not a Markdown page read: it has no handle to offer and comes back as it was.
     """
     path, frontmatter = reply.get("path"), reply.get("frontmatter")
     if not (isinstance(path, str) and isinstance(reply.get("id"), str) and isinstance(frontmatter, Mapping)):
         return reply
     body = reply.get("body")
     title = vault.resolve_display_title(dict(frontmatter), body if isinstance(body, str) else "", path)
-    diagnostics = reply.get("diagnostics")
-    named = _renamed(reply, {"path": {"title": title}})
-    named["diagnostics"] = {**(diagnostics if isinstance(diagnostics, Mapping) else {}), "path": path}
-    return named
+    lead = {"title": title, **{key: reply[key] for key in ("id", "ref") if key in reply}}
+    return {**lead, **{key: value for key, value in reply.items() if key not in lead}}
 
 
 def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
@@ -517,12 +524,12 @@ def name_released_reply(
     A write reply swaps `path` for `title` and `id`; `response_detail="full"` still carries the
     path under `diagnostics.operational`. A search reply swaps each page hit's `path` for its `id`
     (the hit keeps its `title` and `ref`) and, on the public tool shape, shows the links in its
-    excerpt by title where a resolver is resident. A resolve-entity reply names each candidate the
-    same way, and a page read puts its `title` first; both keep the path under `diagnostics`.
-    `keep_paths`, set for `detail="full"`, adds the `id` and keeps the path and the stored links,
-    for a harness that reads vault files. A page that cannot be read keeps its path. This runs after the egress
-    release, so it names only what that filter let through. A reply that is none of these comes
-    back unchanged.
+    excerpt by title where a resolver is resident. A resolve-entity reply puts each candidate's
+    `title` and `id` first and a page read puts its `title` first; both keep the `path`, which clients
+    read. `keep_paths`, set for `detail="full"`, adds the `id` to a hit and keeps the path and the
+    stored links, for a harness that reads vault files. A page that cannot be read keeps its path.
+    This runs after the egress release, so it names only what that filter let through. A reply that
+    is none of these comes back unchanged.
     """
     root = Path(root)
     hits = reply.get("hits")
@@ -538,7 +545,7 @@ def name_released_reply(
         return {**reply, "hits": named}
     candidates = reply.get("candidates")
     if isinstance(candidates, list):
-        return {**reply, "candidates": [_name_candidate(root, item, keep_path=keep_paths) for item in candidates]}
-    if "content_hash" in reply and "frontmatter" in reply:
+        return {**reply, "candidates": [name_candidate(root, item) for item in candidates]}
+    if _is_page_read(reply):
         return reply if keep_paths else _name_read(reply)
     return _name_write(root, reply)

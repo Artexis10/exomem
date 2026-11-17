@@ -82,6 +82,7 @@ from .vault import (
     content_hash,
     ensure_canonical_h1,
     escape_wikilinks_for_log,
+    filename_adjusted_warning,
     find_body_wikilinks,
     folder_split_warnings,
     kb_root,
@@ -2011,13 +2012,11 @@ def note(
     now = today or temporal.now()
     render_date = token_value.render_date if token_value is not None else temporal.render_date(now)
     stamp_iso = token_value.stamp() if token_value is not None else temporal.stamp(now)
+    # A dated type's name starts with the date the path will carry, and the byte cap counts it.
+    name_prefix = _stem_prefix(note_type, started=started, date_iso=_path_date or render_date)
     try:
-        # A dated type's name starts with the date the path will carry, and the byte cap counts it.
         filename_slug, slug_warnings = resolve_filename_slug(
-            title,
-            slug,
-            vault_root=vault_root,
-            date_prefix=_stem_prefix(note_type, started=started, date_iso=_path_date or render_date),
+            title, slug, vault_root=vault_root, date_prefix=name_prefix
         )
     except InvalidSlugError as error:
         raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
@@ -2236,8 +2235,17 @@ def note(
     preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
+    adjusted = filename_adjusted_warning(
+        title,
+        slug,
+        planned=name_prefix + filename_slug,
+        final=note_path.stem,
+        vault_root=vault_root,
+        date_prefix=name_prefix,
+    )
     warnings = (
-        list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
+        list(slug_warnings) + ([adjusted] if adjusted else []) + list(source_warnings)
+        + list(body_warnings) + tag_warnings + topic_warnings
         + home_warnings
         + folder_split_warnings(root, note_path.parent)
     )

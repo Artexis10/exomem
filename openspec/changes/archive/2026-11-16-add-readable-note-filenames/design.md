@@ -67,11 +67,19 @@ a `FILENAME_ADJUSTED` warning shows the whole stem that the page is linked by.
 
 ### A changed name is reported once
 
-The title is stored as given. When the filename differs from it, the write
-carries one `FILENAME_ADJUSTED` warning. It names the corrections
-(`CorrectedName.corrections`) and whether the name was cut, and it shows the name
-and the title, not a path. The rule functions are not changed here; the warning
-is the only text this change adds.
+The title is stored as given. When the final file name differs from it (in NFC),
+the write carries one `FILENAME_ADJUSTED` warning. The writer builds it where the
+name is final, after `unique_path` has added a collision number, so the warning
+names the stem that a link resolves by. It compares that stem with the title and
+says whether characters were changed, the name was cut, or a number was added; it
+shows the name, not a path. The rule functions are not changed here; the warning
+is the only text this change adds. Building it from the final name, not from the
+rule's own correction list, is what reports a character that the file-name
+sanitiser removes (`|`, `/`) and a name that a collision number changed.
+
+`unique_path` counts the collision number in the byte cap: it shortens the title
+part, at a character, so that the name, the number and the extension stay at 200
+bytes.
 
 ### Entities use the vault naming path
 
@@ -93,7 +101,9 @@ produces a vault that is fine until it is opened elsewhere — a name with `:` o
 explicitly a portable artifact synced between machines.
 
 So the removed set is the union: `< > : " / \ | ? *`, control characters,
-trailing dots and spaces, and the Windows reserved device names. macOS
+trailing dots and spaces, and the Windows reserved device names. A device name
+leaves no usable name, so it falls back to the slug style; the slug (`nul`) is
+still a reserved name on Windows, an open gap that the naming rule owns. macOS
 additionally normalises to NFD on HFS+ and APFS behaves differently again, so
 names are NFC-normalised before writing, which is what Obsidian and git both
 expect.
@@ -116,13 +126,14 @@ default macOS. The check therefore cannot be `path.exists()`; it has to be a
 case-insensitive comparison against the directory, on every platform, so a vault
 does not behave differently depending on where the write happened.
 
-### Length cap stays at 100 characters by default
+### Length caps are fixed
 
 #598 suggests truncating near 60 and says it "costs nothing". It does not: the
 warning quoted above exists because a truncated name is not re-derivable from the
 title, so it is the name the caller has to link to. Lowering the cap makes that
-warning fire on more notes. The cap becomes configurable, defaults to today's
-100, and 60 is available to anyone who prefers shorter names to fewer warnings.
+warning fire on more notes. The derived-name cap stays at 100 characters and the
+file name stays within 200 bytes. Neither is a vault setting: the shipped code has
+no key for it, and a key can be added if a vault asks for one.
 
 ## Risks / Trade-offs
 
@@ -133,9 +144,19 @@ warning fire on more notes. The cap becomes configurable, defaults to today's
   ubiquitous in Obsidian vaults, and the issue's own comparison shows the other
   indexer writing them into this same vault, so the vault already contains them.
 - **`project-keys.yaml` gains a key.** That file is per-vault configuration read
-  by `project_keys.py:93` and already the right home for this. The scaffold copy
-  under `src/exomem/_scaffold/` must stay generic — `test_scaffold_no_leak.py`
-  enforces it — so the key ships documented and unset.
+  by `project_keys.py:93` and already the right home for the filename style. The
+  scaffold copy under `src/exomem/_scaffold/` must stay generic —
+  `test_scaffold_no_leak.py` enforces it — so the key ships documented and unset.
+
+## Adjustment After Review
+
+The first design moved the storage path of a page read and of a resolve-entity
+candidate under `diagnostics`. The installed-wheel product end-to-end run and the
+stdio import-guidance test both read `path` from a `read_page` reply, so the move
+broke real clients. The reply now leads with the title and keeps `id`, `ref` and
+`path` at the top level, as before. Title-first presentation to a person stays the
+job of the served citation guidance. Search hits and write replies are unchanged
+by this adjustment.
 
 ## Open Questions
 

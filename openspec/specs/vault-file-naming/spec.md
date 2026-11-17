@@ -25,9 +25,9 @@ caller pins a name it intends to link to.
 
 #### Scenario: A vault with no configuration names a new note by its title
 
-- **WHEN** a note titled `Zöe Exämple` is written to a vault that sets no filename style anywhere
-- **THEN** the file is named `Zöe Exämple.md`
-- **AND** the stored title is `Zöe Exämple`
+- **WHEN** a note titled `Brûlerie Ötzberg` is written to a vault that sets no filename style anywhere
+- **THEN** the file is named `Brûlerie Ötzberg.md`
+- **AND** the stored title is `Brûlerie Ötzberg`
 
 #### Scenario: A vault that chooses slug keeps today's names
 
@@ -80,11 +80,13 @@ alike, by applying the union of their restrictions everywhere rather than the
 host's own, and SHALL be safe as a wikilink target. Exomem SHALL remove the
 characters `< > : " / \ | ? *`, all control characters, and any trailing dot or
 space; SHALL replace each of `# [ ] ^ |` with a space and drop leading dots, so
-that a link to the name resolves; SHALL rename a title that resolves to a Windows
-reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`);
-SHALL cut the name under the filename byte cap; and SHALL normalise the result to
-NFC. A title that sanitises to an empty string SHALL fall back to the slug style
-for that note rather than producing an unnamed file.
+that a link to the name resolves; SHALL treat a title that resolves to a Windows
+reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) as
+having no usable name; SHALL cut the name under the filename byte cap; and SHALL
+normalise the result to NFC. A title that sanitises to an empty string, or that is
+a reserved device name, SHALL fall back to the slug style for that note rather than
+producing an unnamed file. The slug of a device name is the same word in lowercase
+(`nul.md`), which Windows still reserves: this capability does not rename it.
 
 #### Scenario: Reserved characters are removed, not transliterated
 
@@ -93,11 +95,11 @@ for that note rather than producing an unnamed file.
 - **THEN** the filename contains no `:`, `/`, `"` or `?` character
 - **AND** the words, spaces and em dash that surrounded them are preserved
 
-#### Scenario: A reserved device name does not become a file
+#### Scenario: A reserved device name falls back to the slug style
 
 - **GIVEN** a vault configured with filename style `title`
 - **WHEN** a note titled `NUL` is written
-- **THEN** the filename is not `NUL.md`
+- **THEN** the filename is the slug `nul.md`, not `NUL.md`
 - **AND** the note is created successfully
 
 #### Scenario: A title that sanitises away still produces a file
@@ -114,10 +116,13 @@ for that note rather than producing an unnamed file.
 
 ### Requirement: A Changed Filename Is Reported
 
-Exomem SHALL store the title exactly as given. When the derived filename differs
-from the title after the corrections above, the write SHALL carry one warning
-that names each correction and says whether the name was cut. The warning SHALL
-name the file by its name and the page by its title, never by a storage path.
+Exomem SHALL store the title exactly as given. When the file name that a write
+finally uses differs from the title (in NFC), the write SHALL carry one
+`FILENAME_ADJUSTED` warning. The warning SHALL be built where the final name is
+known, after any collision number is added, and SHALL name that name: it is the
+stem that a link resolves by. It SHALL say whether characters were changed, the
+name was cut, or a number was added. It SHALL name the file by its name, never by
+a storage path.
 
 #### Scenario: A link character is replaced and the write says so
 
@@ -125,14 +130,35 @@ name the file by its name and the page by its title, never by a storage path.
 - **WHEN** a note titled `Plan #3 [draft]` is written
 - **THEN** the file is named `Plan 3 draft.md`
 - **AND** the stored title is `Plan #3 [draft]`
-- **AND** exactly one `FILENAME_ADJUSTED` warning names the replaced link characters
+- **AND** exactly one `FILENAME_ADJUSTED` warning names `Plan 3 draft` and says that characters were changed
 - **AND** a wikilink to `Plan 3 draft` resolves to the page
+
+#### Scenario: A character that the file-name rules remove is reported
+
+- **WHEN** a note titled `Plan | B` is written
+- **THEN** the file is named `Plan B.md`
+- **AND** one `FILENAME_ADJUSTED` warning names `Plan B`
+
+#### Scenario: A second page with the same name is reported by its own name
+
+- **GIVEN** a note titled `Plan #3 [draft]` is stored as `Plan 3 draft.md`
+- **WHEN** a second note with that title is written
+- **THEN** the file is named `Plan 3 draft-2.md`
+- **AND** its `FILENAME_ADJUSTED` warning names `Plan 3 draft-2` and says that a number was added
+- **AND** a wikilink to `Plan 3 draft-2` resolves to the second page
 
 #### Scenario: A very long title is cut under the byte cap
 
 - **WHEN** a note whose title is longer than the byte cap allows is written
 - **THEN** the filename is at most 200 bytes
 - **AND** the warning says the name was shortened
+
+#### Scenario: A collision number counts toward the byte cap
+
+- **GIVEN** a note whose title makes a file name of 197 bytes exists
+- **WHEN** a second note with the same title is written
+- **THEN** the title part is cut at a character so that the name, the number and `.md` are at most 200 bytes
+- **AND** the warning says that the name was shortened and a number was added
 
 #### Scenario: A date prefix counts toward the byte cap
 
@@ -142,7 +168,7 @@ name the file by its name and the page by its title, never by a storage path.
 
 #### Scenario: A clean name carries no warning
 
-- **WHEN** a note titled `Zöe Exämple` is written
+- **WHEN** a note titled `Brûlerie Ötzberg` is written
 - **THEN** the write carries no `FILENAME_ADJUSTED` warning
 
 ### Requirement: Doctor Reports The Filename Style
@@ -173,26 +199,26 @@ never silently overwrites an unrelated note.
 - **THEN** the existing file's content is unchanged
 - **AND** the new note is written under a disambiguated name
 
-### Requirement: Configurable Derived-Name Length
+### Requirement: Derived-Name Length Is Capped
 
-The cap on a derived filename SHALL be configurable per vault, defaulting to the
-current 100 characters so no existing vault's names change. Truncation SHALL
-continue to fall on a word boundary and SHALL continue to emit the existing
-warning, because a truncated name cannot be re-derived from the title and is
-therefore the name a caller must link to. Under `title` style that warning is the
-`FILENAME_ADJUSTED` warning above.
+Two fixed caps SHALL bound a derived file name, and no vault setting SHALL change
+either. A name derived from a title SHALL be cut to 100 characters, on a word
+boundary. The whole file name, with its date prefix, collision number and
+extension, SHALL be at most 200 bytes; the title part is the only part that
+shrinks, and it is cut at a character. A cut name cannot be re-derived from the
+title, so it is the name a caller must link to. Under `title` style the
+`FILENAME_ADJUSTED` warning above reports it.
 
-#### Scenario: The default cap is unchanged
+#### Scenario: A long title is cut on a word boundary
 
-- **WHEN** a vault sets no length configuration
-- **THEN** derived names are capped at 100 characters as before
-
-#### Scenario: A shorter cap still warns that the name is not re-derivable
-
-- **GIVEN** a vault configured with a derived-name cap of 60
-- **WHEN** a note whose title would derive a longer name is written
-- **THEN** the name is truncated on a word boundary at or below 60 characters
+- **WHEN** a note whose title is longer than 100 characters is written
+- **THEN** the derived name is at most 100 characters and ends on a whole word
 - **AND** the response carries a warning naming the resulting name
+
+#### Scenario: No vault key moves the cap
+
+- **WHEN** a vault's `project-keys.yaml` carries any length setting
+- **THEN** derived names are still capped at 100 characters and 200 bytes
 
 ### Requirement: No Existing File Is Renamed
 
@@ -225,9 +251,9 @@ filename style, which is `title` unless the environment or the vault configures
 
 #### Scenario: A name keeps its diacritics and case on disk
 
-- **WHEN** an entity named `Zöe Exämple` is created in a vault that sets no style
-- **THEN** the file is named `Zöe Exämple.md`
-- **AND** the entity's title is `Zöe Exämple`
+- **WHEN** an entity named `Brûlerie Ötzberg` is created in a vault that sets no style
+- **THEN** the file is named `Brûlerie Ötzberg.md`
+- **AND** the entity's title is `Brûlerie Ötzberg`
 
 #### Scenario: Reserved characters are removed from an entity filename
 
@@ -245,8 +271,9 @@ filename style, which is `title` unless the environment or the vault configures
 Entity creation SHALL refuse a name when the destination folder already holds a
 leaf that equals the derived name after case folding and NFC normalisation. The
 refusal SHALL be `ENTITY_EXISTS`, SHALL name the page that holds the name, and
-SHALL leave that page unchanged. An agent on the public tool shape SHALL see that
-page named by its title, never by its storage path.
+SHALL leave that page unchanged. A refusal because another entity holds the title
+or an alias SHALL name that entity too. An agent on the public tool shape SHALL see
+each such page named by its title and `id`, never by its storage path.
 
 #### Scenario: Two titles that map to one file do not overwrite each other
 
@@ -255,22 +282,30 @@ page named by its title, never by its storage path.
 - **THEN** the call is refused with `ENTITY_EXISTS`
 - **AND** the existing page's bytes are unchanged
 
+#### Scenario: A refused alias names the page that holds it
+
+- **GIVEN** an entity answers to the alias `Vexa`
+- **WHEN** another entity is created with that alias through the public tool shape
+- **THEN** the call is refused with `ENTITY_EXISTS`
+- **AND** the refusal names the holder by its title and an `id` that opens it, with no storage path
+
 ### Requirement: A Public Page Read And An Entity Candidate Lead With The Title
 
 On the public tool shape, a page read and each resolve-entity candidate SHALL
 lead with the page title and carry the handles that every tool accepts (`id`, and
-`ref` where the page has one). The storage path SHALL move under `diagnostics`.
-A page whose bytes cannot be read, so that it has no handle, SHALL keep its path.
+`ref` where the page has one). The storage path SHALL stay at the top level, where
+clients read it. A page whose bytes cannot be read, so that it has no handle,
+SHALL be returned as it was.
 
 #### Scenario: A page read leads with the title and its id opens the page
 
 - **WHEN** an agent reads a page through `read_page`
 - **THEN** the reply starts with the page title and carries `id`
-- **AND** the path is under `diagnostics`, not at the top level
+- **AND** the path stays at the top level
 - **AND** passing that `id` or `ref` to `read_page` returns the same page
 
 #### Scenario: A resolve-entity candidate leads with the title
 
 - **WHEN** an agent resolves an entity name through `connect_memory`
 - **THEN** each candidate starts with the entity title and carries `id` and `ref`
-- **AND** the candidate's path is under its `diagnostics`
+- **AND** the candidate keeps its `path`

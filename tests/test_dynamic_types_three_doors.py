@@ -124,15 +124,10 @@ def _create(summary: str, **args: Any) -> dict[str, Any]:
     return {"operation": "create-entity", "summary": summary, "response_detail": "full", **args}
 
 
-def _candidate_path(door: str, candidate: dict[str, Any]) -> str:
-    # The MCP door leads with the title and keeps the path under `diagnostics`; CLI and REST keep it.
-    return candidate["diagnostics"]["path"] if door == "mcp" else candidate["path"]
-
-
-def _identity(door: str, candidate: dict[str, Any]) -> tuple[str, str, str, str]:
+def _identity(candidate: dict[str, Any]) -> tuple[str, str, str, str]:
     return (
         candidate["ref"],
-        _candidate_path(door, candidate),
+        candidate["path"],
         candidate["entity_type"],
         candidate["entity_family"],
     )
@@ -236,9 +231,7 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
             "connect_memory",
             {"operation": "resolve-entity", "name": name, "entity_type": entity_type},
         )
-        identities = {
-            door: _identity(door, answer["candidates"][0]) for door, answer in answers.items()
-        }
+        identities = {door: _identity(answer["candidates"][0]) for door, answer in answers.items()}
         assert all(answer["status"] == "match" for answer in answers.values()), answers
         assert len(set(identities.values())) == 1, identities
         assert identities["mcp"][2] == entity_type

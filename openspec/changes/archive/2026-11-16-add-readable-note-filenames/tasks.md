@@ -80,6 +80,11 @@
       production log take `title` and keep their date prefix (`date_prefix`).
 - [x] 7.2 Name a title-style page through `corrected_title_name` and `fit_filename`,
       so that no name breaks a wikilink or passes the byte cap, and warn once when
-      the name differs from the title (`FILENAME_ADJUSTED`).
+      the final name differs from the title (`FILENAME_ADJUSTED`), built where the
+      name is final so that it names a collision number and a removed `|` or `/`.
 - [x] 7.3 Lead a public page read and each resolve-entity candidate with the title,
-      keeping the handle (`id`, `ref`) and moving the path under `diagnostics`.
+      keeping the handle (`id`, `ref`) and the path, which clients read.
+- [x] 7.4 Count the collision number in the 200-byte cap by shortening the title
+      part in `unique_path`, with and without a date prefix.
+- [x] 7.5 Name the page that holds an alias or a title in an `ENTITY_EXISTS`
+      refusal by its title and `id`, with no storage path.

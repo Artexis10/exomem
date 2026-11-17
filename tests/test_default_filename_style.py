@@ -50,29 +50,36 @@ def _choose_slug_in_the_vault(vault_root: Path) -> None:
 
 
 def test_a_new_note_is_named_by_its_title_and_the_title_is_unchanged(vault: Path) -> None:
-    result = _insight(vault, "Jäne Exämple")
+    result = _insight(vault, "Brûlerie Ötzberg")
 
-    assert Path(result.path).name == "Jäne Exämple.md"
-    assert _stored_title(vault, result.path) == "Jäne Exämple"
+    assert Path(result.path).name == "Brûlerie Ötzberg.md"
+    assert _stored_title(vault, result.path) == "Brûlerie Ötzberg"
     assert not [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
 
 
+def _adjusted(result: note_module.NoteResult) -> list[str]:
+    return [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
+
+
 @pytest.mark.parametrize(
-    ("title", "stem", "correction"),
+    ("title", "stem"),
     [
-        ("Plan #3 [draft]", "Plan 3 draft", "link characters"),
-        ("..hidden plan", "hidden plan", "leading dots"),
+        ("Plan #3 [draft]", "Plan 3 draft"),
+        ("..hidden plan", "hidden plan"),
+        # The file-name sanitiser, not the link rule, removes these two.
+        ("Plan | B", "Plan B"),
+        ("Plan / B", "Plan B"),
     ],
 )
 def test_a_title_that_would_break_a_link_gets_a_link_safe_name_and_a_warning(
-    vault: Path, title: str, stem: str, correction: str
+    vault: Path, title: str, stem: str
 ) -> None:
     result = _insight(vault, title)
 
     assert Path(result.path).name == f"{stem}.md"
     assert _stored_title(vault, result.path) == title
-    adjusted = [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
-    assert len(adjusted) == 1 and correction in adjusted[0] and f"'{stem}'" in adjusted[0]
+    adjusted = _adjusted(result)
+    assert len(adjusted) == 1 and "cannot hold" in adjusted[0] and f"'{stem}'" in adjusted[0]
     # The wikilink an agent writes from the warning resolves to the page.
     resolved, unresolved = vault_module.normalize_wikilink(stem, vault, strict=True)
     assert unresolved is None and resolved.endswith(f"/{stem}")
@@ -87,8 +94,59 @@ def test_a_very_long_title_is_cut_under_the_byte_cap_with_a_warning(vault: Path)
     name = Path(result.path).name
     assert len(name.encode()) <= vault_module.MAX_FILENAME_BYTES
     assert _stored_title(vault, result.path) == title
-    adjusted = [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
-    assert len(adjusted) == 1 and "name shortened" in adjusted[0]
+    adjusted = _adjusted(result)
+    assert len(adjusted) == 1 and "shortened" in adjusted[0] and "cannot hold" not in adjusted[0]
+
+
+def test_a_second_page_with_the_same_corrected_name_is_warned_about_by_its_own_name(vault: Path) -> None:
+    first = _insight(vault, "Plan #3 [draft]")
+
+    second = _insight(vault, "Plan #3 [draft]")
+
+    assert Path(first.path).name == "Plan 3 draft.md" and Path(second.path).name == "Plan 3 draft-2.md"
+    (first_warning,) = _adjusted(first)
+    (second_warning,) = _adjusted(second)
+    assert "'Plan 3 draft'" in first_warning and "a number was added" not in first_warning
+    assert "'Plan 3 draft-2'" in second_warning and "a number was added" in second_warning
+    # The name in the warning is the one a link resolves: not the first page's.
+    resolved, unresolved = vault_module.normalize_wikilink("Plan 3 draft-2", vault, strict=True)
+    assert unresolved is None and resolved.endswith("/Plan 3 draft-2")
+
+
+def test_a_number_added_to_a_plain_title_is_reported(vault: Path) -> None:
+    _insight(vault, "Budget Review")
+
+    second = _insight(vault, "budget review")
+
+    (warning,) = _adjusted(second)
+    assert "'budget review-2'" in warning and "a number was added" in warning
+
+
+def test_a_number_added_to_a_long_name_keeps_the_file_under_the_byte_cap(vault: Path) -> None:
+    # 99 two-byte characters: the name fits, but the name and `-2` together would not.
+    title = "é" * 99
+
+    first = _insight(vault, title)
+    second = _insight(vault, title)
+    third = _insight(vault, title)
+
+    names = [Path(result.path).name for result in (first, second, third)]
+    assert all(len(name.encode()) <= vault_module.MAX_FILENAME_BYTES for name in names), names
+    assert names[1].endswith("-2.md") and names[2].endswith("-3.md")
+    assert len(set(names)) == 3
+    assert "shortened" in _adjusted(second)[0] and "a number was added" in _adjusted(second)[0]
+
+
+def test_a_number_added_after_a_date_prefix_keeps_the_file_under_the_byte_cap(vault: Path) -> None:
+    title = "é" * 99
+
+    first = _experiment(vault, title)
+    second = _experiment(vault, title)
+
+    names = [Path(result.path).name for result in (first, second)]
+    assert all(name.startswith("2026-05-") for name in names)
+    assert all(len(name.encode()) <= vault_module.MAX_FILENAME_BYTES for name in names), names
+    assert names[1].endswith("-2.md") and names[0] != names[1]
 
 
 def _experiment(vault_root: Path, title: str) -> note_module.NoteResult:
@@ -135,8 +193,8 @@ def test_a_long_dated_title_is_cut_so_the_date_prefix_fits_under_the_byte_cap(va
     name = Path(result.path).name
     assert name.startswith("2026-05-") and len(name.encode()) <= vault_module.MAX_FILENAME_BYTES
     assert _stored_title(vault, result.path) == title
-    adjusted = [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
-    assert len(adjusted) == 1 and "name shortened" in adjusted[0]
+    adjusted = _adjusted(result)
+    assert len(adjusted) == 1 and "shortened" in adjusted[0] and "'2026-05-" in adjusted[0]
 
 
 def test_an_experiment_in_a_vault_that_chooses_slug_keeps_its_dated_slug_name(vault: Path) -> None:
@@ -160,10 +218,10 @@ def test_titles_that_differ_only_by_case_get_separate_files(vault: Path) -> None
 def test_a_vault_that_chooses_slug_is_named_the_old_way(vault: Path) -> None:
     _choose_slug_in_the_vault(vault)
 
-    result = _insight(vault, "Jäne Exämple")
+    result = _insight(vault, "Brûlerie Ötzberg")
 
-    assert Path(result.path).name == "jane-example.md"
-    assert _stored_title(vault, result.path) == "Jäne Exämple"
+    assert Path(result.path).name == "brulerie-otzberg.md"
+    assert _stored_title(vault, result.path) == "Brûlerie Ötzberg"
 
 
 def test_a_source_keeps_its_dated_slug_name_by_default(
@@ -174,13 +232,13 @@ def test_a_source_keeps_its_dated_slug_name_by_default(
         source_schema,
         content="An invented article body.",
         source_type="article",
-        title="Jäne Exämple notes",
-        url="https://example.com/jane",
+        title="Brûlerie Ötzberg notes",
+        url="https://example.com/roastery",
         today=TODAY,
     )
 
-    assert Path(result.path).name == "2026-05-18-jane-example-notes.md"
-    assert _stored_title(vault, result.path) == "Jäne Exämple notes"
+    assert Path(result.path).name == "2026-05-18-brulerie-otzberg-notes.md"
+    assert _stored_title(vault, result.path) == "Brûlerie Ötzberg notes"
 
 
 def test_a_source_follows_a_style_the_vault_chose(
@@ -193,12 +251,32 @@ def test_a_source_follows_a_style_the_vault_chose(
         source_schema,
         content="An invented article body.",
         source_type="article",
-        title="Jäne Exämple notes",
-        url="https://example.com/jane",
+        title="Brûlerie Ötzberg notes",
+        url="https://example.com/roastery",
         today=TODAY,
     )
 
-    assert Path(result.path).name == "2026-05-18-Jäne Exämple notes.md"
+    assert Path(result.path).name == "2026-05-18-Brûlerie Ötzberg notes.md"
+
+
+def test_a_source_named_by_its_title_reports_a_name_that_differs_from_it(
+    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "title")
+
+    result = add_module.add(
+        vault,
+        source_schema,
+        content="An invented article body.",
+        source_type="article",
+        title="Brûlerie | Ötzberg notes",
+        url="https://example.com/roastery",
+        today=TODAY,
+    )
+
+    assert Path(result.path).name == "2026-05-18-Brûlerie Ötzberg notes.md"
+    (adjusted,) = [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
+    assert "'2026-05-18-Brûlerie Ötzberg notes'" in adjusted
 
 
 def _style_check(vault_root: Path) -> doctor_module.DoctorCheck:

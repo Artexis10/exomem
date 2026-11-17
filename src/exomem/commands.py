@@ -5355,15 +5355,17 @@ def _leaf_error_message(error: Any) -> str:
     return message
 
 
-def _candidates_by_title(candidates: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Entity candidates as a refusal names them: by title and `ref`, with no storage path for an agent.
+def _candidates_by_title(vault_root: Path, candidates: list[dict[str, str]]) -> list[Any]:
+    """Entity candidates as a refusal names them: by title and id, with no storage path for an agent.
 
     The public tool shape names a page by title everywhere else, so a path here would be the one place
-    it leaks. REST and CLI callers keep the whole candidate.
+    it leaks. The id is the handle that the caller's "update or link it instead" follows; an alias or
+    title match carries only a path, so it is named through the page it points at. REST and CLI
+    callers keep the whole candidate.
     """
     if not capabilities_module.shows_links_by_title():
         return candidates
-    return [{key: value for key, value in item.items() if key != "path"} for item in candidates]
+    return page_names_module.candidates_by_handle(vault_root, candidates)
 
 
 def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
@@ -5511,7 +5513,7 @@ def op_link(
     except link_module.LinkError as e:
         msg = _leaf_error_message(e)
         if e.candidates:
-            msg += f" (candidates: {_candidates_by_title(e.candidates)})"
+            msg += f" (candidates: {_candidates_by_title(vault_root, e.candidates)})"
         if e.candidate_fingerprint is not None:
             msg += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(msg) from e
