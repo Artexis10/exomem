@@ -31,13 +31,16 @@ from . import (
     find_results,
     held_fs,
     import_stage,
+    layout,
     markdown_regions,
     note_types,
     originals,
     reserved_paths,
     source_taxonomy,
+    title_occupancy,
 )
 from .governance import raw_protection
+from .held_fs import vault_name_key
 from .vault import (
     GENERATION_RACY_WINDOW_NS,
     kb_root,
@@ -439,6 +442,11 @@ class Destinations:
     def __init__(self, root: Path) -> None:
         self.root = root
         self._taken: dict[Path, set[str]] = {}
+        # The name keys of the plan's own notes. A `root` vault holds a derived name once across the vault,
+        # so two notes of a plan in different folders must not share a name; `nested` keeps it per folder.
+        self._note_names: set[str] = set()
+        # A single page index serves the whole plan, so a file-mode `root` vault builds it once, not per note.
+        self.page_index = title_occupancy.page_index_source(root)
 
     def _names(self, folder: Path) -> set[str]:
         if folder not in self._taken:
@@ -452,22 +460,34 @@ class Destinations:
         path = self.root / rel_path
         self._names(path.parent).add(path.name.casefold())
 
+    def reserve_note(self, rel_path: str) -> None:
+        """Reserve a note's path, and its name across the vault where the vault holds a name once."""
+        self.reserve(rel_path)
+        self._note_names.add(vault_name_key(Path(rel_path).stem))
+
     @classmethod
     def frozen_by(cls, root: Path, items: list[dict]) -> Destinations:
         """Destinations that already hold every path the plan items froze, so a new path never takes a later item's."""
         destinations = cls(root)
         for item in items:
-            frozen = [(item.get("note") or {}).get("target_path")]
+            if note_path := (item.get("note") or {}).get("target_path"):
+                destinations.reserve_note(note_path)
             if item["action"] == "copy-as-source":
-                frozen += [item["target_path"], item.get("artifact_path")]
-            for rel_path in frozen:
-                if rel_path:
-                    destinations.reserve(rel_path)
+                for rel_path in (item["target_path"], item.get("artifact_path")):
+                    if rel_path:
+                        destinations.reserve(rel_path)
         return destinations
 
     def taken(self, rel_path: str) -> bool:
         path = self.root / rel_path
         return path.name.casefold() in self._names(path.parent)
+
+    def note_taken(self, rel_path: str) -> bool:
+        """Whether a note's target is taken in its folder, or its name by another note of the plan in a `root` vault."""
+        return self.taken(rel_path) or (
+            layout.of(self.root) is layout.Layout.ROOT
+            and vault_name_key(Path(rel_path).stem) in self._note_names
+        )
 
     def allocate(
         self, folder: Path, stem: str, *, artifact_suffix: str | None
@@ -887,7 +907,6 @@ def plan_note(
     The leaf names the folder and file under the plan's day; this only keeps two notes
     of one plan apart.
     """
-    from . import title_occupancy
     from .note import NoteError, planned_destination
     from .vault import InvalidSlugError
 
@@ -903,7 +922,9 @@ def plan_note(
     # A page of a taken name takes the collision number that the leaf adds, so a retry keeps the vault's
     # style. The plan freezes the number, and the leaf applies it, so a plan lands where it was made.
     try:
-        title_check = title_occupancy.TitleCheck(root, None)
+        title_check = title_occupancy.TitleCheck(
+            root, None, title=title, resolver=destinations.page_index
+        )
     except InvalidSlugError as error:
         return {"code": "WRITE_REFUSED", "reason": f"the note target is unavailable: {error}"}
     number = 1
@@ -912,18 +933,18 @@ def plan_note(
             target = planned_destination(
                 root, note_type=rule["note_type"], title=title, slug=None,
                 project=rule.get("project"), domain=rule.get("domain"), date_iso=date_iso,
-                name_number=number if number > 1 else None,
+                name_number=number if number > 1 else None, title_check=title_check,
             )
         except (NoteError, InvalidSlugError, ValueError) as error:
             return {"code": getattr(error, "code", "WRITE_REFUSED"),
                     "reason": f"the note target is unavailable: {error}"}
-        if not destinations.taken(target) and not title_check.held(Path(target).stem):
+        if not destinations.note_taken(target) and not title_check.held(Path(target).stem):
             break
         number += 1
     reason = access.writable_reason(root, target)
     if reason is not None:
         return {"code": "WRITE_REFUSED", "reason": reason}
-    destinations.reserve(target)
+    destinations.reserve_note(target)
     note["target_path"] = target
     if number > 1:
         note["name_number"] = number

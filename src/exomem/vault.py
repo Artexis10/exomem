@@ -839,8 +839,9 @@ def filename_adjusted_warning(
         else:
             reasons.append("characters that a file name or a link cannot hold were changed")
     numbered = final != planned
-    # `unique_path` shortens the stem when its number would pass the byte cap.
-    shortened_for_number = numbered and not final.startswith(f"{planned}-")
+    # A number takes `-<n>` after the planned stem in `nested` and ` (<n>)` in a `root` vault. Both
+    # forms leave the planned stem whole, so neither is a cut; `unique_path` shortens the stem when its number would pass the byte cap.
+    shortened_for_number = numbered and not final.startswith((f"{planned}-", f"{planned} ("))
     if cut or shortened_for_number:
         reasons.append("the name was shortened to fit the length limit")
     if numbered:
@@ -888,8 +889,7 @@ def resolve_filename_slug(
     style, style_warning = derived_filename_style(vault_root, dated=dated)
     style_warnings = [style_warning] if style_warning else []
     if style == "title":
-        corrected = corrected_title_name(title)
-        fitted = fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
+        fitted = title_filename(title, date_prefix)
         if fitted is not None:
             # No transliteration warning here: nothing was transliterated. That
             # warning exists because the slug path is lossy for non-ASCII text,
@@ -1045,6 +1045,54 @@ def unique_path(
     return directory / _first_free_name(
         stem, suffix, lambda name: vault_name_key(name) in taken, title_held
     )
+
+
+def title_filename(title: str, date_prefix: str = "") -> tuple[str, bool] | None:
+    """The file stem that `title` names under the byte cap, and whether it was cut, or None.
+
+    None for a title with no readable name (reserved characters only) and for a title with no room beside
+    the prefix: the page then takes a slug name, which keeps the per-folder `-2` collision rule.
+    """
+    corrected = corrected_title_name(title)
+    return fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
+
+
+def unique_vault_path(
+    directory: Path,
+    stem: str,
+    suffix: str = ".md",
+    *,
+    vault_root: Path,
+    date_prefix: str = "",
+    name_held: Callable[[str], bool],
+    title_held: Callable[[str], bool] | None = None,
+) -> Path:
+    """The path for a derived name in a `root` vault: a name no owned page holds anywhere in the vault.
+
+    Only a `root` vault calls this, for a name derived under `title` style, whether `stem` is the plain
+    name or the plain name with a number a plan froze. On a collision it appends ` (2)`, ` (3)` and so
+    on, taking the lowest number that no page holds. The number counts toward the 200-byte cap, so the
+    title part shrinks first (`fit_filename`). `name_held` says whether any owned page in the vault has
+    a file name, under `vault_name_key`. The folder rules of `unique_path` still apply: a file on the
+    folder's listing, a name that a live page's lineage claims (`prior_claims`), and `title_held`, which
+    says whether a stem is another live page's title.
+    """
+    if not stem.startswith(date_prefix):
+        date_prefix = ""
+    title = stem.removeprefix(date_prefix)
+    number = 1
+    while True:
+        fitted = fit_filename(title, date_prefix=date_prefix, number=number, extension=suffix)
+        # No title text fits beside the number: the `-<number>` form keeps the byte cap, as `unique_path` does.
+        candidate = fitted[0] if fitted else numbered_stem(stem, number, suffix)
+        name = f"{candidate}{suffix}"
+        if (
+            not name_held(name)
+            and unique_path(directory, candidate, suffix, vault_root=vault_root).name == name
+            and not (title_held is not None and title_held(candidate))
+        ):
+            return directory / name
+        number += 1
 
 
 def numbered_stem(stem: str, number: int, suffix: str = ".md") -> str:

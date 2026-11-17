@@ -32,6 +32,7 @@ from pathlib import Path
 from . import (
     graph_sync,
     held_fs,
+    layout,
     originals,
     relation_review,
     reserved_paths,
@@ -58,6 +59,7 @@ from .vault import (
     plan_log_entry,
     read_guarded_text,
     resolve_under_vault,
+    unique_vault_path,
     write_log_entry,
 )
 from .vault_store import targets as store_targets
@@ -191,6 +193,7 @@ def _recover_from_trash_local(
         sidecar_name=sidecar.name,
         allow_curated=allow_curated,
         fold=_fold,
+        page=trash_kind == "file",
     )
     # A file entry's commit fetches its original once every other check has passed, so a refused
     # recovery reads nothing from the store. A folder fetches before its census guards, which must see
@@ -965,8 +968,16 @@ def _restore_destination(
     sidecar_name: str,
     allow_curated: bool,
     fold: bool,
+    page: bool = False,
 ) -> tuple[Path, str, str | None]:
-    """Where a recovery puts the entry, with the curated tree it lands in, after every path rule."""
+    """Where a recovery puts the entry, with the curated tree it lands in, after every path rule.
+
+    ``page`` is a lone Markdown page. In a `root` vault, where a page's name is unique across the vault,
+    a page that returns to the sidecar's own path takes ` (2)`, ` (3)` and so on when another page holds
+    its name, by the rule that names a new page. A `restore_path` the caller gave is their choice of name
+    and keeps `DEST_EXISTS`.
+    """
+    chosen = restore_path is not None and bool(str(restore_path).strip())
     if restore_path is None or not str(restore_path).strip():
         original = meta.get("original_path")
         if not original:
@@ -1029,7 +1040,25 @@ def _restore_destination(
                 f"{curated!r}. Pass `allow_curated=true` to override."
             ),
         )
+    if page and not chosen and restore_rel.lower().endswith(".md") and layout.of(vault_root) is layout.Layout.ROOT:
+        restore_abs, restore_rel = _vault_unique_page(vault_root, restore_abs, restore_rel)
     return restore_abs, restore_rel, curated
+
+
+def _vault_unique_page(vault_root: Path, restore_abs: Path, restore_rel: str) -> tuple[Path, str]:
+    """The destination of a restored page in a `root` vault: its own path, or the next name no page holds."""
+    from . import title_occupancy
+
+    resolver = title_occupancy.page_index_source(vault_root) or (lambda: None)
+    stem = restore_abs.name[: -len(".md")]
+    unique = unique_vault_path(
+        restore_abs.parent,
+        stem,
+        restore_abs.name[len(stem) :],
+        vault_root=vault_root,
+        name_held=lambda name: title_occupancy.vault_name_held(vault_root, name, resolver),
+    )
+    return unique, unique.relative_to(vault_root).as_posix()
 
 
 def _destination_exists(restore_rel: str) -> RecoverError:
@@ -1178,6 +1207,7 @@ def _recover_in_store(
             sidecar_name=sidecar.name,
             allow_curated=allow_curated,
             fold=fold,
+            page=trash_kind == "file",
         )
         if trash_kind == "file":
             _admit_publication(root, restore_rel, stored.get(trash_rel))

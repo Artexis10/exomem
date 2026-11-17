@@ -154,3 +154,17 @@ def test_the_index_drift_check_counts_from_the_store_in_a_root_vault(stored_root
         )
     mismatches = [f.detail for f in audit._check_index_drift(stored_root) if "actual is" in f.detail]
     assert mismatches == []
+
+
+def test_a_derived_name_is_held_once_across_the_vault_in_store_mode(stored_root: Path) -> None:
+    """The name lookup reads the store: a stored page that has no file on disk still holds its name."""
+    with library_scope():
+        first = commands.op_remember(stored_root, content=UNIT, status="draft", title="Churn cause", note_type="procedure")["path"]
+        assert not (stored_root / first).exists()
+        pages = [
+            commands.op_remember(stored_root, content=UNIT, status="draft", title=title, note_type="insight")["path"]
+            for title in ("churn cause", "Churn cause")
+        ]
+
+    assert [first, *pages] == ["Procedures/Churn cause.md", "Insights/churn cause (2).md", "Insights/Churn cause (3).md"]
+    assert {first, *pages} <= set(_store_paths(stored_root))

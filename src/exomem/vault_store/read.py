@@ -23,6 +23,7 @@ from typing import TypeVar
 
 from .. import find_corpus, reserved_paths, vault
 from ..collection_store import connection, runtime
+from ..held_fs import vault_name_key
 from ..kbdir import managed_state
 from . import mode, ownership
 
@@ -199,6 +200,20 @@ class StoreSnapshot:
             yield Child(name, is_dir=bool(slash))
             # "0" is the code point after "/", so every path below "name/" sorts before it.
             lower = prefix + name + ("0" if slash else "\x00")
+
+    def pages_named(self, name_key: str) -> list[str]:
+        """The paths of the pages whose file name, without `.md`, has the key ``name_key`` (`vault_name_key`).
+
+        The store indexes a page by its path and by no name key, so this reads the path index once,
+        in path order, and no body or metadata: a name collision check reads the store and not the
+        projection. A page that a commit stored counts at once.
+        """
+        found = []
+        for (path,) in self.connection.execute("SELECT path FROM store_pages"):
+            leaf = path.rpartition("/")[2]
+            if ownership.is_markdown(leaf) and vault_name_key(leaf[: -len(".md")]) == name_key:
+                found.append(path)
+        return found
 
     def held_pages(self, rels: Iterable[str]) -> frozenset[str]:
         """The paths in ``rels`` that the store holds a page at, read in a few queries."""

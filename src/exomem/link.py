@@ -60,7 +60,6 @@ from .vault import (
     resolve_filename_slug,
     sibling_name_variants,
     split_wikilink_target,
-    unique_path,
     writer_link_visibility,
     yaml_flow_list,
     yaml_scalar,
@@ -932,12 +931,15 @@ def link(
     # The writer snapshot that this write builds for its links also answers which titles are taken. It
     # is acquired here, after every refusal above, so a refused write pays nothing new.
     resolver = find_module.writer_resolver_snapshot(vault_root)
-    title_check = title_occupancy.TitleCheck(vault_root, slug, resolver=lambda: resolver)
-    if title_check.held(entity_path.stem):
-        # The name is free as a file but is another page's title: taking it would move every bare link
-        # to that title here. The refusal above stays for a file that exists; this only numbers the name.
-        entity_path = unique_path(folder, entity_path.stem, vault_root=vault_root, title_held=title_check.held)
-        rel_entity = place(entity_path)
+    title_check = title_occupancy.TitleCheck(vault_root, slug, resolver=lambda: resolver, title=name)
+    if title_check.vault_wide or title_check.held(entity_path.stem):
+        # The name is free as a file but is another page's title, or in a `root` vault another page's name
+        # in any folder: taking it would move every bare link to that title or name here. The refusal above
+        # stays for a file that exists; this only numbers the name.
+        numbered = title_check.unique_page_path(folder, entity_path.stem)
+        if numbered != entity_path:
+            entity_path = numbered
+            rel_entity = place(entity_path)
     type_resolution = vocabulary_resolution.entity_type_record(
         requested_type,
         definition,

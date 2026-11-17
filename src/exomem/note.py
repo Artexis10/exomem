@@ -37,7 +37,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -87,6 +87,7 @@ from .vault import (
     escape_wikilinks_for_log,
     filename_adjusted_warning,
     find_body_wikilinks,
+    fit_filename,
     folder_split_warnings,
     kb_root,
     normalize_body_wikilinks,
@@ -1430,7 +1431,7 @@ def _resolve_path(
     home_set: homes_module.HomeSet | None = None,
     topics: Sequence[str] = (),
     predecessor: str | None = None,
-    title_held: Callable[[str], bool] | None = None,
+    title_check: title_occupancy.TitleCheck | None = None,
 ) -> Path:
     placement = _place(
         vault_root=vault_root,
@@ -1464,7 +1465,11 @@ def _resolve_path(
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error
     if create_parents:
         folder.mkdir(parents=True, exist_ok=True)
-    return unique_path(folder, stem, vault_root=vault_root, title_held=title_held)
+    if title_check is None:
+        return unique_path(folder, stem, vault_root=vault_root)
+    return title_check.unique_page_path(
+        folder, stem, date_prefix=_stem_prefix(note_type, started=started, date_iso=date_iso)
+    )
 
 
 def _domain_folder(domain: str) -> str:
@@ -1890,10 +1895,17 @@ def _stem_prefix(note_type: str, *, started: str | None, date_iso: str) -> str:
     return ""
 
 
-def _numbered_slug(slug: str, name_prefix: str, number: int | None) -> str:
-    """`slug` with the collision number an import plan froze for it, counted in the byte cap with the prefix."""
+def _numbered_slug(slug: str, name_prefix: str, number: int | None, *, vault_wide: bool = False) -> str:
+    """`slug` with the collision number an import plan froze for it, counted in the byte cap with the prefix.
+
+    The number is ` (<n>)` for a name that is unique across a `root` vault, and `-<n>` for every other name.
+    """
     if number is None:
         return slug
+    if vault_wide:
+        fitted = fit_filename(slug, date_prefix=name_prefix, number=number)
+        if fitted is not None:
+            return fitted[0].removeprefix(name_prefix)
     return numbered_stem(name_prefix + slug, number).removeprefix(name_prefix)
 
 
@@ -1907,6 +1919,7 @@ def planned_destination(
     domain: str | None = None,
     date_iso: str | None = None,
     name_number: int | None = None,
+    title_check: title_occupancy.TitleCheck | None = None,
 ) -> str:
     """The vault-relative path `note` would create for these inputs; nothing is written.
 
@@ -1915,7 +1928,8 @@ def planned_destination(
     `date_iso` is the day a dated folder or name uses, today by default; a caller that
     creates the note later passes the same day to `note` as `_path_date`. `name_number` is the
     collision number that the plan gives a second page of one name, as `unique_path` would add it;
-    the caller passes the same number to `note` as `_name_number`.
+    the caller passes the same number to `note` as `_name_number`. `title_check` is the plan's name
+    check: a `root` vault's page takes a name that is unique across the vault, as `note` gives it.
     """
     root = Path(vault_root)
     date_iso = date_iso or temporal.render_date(temporal.now())
@@ -1923,7 +1937,12 @@ def planned_destination(
     filename_slug, _warnings = resolve_filename_slug(
         title, slug, vault_root=root, date_prefix=name_prefix
     )
-    filename_slug = _numbered_slug(filename_slug, name_prefix, name_number)
+    filename_slug = _numbered_slug(
+        filename_slug,
+        name_prefix,
+        name_number,
+        vault_wide=title_check is not None and title_check.vault_wide,
+    )
     path = _resolve_path(
         vault_root=root,
         note_type=note_type,
@@ -1935,6 +1954,7 @@ def planned_destination(
         date_iso=date_iso,
         create_parents=False,
         home_set=homes_module.load(root),
+        title_check=title_check,
     )
     return canonical_vault_rel(root, path.relative_to(root).as_posix())
 
@@ -2140,13 +2160,16 @@ def note(
         slug,
         frozen=token_value is not None or _path_date is not None,
         resolver=link_snapshot if has_links else None,
+        title=title,
     )
     if token_value is None:
         note_path = _resolve_path(
             vault_root=root,
             note_type=note_type,
             project=project,
-            slug=_numbered_slug(filename_slug, name_prefix, _name_number),
+            slug=_numbered_slug(
+                filename_slug, name_prefix, _name_number, vault_wide=title_check.vault_wide
+            ),
             domain=placement_domain,
             medium=medium,
             started=started,
@@ -2158,7 +2181,7 @@ def note(
             home_set=home_set,
             topics=topics or (),
             predecessor=_predecessor_path,
-            title_held=title_check.held,
+            title_check=title_check,
         )
         # Re-spell the destination to the real on-disk casing *before* it is
         # bound into the draft token: creating into an existing but

@@ -42,6 +42,7 @@ from . import (
     source_taxonomy,
     tag_variants,
     temporal,
+    title_occupancy,
     vocabulary_auxiliaries,
     vocabulary_resolution,
 )
@@ -682,7 +683,12 @@ def add(
     # and removes it again if the commit is refused.
     if artifact is None:
         artifact_path: Path | None = None
-        source_path = unique_path(folder_path, stem, vault_root=vault_root)
+        title_check = title_occupancy.TitleCheck(vault_root, slug, dated=True, title=title)
+        source_path = (
+            title_check.unique_page_path(folder_path, stem, date_prefix=name_prefix)
+            if title_check.vault_wide
+            else unique_path(folder_path, stem, vault_root=vault_root)
+        )
     else:
         artifact_path, source_path = artifact_pair(
             folder_path, stem, artifact_suffix, vault_root=vault_root, protected=raw_protection
