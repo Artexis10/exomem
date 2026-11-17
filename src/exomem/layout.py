@@ -160,6 +160,31 @@ def read_record(vault_root: Path) -> LayoutRecord | None:
     return None
 
 
+def write_record(
+    vault_root: Path, vault_layout: Layout | str, unmanaged: Iterable[str] = ()
+) -> str:
+    """Create the layout record of a vault that has none, and return its vault-relative path.
+
+    The record goes in the schema folder of `vault_layout`. It refuses to replace a record that
+    exists, so a vault never changes layout through this call: the relayout is the only writer
+    that moves a vault. A `nested` vault lists no unmanaged entries, since its wrapper is the boundary.
+    """
+    chosen = Layout(vault_layout)
+    root = Path(vault_root)
+    names = sorted(unmanaged) if chosen is Layout.ROOT else []
+    rel = f"{schema_folder(chosen)}/{RECORD_NAME}"
+    if read_record(root) is not None:
+        raise LayoutError(
+            "LAYOUT_RECORD_EXISTS",
+            f"{root} already has a layout record.",
+            "Leave the record as it is: only the relayout changes a vault's layout.",
+        )
+    text = yaml.safe_dump({"layout": chosen.value, "unmanaged": names}, sort_keys=False)
+    guard = vault.PathGuard.capture(root, rel, leaf_policy="absent")
+    vault.batch_atomic_write([vault.PlannedWrite(root / rel, text, guard=guard)], vault_root=root)
+    return rel
+
+
 @dataclass(frozen=True, slots=True)
 class Resolved:
     """A vault's layout, with the schema folders that its record leaves unused.

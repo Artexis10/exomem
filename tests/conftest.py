@@ -557,6 +557,19 @@ def _unbind_managed_root():
 
 
 @pytest.fixture(autouse=True)
+def _fixture_vaults_are_nested(monkeypatch):
+    """`init_vault` makes a `nested` vault in a test unless the test names its layout.
+
+    A new vault is `root` in the product, but the fixture vaults and the paths that most suites
+    spell out are `nested`. A test of the product default runs the CLI in a subprocess, which this
+    pin never reaches; a test of `root` names the layout.
+    """
+    from exomem import init, kbdir
+
+    monkeypatch.setattr(init, "NEW_VAULT_LAYOUT", kbdir.Layout.NESTED)
+
+
+@pytest.fixture(autouse=True)
 def _cancel_upload_reattempts():
     """No upload session's re-attempt timer fires inside a later test.
 

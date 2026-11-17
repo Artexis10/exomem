@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import init as init_module
-from . import state_migration
+from . import layout, state_migration
 from .vault import _is_vault
 
 #: Prefix for a staging sibling of the vault path (`/data/.vault-init-<hex>`,
@@ -186,6 +186,8 @@ def _ensure_vault(vault_root: Path, *, backed_up: bool) -> bool:
         init_module.init_vault(staging, initialize_state=False)
         vault_root.rmdir()
         os.replace(staging, vault_root)
+        # `init_vault` bound the process to the staging path; the vault now lives at `vault_root`.
+        layout.bind(vault_root)
         if os.name != "nt":
             # The renamed-in directory carries whatever mode `staging` had;
             # re-assert 0700 so the final vault path's mode never depends on

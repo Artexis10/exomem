@@ -10,6 +10,7 @@ contract (placeholder projects/paths); adapt `project-keys.yaml` to your own.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from . import indexes, layout, note_types
@@ -18,7 +19,8 @@ from .entity_types import (
     extension_registry_path,
     load_entity_types,
 )
-from .kbdir import Layout, managed_join, managed_root
+from .held_fs import vault_name_key
+from .kbdir import Layout, managed_join, managed_root, managed_root_rel, outside_managed_root
 from .vault import (
     PathGuard,
     PathGuardError,
@@ -31,30 +33,35 @@ from .vault import (
 
 _SCAFFOLD = Path(__file__).parent / "_scaffold"
 
-def _area_folders() -> tuple[str, ...]:
+#: The layout of a vault that `init` creates when the caller names none: the vault root is the managed root.
+NEW_VAULT_LAYOUT = Layout.ROOT
+
+
+def _area_folders(vault_layout: Layout, vault_root: Path) -> tuple[str, ...]:
     """The typed folder tree laid down up-front: every shipped type's area, and a group per core entity type.
 
-    The note-type registry names the areas and the layout places them; a new vault is `nested` until
-    the layout is selected at creation. Deeper folders (Sources/Articles, Notes/Research/<Project>,
-    ...) are created on demand by the writers.
+    The note-type registry names the areas and `vault_layout` places them. A `root` vault also gets
+    every area its registries define, so an overlay-defined compiled type has its folder after an
+    overlay too. Deeper folders (Sources/Articles, Notes/Research/<Project>, ...) are created on
+    demand by the writers.
     """
     folders: list[str] = []
     for note_type in note_types.shipped():
-        # `init` creates `nested` vaults until it selects the layout at creation (task 4.6b).
-        area = layout.area_folder(note_type, layout.Layout.NESTED)
+        area = layout.area_folder(note_type, vault_layout)
         if area is None:
             continue
         folders.append(area)
         if note_types.entity(note_type):
             folders.extend(f"{area}/{definition.folder}" for definition in ENTITY_TYPE_REGISTRY)
-    return tuple(folders)
+    if vault_layout is Layout.ROOT:
+        folders.extend(sorted(layout.load_registry(vault_root).areas))
+    return tuple(dict.fromkeys(folders))
 
 
-def _entity_area() -> str:
+def _entity_area(vault_layout: Layout) -> str:
     """The folder that holds a group folder for each entity type."""
     for note_type in note_types.shipped(note_types.entity):
-        # Same reason as `_area_folders`: `init` creates `nested` vaults for now.
-        area = layout.area_folder(note_type, layout.Layout.NESTED)
+        area = layout.area_folder(note_type, vault_layout)
         if area is not None:
             return area
     raise LookupError("the shipped note-type pack has no entity type with a folder")
@@ -197,14 +204,16 @@ def _commit_offline(vault_root: Path, operation: str, change_of, then=None) -> N
     admission.store_mode_route(Path(vault_root).resolve(), operation, step)
 
 
-def _scaffold_plan(vault_root: Path) -> tuple[list[Path], list[tuple[Path, Path]]]:
+def _scaffold_plan(
+    vault_root: Path, vault_layout: Layout
+) -> tuple[list[Path], list[tuple[Path, Path]]]:
     """The folders an overlay creates, and each scaffold file with where an overlay puts it.
 
     It writes nothing. The activation conventions are left out: the packaged ones are the base
     registry, not the add/drop grammar accepted at this vault-owned override path, so even a force
     overlay leaves an owner's override intact.
     """
-    kb = managed_root(vault_root)
+    kb = managed_root(vault_root, layout=vault_layout)
     # The product-owned markdown lands outside the note namespace; everything else -- index.md,
     # log.md, the typed tree, and the per-vault YAML registries that also live under `_Schema/` --
     # is the user's and stays in the Knowledge Base where they can see and edit it (#488).
@@ -214,6 +223,10 @@ def _scaffold_plan(vault_root: Path) -> tuple[list[Path], list[tuple[Path, Path]
     for src in sorted(_SCAFFOLD.rglob("*")):
         scaffold_rel = src.relative_to(_SCAFFOLD)
         if scaffold_rel == Path("_Schema/activation-conventions.yaml"):
+            continue
+        # The scaffold ships the `nested` layout's compiled parent. A `root` vault has no such level:
+        # its compiled areas are top-level folders, which `_area_folders` creates.
+        if vault_layout is Layout.ROOT and scaffold_rel.parts[0] == note_types.NOTES_FOLDER:
             continue
         if scaffold_rel in product_owned:
             dest = shipped_schema_target(vault_root) / scaffold_rel.as_posix().split("/", 1)[1]
@@ -245,8 +258,9 @@ def _overlay_in_store(vault_root: Path) -> dict:
     from .activation_manifest import manifest_path, new_manifest
     from .vault_store import ownership, read, write
 
+    vault_layout = layout.bind(vault_root).layout
     kb = managed_root(vault_root)
-    folders, files = _scaffold_plan(vault_root)
+    folders, files = _scaffold_plan(vault_root, vault_layout)
     pages: dict[str, Path] = {}
     copies: list[tuple[Path, Path]] = []
     for src, dest in files:
@@ -317,17 +331,62 @@ def _overlay_in_store(vault_root: Path) -> dict:
             dest.parent.mkdir(parents=True, exist_ok=True)
             package_skills.copy_shipped_file(src, dest)
             created.append(dest.relative_to(vault_root).as_posix())
-        for folder in _area_folders():
+        for folder in _area_folders(vault_layout, vault_root):
             (kb / folder).mkdir(parents=True, exist_ok=True)
         # The registry is a page: the store says whether the vault holds it, not its file.
         registry = extension_registry_path(vault_root).relative_to(vault_root).as_posix()
         if read.page_exists(vault_root, registry):
             for definition in entity_registry.extensions.values():
                 if definition.status == "active":
-                    (kb / _entity_area() / definition.folder).mkdir(parents=True, exist_ok=True)
+                    (kb / _entity_area(vault_layout) / definition.folder).mkdir(
+                        parents=True, exist_ok=True
+                    )
 
     _commit_offline(vault_root, "exomem init --force", overlay, then=write_files)
-    return {"vault": str(vault_root), "kb": str(kb), "created": created}
+    return {"vault": str(vault_root), "kb": str(kb), "created": created, "layout": vault_layout.value}
+
+
+def _existing_layout(vault_root: Path) -> Layout | None:
+    """The layout of the vault that `vault_root` already holds, or None for a folder that holds no vault.
+
+    A layout record decides, and a wrapper folder with no record is a `nested` vault, as for every vault
+    that exists today. A `_Schema/` at the vault root with no record refuses (`LayoutError`), so `init`
+    never lays a scaffold over a vault whose layout it cannot read.
+    """
+    resolved = layout.inspect(vault_root)
+    if resolved.record is not None:
+        return resolved.layout
+    return Layout.NESTED if managed_root(vault_root, layout=Layout.NESTED).exists() else None
+
+
+def _unmanaged_entries(vault_root: Path) -> list[str]:
+    """The top-level entries that a new `root` vault's folder already holds, for the layout record to list (O4).
+
+    A dot name and the import staging folder are outside the managed root without a listing. An entry
+    that carries a name `init` creates is refused rather than listed: a listed entry is outside the
+    managed root, so the scaffold would either overwrite it or hide it. The refusal costs a user with
+    such a folder a second run with `--layout nested`, and it keeps their files from becoming pages unasked.
+    """
+    held = sorted(
+        entry.name
+        for entry in os.scandir(vault_root)
+        if not outside_managed_root(entry.name, layout=Layout.ROOT, unmanaged=())
+    )
+    folders, files = _scaffold_plan(vault_root, Layout.ROOT)
+    created = {
+        vault_name_key(path.relative_to(vault_root).parts[0])
+        for path in (*folders, *(dest for _src, dest in files))
+    } | {vault_name_key(area.partition("/")[0]) for area in _area_folders(Layout.ROOT, vault_root)}
+    taken = [name for name in held if vault_name_key(name) in created]
+    if taken:
+        raise layout.LayoutError(
+            "INIT_NAME_TAKEN",
+            f"{vault_root} holds {', '.join(taken)}, and a new root vault creates a folder or file "
+            "of that name.",
+            f"Move {', '.join(taken)} out of {vault_root}, or run `exomem init --layout nested` to "
+            f"keep it beside the {managed_root_rel(layout=Layout.NESTED)} folder.",
+        )
+    return held
 
 
 def init_vault(
@@ -335,24 +394,40 @@ def init_vault(
     *,
     force: bool = False,
     initialize_state: bool = True,
+    vault_layout: Layout | str | None = None,
 ) -> dict:
-    """Create `<vault_root>/Knowledge Base/` with the starter scaffold.
+    """Create a vault at `vault_root` with the starter scaffold, in `vault_layout` (default `NEW_VAULT_LAYOUT`).
 
-    Copies the bundled scaffold (index.md, log.md, _Schema/) and lays down the
-    typed folder tree. Raises ``FileExistsError`` if `Knowledge Base/` already
-    exists, unless ``force=True`` (which overlays the scaffold without deleting
-    any existing files). A genuinely new vault also receives its empty external
-    state manifest. Callers building a renameable staging vault must pass
-    ``initialize_state=False`` and initialize state only after publication,
-    because the per-vault state key binds the final vault path.
+    Copies the bundled scaffold (index.md, log.md, _Schema/) and lays down the typed folder tree. A
+    new `root` vault also gets its layout record, listing the entries that the folder already held. A
+    folder that already is a vault keeps its layout: ``init`` never converts a vault, and an explicit
+    `vault_layout` that differs from it raises ``LayoutError``. It raises ``FileExistsError`` for an
+    existing vault unless ``force=True`` (which overlays the scaffold without deleting any existing
+    files). A genuinely new vault also receives its empty external state manifest. Callers building a
+    renameable staging vault must pass ``initialize_state=False`` and initialize state only after
+    publication, because the per-vault state key binds the final vault path. The process is bound to
+    the vault's layout from here on, so the callers that follow read the same managed root.
     """
     vault_root = Path(vault_root)
+    existing = _existing_layout(vault_root)
+    wanted = None if vault_layout is None else Layout(vault_layout)
+    if existing is not None and wanted is not None and wanted is not existing:
+        raise layout.LayoutError(
+            "LAYOUT_CONFLICT",
+            f"{vault_root} is a {existing.value} vault, and init never changes a vault's layout.",
+            f"Leave out the layout to keep it as {existing.value}, or run `exomem relayout --plan` "
+            "to see how a move would go.",
+        )
+    chosen = NEW_VAULT_LAYOUT if existing is None and wanted is None else existing or wanted
     if force and _store_mode(vault_root):
         return _overlay_in_store(vault_root)
     vault_root.mkdir(parents=True, exist_ok=True)
+    fresh_vault = existing is None
+    if fresh_vault and chosen is Layout.ROOT:
+        layout.write_record(vault_root, chosen, _unmanaged_entries(vault_root))
+    layout.bind(vault_root)
     kb = managed_root(vault_root)
-    fresh_vault = not kb.exists()
-    if kb.exists() and not force:
+    if not fresh_vault and not force:
         raise FileExistsError(
             f"{kb} already exists. Pass force=True to overlay the scaffold "
             "(existing files are kept), or choose an empty vault."
@@ -362,31 +437,33 @@ def init_vault(
     from . import package_skills, workflow_contracts
 
     workflow_contracts.ensure_migration_marker(vault_root)
-    folders, files = _scaffold_plan(vault_root)
+    folders, files = _scaffold_plan(vault_root, chosen)
     for folder in folders:
         folder.mkdir(parents=True, exist_ok=True)
     for src, dest in files:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() and (not force or dest == kb / "Entities" / "index.md"):
+        if dest.exists() and (not force or dest == kb / _entity_area(chosen) / "index.md"):
             continue
         package_skills.copy_shipped_file(src, dest)
         created.append(dest.relative_to(vault_root).as_posix())
 
-    for folder in _area_folders():
+    for folder in _area_folders(chosen, vault_root):
         (kb / folder).mkdir(parents=True, exist_ok=True)
 
     entity_registry = load_entity_types(vault_root)
     if extension_registry_path(vault_root).is_file():
         for definition in entity_registry.extensions.values():
             if definition.status == "active":
-                (kb / _entity_area() / definition.folder).mkdir(parents=True, exist_ok=True)
+                (kb / _entity_area(chosen) / definition.folder).mkdir(parents=True, exist_ok=True)
 
-    entity_index = kb / _entity_area() / "index.md"
+    entity_index = kb / _entity_area(chosen) / "index.md"
     if entity_index.is_file():
         current = entity_index.read_text(encoding="utf-8")
         refreshed = indexes._refresh_entities_subindex_text(
             current,
-            counts_by_type=indexes._count_entities(kb / _entity_area(), registry=entity_registry),
+            counts_by_type=indexes._count_entities(
+                kb / _entity_area(chosen), registry=entity_registry, vault_root=vault_root
+            ),
             registry=entity_registry,
         )
         refreshed = render_wikilinks_for_vault(refreshed, vault_root)
@@ -412,7 +489,7 @@ def init_vault(
             authority=authority,
         )
 
-    return {"vault": str(vault_root), "kb": str(kb), "created": created}
+    return {"vault": str(vault_root), "kb": str(kb), "created": created, "layout": chosen.value}
 
 
 def reclaim_legacy_shipped_schema(vault_root: Path, *, apply: bool = False) -> dict:

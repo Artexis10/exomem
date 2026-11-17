@@ -620,7 +620,7 @@ class ExomemBackend:
                 "choose 'Use an existing vault' to connect to it, pick an empty "
                 "folder, or overlay an incomplete scaffold with `exomem init --force`",
             ) from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, cli_ops.OpError) as exc:
             raise BackendError.from_exception(exc) from exc
 
     def install_hooks(self) -> dict:

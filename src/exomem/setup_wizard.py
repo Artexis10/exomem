@@ -36,6 +36,7 @@ from . import install_skill as install_module
 from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
+from .cli_ops import OpError
 from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
@@ -793,6 +794,10 @@ def run_setup(
                 else "; shipped schema already current"
             )
             report("init", f"[skipped: {managed_join('')} already exists]{suffix}")
+    except OpError as error:
+        # A vault that init cannot create or read (a name it would create, a layout it cannot read)
+        # is a failed step with its remedy; the steps after it name the missing vault themselves.
+        report("init", f"[failed: {error.message} {error.remediation}]")
 
     # 3b. packs — product guidance for fresh vaults and suggested routes for existing vaults
     try:

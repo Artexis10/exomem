@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import client_config, prominence, setup_wizard
+from exomem import client_config, init, layout, prominence, setup_wizard
 from exomem.__main__ import main
 
 
@@ -246,6 +246,37 @@ def test_setup_generates_access_policy(tmp_path: Path) -> None:
     code2, out2 = _setup(vault, home, Recorder(results={"mcp add": (1, "", "already exists")}))
     assert code2 == 0
     assert "[skipped: no sibling folders need governing]" in out2
+
+
+def test_setup_makes_a_root_vault_and_governs_only_the_entries_beside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wizard took `Knowledge Base/` as the only managed folder, so in `root` it write-protected every area."""
+    monkeypatch.setattr(init, "NEW_VAULT_LAYOUT", layout.Layout.ROOT)
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+
+    code, _out = _setup(vault, home, Recorder())
+
+    assert code == 0
+    assert layout.read_record(vault).unmanaged == ("Daily", "floating.md")
+    policy = (vault / "_access.yaml").read_text(encoding="utf-8")
+    assert "Daily" in policy and "Insights" not in policy and "_Schema" not in policy
+
+
+def test_setup_reports_a_folder_that_init_cannot_make_a_root_vault_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(init, "NEW_VAULT_LAYOUT", layout.Layout.ROOT)
+    vault, home = tmp_path / "vault", tmp_path / "home"
+    (vault / "Sources").mkdir(parents=True)
+    (vault / "Sources" / "clip.md").write_text("clip\n", encoding="utf-8")
+
+    code, out = _setup(vault, home, Recorder())
+
+    assert code == 1
+    assert "Traceback" not in out
+    assert "init: [failed:" in out and "--layout nested" in out
+    assert not (vault / "_Schema").exists()
 
 
 def test_setup_skips_registration_when_exomem_exists_in_another_scope(tmp_path: Path) -> None:

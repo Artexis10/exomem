@@ -55,7 +55,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import semantic_authoring
-from .kbdir import managed_join, managed_root_rel
+from .kbdir import Layout, managed_join, managed_root_rel
 
 
 def _module_available(name: str) -> bool:
@@ -3362,6 +3362,12 @@ def _init_main(argv: list[str]) -> int:
         action="store_true",
         help=f"Overlay the scaffold even if {managed_join('')} exists (existing files kept).",
     )
+    parser.add_argument(
+        "--layout",
+        choices=[layout.value for layout in Layout],
+        help="Layout of a new vault (default: root, the vault root is the managed root). A vault "
+        "that exists keeps its layout.",
+    )
     args = parser.parse_args(argv)
 
     from . import init as init_module
@@ -3371,19 +3377,21 @@ def _init_main(argv: list[str]) -> int:
     vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH") or "."
     cli_fence.require("init", Path(vault))
     try:
-        report = init_module.init_vault(Path(vault), force=args.force)
+        report = init_module.init_vault(Path(vault), force=args.force, vault_layout=args.layout)
     except FileExistsError as e:
         print(f"exomem init: {e}", file=sys.stderr)
         return 1
     except OpError as error:
         print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
-    print(f"Initialized {managed_root_rel()} at {report['kb']}")
+    # In `root` the managed root is the vault root, which has no folder name to print.
+    label = "vault" if report["layout"] == Layout.ROOT else managed_root_rel()
+    print(f"Initialized {label} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
-        f"  2. Install the Exomem {managed_root_rel()} skill so Claude knows how to use it: "
+        f"  2. Install the Exomem {label} skill so Claude knows how to use it: "
         "python -m exomem install-skill"
     )
     print(f"  3. Adapt {managed_join('_Schema/project-keys.yaml')} to your own projects.")

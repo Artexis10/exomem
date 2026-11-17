@@ -25,7 +25,7 @@ import yaml
 
 from . import access as access_module
 from . import overview as overview_module
-from .kbdir import is_managed_root_name, managed_join, managed_root
+from .kbdir import is_in_managed_root, managed_join, managed_root
 from .vault_store import cli_fence
 
 # Classification of a top-level sibling folder.
@@ -116,7 +116,9 @@ def _sibling_signals(scan: dict) -> dict[str, dict]:
         if entry.get("depth") != 1:
             continue
         name = entry.get("path", "")
-        if not name or is_managed_root_name(name):
+        # A sibling sits beside the managed root: in `root` that is an entry the layout record lists as
+        # unmanaged, never an area, which a policy would write-protect.
+        if not name or is_in_managed_root(name):
             continue
         junk_count = sum(1 for jp in junk_paths if jp == name or jp.startswith(name + "/"))
         signals[name] = {
