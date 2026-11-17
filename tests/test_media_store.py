@@ -4462,6 +4462,30 @@ def test_a_page_stays_editable_after_its_deleted_originals_trash_entry_is_remove
     assert "second note" in (vault / page).read_text(encoding="utf-8")
 
 
+def test_a_page_stays_editable_and_deleted_after_a_compatibility_export_invalidates_its_originals_witness(
+        vault: Path, selected_store):
+    """Catches an edit refused with a raw VOCABULARY_AUXILIARY_CHANGED, because the batch rewrote the page that the
+    edit had bound to drop a backlink, after a compatibility export invalidated the deleted original's witness."""
+    from test_vault_store_media import offloaded
+
+    from exomem import delete_file, edit, trash_metadata
+    from exomem.vault import parse_frontmatter
+
+    original = "Knowledge Base/Notes/Media/exported.txt"
+    offloaded(vault, original)
+    trashed = delete_file.delete_file(vault, path=original, confirm=True)
+    metadata = trashed.trash_path + trash_metadata.METADATA_SUFFIX
+    (vault / metadata).write_bytes(trash_metadata.without_retirement(vault, metadata))
+    page = f"{original}.md"
+
+    edit.edit(vault, path=page, why="note an observation", old_string="extracted text", new_string="a later note")
+
+    fields, body, _marker = parse_frontmatter((vault / page).read_text(encoding="utf-8"))
+    assert "a later note" in body
+    assert fields["original_retirement_meta"] == metadata  # The original stays deleted: its page keeps the record.
+    assert originals.original_state(vault, original).state == "missing"
+
+
 def test_an_archive_that_has_trashed_a_page_takes_writes_while_its_reserved_identity_catalogue_is_unavailable(
         vault: Path, monkeypatch):
     """Catches every write in an archive with a Trash folder refusing while the reserved identity catalogue cannot

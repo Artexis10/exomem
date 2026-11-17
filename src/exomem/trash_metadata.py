@@ -195,8 +195,9 @@ def _matches_retirement_fields(fields: dict[str, object], metadata: str, digest:
 def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list[PlannedWrite]:
     """Carry exact retirement edits, or invalidate before a new original can reuse its source path.
 
-    The reciprocal companion backlink makes lookup bounded and independent of derived state. A page write whose
-    backlink the batch ends goes without it (`withdraw_ended_backlinks`).
+    The reciprocal companion backlink makes lookup bounded and independent of derived state. A batch that writes a
+    new original and its page ends the deletion, so that page goes without its backlink (`withdraw_ended_backlinks`);
+    any other page write keeps its bytes.
     """
     writes = list(writes)
     updates, ended = _binding_changes(vault, writes)
@@ -206,9 +207,9 @@ def prepare_binding_changes(vault: Path, writes: Iterable[PlannedWrite]) -> list
 def withdraw_ended_backlinks(vault: Path, writes: Iterable[PlannedWrite]) -> tuple[PlannedWrite, ...]:
     """The batch's writes, each page without a backlink that the batch ends, for a caller that binds page bytes first.
 
-    A backlink is the one record of a deletion that survives an emptied Trash entry, so a page keeps it only while
-    its metadata is gone or holds a witness that the batch keeps. The batch withdraws the same backlinks itself, so
-    a caller that publishes a catalogue of the page bytes takes them from here first and the two agree.
+    A backlink is the one record of a deletion that survives an emptied Trash entry, so a page loses it only in the
+    batch that writes a new original at its source. The batch withdraws the same backlinks itself, so a caller that
+    publishes a catalogue of the page bytes takes them from here first and the two agree.
     """
     writes = list(writes)
     if not any(_backlink(_companion_fields(write.content)) for write in writes
@@ -284,9 +285,7 @@ def _binding_changes(vault: Path, writes: list[PlannedWrite]) -> tuple[dict[str,
                     continue  # An emptied Trash entry leaves no witness, and its backlink keeps the page deleted.
                 value = fields.get("original_retirement")
                 if value is None:
-                    if path in incoming and _backlink(after_fields) == metadata:
-                        ended.add(path)  # An invalidated witness left this backlink, which an emptied entry would revive.
-                    continue
+                    continue  # A compatibility export invalidated this witness, and its original stays deleted.
                 proof = _retirement(value, root=metadata[:-len(METADATA_SUFFIX)], origin=fields.get("original_path"))
                 if path != proof.companion:
                     continue  # A forged locator never supplies mutation authority over another filing.
@@ -312,8 +311,8 @@ def _binding_changes(vault: Path, writes: list[PlannedWrite]) -> tuple[dict[str,
                     value["after"] = content_hash(after)
                 else:
                     fields.pop("original_retirement")
-                    if path in incoming and _backlink(after_fields) == metadata:
-                        ended.add(path)
+                    if proof.source.path in incoming and path in incoming and _backlink(after_fields) == metadata:
+                        ended.add(path)  # A new original ends the deletion, so its page no longer names it.
                 if metadata in incoming or metadata in updates:
                     raise ValueError("one batch contains conflicting Trash placement changes")
                 updates[metadata] = PlannedWrite(vault / metadata, json.dumps(fields, indent=2), expected_hash=content_hash(text))
