@@ -2768,7 +2768,7 @@ def signature_evidence(
     if not band_audience_allowed(index.vault_root):
         return {}, "audience_restricted", None
     try:
-        from . import embeddings, ranking_config, readiness, runtime_resources
+        from . import embeddings, ranking_config, readiness, runtime_resources, working_set_runtime
 
         if readiness.should_defer("embeddings"):
             return {}, "warming", None
@@ -2789,6 +2789,8 @@ def signature_evidence(
             return {}, "busy", None
         if query_vector is None:
             return {}, "unavailable", None
+        # The domain profile selection reads this vector in the same request instead of encoding the turn again.
+        working_set_runtime.remember_turn_vector(turn, query_vector)
         bands, state = working_set_resolve.matrix_bands(ids, matrix, query_vector, config)
         return bands, state, query_vector
     except Exception:  # noqa: BLE001 - optional scorer failure is explicit
@@ -3442,7 +3444,7 @@ def _resident_vector_paths(
     """
     import numpy as np
 
-    from . import embeddings, ranking_config, readiness, recall_space
+    from . import embeddings, ranking_config, readiness, recall_space, working_set_runtime
 
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return [], "off"
@@ -3478,6 +3480,9 @@ def _resident_vector_paths(
         norm = float(np.linalg.norm(query))
         if norm == 0.0:
             return [], "lane_failed"
+        # The slice encodes nothing on a small catalogue, so the profile selection reads this vector instead of
+        # encoding the same turn again.
+        working_set_runtime.remember_turn_vector(text, query)
         stale = resident.stale_paths or ()
         # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing.
         rows = np.fromiter(

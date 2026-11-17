@@ -5232,6 +5232,20 @@ def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     LexicalStore._ensure_fts_schema(conn)
 
 
+def stamp_catalogue_schema(conn: sqlite3.Connection) -> None:
+    """Record on ``conn`` that every page row was derived under this build's schema (caller owns the txn).
+
+    The counterpart of ``create_catalogue_schema``, which stamps nothing: store mode's owner pass
+    calls it once its rows cover every page, because ``_schema_is_current`` reads the stamp on the
+    store's connection and a store that migration copied from an older sidecar still carries that one.
+    """
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(SCHEMA_VERSION),),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticUnitRow:
     """One `semantic_units` row keyed by column, and the text `unit_fts` indexes for it."""

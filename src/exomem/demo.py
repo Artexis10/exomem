@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .vault_store import cli_fence
+
 SAMPLE_VAULT = Path(__file__).resolve().parent / "_sample_vault"
 TARGET_PATH = "Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md"
 
@@ -250,6 +252,8 @@ def main(argv: list[str]) -> int:
         "(the checks are sample-specific — this is not for your own vault)",
     )
     args = parser.parse_args(argv)
+    if args.vault:
+        cli_fence.require("demo", Path(args.vault).expanduser())
     # Human output uses em-dashes; a redirected legacy-codepage Windows stdout
     # must degrade to replacement chars, never a UnicodeEncodeError mid-demo.
     try:

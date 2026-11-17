@@ -757,13 +757,14 @@ def drain_vocabulary_recovery(
     stops as soon as a pass processes nothing, when the projection never becomes
     current, or when the runtime shuts down. Returns the number of jobs drained.
     """
-    from . import graph_sync, vocabulary_delivery
+    from . import vocabulary_delivery
     from .governance.principal import library_scope
+    from .vault_store import graph_state
 
     deadline = time.monotonic() + wait_seconds
     while not shutdown.is_set():
         try:
-            current = graph_sync.status(vault_root)["state"] == "current"
+            current = graph_state.is_current(vault_root)
         except Exception:  # noqa: BLE001 - a background drain never breaks activation
             current = False
         if current:

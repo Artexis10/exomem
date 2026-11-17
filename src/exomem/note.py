@@ -2235,6 +2235,8 @@ def note(
             source=source,
         )
     try:
+        if not validate_only:
+            semantic_writes.require_profile_preview(root, note_type, previewed=draft_hash is not None)
         preflight = semantic_writes.preflight_creation(
             root,
             path=destination,

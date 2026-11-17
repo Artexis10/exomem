@@ -1,6 +1,6 @@
 # Page Types
 
-Nine page types in the Knowledge Base. Each has a required location, naming
+The page types in the Knowledge Base. Each has a required location, naming
 convention, and content shape. See `frontmatter.md` for the YAML spec per type.
 
 For every active compiled-note type below, the fenced content shape includes a
@@ -285,6 +285,39 @@ Situations where this procedure does not apply, such as a hotfix.
 ## Relations
 
 - depends_on [[...]]
+```
+
+## profile
+
+**Location:** `Notes/Profiles/`
+**Naming:** `<domain>.md` for a domain profile, `global.md` for the global profile.
+**Required frontmatter:** `type: profile`, `status`, `created`, `updated`. A domain profile has exactly one `topics` entry. The global profile has none.
+
+A profile holds the owner's standing preferences, one short confirmed line each, and links the
+long note that holds the detail. A governed write to it needs the proof of its preview; read
+[profiles](profiles.md) before seeding or changing one.
+
+**Content shape:**
+
+```markdown
+---
+type: profile
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+topics: [games]
+---
+
+# Games
+
+## Observations
+
+- [rule] Prefer tactical play over luck.
+- [rule] Keep sessions under two hours.
+
+## Relations
+
+- derived_from [[Notes/Insights/how-i-play]]
 ```
 
 ## experiment

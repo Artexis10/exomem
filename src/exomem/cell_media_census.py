@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from . import media_drain_record
+from .vault_store import cli_fence
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,8 +21,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     args = parser.parse_args(argv)
     try:
+        cli_fence.require("cell-media-census", args.vault)
         line = media_drain_record.read(args.vault)
-    except media_drain_record.RecordUnreadable as error:
+    except (media_drain_record.RecordUnreadable, cli_fence.StoreFenceRefusal) as error:
+        # A refused store-mode vault reports the same unknown count as an unreadable record: it reports no number.
         print("unknown unknown")
         print(error, file=sys.stderr)
         return 1

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    activation,
     call_spans,
     episode_capture,
     find_corpus,
@@ -60,7 +61,8 @@ log = logging.getLogger(__name__)
 #: 2: titles and descriptions are stored without their wikilinks.
 #: 3: the raw boolean stance mark narrows global-unit reads without a corpus walk.
 #: 4: a skill page stores its frontmatter name and its authored description, so skill rows rebuild.
-SCHEMA_VERSION = 4
+#: 5: a page of a profile note type carries a marker, so profile serving reads no corpus walk.
+SCHEMA_VERSION = 5
 SIDECAR_NAME = ".context-catalogue.sqlite"
 
 # The catalogue's entry kinds. A closed set the schema declares; topics are the
@@ -150,6 +152,8 @@ class Entry:
     stance: bool = False
     #: The frontmatter `name` of an Agent Skills page (`vault_skills.recognise`), empty for any other page.
     skill: str = ""
+    #: Whether the page's note type is a profile type. Which domain it covers is read from `topics` when served.
+    profile: bool = False
 
     def digest(self) -> str:
         """Identity of everything this entry stores, to diff a stored row without loading it."""
@@ -158,7 +162,7 @@ class Entry:
                 self.kind, self.anchor_kind, self.path, self.ref, self.title, self.description,
                 self.description_origin, self.status, self.lifecycle_class, self.activity,
                 self.thread_key, self.thread_order, self.source_signature,
-                self.topics, self.projects, self.sources, self.tags, self.stance, self.skill,
+                self.topics, self.projects, self.sources, self.tags, self.stance, self.skill, self.profile,
             ],
             separators=(",", ":"),
         )
@@ -283,6 +287,7 @@ class ContextCatalogue:
                 source_signature TEXT NOT NULL,
                 stance INTEGER NOT NULL DEFAULT 0,
                 skill TEXT NOT NULL DEFAULT '',
+                profile INTEGER NOT NULL DEFAULT 0,
                 entry_digest TEXT NOT NULL
             )
             """
@@ -292,9 +297,12 @@ class ContextCatalogue:
             conn.execute("ALTER TABLE entries ADD COLUMN stance INTEGER NOT NULL DEFAULT 0")
         if "skill" not in columns:
             conn.execute("ALTER TABLE entries ADD COLUMN skill TEXT NOT NULL DEFAULT ''")
+        if "profile" not in columns:
+            conn.execute("ALTER TABLE entries ADD COLUMN profile INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS entries_thread ON entries(thread_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS entries_stance ON entries(stance) WHERE stance = 1")
         conn.execute("CREATE INDEX IF NOT EXISTS entries_skill ON entries(skill) WHERE skill != ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS entries_profile ON entries(profile) WHERE profile = 1")
         for table, column in (
             ("declared_topics_raw", "raw"),
             ("entry_projects", "project_key"),
@@ -409,6 +417,31 @@ class ContextCatalogue:
         """Only the entries recognised as skill pages, without loading declarations."""
         conn = self._connect()
         return [] if conn is None else [row[0] for row in conn.execute("SELECT entry_id FROM entries WHERE skill != ''")]
+
+    def profile_ids(self) -> list[str]:
+        """Only the entries of a profile note type, without loading declarations."""
+        conn = self._connect()
+        return [] if conn is None else [row[0] for row in conn.execute("SELECT entry_id FROM entries WHERE profile = 1")]
+
+    def paths_declaring(self, accepts: Callable[[str], bool]) -> set[str] | None:
+        """The paths of the entries whose own `topics` declare a value that `accepts` takes; None when unreadable.
+
+        Both reads use the `raw` index: the distinct declared values, then the entries of the accepted ones.
+        """
+        conn = self._connect()
+        if conn is None:
+            return None
+        declared = (str(row[0]) for row in conn.execute("SELECT DISTINCT raw FROM declared_topics_raw"))
+        values = [value for value in declared if accepts(value)]
+        paths: set[str] = set()
+        for start in range(0, len(values), SQL_VARIABLE_CHUNK):
+            chunk = values[start : start + SQL_VARIABLE_CHUNK]
+            paths.update(str(row[0]) for row in conn.execute(
+                "SELECT e.path FROM declared_topics_raw t JOIN entries e ON e.entry_id = t.entry_id "
+                f"WHERE t.raw IN ({', '.join('?' * len(chunk))})",
+                chunk,
+            ))
+        return paths
 
     def reached_ids(self, kind: str, match: str) -> list[str]:
         """The ids of the entries one carrier reaches: a project key, a folder (by `folder_reaches`) or a tag form."""
@@ -723,6 +756,7 @@ class ContextCatalogue:
 _ENTRY_COLUMNS = (
     "entry_id", "kind", "anchor_kind", "path", "ref", "title", "description", "description_origin",
     "status", "lifecycle_class", "activity", "thread_key", "thread_order", "source_signature", "stance", "skill",
+    "profile",
 )
 
 
@@ -779,6 +813,7 @@ def _load(
     for row in rows:
         values = dict(zip(columns, row, strict=True))
         values["stance"] = bool(values["stance"])
+        values["profile"] = bool(values["profile"])
         entry_id = values["entry_id"]
         out.append(
             Entry(
@@ -815,6 +850,7 @@ class _Fold:
         #: a page that a file answers for.
         self.signatures: dict[str, freshness.FileSignature | None] = {}
         self.basis = lifecycle_statuses.Basis(vault_root)
+        self.types = note_types.Basis(vault_root)
         index = working_set_index.WorkingSetIndex(vault_root)
         self.activation_token = index.token()
         anchors = index.anchors()
@@ -1139,6 +1175,7 @@ class _Fold:
             tags=_tags(frontmatter.get("tags")),
             stance=frontmatter.get("stance") is True,
             skill=skill.name if skill else "",
+            profile=self.types.selects(activation.normalized_page_type(frontmatter.get("type")), note_types.profile),
         )
 
     def _mirror_other_anchors(self) -> None:

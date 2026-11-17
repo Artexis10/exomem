@@ -11,7 +11,6 @@ import gzip
 import hashlib
 import io
 import os
-import shlex
 import shutil
 import tarfile
 import types
@@ -21,6 +20,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from _curl_send import curl_request
 from fastmcp import Client, FastMCP
 from test_adoption_paging import PDF
 
@@ -99,29 +99,12 @@ class _Agent:
         return result.structured_content
 
     async def send(self, step: dict, archive: bytes) -> httpx.Response:
-        """Run the reply's `send` line: its headers, form fields and URL, with `<archive>` replaced by a real file."""
+        """Run the reply's `send` line with `<token>` and `<archive>` filled in, as its text tells the agent."""
         path = self.scratch / "archive.bin"
         path.write_bytes(archive)
-        words = iter(shlex.split(step["next"][0]["shell"].replace("<archive>", str(path))))
-        assert next(words) == "curl"
-        headers: dict[str, str] = {}
-        fields: dict[str, str] = {}
-        files: dict[str, tuple[str, bytes, str]] = {}
-        url = ""
-        for word in words:
-            if word == "-H":
-                name, _, value = next(words).partition(": ")
-                headers[name] = value
-            elif word == "-F":
-                name, _, value = next(words).partition("=")
-                if value.startswith("@"):
-                    files[name] = (path.name, Path(value[1:]).read_bytes(), "application/octet-stream")
-                else:
-                    fields[name] = value
-            elif word != "-sS":
-                url = word
+        url, request = curl_request(step["next"][0]["shell"], token=step["token"], archive=str(path))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.receiver)) as http:
-            return await http.post(url, headers=headers, data=fields, files=files)
+            return await http.post(url, **request)
 
     async def file(self, client: Client, **arguments) -> dict:
         """One `imports.file` call under its own idempotency key; returns the reply, or `{"refused": "CODE: message"}`."""

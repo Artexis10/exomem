@@ -33,7 +33,8 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -44,10 +45,12 @@ from . import (
     capabilities,
     context_catalogue,
     context_roles,
+    domain_profiles,
     find_types,
     foreground_priority,
     homes,
     lifecycle_statuses,
+    profile_selection,
     project_keys,
     skills_context,
     source_taxonomy,
@@ -1265,6 +1268,7 @@ def activation_packet(
     task_context: Callable[..., dict[str, Any]] | None = None,
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
+    known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1283,19 +1287,28 @@ def activation_packet(
     `native_skills` names the skills the caller loads itself; the skills block omits them. `known_skills` is the
     skills generation the caller holds: the block repeats no item when it is still current. The block has its own
     bound and takes nothing from `max_chars`. `known_stance` does the same for the stance block.
+
+    `known_profiles` maps each domain whose profile the caller holds to the generation it holds. `turn` is the
+    request's turn: the domain profiles block selects the profiles that it touches, from the turn vector the
+    slice already encoded and from one keyword query, and repeats no held profile. The block has its own bound
+    that takes nothing from `max_chars`. `snapshot` is the request's freshness snapshot: the keyword query reads the
+    lexical catalogue at its pinned checkpoint, as the turn slice does, and walks no vault. Without one it does not run.
     """
-    if purpose is not None:
-        with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
-            return _activation_packet(
-                vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
-                packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
-                native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
-            )
-    return _activation_packet(
-        vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
-        packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
-        native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
-    )
+    with working_set_runtime.turn_vector_scope():
+        if purpose is not None:
+            with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
+                return _activation_packet(
+                    vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
+                    packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
+                    native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
+                    known_profiles=known_profiles, turn=turn, snapshot=snapshot,
+                )
+        return _activation_packet(
+            vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
+            packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
+            native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
+            known_profiles=known_profiles, turn=turn, snapshot=snapshot,
+        )
 
 
 def _activation_packet(
@@ -1306,6 +1319,7 @@ def _activation_packet(
     task_context: Callable[..., dict[str, Any]] | None = None,
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
+    known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1433,12 +1447,50 @@ def _activation_packet(
                 prepare_slice()
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
+        if domain_profiles.enabled():
+            # Compiled after the slice and the task context, which encode the turn when they run; the selection
+            # reads the vector either one held. Its own bound neither reduces `max_chars` nor counts in `used_chars`,
+            # so the profiles never cut the map or the leads.
+            with find_types.timing_span(timings, "working_set.profiles"):
+                if working_set.budget_exhausted("working_set.profiles"):
+                    # The request cannot afford the selection's two reads: the profiles are unknown, not absent.
+                    packet["domain_profiles"] = domain_profiles._empty("unavailable")  # noqa: SLF001
+                else:
+                    try:
+                        with _profile_keyword_basis(root, caller, purpose, snapshot) as lexical:
+                            packet["domain_profiles"] = domain_profiles.compile_block(
+                                root, caller, turn=turn, turn_vector=working_set_runtime.remembered_turn_vector(turn),
+                                catalogue=catalogue, known_generations=known_profiles, lexical=lexical,
+                            )
+                    except Exception:  # noqa: BLE001 - optional profiles must leave the map, stance, skills and turn context available
+                        log.warning("domain profiles unavailable", exc_info=True)
+                        packet["domain_profiles"] = domain_profiles._empty("unavailable")  # noqa: SLF001
         packet["abstained"] = False
         packet.pop("abstention", None)
         return packet
     finally:
         if catalogue is not None:
             catalogue.close()
+
+
+@contextmanager
+def _profile_keyword_basis(
+    root: Path, caller: CallerView, purpose: str | None, snapshot: Any,
+) -> Iterator[profile_selection.LexicalBasis | None]:
+    """The checkpoint the profile keyword query reads at: the request's, entered as the turn slice enters it.
+
+    Both read the catalogue at `snapshot`'s lexical checkpoint, which the slice pinned for a restricted caller whose
+    catalogue trails only by pages it may not see. No second snapshot is taken and nothing walks the vault. A
+    request with no snapshot yields None, and the keyword query does not run.
+    """
+    if snapshot is None:
+        yield None
+        return
+    with working_set_runtime.lexical_selection_scope(
+        root, snapshot.lexical_checkpoint("kb"), restricted=caller.restricted, purpose=purpose,
+    ) as checkpoint:
+        view = snapshot.lexical_view("kb", checkpoint)
+        yield profile_selection.LexicalBasis(view.for_scope("kb"), view.lexical_checkpoint("kb"))
 
 
 # --------------------------------------------------------------------------- #

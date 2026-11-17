@@ -69,6 +69,8 @@ roles:
   preferences:
     description: Stated inclinations that should shape a recommendation.
     lane: units
+    # Profile curation reads new units of these categories (a vault adds its own through its overlay).
+    projection: curation
     categories: [preference]
     anchor_defaults: [entity, project]
     cues: ["prefer", "i like", "i hate", "usually", "i'd rather"]
@@ -78,6 +80,7 @@ roles:
   constraints:
     description: Limits, requirements and assumptions that bound what is allowed.
     lane: units
+    projection: curation
     categories: [constraint, requirement, assumption]
     anchor_defaults: [resource, project, plan]
     cues: ["constraint", "limit", "allowed to", "can i", "am i able", "budget"]
