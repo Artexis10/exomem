@@ -55,6 +55,7 @@ from .held_fs import vault_name_key
 from .kbdir import (
     IMPORT_STAGE_DIRNAME,
     Layout,
+    holds_managed_path,
     is_managed_root_name,
     managed_form,
     managed_join,
@@ -7285,18 +7286,14 @@ def resolve_under_vault(
     if not stored:
         candidate = vault_root / rel
 
-    if must_be_under_kb:
-        kb_resolved = managed_root(vault_root).resolve()
-        try:
-            resolved.relative_to(kb_resolved)
-        except ValueError:
-            raise VaultPathError(
-                code="INVALID_PATH",
-                reason=(
-                    f"path is outside Knowledge Base/: {raw!r} — exomem only "
-                    "writes governed content under Knowledge Base/"
-                ),
-            ) from None
+    if must_be_under_kb and not holds_managed_path(vault_root, resolved):
+        raise VaultPathError(
+            code="INVALID_PATH",
+            reason=(
+                f"path is outside Knowledge Base/: {raw!r} — exomem only "
+                "writes governed content under Knowledge Base/"
+            ),
+        )
 
     if refuse_withheld:
         admit_write_target(vault_root, rel, resolved)

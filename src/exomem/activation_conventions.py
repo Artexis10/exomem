@@ -46,7 +46,7 @@ from typing import Any
 import yaml
 
 from . import registry_history, vault
-from .kbdir import is_managed_root_name, managed_root
+from .kbdir import Layout, is_managed_root_name, managed_root
 
 log = logging.getLogger(__name__)
 
@@ -581,7 +581,9 @@ def _validate_folder_rule(raw: str) -> tuple[str | None, str | None]:
     if any(segment.startswith(".") or segment.startswith("_") for segment in segments):
         return None, "rule_hidden_segment"
     head = segments[0]
-    if is_managed_root_name(head, key=str.casefold):
+    # A rule is managed-root-relative, so one that leads with the wrapper's name matches no page. A `root`
+    # vault has no wrapper, and the bound layout would let a rule copied from a `nested` vault sit dead.
+    if is_managed_root_name(head, key=str.casefold, layout=Layout.NESTED):
         return None, "rule_kb_prefixed"
     if head.casefold() == "entities":
         return None, "rule_entity_folder"

@@ -113,7 +113,11 @@ def _outside_root(
 
 
 def outside_managed_root(
-    name: str, *, layout: Layout | str | None = None, unmanaged: Collection[str] | None = None
+    name: str,
+    *,
+    key: Callable[[str], str] | None = None,
+    layout: Layout | str | None = None,
+    unmanaged: Collection[str] | None = None,
 ) -> bool:
     """Whether the top-level entry ``name`` of the managed root's folder is not managed content.
 
@@ -122,10 +126,10 @@ def outside_managed_root(
     so it answers False. In `root` the managed root is the vault root, and the entries that
     ``managed_split`` puts outside it (dot names, the import staging folder, the layout record's
     ``unmanaged`` list) are the ones to leave out. It is a name test: a walk applies it to the entries
-    of the root's own listing only and takes no stat. Without ``layout`` and ``unmanaged`` it reads the
-    bound managed root.
+    of the root's own listing only and takes no stat. A ``key`` compares the names through it, as in
+    ``managed_split``. Without ``layout`` and ``unmanaged`` it reads the bound managed root.
     """
-    return _is_root(layout) and _outside_root(name, _unmanaged(layout, unmanaged), None)
+    return _is_root(layout) and _outside_root(name, _unmanaged(layout, unmanaged), key)
 
 
 def kb_dirname() -> str:
@@ -252,6 +256,21 @@ def is_in_managed_root(vault_rel: str, *, layout: Layout | str | None = None) ->
         return vault_rel in ("", ".") or managed_split(vault_rel, layout=layout) is not None
     name = kb_dirname()
     return vault_rel == name or vault_rel.startswith(name + "/")
+
+
+def holds_managed_path(vault_root: Path, resolved: Path) -> bool:
+    """Whether the resolved absolute path is the managed root or managed content below it.
+
+    The containment test of a governed writer. In ``nested`` it is "below the wrapper folder". In
+    ``root`` every path is below the vault root, so it also leaves out the entries that sit outside
+    the managed root (see ``managed_split``): the same spelling that names a file under the wrapper
+    in ``nested`` names the shipped contract or an editor's settings there.
+    """
+    try:
+        below = resolved.relative_to(managed_root(vault_root).resolve())
+    except ValueError:
+        return False
+    return not below.parts or not outside_managed_root(below.parts[0], key=str.casefold)
 
 
 def managed_form(path: str, *, layout: Layout | str | None = None) -> str:

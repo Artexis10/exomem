@@ -59,6 +59,7 @@ from . import (
 from . import find as find_module
 from .cli_ops import OpError
 from .kbdir import (
+    holds_managed_path,
     kb_page_target,
     managed_join,
     managed_relative,
@@ -527,6 +528,8 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     try:
         resolved = candidate.resolve()
         kb_relative = resolved.relative_to(kb_root(vault_root).resolve())
+        if not holds_managed_path(vault_root, resolved):
+            raise ValueError(f"{resolved.name} is not managed content")
     except (ValueError, OSError) as e:
         raise EditError(
             code="INVALID_PATH",

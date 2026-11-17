@@ -39,6 +39,7 @@ from . import (
 )
 from . import note as note_module
 from .kbdir import (
+    holds_managed_path,
     kb_page_target,
     managed_form,
     managed_join,
@@ -362,6 +363,8 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
     try:
         resolved = candidate.resolve()
         resolved.relative_to(kb_root(vault_root).resolve())
+        if not holds_managed_path(vault_root, resolved):
+            raise ValueError(f"{resolved.name} is not managed content")
     except (ValueError, OSError) as e:
         raise ReplaceError(
             code="INVALID_PATH",
