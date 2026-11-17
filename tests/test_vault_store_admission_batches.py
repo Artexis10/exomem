@@ -41,6 +41,7 @@ from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import connector_boundary, egress, lifecycle, page_admission, policy
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.structured_collections import CollectionError
 from exomem.vault_store import ownership, read, write
 
 
@@ -636,20 +637,36 @@ OPEN_PAGE = "Knowledge Base/Notes/Open.md"
 HIDDEN_PAGE = "Knowledge Base/Notes/Hidden.md"
 BRIDGE_PAGE = "Knowledge Base/Notes/Bridge.md"
 EXTERNAL_AUDIT = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", purpose="audit")
-#: Each caller, the purpose its filter declares and whether the bound write's own authorization carries it,
-#: so that its set may be decided by scope class. A caller that the authorization does not carry is decided
-#: page by page, as the per-page chain refuses or withholds it.
+#: Each caller, the purpose its filter declares, and how the bound write answers a set for it: "class" when its
+#: authorization carries the caller and a set may be decided by scope class, "pages" when the caller is decided
+#: page by page (an authorization session, an unresolved principal), "refused" when the per-page chain refuses
+#: the caller outright, as it refuses a purpose that the write's own authorization does not hold.
 CALLERS = {
-    "owner": (owner_principal(surface="library"), None, True),
-    "external": (EXTERNAL, None, True),
-    "external with a purpose": (EXTERNAL_AUDIT, None, True),
+    "owner": (owner_principal(surface="library"), None, "class"),
+    "external": (EXTERNAL, None, "class"),
+    "external with a purpose": (EXTERNAL_AUDIT, None, "class"),
     "an authorization session": (
         RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", authorization_session_id="session-one"),
-        None, False,
+        None, "pages",
     ),
-    "an unresolved principal": (RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", resolved=False), None, False),
-    "a purpose the write does not hold": (EXTERNAL, "audit", False),
+    "an unresolved principal": (
+        RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", resolved=False), None, "pages",
+    ),
+    "a purpose the write does not hold": (EXTERNAL, "audit", "refused"),
 }
+def refusal(decide, *arguments):
+    """The refusal that ``decide`` raises, or None when it answers."""
+    try:
+        decide(*arguments)
+    except CollectionError as error:
+        return str(error)
+    return None
+
+
+def one_by_one(offered, paths):
+    return {path: offered.decide(path, True) for path in paths}
+
+
 STATES = (
     "an empty policy", "rules and a grant", "a tombstone", "a tombstone that fails closed",
     "a blocked policy", "stale facts",
@@ -709,14 +726,22 @@ def test_a_bound_set_decided_by_scope_class_answers_as_each_page_does_for_every_
     with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
         by_class = arrange_state(state, corpus, vault, handle, monkeypatch)
         with bound_to(vault, CollectionWriter(vault, handle)):
-            for label, (who, declared, carried) in CALLERS.items():
+            for label, (who, declared, route) in CALLERS.items():
                 with request_scope(who):
                     for make in (egress.restricted_release_filter, egress.visible_page_filter):
                         offered = published_admission.admission_of(make(vault, purpose=declared))
                         case = (state, label, make.__name__)
-                        expected = {path: offered.decide(path, True) for path in paths}
                         classed.clear()
-                        assert offered.decide_many(paths, True) == expected, case
-                        assert bool(classed) == (by_class and carried), (
+                        refused = None
+                        if route == "refused":
+                            refused = refusal(one_by_one, offered, paths)
+                            # No page reaches the refusal where every page is withheld before its decision.
+                            assert refused or state in ("a tombstone that fails closed", "a blocked policy"), case
+                        if refused:
+                            assert refusal(offered.decide_many, paths, True) == refused, case
+                            assert not classed, ("a refused caller's set stays per page", case)
+                            continue
+                        assert offered.decide_many(paths, True) == one_by_one(offered, paths), case
+                        assert bool(classed) == (by_class and route == "class"), (
                             "a set is decided by class exactly for a caller that the write carries", case,
                         )
