@@ -1,6 +1,6 @@
 """Adopt: read an existing folder of notes before deciding anything.
 
-Scan-only is the default and works before a Knowledge Base exists — it writes
+Scan-only is the default and works before a managed root exists — it writes
 nothing, which is why it can be the very first thing a cautious user does.
 Write modes are separate, confirmed steps that say what will be written and
 where; originals are never rewritten, because adoption is a governed overlay,

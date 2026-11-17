@@ -118,7 +118,7 @@ def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bo
 
 
 def _prune_identity_census_name(name: str, *, at_kb_root: bool) -> bool:
-    """``_prune_identity_census_directory`` for an entry of the Knowledge Base folder itself, or of
+    """``_prune_identity_census_directory`` for an entry of the managed root folder itself, or of
     a folder below it."""
     if vault.is_scan_skipped_runtime_name(name):
         return True
@@ -137,7 +137,7 @@ def _prune_identity_census_name(name: str, *, at_kb_root: bool) -> bool:
 
 
 def _reference_only_directory_names() -> tuple[str, ...]:
-    """Reserved Knowledge Base directories that the census prunes but the reference scan reads.
+    """Reserved managed root directories that the census prunes but the reference scan reads.
 
     `trash/` is the one such name today: the identity census never admits a
     page there, while `vault.in_excluded_scan_dir` keeps it, so the memory
@@ -2680,7 +2680,7 @@ def _corpus_census(root: Path) -> tuple | None:
             is_directory = child.is_dir(follow_symlinks=False)
             # Filter BEFORE the stat -- the half of #528 that fixed
             # `_build_identity_census` but never reached this mirror. The
-            # Knowledge Base root also holds SQLite's transient sidecars
+            # managed root also holds SQLite's transient sidecars
             # (`.embeddings.sqlite-wal`, `-shm`), created and dropped as
             # connections open and close. They are not census input, so
             # statting them bought nothing and cost a race: one vanishing
@@ -2940,7 +2940,7 @@ def _without_store_revision(entries: tuple) -> tuple:
 
 
 def _stored_identity_member(split: Callable[[str], str | None], rel: str) -> bool:
-    """Whether the identity census admits the stored page at ``rel``: a Knowledge Base Markdown page
+    """Whether the identity census admits the stored page at ``rel``: a managed root Markdown page
     that the walk's name rules, applied to each of its folder and file names, do not prune.
 
     ``split`` is ``managed_splitter()``, read once by a caller that judges many pages.
@@ -2956,7 +2956,7 @@ def _stored_identity_member(split: Callable[[str], str | None], rel: str) -> boo
 
 @functools.lru_cache(maxsize=4096)
 def _pruned_identity_folder(folder: str, _managed: tuple[str, tuple[str, ...]]) -> bool:
-    """Whether the identity census prunes a folder of the Knowledge Base ("" is the folder itself).
+    """Whether the identity census prunes a folder of the managed root ("" is the folder itself).
 
     A census judges each stored page by its folder, and many pages share a folder. The answer depends
     only on the folder and on the managed root's state, which the key carries (`kbdir.managed_state`).
@@ -4615,7 +4615,7 @@ def _build_identity_census(
                     "IDENTITY_CENSUS_ENTRY_UNREADABLE",
                     "could not inspect a stable-identity census entry",
                 ) from error
-            # Filter BEFORE the stat. The Knowledge Base root also holds
+            # Filter BEFORE the stat. The managed root also holds
             # SQLite's transient sidecars (`.embeddings.sqlite-shm`, `-wal`),
             # created and dropped as embedding connections open and close.
             # They are not census input, so statting them bought nothing and

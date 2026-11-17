@@ -1,6 +1,6 @@
-"""Filing an artifact member of a recorded stage by renaming it into the Knowledge Base (design D8, D12).
+"""Filing an artifact member of a recorded stage by renaming it into the managed root (design D8, D12).
 
-The stage and the Knowledge Base share a filesystem, so a rename files a member with no copy. The
+The stage and the managed root share a filesystem, so a rename files a member with no copy. The
 manifest identity proves that the staged file still holds the manifest's bytes without reading them.
 The rename never replaces a file. It happens before the Source page commits, and the page is the
 binary's sidecar, so the batch writer never lists the binary and its rollback cannot remove it.
@@ -17,13 +17,13 @@ from pathlib import Path
 
 from . import adoption_consume, adoption_plan, held_fs, import_stage, rename_journal
 
-#: The outcome code of a file that stays at its Knowledge Base path with no Source page.
+#: The outcome code of a file that stays at its managed root path with no Source page.
 UNBOUND = "ARTIFACT_UNBOUND"
 
 
 @dataclass(frozen=True, slots=True)
 class Placed:
-    """A member now at its Knowledge Base path, with its Source page still to commit."""
+    """A member now at its managed root path, with its Source page still to commit."""
 
     original_path: str
     artifact_path: str
@@ -112,7 +112,7 @@ def place(
     root: Path, filesystem: held_fs.HeldFilesystem, stage: import_stage.Stage, planned: dict, *,
     ceiling: int, inode: int,
 ) -> Placed | Refused | None:
-    """Rename the member's staged file to its Knowledge Base path; None when the copy route must file it.
+    """Rename the member's staged file to its managed root path; None when the copy route must file it.
 
     `inode` is the one the journal recorded for this member before the rename. The record is the caller's:
     this function neither writes nor releases it. A rename that fails across devices returns None.
@@ -189,7 +189,7 @@ def place_all(
 def settle(root: Path, stage: import_stage.Stage, planned: dict, *, ceiling: int) -> Placed | Refused | None:
     """Replay one member whose staged file is gone and whose Source page is not committed.
 
-    The binary at the Knowledge Base path is the member when its inode, size and mtime match the
+    The binary at the managed root path is the member when its inode, size and mtime match the
     manifest identity (the rename changed the ctime, so that is not compared). Otherwise it is hashed
     where it is, within the ceiling. A file that cannot be vouched for stays unbound at its path.
     Returns None when no such binary is there.

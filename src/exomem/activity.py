@@ -294,7 +294,7 @@ def _iso(value: dt.datetime) -> str:
 
 
 def note_count(vault_root: Path) -> int | None:
-    """Pages saved in the Knowledge Base, or `None` when the count is unknown.
+    """Pages saved in the managed root, or `None` when the count is unknown.
 
     Counted on every call, never cached: no token that every writer process
     advances can prove a cached count current, and a count older than a
@@ -304,7 +304,7 @@ def note_count(vault_root: Path) -> int | None:
 
 
 def _count_saved_pages(vault_root: Path) -> int | None:
-    """Every page the Knowledge Base corpus walk yields: sources, records kept
+    """Every page the managed root corpus walk yields: sources, records kept
     as pages, entities, evidence and compiled notes. Navigation pages and
     collection manifests are structure, not saved items. A walk that could not
     read part of the tree is unknown."""

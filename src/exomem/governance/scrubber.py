@@ -447,7 +447,7 @@ _CREDENTIAL_PATTERN = re.compile(
 #:
 #: - **Contiguous.** `-` and `_` are word separators, and `/` is a path
 #:   separator. A real API key is one unbroken run; a vault path
-#:   (`Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases`) and a
+#:   (`<managed root>/Notes/Patterns/kill-switch-for-risky-releases`) and a
 #:   kebab-case slug are separator-delimited. Including `/` in the token class
 #:   made whole path segments read as base64 and rewrote real vault paths.
 #: - **Mixed case + digits.** A single-case 32+ run is a hex hash or an

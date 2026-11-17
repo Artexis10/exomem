@@ -241,8 +241,8 @@ def categories(vault_root: Path, snapshot: Snapshot) -> Usage:
 
 
 def catalogue_axis(vault_root: Path, snapshot: Snapshot, *, column: str) -> Usage:
-    """Knowledge Base pages per source kind or domain, from the lexical catalogue."""
-    source = f"catalogue Knowledge Base pages by {column}"
+    """Managed pages per source kind or domain, from the lexical catalogue."""
+    source = f"catalogue managed pages by {column}"
 
     def read() -> Usage:
         from .. import lexstore

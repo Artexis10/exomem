@@ -108,7 +108,7 @@ def _ledger(path: Path) -> tuple[frozenset[str], frozenset[str]]:
 
 
 def _references(vault: Path) -> frozenset[tuple[str, str]]:
-    """Every stored reference that a companion under the Knowledge Base holds, Trash included.
+    """Every stored reference that a companion under the managed root holds, Trash included.
 
     The live census walks the held tree, which takes the writer lease and probes its root by writing to it. The
     Job's clone is read-only and no other process writes it, so this walk reads the tree directly and follows no

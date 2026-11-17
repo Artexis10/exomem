@@ -475,7 +475,7 @@ def platform_support() -> PlatformSupport:
 PROBE_ENTRY_PREFIX = ".exomem-held-probe-"
 #: The probe's own entry names: the prefix, its 32-hex token and an optional role suffix such
 #: as `-alias`. The probe briefly leaves symlink aliases in its root, which can lie inside the
-#: Knowledge Base, so vault scans skip these names and `reserved_paths` refuses writes under them.
+#: managed root, so vault scans skip these names and `reserved_paths` refuses writes under them.
 PROBE_ENTRY_RE = re.compile(rf"{re.escape(PROBE_ENTRY_PREFIX)}[0-9a-f]{{32}}(?:-[a-z]+)*", re.ASCII)
 
 

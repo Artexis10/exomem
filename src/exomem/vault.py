@@ -142,7 +142,7 @@ class UnparseableFilenameStyleError(InvalidSlugError):
 
 
 # Legacy hardcoded curated-tree list — now EMPTY by default. Curated /
-# read-only protection is governed per-subtree by `Knowledge Base/_access.yaml`
+# read-only protection is governed per-subtree by `<managed root>/_access.yaml`
 # (`readonly:` / `excluded:`), not by a hardcoded folder list: mark any subtree
 # read-only there and the write guards (see `access.writable_reason`) refuse
 # writes to it. Kept as an extension point — populate it to hard-code extra
@@ -298,10 +298,10 @@ def governed_frontmatter_reason(
 #:
 #: Per-vault configuration -- the YAML registries, `contracts/`,
 #: `relation-reviews/`, `private-skills/`, the activation manifest -- deliberately
-#: stays under `Knowledge Base/_Schema/`. It belongs to the user, it is small, and
+#: stays under `<managed root>/_Schema/`. It belongs to the user, it is small, and
 #: it is not markdown, so it is not what pollutes a note index.
 SHIPPED_SCHEMA_DIRNAME = ".exomem"
-#: The per-vault overlay under the Knowledge Base: YAML registries, contracts and private skills.
+#: The per-vault overlay under the managed root: YAML registries, contracts and private skills.
 #: Store mode owns it as pages (`vault_store.ownership`).
 SCHEMA_OVERLAY_DIRNAME = "_Schema"
 _SHIPPED_SCHEMA_SUBDIR = "schema"
@@ -309,7 +309,7 @@ _SCHEMA_SENTINEL = "SKILL.md"
 
 
 # Machinery and operational-state folders that no content walk enters, in the vault or in the
-# Knowledge Base corpus.
+# managed root corpus.
 #
 # `_Governance` and `_Adoption` are operational state, not knowledge: they name
 # items whose own disclosure decisions may be restrictive, so surfacing them as
@@ -353,7 +353,7 @@ def is_scan_skipped_runtime_name(name: str) -> bool:
 
     Batch workspaces, and the entries a held-filesystem capability probe briefly
     creates (symlink aliases included) in a root it tests, which can lie inside the
-    Knowledge Base. `reserved_paths` refuses writes under the probe's names.
+    managed root. `reserved_paths` refuses writes under the probe's names.
     """
     return name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES) or held_fs.is_probe_entry(name)
 _GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
@@ -441,7 +441,7 @@ def is_import_id(value: object) -> bool:
 def in_import_stage(rel_path: str) -> bool:
     """True when a vault-relative path is, or lies inside, a staged import `_Imports/<import_id>`.
 
-    A stage is transient input that adoption files into the Knowledge Base and then discards;
+    A stage is transient input that adoption files into the managed root and then discards;
     indexing it doubles every filed note and, after a large import lands offline, makes readiness
     wait on a whole-catalogue rebuild over the stage. Only the vault root holds stages, each under
     an import id, so a person's own `_Imports` folder elsewhere, or a named one at the root, stays
@@ -457,7 +457,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     The incremental-path counterpart of the exclusion every FULL walk applies
     (walk_vault_md, find's walker, the inbound scan): event-driven patchers
     must not index a path their index's full rebuild would skip. The concrete
-    bug this guards: `delete_file` moves a note into `Knowledge Base/_trash/`,
+    bug this guards: `delete_file` moves a note into `<managed root>/_trash/`,
     the watcher sees that as a fresh markdown file, and the trashed content
     gets re-embedded under its trash path — invisible to find (walks exclude
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
@@ -500,10 +500,10 @@ _HELD_LOCKS = threading.local()
 
 
 def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
-    """Return the Obsidian vault root that contains Knowledge Base/.
+    """Return the Obsidian vault root that contains the managed root.
 
     Resolved from the ``{env_var}`` environment variable — the vault *root*, i.e.
-    the folder that contains ``Knowledge Base/``. Raises if it is unset or does
+    the folder that contains the managed root. Raises if it is unset or does
     not point at a vault, or if the vault cannot say its layout (`layout.LayoutError`, which
     names the record to write). (This is cross-platform: there are no machine-specific
     fallback paths — every host sets the env var to its own vault.)
@@ -6369,7 +6369,7 @@ def _batch_atomic_write_locked(
     # still strictly before any canonical byte is replaced.
     #
     # Earlier is wrong even though the debt is known earlier. Opening the queue
-    # database creates `Knowledge Base/` when it does not exist, and a batch
+    # database creates the managed root when it does not exist, and a batch
     # that is creating that directory has already captured it as a *missing*
     # parent it will create itself, in order. Creating it first fails the
     # guard's own recheck with `missing guard ancestor appeared`, surfaced to
@@ -7280,7 +7280,7 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     `O_NOFOLLOW` guard in `hosted_transfer_routes._open_bounded_vault_file`.
     So the resolved form is adopted only when `is_casing_only_rewrite` says the
     sole difference from the caller's path is casing; otherwise `rel` comes
-    back untouched. A consequence: `Knowledge Base/../Knowledge Base/x.md` is
+    back untouched. A consequence: `<managed root>/../<managed root>/x.md` is
     no longer incidentally collapsed. That is intended — vault-escape is
     checked separately in `resolve_under_vault`, against the *resolved* path,
     and is unaffected.
@@ -7586,9 +7586,9 @@ def resolve_under_vault(
     its store key; details retain both the caller's spelling and that key.
 
     `must_be_under_kb` additionally refuses any target that resolves OUTSIDE
-    `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
+    the managed root (checked on the resolved path, so `<managed root>/../x`
     can't sneak a write to a vault-root sibling of KB). Governed content writers
-    (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
+    (`create`/`append`) set it — exomem only ever authors under the managed root.
 
     `refuse_withheld` is for write doors. A restricted writer's target is decided
     first, from scope sets alone, so a withheld, an absent and a read-only target
@@ -7617,11 +7617,11 @@ def resolve_under_vault(
 
     if must_be_under_kb:
         # Governed writes are KB-relative: a bare `Reference/x.md` means
-        # `Knowledge Base/Reference/x.md` (matching how access tiers are keyed),
+        # `<managed root>/Reference/x.md` (matching how access tiers are keyed),
         # so root it under KB unless it already is (any case) or leads with `..`
         # (left for the escape guards below to reject). This makes bare and
         # prefixed paths resolve to the SAME governed location instead of a bare
-        # path silently writing to a vault-root sibling of Knowledge Base/.
+        # path silently writing to a vault-root sibling of <managed root>/.
         first = rel.split("/", 1)[0]
         if not is_managed_root_name(first, key=str.casefold) and first != "..":
             rel = managed_join(rel)
@@ -7746,8 +7746,8 @@ def _is_curated_top_level(vault_root: Path, head: str) -> bool:
 
     Used so an unresolved wikilink into such a folder (a forward reference to a
     file that doesn't exist yet) is kept vault-relative rather than promoted
-    under ``Knowledge Base/``. Curated/read-only status is sourced from
-    ``Knowledge Base/_access.yaml`` (``readonly:`` / ``excluded:``); the legacy
+    under the managed root. Curated/read-only status is sourced from
+    ``<managed root>/_access.yaml`` (``readonly:`` / ``excluded:``); the legacy
     ``CURATED_TREES`` tuple (empty by default) is also honored.
     """
     if head in CURATED_TREES:
@@ -7766,7 +7766,7 @@ def _is_curated_top_level(vault_root: Path, head: str) -> bool:
 def in_append_only_tree(rel_path: str) -> str | None:
     """Return the canonical subpath name ("Sources" or "Evidence") if matched.
 
-    Matches both `Knowledge Base/Sources/...` and bare `Sources/...` —
+    Matches both `<managed root>/Sources/...` and bare `Sources/...` —
     callers may pass either form. Matching is case-insensitive (see below).
     """
     parts = rel_path.replace("\\", "/").split("/")
@@ -8093,7 +8093,7 @@ def relative_posix(path: Path, anchor: Path) -> str:
 def walk_vault_md(vault_root: Path, *, skip: Callable[[Path], bool] | None = None):
     """Yield every .md path under vault_root, skipping config/cruft dirs.
 
-    Walks the FULL vault, not just Knowledge Base/. Used by Tier 2 inbound-
+    Walks the FULL vault, not just <managed root>/. Used by Tier 2 inbound-
     wikilink scans and move/delete safety checks. ``skip`` is asked about each
     Markdown-named entry before the walk stats it, and an entry that it takes is
     dropped unstatted.
@@ -9100,7 +9100,7 @@ def find_inbound_wikilinks(
 
     `target_rel_path` is vault-relative POSIX, with or without `.md`. Matches
     three forms:
-    - full path with leading `Knowledge Base/`: `[[Knowledge Base/Notes/Insights/foo]]`
+    - full path with leading `<managed root>/`: `[[<managed root>/Notes/Insights/foo]]`
     - KB-stripped path: `[[Notes/Insights/foo]]`
     - bare basename (only if unambiguous in the vault): `[[foo]]`
 
@@ -9614,8 +9614,8 @@ class WikilinkResolver:
 
     The resolver knows three keying strategies:
     - `full_paths`: vault-relative POSIX without `.md` (e.g.
-      `Knowledge Base/Entities/Concepts/Profile`).
-    - `kb_stripped`: same with the leading `Knowledge Base/` removed.
+      `<managed root>/Entities/Concepts/Profile`).
+    - `kb_stripped`: same with the leading `<managed root>/` removed.
     - `stems`: filename stem (no path) → sorted full paths (multi-match if
       the basename collides across folders).
     - `titles`: frontmatter `title:` lower-cased → sorted full paths. This
@@ -10007,7 +10007,7 @@ def split_wikilink_target(target: str) -> tuple[str, str]:
 def obsidian_uses_kb_root(vault_root: Path) -> bool:
     """Whether Obsidian opens the managed KB directory as its vault root.
 
-    Exomem's API paths stay vault-rooted (``Knowledge Base/...``). Markdown
+    Exomem's API paths stay vault-rooted (``<managed root>/...``). Markdown
     targets must instead be relative to the directory containing ``.obsidian``
     or Obsidian interprets the KB prefix as a nested folder.
     """
@@ -10118,7 +10118,7 @@ def normalize_wikilink(
     Accepts any input form: bare, KB-relative, full vault-rooted, with or
     without `.md`, with or without `[[ ]]` wrappers, with or without
     `|alias`, with optional `#anchor`. The returned form is always
-    `Knowledge Base/<rest>` (or a read-only sibling tree like `Reference/<rest>`)
+    `<managed root>/<rest>` (or a read-only sibling tree like `Reference/<rest>`)
     with `.md` stripped and `#anchor` preserved.
 
     Returns `(canonical, warning_or_none)`. On unresolvable target:
@@ -10242,7 +10242,7 @@ def _prior_path_claimants(
     targeted: bool,
     visible: Callable[[str], bool] | None,
 ) -> list[WikilinkCandidate]:
-    """The visible live pages that left the path `cleaned`, as written or under Knowledge Base."""
+    """The visible live pages that left the path `cleaned`, as written or under the managed root."""
     claims = _current_claims(resolver, vault_root)
     for key in (cleaned, managed_join(cleaned)):
         claimed = _live_claimants(
@@ -10344,8 +10344,8 @@ def _normalize_wikilink(
             raise UnresolvedWikilinkError(f"empty wikilink target: {target!r}")
         return "", f"empty wikilink target: {target!r}", None
 
-    # Folder-hub link (e.g. `[[Knowledge Base/Notes/Patterns/]]`): we never
-    # canonicalize beyond ensuring the Knowledge Base/ prefix.
+    # Folder-hub link (e.g. `[[<managed root>/Notes/Patterns/]]`): we never
+    # canonicalize beyond ensuring the managed root prefix.
     if cleaned.endswith("/"):
         canonical = managed_form(cleaned)
         return canonical + anchor, None, None
@@ -10436,9 +10436,9 @@ def _normalize_wikilink(
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result
     # directly without prefix manipulation:
-    # - already starts with `Knowledge Base/` → keep
+    # - already starts with the managed root → keep
     # - already starts with a read-only sibling tree (per _access.yaml) → keep
-    # - has a path separator → promote to `Knowledge Base/<rest>`
+    # - has a path separator → promote to `<managed root>/<rest>`
     # - bare name → leave as-is (audit's bare-name lookup will try later)
     if strict:
         raise UnresolvedWikilinkError(
@@ -10556,7 +10556,7 @@ def normalize_body_wikilinks(
 
     Preserves `[[X|alias]]` aliases. Skips matches inside fenced code blocks,
     inline code spans and origin carriers. Internal resolution remains canonical vault-rooted;
-    emitted Markdown is KB-relative when ``Knowledge Base/.obsidian`` marks the
+    emitted Markdown is KB-relative when ``<managed root>/.obsidian`` marks the
     managed directory as the Obsidian vault root. Returns `(new_body, warnings)`.
     Unresolvable links are left as-is with a warning — forward references are
     intentional. The writer's links resolve over the pages it may see
@@ -10940,7 +10940,7 @@ def prepend_log_entry(
     """Insert a `## [date] <op> | <rel>` block after the log's `---` separator.
 
     `rel_path_no_ext` is vault-relative POSIX without `.md`. The leading
-    `Knowledge Base/` is stripped from the title for compactness (matches
+    the managed root is stripped from the title for compactness (matches
     the existing add/edit/preserve log style); paths outside KB keep the
     full vault-relative form so curated-tree writes stay traceable.
     """
@@ -11302,13 +11302,13 @@ def plan_log_writes_many(
 
 
 def rotate_log_if_needed(vault_root: Path) -> str | None:
-    """Size-triggered rotation of `Knowledge Base/log.md`.
+    """Size-triggered rotation of `<managed root>/log.md`.
 
     Every write op reads + rewrites log.md WHOLE (append-only feed, newest
     first), so an unbounded log makes every write O(log size). Past
     `EXOMEM_LOG_ROTATE_BYTES` (default 2MB) the tail beyond the newest
     `LOG_ROTATE_KEEP_ENTRIES` entries moves — byte-exact — to
-    `Knowledge Base/_archive/logs/log-<utc-stamp>.md`. `_archive/` is excluded
+    `<managed root>/_archive/logs/log-<utc-stamp>.md`. `_archive/` is excluded
     from find/index walks AND from every incremental index path (the
     exclusion-parity guard), so archives are inert; nothing is ever deleted.
     Keeping the newest 200 entries preserves index.md's cap-50
@@ -11421,7 +11421,7 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
     The inverse of `prepend_log_entry`: it parses the append-only activity log
     and returns the `why`/rationale history for a single page so a reader can
     verify *why* a note changed. Title matching mirrors how writers record the
-    entry (`prepend_log_entry`): a leading `Knowledge Base/` is stripped and the
+    entry (`prepend_log_entry`): a leading `<managed root>/` is stripped and the
     `.md` extension dropped. Entries are stored newest-first (prepended), so file
     order is preserved.
 

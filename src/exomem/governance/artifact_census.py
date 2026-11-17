@@ -451,7 +451,7 @@ _LISTINGS: OrderedDict[tuple[tuple[str, str], str], Mapping[str, _Listing]] = Or
 
 
 def vault_listing(vault_root: Path, directory: str | None = None) -> VaultListing:
-    """The listings under a vault directory (the Knowledge Base unless named), read again only where one changed.
+    """The listings under a vault directory (the managed root unless named), read again only where one changed.
 
     `directory` is vault-relative with forward slashes; each directory walked keeps its own listings.
     """

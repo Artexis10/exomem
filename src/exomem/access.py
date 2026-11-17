@@ -5,17 +5,17 @@ A path resolves to exactly one tier:
 - ``excluded``    — invisible to find/embedding AND unwritable (truly private).
 - ``readonly``    — findable, but every write is refused (no override). The
                     "off-limits" marker: lets a curated-thinking folder be
-                    folded into ``Knowledge Base/`` and stay write-protected
+                    folded into the managed root and stay write-protected
                     without moving it back out of the search corpus.
 - ``append-only`` — ``Sources/`` and ``Evidence/`` (add/preserve only).
 - ``read-write``  — the default (Notes/, compiled material, data subtrees).
 
-Tiers come from a live-loaded ``Knowledge Base/_access.yaml`` (folder paths, one
+Tiers come from a live-loaded ``<managed root>/_access.yaml`` (folder paths, one
 subtree per entry) layered over built-in defaults. The config is read fresh when
 its mtime changes — edit it desk-side and the next call sees the new policy, no
 restart (mirrors ``project-keys.yaml``). Decoupling *capability* from *location*
 is the same move as decoupling *searchability* from a folder: a single
-``Knowledge Base/`` boundary, with per-subtree access governed by this file.
+the managed root boundary, with per-subtree access governed by this file.
 
 This layer is ADDITIVE and back-compatible: with no ``_access.yaml`` present,
 only ``Sources/``/``Evidence/`` differ from ``read-write`` — the existing
@@ -260,9 +260,9 @@ def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
 
 
 def _kb_relative(rel_path: str) -> str:
-    """Strip a leading ``Knowledge Base/`` so config entries are KB-relative.
+    """Strip a leading `<managed root>/` so config entries are KB-relative.
 
-    Callers pass either form (``Knowledge Base/Reference/x.md`` or
+    Callers pass either form (``<managed root>/Reference/x.md`` or
     ``Reference/x.md``); both normalize to the same KB-relative key.
     """
     rel = rel_path.replace("\\", "/").strip("/")

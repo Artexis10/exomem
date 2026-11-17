@@ -5989,7 +5989,7 @@ class EpistemicGraphIndex:
     def _derive_pages(
         self, conn: sqlite3.Connection, resolver: vault_module.WikilinkResolver
     ) -> int:
-        """Index every Knowledge Base page into ``conn`` without committing; return the count."""
+        """Index every managed page into ``conn`` without committing; return the count."""
         indexed = 0
         kb = managed_root(self.vault_root)
         type_basis = producer_type_basis(self.vault_root)
@@ -7118,7 +7118,7 @@ class EpistemicGraphIndex:
             )
             queued_scope = {receipt.rel_path for receipt in receipts}
             if queued_scope != scope:
-                # The path queue admits only canonical Knowledge Base Markdown.
+                # The path queue admits only canonical managed Markdown.
                 # A vault-wide resolver change can include a supported recall
                 # path outside that root, and silently dropping it would make a
                 # later coalesced response false. Escalate incomplete path
@@ -14220,11 +14220,11 @@ def homonyms_across_patch(
     """Carry the homonyms of ``resolver``'s publication across the body, which patches ``rels`` into
     ``resolver`` in place and gives it a new publication token.
 
-    A name's candidates read the path maps at the name and at its Knowledge Base spelling, and a
+    A name's candidates read the path maps at the name and at its managed root spelling, and a
     name without a folder also reads the stem and title buckets at the name and at its title key.
     The patch changes the path maps only at each touched path's key, the stem buckets only at its
     stem, and the title buckets only at the title keys of the key's candidates before and after it.
-    So only these names can gain, lose or change candidates: each key and its Knowledge Base
+    So only these names can gain, lose or change candidates: each key and its managed root
     relative spelling, each stem, each such title key, and each name without a folder that files
     under one of those title keys. Every other name keeps its group. Without a kept entry for this
     publication the body runs alone, and the next reader groups the whole resolver.

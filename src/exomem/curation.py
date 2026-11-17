@@ -520,7 +520,7 @@ def _require_string(value: Any, field: str, *, max_chars: int = MAX_PLAN_BYTES) 
     return value
 
 
-#: Casefolded top-level Knowledge Base trees another typed owner governs.
+#: Casefolded top-level managed root trees another typed owner governs.
 #: Curation cannot target them and tag maintenance never rewrites them.
 PROTECTED_TREES: Final = frozenset(
     {

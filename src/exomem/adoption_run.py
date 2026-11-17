@@ -1,11 +1,11 @@
 """Adoption Studio run lifecycle: canonical-file-backed, deterministic, governed.
 
 A durable adoption run is a JSON object under
-``Knowledge Base/_Adoption/runs/<run_id>/`` written only through
+``<managed root>/_Adoption/runs/<run_id>/`` written only through
 ``vault.batch_atomic_write`` — so it inherits the access-tier backstop and the
 writer-lease fence exactly like every other governed write. The run is fully
 reconstructable after a process restart with no dependence on any rebuildable
-sidecar. Originals outside ``Knowledge Base/`` are never rewritten, moved, or
+sidecar. Originals outside the managed root are never rewritten, moved, or
 deleted under any action or failure: imports are copies with provenance, and
 scan/select/plan write nothing outside the run object.
 
@@ -1170,7 +1170,7 @@ def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
 
 
 def _refuse_pending_renames(root: Path, verb: str, *, run_id: str | None = None, under: str | None = None) -> None:
-    """Refuse `verb` while a run has renamed staged files into the Knowledge Base and not committed their Source pages.
+    """Refuse `verb` while a run has renamed staged files into the managed root and not committed their Source pages.
 
     Such a file is in no stage and has no page, so a run that is cancelled, re-planned or restarted would leave
     it with no run to finish it. `apply` finishes it. A caller names the run, or a folder of staged files.
@@ -2384,7 +2384,7 @@ def _commit_chunk(
     Returns the items now on disk. A batch that raises may still have committed, so
     each item is resolved by the same identity check the next call would use; the
     rest fail as retryable, and the call's closing save records them. `placed` holds the items
-    whose binary is already at its Knowledge Base path. When the batch fails, a binary that this
+    whose binary is already at its managed root path. When the batch fails, a binary that this
     call renamed goes back to its stage; one that an earlier call renamed stays where it is.
     """
     outcomes = run["outcomes"]
@@ -2709,7 +2709,7 @@ def _file_by_rename(
     root: Path, stage: import_stage.Stage, survivors: list[tuple[dict, adopt_module.ImportItem]], *,
     run_id: str, ceiling: int, outcomes: dict, placed: dict[str, import_rename.Placed],
 ) -> list[tuple[dict, adopt_module.ImportItem]]:
-    """Rename each renamable survivor's staged file into its Knowledge Base path, before the batch.
+    """Rename each renamable survivor's staged file into its managed root path, before the batch.
 
     A member that the primitive refuses fails here and leaves the batch; a member it cannot rename
     stays a survivor and files by copy, which the adoption ceiling bounds. Each renamed member is added to `placed`.

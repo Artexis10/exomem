@@ -440,7 +440,7 @@ class StoreCorpus:
     disk.
 
     It lists the pages that the store serves, then the Markdown files that the store does not own (a
-    Records or Planning layer, a page outside the Knowledge Base folder), which a walk of the disk
+    Records or Planning layer, a page outside the managed root folder), which a walk of the disk
     finds. A file that lies at a path that the store owns is the projection of a stored page, or a
     stray: the store decides, so the walk's copy of it is left out.
     """
@@ -643,7 +643,7 @@ def corpus_pages(
 
 
 def kb_walk_member(rel: str) -> bool:
-    """Whether ``walk_md`` over the Knowledge Base folder reaches the file at this vault-relative
+    """Whether ``walk_md`` over the managed root folder reaches the file at this vault-relative
     path, by path alone.
 
     The walk's entry rule (`_classify_walk_entry`) also lstat's each entry, and a stored page may
@@ -677,7 +677,7 @@ class EntryKind(StrEnum):
 
 
 def entry_kind(path: Path | str, info: os.stat_result) -> EntryKind:
-    """The entry rule that every Knowledge Base walk shares; ``info`` is ``lstat(path)``.
+    """The entry rule that every managed root walk shares; ``info`` is ``lstat(path)``.
 
     ``os.path.isjunction`` exists from Python 3.12, so older interpreters see no junctions.
     """

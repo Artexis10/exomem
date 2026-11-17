@@ -669,7 +669,7 @@ class Sweep:
 
 
 def _knowledge_base_pages(root: Path) -> Iterator[tuple[Path, Callable[[], int]]]:
-    """Each page of the Knowledge Base with a call that reads the number of parts it lists.
+    """Each page of the managed root with a call that reads the number of parts it lists.
 
     A store-mode vault lists its stored pages from the store, so a part page that has no file yet
     is found, and reads their front matter from the same listing; a file the store does not own is

@@ -60,7 +60,7 @@ def resolve_existing(vault_root: Path, path: str) -> tuple[Path, str]:
 class InboundCheck(NamedTuple):
     """The links to a stored page, and the linking pages that its delete commit must bind.
 
-    ``unimported`` holds the links from files in the Knowledge Base that the store has no page
+    ``unimported`` holds the links from files in the managed root that the store has no page
     for. No policy covers such a file yet, so the publication filter would hide it from every
     caller. The caller decides whether to count it, and must not name it to a restricted one.
     """
@@ -79,7 +79,7 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
     with line and context: a page that has no file yet counts, and a file that a queued delete has
     not removed yet does not. A file with no rows (a note that nothing has imported or swept yet)
     is read off the disk, and a bare ``[[name]]`` in it counts even when another page shares the
-    name. Such a note outside what the store owns counts as a link; one in the Knowledge Base goes
+    name. Such a note outside what the store owns counts as a link; one in the managed root goes
     to ``unimported``. Each wrong count costs one ``force_orphan``. ``bound`` is every page that
     the rows name: the commit binds the same rule (``write.check``) and refuses a link from a page
     outside it. A folder's pages share one read of the rows and one walk of the disk, so the cost

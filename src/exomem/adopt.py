@@ -3,8 +3,8 @@
 ``adopt`` is the product-facing companion to ``overview``: it says what Exomem
 found, what remains untouched, which packs look relevant, and which safe next
 actions are available. The default mode is read-only and must work before
-``Knowledge Base/`` exists. Write modes are explicit and only write under the
-governed Knowledge Base layer.
+the managed root exists. Write modes are explicit and only write under the
+governed layer.
 """
 
 from __future__ import annotations

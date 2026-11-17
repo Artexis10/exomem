@@ -57,7 +57,7 @@ def governed(rel: str) -> bool:
     """Whether media processing derives rows for ``rel``: a media binary that the store owns.
 
     ``media_processing.classify_media`` is the one list of media kinds. The store owns only the
-    Knowledge Base, which is also all that the file-mode watcher reconciles.
+    managed root, which is also all that the file-mode watcher reconciles.
     """
     return (
         ownership.classify(rel) is ownership.Ownership.BINARY

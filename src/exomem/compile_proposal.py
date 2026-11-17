@@ -51,7 +51,7 @@ def propose_compilation(
         raise ProposeError("INVALID_PROPOSE", "provide at least one source path")
 
     resolver = find_module.shared_resolver(vault_root)
-    resolved: list[str] = []          # canonical "Knowledge Base/..." (no .md)
+    resolved: list[str] = []          # canonical "<managed root>/..." (no .md)
     pages: list[find_module.ParsedPage] = []
     source_types: list[str] = []
     titles: list[str] = []

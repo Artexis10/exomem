@@ -36,7 +36,7 @@ def fit(text: str, budget: int, ellipsis: str = "…") -> str:
 def truncate_path(path: str, budget: int, ellipsis: str = "…") -> str:
     """Shorten a vault path from the LEFT so the filename stays readable.
 
-    `Knowledge Base/Notes/Insights/queue-backpressure-needs-explicit-limits.md`
+    `<managed root>/Notes/Insights/queue-backpressure-needs-explicit-limits.md`
     becomes `…/Insights/queue-backpressure-needs-explicit-limits.md` and, if
     that still overflows, `…limits.md` — never a truncated directory with the
     filename gone.

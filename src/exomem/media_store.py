@@ -2113,7 +2113,7 @@ def evict_to_target(vault: Path) -> int:
 # the cell can make that count final: the backup does not stop it, so a zero latches eviction off.
 
 # A complete census repeats at most this often; an unknown one waits as long. One hour keeps a walk of the
-# Knowledge Base rare while a restore that brings back evicted originals is seen within the hour.
+# the managed root rare while a restore that brings back evicted originals is seen within the hour.
 CENSUS_INTERVAL_SECONDS = 3600
 
 

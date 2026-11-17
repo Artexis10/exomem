@@ -218,7 +218,7 @@ class FileSeen:
 class StoreChange:
     """Everything one commit changes. A path appears in at most one of the operations.
 
-    ``refresh`` names files that the store does not own (a Markdown file outside the Knowledge Base
+    ``refresh`` names files that the store does not own (a Markdown file outside the managed root
     folder, or one at a page path the store holds no row for, say) and that a caller made durable
     on disk before the commit: the commit derives their rows from the file's bytes, so a search
     sees them at the same revision as the pages. The store keeps no page, record or audit row for

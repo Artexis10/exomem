@@ -1,4 +1,4 @@
-"""The write-ahead record of a binary that adoption renamed into the Knowledge Base before its Source page committed.
+"""The write-ahead record of a binary that adoption renamed into the managed root before its Source page committed.
 
 Between the rename and the commit the binary sits unbound at its final path, and a stop leaves it there
 until the next `apply` replays the member. The file watcher and the media scans must not bind it in

@@ -1,11 +1,11 @@
 """The `delete_file` Tier 2 op: trash a file with safety rails.
 
 Deletes are NEVER permanent at this layer. The file is moved to
-`Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`
+`<managed root>/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`
 alongside a `.meta.json` sidecar capturing the original location,
 timestamp, inbound link count at trash, and which force-flags were used.
 Recovery is `move_file` from the trash path back to the original.
-Permanent removal happens desk-side via `rm Knowledge Base/_trash/...`.
+Permanent removal happens desk-side via `rm <managed root>/_trash/...`.
 
 The trash semantics are deliberate: an LLM-driven workflow shouldn't be
 able to lose data even when it's persuaded (or confused) into pressing

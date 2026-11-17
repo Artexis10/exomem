@@ -1191,7 +1191,7 @@ def _reference_owners_read_only(
     # projection the server already holds: it never builds, fills, or
     # refreshes one.
     #
-    # The census does not walk the Knowledge Base `trash/` directory, while the
+    # The census does not walk the managed root `trash/` directory, while the
     # scan reads it and the sidecar hands out its refs. The projection keeps the
     # owners there in a table that only this lookup reads, so a vault that holds
     # that directory resolves those refs from the projection as the scan does.
@@ -1662,7 +1662,7 @@ def _from_store_identities(
 ) -> _T | None:
     """``query`` on the store's identity rows at this request's snapshot; None outside store mode.
 
-    The store holds one identity row per Knowledge Base page, owned or not, with the sidecar's
+    The store holds one identity row per managed page, owned or not, with the sidecar's
     columns (``create_identity_schema``), so the sidecar's statements read it unchanged.
     """
     from .collection_store import connection
@@ -1769,7 +1769,7 @@ def _relative_markdown(vault_root: Path, path: Path) -> str | None:
 
 
 def is_scanned_page(rel: str) -> bool:
-    """Whether the reference scan reads this path: a Markdown page in the Knowledge Base."""
+    """Whether the reference scan reads this path: a Markdown page in the managed root."""
     if managed_split(rel) is None or not rel.lower().endswith(".md"):
         return False
     return not vault_module.in_excluded_scan_dir(rel)
@@ -1906,7 +1906,7 @@ def identity_row(
     """The row that the reference sidecar holds for one page, read from bytes instead of a file.
 
     It returns what ``_read_identity`` returns for the same file: None when the scan does not
-    read ``rel`` (outside the Knowledge Base, an excluded directory, not Markdown) or when the
+    read ``rel`` (outside the managed root, an excluded directory, not Markdown) or when the
     bytes are not text. ``vault_root`` names the vault whose scan rule applies; today that rule
     depends on configuration only.
     """
@@ -1989,7 +1989,7 @@ def scan_reference_owners(vault_root: Path, directory: Path) -> tuple[tuple[str,
 
     Reads a directory with the reference scan's own membership rule, so a table
     built from it resolves a reference as the scan does. The identity projection
-    uses it for the Knowledge Base directories its census prunes and the scan reads.
+    uses it for the managed root directories its census prunes and the scan reads.
     """
     return tuple(
         (path, exomem_id)

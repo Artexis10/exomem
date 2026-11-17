@@ -722,7 +722,7 @@ def infer_counts(
 ) -> dict[str, Any] | None:
     """`infer`'s census keys, computed from the snapshot; None if unavailable.
 
-    The cohort stays infer's: every indexed Knowledge Base page matching the
+    The cohort stays infer's: every indexed managed page matching the
     page-type scope, date-scoped by origin date exactly as the Markdown count
     did. An authored row counts whether or not its target resolves to a page
     in view, so `relation_counts` and `zero_authored_relation_rows` keep the

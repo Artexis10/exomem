@@ -2,7 +2,7 @@
 
 Answers "what does this vault look like?" in one cheap pass so agents never
 bulk-read a vault for a structural question, and so the setup wizard can scan a
-vault BEFORE `init` lays down `Knowledge Base/` (this module takes a raw path
+vault BEFORE `init` lays down the managed root (this module takes a raw path
 and never goes through `vault.resolve_vault`, which refuses un-initialized
 roots).
 
@@ -200,7 +200,7 @@ def overview(
 ) -> dict:
     """Structure report for `root` (or the subtree `path` under it). Read-only.
 
-    Works on vaults with no initialized `Knowledge Base/` — the report simply
+    Works on vaults with no initialized managed root — the report simply
     carries `kb: {present: false}`.
     """
     root = Path(root)

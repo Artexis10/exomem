@@ -438,7 +438,7 @@ def edit(
 
 def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
     """The vault-relative page the caller addressed, iff it exists on disk under
-    the vault root but outside ``Knowledge Base/`` — else ``None``.
+    the vault root but outside the managed root — else ``None``.
 
     Lets `_resolve` tell "you addressed a real page outside the governed root"
     apart from "no such page". It leaks nothing the read side would not already
@@ -541,8 +541,8 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # never loaded (see `egress.write_target_withheld`).
     if not candidate.exists() or _write_target_withheld(vault_root, rel):
         # The read side (`get_page`) accepts a vault-relative path and will read
-        # a page living OUTSIDE the governed Knowledge Base/ root. Governed edits
-        # re-root every bare path under Knowledge Base/, so a caller re-using
+        # a page living OUTSIDE the managed root. Governed edits
+        # re-root every bare path under the managed root, so a caller re-using
         # such a path here gets a re-rooted candidate that does not exist. A
         # plain NOT_FOUND would then name a path the caller never gave and
         # assert the page is missing when it demonstrably exists — a typo and an

@@ -16,7 +16,7 @@ with no path, which says that every page's life restarts. A sidecar with no curs
 up, and one whose cursor lies past the end of the audit trail belongs to another store: all three
 make the drain compare every stored page with the sidecar. That census judges only the pages that
 the store owns; the sidecar's rows for other files (collection layers, dot-folders, the vault
-outside the Knowledge Base) are not the store's to keep or to delete.
+outside the managed root) are not the store's to keep or to delete.
 
 The cursor moves only after every page that its audit rows name is stamped, purged or owed. A page
 whose attempt failed is owed: its stamp says so, readers withhold it, and a turn with nothing newer

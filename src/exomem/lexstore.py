@@ -11922,7 +11922,7 @@ class LexicalStore:
                 yield conn
 
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
-        """Each Knowledge Base page's stored `page.tags` members, by path.
+        """Each managed page's stored `page.tags` members, by path.
 
         Per page rather than aggregated so a caller can drop pages its reader
         may not see, or that another subsystem owns, before it counts. None
@@ -11951,7 +11951,7 @@ class LexicalStore:
         return out
 
     def page_axis_counts(self, column: str) -> dict[str, int] | None:
-        """Knowledge Base pages per stored value of one scalar page axis.
+        """Managed pages per stored value of one scalar page axis.
 
         `column` is `source_kind` or `domain`, the canonicalized scalar columns
         a vocabulary registry counts its keys over. None when the catalogue is
@@ -12026,7 +12026,7 @@ class LexicalStore:
     ) -> tuple[dict[str, int], dict[str, int]] | None:
         """Pages per stored `page.tags` member and per written form, in SQL.
 
-        A Knowledge Base page under a directory whose lowercased name is in
+        A managed page under a directory whose lowercased name is in
         `excluded_dirs`, or under any dot directory, is not counted. The
         written form trims `whitespace` from both ends and writes ` ` and `_`
         as `-`, as the tag writers do. None when the catalogue is absent or

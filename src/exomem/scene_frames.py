@@ -433,7 +433,7 @@ def write_scene_frames(
             ),
         )
     d = frames_dir_for(canonical_video)
-    # Tag context from Knowledge Base/Evidence/<scope>/<category>/… (same derivation
+    # Tag context from <managed root>/Evidence/<scope>/<category>/… (same derivation
     # as preserve.ensure_media_sidecar).
     parts = video_rel.split("/")
     scope = parts[2] if len(parts) > 2 else "evidence"

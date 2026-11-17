@@ -11,7 +11,7 @@ less, with no file to edit and no finding that said why.
 
 Load order mirrors `context_roles`, for the same reason: the shipped registry
 ships in the skill scaffold (and its byte-identical plugin copy), a vault
-override at `<Knowledge Base>/_Schema/activation-conventions.yaml` may add to
+override at `<managed root>/_Schema/activation-conventions.yaml` may add to
 it or narrow it, and a broken override falls back to the shipped registry
 with the failure reported rather than raising — a typo in an owner's file is
 the expected failure, and refusing to activate would cost the owner every

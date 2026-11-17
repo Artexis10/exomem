@@ -1069,7 +1069,7 @@ def publish_replica(
     a random name, permissions or the lease alone cannot establish custody.
     Disposable isolated callers supply their own custody. No replica is ever
     opened by SQLite for writing; this foundation proves no live sync configuration.
-    The vault's ordinary Knowledge Base directory must already exist.
+    The vault's ordinary managed root directory must already exist.
     """
     return _run(vault_root, writer, authority_check, deadline, cancelled, stage_new=True, force=force)
 

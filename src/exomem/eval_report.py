@@ -25,7 +25,7 @@ markdown vs. media, not invented here):
              walk `vault.walk_vault_md` uses (skips `vault.VAULT_SCAN_SKIP_DIRS`,
              `.md`-only, Obsidian `.sync-conflict-` duplicates excluded).
 - "notes"  = markdown pages in the KB scope — the KB walk `find()` indexes over
-             (`find._walk_md` under `Knowledge Base/`, skipping
+             (`find._walk_md` under the managed root, skipping
              `find.EXCLUDED_DIR_NAMES` such as `_Schema`; `.md`-only, sync-
              conflict excluded). Always a subset of "files".
 - "media"  = binary artifacts (audio / video / image / pdf) anywhere in the

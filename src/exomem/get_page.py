@@ -5,13 +5,13 @@ when Claude finds a page via `find` and wants to read/cite/build on it,
 `get` returns the full frontmatter + body.
 
 Path is vault-relative. Reads anywhere under the vault root:
-- `Knowledge Base/...` — the compiled KB layer
+- `<managed root>/...` — the compiled KB layer
 - sibling top-level folders (e.g. `Reference/...`) — curated, hand-authored
   material that compiled notes link to, kept read-only via `_access.yaml`.
   `get` honors that by only reading.
 
 The trailing `.md` is optional. Bare-name shortcuts (`Notes/Insights/foo`)
-auto-prepend `Knowledge Base/` if the literal path doesn't exist — back-
+auto-prepend the managed root if the literal path doesn't exist — back-
 compat with how this tool worked before the broadening.
 """
 
@@ -143,7 +143,7 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
 
     with call_spans.span("read.prepare.resolve_path"):
         # Back-compat shortcut: if the literal path doesn't exist but the same
-        # path under Knowledge Base/ does, use that. Lets callers write
+        # path under the managed root does, use that. Lets callers write
         # `Notes/Insights/foo` without the leading prefix.
         if (
             len(named) > 1
@@ -253,7 +253,7 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
 
 
 def spellings(path: str) -> tuple[str, ...]:
-    """The vault-relative paths a direct read of `path` names: as written, then under Knowledge Base/.
+    """The vault-relative paths a direct read of `path` names: as written, then under <managed root>/.
 
     Only auto-append .md if the path has NO extension (`missing_path_for`).
     """
@@ -287,8 +287,8 @@ def get_page(
     """Read any markdown file under the vault root.
 
     Accepts any vault-relative path. Examples:
-    - `Knowledge Base/Notes/Insights/foo.md`
-    - `Notes/Insights/foo` (auto-prepends `Knowledge Base/`, auto-adds `.md`)
+    - `<managed root>/Notes/Insights/foo.md`
+    - `Notes/Insights/foo` (auto-prepends the managed root, auto-adds `.md`)
     - `Reference/Strategy.md`
     - `Reference/AI Systems & Architecture.md`
     """

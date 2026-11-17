@@ -2871,7 +2871,7 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
        one indexed lookup (`lexstore.page_content_hashes`), never a search
        and never a directory read.
 
-    Every other spelling of an eligible page — `./Knowledge Base/...`, a
+    Every other spelling of an eligible page — `./<managed root>/...`, a
     doubled slash, a backslashed separator, an absolute path, a `..` that
     lands back inside the knowledge base — used to reach `_is_current_page`
     (which reads the file) and, for a page that turned out eligible, all the

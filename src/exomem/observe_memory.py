@@ -222,9 +222,9 @@ def observe_memory(
     except edit.EditError as error:
         if error.code in {"FRONTMATTER_REQUIRED", "OUTSIDE_GOVERNED_ROOT"}:
             # `load_editable` raised before resolving a canonical `rel_path`
-            # (frontmatterless: found under Knowledge Base/ but refused before
+            # (frontmatterless: found under the managed root but refused before
             # reading further; outside-governed-root: never found under
-            # Knowledge Base/ at all), so both resolutions below are derived
+            # the managed root at all), so both resolutions below are derived
             # from the caller's own path text, normalised the same way
             # `edit._existing_page_outside_kb` normalises it (strip,
             # backslash to slash, lstrip leading "/", ".md" suffix) — one
@@ -234,7 +234,7 @@ def observe_memory(
             given = _legacy_page_given_form(path)
             if error.code == "FRONTMATTER_REQUIRED":
                 # Reachable only for a page `load_editable` already found
-                # under Knowledge Base/, so re-root the given form the same
+                # under the managed root, so re-root the given form the same
                 # way `kbdir.kb_page_relative_form` would.
                 rel_path = (
                     managed_form(given)

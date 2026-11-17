@@ -12,7 +12,7 @@ keeps the payload it replaced, in the SAME atomic batch as the correction:
 
 An entry is one create-only JSON file per correction, named like
 `registry_history` versions and kept under
-`<Knowledge Base>/_Collections/history/<collection_id>/<item_key>/`, inside the
+`<managed root>/_Collections/history/<collection_id>/<item_key>/`, inside the
 collection store's own reserved tree. No read surface serves a reserved file,
 so the only way to a kept payload is `read`, which first releases the row
 itself exactly as a query would. History is withheld exactly when the row is,

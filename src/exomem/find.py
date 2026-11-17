@@ -1,6 +1,6 @@
-"""Read-only search across the Knowledge Base.
+"""Read-only search across the managed root.
 
-Scans every `.md` under `Knowledge Base/`, parses YAML frontmatter, filters by
+Scans every `.md` under the managed root, parses YAML frontmatter, filters by
 structured fields, then does case-insensitive substring matching on
 title + body. A typical vault is hundreds of pages — full-scan is fast enough.
 
@@ -1102,7 +1102,7 @@ def _corpus_walk(vault_root: Path, scope: str) -> Iterable[Path]:
 
 
 def _kb_missing(vault_root: Path) -> bool:
-    """Whether the Knowledge Base folder is missing: a store-mode vault holds its pages in the
+    """Whether the managed root folder is missing: a store-mode vault holds its pages in the
     store, so it needs no folder.
     """
     return not managed_root(vault_root).is_dir() and not find_corpus.store_serves(vault_root)
@@ -1675,9 +1675,9 @@ def find(
     selected units, which `dimension_display.group_hits` turns into the groups.
 
     `scope` controls the walk root:
-    - "kb" (default): only `Knowledge Base/`. Compiled material + sources.
+    - "kb" (default): only the managed root. Compiled material + sources.
     - "vault": full vault, including sibling folders outside
-      `Knowledge Base/` (e.g. curated, read-only material kept in its own
+      the managed root (e.g. curated, read-only material kept in its own
       top-level folders). Use when you need to discover content outside the
       KB. Existing filters still apply — such pages typically lack structured
       frontmatter so `types`/`projects`/`tags` filters won't match many of
@@ -1757,7 +1757,7 @@ def find(
     `EXOMEM_DISABLE_USAGE_BOOST`. Bypasses the hot find cache.
 
     `widen_outside_kb`: when True (OFF by default), `scope="kb"` reserves up
-    to `limit - 1` slots for pages OUTSIDE `Knowledge Base/` (see the reserve
+    to `limit - 1` slots for pages OUTSIDE the managed root (see the reserve
     note at the widening call site). Off, `scope="kb"` serves the knowledge
     base and nothing else. The reserve used to run on every default recall and
     cost the reader a whole-corpus lexical pass, so it is now something a
@@ -2862,7 +2862,7 @@ def find(
 
         # Requested widening: reach into the wider vault (sibling folders like
         # Tracking/, Reference/, plus curated trees) so content outside
-        # Knowledge Base/ isn't silently invisible. Only for scope="kb" (not
+        # the managed root isn't silently invisible. Only for scope="kb" (not
         # "kb-only"/"vault"), non-empty queries (an empty query has no signal to
         # widen on), and only when the caller asked for it.
         #
@@ -7327,7 +7327,7 @@ def _find_outside_kb(
     stage_name: str = "outside_kb",
 ) -> list[Hit] | _OutsideSelection:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
-    `Knowledge Base/`. Powers the requested `scope="kb"` widening.
+    the managed root. Powers the requested `scope="kb"` widening.
 
     Recall here is BM25-only (the vector lane already searches the WHOLE sidecar,
     so under `EXOMEM_INDEX_SCOPE=vault` out-of-KB notes surface semantically via
@@ -7686,7 +7686,7 @@ def _stem_word_coverage(
 
 
 def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
-    """BM25-unavailable fallback: walk vault .md outside Knowledge Base/, keep
+    """BM25-unavailable fallback: walk vault .md outside the managed root, keep
     files where >=1 query stem is present, ordered most-recent first."""
     vault_resolved = vault_root.resolve()
     matches: list[tuple[str, str]] = []

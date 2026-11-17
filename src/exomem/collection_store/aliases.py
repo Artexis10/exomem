@@ -74,7 +74,7 @@ def read(vault_root, path):
 def read_named(vault_root, path):
     """``read`` for every spelling of ``path`` that a direct page read accepts, or None.
 
-    Those spellings drop the Knowledge Base prefix, the ``.md`` suffix or both, as a wikilink does.
+    Those spellings drop the managed root prefix, the ``.md`` suffix or both, as a wikilink does.
     """
     from .. import get_page
 

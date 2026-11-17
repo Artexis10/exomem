@@ -1281,7 +1281,7 @@ class _LinkProjector:
             except (UnicodeDecodeError, vault.PathGuardError, vault.FrontmatterError):
                 complete = False
                 break
-            # The published corpus gives a Knowledge Base `trash/` page no title or
+            # The published corpus gives a managed root `trash/` page no title or
             # stem but keeps its identity; the walk answers as the borrowed route does.
             # The census owns that rule, so the walk asks it rather than keep a copy.
             if not semantic_contract._is_reference_only_path(relative):

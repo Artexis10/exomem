@@ -202,7 +202,7 @@ def _is_shipped_schema(_path: str, parts: tuple[str, ...]) -> bool:
     """The governance contract, which moved to `.exomem/schema/` (#488).
 
     Registered explicitly because the rule below fails ALL hidden state closed,
-    and this content used to live under `Knowledge Base/` where it was canonical
+    and this content used to live under the managed root where it was canonical
     by default. Without this the move would silently change portability
     semantics: the archive would drop the schema, and `_valid_vault_scaffold`
     requires `SKILL.md`, so the restored vault would be refused.
@@ -1501,7 +1501,7 @@ def verify_export_stream(
 
 def _verify_required_scaffold(records: Iterable[Mapping[str, Any]]) -> None:
     paths = {str(record["path"]) for record in records}
-    # The schema is accepted at either location: `Knowledge Base/_Schema/` for an
+    # The schema is accepted at either location: `<managed root>/_Schema/` for an
     # archive taken before #488, `.exomem/schema/` for one taken after.
     if not any(managed_split(path) is not None for path in paths) or not any(
         path.startswith(managed_join("_Schema/")) or path.startswith(".exomem/schema/")

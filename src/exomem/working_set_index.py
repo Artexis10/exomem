@@ -467,7 +467,7 @@ _FILE_EXTENSION = re.compile(r"[^.]\.[A-Za-z0-9]{1,8}$")
 def _vault_path(kb: str) -> re.Pattern[str]:
     """A path into the indexed folder (`kb_dirname`), up to a file name with
     an extension, read as one reference even with spaces in its segments. A
-    root before the folder (`/srv/vault/Knowledge Base/...`) is part of it."""
+    root before the folder (`/srv/vault/<managed root>/...`) is part of it."""
     return re.compile(
         _STARTS_A_REFERENCE
         + _VAULT_PATH_PREFIX
@@ -532,7 +532,7 @@ def subject_text(turn: str) -> str:
     whose title is its file name; its directories are removed. A slash run is a
     relative path when it starts `./` or `../` or ends in a file name, so
     `dev/staging/prod` and `and/or` are prose, and `records/Node.js` loses
-    `records`. A path into the indexed folder (`Knowledge Base/...`), rooted or
+    `records`. A path into the indexed folder (`<managed root>/...`), rooted or
     not, is one reference up to its file name, spaces included. So is a quoted or
     backticked span. Any other path with spaces in it is cut at the first
     space: nothing marks where it ends.

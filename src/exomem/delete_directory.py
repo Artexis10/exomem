@@ -2,7 +2,7 @@
 
 Symmetric with `create_directory`. Like `delete_file`, this NEVER does
 a permanent delete: the folder is moved to
-`Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>/`
+`<managed root>/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>/`
 with a `.meta.json` sidecar capturing what was trashed and why.
 
 Refuses Sources/ and Evidence/ outright (append-only). Refuses non-

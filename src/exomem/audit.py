@@ -1,4 +1,4 @@
-"""Read-only audit of the Knowledge Base. Returns structured findings.
+"""Read-only audit of the managed root. Returns structured findings.
 
 Checks (all read-only; no writes ever):
 - `broken_wikilink`: `[[...]]` with a definite resolution error.
@@ -8,7 +8,7 @@ Checks (all read-only; no writes ever):
   against filename stems AND frontmatter `title:` (so date-prefixed
   sources with a title match are not flagged).
 - `orphan_entity`: file under `Entities/` with no inbound wikilinks from
-  anywhere in `Knowledge Base/`
+  anywhere in the managed root
 - `unprocessed_source`: `type: source` page that no live note compiles: no page
   its `ingested_into:` names is live and cites it in its own `sources:`
 - `uncompiled_episode` (optional): conversation recap whose live revision has a
@@ -2757,7 +2757,7 @@ def _check_wikilinks(
     findings: list[AuditFinding] = []
 
     # Wikilinks in compiled KB notes may legitimately target curated sibling
-    # folders outside Knowledge Base/ (read-only material), plus `_Schema/`.
+    # folders outside the managed root (read-only material), plus `_Schema/`.
     # SKILL.md rule 1 explicitly calls these out as link targets. Build the
     # existence set from the full vault so those don't false-positive.
     full_paths: set[str] = set()          # vault-relative, no .md, e.g. "Reference/Strategy"
@@ -3027,7 +3027,7 @@ def _walk_vault_md(vault_root: Path):
     """Yield every .md path under the full vault, skipping config/cruft dirs.
 
     Used for wikilink resolution — broader than find._walk_md which scopes to
-    Knowledge Base/ only. Compiled notes can link to curated parent trees
+    the managed root only. Compiled notes can link to curated parent trees
     (per SKILL.md rule 1), so we need a full-vault existence set.
     """
     from . import find_corpus
@@ -7528,7 +7528,7 @@ def _entity_recurrence_resolution_entries(
     and the resolver derive a title through the same `resolve_display_title`, so
     the title edges are the ones a full build would have produced); the walk adds
     PATHS ONLY, opening no file, so links into curated sibling trees outside the
-    Knowledge Base resolve instead of reading as unwritten identities.
+    managed root resolve instead of reading as unwritten identities.
 
     The residual gap is recorded rather than hidden: a page OUTSIDE the Knowledge
     Base that is reachable only by its frontmatter title contributes no title
@@ -8046,7 +8046,7 @@ def _proximity_contradictions(
 def _rel_kb_path_no_ext(absolute: Path, vault_root: Path) -> str:
     """Return KB-rooted path with .md stripped, e.g. 'Sources/Articles/foo'.
 
-    Matches the form wikilinks use after the leading 'Knowledge Base/' is stripped.
+    Matches the form wikilinks use after the leading '<managed root>/' is stripped.
     """
     from . import find_corpus
 

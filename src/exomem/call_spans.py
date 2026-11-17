@@ -102,7 +102,7 @@ PROJECTION_WRITE_FIELDS = (
 #: declared list, so a new count needs no registry edit, but a key carrying
 #: content cannot pass: no slashes, dots, spaces, digits or capitals, which is
 #: every shape a path, title or identifier takes. Without this,
-#: `measured["Knowledge Base/Notes/<title>"] = 1` would reach a hash-chained
+#: `measured["<managed root>/Notes/<title>"] = 1` would reach a hash-chained
 #: ledger row -- the same hole the closed phase vocabulary exists to prevent.
 FIELD_KEY_PATTERN = re.compile(r"^[a-z_]{1,32}$")
 

@@ -1254,7 +1254,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _fsync_durable_directories(vault_root: Path, instance_dir: Path) -> None:
-    """Persist receipt path entries through the existing Knowledge Base root.
+    """Persist receipt path entries through the existing managed root.
 
     Windows' portable stdlib does not offer an openat-style equivalent for this
     directory durability operation, so an unsupported directory fsync refuses

@@ -1,6 +1,6 @@
 """The `create_directory` Tier 2 op: mkdir at a vault path.
 
-Refuses subtrees marked `readonly`/`excluded` in `Knowledge Base/_access.yaml`
+Refuses subtrees marked `readonly`/`excluded` in `<managed root>/_access.yaml`
 (curated, read-only material) — a hard refusal with no override.
 Append-only trees (Sources/, Evidence/) are not refused at the directory
 level since those subfolders auto-materialize on add/preserve writes

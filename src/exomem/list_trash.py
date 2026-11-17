@@ -1,6 +1,6 @@
 """The `list_trash` Tier 2 op: enumerate recoverable trash entries.
 
-Walks `Knowledge Base/_trash/YYYY-MM-DD/` dirs, parses each `.meta.json`
+Walks `<managed root>/_trash/YYYY-MM-DD/` dirs, parses each `.meta.json`
 sidecar, and returns a structured list. Without this, callers have to
 `list_directory` the trash and walk sidecars manually — the trash is
 technically reachable but not ergonomic.

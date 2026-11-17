@@ -3,7 +3,7 @@
 Knowledge packs are product-level routing hints: small, declarative bundles that
 make common domains feel like first-class Exomem primitives without changing the
 storage engine. Suggestions are deterministic measurements over vault structure;
-selection is durable guidance stored under the governed Knowledge Base layer.
+selection is durable guidance stored under the managed layer.
 """
 
 from __future__ import annotations
@@ -570,7 +570,7 @@ def write_selected_packs(
     source: str = "setup",
     today: dt.date | None = None,
 ) -> dict:
-    """Persist selected packs under the governed Knowledge Base layer."""
+    """Persist selected packs under the managed layer."""
     root_path = Path(root)
     kb = kb_root(root_path)
     if not kb.is_dir():

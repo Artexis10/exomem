@@ -1,6 +1,6 @@
 """Project-key registry — single source of truth lives in the vault.
 
-`Knowledge Base/_Schema/project-keys.yaml` declares every valid `project:`
+`<managed root>/_Schema/project-keys.yaml` declares every valid `project:`
 value for research-notes and every valid entry for the `projects:` list on
 insights/failures/patterns/production-logs.
 

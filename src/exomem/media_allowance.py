@@ -187,7 +187,7 @@ def _binding(
 def bound_references(
     vault: Path, store: originals.StoreBinding, *, unreadable: Callable[[str, Exception], None] | None = None,
 ) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject, bool]]:
-    """Every reference to `store` under the Knowledge Base: the companion's path, what it binds, and if displaced.
+    """Every reference to `store` under the managed root: the companion's path, what it binds, and if displaced.
 
     The caller holds the consistency guard around the whole iteration, and takes any read failure as an
     unknown census: a failed read never ends the walk early and reads as complete. A caller that passes
@@ -267,7 +267,7 @@ def bound_references(
             source.require_current()
 
 
-# What a failed read of the Knowledge Base tree can raise; the census that hit one is unknown.
+# What a failed read of the managed root tree can raise; the census that hit one is unknown.
 UNREADABLE = (
     OSError, ValueError, MemoryError, RecursionError, held_fs.HeldFsError,
     reserved_paths.ReservedPathLeafError, runtime_resources.PreparationBudgetExceeded,

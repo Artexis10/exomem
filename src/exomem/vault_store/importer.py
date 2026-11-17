@@ -795,7 +795,7 @@ class Importer:
 
         The store does not hold such a file's bytes, so nothing is imported: ``_refresh_noted``
         rederives the page's rows from the file. A file with no row is noted only when a walk that
-        gives it rows reaches it: the Knowledge Base or vault corpus walk, as the sweep's corpus is
+        gives it rows reaches it: the managed root or vault corpus walk, as the sweep's corpus is
         both, or the reference scan, which gives a raw Records item its identity row.
         """
         if not ownership.is_markdown(rel):

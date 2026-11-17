@@ -4,7 +4,7 @@ Two orthogonal axes classify a captured source: what the artifact **is**
 (`source_kind`) and what it is **about** (`domain`). Both are open. Any value
 that normalizes to a safe canonical key is accepted, including one this code has
 never seen, and it auto-registers into the selected source-taxonomy overlay on
-first use. Unbound vaults use `Knowledge Base/_Schema/source-taxonomy.yaml`;
+first use. Unbound vaults use `<managed root>/_Schema/source-taxonomy.yaml`;
 bound vaults use their instance's configured overlay. This is the same contract
 that `project_keys` already gives the project axis.
 

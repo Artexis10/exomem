@@ -777,7 +777,7 @@ def run_setup(
         init_module.init_vault(vault_path)
         report("init", f"[done] {managed_root_label()} scaffold created")
     except FileExistsError:
-        # The vault already has a Knowledge Base, so init is skipped — but the
+        # The vault already has a managed root, so init is skipped — but the
         # governance docs inside it are product-owned and were last written by
         # whatever version created the vault, while `install-skill` below
         # redeploys its copy on every run. Left alone the two drift, and both

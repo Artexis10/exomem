@@ -4,7 +4,7 @@ The vault is edited *around* the server — directly in Obsidian, on mobile, or 
 filesystem write (Obsidian Sync, a git pull). Those bypass the writer hooks, so the
 embedding sidecar drifts until someone runs `reconcile`. This watcher closes that gap:
 it watches the complete vault for freshness and vault-scope lexical maintenance, while
-re-embedding only the `Knowledge Base/` subset through the SAME
+re-embedding only the managed root subset through the SAME
 `index_sync.upsert_after_write` dispatch the writers (and `reconcile`) use — deletes go
 through `index_sync.delete_after_remove`. Each index remains behind its own availability
 and scope gates.
@@ -1134,7 +1134,7 @@ def _background_graph_caller(method: Callable[..., Any]) -> Callable[..., Any]:
 
 
 class FileWatcher:
-    """Watch Knowledge Base/ for `.md` changes and re-embed them, debounced.
+    """Watch the managed root for `.md` changes and re-embed them, debounced.
 
     With an ``importer`` (a store-mode vault) the watcher keeps its observer, debounce, reconcile
     interval and census notes, and hands every path that the store owns to the importer instead of
@@ -1199,7 +1199,7 @@ class FileWatcher:
         return self._watcher_policy().reconcile_interval_seconds
 
     def _is_kb(self, path: Path) -> bool:
-        """True when `path` is under Knowledge Base/ — the subset that gets
+        """True when `path` is under the managed root — the subset that gets
         embedded. The watcher observes the whole vault (for freshness/inbound)
         but only KB markdown is re-embedded into the KB sidecar."""
         try:
@@ -1516,7 +1516,7 @@ class FileWatcher:
     @_background_graph_caller
     def _flush(self) -> None:
         """Dispatch the coalesced batch: publish freshness/inbound for every
-        changed path (vault-wide), and re-embed only the Knowledge Base subset."""
+        changed path (vault-wide), and re-embed only the managed root subset."""
         self._resolve_held_publication_intents()
         self._flush_raw()
         if self._importer is not None:
@@ -2738,7 +2738,7 @@ class FileWatcher:
             self._observer = Observer()
             # Watch the whole vault: freshness (vault scope) and inbound links
             # index sibling folders too. The embed dispatch in _flush stays
-            # KB-filtered, so only Knowledge Base/ markdown is re-embedded.
+            # KB-filtered, so only the managed root markdown is re-embedded.
             self._observer.schedule(
                 _Handler(),
                 str(self._vault_root),

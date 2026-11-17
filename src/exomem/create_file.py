@@ -6,7 +6,7 @@ config, scratch. For typed notes, use `note`/`add`/`link`/`preserve`.
 
 Refuses by default:
 - Sources/ and Evidence/ (append-only — use `add` / `preserve`).
-- Any subtree marked `readonly`/`excluded` in `Knowledge Base/_access.yaml`
+- Any subtree marked `readonly`/`excluded` in `<managed root>/_access.yaml`
   (curated, read-only material) — a hard refusal with no override.
 
 If `frontmatter` is supplied, it's prepended to `content` as a YAML block

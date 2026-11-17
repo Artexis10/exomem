@@ -1,4 +1,4 @@
-"""init: bootstrap a fresh Knowledge Base scaffold into a vault.
+"""init: bootstrap a fresh Exomem scaffold into a vault.
 
 A new user (no existing KB) needs the three load-bearing files — `index.md`,
 `log.md`, `_Schema/SKILL.md` — plus the typed folder tree, before the writers
@@ -69,7 +69,7 @@ def _entity_area(vault_layout: Layout) -> str:
 
 #: Scaffold entries the PRODUCT owns: the governance contract the agent follows.
 #: `install-skill` redeploys its copy of these from this same source on every
-#: upgrade, but `init` is skipped once a Knowledge Base exists, so the vault
+#: upgrade, but `init` is skipped once a managed root exists, so the vault
 #: copy stayed frozen at whatever version created the vault. The two then drift,
 #: and both are live — `product_invoke` resolves the vault copy while agents
 #: read the deployed one — which makes it a correctness problem, not clutter
@@ -216,7 +216,7 @@ def _scaffold_plan(
     kb = managed_root(vault_root, layout=vault_layout)
     # The product-owned markdown lands outside the note namespace; everything else -- index.md,
     # log.md, the typed tree, and the per-vault YAML registries that also live under `_Schema/` --
-    # is the user's and stays in the Knowledge Base where they can see and edit it (#488).
+    # is the user's and stays in the managed root where they can see and edit it (#488).
     product_owned = {source.relative_to(_SCAFFOLD) for source in shipped_schema_sources()}
     folders: list[Path] = []
     plan: list[tuple[Path, Path]] = []
@@ -234,7 +234,7 @@ def _scaffold_plan(
             dest = kb / scaffold_rel
         if src.is_dir():
             # A directory that exists only to hold product-owned markdown is not created in the
-            # Knowledge Base at all; its files carry their own `mkdir(parents=True)` at the new
+            # managed root at all; its files carry their own `mkdir(parents=True)` at the new
             # location.
             if not any(str(candidate).startswith(str(scaffold_rel)) for candidate in product_owned):
                 folders.append(dest)

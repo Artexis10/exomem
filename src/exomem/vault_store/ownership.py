@@ -114,18 +114,18 @@ def classify(rel: str, managed: Managed | None = None) -> Ownership:
 
     1. A path outside the managed root is a read-only input: NONE.
     2. A path with a dot-named component below the managed root is NONE.
-    3. A Syncthing conflict copy is NONE, as the Knowledge Base walk treats it.
+    3. A Syncthing conflict copy is NONE, as the managed root walk treats it.
     4. A Records or Planning layer belongs to the collection store: NONE.
     5. A reserved family belongs to its own owner: NONE, unless its descriptor sets ``vault_store``.
     6. The schema overlay is PAGE, whatever its extension.
     7. Any other ``.md`` file, in any letter case, is PAGE.
     8. Everything else is BINARY.
 
-    The managed root is the Knowledge Base folder in a `nested` vault. A call without `managed` reads
+    The managed root is the wrapper folder in a `nested` vault. A call without `managed` reads
     the managed root that the process is bound to, which is `nested` until a vault is bound. In a `root` vault it is the vault root, less the import staging folder and
     the entries that the layout record lists as unmanaged (`layout.managed_of` returns both).
     The store owns content that search hides: ``_trash``, ``_archive``, ``_attachments`` and ``_Adoption``
-    are owned, although the Knowledge Base walk skips them.
+    are owned, although the managed root walk skips them.
     """
     below = _split(rel, managed)
     if below is None:

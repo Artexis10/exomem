@@ -8,7 +8,7 @@ canonical batch:
 
 * writes the new override;
 * snapshots the bytes it replaced at
-  `<Knowledge Base>/_Schema/history/<stem>/<utc>-<before8>.yaml`, the first
+  `<managed root>/_Schema/history/<stem>/<utc>-<before8>.yaml`, the first
   line a comment recording the operation, the reason and both hashes;
 * prepends `schema_memory <operation>: <why> (<before8> -> <after8>)` to
   `log.md`, which `read_memory(include_history=true)` already reads.

@@ -366,7 +366,7 @@ def _bound_storage(
 ) -> tuple[tuple[str | None, str, tuple[str, ...], frozenset[str]], ...]:
     """Each binding's scope, namespace, and the portable keys of its history trees and overlays.
 
-    They depend only on the binding, the Knowledge Base folder name and the areas that its paths are
+    They depend only on the binding, the managed root folder name and the areas that its paths are
     read with. A store request asks for every page it admits, so it prepares them once.
     """
     from .. import layout, registry_history

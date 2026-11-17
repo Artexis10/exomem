@@ -359,7 +359,7 @@ def area_folder(note_type: note_types.NoteType, layout: Layout | str) -> str | N
 def example_note_path(area: str, leaf: str) -> str:
     """The vault path of a sample compiled page in `area`, laid out as the served vault lays it.
 
-    For an example inside a tool's contract or message, where a literal `Knowledge Base/Notes/...`
+    For an example inside a tool's contract or message, where a literal `<managed root>/Notes/...`
     would name a wrapper folder that a `root` vault does not have.
     """
     return kbdir.managed_join(f"{_compiled_folder(area, kbdir.bound().layout)}/{leaf}")

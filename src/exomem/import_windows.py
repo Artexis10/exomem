@@ -80,7 +80,7 @@ class Window:
     A landed window lists the manifest members that no run filed. A discarded one lists its residual record,
     and the members that the person acknowledged. An unreadable one has a record that cannot be used, or a
     stage and no record, so nothing about its members is known; `staged` says whether its stage folder exists.
-    `renames_pending` names the Knowledge Base paths that a refused discard found renamed and not committed.
+    `renames_pending` names the managed root paths that a refused discard found renamed and not committed.
     `filing_done` says whether a `file` call on a landed window answers `done`, so a sender that files leaves it alone.
     """
 

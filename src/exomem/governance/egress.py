@@ -4443,7 +4443,7 @@ def _is_page_shaped(text: str) -> bool:
     item's OTHER references insufficient, and it never by itself supplies
     the "at least one admitted page reference" half of that invariant
     either. Every real vault path the compiler emits carries a directory
-    (`Knowledge Base/...`), so this only ever excludes a genuinely opaque
+    (`<managed root>/...`), so this only ever excludes a genuinely opaque
     string, never a real page reference.
 
     Correction round 4, T2: this classifier now gates exactly ONE thing --
@@ -4867,7 +4867,7 @@ def _is_admitted_typed_reference(value: str, invalid_refs: frozenset[str]) -> bo
     No `_is_page_shaped` gate here (round 4's fix): `_working_set_paths`
     decided this value WITHOUT one, since it came from a typed field
     (`strict=True`) -- `secret`/`secret.markdown` are exactly as candidate
-    as `Knowledge Base/Notes/real-page.md` there. Re-applying the gate here
+    as `<managed root>/Notes/real-page.md` there. Re-applying the gate here
     would incorrectly call a genuinely decided-and-admitted bare-word
     candidate "not admitted" merely for not looking like a path.
 
@@ -5877,7 +5877,7 @@ def _annotate_page(
 def _iter_reference_targets(value: Any) -> Iterable[str]:
     """Directory-carrying reference tokens inside a reference container.
 
-    Frontmatter provenance stores WIKILINKS (`[[Knowledge Base/Notes/x]]`,
+    Frontmatter provenance stores WIKILINKS (`[[<managed root>/Notes/x]]`,
     `[[Notes/x]]`), which carry no `.md` suffix, so `_iter_path_strings`
     yielded nothing for them and the item they name was never decided —
     leaving `_strip_page_provenance` with an empty withheld set and the
@@ -6321,7 +6321,7 @@ def _caller_supplied_references(
             if canonical is not None:
                 out.add(canonical[0])
                 # Mirror `_withheld_keys`: a supplied `Notes/x.md` and a
-                # volunteered `Knowledge Base/Notes/x.md` are the same item.
+                # volunteered `<managed root>/Notes/x.md` are the same item.
                 stripped = _kb_stripped(canonical[0])
                 if stripped:
                     out.add(stripped)
@@ -8605,7 +8605,7 @@ def _decode_pathish(value: str) -> str | None:
 
     Ordered AHEAD of every shape test, which is the fix for a real gap:
     `_path_like` used to require a literal `/` in the RAW string, so
-    `Knowledge Base%2FNotes%2F….md` failed the shape test and never reached
+    `<managed root>%2FNotes%2F….md` failed the shape test and never reached
     the resolver that would have unquoted it. A decoder that runs after the
     test it is supposed to inform is not a decoder.
 

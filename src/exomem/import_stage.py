@@ -32,7 +32,7 @@ IDENTITY_KEY = "identity"
 # What a discard leaves in the receipt, in the same write that drops the manifest (see `residual_record`).
 RESIDUAL_KEY = "residual"
 RESIDUAL_VERSION = 1
-# The renamed members that a refused discard found unsettled: their Knowledge Base paths, for the status to read.
+# The renamed members that a refused discard found unsettled: their managed root paths, for the status to read.
 # A readable receipt carries them; when it is unreadable, the walk file does (see `read_walk`).
 RENAMES_PENDING_KEY = "renames_pending"
 # Where a discard that walked the stage writes its record, when the receipt could not be read.
@@ -315,7 +315,7 @@ def residual_record_with_walk(vault_root: Path, import_id: str, unfiled: list[di
 
 
 def renames_pending_record(paths: list[str]) -> dict:
-    """The walk file of a walking discard that renamed members refused: their Knowledge Base paths and no member list.
+    """The walk file of a walking discard that renamed members refused: their managed root paths and no member list.
 
     It has no `members` key, so `read_residual` finds no record in it and a later walk still writes its own.
     """

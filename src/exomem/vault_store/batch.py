@@ -4,7 +4,7 @@
 which is the only writer of the store, and it writes no Markdown for a page: the pages of the
 batch commit with their lexical, graph and identity rows in one store transaction
 (``write.commit``). A file that the store holds as a binary, or does not hold at all (a Markdown
-file outside the Knowledge Base folder, a machine-local file), is published to disk through the
+file outside the managed root folder, a machine-local file), is published to disk through the
 file-mode machinery, and the store commit runs inside that batch's rollback window as its last
 step: it records the binary or derives the rows of the file, and a failure of any part restores the
 published files. Only what lives outside the store runs after the commit: the free-text census

@@ -1,6 +1,6 @@
 """Bulk media back-fill — make pre-existing KB binaries searchable.
 
-`exomem backfill-media` walks the whole `Knowledge Base/` tree (not just
+`exomem backfill-media` walks the whole managed root tree (not just
 `Evidence/`), and for every media file (image/audio/video/pdf):
   1. writes a `.md` sidecar if missing — so `find()` can surface it (a CLIP/text match maps
      to `<file>.md`, which must exist);
@@ -258,7 +258,7 @@ def backfill_media(
     dry_run: bool = False,
     log_fn=log.info,
 ) -> BackfillStats:
-    """Back-fill sidecars + text + CLIP for every media file under Knowledge Base/. Idempotent.
+    """Back-fill sidecars + text + CLIP for every media file under <managed root>/. Idempotent.
 
     `rediarize` re-extracts audio/video whose transcript predates diarization (a completed
     ASR engine without `+diarized`) so they gain labeled turns + `speakers:` frontmatter.

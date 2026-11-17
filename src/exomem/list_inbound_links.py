@@ -2,7 +2,7 @@
 
 Read-only. Useful before `move_file` (to know what update_wikilinks will
 touch) or `delete_file` (to know what would break). Matches three forms:
-- `[[Knowledge Base/Notes/Insights/foo]]`  (full path)
+- `[[<managed root>/Notes/Insights/foo]]`  (full path)
 - `[[Notes/Insights/foo]]`                 (KB-stripped path)
 - `[[foo]]`                                (bare basename, only when unique)
 """

@@ -346,7 +346,7 @@ def corpus_member(rel: str, scope: str) -> bool:
     """Whether the corpus of ``scope`` ("kb" or "vault") holds this stored page, as a walk of the
     disk would.
 
-    The Knowledge Base corpus is ``find_corpus.walk_md`` over that folder; the vault corpus is
+    The managed root corpus is ``find_corpus.walk_md`` over that folder; the vault corpus is
     ``vault.walk_vault_md``. The two differ in their anchor and in the folders they skip.
     """
     return find_corpus.kb_walk_member(rel) if scope == "kb" else walk_member(rel)

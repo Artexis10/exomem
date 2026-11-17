@@ -1,10 +1,10 @@
 """A persisted, read-through store of per-page `entity_recurrence` evidence.
 
-An explicit `entity_recurrence` sweep used to read and parse every Knowledge Base
+An explicit `entity_recurrence` sweep used to read and parse every managed root
 page, although most pages have not changed since the last sweep. This module keeps
 what a sweep learns from one page (`entity_recurrence.PageEvidence`) in a derived
 SQLite file beside the vault's other machine-local state, keyed by the page's file
-identity. A sweep walks the Knowledge Base by file metadata, reads again only the
+identity. A sweep walks the managed root by file metadata, reads again only the
 pages whose identity changed, and runs the cross-page half of the sweep
 (`entity_recurrence.collect_evidence`) over the result.
 
@@ -392,7 +392,7 @@ def sweep(
 
 
 def _walk(vault_root: Path, rows: Mapping[str, _Row]) -> tuple[list[_Visible], bool, set[str]]:
-    """Walk the Knowledge Base by file metadata and ask egress before any row is read.
+    """Walk the managed root by file metadata and ask egress before any row is read.
 
     Returns the visible pages in walk order, whether the walk reported no error, and
     every walked path, visible or not, so a row is dropped only when its file is gone.

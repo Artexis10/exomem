@@ -1,7 +1,7 @@
 """One loader and one contract for every vocabulary registry.
 
 A registry is a shipped pack plus an optional vault overlay under
-`<Knowledge Base>/_Schema/`. A `RegistrySpec` declares what differs between
+`<managed root>/_Schema/`. A `RegistrySpec` declares what differs between
 registries: the pack, the overlay path, the history stem, which generic fields
 and attributes a delta may carry, which of them are fixed once an entry exists,
 whether a deprecation needs a replacement, the cap, and the review family a

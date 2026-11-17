@@ -265,7 +265,7 @@ class _Derivation:
         """Replace the inbound-link rows of each page that the commit gives bytes to or removes.
 
         A page's link rows depend on its own bytes alone, so no dependent page is touched. The
-        index holds every page that the vault walk reaches, inside the Knowledge Base or not.
+        index holds every page that the vault walk reaches, inside the managed root or not.
         """
         for rel in self.removed:
             vault.replace_inbound_rows(self.tx, rel, None)
@@ -295,7 +295,7 @@ class _Derivation:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
         found = self.source(rel)
-        # File mode builds the graph from the Knowledge Base walk alone: a refreshed page outside it
+        # File mode builds the graph from the managed root walk alone: a refreshed page outside it
         # has lexical rows and no graph rows, or it would get a node under a path that has no file.
         if found is not None and lexstore.page_membership(rel)[0]:
             raw, mtime_ns = found

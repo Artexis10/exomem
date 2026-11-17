@@ -83,7 +83,7 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 
-# Sub-folders within Knowledge Base that are append-only or infra and should
+# Sub-folders within the managed root that are append-only or infra and should
 # be skipped during the canonicalization sweep.
 _SKIP_KB_SUBDIRS = frozenset({
     "Sources", "Evidence", "_Schema", "_trash", "_archive", "_attachments",

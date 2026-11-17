@@ -1387,8 +1387,8 @@ def discover_collections_with_errors(
     from .governance import artifact_census
 
     candidates = []
-    # The Knowledge Base's listing only proposes: `_declared_candidate_rel` still drops whatever lies
-    # outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
+    # The managed root's listing only proposes: `_declared_candidate_rel` still drops whatever lies
+    # outside the managed root first, and the later guards read the disk. Sorted before the bound.
     listing = artifact_census.vault_listing(root) if listing is None else listing
     proposed = sorted(root / rel for rel in listing.files_named(MANIFEST_FILENAME))
     for candidate in proposed:

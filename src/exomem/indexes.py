@@ -2,7 +2,7 @@
 
 `add` calls into here to compute the new contents of:
 - `Sources/index.md` (bump By-type count + prepend Recent-captures bullet)
-- `Knowledge Base/index.md` (prepend Recent-activity cap-50 + bump Counts line)
+- `<managed root>/index.md` (prepend Recent-activity cap-50 + bump Counts line)
 - `log.md` (prepend most-recent-first entry)
 
 Each function returns a PlannedWrite-ready string; nothing is written here.
@@ -113,7 +113,7 @@ def compute_updates(
     source_type: str,
     folder_title: str,  # e.g., "Articles", "Papers"
     folder_description: str,  # e.g., "captured web/PDF content"
-    rel_source_path: str,  # vault-relative, e.g. "Knowledge Base/Sources/Papers/2026-05-18-foo"
+    rel_source_path: str,  # vault-relative, e.g. "<managed root>/Sources/Papers/2026-05-18-foo"
     date_iso: str,
     activity_summary: str,
     log_entry_body: str,

@@ -192,7 +192,7 @@ class Usage:
 
 
 def _catalogue_rows(vault_root: Path) -> list[tuple[str, list[str]]] | None:
-    """Every Knowledge Base page's catalogued tags, or None when it cannot answer."""
+    """Every managed page's catalogued tags, or None when it cannot answer."""
     from . import lexstore
 
     try:

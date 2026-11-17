@@ -301,7 +301,7 @@ def subject_inputs(root: Path, policy: Policy) -> tuple:
 
     The page-admission scope-set memo keys on this tuple: an input that `evaluate_subject` gains goes here.
     The policy's scopes follow its fingerprint; registry assignment follows the connector requirement,
-    the Knowledge Base folder name and the root; a path selector follows the areas it is read with.
+    the managed root folder name and the root; a path selector follows the areas it is read with.
     """
     from . import connector_boundary  # imports this module, so it loads on use
 

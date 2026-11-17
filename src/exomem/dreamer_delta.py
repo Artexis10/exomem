@@ -76,7 +76,7 @@ def checkpoint(
 
 
 def eligible(vault_root: Path, rel_path: str) -> bool:
-    """Indexable Markdown under the Knowledge Base, outside governance and trash."""
+    """Indexable Markdown under the managed root, outside governance and trash."""
     rel = PurePosixPath(rel_path)
     if rel.suffix.lower() != ".md" or managed_split_parts(rel.parts) is None:
         return False

@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 
 def canon(path: str) -> str:
     """Canonical page key: forward slashes, no .md, no leading
-    `Knowledge Base/`, lowercased."""
+    the managed root, lowercased."""
     p = (path or "").strip().replace("\\", "/")
     if p.lower().endswith(".md"):
         p = p[:-3]

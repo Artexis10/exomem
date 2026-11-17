@@ -1,4 +1,4 @@
-"""Removal of a staged artifact once the Knowledge Base holds its identical copy.
+"""Removal of a staged artifact once the managed root holds its identical copy.
 
 Adoption removes a staged file only when a stage manifest (`import_stage`) lists it, the staged
 bytes still match that entry and the plan, and the durable copy matches the plan. The staged file
@@ -15,7 +15,7 @@ from types import MappingProxyType
 
 from . import adoption_plan, held_fs, import_stage
 
-# The outcome statuses of an item that is in the Knowledge Base; a run, its residual report and a discard all read them here.
+# The outcome statuses of an item that is in the managed root; a run, its residual report and a discard all read them here.
 FILED_STATUSES = ("applied", "already-applied")  # nosemgrep: ep-word-set -- the statuses that `apply` writes: a closed protocol of the run object.
 #: Why a staged file no scan of the run covers stays.
 OUTSIDE_RUN = "outside_run"
@@ -43,7 +43,7 @@ def _stay(reason: str) -> tuple[bool, str]:
 
 
 def is_filed(reason: str) -> bool:
-    """Whether a member that stays for this reason is in the Knowledge Base."""
+    """Whether a member that stays for this reason is in the managed root."""
     return _stay(reason)[0]
 
 
@@ -57,7 +57,7 @@ def _summary(by_reason: dict[str, dict[str, int]], unfiled: dict[str, int]) -> s
     if not by_reason:
         return "No file is left in the stage."
     if not unfiled["files"]:
-        # `finish` checks no filed copy that stays, so the sentence claims filing only, never a verified Knowledge Base copy.
+        # `finish` checks no filed copy that stays, so the sentence claims filing only, never a verified managed root copy.
         count = sum(entry["files"] for entry in by_reason.values())
         return (
             f"{count} file{' stays' if count == 1 else 's stay'} staged ({groups(True)}): adoption filed "
@@ -122,7 +122,7 @@ def matches(file: held_fs.HeldFile, size: int, sha256: str) -> bool:
 
 
 def durable_matches(root: Path, artifact_path: str | None, planned: dict) -> bool:
-    """Whether the Knowledge Base artifact has the planned bytes, read back in a stream."""
+    """Whether the managed root artifact has the planned bytes, read back in a stream."""
     if not artifact_path:
         return False
     parent, _, leaf = artifact_path.rpartition("/")
@@ -220,13 +220,13 @@ def stage_reasons(
 def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pages: tuple[dict, ...] = ()) -> dict | None:
     """What is still in the run's stage, by why it stays, with counts and bytes; None for a run with no stage.
 
-    `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. `earlier_pages` are
+    `filed_statuses` are the outcome statuses of an item that is in the managed root. `earlier_pages` are
     the earlier pages of a paged scan, nearest first; each file is classified by the page that scanned it, so
     the last page's report covers the whole stage. The reasons are a closed set of result keys that this
     report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `source_differs`, `copy_changed`, `unchecked`,
     `pending`, `unselected`, `ineligible`, `over_ceiling` (above the adoption ceiling, which `ceiling_bytes`
     then reports) and `outside_run` (hidden or added after the scan, or on a later page not yet scanned). `text`
-    and `kept` are in the Knowledge Base and only their staged copy stays. Every other reason is a file that
+    and `kept` are in the managed root and only their staged copy stays. Every other reason is a file that
     adoption did not file, or that `finish` has not verified. `source_differs` is a filed text whose Source page no
     longer holds its text, so that the staged copy is the only exact one. `copy_changed` is a filed text whose
     Source page holds its text but whose staged copy is no longer the file that the manifest lists. `unchecked` is a

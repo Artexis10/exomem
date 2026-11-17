@@ -777,7 +777,7 @@ def scan_provenance(
     """Scan note bodies for provenance tags. Read-only; no index/sidecar.
 
     Filter by `tag` ("key" or "key:value" shorthand), or explicit `key`/`value`.
-    Restrict to one file with `path` (else the whole Knowledge Base is walked).
+    Restrict to one file with `path` (else the whole managed root is walked).
     Line numbers are body-relative (provenance never lives in frontmatter).
     """
     key_f, value_f = _resolve_filter(tag, key, value)

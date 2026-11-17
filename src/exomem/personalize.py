@@ -1,9 +1,9 @@
 """`exomem personalize` — turn a vault scan into a starter access policy.
 
-Per-vault behavior is governed by ``Knowledge Base/_access.yaml`` (``readonly:`` /
+Per-vault behavior is governed by ``<managed root>/_access.yaml`` (``readonly:`` /
 ``excluded:`` subtree lists, read by ``access.py``). Users shouldn't have to hand-write
 that YAML: this scans the vault with the existing ``overview`` and proposes a policy for
-the top-level folders that sit *beside* ``Knowledge Base/``, then merges it in
+the top-level folders that sit *beside* the managed root, then merges it in
 non-destructively.
 
 No model, no network — just the bounded ``overview`` walk. It only ever ADDS the entries
@@ -105,7 +105,7 @@ class PersonalizeReport:
 def _sibling_signals(scan: dict) -> dict[str, dict]:
     """Top-level folder name -> ``{files, markdown, binary, junk}``.
 
-    Reads depth-1 ``tree`` entries (excluding ``Knowledge Base``) and attributes junk
+    Reads depth-1 ``tree`` entries (excluding the managed root) and attributes junk
     (sync-conflicts + zero-byte files) to a folder by path prefix. ``overview`` has
     already dropped ``.git``/``node_modules``/dot-dirs, so those never appear here.
     """
@@ -198,7 +198,7 @@ def _vault_default() -> str | None:
 
 
 def scan_and_classify(vault: str | Path, *, overview_fn=overview_module.overview) -> PersonalizeReport:
-    """Scan and classify — never writes. Requires an initialized ``Knowledge Base/``
+    """Scan and classify — never writes. Requires an initialized managed root
     (that's where ``_access.yaml`` lives), else raises ``PersonalizeError('NO_KB')``."""
     vault_path = Path(vault).expanduser()
     if not managed_root(vault_path).is_dir():

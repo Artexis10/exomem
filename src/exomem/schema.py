@@ -1,6 +1,6 @@
-"""Parse Knowledge Base schema docs at startup; validate `add` calls against the spec.
+"""Parse the vault's schema docs at startup; validate `add` calls against the spec.
 
-The schema lives at `<vault>/Knowledge Base/_Schema/`. Two docs matter for the
+The schema lives at `<vault>/<managed root>/_Schema/`. Two docs matter for the
 MCP's scope:
 - `references/frontmatter.md` — required source-page fields.
 - `references/page-types.md` — source location + naming convention.
