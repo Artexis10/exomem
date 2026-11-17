@@ -20,6 +20,7 @@ from exomem import (
     collection_claims,
     due_state,
     prominence,
+    records_disposition,
     semantic_writes,
     vocabulary_fold,
 )
@@ -650,6 +651,26 @@ def test_moderate_routes_keep_the_plain_advisory(
 
     assert delivered is not None and delivered["strength"] == "moderate"
     assert "disposition" not in delivered
+
+
+@pytest.mark.parametrize(
+    ("note_type", "acts"), [("failure", True), ("decision", False)], ids=["failure-shaped", "not-failure-shaped"]
+)
+def test_a_strong_route_no_declaration_produced_still_needs_a_failure_shaped_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, note_type: str, acts: bool
+) -> None:
+    """Only a full `claims.match` lifts the gate: a natural-key route has no declaration behind it."""
+    _write_incidents(tmp_path, claims=_INCIDENT_CLAIMS)
+    due_state.reconcile(tmp_path, now=NOW)
+    monkeypatch.setattr(prominence, "effective_capture_level", lambda *_a, **_k: "maximal")
+    state = _routed_state(tmp_path)
+    state.frontmatter = {**state.frontmatter, "type": note_type}
+    state.document = SimpleNamespace(units=())  # no unit category speaks for the note either
+    natural_key_route = {"collection": INCIDENTS, "title": "Incidents", "strength": "strong"}
+
+    delivered = records_disposition.disposition(tmp_path, natural_key_route, state, level="maximal")
+
+    assert (delivered is not None and delivered["disposition"] == "file") is acts
 
 
 # --- Part 5: collection_candidate noise budget -----------------------------
