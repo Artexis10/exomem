@@ -1440,7 +1440,10 @@ def run(
         # sets a context variable, and FastMCP sets its own again per request.
         uvicorn_config: dict[str, object] = {"reset_contextvars": True}
         if worker_socket is not None:
+            from .service_ingress import WORKER_KEEP_ALIVE_SECONDS
+
             uvicorn_config["uds"] = str(worker_socket)
+            uvicorn_config["timeout_keep_alive"] = WORKER_KEEP_ALIVE_SECONDS
         worker_options = {"uvicorn_config": uvicorn_config}
         # Only this process answers /download, so only the short links it mints can resolve.
         from . import download_links

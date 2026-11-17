@@ -158,7 +158,9 @@ def test_operator_and_same_name_site_are_distinct_identities(
         },
     )
     site = created["path"]
-    assert site == "Knowledge Base/Entities/Sites/Merrow Farm.md"
+    # The organization holds the title "Merrow Farm", so the site takes a number and a bare link to
+    # that title keeps reaching the organization.
+    assert site == "Knowledge Base/Entities/Sites/Merrow Farm-2.md"
     # The operating role is a registered core relation, not ownership.
     _relate(root, organization, "operates", site)
 

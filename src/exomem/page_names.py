@@ -21,7 +21,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import find, find_corpus, memory_refs, page_ids, reserved_paths, semantic_contract, vault
+from . import (
+    capabilities,
+    find,
+    find_corpus,
+    memory_refs,
+    page_ids,
+    reserved_paths,
+    semantic_contract,
+    vault,
+)
 from .cli_ops import OpError
 from .governance import egress
 from .kbdir import kb_page_target, managed_join, managed_root
@@ -348,13 +357,90 @@ def _renamed(item: Mapping[str, Any], swaps: Mapping[str, Mapping[str, str]]) ->
     return out
 
 
-def _name_hit(root: Path, hit: Any, *, keep_paths: bool) -> Any:
+def _title_link_renderer(root: Path) -> Callable[[str], str] | None:
+    """Shows the links of a text by title, as `read_page` shows a body; None with no resident resolver.
+
+    A search reply only borrows the resident resolver: it never builds one, so a cold server keeps
+    the stored links rather than pay a vault-sized build.
+    """
+    visible = egress.visible_page_filter(root)
+    resolver = find.borrow_query_resolver(root, visible, schedule_rebuild=False)
+    if resolver is None:
+        return None
+    return lambda text: vault.render_title_links(text, root, resolver=resolver, visible=visible).text
+
+
+def _without_cut_link(text: str) -> str:
+    """`text` without a link that the excerpt ended inside: it would show half a stored path."""
+    start = text.rfind("[[")
+    if start == -1 or "]]" in text[start:]:
+        return text
+    return text[:start].rstrip() + "…"
+
+
+def _name_hit(
+    root: Path, hit: Any, *, keep_paths: bool, render: Callable[[str], str] | None = None
+) -> Any:
     if not isinstance(hit, Mapping) or not isinstance(hit.get("path"), str):
         return hit
     found = read_identity(root, hit["path"])
     if found is None:
         return hit
-    return {**hit, "id": found.id} if keep_paths else _renamed(hit, {"path": {"id": found.id}})
+    if keep_paths:
+        return {**hit, "id": found.id}
+    named = _renamed(hit, {"path": {"id": found.id}})
+    excerpt = named.get("excerpt")
+    if render is not None and isinstance(excerpt, str) and "[[" in excerpt:
+        named["excerpt"] = render(_without_cut_link(excerpt))
+    return named
+
+
+def name_candidate(root: Path, candidate: Any) -> Any:
+    """A candidate page with its title first, then its short id, beside its `ref` and its path.
+
+    The title is the candidate's own or, for an alias or title match that has none, the page's.
+    Clients read `path` from a candidate, so it stays. A candidate whose bytes cannot be read has no
+    id to offer and comes back as it was.
+    """
+    if not isinstance(candidate, Mapping) or not isinstance(candidate.get("path"), str):
+        return candidate
+    found = read_identity(root, candidate["path"])
+    if found is None:
+        return candidate
+    rest = {key: value for key, value in candidate.items() if key not in ("title", "id")}
+    return {"title": candidate.get("title") or found.title, "id": found.id, **rest}
+
+
+def candidates_by_handle(root: Path, candidates: list[dict[str, str]]) -> list[Any]:
+    """Candidates for a refusal message: each by its title and id (and `ref`), with no path.
+
+    An agent reads a message as text, and the id is the handle that every tool takes, so the path
+    stays out. A candidate whose page cannot be read has no handle to offer and keeps its path.
+    """
+    out: list[Any] = []
+    for item in candidates:
+        named = name_candidate(root, item)
+        out.append(named if named is item else {key: value for key, value in named.items() if key != "path"})
+    return out
+
+
+def _is_page_read(reply: Mapping[str, Any]) -> bool:
+    """Whether `reply` reads a Markdown page: it carries the page's content hash and frontmatter."""
+    return isinstance(reply.get("content_hash"), str) and isinstance(reply.get("frontmatter"), Mapping)
+
+
+def _name_read(reply: dict[str, Any]) -> dict[str, Any]:
+    """A page read with its `title` first, then its `id` and `ref`; `path` stays where clients read it.
+
+    A reply with no `id` is not a Markdown page read: it has no handle to offer and comes back as it was.
+    """
+    path, frontmatter = reply.get("path"), reply.get("frontmatter")
+    if not (isinstance(path, str) and isinstance(reply.get("id"), str) and isinstance(frontmatter, Mapping)):
+        return reply
+    body = reply.get("body")
+    title = vault.resolve_display_title(dict(frontmatter), body if isinstance(body, str) else "", path)
+    lead = {"title": title, **{key: reply[key] for key in ("id", "ref") if key in reply}}
+    return {**lead, **{key: value for key, value in reply.items() if key not in lead}}
 
 
 def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
@@ -437,13 +523,29 @@ def name_released_reply(
 
     A write reply swaps `path` for `title` and `id`; `response_detail="full"` still carries the
     path under `diagnostics.operational`. A search reply swaps each page hit's `path` for its `id`
-    (the hit keeps its `title` and `ref`). `keep_paths`, set for `detail="full"`, adds the `id` and
-    keeps the path, for a harness that reads vault files. A page that cannot be read keeps its
-    path. This runs after the egress release, so it names only what that filter let through. A
-    reply that is none of these comes back unchanged.
+    (the hit keeps its `title` and `ref`) and, on the public tool shape, shows the links in its
+    excerpt by title where a resolver is resident. A resolve-entity reply puts each candidate's
+    `title` and `id` first and a page read puts its `title` first; both keep the `path`, which clients
+    read. `keep_paths`, set for `detail="full"`, adds the `id` to a hit and keeps the path and the
+    stored links, for a harness that reads vault files. A page that cannot be read keeps its path.
+    This runs after the egress release, so it names only what that filter let through. A reply that
+    is none of these comes back unchanged.
     """
     root = Path(root)
     hits = reply.get("hits")
     if isinstance(hits, list):
-        return {**reply, "hits": [_name_hit(root, hit, keep_paths=keep_paths) for hit in hits]}
+        render = None
+        if (
+            not keep_paths
+            and capabilities.shows_links_by_title()
+            and any(isinstance(hit, Mapping) and "[[" in str(hit.get("excerpt", "")) for hit in hits)
+        ):
+            render = _title_link_renderer(root)
+        named = [_name_hit(root, hit, keep_paths=keep_paths, render=render) for hit in hits]
+        return {**reply, "hits": named}
+    candidates = reply.get("candidates")
+    if isinstance(candidates, list):
+        return {**reply, "candidates": [name_candidate(root, item) for item in candidates]}
+    if _is_page_read(reply):
+        return reply if keep_paths else _name_read(reply)
     return _name_write(root, reply)

@@ -547,7 +547,9 @@ def test_shared_name_distinct_identity_needs_decision_not_refusal(vault: Path) -
     )
 
     assert isinstance(created, link_module.LinkResult)
-    assert created.path == "Knowledge Base/Entities/Sites/Kestrel Farm.md"
+    # The organization holds the title "Kestrel Farm", so the site takes a number and a bare link to
+    # that title keeps reaching the organization.
+    assert created.path == "Knowledge Base/Entities/Sites/Kestrel Farm-2.md"
     site = _fm(vault / created.path)
     assert site["entity_type"] == "site"
     assert "aliases" not in site

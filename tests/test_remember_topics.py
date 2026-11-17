@@ -21,7 +21,7 @@ def test_remember_registers_topics_in_the_page_batch(vault: Path, monkeypatch: p
 
     def record_batch(writes, **kwargs):
         writes = list(writes)
-        if any(write.path.name == "catalogue-description.md" for write in writes):
+        if any(write.path.name == "Catalogue description.md" for write in writes):
             batches.append([write.path for write in writes])
         return real_batch(writes, **kwargs)
 
