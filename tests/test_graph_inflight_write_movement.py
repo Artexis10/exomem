@@ -280,6 +280,22 @@ def test_a_rebuild_racing_an_in_flight_write_leaves_no_fence_behind(
     assert freshness.external_pending(vault) is False
 
 
+def _snapshot_reads_move_atime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the writer's snapshot read move atime, as a strictatime mount does.
+
+    The writer skips restoring timestamps that did not move, so only a moved
+    atime makes its restore run and move the ctime that these cases sample.
+    """
+    original = vault_module._restore_bound_source_timestamps
+
+    def read_moved_atime(source: Any, descriptor: int, atime_ns: int, mtime_ns: int) -> Any:
+        if threading.current_thread().name == WRITER_THREAD:
+            os.utime(descriptor, ns=(atime_ns + 10**9, mtime_ns))
+        return original(source, descriptor, atime_ns, mtime_ns)
+
+    monkeypatch.setattr(vault_module, "_restore_bound_source_timestamps", read_moved_atime)
+
+
 class _HeldAfterSnapshot:
     """A governed write held just after it snapshotted its destination.
 
@@ -335,6 +351,7 @@ class _HeldAfterSnapshot:
 def held_after_snapshot(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[_HeldAfterSnapshot]:
+    _snapshot_reads_move_atime(monkeypatch)
     held = _HeldAfterSnapshot(monkeypatch, vault, PAGE_B)
     try:
         yield held
@@ -434,6 +451,7 @@ def test_a_write_held_in_its_installing_window_is_recorded(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Installing, not yet renamed: the snapshot's ctime move is still the writer's."""
+    _snapshot_reads_move_atime(monkeypatch)
     before = (vault / PAGE_B).read_bytes()
     target_key = file_watcher._publication_key(vault, vault / PAGE_B)
 
@@ -473,6 +491,7 @@ def test_a_before_shaped_sample_proven_after_the_rename(
     records next, so the sampled difference is the writer's. A foreign
     replacement of those bytes is still evidence.
     """
+    _snapshot_reads_move_atime(monkeypatch)
     snapshotted, release_snapshot = _hold_on_writer(
         monkeypatch, vault_module, "_restore_bound_source_timestamps"
     )

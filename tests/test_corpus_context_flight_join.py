@@ -749,6 +749,11 @@ _DECLARED_UNBOUNDED_JOINS = {
         "embeddings.get_embedding_index(vault_root).start_corpus_matrix_load().join",
     ): "startup warm thread joins the background matrix load it shares; not a request path",
     (
+        "server_runtime.py",
+        "_warm_embedding_matrix",
+        "loading.join",
+    ): "startup warm thread joins the optional passage-matrix load it requested; not a request path",
+    (
         "working_set_runtime.py",
         "join_builds",
         "thread.join",

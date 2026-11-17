@@ -95,6 +95,16 @@ def signal(root: Path, paths: list[str] | tuple[str, ...] = ()) -> None:
         owner.signal(paths)
 
 
+def request_inventory_proof(root: Path, entry, space: str) -> None:
+    """Queue only caller-selected witnesses on the existing service dispatcher."""
+    with _LOCK:
+        owner = _ACTIVE.get(_key(root))
+    if owner is not None:
+        with owner._lock:
+            owner._inventory_proofs[entry.path] = (entry, space)
+        owner._wake.set()
+
+
 def status(root: Path | None) -> dict[str, Any]:
     """Content-free worker state, without allocating a worker, model or sidecar."""
     with _LOCK:
@@ -151,6 +161,8 @@ class SemanticDrain:
         self._scan_after = 0
         self._scan_through: int | None = None
         self._proofs: OrderedDict[str, Any] = OrderedDict()
+        self._inventory_proofs: OrderedDict[str, Any] = OrderedDict()
+        self._proof_yield_to_mutations = False
 
     def start(self) -> SemanticDrain:
         with _LOCK:
@@ -191,6 +203,36 @@ class SemanticDrain:
             and proof.current(self.root, claims_required=claims_required)
         )
 
+    def _inventory_turn(self) -> bool:
+        from . import (
+            capture_inventory,
+            embeddings,
+            find_corpus,
+            passage_evidence,
+            semantic_contract,
+        )
+
+        with self._lock:
+            if not self._inventory_proofs:
+                return False
+            path, (entry, space) = self._inventory_proofs.popitem(last=False)
+        publication = semantic_contract.borrow_capture_inventory(self.root)
+        if publication is None:
+            with self._lock:
+                self._inventory_proofs.setdefault(path, (entry, space))
+            return False  # Existing idle recovery revisits temporarily unpublished inputs.
+        inventory = publication[0]
+        if inventory.entries.get(path) != entry:
+            return True  # Stale queued work has no authority over a newer capture.
+        data = capture_inventory.read_canonical(self.root, path)
+        if data is None or hashlib.sha256(data).hexdigest() != entry.source_hash:
+            return True
+        page = find_corpus.parse_page(self.root / path, 0, self.root, content=data, resolved_relative=path)
+        chunks = passage_evidence.declared_chunks(page) if page is not None else None
+        if chunks is not None:
+            embeddings.get_embedding_index(self.root).reconstruct_chunk_receipt(path, [chunk.text for chunk in chunks], space=space)
+        return True
+
     def _run(self) -> None:
         interval = IDLE_POLL_SECONDS
         while not self._stop.is_set():
@@ -217,8 +259,17 @@ class SemanticDrain:
         """
         from .vault_store import vectors
 
+        began_proof = time.monotonic()
+        proof_progressed = False if self._proof_yield_to_mutations else self._inventory_turn()
+        self._proof_yield_to_mutations = False
+        proof_elapsed = time.monotonic() - began_proof
+        if proof_progressed and proof_elapsed >= TURN_OVERHEAD_SECONDS:
+            # A proof that spends the allowance yields the next turn to mutation debt.
+            self._proof_yield_to_mutations = True
+            return True, MIN_WAKE_SECONDS
         if vectors.in_store_mode(self.root):
-            return self._store_turn()
+            progressed, interval = self._store_turn(pages=max(1, vectors.PAGES_PER_TURN - int(proof_progressed)))
+            return progressed or proof_progressed, MIN_WAKE_SECONDS if proof_progressed else interval
         with self._lock:
             hints = self._hints
             self._hints = set()
@@ -235,9 +286,9 @@ class SemanticDrain:
                 self.root, after_rowid=0, through_rowid=self._scan_through, limit=SCAN_LIMIT,
             )
         seen: set[str] = set()
-        attempted = 0
-        overhead = 0.0
-        progressed = False
+        attempted = int(proof_progressed)
+        overhead = proof_elapsed
+        progressed = proof_progressed
         runnable_pending = False
         policy = preparation_policy(self.root)
         def candidates():
@@ -321,7 +372,7 @@ class SemanticDrain:
             return False, IDLE_POLL_SECONDS
         return False, min(IDLE_POLL_SECONDS, max(MIN_WAKE_SECONDS, due - now))
 
-    def _store_turn(self) -> tuple[bool, float]:
+    def _store_turn(self, *, pages: int | None = None) -> tuple[bool, float]:
         """A store-mode vault's turn. Its changes are the store's audit rows, not receipts.
 
         The drain bounds its own turn, so this runs it inline: a page's bytes come from the store,
@@ -330,7 +381,7 @@ class SemanticDrain:
         from .vault_store import vectors
 
         try:
-            report = vectors.drain(self.root, stop=self._stop)
+            report = vectors.drain(self.root, stop=self._stop, pages=vectors.PAGES_PER_TURN if pages is None else pages)
         except foreground_priority.BulkCancelled:
             return False, IDLE_POLL_SECONDS
         if report.blocked is not None:

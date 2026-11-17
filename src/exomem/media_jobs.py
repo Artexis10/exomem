@@ -1004,6 +1004,9 @@ class MediaJobStore:
             conn.execute("ALTER TABLE media_access ADD COLUMN temporary_identity TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydration_key ON media_access(hydration_key) "
                      "WHERE temporary_name IS NOT NULL")
+        if "source_custody_json" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN source_custody_json TEXT "
+                         "CHECK(source_custody_json IS NULL OR json_valid(source_custody_json))")
         if "pinned" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         # Whether the worker hydrated the original when it claimed the job.

@@ -267,6 +267,7 @@ def stage(
     expected_sha256: str | None = None,
     expected: dict | None = None,
     byte_proofs: dict | None = None,
+    materialize: bool = True,
 ):
     """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
     if not who.resolved:
@@ -284,14 +285,16 @@ def stage(
                     else time.monotonic() + seconds
                 )
                 path, metadata = _resolve(root, selected)
-                stack.enter_context(media_store.local_originals(root, (path,), read=True))
+                if materialize:
+                    stack.enter_context(media_store.local_originals(root, (path,), read=True))
 
                 def recorded(version):
                     return media_store.cached_sha256(root, path, version)
 
                 try:
                     # The hold hashes an ordinary file under the deadline, and `_descriptor` refuses bytes
-                    # that differ from the binding. The local pin above has already fetched an evicted file.
+                    # that differ from the binding. A pin taken here, or by a caller that passes
+                    # `materialize=False`, has already fetched an evicted file.
                     held = stack.enter_context(
                         reserved_paths.hold_generic_file(root, path, recorded_sha256=recorded, deadline=deadline)
                     )

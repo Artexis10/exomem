@@ -18,12 +18,17 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, source_corrections, source_coverage
+from . import corpus_aware, memory_refs, source_corrections, source_coverage, source_result_attribution
 from . import find as find_module
 from .governance import egress
 from .vault import normalize_wikilink
 
 log = logging.getLogger(__name__)
+
+
+def _page_ref(page: find_module.ParsedPage) -> str | None:
+    identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
+    return memory_refs.memory_ref(identity) if identity is not None else None
 
 
 @dataclass
@@ -99,7 +104,7 @@ def propose_compilation(
     )
     connections = [s.path for s in suggestions if s.type != "source"][:5]
 
-    return {
+    out = {
         "suggested_note_type": note_type,
         "suggested_title": title,
         "suggested_sources": resolved,
@@ -107,10 +112,20 @@ def propose_compilation(
         "outline_scope": "optional_single_destination",
         "candidate_status": "unreviewed",
         "outline_markdown": _render_outline(note_type, title),
-        "semantic_compilation": source_coverage.compilation_guidance(vault_root, resolved),
+        "semantic_compilation": source_coverage.compilation_guidance(
+            vault_root, resolved, source_refs={page.rel_path: (_page_ref(page),) for page in pages},
+        ),
         "source_excerpts": _source_excerpts(vault_root, resolved, pages, warnings),
         "warnings": warnings,
     }
+    refs = tuple(_page_ref(page) for page in pages)
+    # These scaffold fields derive jointly from the resolved Source pages; protocol facts remain independent.
+    source_result_attribution.bind(out, refs, paths=tuple((key,) for key in (
+        "suggested_note_type", "suggested_title", "suggested_connections", "outline_markdown", "warnings",
+    )))
+    for index, page in enumerate(pages):
+        source_result_attribution.bind(out, (_page_ref(page),), paths=(("suggested_sources", index),))
+    return out
 
 
 def _source_excerpts(
@@ -143,7 +158,7 @@ def _source_excerpts(
             share = min(source_coverage.EXCERPT_CHARS, remaining // (funded - index))
         described = source_coverage.describe(vault_root, page, excerpt_chars=share)
         remaining -= len(described.get("excerpt", ""))
-        out.append({"path": canonical, **described})
+        out.append(source_result_attribution.bind({"path": canonical, **described}, (_page_ref(page),)))
     if funded < len(released):
         warnings.append(
             f"excerpt omitted for {len(released) - funded} source(s): the scaffold's total "

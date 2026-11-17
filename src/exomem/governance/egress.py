@@ -6145,6 +6145,13 @@ def _postfilter(
     """
     if result is None:
         return None
+    inventory_projection = result if command_name == "inspect_captured_sources" and isinstance(result, dict) else None
+    capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
+    if inventory_projection is not None or capture_attempt or command_name == "inspect_capture_erasure_policy":
+        from ..source_capture import require_authority
+
+        # Reuse whole-namespace authority at release; revocation cannot become a partial identity leak.
+        require_authority(Path(vault_root))
     evidence_projection = (
         result if isinstance(result, dict) and "evidence_version" in result else None
     )
@@ -6254,6 +6261,9 @@ def _postfilter(
         from ..episode_recovery import EpisodeInputOwner
 
         cleaned = EpisodeInputOwner(vault_root).release_material(material_projection, cleaned)
+    if inventory_projection is not None and isinstance(cleaned, dict) and cleaned != inventory_projection:
+        cleaned = {**cleaned, "state": "partial", "complete": False, "next_cursor": None,
+                   "summary": "Captured Source inventory is incomplete after release filtering."}
     from .. import origin_bindings
 
     cleaned = origin_bindings.release_origin_response(vault_root, cleaned)
@@ -6454,6 +6464,11 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "preserve",
         "remember",
         "capture_source",
+        # Attempt receipts require whole-namespace authority at lookup and release.
+        "reserve_source_capture",
+        "settle_source_capture",
+        # Host policy metadata contains no Source content; namespace authority still gates lookup and release.
+        "inspect_capture_erasure_policy",
         "preserve_evidence",
         "preserve_artifacts",
         "compile_source",
@@ -6508,6 +6523,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "attention": "structure",
     "audit": "structure",
     "overview": "structure",
+    "inspect_captured_sources": "structure",
     "list_directory": "structure",
     "list_inbound_links": "structure",
     "evolution": "structure",
@@ -6557,6 +6573,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     },
     "record_memory": "structure",
     "plan_memory": "structure",
+    "inspect_captured_sources": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
     "served_context": "structure",

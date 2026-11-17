@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
-from . import duplicates, evidence_reuse
+from . import duplicates, evidence_reuse, memory_refs, source_result_attribution
 from .cli_ops import OpError
 from .mutation_terminal import as_reused
 from .preserve import (
@@ -196,6 +196,7 @@ class AdoptionReceiptSnapshot:
 
     receipt: dict[str, object]
     page_guard: PathGuard
+    source_ref: str | None = None
 
 
 def remaining_retrieval_timeout(
@@ -843,6 +844,14 @@ def _unless_written(result: dict) -> dict:
     A call that wrote nothing reports `mutated: false` and is never marked committed, so the reply states the outcome
     and carries no durable-write text.
     """
+    # Only Source-bound rows contribute; Evidence and calls outside a capture frame remain unchanged.
+    if source_result_attribution.active():
+        for row in result.get("files") or ():
+            refs = source_result_attribution.recipe(row).sources
+            state = row.get("state", row.get("outcome"))
+            summary = result.get("summary")
+            if refs and isinstance(summary, dict) and state in summary:
+                source_result_attribution.bind(summary, refs, paths=((state,),), action="count")
     reused = False
     for row in result.get("files") or ():
         if row.get("outcome") == "stored":
@@ -1120,7 +1129,9 @@ def _find_adoption_receipt(
         if not isinstance(value, Mapping) or value.get("key_digest") != key_digest:
             continue
         receipt = _validate_receipt(value, page_path=page, vault_root=vault_root)
-        matches.append(AdoptionReceiptSnapshot(receipt, page_guard))
+        identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
+        source_ref = memory_refs.memory_ref(identity) if identity is not None else None
+        matches.append(AdoptionReceiptSnapshot(receipt, page_guard, source_ref))
     if len(matches) > 1:
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key has multiple stored receipts")
     return matches[0] if matches else None
@@ -1214,15 +1225,17 @@ def _earlier_source(
 def _with_unavailable_warning(payload: Mapping[str, object], available: bool, subject: str) -> dict[str, object]:
     """`payload` with the duplicate-check warning when the index could not answer, so the row says the check did not run."""
     if available:
-        return dict(payload)
-    return {**payload, "warnings": [*(payload.get("warnings") or ()), duplicates.unavailable_warning(subject)]}
+        return source_result_attribution.carry(payload, dict(payload))
+    return source_result_attribution.carry(payload, {
+        **payload, "warnings": [*(payload.get("warnings") or ()), duplicates.unavailable_warning(subject)],
+    })
 
 
 def _already_stored_outcome(
     artifact: StagedArtifact, duplicate: DuplicateArtifact, *, lane: str
 ) -> dict[str, object]:
     """The hand-over's answer when its exact bytes are already stored: the earlier copy, nothing written."""
-    return {
+    out = {
         "file_id": artifact.file_id,
         **duplicate.receipt(
             size=artifact.size, content_type=_effective_content_type(artifact, lane=lane)
@@ -1230,6 +1243,7 @@ def _already_stored_outcome(
         # A stored row names its page as `page`; the earlier copy's page answers the same question.
         "page": duplicate.sidecar_path,
     }
+    return source_result_attribution.bind(out, (duplicate.ref,)) if lane == "source" else out
 
 
 def _validate_staged_adoption(
@@ -1278,8 +1292,10 @@ def _assert_replay_identity(
         ) from error
 
 
-def _replayed_outcome(receipt: Mapping[str, object]) -> dict[str, object]:
-    return {
+def _replayed_outcome(
+    receipt: Mapping[str, object], *, source_refs: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    out = {
         "file_id": receipt["selected_file_id"],
         "outcome": "replayed",
         "stored_path": receipt["stored_path"],
@@ -1293,6 +1309,7 @@ def _replayed_outcome(receipt: Mapping[str, object]) -> dict[str, object]:
         "warnings": [],
         "adoption": dict(receipt),
     }
+    return source_result_attribution.bind(out, source_refs) if source_refs is not None else out
 
 
 def _stored_outcome(
@@ -1326,6 +1343,7 @@ def _stored_outcome(
                 "ref": payload.get("ref"),
             }
         )
+        source_result_attribution.bind(outcome, (payload.get("ref"),))
     return outcome
 
 
@@ -1413,7 +1431,7 @@ def _capture_source_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt, source_refs=(receipt.source_ref,))
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1456,7 +1474,7 @@ def _capture_source_adoption(
                         )
                         payload = _with_unavailable_warning(result.as_dict(), available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt, source_refs=(raced.source_ref,))
             elif duplicate is not None:
                 # Nothing is written: the earlier copy answers, and the call settles without a commit.
                 outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
@@ -1782,6 +1800,7 @@ def capture_source_artifacts(
                 }
                 if isinstance(payload.get("document_container"), Mapping):
                     outcomes[index]["document_container"] = dict(payload["document_container"])
+                source_result_attribution.bind(outcomes[index], (result.ref,))
             except (SafeFetchError, PreserveError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
             except add_module.AddError as error:

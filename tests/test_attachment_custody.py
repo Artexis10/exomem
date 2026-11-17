@@ -169,7 +169,8 @@ def test_capture_source_declares_openai_file_parameters(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     command = _command("capture_source")
-    assert command.mcp_meta == {"openai/fileParams": ("files",)}
+    # capture_source also declares its service capabilities under their own key.
+    assert command.mcp_meta["openai/fileParams"] == ("files",)
     assert _command("preserve_artifacts").mcp_meta == {"openai/fileParams": ("files",)}
 
 

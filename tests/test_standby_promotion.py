@@ -622,7 +622,15 @@ def test_carried_corpus_reproves_reference_owners_after_watcher_seed(
     """A new watcher baseline must not leave reads cold or bless unwatched edits."""
     import threading
 
-    from exomem import file_watcher, freshness, memory_refs, mode, semantic_contract, warmup
+    from exomem import (
+        capture_inventory,
+        file_watcher,
+        freshness,
+        memory_refs,
+        mode,
+        semantic_contract,
+        warmup,
+    )
 
     monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
     semantic_contract.reset_corpus_context_cache()
@@ -656,6 +664,10 @@ def test_carried_corpus_reproves_reference_owners_after_watcher_seed(
         watcher._kb_root = tmp_path / "Knowledge Base"
         watcher._stop = threading.Event()
         watcher._importer = None  # a file-mode watcher has no store-mode importer
+        # The seed also flushes the captured-Source inventory witness that the watcher owns.
+        watcher._raw_witness = capture_inventory.new_raw_witness(tmp_path)
+        watcher._lock, watcher._wake, watcher._last_change = threading.Lock(), threading.Event(), 0.0
+        watcher._pending_publication_intents = {}
         assert watcher._reconcile_once(seed=True)
         if catch_up:
             other.write_text("# Other\n\nObserved edit.\n", encoding="utf-8")

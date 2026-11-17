@@ -11,7 +11,7 @@ from itertools import islice
 from pathlib import Path
 
 from .. import mutation_terminal, records
-from . import chain, tokens, typed_storage, types
+from . import chain, tokens, typed_storage, types, version_sources
 
 # A6 fixes the generated history page limits.
 MAIN_ENTRIES = 200
@@ -179,7 +179,10 @@ def verify_event(conn, txn):
                       "manifest_version_before", "manifest_version_after", "prev_event_hash", "committed_at",
                       "why", "request_hash")}
             event.update(manifest_hash=manifest[0], effects=effects(conn, txn))
-            digest = hashlib.sha256(b"exomem-collection-event:v1\0" + records._canonical_json(event)).hexdigest()
+            version = txn.get("event_version", 1)
+            if version == 2:
+                event.update(version_sources.event_fields(conn, txn))
+            digest = tokens.event_hash(event, version=version)
         if digest != txn["event_hash"]:
             _fail(txn, "event hash differs from immutable material")
     except (KeyError, IndexError, TypeError, ValueError) as error:
