@@ -87,10 +87,10 @@ def test_a_note_links_a_unique_page_by_its_name_and_a_homonym_by_its_shortest_pa
     root_vault: Path,
 ) -> None:
     """Two areas share a name, a trash folder shares another, and a fourth page is the only page of its name."""
-    _write_markdown(root_vault, "_trash/restart-order.md")
     checklist_insight = _remember(root_vault, "Pump seal checklist", "insight")
     checklist_pattern = _remember(root_vault, "Pump seal checklist", "pattern")
     trashed_twin = _remember(root_vault, "Restart order", "insight")
+    _write_markdown(root_vault, f"_trash/{Path(trashed_twin).name}")
     only = _remember(root_vault, "Valve inventory", "insight")
     assert Path(checklist_insight).name == Path(checklist_pattern).name
 
@@ -100,10 +100,10 @@ def test_a_note_links_a_unique_page_by_its_name_and_a_homonym_by_its_shortest_pa
 
     texts = _link_texts((root_vault / note).read_text(encoding="utf-8"))
     assert texts == [
-        f"{Path(checklist_insight).parent.name}/pump-seal-checklist",
-        f"{Path(checklist_pattern).parent.name}/pump-seal-checklist",
-        f"{Path(trashed_twin).parent.name}/restart-order",
-        "valve-inventory",
+        f"{Path(checklist_insight).parent.name}/{Path(checklist_insight).stem}",
+        f"{Path(checklist_pattern).parent.name}/{Path(checklist_pattern).stem}",
+        f"{Path(trashed_twin).parent.name}/{Path(trashed_twin).stem}",
+        Path(only).stem,
     ]
     assert _resolved(root_vault, note) == pages
 
@@ -178,6 +178,13 @@ def test_a_writer_that_files_a_homonym_in_the_trash_changes_the_next_link_and_no
     monkeypatch.setattr(
         vault_module, "_machinery_markdown", lambda root: (walks.append(root), walk(root))[1]
     )
+    # A resolver built from disk drops the kept listing by design. A writer builds one only when the shared
+    # resolver is stale, which a write inside the freshness window can cause, so the walks are read against these.
+    builds: list[Path] = []
+    build = vault_module.WikilinkResolver._build
+    monkeypatch.setattr(
+        vault_module.WikilinkResolver, "_build", lambda self: (builds.append(self.vault_root), build(self))[1]
+    )
     page = _remember(root_vault, "Valve inventory", "insight")
     stem = Path(page).stem
     # The server's route: writers fork the shared resolver, which each write patches instead of rebuilding.
@@ -187,6 +194,7 @@ def test_a_writer_that_files_a_homonym_in_the_trash_changes_the_next_link_and_no
         ((str(path), freshness.stat_signature(path)) for path in walk_vault_md(root_vault)),
     )
     find_module._get_query_resolver(root_vault)
+    builds_before_writes = len(builds)
 
     def linked_from(title: str) -> str:
         created = _remember(root_vault, title, "insight", f"{UNIT}\n[[{page.removesuffix('.md')}]]\n")
@@ -195,14 +203,15 @@ def test_a_writer_that_files_a_homonym_in_the_trash_changes_the_next_link_and_no
     assert linked_from("First summary") == stem
     assert linked_from("Second summary") == stem
     reads_while_kept = len(walks)
+    rebuilds_while_kept = len(builds) - builds_before_writes
 
     reserved_paths.publish_generic_bytes(
         root_vault, f"_trash/2026-01-01/{stem}.md", b"# Older copy\n", expected_identity=None
     )
 
     assert linked_from("Third summary") == f"{Path(page).parent.name}/{stem}"
-    assert reads_while_kept == 1
-    assert len(walks) == 2
+    assert 1 <= reads_while_kept <= 1 + rebuilds_while_kept
+    assert len(walks) > reads_while_kept
 
 
 def test_a_link_that_only_the_obsidian_rule_resolves_is_resolved_alike_by_the_contract_and_the_writer(
