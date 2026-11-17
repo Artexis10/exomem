@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.186.0](https://github.com/Artexis10/exomem/compare/v0.185.0...v0.186.0) (2026-11-17)
+
+
+### Features
+
+* **naming:** name new notes and entities by their title ([#2890](https://github.com/Artexis10/exomem/issues/2890)) ([ec6bf42](https://github.com/Artexis10/exomem/commit/ec6bf422b23b8531e2a2fabd4ad08bf1778a06c1))
+* rank declared passages, inventory captured Sources and bind Source dependencies ([#2852](https://github.com/Artexis10/exomem/issues/2852)) ([4b186f4](https://github.com/Artexis10/exomem/commit/4b186f470f918338eb92fda020e7c4f82ab4ed48))
+
+
+### Bug Fixes
+
+* **service:** keep a managed worker's idle supervisor connections past the pool expiry ([#2891](https://github.com/Artexis10/exomem/issues/2891)) ([e638179](https://github.com/Artexis10/exomem/commit/e63817968b7bd3bf55102ca9189c4dca983f59e3))
+* **upload:** name the send in every file upload reply and the way on after a refused send ([#2893](https://github.com/Artexis10/exomem/issues/2893)) ([c493bd0](https://github.com/Artexis10/exomem/commit/c493bd060916f3b4f89a2289ed94e2bcde06375a))
+
 ## [0.185.0](https://github.com/Artexis10/exomem/compare/v0.184.1...v0.185.0) (2026-11-16)
 
 
