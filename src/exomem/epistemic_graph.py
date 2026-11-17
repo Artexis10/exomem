@@ -8237,7 +8237,9 @@ class EpistemicGraphIndex:
             "indexed": (),
         }
         if not paths:
-            return report
+            committed = graph_sync.read_checkpoint(self.vault_root)
+            if committed is None or not committed.changes_no_input:
+                return report
         if not graph_enabled():
             return {**report, "disabled": 1}
         if not self.path.exists():

@@ -227,7 +227,8 @@ class _Eraser:
     def _graph_dropped(self, path: str, reused: bool) -> bool:
         """The graph keeps no row of the retired version, nor a queued repair or handoff record that names its page.
 
-        The handoff record names the last write's pages, so the page leaves it only when a later write replaces it.
+        The handoff record names the last write's pages. Once the graph acknowledges it, this call replaces it
+        with a record of no page, and the drain's acknowledgement of that one carries the name out of the graph.
         """
         from . import deferred_index, epistemic_graph, graph_sync
 
@@ -243,6 +244,10 @@ class _Eraser:
         if registered is None:
             return built is None
         if path in registered.created_paths or any(name == path for name, _hash in registered.paths):
+            try:
+                graph_sync.forget_settled_path(self.root, path)
+            except (OSError, graph_sync.GraphRebuildRegistrationError):
+                pass  # The record stays as it was; a later call tries again.
             return False
         # The graph stores the registered record only once a build covers it; an absent graph stores none.
         if built is None:

@@ -488,7 +488,7 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
     its drain did: queued receipts are the ordinary drain's, and a cover that
     did not acknowledge is escalated on the next pass, not retried.
     """
-    from . import deferred_index, freshness, graph_sync, index_sync
+    from . import deferred_index, epistemic_graph, freshness, graph_sync, index_sync
 
     key = str(vault_root)
     try:
@@ -515,7 +515,13 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
         log.warning("graph drain: covering drain could not queue its checkpoint", exc_info=True)
         return False
     try:
-        index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT, paths=rels)
+        if rels:
+            index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT, paths=rels)
+        else:
+            # A generation that changed no page queues no receipt; a pass over no page covers it.
+            index = epistemic_graph.EpistemicGraphIndex(vault_root)
+            if index.epoch_admits_incremental_repair():
+                index.drain_paths([])
     except Exception:  # noqa: BLE001 - the ordinary drain retries the queued receipts
         log.warning("graph drain: covering drain failed; its paths stay queued", exc_info=True)
         return True

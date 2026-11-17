@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import secrets
 import time
 
 import pytest
@@ -55,21 +54,12 @@ def erase(call, reference, source_hash, operation_id="erase-one", identity=IDENT
                 expected_source_ref=reference, expected_source_hash=source_hash)
 
 
-def later_write(call):
-    """Another capture, as a live vault's traffic: the graph's handoff record names a page until a later write."""
-    marker = secrets.token_hex(4)
-    args = {**authored(), "title": f"Later note {marker}", "content": "A later, unrelated record.",
-            "source_identity": {"system": "archive", "record_id": f"later-{marker}", "revision": "one"}}
-    call("capture_source", **args, capture_reservation=reserve(call, args))
-
-
 def drive(call, reference, source_hash, operation_id="erase-one", seconds=30.0):
     """Retry as a caller does: a pending answer, or a busy writer, means a later call makes progress.
 
     Each call holds the writer boundary, so a caller that repeats at once starves the graph drain it waits for.
     """
     deadline = time.monotonic() + seconds
-    wrote = False
     while True:
         try:
             result = erase(call, reference, source_hash, operation_id)
@@ -79,9 +69,6 @@ def drive(call, reference, source_hash, operation_id="erase-one", seconds=30.0):
         else:
             if result["status"] != "pending" or time.monotonic() >= deadline:
                 return result
-            if not wrote:
-                later_write(call)
-                wrote = True
         time.sleep(0.5)
 
 
@@ -113,6 +100,23 @@ def test_erase_retires_the_page_copies_and_derived_rows_until_complete(vault, at
     assert again["status"] == "complete" and again["target_source_ref"] == reference
     _path, fresh, _hash = capture(vault, call)
     assert fresh != reference
+
+
+def test_a_quiet_vault_reaches_complete_and_settled_with_no_other_write(vault, attempts, erasable):
+    """A creator cell may write nothing for days, so the erase alone must retire the graph's handoff record of the page."""
+    from exomem import epistemic_graph, graph_sync
+
+    _manager, call = attempts
+    path, reference, source_hash = capture(vault, call)
+    others = {page: page.read_bytes() for page in vault.rglob("*.md") if page != vault / path}
+
+    result = drive(call, reference, source_hash)
+
+    assert result["status"] == "complete" and result["settled"] is True, json.dumps(result)
+    assert {page: page.read_bytes() for page in vault.rglob("*.md")} == others  # No other page was written.
+    assert path not in graph_sync.checkpoint_path(vault).read_text(encoding="utf-8")
+    held = _file_holders(epistemic_graph.sidecar_path(vault), [path.encode("utf-8")])
+    assert not held, held
 
 
 def _holders(roots, needles: list[str]) -> list[str]:
@@ -537,8 +541,8 @@ def test_service_erases_a_captured_source_with_passages_until_every_owner_acknow
 _CHILD = """
 import os, sys, time
 from pathlib import Path
-from exomem import (_held_fs_posix, commands, graph_drain, held_fs, index_sync, privacy_log, source_custody, source_eraser,
-                    writer_lease)
+from exomem import (_held_fs_posix, commands, graph_drain, graph_sync, held_fs, index_sync, privacy_log, source_custody,
+                    source_eraser, writer_lease)
 from exomem.cli_ops import OpError
 from exomem.governance.principal import owner_principal, request_scope
 
@@ -583,6 +587,11 @@ elif phase == "before_derived":
     index_sync.delete_after_remove = die
 elif phase == "after_derived":
     index_sync.delete_after_remove = then_die(index_sync.delete_after_remove)
+elif phase == "before_record_rewrite":
+    graph_sync.forget_settled_path = die
+elif phase == "after_record_rewrite":
+    real_forget = graph_sync.forget_settled_path
+    graph_sync.forget_settled_path = lambda *args: real_forget(*args) is not None and die()
 elif phase == "before_completion_record":
     source_custody.retire = lambda root, ref, fence: die() if fence.complete else real_retire(root, ref, fence)
 elif phase == "after_completion_record":
@@ -622,16 +631,23 @@ def _staged(vault, path: str) -> list[str]:
 
 
 @pytest.mark.parametrize("phase", ["before_fence", "after_fence", "after_move", "after_unlink", "before_derived",
-                                   "after_derived", "before_completion_record", "after_completion_record"])
+                                   "after_derived", "before_record_rewrite", "after_record_rewrite",
+                                   "before_completion_record", "after_completion_record"])
 def test_a_process_killed_at_each_phase_is_finished_by_a_later_retry(vault, attempts, erasable, tmp_path, phase):
     """Each phase leaves a different durable state; a retry must reach complete from every one of them."""
+    from exomem import epistemic_graph, graph_sync
+
     _manager, call = attempts
     path, reference, source_hash = capture(vault, call)
-    later_write(call)  # The killed process has no traffic of its own to retire the graph's record of the page.
     _kill(vault, tmp_path, path, reference, source_hash, phase)
     if phase in ("after_move", "after_unlink"):
         # The kill landed on the page itself: moved to its staging name, or already unlinked from it.
         assert not (vault / path).exists() and len(_staged(vault, path)) == (phase == "after_move")
+    if phase in ("before_record_rewrite", "after_record_rewrite"):
+        # The graph dropped the rows; the kill landed before or after the record stopped naming the page.
+        assert epistemic_graph.holds_page(vault, path, source_hash=source_hash, reference=reference) is False
+        named = path in graph_sync.checkpoint_path(vault).read_text(encoding="utf-8")
+        assert named is (phase == "before_record_rewrite")
     result = drive(call, reference, source_hash)
     assert result["status"] == "complete", json.dumps(result)
     assert not (vault / path).exists()
