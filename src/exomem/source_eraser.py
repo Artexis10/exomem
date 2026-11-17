@@ -48,15 +48,13 @@ def _refuse(code: str, reason: str, remedy: str | None = None) -> OpError:
 
 
 class _Ledger:
-    """Operation bindings and per-target progress beside the private attempt ledger."""
+    """Operation bindings and per-target progress beside the private attempt ledger.
+
+    Its tables exist from the first admitted operation: a refused call reads only, so it leaves no trace.
+    """
 
     def __init__(self, store):
         self.store = store
-        with store._connect() as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS source_erasure_operations (operation_id TEXT PRIMARY KEY, "
-                         "source_ref TEXT NOT NULL, source_hash TEXT NOT NULL, identity_sha256 TEXT NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS source_erasure_progress (source_ref TEXT PRIMARY KEY, "
-                         "data TEXT NOT NULL)")
 
     def _row(self, conn, operation_id: str):
         row = conn.execute("SELECT operation_id,source_ref,source_hash,identity_sha256 "
@@ -66,6 +64,10 @@ class _Ledger:
     def bind(self, operation_id: str, reference: str, source_hash: str, identity: dict) -> None:
         value = (operation_id, reference, source_hash, _identity_sha256(identity))
         with self.store._connect() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS source_erasure_operations (operation_id TEXT PRIMARY KEY, "
+                         "source_ref TEXT NOT NULL, source_hash TEXT NOT NULL, identity_sha256 TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS source_erasure_progress (source_ref TEXT PRIMARY KEY, "
+                         "data TEXT NOT NULL)")
             conn.execute("INSERT OR IGNORE INTO source_erasure_operations VALUES (?,?,?,?)", value)
             row = self._row(conn, operation_id)
         if row != value:
@@ -74,6 +76,9 @@ class _Ledger:
 
     def bound(self, operation_id: str, reference: str, source_hash: str, identity: dict) -> bool:
         with self.store._connect() as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                            "AND name = 'source_erasure_operations'").fetchone() is None:
+                return False  # No operation was ever admitted here.
             return self._row(conn, operation_id) == (operation_id, reference, source_hash, _identity_sha256(identity))
 
     def progress(self, reference: str) -> dict[str, Any]:

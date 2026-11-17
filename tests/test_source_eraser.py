@@ -283,12 +283,27 @@ def test_a_catalogue_staged_before_the_erase_is_not_adopted_at_boot(vault, attem
     conn.close()
 
 
-def test_disabled_policy_refuses_before_any_lookup(vault, attempts, monkeypatch):
-    _manager, call = attempts
-    monkeypatch.delenv("EXOMEM_SOURCE_ERASURE_POLICY", raising=False)
-    reference = memory_refs.memory_ref(memory_refs.new_id())
-    with pytest.raises(Exception, match="SOURCE_ERASURE_DISABLED"):
-        erase(call, reference, "0" * 64)
+def test_a_disabled_policy_refusal_reveals_no_target_and_writes_nothing(vault, attempts, erasable, monkeypatch):
+    """A refused caller must not learn whether the Source exists, and the refusal must leave no private trace."""
+    manager, call = attempts
+    _path, reference, source_hash = capture(vault, call)
+    monkeypatch.delenv("EXOMEM_SOURCE_ERASURE_POLICY")
+
+    def schema():
+        with manager.idempotency._connect() as conn:
+            return sorted(conn.execute("SELECT type, name, sql FROM sqlite_master").fetchall())
+
+    before = schema()
+    refusals = []
+    for target, digest in ((reference, source_hash), (memory_refs.memory_ref(memory_refs.new_id()), "0" * 64)):
+        with pytest.raises(Exception, match="SOURCE_ERASURE_DISABLED") as refused:
+            erase(call, target, digest)
+        answer = json.loads(str(refused.value))
+        answer.pop("request_id")  # Each call gets its own.
+        refusals.append(answer)
+
+    assert refusals[0] == refusals[1]
+    assert schema() == before
 
 
 def test_store_mode_refuses_and_its_policy_read_reports_disabled(vault, attempts, erasable, monkeypatch):
