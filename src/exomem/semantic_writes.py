@@ -980,9 +980,17 @@ class CreationPreflight:
     #: call: the review hash it would copy from the validate result is the server's.
     draft_bound: bool = True
 
+    #: A profile page's creation needs no relation review while it is a draft, so its preview names the
+    #: exact source it would write instead of a review draft; see `require_profile_preview`.
+    profile_source_hash: str | None = None
+    #: Whether the page is a profile, so its preview says when its proof may be used.
+    profile: bool = False
+
     @property
     def draft_hash(self) -> str | None:
-        return self.creation_validation.draft_hash if self.creation_validation is not None else None
+        if self.creation_validation is not None:
+            return self.creation_validation.draft_hash
+        return self.profile_source_hash
 
     @property
     def relation_candidates(self) -> tuple[relation_review.RelationCandidate, ...]:
@@ -1014,6 +1022,9 @@ class CreationPreflight:
             value["placement"] = self.placement
         if fields := self.review_fields.as_dict():
             value["relation_review_fields"] = fields
+        if self.profile:
+            value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
+            value["review_token"] = creation_review(self.draft_id, self.draft_hash, self.draft_token)
         return value
 
 
@@ -1137,6 +1148,8 @@ class ExistingPreflight:
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
     read_dependency_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     provenance_server_at: str | None = None
+    #: The page is a profile, so the preview tells the agent what a commit needs (`PROFILE_PREVIEW_NEXT_ACTION`).
+    profile: bool = False
 
     @property
     def before_hash(self) -> str:
@@ -1158,6 +1171,10 @@ class ExistingPreflight:
         }
         if self.operation == "tier2_overwrite":
             value["draft_token"] = self.transition_token
+        if self.profile:
+            value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
+            # An in-place change's proof is its transition token alone, so the token is its `review_token`.
+            value["review_token"] = self.transition_token
         return value
 
 
@@ -1831,6 +1848,77 @@ def _existing_applicability(
     return "structural"
 
 
+PROFILE_PREVIEW_REQUIRED = "PROFILE_PREVIEW_REQUIRED"
+# The proof shows the preview happened, not that the owner agreed, so the preview says when its proof may be used.
+PROFILE_PREVIEW_NEXT_ACTION = (
+    "This changes a profile page. Show the owner the resulting lines. Send the same call with `review` set to this "
+    "preview's `review_token` only after the owner confirms these exact lines, or when the owner's latest message "
+    "asked for this profile change. A preference the owner only states is not that request: use it in your answer "
+    "and offer the line."
+)
+
+
+def creation_review(draft_id: str | None, draft_hash: str | None, draft_token: str) -> str:
+    """A creation preview's one proof value: its draft fields as a base64url JSON array.
+
+    A profile preview returns its proof as `review_token`, because the egress scrubber leaves a `_token` field,
+    which the caller echoes back, unchanged.
+    """
+    return base64.urlsafe_b64encode(json.dumps([draft_id, draft_hash, draft_token]).encode()).decode()
+
+
+def creation_review_fields(review: str) -> tuple[str, str, str] | None:
+    """The draft_id, draft_hash and draft_token that `creation_review` packed; None for any other value."""
+    try:
+        fields = json.loads(base64.urlsafe_b64decode(review.encode("ascii")))
+    except ValueError:
+        return None
+    if not (isinstance(fields, list) and len(fields) == 3 and all(isinstance(f, str) and f for f in fields)):
+        return None
+    return fields[0], fields[1], fields[2]
+
+
+def _is_profile(vault_root: Path, *page_types: object) -> bool:
+    types = note_types.Basis(vault_root).reading()
+    return any(types.selects(semantic_contract.normalized_compiled_type(value), note_types.profile) for value in page_types)
+
+
+def require_profile_preview(vault_root: Path, *page_types: object, previewed: bool) -> None:
+    """Refuse a commit that creates or changes a profile page without the proof of its preview.
+
+    `previewed` is whether the write carries what its own preview returned: the transition token
+    for an in-place change (bound to the exact before and after bytes), the draft hash for a
+    creation. Every governed write path calls this one check.
+    """
+    # A one-call profile rewrite the owner never saw is what this stops; a wrong firing costs the agent one preview call.
+    if not previewed and _is_profile(vault_root, *page_types):
+        raise SemanticWriteError(
+            PROFILE_PREVIEW_REQUIRED,
+            "a profile page changes only from a reviewed preview: preview this exact change first "
+            "(preview=true), show the owner the resulting lines, then send the same call with `review` "
+            "set to the preview's `review_token`. To remove a line, preview an edit_note change that "
+            "deletes it.",
+        )
+
+
+PROFILE_SUPERSESSION_REFUSED = "PROFILE_SUPERSESSION_REFUSED"
+
+
+def refuse_profile_supersession(vault_root: Path, *page_types: object) -> None:
+    """Refuse a page supersession whose predecessor or successor is a profile, at its first call.
+
+    Only the page types matter, so a preview is refused as early as a commit.
+    """
+    # Stops a successor that loses its domain and becomes the global profile; a wrong firing costs the agent one
+    # different call, and the agent pays it.
+    if _is_profile(vault_root, *page_types):
+        raise SemanticWriteError(
+            PROFILE_SUPERSESSION_REFUSED,
+            "a profile is not superseded by another page. To change a profile, preview an edit_note change "
+            "of it in place (replace_body replaces the whole body). To start a new profile, use create_note.",
+        )
+
+
 # Which attempt an `exomem_write_*` sample belongs to. A stale validity stamp
 # re-runs the WHOLE preflight through the public `preflight_existing` (kept
 # public deliberately: tests monkeypatch that name as a race seam), so without
@@ -2131,6 +2219,8 @@ def _preflight_existing(
             origin_inputs = _prepare_origin_inputs(
                 root, path, after_source, before_source=before_source
             )
+    if not validate_only:
+        require_profile_preview(root, before.page_type, after.page_type, previewed=transition_token is not None)
     before_contracts = memory_schema.resolve_contracts(
         loaded_contracts,
         projects=before.projects,
@@ -2356,6 +2446,7 @@ def _preflight_existing(
         closure_plan,
         origin_inputs,
         provenance_server_at=provenance_server_at,
+        profile=_is_profile(root, before.page_type, after.page_type),
     )
 
 
@@ -4920,6 +5011,7 @@ def _preflight_creation(
                 relation_review.review_applies(validation.relation_disposition),
             ),
             draft_bound=draft_bound,
+            profile=_is_profile(root, state.page_type),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4943,6 +5035,7 @@ def _preflight_creation(
         ),
         definitions=semantic_contract.page_definitions_witnesses(state),
     )
+    profile = _is_profile(root, state.page_type)
     return CreationPreflight(
         applicability,
         path,
@@ -4963,6 +5056,8 @@ def _preflight_creation(
         ) if vocabulary_binding is not None else (),
         origin_inputs,
         review_fields=relation_review.check_review_fields(supplied_review_fields, False),
+        profile_source_hash=vault.content_hash(source) if profile else None,
+        profile=profile,
     )
 
 

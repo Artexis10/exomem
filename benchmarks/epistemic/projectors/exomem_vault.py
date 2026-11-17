@@ -83,12 +83,12 @@ KIND_MAPPING_EVIDENCE: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "insight": ("src/exomem/_scaffold/_Schema/references/page-types.md:109",),
         "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:203",),
         "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:156",),
-        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:299",),
-        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:454",),
-        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:551",),
+        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:332",),
+        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:487",),
+        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:584",),
         "entity:decision": (
-            "src/exomem/_scaffold/_Schema/references/page-types.md:649",
-            "src/exomem/_scaffold/_Schema/references/page-types.md:650",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:682",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:683",
         ),
         "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:21",),
     }
@@ -183,7 +183,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="locator",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:153",
+        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:163",
     ),
     FieldDeclaration(
         field="open_question",
@@ -203,12 +203,12 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="external_edit",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/SKILL.md:137",
+        evidence="src/exomem/_scaffold/_Schema/SKILL.md:138",
     ),
     FieldDeclaration(
         field="export",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/SKILL.md:137",
+        evidence="src/exomem/_scaffold/_Schema/SKILL.md:138",
     ),
     # Added for the 2026-08 no-nudge amendment (§7, sequence 2). Three of these
     # four are declared *unavailable* on purpose: the no-nudge surfaces do not
