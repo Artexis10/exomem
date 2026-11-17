@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, server
+from exomem import commands, semantic_writes, server
 from exomem import vault as vault_module
 
 KB = "Knowledge Base"
@@ -149,7 +149,10 @@ def mcp(pages: Path, monkeypatch: pytest.MonkeyPatch):
 def test_a_connected_agent_edits_a_profile_with_the_review_its_preview_returned(pages: Path, mcp) -> None:
     edit = {"note": PROFILE, "why": "change a rule", "action": "replace_text", "old_text": "Tactical", "new_text": "Slow"}
     assert _public(mcp, "edit_note", **edit)["error"]["code"] == "PROFILE_PREVIEW_REQUIRED"
-    token = _public(mcp, "edit_note", **edit, preview=True)["semantic"]["transition_token"]
+    preview = _public(mcp, "edit_note", **edit, preview=True)["semantic"]
+    # The proof alone does not show the owner agreed; the preview must say so where the agent reads the token.
+    assert preview["next_action"] == semantic_writes.PROFILE_PREVIEW_NEXT_ACTION
+    token = preview["transition_token"]
 
     _public(mcp, "edit_note", **edit, review={"transition_token": token})
 

@@ -1141,6 +1141,8 @@ class ExistingPreflight:
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
     read_dependency_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     provenance_server_at: str | None = None
+    #: The page is a profile, so the preview tells the agent what a commit needs (`PROFILE_PREVIEW_NEXT_ACTION`).
+    profile: bool = False
 
     @property
     def before_hash(self) -> str:
@@ -1162,6 +1164,8 @@ class ExistingPreflight:
         }
         if self.operation == "tier2_overwrite":
             value["draft_token"] = self.transition_token
+        if self.profile:
+            value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
         return value
 
 
@@ -1828,6 +1832,12 @@ def _existing_applicability(
 
 
 PROFILE_PREVIEW_REQUIRED = "PROFILE_PREVIEW_REQUIRED"
+# The proof shows the preview happened, not that the owner agreed, so the preview says when its proof may be used.
+PROFILE_PREVIEW_NEXT_ACTION = (
+    "This changes a profile page. Show the owner the resulting lines. Commit with `review` only after the owner "
+    "confirms these exact lines, or when the owner's latest message asked for this profile change. A preference "
+    "the owner only states is not that request: use it in your answer and offer the line."
+)
 
 
 def _is_profile(vault_root: Path, *page_types: object) -> bool:
@@ -2380,6 +2390,7 @@ def _preflight_existing(
         closure_plan,
         origin_inputs,
         provenance_server_at=provenance_server_at,
+        profile=_is_profile(root, before.page_type, after.page_type),
     )
 
 
