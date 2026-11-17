@@ -1056,7 +1056,7 @@ def _vault_unique_page(vault_root: Path, restore_abs: Path, restore_rel: str) ->
         stem,
         restore_abs.name[len(stem) :],
         vault_root=vault_root,
-        name_held=lambda name: title_occupancy.vault_name_held(vault_root, name, resolver),
+        name_held=title_occupancy.name_holder(vault_root, resolver),
     )
     return unique, unique.relative_to(vault_root).as_posix()
 

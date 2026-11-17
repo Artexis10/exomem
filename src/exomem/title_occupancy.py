@@ -36,22 +36,36 @@ UNAVAILABLE_WARNING = (
 )
 
 
-def vault_name_held(
-    vault_root: Path, file_name: str, resolver: Callable[[], WikilinkResolver | None]
-) -> bool:
-    """Whether an owned page anywhere in the vault has this file name, under `vault_name_key`.
+def name_holder(
+    vault_root: Path, resolver: Callable[[], WikilinkResolver | None]
+) -> Callable[[str], bool]:
+    """For one write, the question whether an owned page anywhere in the vault has a file name, under `vault_name_key`.
 
-    A store-mode vault answers from the store, and a file-mode vault from the link index of the
-    resolver that `resolver` returns. Both are lookups by name key, and neither reads the vault.
-    Every page counts, whatever the writer may see: a name that a withheld page holds would make a
-    bare link ambiguous for its owner, and the number tells the writer only that the name is taken.
+    A file-mode vault answers from the link index of the resolver that `resolver` returns. A store-mode
+    vault reads the store's page paths once, at the first question, and answers every later candidate
+    name from that single read: the store has no name index, so a question per candidate would be a pass
+    per candidate. Neither reads the vault's folders. Every page counts, whatever the writer may see: a
+    name that a withheld page holds would make a bare link ambiguous for its owner, and the number tells
+    the writer only that the name is taken.
     """
-    key = vault_name_key(file_name.removesuffix(".md"))
-    if store_mode_for_reads(vault_root):
-        with snapshot(vault_root) as view:
-            return any(not in_excluded_scan_dir(path) for path in view.pages_named(key))
-    answerer = resolver()
-    return answerer is not None and bool(answerer.link_names().index.get(key))
+    taken: frozenset[str] | None = None
+
+    def held(file_name: str) -> bool:
+        nonlocal taken
+        key = vault_name_key(file_name.removesuffix(".md"))
+        if store_mode_for_reads(vault_root):
+            if taken is None:
+                with snapshot(vault_root) as view:
+                    taken = frozenset(
+                        name
+                        for name, paths in view.name_buckets().items()
+                        if any(not in_excluded_scan_dir(path) for path in paths)
+                    )
+            return key in taken
+        answerer = resolver()
+        return answerer is not None and bool(answerer.link_names().index.get(key))
+
+    return held
 
 
 def page_index_source(vault_root: Path) -> Callable[[], WikilinkResolver] | None:
@@ -110,6 +124,7 @@ class TitleCheck:
         self._asked = False
         self._answerer: WikilinkResolver | None = None
         self._visible: Callable[[str], bool] | None = None
+        self._name_holder: Callable[[str], bool] | None = None
 
     def _resolver(self) -> WikilinkResolver | None:
         if not self._asked:
@@ -144,8 +159,10 @@ class TitleCheck:
         return self._derived and layout.of(self._root) is layout.Layout.ROOT
 
     def name_held(self, file_name: str) -> bool:
-        """Whether an owned page anywhere in the vault has this file name; see `vault_name_held`."""
-        return vault_name_held(self._root, file_name, self._resolver)
+        """Whether an owned page anywhere in the vault has this file name; see `name_holder`."""
+        if self._name_holder is None:
+            self._name_holder = name_holder(self._root, self._resolver)
+        return self._name_holder(file_name)
 
     def unique_page_path(
         self, directory: Path, stem: str, suffix: str = ".md", *, date_prefix: str = ""
