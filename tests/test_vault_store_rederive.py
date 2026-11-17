@@ -32,7 +32,7 @@ from test_vault_store_migration import (  # noqa: F401
 )
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
-from exomem import note_types, writer_lease
+from exomem import lexstore, note_types, writer_lease
 from exomem.collection_store import connection, preview, runtime
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import connector_boundary
@@ -196,6 +196,45 @@ def test_a_store_migrated_under_an_older_lexical_schema_answers_the_duplicate_in
         lexstore.clear_stores()
         build_indexes(vault)
         assert migrate_apply(vault) == 0
+    lexstore.clear_stores()
+
+    assert mode.status(vault)["owner_schema"] == "behind"
+    assert lexstore.payload_candidates(vault, digest) is None
+    with store_writer(vault) as bound:
+        settle_to_the_end(vault, bound)
+
+    assert mode.status(vault)["owner_schema"] == "current"
+    assert lexstore.payload_candidates(vault, digest) == (rel,)
+    lookup = duplicates.find_duplicate(vault, sha256=digest, lane=duplicates.EVIDENCE, protected=False)
+    assert lookup.available and lookup.hit is not None and lookup.hit.path == rel
+
+
+@pytest.mark.parametrize("schema_16_shape", [False, True], ids=["stamp-only", "without-schema-17-columns"])
+def test_a_store_with_a_current_owner_version_and_an_old_lexical_stamp_answers_once_the_pass_settles(
+    vault, schema_16_shape  # noqa: F811
+):
+    """A store that a lexical-16 build migrated and a later build only settled keeps its stamp, so its
+    lexical readers answer None for good unless the stamp itself makes the owner state behind."""
+    from duplicate_fixtures import legacy_evidence_filing
+    from test_vault_store_migration import build_indexes
+
+    from exomem import duplicates, freshness, lexstore
+
+    original = b"original kept by a store that a lexical-16 build migrated"
+    rel = legacy_evidence_filing(vault, original)
+    digest = hashlib.sha256(original).hexdigest()
+    freshness.clear()
+    lexstore.clear_stores()
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    with store_writer(vault) as bound, bound.handle.transaction() as tx:
+        tx.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(lexstore.SCHEMA_VERSION - 1),))
+        if schema_16_shape:
+            # Schema 17 added these two columns; their indexes go first, as SQLite refuses to drop an indexed column.
+            for index in ("pages_payload_hash", "pages_source_url"):
+                tx.execute(f"DROP INDEX {index}")
+            for column in ("payload_hash", "source_url"):
+                tx.execute(f"ALTER TABLE pages DROP COLUMN {column}")
     lexstore.clear_stores()
 
     assert mode.status(vault)["owner_schema"] == "behind"
@@ -631,6 +670,8 @@ def served_store(tmp_path, monkeypatch):
                 "INSERT INTO store_meta(key, value) VALUES (?, ?)",
                 (rederive.OWNER_SCHEMA, str(rederive.OWNER_SCHEMA_VERSION)),
             )
+            lexstore.create_catalogue_schema(tx)
+            lexstore.stamp_catalogue_schema(tx)
     monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
     # The state manifest of a real migration is another suite's subject; this one needs the answer.
     monkeypatch.setattr(mode, "store_mode_for_reads", lambda _root: True)
