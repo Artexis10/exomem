@@ -428,13 +428,15 @@ def warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
 
 def warm_store_reads(vault_root: Path) -> None:
     """Fill what a store-mode vault's first restricted read would fill: the ownership of every stored
-    page, and the scope set of every page with simple selector facts, under the live policy. Reads only.
+    page, the scope set of every page with simple selector facts under the live policy, and the name
+    groups of the recall resolver. Reads only.
 
-    Both are process-wide memos keyed by their whole input, so a commit or a policy change drops what
-    it changes, and a request that runs meanwhile reads the same answers, only faster. Each batch is
-    its own store request and waits for foreground work first, so no request queues behind this step;
-    a stop from `foreground_priority` ends it between batches. A vault that reads files has nothing here.
+    Each is a process-wide memo keyed by its whole input, so a commit or a policy change drops what it
+    changes, and a request that runs meanwhile reads the same answers, only faster. Each batch is its
+    own store request and waits for foreground work first, so no request queues behind this step; a
+    stop from `foreground_priority` ends it between batches. A vault that reads files has nothing here.
     """
+    from . import epistemic_graph, find
     from .governance import page_admission
     from .governance import policy as policy_module
     from .vault_store import mode, read
@@ -450,6 +452,11 @@ def warm_store_reads(vault_root: Path) -> None:
         batch = paths[start:start + read.KEYS_PER_QUERY]
         with read.request_snapshot(root):
             page_admission.scopes_many(root, batch, policy)
+    try:
+        epistemic_graph.warm_homonyms(root, foreground_priority.check_cancelled)
+    except find.RetrievalIndexWarming:
+        # No recall resolver yet: the first restricted read groups the names itself, as it does today.
+        return
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:

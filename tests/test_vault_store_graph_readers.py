@@ -1581,6 +1581,7 @@ def a_new_process_state():
     """The memos a process fills as it serves, empty, as they are after a start."""
     page_admission.forget_scopes()
     ownership._classified.cache_clear()
+    epistemic_graph.forget_homonyms()
 
 
 def test_a_second_read_in_the_process_classifies_no_path(stored, writer):  # noqa: F811
@@ -1618,6 +1619,23 @@ def test_a_warmed_service_decodes_no_subject_in_its_first_restricted_read(stored
     warmup.warm_store_reads(stored)
     served = admission_sample(stored, "few withheld", "find")
     assert served["subject_decodes"] == 0 and served["membership_evaluations"] == 0, served
+    assert served["result_count"] == control["result_count"] > 0
+
+
+def test_a_warmed_service_groups_no_name_in_its_first_restricted_read(stored, writer):  # noqa: F811
+    """Defect: the first restricted read after a start groups every name of the recall resolver to find the
+    names that two pages share, which the service could have done while it was idle.
+
+    The control read has no warm-up; it must group, or a zero below proves nothing.
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    control = admission_sample(stored, "few withheld", "participants")
+    assert control["name_candidate_lookups"] > 0, control
+    a_new_process_state()
+    warmup.warm_store_reads(stored)
+    served = admission_sample(stored, "few withheld", "participants")
+    assert served["name_candidate_lookups"] == 0, served
     assert served["result_count"] == control["result_count"] > 0
 
 
