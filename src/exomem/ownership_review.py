@@ -150,6 +150,75 @@ def question(*, keep: str) -> str:
     )
 
 
+#: How many placing steps a plan question names before it counts the rest. A plan holds at most
+#: 64 steps, and the question stays under the 400-token bound that gate 5 measures.
+PLAN_NAMED_STEPS = 12
+
+PLAN_ANSWERS = (
+    "This plan places notes with these projects, by step id: {named}. "
+    "Before the user confirms it, check each step's project against the ownership test. "
+    "If a step's project is wrong, propose a corrected plan; the question changes no step."
+)
+
+
+def plan_question(vault_root: Path, steps: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The one ownership question a curation preview carries, or None.
+
+    A `create-note` step places a new note and a `move` step with a `project` field
+    reassigns one. Each such step for a compiled note is named by its step id with the
+    project it assigns, so a split's children are asked about together, once. Reads the
+    plan's steps and each moved page's frontmatter; it never changes the plan, so the
+    plan fingerprint is the same with or without the question.
+    """
+    from . import vault as vault_module
+
+    basis = note_types.Basis(vault_root)
+    placed: list[tuple[str, str]] = []
+    for step in steps:
+        args = step.get("args") or {}
+        kind = step.get("kind")
+        if kind == "create-note":
+            note_type = args.get("note_type")
+            project = project_key(args)
+            if project is not None and (note_type is None or basis.selects(note_type, note_types.compiled)):
+                placed.append((str(step["step_id"]), project))
+        elif kind == "move":
+            try:
+                text = (vault_root / str(args["old_path"])).read_text(encoding="utf-8")
+                frontmatter = vault_module.parse_frontmatter(text)[0]
+            except (OSError, ValueError, KeyError):
+                continue
+            if not note_cohesion.is_candidate(
+                str(args["old_path"]),
+                page_type=frontmatter.get("type"),
+                frontmatter=frontmatter,
+                type_basis=basis,
+            ):
+                continue
+            fields = args.get("fields") or {}
+            assigned = project_key(fields if {"project", "projects"} & fields.keys() else frontmatter)
+            if assigned is not None:
+                placed.append((str(step["step_id"]), assigned))
+    if not placed:
+        return None
+    named = ", ".join(f"{step_id} ({project})" for step_id, project in placed[:PLAN_NAMED_STEPS])
+    if len(placed) > PLAN_NAMED_STEPS:
+        named += f", and {len(placed) - PLAN_NAMED_STEPS} more"
+    routes = semantic_authoring.AUTHORING_CONTRACT.routes
+    return {
+        "kind": KIND,
+        "steps": [{"step_id": step_id, "project": project} for step_id, project in placed],
+        "question": " ".join(
+            (
+                routes["ownership_question"],
+                routes["ownership_test"],
+                routes["ownership_deferral"],
+                PLAN_ANSWERS.format(named=named),
+            )
+        ),
+    }
+
+
 def keep_call(item_id: str = "<id>") -> str:
     """The dismissal that records a keep answer, spelled for the serving surface.
 

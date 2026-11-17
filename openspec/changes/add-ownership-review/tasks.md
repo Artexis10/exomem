@@ -12,7 +12,8 @@
 ## 3. Delivery
 
 - [x] 3.1 Add the `ownership` structure suggestion on writes to a page with an open item, with its terminal projector and bounds (question at most 400 tokens), behind the `structural_suggestions` envelope. Test: an open page's write carries it through the MCP door; an answered page writes quietly.
-- [ ] 3.2 Add the once-per-plan ownership question to curation previews with `create-note` or `move` steps, without changing the plan fingerprint. Rebase over `add-curation-relocation-protocol` first. Test: a split's children are each named; an edit-only plan carries none; the fingerprint is unchanged.
+- [x] 3.2 Add the once-per-plan ownership question to curation previews with `create-note` or `move` steps, without changing the plan fingerprint. Rebase over `add-curation-relocation-protocol` first. Test: a split's children are each named; an edit-only plan carries none; the fingerprint is unchanged.
+      Evidence, 2026-11-17: `ownership_review.plan_question` builds the question from the sealed plan's steps; `commands._with_ownership_question` adds it to the preview reply only, so the sealed plan and its fingerprint are untouched. Three tests in `tests/test_ownership_review.py`: a split's two children are each named and the fingerprint equals the proposal's; an edit-only plan carries none; a `move` that assigns a project is named. The split and move tests fail with the preview wiring removed.
 - [x] 3.3 Add handling text in `commands.py` and the scaffold references for the family and its answers, keeping the scaffold generic. Test: `tests/test_scaffold_no_leak.py` passes.
 
 ## 4. Proof before release

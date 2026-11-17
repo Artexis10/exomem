@@ -34,7 +34,7 @@ from exomem import (
 from exomem import audit as audit_module
 from exomem.cli_ops import OpError
 from exomem.governance.principal import request_scope
-from exomem.vault import parse_frontmatter
+from exomem.vault import content_hash, parse_frontmatter
 from tests.page_opens import pages_opened
 from tests.test_consolidated_tools import _build, _call, _tool
 from tests.test_derived_identifier_egress import _govern, _reset
@@ -1095,3 +1095,99 @@ def test_a_real_question_fits_the_response_layer_bound() -> None:
 
     assert 0 < len(text) <= mutation_terminal._MAX_OWNERSHIP_QUESTION_CHARS
     assert json.dumps({"question": text})
+
+
+# --- the curation preview ---------------------------------------------------------------
+
+
+def _child_step(step_id: str, title: str, project: str) -> dict:
+    return {
+        "step_id": step_id,
+        "kind": "create-note",
+        "args": {
+            "title": title,
+            "slug": title.lower().replace(" ", "-"),
+            "note_type": "insight",
+            "project": project,
+            "content": "## Observations\n\n- [finding] A split-out finding. #travel ^split\n",
+            "relation_disposition": "reviewed_none",
+            "relation_review_reason": "a standalone split child",
+        },
+    }
+
+
+def _propose_and_preview(vault: Path, steps: list[dict]) -> tuple[dict, dict]:
+    command = _command("maintain_memory")
+    proposed = writer_lease.invoke_command(
+        command,
+        vault,
+        mode="curation",
+        curation_action="propose",
+        plan={"version": 1, "title": "Place notes", "steps": steps},
+    )
+    preview = writer_lease.invoke_command(
+        command, vault, mode="curation", curation_action="preview", run_id=proposed["run_id"]
+    )
+    return proposed, preview
+
+
+def test_a_split_previews_one_question_naming_each_child_and_leaves_the_fingerprint(
+    vault: Path,
+) -> None:
+    steps = [
+        _child_step("child-one", "Harbour fare notes", "project-alpha"),
+        _child_step("child-two", "Island fare notes", "project-alpha"),
+    ]
+
+    proposed, preview = _propose_and_preview(vault, steps)
+
+    asked = preview["ownership_question"]
+    assert [(s["step_id"], s["project"]) for s in asked["steps"]] == [
+        ("child-one", "project-alpha"),
+        ("child-two", "project-alpha"),
+    ]
+    assert "child-one (project-alpha), child-two (project-alpha)" in asked["question"]
+    assert semantic_authoring.AUTHORING_CONTRACT.routes["ownership_test"] in asked["question"]
+    # The question is a reply field: the sealed plan the user confirms is the same plan.
+    assert preview["plan_fingerprint"] == proposed["plan_fingerprint"]
+
+
+def test_a_plan_without_note_placement_previews_no_question(vault: Path) -> None:
+    _put(vault, PAGE, _text())
+    edit = {
+        "step_id": "retag",
+        "kind": "edit",
+        "args": {
+            "path": PAGE,
+            "why": "tidy the heading",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "## Observations",
+                "new_string": "## Rules",
+                "expected_hash": content_hash((vault / PAGE).read_text(encoding="utf-8")),
+            },
+        },
+    }
+
+    _, preview = _propose_and_preview(vault, [edit])
+
+    assert "ownership_question" not in preview
+
+
+def test_a_move_that_assigns_a_project_is_named_with_that_project(vault: Path) -> None:
+    _put(vault, PAGE, _text())
+    move = {
+        "step_id": "rehome",
+        "kind": "move",
+        "args": {
+            "old_path": PAGE,
+            "new_path": f"{FOLDER}/project-alpha/seasonal-fare-scouting.md",
+            "fields": {"project": "project-alpha"},
+        },
+    }
+
+    _, preview = _propose_and_preview(vault, [move])
+
+    assert [(s["step_id"], s["project"]) for s in preview["ownership_question"]["steps"]] == [
+        ("rehome", "project-alpha")
+    ]
