@@ -586,6 +586,53 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     assert calls.count("media") == 1
 
 
+def test_store_mode_activation_keeps_its_importer_when_the_first_sweep_outlasts_the_seed_wait(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large vault's first sweep must not stop the watcher that imports its edited files."""
+    readiness.reset()
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    calls: list[str] = []
+    managed_at_compute: list[bool] = []
+
+    class Watcher:
+        def wait_until_seeded(self, timeout=None) -> bool:
+            calls.append("watcher-seed:wait")
+            return False  # the sweep is still hashing pages when the wait ends
+
+        def arm_optional_recovery(self) -> None:
+            pass
+
+        def finish_startup_recovery(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            calls.append("watcher-stop")
+
+    monkeypatch.setattr("exomem.vault_store.mode.store_mode_active", lambda _root: True)
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: Watcher())
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root, **_kwargs: managed_at_compute.append(readiness.runtime_managed()),
+    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+    monkeypatch.setattr(activation, "_start_vault_projector", lambda _root: None)
+    try:
+        activation._activate()
+        stopped_while_activating = "watcher-stop" in calls
+        watcher_kept = activation.file_watcher is not None
+    finally:
+        activation._stop_background_workers()
+        readiness.reset()
+
+    assert not stopped_while_activating
+    assert watcher_kept
+    assert managed_at_compute == [True]
+
+
 def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

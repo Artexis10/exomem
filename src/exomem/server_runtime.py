@@ -319,9 +319,15 @@ class LocalRuntimeActivation:
     def _wait_for_recall_seed(self) -> None:
         """Order maintained-catalog verification behind watcher authority."""
         from . import freshness
+        from .vault_store import mode
 
         watcher = self.file_watcher
         if watcher is None or not freshness.event_indexes_enabled():
+            return
+        if mode.store_mode_active(self.vault_root):
+            # A store-mode watcher seeds no recall projection: its first pass is the importer's
+            # whole-vault sweep, which outlasts the wait on a large vault. A downgrade would then
+            # stop the importer for the life of the process; readers answer from the store.
             return
         try:
             seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
