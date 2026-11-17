@@ -78,6 +78,23 @@ def test_only_a_caller_who_can_write_the_receipt_is_offered_a_correction(vault, 
         assert not source_corrections.can_record(vault, saved["ref"])
 
 
+def test_a_content_capture_says_it_kept_text_not_the_original_file(
+    vault, source_schema, tmp_path, monkeypatch, owner_scope
+) -> None:
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Call notes", source_kind="session",
+        content="A transcript's pasted text.")
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+    assert "text only; no original file stored" in reply["user_summary"]
+
+    # An exact-bytes capture gets the same sentence without the clause.
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    stored = _save_pdf(vault, source_schema, url=CLAIM)
+    assert "text only" not in stored["user_summary"]
+
+
 def test_a_source_in_shared_original_storage_is_corrected_without_re_upload(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:
     # A new archive keeps originals in the content-addressed pool, where no file holds the logical path.
     from conftest import initialize_vault_state_offline

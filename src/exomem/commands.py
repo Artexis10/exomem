@@ -9407,7 +9407,7 @@ def op_capture_source(
             passages=passages,
             document_form=document_form,
         )
-        out = {"source": source}
+        out = {"source": source, "text_only": True}
         if source_identity is not None:
             out["capture_outcome"] = source["capture_outcome"]
             out["mutated"] = source["capture_outcome"] == "created"

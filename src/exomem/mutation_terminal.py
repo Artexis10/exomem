@@ -2410,7 +2410,21 @@ def _user_summary(
     if verb == "replaced" and len(names) == 2:
         # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
         return f"{head} -> {names[1]}, was {names[0]}"
-    return _lead(head, names)
+    sentence = _lead(head, names)
+    if _text_only_source_capture(result, head, verb):
+        sentence += " (text only; no original file stored)"
+    return sentence
+
+
+def _text_only_source_capture(result: Mapping[str, Any], head: str, verb: OutcomeVerb | None) -> bool:
+    """A `content` capture stored supplied text, never an original file; say so on a fresh save."""
+    leaf = result.get("leaf_result")
+    return (
+        verb == "saved"
+        and head == verb.capitalize()
+        and isinstance(leaf, Mapping)
+        and leaf.get("text_only") is True
+    )
 
 
 def _pointer_repointed(leaf: Any) -> list[Mapping[str, Any]]:
