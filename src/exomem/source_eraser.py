@@ -169,7 +169,7 @@ class _Eraser:
             cursor = page.cursor
             if cursor is None:
                 return state, path
-        return "unknown", path
+        return "backlog", path  # More open bindings than one call reads: still open, nothing failed to read.
 
     def _gate(self, manifest: source_custody.Manifest, bindings: str, path: str | None) -> str | None:
         """Refuse known dependence and return the missing evidence; None admits the cutoff."""
@@ -181,7 +181,7 @@ class _Eraser:
             return "dependency_uncertain"
         if not manifest.coverage_complete or manifest.generated_birth is None:
             return "coverage_incomplete"
-        if bindings == "unknown":
+        if bindings in ("unknown", "backlog"):
             return "canonical_page_unavailable"
         if path is None:
             if manifest.publication == "published":
@@ -255,7 +255,9 @@ class _Eraser:
         unknown = sweep["unknown"] or sweep["last_unknown"] or final.state == "unknown"
         if not unknown:
             return {"state": "pending", "catalogue": final.state}
-        unreadable = sweep["unreadable"] or sweep["last_unreadable"] or final.state == "unknown"
+        # Only a failed head read carries no catalogue; recorded uncertainty names one and lasts.
+        head_unread = final.state == "unknown" and final.catalogue_id is None
+        unreadable = sweep["unreadable"] or sweep["last_unreadable"] or head_unread
         reason = "copy_unreadable" if unreadable else "copy_unprovable"
         return {"state": "unknown", "catalogue": final.state, "reason": reason}
 
@@ -395,7 +397,7 @@ class _Eraser:
         found: dict[str, Any] = {"copies": self._copies(manifest.generated_birth, progress)}
         bindings, _path = self._bindings()
         found["canonical"] = ({"state": "unknown", "reason": "native_ledger_unreadable"} if bindings == "unknown"
-                              else {"state": "acknowledged" if bindings == "none" else "pending"})
+                              else {"state": "acknowledged" if bindings == "none" else "pending"})  # open, backlog
         found["attempts"] = {"state": "acknowledged" if self.attempts.retire_allocations(self.reference) else "pending"}
         found["derived"] = self._derived(progress, manifest)
         found["caches"] = self._caches(progress, found["derived"])

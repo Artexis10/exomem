@@ -285,11 +285,15 @@ def test_a_catalogue_staged_before_the_erase_is_not_adopted_at_boot(vault, attem
     _manager, call = attempts
     assert lexstore.get_store(vault).rebuild_atomic()  # A live cell keeps its lexical index built.
     path, reference, source_hash = capture(vault, call)
-    with sqlite3.connect(lexstore.lexical_path(vault)) as conn:
-        # The old release's live catalogue, which the new release cannot use, so it stages its own.
-        conn.execute("UPDATE meta SET value = 'older-release' WHERE key = 'catalog_identity'")
-    conn.close()
-    assert catalogue_prewarm.build(vault) == "staged"
+    deadline, outcome = time.monotonic() + 20.0, None
+    while outcome != "staged" and time.monotonic() < deadline:
+        # The old release's live catalogue, which the new release cannot use, so it stages its own. The
+        # capture's background publication can restamp the live identity between these two steps; repeat.
+        with sqlite3.connect(lexstore.lexical_path(vault)) as conn:
+            conn.execute("UPDATE meta SET value = 'older-release' WHERE key = 'catalog_identity'")
+        conn.close()
+        outcome = catalogue_prewarm.build(vault)
+    assert outcome == "staged"
 
     assert drive(call, reference, source_hash)["status"] == "complete"
 
@@ -512,6 +516,25 @@ def test_a_read_that_fails_once_keeps_the_answer_open_until_a_repeat_finishes(va
     assert second["components"]["derived"]["reason"] == "heat_unreadable", json.dumps(second)
     assert second["settled"] is False and second["retry_after_ms"] is not None
     assert drive(call, reference, source_hash)["status"] == "complete"
+
+
+def test_a_catalogue_that_recorded_uncertainty_settles_as_unknown(vault, attempts, erasable):
+    """Recorded catalogue uncertainty lasts, unlike a failed head read: the answer must settle, not poll."""
+    manager, call = attempts
+    _path, reference, source_hash = capture(vault, call)
+    manifest, _guard = source_custody.read_manifest(vault, reference)
+    with manager.mutation_guard(vault):
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        try:
+            image_ids = store.lookup(reference, manifest.generated_birth, limit=4).image_ids
+            assert image_ids, "the capture left no catalogue image to mark"
+            store.mark_uncertain(image_ids[0])
+        finally:
+            store.close()
+    result = drive(call, reference, source_hash, seconds=20.0)
+    copies = result["components"]["copies"]
+    assert result["status"] == "unknown" and result["settled"] is True, json.dumps(result)
+    assert copies["reason"] == "copy_unprovable" and result["retry_after_ms"] is None
 
 
 def published(vault) -> bool:
