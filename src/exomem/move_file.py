@@ -39,6 +39,7 @@ from . import (
     reserved_paths,
     semantic_index,
     semantic_writes,
+    source_custody,
     source_taxonomy,
     trash_metadata,
     working_set_heat,
@@ -1061,6 +1062,9 @@ def _move_file_local(
         _refuse_taken_destination(vault_root, new_rel)
     if not recovering_from_trash:
         _refuse_reserved_destination(vault_root, old_rel, new_rel, validate_only=validate_only)
+
+    if (held := source_custody.erase_refusal_at(vault_root, old_rel)) is not None:
+        raise MoveFileError(*held)
 
     # Append-only guards. Rule 2 protects content *immutability*, not file
     # *location*: a move that stays WITHIN the same append-only tree

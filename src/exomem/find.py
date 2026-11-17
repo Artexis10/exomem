@@ -46,6 +46,7 @@ from . import (
     request_budget,
     runtime_resources,
     semantic_units,
+    source_custody,
     structured_filters,
     view_lag,
 )
@@ -1778,11 +1779,18 @@ def find(
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     type_basis = type_basis or note_types.Basis(vault_root)
 
-    def _dependency() -> tuple[tuple[str, str], tuple[str, str]]:
-        return (status_basis.dependency, type_basis.dependency)
+    # Source erasure moves this at its cutoff: a result read before it is never stored or served after it.
+    retired_through = source_custody.retirement_generation(vault_root)
 
-    def _current(dependency: tuple[tuple[str, str], tuple[str, str]]) -> bool:
-        return status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
+    def _publishable() -> bool:
+        return retired_through is not None and retired_through == source_custody.retirement_generation(vault_root)
+
+    def _dependency() -> tuple[tuple[str, str], tuple[str, str], int | None]:
+        return (status_basis.dependency, type_basis.dependency, retired_through)
+
+    def _current(dependency: tuple[tuple[str, str], tuple[str, str], int | None]) -> bool:
+        return (status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
+                and dependency[2] == source_custody.retirement_generation(vault_root))
 
     if catalog_proof_out is not None:
         catalog_proof_out.clear()
@@ -2318,7 +2326,7 @@ def find(
                 catalog_view=catalog_view,
             )
             _note_projection_lag()
-            if unit_cache_key is not None and not degraded and not failed:
+            if unit_cache_key is not None and not degraded and not failed and _publishable():
                 with _FIND_CACHE_LOCK:
                     _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency())
                     _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
@@ -3044,6 +3052,7 @@ def find(
             and not failed
             and not budget_skipped_rerank
             and not unproven_graph_key
+            and _publishable()
         ):
             with _FIND_CACHE_LOCK:
                 _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
