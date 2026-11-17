@@ -7461,6 +7461,8 @@ class _ArtifactReferenceGate:
         self.tombstone_literals = artifact_census.LiteralAliases()
         # Path-shaped tokens that the census lacked, checked on disk once each.
         self._directly: dict[str, tuple[str, ...]] = {}
+        # Bare names with no file, checked once each against the companion pages that might bind them.
+        self._filings: dict[str, tuple[str, ...]] = {}
         # One gate pass shares one lifecycle view, as the release walk does.
         with call_spans.span("egress.artifact_gate.tombstones"):
             self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
@@ -7499,6 +7501,25 @@ class _ArtifactReferenceGate:
         found = self._directly.get(token)
         if found is None:
             found = self._directly[token] = artifact_census.direct_paths(self.vault_root, token)
+        return found
+
+    def _filings_named(self, token: str) -> tuple[str, ...]:
+        """The companion pages that bind an original named `token`, which has no file at its path.
+
+        A shared original keeps no file, so the census holds its companion `<token>.md` alone. A page by that
+        name that binds no original, such as a note with a dot in its name, is no filing of `token`.
+        """
+        found = self._filings.get(token)
+        if found is None:
+            filings = []
+            for companion in self.census.names(f"{token}.md".casefold()):
+                try:
+                    bound = originals.bound_companion(self.vault_root, companion.removesuffix(".md"))
+                except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+                    bound = (companion,)  # An unreadable page cannot prove it binds nothing, and a mention is cheap to withhold.
+                if bound is not None and bound[0] == companion:
+                    filings.append(companion)
+            found = self._filings[token] = tuple(sorted(filings))
         return found
 
     @staticmethod
@@ -7554,6 +7575,8 @@ class _ArtifactReferenceGate:
             named = self.census.names(token.casefold())
             if named:
                 return tuple(sorted(named))
+            if filings := self._filings_named(token):
+                return filings
             if wikilink or "." not in token:
                 stemmed = self.census.stems(Path(token).stem.casefold())
                 if stemmed:

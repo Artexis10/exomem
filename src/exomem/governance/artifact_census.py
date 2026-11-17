@@ -323,6 +323,10 @@ class _Tables:
         add_alias(self.by_stem, stem, rel)
         if len(name) >= 3:
             self.literal_aliases.add(name)
+        # A pooled original has no file, so its bare name is found from its companion's `<name>.md`. This only
+        # makes the name a candidate: the gate keeps it only where that page binds an original of that name.
+        if suffix == ".md" and PurePosixPath(stem).suffix and len(stem) >= 3:
+            self.literal_aliases.add(stem)
 
     def census(self, listings: Mapping[str, _Listing]) -> ArtifactCensus:
         return ArtifactCensus(

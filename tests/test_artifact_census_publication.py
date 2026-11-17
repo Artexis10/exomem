@@ -308,3 +308,30 @@ def test_a_generic_directory_move_adds_the_files_it_brings_to_the_census(
     arrived = f"{WITHHELD_DIR}/Lot/orchid-batch-chart.pdf"
     assert arrived in artifact_census.published_view(vault).paths(arrived.casefold())
     assert walks == []
+
+
+@pytest.mark.parametrize("published", [False, True], ids=["walked", "published"])
+def test_a_bare_filename_of_a_withheld_pooled_original_is_withheld_as_an_ordinary_file_is(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    """Catches a census of files on disk: a shared original has no file, so its bare name resolves to nothing and a
+    visible note that mentions it names a withheld original to a restricted caller, where the same mention of an
+    ordinary file is withheld. A note whose name merely contains a dot is no original and stays readable."""
+    from exomem import artifact_lifecycle, original_pool
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    _withhold_from_external(vault, "Evidence/**", "Notes/Scratch/**")
+    if published:
+        _publish(vault)
+
+    with library_scope():
+        filed = preserve.preserve_bytes(
+            vault, scope="Rental", category="clips", filename="orchid-quarterly-terms.pdf",
+            data=b"%PDF-1.4", text="terms",
+        )
+        create_file.create_file(vault, path=f"{KB}/Notes/Scratch/orchid-roadmap.v2.md", content="Internal note.\n")
+
+    assert not (vault / filed.path).exists()
+    assert egress.WITHHELD_REFERENCE in _gate(vault, "See orchid-quarterly-terms.pdf for the terms.")
+    assert _gate(vault, "Ships as orchid-roadmap.v2 soon.") == "Ships as orchid-roadmap.v2 soon."
