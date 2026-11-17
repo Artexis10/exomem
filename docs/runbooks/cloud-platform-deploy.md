@@ -536,8 +536,8 @@ Release the cell image with the narrow builder and boot adoption before enabling
 
 When enabled, cellctl starts a build Job from the target image when a running candidate's upgrade window opens.
 The scheduler places it beside the serving pod with required pod affinity. Each cell gets one extra quota slot; each node admits one build at a time.
-`cellctl.catalogueBuildResources` requests and limits default to 2 CPU and 3 GiB, the conservative estimate from the serving limits.
-`cellctl.catalogueBuildTimeoutSeconds` defaults to 1800 seconds. Rehearsal must measure the peak and set the real timeout before rollout.
+`cellctl.catalogueBuildResources` and `cellctl.catalogueBuildTimeoutSeconds` hold the build's resource profile and timeout; `values.yaml` gives the defaults and the measurements behind them.
+Memory pressure evicts a build that uses more than its memory request first; the upgrade then rebuilds the catalogue cold.
 
 A running build includes image pull after the scheduler binds its pod. A pod waiting for node capacity does not defer an idle attempt.
 Build activity defers the idle stop before the final force minutes, which still default to 10.

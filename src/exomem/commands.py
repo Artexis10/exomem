@@ -53,7 +53,9 @@ from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
+from . import capture_attempts as capture_attempts_module
 from . import capture_carrier as capture_carrier_module
+from . import capture_inventory as capture_inventory_module
 from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
@@ -153,6 +155,7 @@ from . import set_take as set_take_module
 from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
+from . import topic_brief as topic_brief_module
 from . import traversal_profiles as traversal_profiles_module
 from . import vault_skills as vault_skills_module
 from . import vocabulary_delta as vocabulary_delta_module
@@ -510,7 +513,7 @@ RecallResult = retrieval_models.RecallResult
 #: nothing branches on it; the runtime payload is unchanged, and
 #: `tests/test_mcp_output_schema_conformance.py` still validates it.
 _RecallOutput = Annotated[
-    RecallResult,
+    RecallResult | dict[str, Any],
     WithJsonSchema({"anyOf": [{"type": "array"}, {"type": "object"}]}, mode="serialization"),
 ]
 
@@ -4011,6 +4014,7 @@ def _add_source(
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
     reuse: bool = False,
+    passages: list[source_capture.DeclaredPassage] | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4043,6 +4047,7 @@ def _add_source(
                 expected_sha256=expected_sha256,
                 correction=correction,
                 reuse_payload=reuse,
+                passages=passages,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -6917,7 +6922,7 @@ def op_ask_memory(
         relation_of: Anchor path; restrict `relations` to pages connected to it.
         relation_direction: outbound, inbound or any.
         filters: Structured page/unit metadata filters.
-        result_level: auto, page, unit or mixed.
+        result_level: auto, page, unit, mixed or passage.
         limit: Max hits.
         continuation: Token from a prior recall page.
         scope: kb, vault or kb-only.
@@ -6937,6 +6942,10 @@ def op_ask_memory(
         explain: Add retrieval-plan and ranking evidence.
         purpose: Declared purpose; governance may widen or narrow visibility.
     """
+    if result_level == "passage":
+        from . import passage_evidence
+
+        return passage_evidence.search_memory(vault_root, locals())
     with recall_timing_module.measure_recall(include_timings) as trace:
         # Reuse request-local placement and policy work; terminal egress opens fresh scopes.
         with state_paths_module.resolution_scope():
@@ -8391,6 +8400,19 @@ def _refuse_unused_offset(result: dict, offset: int | None) -> dict:
     return result
 
 
+def _with_registry_lag(vault_root: Path, view: dict) -> dict:
+    """A derived view that says so when a store-mode registry pass may still re-derive its rows.
+
+    A view that would read ready and current is marked stale, in the words every store-mode reader uses.
+    """
+    registry_lag = _store_registry_lag(vault_root)
+    if registry_lag is not None:
+        view = {**view, **registry_lag}
+        if view.get("state") == context_views_module.READY:
+            view["stale"] = True
+    return view
+
+
 def read_memory_stored(
     vault_root: Path,
     path: str,
@@ -8406,8 +8428,9 @@ def read_memory_stored(
     follow_corrections: bool = True,
     offset: int | None = None,
     units: bool = False,
+    brief: bool = False,
 ) -> dict:
-    """Read a page, exact unit, or exomem://map view.
+    """Read a page, exact unit, exomem://map view, or topic brief.
 
     Missing/stale units report status; never substituted.
     Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
@@ -8427,7 +8450,18 @@ def read_memory_stored(
         follow_corrections: False reads the historical Source; unit reads stay exact.
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
         units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
+        brief: Read `path` as a topic (a page or free text) and serve its brief: conclusions, sources, open questions, and changes since this principal's last read.
     """
+    if brief:
+        # A brief is a derived view over one subject, never a page: it takes none of a page's read options.
+        if unit_ref is not None or frontmatter_only or include_history or links or include_raw or units or offset is not None:
+            raise ValueError(
+                "INVALID_VIEW_READ_OPTIONS: a brief read cannot be combined with "
+                "unit_ref, frontmatter_only, include_history, links, include_raw, units, or offset"
+            )
+        return _with_registry_lag(vault_root, topic_brief_module.read(
+            vault_root, path, continuation=continuation, purpose=purpose
+        ))
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
     if context_views_module.in_view_namespace(path):
@@ -8436,17 +8470,9 @@ def read_memory_stored(
                 "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
                 "unit_ref, frontmatter_only, include_history, links, include_raw, or offset"
             )
-        view = context_views_module.read_view(
+        return _with_registry_lag(vault_root, context_views_module.read_view(
             vault_root, path, continuation=continuation, purpose=purpose
-        )
-        # A store-mode view is compiled over rows that a registry pass may still re-derive: a view
-        # that would read ready and current says so, in the words every store-mode reader uses.
-        registry_lag = _store_registry_lag(vault_root)
-        if registry_lag is not None:
-            view = {**view, **registry_lag}
-            if view.get("state") == context_views_module.READY:
-                view["stale"] = True
-        return view
+        ))
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
     # (which has no `purpose` parameter of its own) see the declared purpose.
@@ -9165,11 +9191,30 @@ def op_replace_memory(
     )
 
 
+def op_reserve_source_capture(
+    vault_root: Path,
+    source_identity: source_capture.SourceIdentity,
+    request_sha256: str,
+    capture_wire_version: Literal[1] = 1,
+) -> dict:
+    """Reserve exact text-capture admission without sending or retaining its content."""
+    return capture_attempts_module.reserve(vault_root, source_identity, request_sha256, capture_wire_version)
+
+
+def op_settle_source_capture(
+    vault_root: Path,
+    reservation: capture_attempts_module.CaptureReservation,
+    retire_owned: bool = False,
+) -> dict:
+    """Close local capture admission or observe its retained receipt under the canonical boundary."""
+    return capture_attempts_module.settle(vault_root, reservation, retire_owned=retire_owned)
+
+
 def op_capture_source(
     vault_root: Path,
     source_schema: object,
     title: str,
-    content: str = "",
+    content: str | None = None,
     slug: str | None = None,
     source_type: str | None = None,
     url: str | None = None,
@@ -9186,6 +9231,8 @@ def op_capture_source(
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
+    passages: Any = None,
+    capture_reservation: capture_attempts_module.CaptureReservation | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9195,7 +9242,8 @@ def op_capture_source(
     needs HTTP MCP. source_kind is required.
 
     Args:
-        content: Authored text, or supply files.
+        content: Authored text, or supply files or passages.
+        passages: Ordered key/text objects; excludes content and files.
         source_type: source_kind alias.
         url: Source URL.
         tags: Labels.
@@ -9210,7 +9258,18 @@ def op_capture_source(
         source_identity: Durable text-capture identity.
         expected_sha256: Original SHA-256 (UTF-8 for content).
         correction: Correct a Source; expected_hash is its page hash.
+        capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
     """
+    if capture_reservation is not None:
+        capture_attempts_module.require_active_capture(vault_root, capture_reservation)
+    if passages is not None:
+        if content is not None:
+            raise ValueError("INVALID_PASSAGES: remove content when supplying passages")
+        passages = source_capture.validate_passages(passages)
+        if files or adoption is not None:
+            raise ValueError("INVALID_PASSAGES: remove files and adoption when supplying passages")
+        content = "\n\n".join(passage["text"] for passage in passages)
+    content = content or ""
     if correction is not None:
         correction = source_corrections.validate_correction(correction)
         if source_identity is not None or adoption is not None or files and len(files) != 1:
@@ -9230,6 +9289,8 @@ def op_capture_source(
         source_capture.require_authority(vault_root)
     # Resolved before any byte is fetched or written, for files and text alike.
     kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    from . import source_result_attribution
+
     out: dict
     if files or adoption is not None:
         from . import client_artifacts
@@ -9258,6 +9319,10 @@ def op_capture_source(
             row["page"] for row in captured.get("files", [])
             if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
         ]
+        source_refs = {
+            row["page"]: source_result_attribution.recipe(row).sources for row in captured.get("files", [])
+            if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
+        }
     else:
         source = _add_source(
             vault_root,
@@ -9276,6 +9341,7 @@ def op_capture_source(
             expected_sha256=expected_sha256,
             correction=correction,
             reuse=True,
+            passages=passages,
         )
         out = {"source": source}
         if source_identity is not None:
@@ -9288,13 +9354,16 @@ def op_capture_source(
         for key in ("vocabulary_resolution", "vocabulary_receipt"):
             if key in source:
                 out[key] = source[key]
+                source_result_attribution.carry(source, out, moves={(key,): (key,)})
         # What the duplicate check found moves up, so a reused reply (which the terminal passes through whole)
         # states it once.
         for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable"):
             if key in source:
+                source_result_attribution.carry_fields(source, out, {key: key})
                 out[key] = source.pop(key)
         source_paths = [source["path"]]
-    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
+        source_refs = {source["path"]: (source["ref"],)}
+    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths, source_refs=source_refs)
     if compile_guidance:
         if files or adoption is not None:
             # Originals remain usable while extraction is pending; preparation is optional.
@@ -14421,6 +14490,33 @@ def remember_description(project_keys_hint: str) -> str:
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
 
 
+def op_inspect_captured_sources(
+    vault_root: Path,
+    system: str,
+    record_id: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=capture_inventory_module.MAX_PAGE_SIZE)] = capture_inventory_module.MAX_PAGE_SIZE,
+) -> dict:
+    """List canonical captured revisions with complete-publication and exact-index observations.
+
+    Traverse one identity system, optionally one record. Compare every page's generation;
+    repeat traversal when it changes. Pending or incomplete observations never prove absence.
+    """
+    from .capture_inventory import inventory
+
+    return inventory(vault_root, system=system, record_id=record_id, cursor=cursor, limit=limit)
+
+
+def op_inspect_capture_erasure_policy(
+    vault_root: Path,
+    system: Annotated[str, Field(min_length=1)],
+) -> dict:
+    """Read whether current host policy enables erasure for one opaque identity system."""
+    from .source_erasure import inspect_policy
+
+    return inspect_policy(vault_root, system=system)
+
+
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
@@ -14917,6 +15013,7 @@ _SPEC: tuple[tuple, ...] = (
     ("served_context", op_served_context, 2, False, False, None, _RC),
     ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
+    ("inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
     ("fetch", op_fetch, 1, False, False, "id", _MCRC),
@@ -15014,6 +15111,18 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         {"public_title": "Read or change memory settings", "surface": "primary", "actions": (), "first_run_safe": False},
     ),
     (
+        "inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None,
+        _MCRC, ("inspect_captured_sources",),
+        {"public_title": "Inspect captured Source inventory", "surface": "service", "actions": (), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_inventory",)}},
+    ),
+    (
+        "inspect_capture_erasure_policy", op_inspect_capture_erasure_policy, 1, False, False, None,
+        _MCRC, (),
+        {"public_title": "Inspect Source erasure policy", "surface": "service", "actions": (), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure_policy",)}},
+    ),
+    (
         "coordination_status",
         op_coordination_status,
         1,
@@ -15044,7 +15153,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "query",
         _MCRC,
         ("search", "find"),
-        {"public_title": "Search saved knowledge", "preferred_name": "search_memory", "surface": "primary", "actions": ("ask",), "first_run_safe": True},
+        {"public_title": "Search saved knowledge", "preferred_name": "search_memory", "surface": "primary", "actions": ("ask",), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("passage_results",)}},
     ),
     (
         "activate_context",
@@ -15141,6 +15251,20 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         {"public_title": "Supersede a knowledge note", "preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
     ),
     (
+        "reserve_source_capture",
+        op_reserve_source_capture,
+        1, True, False, None, _MCRC, (),
+        {"public_title": "Reserve Source capture admission", "surface": "service", "actions": ("save",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_reservation",)}},
+    ),
+    (
+        "settle_source_capture",
+        op_settle_source_capture,
+        1, True, False, None, _MCRC, (),
+        {"public_title": "Close Source capture admission", "surface": "service", "actions": ("save",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_settlement",)}},
+    ),
+    (
         "capture_source",
         op_capture_source,
         1,
@@ -15154,7 +15278,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
             "surface": "primary",
             "actions": ("save",),
             "first_run_safe": False,
-            "mcp_meta": {"openai/fileParams": ("files",)},
+            "mcp_meta": {"openai/fileParams": ("files",),
+                         capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("declared_passages", "capture_attempt_commit")},
         },
     ),
     (
@@ -15910,6 +16035,7 @@ def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescripto
         tier2_enabled=True,
         product_commands=tuple(
             command.public_name for command in product_commands_for("mcp", expose_tier2=True)
+            if command.agent_listed
         ),
         compatibility_commands=tuple(command.name for command in PRODUCT_COMMANDS if command.preferred_name),
     )

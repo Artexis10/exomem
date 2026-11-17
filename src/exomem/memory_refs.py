@@ -43,7 +43,8 @@ def _sqlite_connect_owned(
     return sqlite3.connect(database, *args, **kwargs)
 
 
-@dataclass(frozen=True)
+# Not frozen: contextlib assigns __traceback__ when an exception leaves a generator context manager.
+@dataclass(eq=False)
 class ReferenceError(Exception):
     code: str
     reason: str
@@ -114,6 +115,14 @@ def parse_memory_ref(value: str) -> str | None:
     if not raw.lower().startswith(REF_PREFIX):
         return None
     return normalize_id(raw[len(REF_PREFIX) :])
+
+
+def canonical_memory_ref(value: str) -> str:
+    """`value` unchanged when it is already a canonical memory ref; a ValueError otherwise."""
+    identity = parse_memory_ref(value)
+    if identity is None or memory_ref(identity) != value:
+        raise ValueError("memory_ref_not_canonical")
+    return value
 
 
 def ref_from_markdown(markdown: str) -> str | None:

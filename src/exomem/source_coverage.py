@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import lifecycle_statuses, note_types, source_closure, vault
+from . import lifecycle_statuses, memory_refs, note_types, source_closure, source_result_attribution, vault
 from .find_types import ParsedPage
 
 #: The closed reasons a derivative fails the citation-backlog criterion.
@@ -253,7 +253,9 @@ def excerpt(root: Path, page: ParsedPage, limit: int = EXCERPT_CHARS) -> str:
     return _clip(" ".join(prose.split()), limit)
 
 
-def compilation_guidance(root: Path, paths: Sequence[str]) -> dict[str, Any]:
+def compilation_guidance(
+    root: Path, paths: Sequence[str], *, source_refs: Mapping[str, tuple[str, ...]] | None = None,
+) -> dict[str, Any]:
     """Informational assessment state and bounded routes over released Source paths."""
     from .governance import egress
 
@@ -268,13 +270,15 @@ def compilation_guidance(root: Path, paths: Sequence[str]) -> dict[str, Any]:
     selected = [path for path in released if len(path) <= COMPILATION_PATH_CHARS][
         :COMPILATION_SOURCES_LISTED
     ]
-    out = compilation_routes(selected)
+    out = compilation_routes(selected, source_refs=source_refs)
     if len(selected) < len(released):
         out["truncated"] = True
     return out
 
 
-def compilation_routes(paths: Sequence[str]) -> dict[str, Any]:
+def compilation_routes(
+    paths: Sequence[str], *, source_refs: Mapping[str, tuple[str, ...]] | None = None,
+) -> dict[str, Any]:
     """Render already admitted, bounded paths; callers own admission and bounds."""
     # `unassessed` is a declared protocol state, never inferred from citations or extraction.
     out: dict[str, Any] = {"state": "unassessed"}
@@ -287,6 +291,12 @@ def compilation_routes(paths: Sequence[str]) -> dict[str, Any]:
             for path in paths
         ]
         out["preparation_route"] = {"tool": "compile_source", "args": {"sources": list(paths)}}
+        if source_refs is not None and source_result_attribution.active():
+            for index, path in enumerate(paths):
+                # The route schema fixes these selectors; callers provide refs from typed Source producers.
+                source_result_attribution.bind(out, source_refs.get(path, ()), paths=(
+                    ("full_source_reads", index), ("preparation_route", "args", "sources", index),
+                ))
     return out
 
 
@@ -300,9 +310,11 @@ def describe(
     which Sources belong in one note.
     """
     frontmatter: Mapping[str, Any] = page.frontmatter
+    identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
+    refs = (memory_refs.memory_ref(identity),) if identity is not None else ()
     out: dict[str, Any] = {
         "title": _clip(page.title, TITLE_CHARS),
-        "semantic_compilation": compilation_guidance(root, [page.rel_path]),
+        "semantic_compilation": compilation_guidance(root, [page.rel_path], source_refs={page.rel_path: refs}),
     }
     opening = excerpt(root, page, excerpt_chars) if excerpt_chars else ""
     if opening:

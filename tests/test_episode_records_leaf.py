@@ -810,8 +810,9 @@ def test_original_record_origin_proposal_preserves_committed_leaf_when_adding_an
 
 
 @pytest.mark.parametrize("checkpoint", ["preparation", "before-publication", "after-publication"])
+@pytest.mark.parametrize("catalogue", [False, True])
 def test_record_origin_refuses_current_source_narrowing_without_an_append(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+    vault: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str, catalogue: bool
 ) -> None:
     """Preparation and both atomic checkpoints must reacquire Source permission."""
     from test_episode_recovery import _write_source_rule
@@ -821,6 +822,15 @@ def test_record_origin_refuses_current_source_narrowing_without_an_append(
 
     _collection(vault)
     body = _origin_reading_body(vault)
+    if catalogue:
+        from exomem import generated_fragment_store, writer_lease
+
+        with request_scope(owner_principal(surface="mcp")), writer_lease.active_manager().mutation_guard(vault):
+            store = generated_fragment_store.GeneratedFragmentStore(vault)
+            try:
+                store.initialize()
+            finally:
+                store.close()
     _write_source_rule(vault, ceiling=6, audience=OWNER_AUDIENCE)
     before_manifest = (vault / COLLECTION).read_bytes()
     before_log = (vault / "Knowledge Base/log.md").read_bytes()

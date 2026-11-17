@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 37
-- Tier 1 commands: 32
+- Product commands: 41
+- Tier 1 commands: 36
 - Tier 2 commands: 5
 - Public MCP tools: 34
-- REST commands: 34
-- CLI commands: 34
+- REST commands: 38
+- CLI commands: 38
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -81,18 +81,22 @@ REST and CLI calls keep the grouped commands in the following registry.
 | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
 | served_context | 2 | REST, CLI | read | no | - | served_context | served_context_id | Inspect retained composed response metadata with verified owner authority. |
 | configure_memory | 1 | MCP, REST, CLI | write | yes | - | configure_memory | action, prominence, expected_revision, context, response_detail | Inspect or change saved Exomem engagement for this vault. |
+| inspect_captured_sources | 1 | MCP, REST, CLI | read | no | - | inspect_captured_sources | system*, record_id, cursor, limit | List canonical captured revisions with complete-publication and exact-index observations. |
+| inspect_capture_erasure_policy | 1 | MCP, REST, CLI | read | no | - | - | system* | Read whether current host policy enables erasure for one opaque identity system. |
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Read writer-lease health during outages. |
 | bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract, section, topic | Read Exomem's contract and live settings when missing or changed; reuse while current. |
 | search_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Search compiled knowledge and originals for an evidence gap. |
 | recall_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings, client, session, workspace, conversation, trigger, initiator, native_skills | Recall authorized context; abstain if uncertain. |
-| read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose, history_limit, history_continuation, continuation, follow_corrections, offset, units | Read a page, exact unit, or exomem://map view. |
+| read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose, history_limit, history_continuation, continuation, follow_corrections, offset, units, brief | Read a page, exact unit, exomem://map view, or topic brief. |
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive, limit, cursor | Browse folders; read-only. |
 | viewer_map | 1 | MCP, REST, CLI | read | no | - | viewer_map | max_nodes, max_edges, purpose | Return a bounded global map of admitted current graph pages. Read-only. |
 | create_note | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, slug, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, suggestions, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, vocabulary_decision, summary, topics, response_detail | Save a durable conclusion as compiled knowledge. |
 | edit_note | 1 | MCP, REST, CLI | write | yes | path | edit | path*, why*, operation*, validate_only, identity_decision, response_detail | Edit an existing memory page with an auditable reason. |
 | observe_memory | 1 | MCP, REST, CLI | write | yes | path | observe_memory | path*, operation, category, content, kind, tags, context, relations, verdict, check_by, as_of, until, id, unit_ref, unit, expected_fingerprint, expected_hash, transition_token, relation_disposition, relation_review_hash, relation_review_reason, reason, target_fingerprints, response_detail | Check or edit one semantic unit on a compiled note. |
 | supersede_note | 1 | MCP, REST, CLI | write | yes | old_path | replace | old_path*, content*, title*, slug, note_type, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, vocabulary_decision, response_detail | Supersede compiled memory with a new version. |
-| capture_source | 1 | MCP, REST, CLI | write | no | - | add, propose_compilation | title*, content, slug, source_type, url, tags, why_captured, compile_guidance, suggested_title, source_kind, domain, projects, files, adoption, raw_protection, source_identity, expected_sha256, correction, response_detail | Save Source text or original files. |
+| reserve_source_capture | 1 | MCP, REST, CLI | write | no | - | - | source_identity*, request_sha256*, capture_wire_version, response_detail | Reserve exact text-capture admission without sending or retaining its content. |
+| settle_source_capture | 1 | MCP, REST, CLI | write | no | - | - | reservation*, retire_owned, response_detail | Close local capture admission or observe its retained receipt under the canonical boundary. |
+| capture_source | 1 | MCP, REST, CLI | write | no | - | add, propose_compilation | title*, content, slug, source_type, url, tags, why_captured, compile_guidance, suggested_title, source_kind, domain, projects, files, adoption, raw_protection, source_identity, expected_sha256, correction, passages, capture_reservation, response_detail | Save Source text or original files. |
 | episode_memory | 1 | MCP, REST, CLI | write | yes | - | episode_memory | action*, episode, subject, summary, worked_on, decided, open, said, about, client, candidate, proposal, disposition, reason, input_revision, journal_digest, materials, material_key, order, max_leaves, postcommit, response_detail | Save a recap for later sessions. |
 | prepare_note | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Prepare a sourced note without saving. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description, raw_protection, response_detail | Preserve text as append-only proof. |

@@ -6,12 +6,16 @@ The shared semantic write boundary SHALL define
 `compiled_intent(after_state)` as exactly
 `canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`.
 The effective note-type registry SHALL supply each type's note-type role and each
-compiled type's folder. The shipped pack gives role `compiled` to `research-note`,
+compiled type's area. The shipped pack gives role `compiled` to `research-note`,
 `insight`, `failure`, `pattern`, `experiment`, and `production-log`, and a vault MAY
 register more. The canonical destination resolver SHALL map each compiled type to
-its registered folder; the shipped pack sets `Notes/Research`, `Notes/Insights`,
-`Notes/Failures`, `Notes/Patterns`, `Notes/Experiments`, and `Notes/Productions`,
-respectively. The resolver SHALL apply the existing index, log, schema/admin,
+its registered area, below the parent that the vault's layout supplies: `Notes/` in
+`nested` layout and the managed root in `root` layout. The shipped pack's areas are
+`Research`, `Insights`, `Failures`, `Patterns`, `Experiments`, and `Productions`,
+respectively, so a `nested` vault keeps `Notes/Research`, `Notes/Insights`,
+`Notes/Failures`, `Notes/Patterns`, `Notes/Experiments`, and `Notes/Productions`. A
+`folder` value that starts with `Notes/` reads as the `nested` parent plus the area
+name, in either layout. The resolver SHALL apply the existing index, log, schema/admin,
 template, dataset-card, hub, snapshot, and activation exclusions. A type folder
 keeps compiled intent but SHALL accept a page of any compiled type, and a page of
 a compiled type SHALL be valid in any folder under the Notes root that no exemption
@@ -66,9 +70,9 @@ interpreted as an inactive page or a false minimum-unit obligation.
 - **AND** independent operations without that dependency remain usable
 
 #### Scenario: A vault-registered compiled type has compiled intent
-- **WHEN** the admitted note-type registry gives a vault-defined type note-type role `compiled` and folder `Notes/<Name>`
-- **THEN** a page of that type in that folder has compiled intent and follows the shared minimum-unit predicate
-- **AND** the same type in another compiled folder or a home under Notes passes structural validation
+- **WHEN** the admitted note-type registry gives a vault-defined type note-type role `compiled` and the area `<Name>`
+- **THEN** a page of that type in that area, below `Notes/` in `nested` layout and at the managed root in `root` layout, has compiled intent and follows the shared minimum-unit predicate
+- **AND** the same type in another compiled area or a home under Notes passes structural validation
 
 #### Scenario: A type folder holds several compiled types
 - **WHEN** an `insight` page is created in `Notes/Research/<Project>`

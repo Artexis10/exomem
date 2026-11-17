@@ -101,13 +101,20 @@ def publication_hook(state: PendingWitness | None) -> Callable[[], None] | None:
     write = state.before_publication
 
     def run() -> None:
-        token = _ACTIVE.set(None)
-        try:
+        with suspended():
             write()
-        finally:
-            _ACTIVE.reset(token)
 
     return run
+
+
+@contextmanager
+def suspended() -> Iterator[None]:
+    """Keep an owner's auxiliary batch from consuming its caller's pending witness."""
+    token = _ACTIVE.set(None)
+    try:
+        yield
+    finally:
+        _ACTIVE.reset(token)
 
 
 def render_with_after(content: str, after: list[dict[str, Any]]) -> str:

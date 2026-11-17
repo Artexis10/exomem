@@ -364,7 +364,24 @@ def _dispatch_main(raw: list[str]) -> int:
     return _serve_main(raw)
 
 
-def _load_cwd_dotenv() -> None:
+class _DotenvConflict(Exception):
+    """The working-directory `.env` would replace exported values; a credential write must not guess."""
+
+    def __init__(self, keys: list[str]) -> None:
+        super().__init__(", ".join(keys))
+        self.keys = keys
+
+
+def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
+    return (
+        f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        "to a different value than this process's environment, so it is unclear which "
+        "deployment to act on. Unset those variables, remove them from the .env, or run "
+        "from a directory without that .env."
+    )
+
+
+def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     """Load the operator's cwd `.env`, as the local CLI always has.
 
     Never in a cloud cell: its environment is the pod spec, and "no `.env`
@@ -373,6 +390,11 @@ def _load_cwd_dotenv() -> None:
     example to set `EXOMEM_OAUTH_STORAGE_URL`) must not become CLI
     configuration just because an operator ran a command from inside it --
     the same guard `server_runtime` applies to the service's own load.
+
+    The `.env` still wins over exported values. A command that writes
+    credentials or sessions passes `refuse_conflicts`: when the `.env` would
+    replace an exported value with a different one, it stops instead of
+    acting on a store the operator did not name. Other commands warn.
     """
     from . import cloud_cell
 
@@ -383,8 +405,21 @@ def _load_cwd_dotenv() -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
 
+    # Names only: the values may be secrets.
+    replaced = sorted(
+        key
+        for key, value in dotenv_values(dotenv_path).items()
+        if value is not None and key in os.environ and os.environ[key] != value
+    )
+    if replaced and refuse_conflicts:
+        raise _DotenvConflict(replaced)
+    if replaced:
+        print(
+            f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
+            file=sys.stderr,
+        )
     load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
@@ -395,7 +430,7 @@ def _build_auth_session_authority():
     issuer, audience, storage namespace, and local-vs-HA selection without
     importing server auth during unrelated CLI startup.
     """
-    _load_cwd_dotenv()
+    _load_cwd_dotenv(refuse_conflicts=True)
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -485,7 +520,11 @@ def _issue_local_main(args: argparse.Namespace) -> int:
     if output.exists() or output.is_symlink():
         print(f"issue-local: {output} already exists; choose a new path", file=sys.stderr)
         return 2
-    _load_cwd_dotenv()
+    try:
+        _load_cwd_dotenv(refuse_conflicts=True)
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message("auth issue-local", conflict), file=sys.stderr)
+        return 2
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -589,6 +628,9 @@ def _auth_main(argv: list[str]) -> int:
 
     try:
         authority = _build_auth_session_authority()
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message(f"auth {args.command}", conflict), file=sys.stderr)
+        return 2
     except (SessionStoreUnavailable, OSError):
         print(
             "session authority unavailable; check storage configuration and connectivity",
@@ -1651,7 +1693,7 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
-    from . import resource_status, state_migration
+    from . import layout_report, resource_status, state_migration
 
     vault_root = Path(args.vault).expanduser() if args.vault else None
     if vault_root is not None:
@@ -1662,6 +1704,8 @@ def _status_main(argv: list[str]) -> int:
 
         # The records' own answer: it opens the store only when the manifest says store mode.
         status["vault_store"] = store_mode.status(vault_root)
+        # A layout that cannot be read is a state in the report, so status never refuses on it.
+        status["layout"] = layout_report.report(vault_root)
     if args.json:
         print(json.dumps(status))
     else:
@@ -1674,6 +1718,10 @@ def _status_main(argv: list[str]) -> int:
         print(f"  cuda: {status['cuda']}")
         if "vault_store" in status:
             print(f"  vault_store: {status['vault_store']}")
+        if "layout" in status:
+            print(f"  layout: {status['layout']['outcome']}")
+            if status["layout"]["remedy"]:
+                print(f"    fix: {status['layout']['remedy']}")
     return 0
 
 
@@ -2582,7 +2630,7 @@ def _store_mode_main(argv: list[str]) -> int:
         description=(
             "Owner operations that move this vault's pages, lexical rows and graph rows into the "
             "collection store and back. Behind the vault-store-v1 release gate; vault files are "
-            "never rewritten by a migration."
+            "never rewritten by a migration. `relayout --plan` reads the vault and writes nothing."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -2627,7 +2675,21 @@ def _store_mode_main(argv: list[str]) -> int:
         "--claim", help="the claim id that the refusal or --dry-run names (required with --apply)"
     )
     release.add_argument("--why", help="reason for the release (required with --apply)")
-    for command in (status, migrate, rollback, release):
+    relayout = subcommands.add_parser(
+        "relayout",
+        help="plan the move of the managed folder's content to the vault root; the plan reads "
+        "the vault and writes nothing",
+    )
+    relayout.add_argument(
+        "--plan",
+        action="store_true",
+        required=True,
+        help="print the plan: outcome, counts, alternatives and samples of each listing",
+    )
+    relayout.add_argument(
+        "--full", action="store_true", help="list every entry instead of the first 20 of each listing"
+    )
+    for command in (status, migrate, rollback, release, relayout):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2651,7 +2713,7 @@ def _store_mode_main(argv: list[str]) -> int:
         )
         return 2
 
-    from . import state_migration
+    from . import relayout, state_migration
     from .cli_ops import OpError
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
@@ -2673,14 +2735,16 @@ def _store_mode_main(argv: list[str]) -> int:
                     if applying
                     else store_release.dry_run(root)
                 )
+            elif args.command == "relayout":
+                result = relayout.render(relayout.plan(root), full=args.full)
             elif applying:
                 result = store_rollback.apply_route(
                     root, export_to=args.export_to, why=args.why, export_held=args.export_held
                 )
             else:
                 result = store_rollback.dry_run(root)
-        # A release leads with its outcome sentence, so its keys keep their order; the rest sort.
-        print(json.dumps(result, sort_keys=args.command != "release"))
+        # A release and a relayout plan lead with their outcome sentence, so their keys keep their order; the rest sort.
+        print(json.dumps(result, sort_keys=args.command not in ("release", "relayout")))
     except (
         CollectionStoreError,
         OpError,

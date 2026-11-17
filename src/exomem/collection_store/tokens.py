@@ -21,6 +21,15 @@ ROW_DOMAIN = "exomem-collection-row:v1"
 STORE_HEAD_DOMAIN = "exomem-store-head:v1"
 
 
+def event_hash(event: Mapping, *, version: int = 1) -> str:
+    """Hash either supported immutable event format with the same canonical JSON encoding."""
+    # These versions are the closed on-disk event protocol, not a caller vocabulary.
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported collection event version")
+    encoded = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(f"exomem-collection-event:v{version}\0".encode() + encoded).hexdigest()
+
+
 def _component(value: str, name: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{name} must be a string")

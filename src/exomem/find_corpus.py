@@ -479,19 +479,33 @@ class StoreCorpus:
         does.
         """
         stored = {
-            self.vault_root.joinpath(*meta.path.split("/")): (
-                meta.mtime_ns,
-                meta.revision,
-                meta.size,
-            )
-            for meta in self.pages
+            self.vault_root.joinpath(*rel.split("/")): signature
+            for rel, signature in self.stored_signatures().items()
         }
         return lambda path: stored.get(path) or freshness.stat_signature(path)
+
+    def stored_signatures(self) -> dict[str, freshness.FileSignature]:
+        """The change signature of each stored page, by its vault-relative path."""
+        return {meta.path: _stored_signature(meta) for meta in self.pages}
+
+
+def _stored_signature(meta: PageMeta) -> freshness.FileSignature:
+    """A stored page's change signature: its mtime, its page revision and its size."""
+    return (meta.mtime_ns, meta.revision, meta.size)
 
 
 def signature_lookup(paths) -> Callable[[Path], freshness.FileSignature]:
     """The change signature of one page of ``paths``: a file stat, or a stored page's row."""
     return paths.signature_lookup() if isinstance(paths, StoreCorpus) else freshness.stat_signature
+
+
+def stored_signatures(paths) -> dict[str, freshness.FileSignature]:
+    """The stored pages of ``paths`` and their change signatures, by vault-relative path.
+
+    Empty for a file-mode walk, whose pages are all files: a caller that keys a page on its
+    signature asks here first, and falls back to the file's stat for a page that is not listed.
+    """
+    return paths.stored_signatures() if isinstance(paths, StoreCorpus) else {}
 
 
 def store_serves(vault_root: Path) -> bool:
@@ -503,7 +517,13 @@ def store_serves(vault_root: Path) -> bool:
     return mode.store_mode_for_reads(vault_root)
 
 
-def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[..., Iterable[Path]]):
+def corpus_paths(
+    vault_root: Path,
+    scope: str,
+    disk_walk: Callable[..., Iterable[Path]],
+    *,
+    member: Callable[[str], bool] | None = None,
+):
     """The page paths of ``scope`` ("kb" or "vault"): ``disk_walk()`` in file mode, a
     ``StoreCorpus`` in store mode.
 
@@ -511,13 +531,24 @@ def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[..., Iterable
     a read of the mode records and calls the walk it always called. In store mode the walk also
     takes ``skip=``, the test that drops a stored page's file unstatted (``walk_md``'s ``skip``), so
     a caller passes its keywords on: ``lambda **walk: walk_md(root, **walk)``.
+
+    ``member`` replaces the scope's own test of which stored pages the corpus lists, for a caller
+    whose walk admits pages by another rule: it takes a stored page's vault-relative path. Give it
+    the path form of that walk's own rule, so a stored page is listed as its file would be.
     """
-    from .vault_store import read
+    from .vault_store import ownership, read
 
     if not store_serves(vault_root):
         return disk_walk()
     with read.snapshot(vault_root) as view:
-        members = tuple(meta for meta in view.pages() if read.corpus_member(meta.path, scope))
+        # Only a path the store owns: the walk lists a stored page's file whenever the store does
+        # not own its path, so listing both would count the page twice.
+        members = tuple(
+            meta
+            for meta in view.pages()
+            if (member(meta.path) if member is not None else read.corpus_member(meta.path, scope))
+            and ownership.classify(meta.path) is ownership.Ownership.PAGE
+        )
     return StoreCorpus(
         vault_root=Path(vault_root), revision=view.revision, pages=members, disk=disk_walk
     )
@@ -895,6 +926,21 @@ def page_stat(path: Path, vault_root: Path) -> PageStat:
             return PageStat(meta.mtime, meta.mtime_ns, meta.size)
     found = path.stat()
     return PageStat(found.st_mtime, found.st_mtime_ns, found.st_size)
+
+
+def stored_page_signature(path: Path, vault_root: Path) -> freshness.FileSignature | None:
+    """The store's change signature for the page at ``path``, or None when a file answers for it.
+
+    A page that the store serves but lacks raises ``FileNotFoundError``, as a stat of a missing file
+    does.
+    """
+    rel = stored_relative(path, vault_root)
+    if rel is None:
+        return None
+    from .vault_store import read
+
+    meta = read.owned_meta(vault_root, rel)
+    return None if meta is None else _stored_signature(meta)
 
 
 def page_relative_path(path: Path, vault_root: Path) -> str:

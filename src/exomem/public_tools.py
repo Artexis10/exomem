@@ -227,6 +227,13 @@ class SearchMemory(Wire):
 
 
 def _search(wire: dict[str, Any], ctx: Context) -> Translated:
+    if (wire.get("options") or {}).get("result_level") == "passage":
+        from . import passage_evidence
+
+        try:
+            passage_evidence.validate_ranking_options(wire.get("options") or {})
+        except ValueError as error:
+            raise Refusal("INVALID_PASSAGE_OPTION", str(error).partition(": ")[2]) from None
     leaf = {
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
@@ -237,7 +244,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class ReadPage(Wire):
     page: Page
-    part: Literal["text", "history", "units"] | None = Field(default=None, description="text (default), history, or units: observations with their ids.")
+    part: Literal["text", "history", "units", "brief"] | None = Field(default=None, description="text (default), history, units: observations with ids, or brief: a topic's brief.")
     more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(
         default=None, description="Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
@@ -250,6 +257,7 @@ def _read_page_leaf(wire: Mapping[str, Any]) -> dict[str, Any]:
         "path": wire.get("page"), "continuation": wire.get("more"),
         "include_history": True if wire.get("part") == "history" else None,
         "units": True if wire.get("part") == "units" else None,
+        "brief": True if wire.get("part") == "brief" else None,
     }
 
 
@@ -261,6 +269,8 @@ def _spell_read(arguments: Mapping[str, Any]) -> dict[str, Any]:
         wire["part"] = "history"
     elif arguments.get("units"):
         wire["part"] = "units"
+    elif arguments.get("brief"):
+        wire["part"] = "brief"
     rest = {key: value for key, value in arguments.items() if key not in handled and value is not None}
     return {**wire, **({"options": rest} if rest else {})}
 

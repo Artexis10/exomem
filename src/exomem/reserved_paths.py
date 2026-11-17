@@ -453,8 +453,26 @@ _REGISTRY = (
         exact=_sqlite_family(".served-context.sqlite"),
     ),
     InternalStateDescriptor(
+        "brief-watermarks", "brief_watermarks", StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".brief-watermarks.sqlite"),
+    ),
+    InternalStateDescriptor(
         "source-corrections", "source_corrections", StatePlacement.VAULT_CANONICAL,
         trees=("_sources/corrections",),
+    ),
+    InternalStateDescriptor(
+        "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/custody",),
+    ),
+    InternalStateDescriptor(
+        "generated-fragments", "generated_fragment_store", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/generated",),
+    ),
+    InternalStateDescriptor(
+        "generated-fragments-index", "generated_fragment_store", StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".generated-fragments.sqlite"),
     ),
     InternalStateDescriptor(
         "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,

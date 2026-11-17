@@ -330,6 +330,7 @@ def test_a_descriptor_field_that_the_prefilter_has_no_condition_for_lets_every_p
 
 def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> None:
     from exomem import (
+        brief_watermarks,
         claims,
         compiled_history,
         deferred_index,
@@ -343,6 +344,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         procedure_approval,
         review_state,
         served_context,
+        source_custody,
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
@@ -353,6 +355,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     expected = {
         "authorization-projections",
         "batch-workspace",
+        "brief-watermarks",
         "claims-store",
         "clip-store",
         "collection-archive",
@@ -369,6 +372,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "due-state",
         "embeddings-store",
         "freshness-store",
+        "generated-fragments",
+        "generated-fragments-index",
         "governance-store",
         "governance-tree",
         "graph-handoff",
@@ -393,6 +398,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "refs-store",
         "review-state",
         "source-corrections",
+        "source-custody",
         "served-context",
         "voice-profile-store",
     }
@@ -410,6 +416,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     token32 = "1" * 32
     claims_from_owners = [
         (root / compiled_history.history_root(), "compiled-history"),
+        (source_custody.manifest_root(root) / "6b1f2c3e-0d4a-4e5f-8a9b-1c2d3e4f5a6b.json", "source-custody"),
         (governance_policy.governance_root(root), "governance-tree"),
         (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),
@@ -440,6 +447,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         ),
         (review_state.state_path(root), "review-state"),
         (served_context.sidecar_path(root), "served-context"),
+        (brief_watermarks.sidecar_path(root), "brief-watermarks"),
         (
             review_state.state_path(root).with_name(
                 f".{review_state.STATE_FILENAME}.abc123_4.tmp"

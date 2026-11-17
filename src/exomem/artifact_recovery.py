@@ -267,6 +267,7 @@ def stage(
     expected_sha256: str | None = None,
     expected: dict | None = None,
     byte_proofs: dict | None = None,
+    materialize: bool = True,
 ):
     """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
     if not who.resolved:
@@ -284,7 +285,8 @@ def stage(
                     else time.monotonic() + seconds
                 )
                 path, metadata = _resolve(root, selected)
-                stack.enter_context(media_store.local_originals(root, (path,), read=True))
+                if materialize:
+                    stack.enter_context(media_store.local_originals(root, (path,), read=True))
                 held = stack.enter_context(
                     reserved_paths.hold_generic_file(
                         root,

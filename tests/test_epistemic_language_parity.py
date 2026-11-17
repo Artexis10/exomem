@@ -1612,6 +1612,7 @@ def test_the_built_in_traversal_profiles_keep_their_families_and_limits() -> Non
             "resolution",
             "use",
         ],
+        "brief": ["citation", "derivation", "evidence", "link", "observation"],
     }
     for profile in profiles.values():
         assert profile.priority == tuple(sorted(profile.families))  # CORE

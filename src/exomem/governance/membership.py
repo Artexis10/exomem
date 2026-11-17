@@ -137,6 +137,16 @@ def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
     return rel_path in normalized or kb_rel in normalized
 
 
+def path_selector_matches(patterns: tuple[str, ...], rel_path: str) -> bool:
+    """Whether a `paths` or `exclude_paths` value in `patterns` selects `rel_path`, by the rule that scope membership applies."""
+    return _matches_paths(patterns, rel_path)
+
+
+def ref_selector_matches(values: tuple[str, ...], rel_path: str) -> bool:
+    """Whether a path form in a `refs` or `exclude_refs` value list names `rel_path`, by the rule that scope membership applies."""
+    return _matches_refs(values, rel_path)
+
+
 def _scope_matches(scope: Scope, subject: MetadataSubject) -> bool:
     def semantic(values, candidates):
         return any(value.lower() in candidates for value in values)
@@ -577,31 +587,62 @@ def _read_parent(page: ParsedPage, parent: str) -> ParsedPage:
     return parsed
 
 
-def _part_source(page: ParsedPage) -> ParsedPage | None:
-    """The Source page of an extracted-text part, else None.
+#: The two page-to-page inheritance edges that membership reads, named for a caller that reports them.
+PART_EDGE = "part"
+FRAME_EDGE = "frame"
 
-    A part is hidden text of its Source and never an item of its own, so its scope membership,
-    and with it the audience that may read it, is exactly the Source's.
+
+@dataclass(frozen=True, slots=True)
+class InheritanceEdge:
+    """The page that a page takes scopes from: its `kind` (`PART_EDGE` or `FRAME_EDGE`) and its vault path."""
+
+    kind: str
+    parent: str
+
+
+def inheritance_edge(
+    rel_path: str, *, part_of: bool, parent_media: str | None
+) -> InheritanceEdge | None:
+    """The edge by which the page at `rel_path` inherits scopes, from three facts about the page; pure.
+
+    `part_of` says the frontmatter carries a `part_of` key, whatever its value, and `parent_media`
+    is the frontmatter's `parent_media` as `ParsedPage.parent_media` reads it. A part is hidden
+    text of its Source and never an item of its own, so its scope membership, and with it the
+    audience that may read it, is exactly the Source's. A frame is an item of its own with its own
+    id and tags, and holds text taken from its video, so it belongs to its own scopes and to the
+    video's. Because a decision takes the most restrictive of an item's scopes, the added scopes
+    can only narrow who reads the frame, and a page that claims a parent it does not have gains
+    nothing: a frame needs `parent_media` and to sit in that video's own frames folder. A part
+    wins over a frame, as `evaluate` reads them. Container members have no edge here: their
+    parent comes from a stored binding, which a pure function cannot read.
     """
-    return None if page.part_of is None else _read_parent(page, page.part_of)
+    from .. import extraction_parts, scene_frames
+
+    # `Path`, as the readers before this function used: on Windows its comparison folds case, as NTFS does.
+    page = Path(rel_path)
+    if part_of and (source := extraction_parts.source_page_for(page)) is not None:
+        return InheritanceEdge(PART_EDGE, source.as_posix())
+    if parent_media is not None and page.parent == scene_frames.frames_dir_for(Path(parent_media)):
+        return InheritanceEdge(FRAME_EDGE, parent_media + ".md")
+    return None
+
+
+def _edge_of(page: ParsedPage) -> InheritanceEdge | None:
+    return inheritance_edge(
+        page.rel_path, part_of="part_of" in page.frontmatter, parent_media=page.parent_media
+    )
+
+
+def _part_source(page: ParsedPage) -> ParsedPage | None:
+    """The Source page of an extracted-text part, else None."""
+    edge = _edge_of(page)
+    return None if edge is None or edge.kind != PART_EDGE else _read_parent(page, edge.parent)
 
 
 def _frame_video(page: ParsedPage) -> ParsedPage | None:
-    """The video page of a scene frame, else None.
-
-    A frame is an item of its own with its own id and tags, and holds text taken from its video,
-    so it belongs to its own scopes and to the video's. Because a decision takes the most
-    restrictive of an item's scopes, the added scopes can only narrow who reads the frame, and a
-    page that claims a parent it does not have gains nothing. A frame needs `parent_media` and
-    to sit in that video's own frames folder.
-    """
-    from .. import scene_frames
-
-    if page.parent_media is None:
-        return None
-    if Path(page.rel_path).parent != scene_frames.frames_dir_for(Path(page.parent_media)):
-        return None
-    return _read_parent(page, page.parent_media + ".md")
+    """The video page of a scene frame, else None."""
+    edge = _edge_of(page)
+    return None if edge is None or edge.kind != FRAME_EDGE else _read_parent(page, edge.parent)
 
 
 def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
