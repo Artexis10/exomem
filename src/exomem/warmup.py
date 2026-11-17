@@ -426,6 +426,32 @@ def warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
     log.info("method-unit statistics warm: %s (%.1f s)", outcome, time.monotonic() - began)
 
 
+def warm_store_reads(vault_root: Path) -> None:
+    """Fill what a store-mode vault's first restricted read would fill: the ownership of every stored
+    page, and the scope set of every page with simple selector facts, under the live policy. Reads only.
+
+    Both are process-wide memos keyed by their whole input, so a commit or a policy change drops what
+    it changes, and a request that runs meanwhile reads the same answers, only faster. Each batch is
+    its own store request and waits for foreground work first, so no request queues behind this step;
+    a stop from `foreground_priority` ends it between batches. A vault that reads files has nothing here.
+    """
+    from .governance import page_admission
+    from .governance import policy as policy_module
+    from .vault_store import mode, read
+
+    root = Path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return
+    with read.snapshot(root) as view:
+        paths = [page.path for page in view.pages()]
+    policy = policy_module.load(root)
+    for start in range(0, len(paths), read.KEYS_PER_QUERY):
+        foreground_priority.yield_to_foreground()
+        batch = paths[start:start + read.KEYS_PER_QUERY]
+        with read.request_snapshot(root):
+            page_admission.scopes_many(root, batch, policy)
+
+
 def warm_all(vault_root: Path) -> dict[str, float]:
     """Required catalog/graph/corpus state, then optional caches and model preloads.
 
@@ -738,6 +764,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # The cold-start budget is only a loose cap on a background step, not a readiness window.
         from .service_manager import cold_start_budget
 
+        _run_step(durations, "store_reads", lambda: warm_store_reads(vault_root))
         _run_step(
             durations,
             "method_units",

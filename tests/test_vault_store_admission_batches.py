@@ -34,12 +34,13 @@ from exomem import (
     published_admission,
     recall_policy,
     state_paths,
+    warmup,
 )
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
-from exomem.governance import connector_boundary, egress, page_admission, policy
+from exomem.governance import connector_boundary, egress, lifecycle, page_admission, policy
 from exomem.governance.principal import RequestPrincipal, request_scope
-from exomem.vault_store import read, write
+from exomem.vault_store import ownership, read, write
 
 
 def test_single_page_content_check_does_not_read_unrelated_metadata(stored, writer, monkeypatch):  # noqa: F811
@@ -397,6 +398,56 @@ def test_a_warm_scope_memo_answers_what_the_scalar_chain_answers_after_each_even
     assert after == decide_in_a_new_request(vault, who, asked, monkeypatch)
     if event != "facts rewritten without a byte change":  # there the stored facts and the bytes disagree by construction
         assert after == decide_in_a_new_request(vault, who, asked, monkeypatch, scalar=True)
+
+
+OPEN = "Knowledge Base/Notes/Open.md"
+
+
+@pytest.mark.parametrize("event", ["commit", "policy change", "grant", "tombstone"])
+def test_a_warmed_store_releases_what_a_cold_one_releases_after_each_change(vault, monkeypatch, event):  # noqa: F811
+    """Defect: a memo or a warm-up that a start fills outlives the change that alters a release, so a
+    restricted caller reads a page that the change withheld, or misses one that it released.
+
+    The ownership and scope-set memos are warm from the store-read warm-up and one request before the
+    event. After it, the warm answer is the cold one (every memo dropped) and differs from the answer before.
+    """
+    corpus = exception_corpus(vault)
+    apply_case(corpus, 'tags: [secret]\nexclude:\n  tags: [public]', False)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    asked = [path for path in corpus.paths if ".." not in path and path != corpus.child]
+    who = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", purpose="audit")
+
+    def released():
+        with request_scope(who), read.request_snapshot(vault):
+            keep = egress.restricted_release_filter(vault)
+            return egress.admitted(keep, asked)
+
+    def forget_every_memo():
+        page_admission.forget_scopes()
+        ownership._classified.cache_clear()
+
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        token = preview._BOUND.set((vault.resolve(), writer, False))
+        try:
+            warmup.warm_store_reads(vault)
+            before = released()
+            assert released() == before and OPEN in before
+            if event == "commit":
+                write.commit(writer, put(OPEN, note("secret").encode()))
+            elif event == "policy change":
+                apply_case(corpus, 'paths: ["Notes/Open.md"]', False)
+            elif event == "grant":
+                apply_case(corpus, 'tags: [secret]\nexclude:\n  tags: [public]', True)
+            else:
+                monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda _root: frozenset({OPEN}))
+            warm = released()
+            forget_every_memo()
+            assert warm == released()
+            assert warm != before, "the event must change a release, or a stale memo would pass"
+        finally:
+            preview._BOUND.reset(token)
 
 
 def test_a_scope_set_is_never_borrowed_from_another_page_with_the_same_subject_text(stored, writer, monkeypatch):  # noqa: F811

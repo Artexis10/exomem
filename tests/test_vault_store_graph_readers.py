@@ -43,16 +43,18 @@ from exomem import (
     delete_directory,
     epistemic_graph,
     find,
+    foreground_priority,
     graph_read_publication,
     held_fs,
     lexstore,
     recover_from_trash,
     semantic_index,
+    warmup,
 )
 from exomem import vault as vaults
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
-from exomem.governance import egress, lifecycle
+from exomem.governance import egress, lifecycle, page_admission
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
@@ -1244,6 +1246,25 @@ def cpu_pressure():
         return None
 
 
+#: The function that evaluates the ownership rule once; a memoised `classify` calls it only on a miss.
+OWNERSHIP_RULE = "classify_by_rule"
+
+
+@contextlib.contextmanager
+def counting_held_statements(root, counters):
+    """Count the statements of this request's snapshot that read stored pages for a batch of paths."""
+    with read.snapshot(root) as view:
+        def trace(sql):
+            if "store_pages" in sql and ("json_each" in sql or " IN (" in sql):
+                counters["held_statements"] += 1
+
+        view.connection.set_trace_callback(trace)
+        try:
+            yield
+        finally:
+            view.connection.set_trace_callback(None)
+
+
 def admission_sample(root, caller, operation, anchor=CLAIM):
     """One graph-reader sample, including the scalar work hidden by an elapsed time.
 
@@ -1264,7 +1285,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
                 "admitted_publications": 0, "published_candidates": 0,
                 "layer_folder_reads": 0, "descriptor_matches": 0, "subject_decodes": 0,
                 "membership_evaluations": 0, "publication_decisions": 0, "coordinator_status_calls": 0,
-                "name_candidate_lookups": 0, "held_page_reads": 0, "content_floor_checks": 0}
+                "name_candidate_lookups": 0, "held_page_reads": 0, "content_floor_checks": 0,
+                "held_statements": 0, "held_paths": 0}
     classified, held = set(), set()
 
     def counted(name, real):
@@ -1306,7 +1328,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
                       counted("page_parses", find_corpus._parse_page_after_checkpoint))
         # Both safe_load and the vault's libyaml loader call this decoder entry.
         patch.setattr(yaml, "load", counted("yaml_decodes", yaml.load))
-        patch.setattr(ownership, "classify", counted("ownership_classifications", ownership.classify))
+        patch.setattr(ownership, OWNERSHIP_RULE,
+                      counted("ownership_classifications", getattr(ownership, OWNERSHIP_RULE)))
         patch.setattr(find, "_resolve_page", counted("page_hydrations", find._resolve_page))
         patch.setattr(lexstore.LexicalStore, "published_admitted_paths", published)
         patch.setattr(lexstore.LexicalStore, "_publish_verdicts", deciding_verdicts)
@@ -1326,7 +1349,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
         with library_scope(), request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
             started, cpu_started = time.perf_counter(), time.process_time()
             # The pins that the tool dispatcher holds for a store read, and its ownership finish.
-            with read.request_snapshot(root), collection_ownership.read_scope(root) as owned:
+            with (read.request_snapshot(root), collection_ownership.read_scope(root) as owned,
+                  counting_held_statements(root, counters)):
                 if operation == "participants":
                     with state_paths.resolution_scope():
                         answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
@@ -1336,6 +1360,7 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
                     size = len(answer.paths)
                 else:
                     size = len(GRAPH_CALLS["find relation_of"](root))
+                counters["held_paths"] = len(read.request_memo(root).get((read.__name__, "held"), ()))
                 owned.finish()
             elapsed = (time.perf_counter() - started) * 1000
             cpu = (time.process_time() - cpu_started) * 1000
@@ -1546,6 +1571,116 @@ def test_a_commit_and_the_next_restricted_read_look_up_only_the_names_it_touched
     assert during_commits[0] == during_commits[1], during_commits
 
 
+def a_restricted_hub(stored, writer, pages=20):  # noqa: F811
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, pages)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+
+
+def a_new_process_state():
+    """The memos a process fills as it serves, empty, as they are after a start."""
+    page_admission.forget_scopes()
+    ownership._classified.cache_clear()
+
+
+def test_a_second_read_in_the_process_classifies_no_path(stored, writer):  # noqa: F811
+    """Defect: every request classifies the owner of each page it touches again, so the cost of a hub
+    request grows with the hub however warm the process is.
+
+    Ownership is a function of the path and of settings that no request changes.
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    first = admission_sample(stored, "few withheld", "find")
+    second = admission_sample(stored, "few withheld", "find")
+    assert first["ownership_classifications"] > 0, "the first read classifies, or this test proves nothing"
+    assert second["ownership_classifications"] == 0, (first, second)
+    assert second["result_count"] == first["result_count"] > 0
+
+
+def hub_hits(root):
+    """The pages that a restricted caller's search filtered to the hub returns, in order."""
+    with library_scope(), request_scope(EXTERNAL):
+        return [getattr(hit, "path", None) or hit.parent_path for hit in GRAPH_CALLS["find relation_of"](root)]
+
+
+def test_a_warmed_service_decodes_no_subject_in_its_first_restricted_read(stored, writer):  # noqa: F811
+    """Defect: the first restricted read after a start decodes and evaluates every page's selector facts,
+    which the service could have done while it was idle.
+
+    The control read has no warm-up; it must decode, or a zero below proves nothing.
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    control = admission_sample(stored, "few withheld", "find")
+    assert control["subject_decodes"] > 0, control
+    a_new_process_state()
+    warmup.warm_store_reads(stored)
+    served = admission_sample(stored, "few withheld", "find")
+    assert served["subject_decodes"] == 0 and served["membership_evaluations"] == 0, served
+    assert served["result_count"] == control["result_count"] > 0
+
+
+def test_a_request_during_the_store_read_warm_up_gets_the_answer_it_gets_after_it(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: the warm-up holds something that a request needs, or lets one read half-filled memos
+    differently, so a request that arrives during a start is refused, waits for the warm-up or answers otherwise.
+
+    The warm-up parks after its first batch, with later batches still to fill.
+    """
+    monkeypatch.setattr(read, "KEYS_PER_QUERY", 7)
+    a_restricted_hub(stored, writer)
+    expected = hub_hits(stored)
+    assert expected
+    a_new_process_state()
+    parked, resume, failures = threading.Event(), threading.Event(), []
+    scopes_many = page_admission.scopes_many
+
+    def parks_the_warm_up(*args, **kwargs):
+        found = scopes_many(*args, **kwargs)
+        if threading.current_thread().name == "store-read-warm-up":
+            parked.set()
+            assert resume.wait(60), "the request did not finish while the warm-up was parked"
+        return found
+
+    def warm_up():
+        try:
+            warmup.warm_store_reads(stored)
+        except BaseException as error:  # noqa: BLE001 - reported to the test thread
+            failures.append(error)
+
+    monkeypatch.setattr(page_admission, "scopes_many", parks_the_warm_up)
+    warming = threading.Thread(target=warm_up, name="store-read-warm-up")
+    warming.start()
+    try:
+        assert parked.wait(60), "the warm-up reached its first batch"
+        assert hub_hits(stored) == expected
+    finally:
+        resume.set()
+        warming.join(60)
+    assert not warming.is_alive() and not failures, failures
+    assert hub_hits(stored) == expected
+
+
+def test_the_store_read_warm_up_stops_between_batches_when_it_is_stopped(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: a warm-up that ignores the stop it was given keeps reading the store while the service
+    shuts down or hands over to its successor.
+    """
+    monkeypatch.setattr(read, "KEYS_PER_QUERY", 7)
+    a_restricted_hub(stored, writer)
+    stop, batches = threading.Event(), []
+    scopes_many = page_admission.scopes_many
+
+    def stops_after_a_batch(*args, **kwargs):
+        batches.append(args[1])
+        stop.set()
+        return scopes_many(*args, **kwargs)
+
+    monkeypatch.setattr(page_admission, "scopes_many", stops_after_a_batch)
+    with pytest.raises(foreground_priority.BulkCancelled), foreground_priority.cancellable(stop):
+        warmup.warm_store_reads(stored)
+    assert len(batches) == 1, "it read one batch and no more"
+
+
 @pytest.mark.parametrize("caller", ["owner", "few withheld"])
 def test_store_hub_ranking_reads_yaml_only_for_selected_pages(stored, writer, caller, monkeypatch):  # noqa: F811
     """A linked page's unique identifier must not force YAML decoding for every ranked candidate."""
@@ -1567,15 +1702,8 @@ def test_store_hub_ranking_reads_yaml_only_for_selected_pages(stored, writer, ca
     assert larger["yaml_decodes"] <= sample["yaml_decodes"], (sample, larger)
 
 
-@pytest.mark.skipif(not os.environ.get("EXOMEM_ADMISSION_DRILL_REPORT"), reason="Explicit load drill")
-@pytest.mark.timeout(1800)
-def test_restricted_admission_drill(stored, writer):  # noqa: F811
-    """Measure a realistic hub before and after commits and owner-pass revision bumps."""
-    import statistics
-    import subprocess
-
-    from exomem.governance import membership
-
+def build_drill_store(stored, writer):  # noqa: F811
+    """Commit the drill's corpus: `GENERATED` linked pages, the hub's `links`, and the degree sweep's anchors."""
     links = int(os.environ.get("EXOMEM_ADMISSION_DRILL_LINKS", str(GENERATED)))
     # The degree sweep reads smaller hubs of the same corpus: the first `degree` pages also link to their anchor.
     degrees = [int(value) for value in os.environ.get("EXOMEM_ADMISSION_DRILL_DEGREES", "").split(",") if value]
@@ -1596,13 +1724,29 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
             puts.append(write.PagePut(rel, body))
         write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "drill", puts=tuple(puts)))
     restrict_external(stored, 'tags: ["cohort-0"]')
+    return links, degrees, anchors
+
+
+@pytest.mark.skipif(not os.environ.get("EXOMEM_ADMISSION_DRILL_REPORT"), reason="Explicit load drill")
+@pytest.mark.timeout(1800)
+def test_restricted_admission_drill(stored, writer):  # noqa: F811
+    """Measure a realistic hub before and after commits and owner-pass revision bumps."""
+    import statistics
+    import subprocess
+
+    from exomem.governance import membership
+
+    links, degrees, anchors = build_drill_store(stored, writer)
     report = {"pages": GENERATED, "hub_links": links,
               "units_per_page": int(os.environ.get("EXOMEM_ADMISSION_DRILL_UNITS", "0")), "samples": {}}
     report_path = Path(os.environ["EXOMEM_ADMISSION_DRILL_REPORT"])
     repeats = int(os.environ.get("EXOMEM_ADMISSION_DRILL_REPEATS", "3"))
     callers = os.environ.get("EXOMEM_ADMISSION_DRILL_CALLERS", "owner,few withheld,most withheld,homonym").split(",")
     operations = os.environ.get("EXOMEM_ADMISSION_DRILL_OPERATIONS", "participants,find").split(",")
-    states = os.environ.get("EXOMEM_ADMISSION_DRILL_STATES", "cold process,first after commit,registry pass,warm").split(",")
+    states = os.environ.get(
+        "EXOMEM_ADMISSION_DRILL_STATES",
+        "cold process,cold service,first after commit,first after policy change,registry pass,warm",
+    ).split(",")
     for caller in callers:
         scope = stored / "Knowledge Base/_Governance/scopes/secret.yaml"
         selector = '["cohort-0"]' if caller != "most withheld" else (
@@ -1616,22 +1760,32 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
         for operation in operations:
             for state in states:
                 samples = []
-                if state == "first after commit":
+                if state in ("first after commit", "first after policy change"):
                     # A caller view this process has not seen yet is the cold cell's cost, not this one's.
                     admission_sample(stored, caller, operation)
                 for repeat in range(repeats):
-                    if state == "cold process":
+                    if state in ("cold process", "cold service"):
+                        # A new process: nothing is memoised. A service has also run its store-read warm-up,
+                        # whose seconds the sample reports beside the read's own.
                         result = subprocess.run([
                             sys.executable, "-c",
-                            "import json,sys; from pathlib import Path; "
+                            "import json,sys,time; from pathlib import Path; "
+                            "from exomem import warmup; "
                             "from test_vault_store_graph_readers import admission_sample; "
-                            "print(json.dumps(admission_sample(Path(sys.argv[1]),sys.argv[2],sys.argv[3])))",
-                            str(stored), caller, operation,
-                        ], check=True, capture_output=True, text=True, timeout=180)
+                            "root=Path(sys.argv[1]); began=time.perf_counter(); "
+                            "sys.argv[4] == 'service' and warmup.warm_store_reads(root); "
+                            "warmed=time.perf_counter()-began; "
+                            "print(json.dumps({**admission_sample(root,sys.argv[2],sys.argv[3]),"
+                            "'warm_up_seconds':warmed}))",
+                            str(stored), caller, operation, state.split()[1],
+                        ], check=True, capture_output=True, text=True, timeout=1800)
                         samples.append(json.loads(result.stdout.splitlines()[-1]))
                         continue
                     if state == "first after commit":
                         write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\n{repeat}\n".encode()))
+                    elif state == "first after policy change":
+                        # An edit that names the same pages: a new caller view, so no scope set is memoised for it.
+                        scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector[:-1]}, \"edit-{repeat}\"]\n")
                     elif state == "registry pass":
                         if repeat == 0:
                             with writer.handle.transaction() as tx:
@@ -1641,6 +1795,8 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
                         admission_sample(stored, caller, operation)
                     membership.clear_memo()
                     samples.append(admission_sample(stored, caller, operation))
+                    if state == "first after policy change":
+                        scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector}\n")
                 report["samples"][f"{caller}/{operation}/{state}"] = samples
                 report_path.write_text(json.dumps(report, indent=2))
     report["sweep"] = {}
@@ -1700,10 +1856,12 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
             )
             scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector}\n")
             target = profile_path + f".{index}"
-            if state == "cold process":
+            if state in ("cold process", "cold service"):
                 script = (
                     "import cProfile,json,pstats,sys; from pathlib import Path; "
+                    "from exomem import warmup; "
                     "from test_vault_store_graph_readers import admission_sample; "
+                    "sys.argv[5] == 'service' and warmup.warm_store_reads(Path(sys.argv[1])); "
                     "p=cProfile.Profile(); p.enable(); "
                     "sample=admission_sample(Path(sys.argv[1]),sys.argv[2],sys.argv[3]); "
                     "p.disable(); p.dump_stats(sys.argv[4]+'.pstats'); "
@@ -1712,14 +1870,16 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
                     "out.close(); print(json.dumps(sample))"
                 )
                 profiled = subprocess.run(
-                    [sys.executable, "-c", script, str(stored), caller, operation, target],
-                    check=True, capture_output=True, text=True, timeout=180,
+                    [sys.executable, "-c", script, str(stored), caller, operation, target, state.split()[1]],
+                    check=True, capture_output=True, text=True, timeout=1800,
                 )
                 sample = json.loads(profiled.stdout.splitlines()[-1])
             else:
                 admission_sample(stored, caller, operation)
                 if state == "first after commit":
                     write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\nProfile {index}.\n".encode()))
+                elif state == "first after policy change":
+                    scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector[:-1]}, \"edit-{index}\"]\n")
                 elif state == "registry pass":
                     rederive.settle(stored, writer)
                 membership.clear_memo()
