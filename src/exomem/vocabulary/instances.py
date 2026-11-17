@@ -161,12 +161,25 @@ def _contains(directory: str, path: str) -> bool:
     return child == parent or child.startswith(parent + "/")
 
 
-def storage(spec: RegistrySpec, binding: dict[str, Any]) -> tuple[str, str]:
+def _authored_storage(spec: RegistrySpec, binding: dict[str, Any]) -> tuple[str, str]:
+    """A binding's overlay path and history stem for `spec`, exactly as the assignment spells them."""
     override = binding.get("overrides", {}).get(spec.stem, {})
     return (
         override.get("overlay", f"{binding['namespace']}/{spec.overlay(Path()).name}"),
         override.get("history", f"{binding['history']}/{spec.stem}"),
     )
+
+
+def storage(spec: RegistrySpec, binding: dict[str, Any]) -> tuple[str, str]:
+    """A binding's overlay path, read in the served layout, and its history stem.
+
+    The overlay is a vault path, so it is read through the layout and the assignment stays as written.
+    The history is a name below the schema folder's history folder, which no layout moves.
+    """
+    from .. import layout
+
+    overlay, history = _authored_storage(spec, binding)
+    return layout.read_selector(overlay), history
 
 
 def validate(document: object, compiled: Any) -> dict[str, Any]:
@@ -206,7 +219,7 @@ def validate(document: object, compiled: Any) -> dict[str, Any]:
                 raise RegistryError("INVALID_REGISTRY_BINDING: overlay format changed")
         paths = {binding["namespace"], registry_history.history_dir(Path(), binding["history"]).as_posix()}
         for spec in specs.values():
-            overlay, stem = storage(spec, binding)
+            overlay, stem = _authored_storage(spec, binding)
             paths.update((overlay, registry_history.history_dir(Path(), stem).as_posix()))
         for path in paths:
             for other_scope, other_path in occupied:
@@ -353,16 +366,16 @@ def _bound_storage(
 ) -> tuple[tuple[str | None, str, tuple[str, ...], frozenset[str]], ...]:
     """Each binding's scope, namespace, and the portable keys of its history trees and overlays.
 
-    They depend only on the binding and the Knowledge Base folder name. A store request asks for
-    every page it admits, so it prepares them once.
+    They depend only on the binding, the Knowledge Base folder name and the areas that its paths are
+    read with. A store request asks for every page it admits, so it prepares them once.
     """
-    from .. import registry_history
+    from .. import layout, registry_history
     from ..structured_collections import _portable_path_key
     from ..vault_store import read
     from . import registry_specs
 
     memo = read.request_memo(root)
-    folder = managed_root_rel()
+    folder = (managed_root_rel(), layout.selector_areas())
     if memo is not None:
         kept = memo.get((__name__, "bound storage"))
         if kept is not None and kept[1] == folder and (kept[0] is document or kept[0] == document):
@@ -375,7 +388,8 @@ def _bound_storage(
             overlay, stem = storage(spec, binding)
             trees.append(registry_history.history_dir(root, stem).relative_to(root).as_posix())
             overlays.add(_portable_path_key(overlay))
-        prepared.append((scope, binding["namespace"], tuple(map(_portable_path_key, trees)), frozenset(overlays)))
+        prepared.append((scope, layout.read_selector(binding["namespace"]),
+                         tuple(map(_portable_path_key, trees)), frozenset(overlays)))
     if memo is not None:
         memo[(__name__, "bound storage")] = (document, folder, tuple(prepared))
     return tuple(prepared)
@@ -403,6 +417,33 @@ def public_storage(root: Path, path: str) -> bool:
     return False
 
 
+#: `(document, areas, destinations, selections)` of the last read of an assignment's page paths.
+_PAGE_BINDINGS: tuple[Any, Any, dict[str, str | None], dict[str, str | None]] | None = None
+
+
+def _page_bindings(document: dict[str, Any]) -> tuple[dict[str, str | None], dict[str, str | None]]:
+    """The `destinations` and `selections` of an assignment, each path read in the served layout.
+
+    A page asks for them, so they are read once for a document and set of areas, not once per page.
+    `nested` reads both as written. Two paths that read as one keep the later one, in the order written.
+    """
+    global _PAGE_BINDINGS
+    from .. import layout
+
+    areas = layout.selector_areas()
+    if areas is None:
+        return document["destinations"], document["selections"]
+    kept = _PAGE_BINDINGS
+    if kept is not None and kept[1] == areas and (kept[0] is document or kept[0] == document):
+        return kept[2], kept[3]
+    destinations, selections = (
+        {layout.read_selector(path): scope for path, scope in document[field].items()}
+        for field in ("destinations", "selections")
+    )
+    _PAGE_BINDINGS = (document, areas, destinations, selections)
+    return destinations, selections
+
+
 def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str | None = None,
                prospective: bool = False,
                configured: Callable[[], dict[str, Any] | None] | None = None) -> str | None:
@@ -428,9 +469,10 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
                                 frontmatter=semantic_contract._thaw(frontmatter), body="", title="", mtime=0)
     scopes = membership._evaluate_markdown_scopes(membership.markdown_subject(page), compiled)
     candidates = set(scopes).intersection(document["private"])
-    destinations = {scope for folder, scope in document["destinations"].items() if _contains(folder, path)}
-    selected = document["selections"].get(path, registry_scope)
-    explicit = path in document["selections"] or registry_scope is not None
+    destinations_of, selections = _page_bindings(document)
+    destinations = {scope for folder, scope in destinations_of.items() if _contains(folder, path)}
+    selected = selections.get(path, registry_scope)
+    explicit = path in selections or registry_scope is not None
     selected = None if selected == PUBLIC_INSTANCE else selected
     if selected is not None and selected not in document["private"]:
         raise RegistryError("REGISTRY_UNAVAILABLE: selected instance is unavailable")

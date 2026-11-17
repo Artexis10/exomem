@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
-from . import note_types, tag_variants
+from . import layout, note_types, tag_variants
 from .kbdir import managed_relative
 from .vault import kb_root
 from .vocabulary import registry
@@ -60,8 +60,8 @@ class Carrier:
 
     @property
     def folder_parts(self) -> tuple[str, ...]:
-        """A folder carrier's casefolded segments below the knowledge base."""
-        return fold_folder(self.match)
+        """A folder carrier's casefolded segments below the managed root, as the served layout reads its `match`."""
+        return fold_folder(layout.read_selector(self.match))
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +116,13 @@ def fold_folder(folder: str) -> tuple[str, ...]:
 
 
 def identity_of(kind: str, match: str) -> tuple[str, str]:
-    """What makes two carriers the same one: a project key exactly, a folder or tag casefolded."""
+    """What makes two carriers the same one: a project key exactly, a folder or tag casefolded.
+
+    A folder is authored against the wrapper, so it is read in the served layout first: an authored
+    `Notes/<Area>/x` and a path that sits at `<Area>/x` in `root` name one folder.
+    """
+    if kind == KIND_FOLDER:
+        match = layout.read_selector(match)
     return kind, match if kind == KIND_PROJECT else match.casefold()
 
 
@@ -168,7 +174,7 @@ def _finding(code: str, entry: registry.Entry, detail: str) -> dict[str, str]:
 
 def protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, bool]]:
     """Every folder that groups by type or placement: `(casefolded segments, owner, split by project)`."""
-    from . import entity_recurrence, entity_types, homes, layout
+    from . import entity_recurrence, entity_types, homes
 
     out: list[tuple[tuple[str, ...], str, bool]] = []
     lay = layout.of(vault_root)
@@ -209,14 +215,15 @@ def _folder_findings(vault_root: Path, entry: registry.Entry) -> list[dict[str, 
     from .context_catalogue import ContextCatalogue
 
     match = str(entry.attributes["match"])
-    mine = fold_folder(match)
+    read = layout.read_selector(match)
+    mine = fold_folder(read)
     if (refused := protection(protected_folders(vault_root), mine)) is not None:
         return [_finding(refused[0], entry, f"{match} is {refused[1]}")]
     catalogue = ContextCatalogue(vault_root)
     try:
         if not catalogue.built():
             return [_finding("CARRIER_FOLDER_UNCHECKED", entry, "the context catalogue is still building, so the folder's entries cannot be counted; retry when it is ready")]
-        if not catalogue.reached_ids(KIND_FOLDER, match):
+        if not catalogue.reached_ids(KIND_FOLDER, read):
             return [_finding("CARRIER_FOLDER_EMPTY", entry, f"{match} holds no catalogue entries")]
     finally:
         catalogue.close()

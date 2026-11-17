@@ -21,7 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from .. import document_containers, find_corpus, memory_refs, reserved_paths
+from .. import document_containers, find_corpus, layout, memory_refs, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import managed_root_rel, managed_split_parts
 from . import companions
@@ -33,11 +33,19 @@ _ASSIGNMENT_UNSET = object()
 #: The frontmatter fields `markdown_subject` reads, through `ParsedPage`
 #: and `find_corpus.all_projects`. A stored summary keeps these for membership.
 FRONTMATTER_INPUTS = ("type", "project", "projects", "tags", "classes", memory_refs.ID_FIELD)  # nosemgrep: ep-word-set -- the closed frontmatter fields this kernel reads
-_MEMO: OrderedDict[tuple[str, str, int, int, bool, str, frozenset[str] | None], frozenset[str]] = OrderedDict()
-_SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str, str, frozenset[str] | None], frozenset[str]] = OrderedDict()
+#: What a memoized answer depends on besides the page: the policy and, in `root`, the areas that its
+#: path selectors are read with. The first part of every memo key below.
+_SelectorKey = tuple[str, "layout.Areas | None"]
+_MEMO: OrderedDict[tuple[_SelectorKey, str, int, int, bool, str, frozenset[str] | None], frozenset[str]] = OrderedDict()
+_SNAPSHOT_MEMO: OrderedDict[tuple[_SelectorKey, str, str, str, frozenset[str] | None], frozenset[str]] = OrderedDict()
 _PATH_MEMO: OrderedDict[
-    tuple[str, str, tuple[companions.BoundSnapshot, ...], tuple[companions.StoredOriginalProof, ...], frozenset[str] | None], MembershipOutcome
+    tuple[_SelectorKey, str, tuple[companions.BoundSnapshot, ...], tuple[companions.StoredOriginalProof, ...], frozenset[str] | None], MembershipOutcome
 ] = OrderedDict()
+
+
+def _selector_key(policy: Policy) -> _SelectorKey:
+    """The policy's fingerprint with the areas its path selectors are read with, which move without a policy edit."""
+    return policy.fingerprint, layout.selector_areas()
 
 
 class MembershipUnresolved(Exception):
@@ -103,6 +111,7 @@ def _relative_to_kb(rel_path: str) -> str:
 
 
 def _matches_paths(patterns: tuple[str, ...], rel_path: str) -> bool:
+    patterns = layout.read_selectors(patterns)
     kb_rel = _kb_relative(rel_path)
     return any(fnmatch.fnmatchcase(rel_path, p) or fnmatch.fnmatchcase(kb_rel, p) for p in patterns)
 
@@ -133,7 +142,7 @@ def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
         return False
     dirname = managed_root_rel()
     kb_rel = _relative_to_kb(rel_path)
-    normalized = _normalized_refs(values, dirname)
+    normalized = _normalized_refs(layout.read_selectors(values), dirname)
     return rel_path in normalized or kb_rel in normalized
 
 
@@ -292,12 +301,13 @@ def subject_inputs(root: Path, policy: Policy) -> tuple:
 
     The page-admission scope-set memo keys on this tuple: an input that `evaluate_subject` gains goes here.
     The policy's scopes follow its fingerprint; registry assignment follows the connector requirement,
-    the Knowledge Base folder name and the root.
+    the Knowledge Base folder name and the root; a path selector follows the areas it is read with.
     """
     from . import connector_boundary  # imports this module, so it loads on use
 
     requirement = json.dumps(connector_boundary.read_requirement(root), sort_keys=True)
-    return str(root), policy.fingerprint, managed_root_rel(), hashlib.sha256(requirement.encode()).hexdigest()
+    return (str(root), policy.fingerprint, managed_root_rel(), hashlib.sha256(requirement.encode()).hexdigest(),
+            layout.selector_areas())
 
 
 def _page_membership(
@@ -505,7 +515,7 @@ def evaluate_path_only(
             if assigned is not None and error.reason == "descriptor_missing":
                 return classified(matched)
             return MembershipOutcome("unresolved", frozenset(matched), error.reason)
-        memo_key = (policy.fingerprint, rel_path, companion.identities, companion.stored_originals, assigned)
+        memo_key = (_selector_key(policy), rel_path, companion.identities, companion.stored_originals, assigned)
         cached = _PATH_MEMO.get(memo_key) if proposed_companion is None and dependency is None else None
         if cached is not None:
             _PATH_MEMO.move_to_end(memo_key)
@@ -679,7 +689,7 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
             f"cannot stat {page.rel_path!r} to resolve scope membership: {exc}"
         ) from exc
     assigned = _registry_assignment(page.vault_root, page.rel_path, policy)
-    key = (policy.fingerprint, page.rel_path, mtime_ns, size, page.frontmatter_valid,
+    key = (_selector_key(policy), page.rel_path, mtime_ns, size, page.frontmatter_valid,
            str(page.vault_root), assigned)
     cached = _MEMO.get(key)
     if cached is not None:
@@ -696,9 +706,9 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
 
 def _snapshot_key(
     vault_root: Path | None, rel_path: str, policy: Policy, content_hash: str,
-) -> tuple[str, str, str, str, frozenset[str] | None]:
+) -> tuple[_SelectorKey, str, str, str, frozenset[str] | None]:
     assigned = _registry_assignment(vault_root, rel_path, policy)
-    return (policy.fingerprint, rel_path, content_hash, str(vault_root), assigned)
+    return (_selector_key(policy), rel_path, content_hash, str(vault_root), assigned)
 
 
 def cached_snapshot_membership(

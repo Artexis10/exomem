@@ -269,7 +269,11 @@ def _under(prefix: str, kb_rel: str) -> bool:
 
 
 def _matches(prefixes: list[str], kb_rel: str) -> bool:
-    return any(_under(p, kb_rel) for p in prefixes)
+    # layout imports modules that import access, so it waits for the first call.
+    from . import layout
+
+    # A tier is authored against the wrapper; the served layout reads it, and the file stays as written.
+    return any(_under(p, kb_rel) for p in layout.read_selectors(tuple(prefixes)))
 
 
 def access_tier(vault_root: Path, rel_path: str) -> str:
