@@ -5244,6 +5244,12 @@ class _WikilinkResolverView:
     titles: Mapping[str, tuple[str, ...]]
     candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
 
+    def obsidian_match(
+        self, page: str, *, visible: Callable[[str], bool] | None = None
+    ) -> vault.WikilinkCandidate | None:
+        """Step 6 of the resolver chain needs Obsidian's link index, which the corpus snapshot does not carry."""
+        return None
+
 
 def _qualifying_body_wikilink_targets(
     page: SemanticPageState,
