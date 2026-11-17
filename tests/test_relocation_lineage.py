@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, create_file, memory_refs, move_file, page_lineage, vault as vault_module
+from exomem import audit, create_file, memory_refs, move_file, page_lineage
+from exomem import vault as vault_module
 
 TODAY = dt.date(2026, 11, 16)
 #: A compiled note of the fixture vault, which a governed move accepts as it stands.
@@ -156,6 +157,23 @@ def test_a_relayout_old_path_resolves_after_a_later_move_and_a_rebuild(vault: Pa
     assert _resolve(vault, "Knowledge Base/Old/autovacuum-tuning")[1] is not None
 
 
+def test_a_lineage_key_spelled_with_a_yaml_escape_claims_without_a_relayout_record(
+    vault: Path,
+) -> None:
+    """A byte prefilter that skips the parse of a page whose `moved_from` key a double-quoted
+    escape spells, so its prior path claims only once an unrelated relayout row exists."""
+    old = "Knowledge Base/Old/escaped-ledger.md"
+    rel = "Knowledge Base/Notes/escaped-ledger.md"
+    _write(
+        vault, rel,
+        f'---\ntitle: Ledger\ntype: note\n"moved\\x5ffrom": [{{path: "{old}"}}]\n---\n# Ledger\n',
+    )
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+
+    assert (old, rel) in _prior_rows(vault)
+    assert _resolve(vault, old.removesuffix(".md")) == (rel.removesuffix(".md"), None)
+
+
 def test_a_prior_path_only_a_withheld_page_claims_answers_as_a_missing_path(moved: Path) -> None:
     """A visibility filter applied after counting claimants, so a hidden page's move leaks."""
     hidden = _resolve(moved, A, visible=lambda path: path != C)
@@ -213,6 +231,7 @@ def test_a_conflict_that_names_a_withheld_claimant_is_absent_from_a_restricted_a
     for rel in (left, hidden):
         _write(vault, rel, f"---\ntitle: {rel}\ntype: note\nmoved_from:\n  - path: {A}\n---\nBody.\n")
     memory_refs.ReferenceIndex(vault).rebuild_all()
+    monkeypatch.setattr(egress, "caller_restricted", lambda _root: True)
     monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda path: path != hidden)
 
     assert _prior_findings(vault, "prior_path_conflict") == []
@@ -223,14 +242,16 @@ def test_an_identified_page_at_a_prior_path_is_reported_to_the_owner_only(
 ) -> None:
     """A page with its own identity that a sync or an outside editor drops at a moved page's old
     path, which takes the old links with no finding, or whose finding pairs two pages' histories
-    for a caller whose view is partial."""
+    for a caller whose view is partial. A bound store gives the owner a release filter too, so
+    an audit that reads restriction from that filter hides the finding from the owner."""
     from exomem.governance import egress
 
     _write(moved, A, _note("Harbour ledger", exomem_id=str(uuid.uuid4())))
     memory_refs.ReferenceIndex(moved).rebuild_all()
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda _path: True)
 
     owner = _prior_findings(moved, "reserved_path_identified")
-    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda _path: True)
+    monkeypatch.setattr(egress, "caller_restricted", lambda _root: True)
     restricted = _prior_findings(moved, "reserved_path_identified")
 
     assert owner == [(A, [C])]

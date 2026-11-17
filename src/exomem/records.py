@@ -2184,7 +2184,9 @@ def create_collection(
             raise collections.CollectionError(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
-        manifest = _preflight_collection_create(root, path, manifest_text, scaffold=scaffold)
+        manifest = _preflight_collection_create(
+            root, path, manifest_text, scaffold=scaffold, commit=True
+        )
         _refuse_store_only_features(manifest)
         manifest_guard = vault.PathGuard.capture(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
@@ -2372,7 +2374,7 @@ def _validate_collection_create_for_profile(
             "INVALID_COLLECTION_MANIFEST", "manifest text is required"
         )
     manifest = _preflight_collection_create(
-        root, root / manifest_path, manifest_text, scaffold=scaffold
+        root, root / manifest_path, manifest_text, scaffold=scaffold, commit=False
     )
     if manifest.semantic_profile != semantic_profile:
         raise collections.CollectionError(
@@ -3321,14 +3323,22 @@ def _lifecycle_result(
 
 
 def _require_unclaimed(
-    root: Path, paths: tuple[str, ...], *, taken: str = "CREATE_ONLY_CONFLICT"
+    root: Path,
+    paths: tuple[str, ...],
+    *,
+    taken: str = "CREATE_ONLY_CONFLICT",
+    newest: bool = True,
 ) -> None:
-    """Refuse a new collection file at a path that a moved page still claims (`prior_claims`)."""
+    """Refuse a new collection file at a path that a moved page still claims (`prior_claims`).
+
+    A commit reads the newest claims; a validation passes `newest=False` and reads its request's
+    store revision, as every other read of that request does.
+    """
     from . import prior_claims
 
     for rel in paths:
         try:
-            prior_claims.require_unreserved(root, rel)
+            prior_claims.require_unreserved(root, rel, newest=newest)
         except prior_claims.ReservedPathError as error:
             code = taken if error.code == "FILE_EXISTS" else error.code
             raise collections.CollectionError(code, error.reason) from None
@@ -3340,6 +3350,7 @@ def _preflight_collection_create(
     manifest_text: str,
     *,
     scaffold: bool,
+    commit: bool,
 ) -> collections.CollectionManifest:
     record_governance.require_candidate_manifest_visibility(root, path.relative_to(root).as_posix())
     _assert_portable_absent(root, path)
@@ -3359,7 +3370,7 @@ def _preflight_collection_create(
         raise collections.CollectionError("CREATE_ONLY_CONFLICT", "canonical source already exists")
     # A markdown-items source is a folder, which no page's name reserves.
     log_page = (manifest.storage.source,) if manifest.storage.strategy == "markdown-log" else ()
-    _require_unclaimed(root, (path.relative_to(root).as_posix(), *log_page))
+    _require_unclaimed(root, (path.relative_to(root).as_posix(), *log_page), newest=commit)
     if scaffold and manifest.storage.strategy == "markdown-log":
         # Descriptor shape is validated above; this access pins the exact scaffold fields.
         manifest.storage.descriptor["section"]["title"]

@@ -287,14 +287,15 @@ def require_unreserved(
 ) -> None:
     """Refuse a write that would take `rel` while a live page claims it as a prior path.
 
-    A caller that may see a claimant hears which page holds the path. A caller that may see
-    none gets the refusal that any unavailable target gets, which names no claimant, path or
-    content. It still discloses one fact, that some live page claims this exact path; the
-    reservation holds anyway, because the caller's page would otherwise win exact-path
-    resolution and capture the claimant's old links. The path is in a folder the caller may
-    write, where the claimant was visible before it moved. A commit reads the newest claims,
-    because no commit guard rechecks a reservation made after its request began; a validation
-    passes `newest=False` and reads its request's revision.
+    The reservation covers every spelling of `rel` that names the same file: case and Unicode
+    form variants (`reservation_key`). A caller that may see a claimant hears which page holds
+    the path. A caller that may see none gets the refusal that any unavailable target gets,
+    which names no claimant, path or content. The refusal still tells the caller that something
+    holds the path. A create at a path that a hidden page holds now refuses the same way, so the
+    reservation adds no new class of disclosure; it holds because the caller's page would
+    otherwise win exact-path resolution and capture the claimant's old links. A commit reads the
+    newest claims, because no commit guard rechecks a reservation made after its request began;
+    a validation passes `newest=False` and reads its request's revision.
     """
     from .governance import egress
 

@@ -1667,6 +1667,8 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     """The answer carries nothing about a withheld linking page, which the
     confined mover cannot rewrite and leaves as it was: no graph or index
     outcome, no contract result for it, and the same shape on every later move."""
+    from exomem import lexstore, path_mentions
+
     scope = "Notes/Withheld/**, Notes/Insights/Withheld/**"
     base = {
         **_semantic_move_fixture(),
@@ -1688,19 +1690,20 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
 
     moves = (("gamma", "gamma-x"), ("gamma-x", "gamma-y"), ("solo", "solo-x"))
 
-    def moved(vault: Path) -> list[str]:
-        return [
-            _VOLATILE_TEXT.sub(
-                "<v>",
-                _text(
-                    _call(
-                        vault, _writer(audience), "manage_memory_file", operation="move",
-                        old_path=f"{INSIGHTS}/{old}.md", new_path=f"{INSIGHTS}/{new}.md", **extra,
-                    )
-                ),
+    def move(vault: Path, old: str, new: str) -> str:
+        # Each move reads a current index: otherwise whether the catalogue repair that the last
+        # move scheduled has finished decides the path-mention warning, not the withheld page.
+        with library_scope():
+            assert lexstore.ensure_fresh(vault)
+        return _text(
+            _call(
+                vault, _writer(audience), "manage_memory_file", operation="move",
+                old_path=f"{INSIGHTS}/{old}.md", new_path=f"{INSIGHTS}/{new}.md", **extra,
             )
-            for old, new in moves
-        ] + [
+        )
+
+    def moved(vault: Path) -> list[str]:
+        return [_VOLATILE_TEXT.sub("<v>", move(vault, old, new)) for old, new in moves] + [
             # The activity log is readable by the mover: its line carries the
             # figures the mover may see.
             _VOLATILE_TEXT.sub(
@@ -1712,6 +1715,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     answers = {variant: moved(vault) for variant, vault in vaults.items()}
 
     assert '"__error__"' not in _text(answers["A"]), answers["A"]
+    assert not any(path_mentions.NOT_CHECKED in answer for answer in answers["B"])
     for step in range(len(moves) + 1):
         assert answers["A"][step] == answers["B"][step], step
         assert answers["C"][step] == answers["B"][step], step
@@ -3520,3 +3524,89 @@ def test_a_restricted_writer_cannot_forge_a_lineage_that_takes_a_withheld_pages_
     assert "moved_from" not in page_bytes(vault, own).decode()
     with library_scope():
         assert normalize_wikilink(withheld[:-3], vault) == (withheld[:-3], None)
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("relayout", [False, True], ids=["no-relayout", "relayout"])
+def test_a_lineage_key_spelled_with_a_yaml_escape_is_refused_like_the_plain_key(
+    tmp_path: Path, relayout: bool
+) -> None:
+    """A writer that spells `moved_from` with a double-quoted escape, which a byte test for the
+    key misses but the parse that derives claims reads, so once any relayout row is active the
+    owner's links to a withheld page without an id resolve to the writer's note."""
+    from exomem.vault import normalize_wikilink
+
+    withheld = f"{WITHHELD_DIR}/harbour-plan.md"
+    own = f"{INSIGHTS}/claim.md"
+    record = {
+        f"{KB}/_Schema/relayout-record.yaml": (
+            "schema_version: 1\nrelayouts:\n  layout-1:\n    reverted: false\n    rows:\n"
+            f"      - {{exomem_id: null, old_path: '{NOTES}/orchard-old.md', "
+            f"new_path: '{NOTES}/filler-orchard.md'}}\n"
+        )
+    }
+    vault = _materialize(
+        tmp_path / "vault",
+        {
+            **_filler(),
+            **(record if relayout else {}),
+            withheld: _page("Hidden Plan", "Withheld body text.", type="insight"),
+            f"{NOTES}/index.md": _page("Index", f"See [[{withheld[:-3]}]].", type="insight"),
+        },
+        "external",
+    )
+    escaped = {'"moved\\x5ffrom"': [{"path": withheld}]}
+    reviewed = {"relation_disposition": "reviewed_none", "relation_review_reason": "a stub note"}
+    created = _call(
+        vault, _writer("external"), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active", **escaped),
+        **reviewed,
+    )
+    plain = _call(
+        vault, _writer("external"), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active"), **reviewed,
+    )
+
+    assert "LINEAGE_PROTECTED" in _text(created), created
+    assert "__error__" not in plain, plain
+    assert "x5ffrom" not in page_bytes(vault, own).decode()
+    with library_scope():
+        assert normalize_wikilink(withheld[:-3], vault) == (withheld[:-3], None)
+
+
+def test_the_owner_audit_names_an_identified_page_at_a_prior_path_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    """An audit that reads restriction from the release filter, which a bound store gives the
+    owner too, so the store's owner never learns that a page with its own identity took a moved
+    page's old links."""
+    from exomem import memory_refs
+
+    old = f"{NOTES}/harbour-ledger.md"
+    moved = f"{NOTES}/Archive/harbour-ledger.md"
+    vault = _materialize(
+        tmp_path / "vault",
+        {
+            **_filler(),
+            moved: _page(
+                "Harbour Ledger", "Moved once.", type="insight",
+                exomem_id="5b0f6a52-2f4e-4c1e-9a43-0d8e1c7b2a61", moved_from=[{"path": old}],
+            ),
+            old: _page(
+                "Tide Table", "A page of its own.", type="insight",
+                exomem_id="9c3d1e7f-6a2b-4d58-8e10-4f7a2b9c0d33",
+            ),
+        },
+        "external",
+    )
+    with library_scope():
+        memory_refs.ReferenceIndex(vault).rebuild_all()
+
+    # The service binds its store writer for every call, a read included.
+    _reset()
+    with backend_writer(vault):
+        answer = _call_bound(
+            vault, None, "review_memory", mode="audit", categories=["reference_identity"]
+        )
+
+    assert "reserved_path_identified" in _text(answer), answer

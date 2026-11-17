@@ -87,16 +87,44 @@ def prior_paths(front: Mapping[str, Any], current: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def read_front(text: str) -> tuple[dict[str, Any], bool]:
+    """The frontmatter that every lineage decision reads from a page's text, and whether the
+    page has a frontmatter block.
+
+    The derived claims (`memory_refs.prior_path_rows`, `vault.lineage_link_targets`) and a
+    writer's refusal of a caller-supplied change (`changed_field`) all read this one parse, so a
+    key spelled with quotes or escapes counts in all of them or in none.
+    """
+    front, _body, block = vault.parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
+    return front, block is not None
+
+
+def read_front_of_bytes(raw: bytes) -> tuple[dict[str, Any], bool]:
+    """`read_front` of a page's bytes. Bytes that are not UTF-8 are not a page's text, so they
+    hold no frontmatter and claim no lineage."""
+    try:
+        return read_front(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        return {}, False
+
+
 def prior_paths_of_text(text: str, current: str) -> tuple[str, ...]:
     """`prior_paths` of a page's text; a page without frontmatter has none."""
-    front, _body, block = vault.parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
-    return () if block is None else prior_paths(front, current)
+    front, has_block = read_front(text)
+    return prior_paths(front, current) if has_block else ()
 
 
 def may_hold_lineage(raw: bytes) -> bool:
-    """False when a page's bytes name neither lineage key, so it records no lineage and a
-    caller may skip the parse; True leaves the decision to the parse."""
-    return LINEAGE_FIELD.encode() in raw or LEGACY_FIELD.encode() in raw
+    """False only when no frontmatter that `read_front` parses from these bytes holds a lineage
+    key, so a caller may skip the parse; True leaves the decision to the parse.
+
+    The YAML reader yields a key equal to a lineage key only when the key's characters stand in
+    the bytes as they are or a double-quoted escape produces them. Line folding joins lines with a
+    space or a line break, a single-quoted scalar escapes only a quote, and an alias or a merge
+    key repeats a node that is spelled elsewhere in the same bytes. So bytes that hold neither
+    lineage key nor a backslash hold no lineage.
+    """
+    return LINEAGE_FIELD.encode() in raw or LEGACY_FIELD.encode() in raw or b"\\" in raw
 
 
 #: The refusal of a write whose caller supplied a change to a page's lineage.
@@ -108,13 +136,11 @@ def changed_field(before: str | None, after: str) -> str | None:
 
     `before` is None for a page the write creates. A writer other than a move, its undo or a
     reclassification refuses such a change (`PROTECTED_CODE`), since a forged entry would claim
-    another page's old path and its links.
+    another page's old path and its links. Both texts are always parsed by `read_front`, the
+    reader the derived claims use: a byte test for the key would miss an escaped spelling.
     """
-    texts = [text for text in (before, after) if text is not None]
-    if not any(may_hold_lineage(text.encode("utf-8")) for text in texts):
-        return None
-    old = vault.parse_frontmatter(before)[0] if before is not None else {}
-    new = vault.parse_frontmatter(after)[0]
+    old = read_front(before)[0] if before is not None else {}
+    new = read_front(after)[0]
     return next((key for key in sorted(FIELDS) if old.get(key) != new.get(key)), None)
 
 

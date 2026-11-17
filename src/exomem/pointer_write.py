@@ -274,25 +274,30 @@ def page_matcher(
     return same_page
 
 
-def _refuse_aliases(rel: str, yaml_text: str) -> None:
-    """Refuse a frontmatter that uses a YAML anchor or alias.
+def _comments(rel: str, yaml_text: str) -> list[str]:
+    """A frontmatter's comments in order, or a refusal of one that uses a YAML anchor or alias.
 
-    An alias makes one field's parsed value depend on another field's bytes, so an admitted
-    span could change a field that the write does not declare.
+    A comment is the text between the parser's tokens, so this counts one inside an admitted
+    span too, which the span comparison cannot see. An alias makes one field's parsed value
+    depend on another field's bytes, so an admitted span could change an undeclared field.
     """
     try:
-        aliased = any(
-            isinstance(token, (vault.yaml.AnchorToken, vault.yaml.AliasToken))
-            for token in vault.yaml.scan(yaml_text)
-        )
+        tokens = list(vault.yaml.scan(yaml_text))
     except vault.yaml.YAMLError as error:
         raise PointerWriteError("INVALID_FRONTMATTER", "frontmatter is invalid") from error
-    if aliased:
+    if any(isinstance(token, (vault.yaml.AnchorToken, vault.yaml.AliasToken)) for token in tokens):
         raise PointerWriteError(
             "APPEND_ONLY",
             f"{rel} is append-only, and its frontmatter uses YAML anchors or aliases, so no "
             "write can prove that only its declared fields change",
         )
+    comments: list[str] = []
+    at = 0
+    for token in tokens:
+        gap = yaml_text[at : token.start_mark.index]
+        comments.extend(line.strip() for line in gap.splitlines() if line.strip())
+        at = max(at, token.end_mark.index)
+    return comments
 
 
 def _require_lineage_append(
@@ -310,7 +315,8 @@ def _require_lineage_append(
         and page_lineage.entry_path(new_value[-1]) is not None
         and isinstance(new_value[-1], Mapping)
     )
-    # A non-empty list keeps its bytes, comments included; the entry follows them.
+    # A non-empty list keeps its bytes, comments included; the entry follows them. Cost: a flow
+    # list (`[{path: ...}]`) has no byte-preserving append, so a move of such a page refuses.
     kept = not earlier or (
         old_entry is not None and new_entry is not None and new_entry.startswith(old_entry)
     )
@@ -345,8 +351,8 @@ def prove(
     if before[:old_start] != after[:new_start] or before[old_end:old_body] != after[new_end:new_body]:
         raise _refuse(rel, "its frontmatter fences")
     old_yaml, new_yaml = before[old_start:old_end], after[new_start:new_end]
-    _refuse_aliases(rel, old_yaml)
-    _refuse_aliases(rel, new_yaml)
+    if _comments(rel, old_yaml) != _comments(rel, new_yaml):
+        raise _refuse(rel, "a comment in its frontmatter")
     try:
         old_spans, new_spans = frontmatter_entry_spans(old_yaml), frontmatter_entry_spans(new_yaml)
     except FrontmatterSpliceError as error:

@@ -8681,9 +8681,8 @@ def lineage_link_targets(vault_root: Path, target_rel_path: str) -> tuple[str, .
     raw = served_page_bytes(root, rel)
     if raw is None:
         return ()
-    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-    front, _body, block = parse_frontmatter(text)
-    if block is None:
+    front, has_block = page_lineage.read_front_of_bytes(raw)
+    if not has_block:
         front = {}
     claimed = page_lineage.iter_claims(
         rel, front, memory_refs.normalize_id(front.get(memory_refs.ID_FIELD)),

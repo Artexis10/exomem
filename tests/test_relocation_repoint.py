@@ -87,6 +87,27 @@ def test_a_preview_gives_each_referrer_one_outcome_and_writes_nothing(vault: Pat
     assert not (vault / MOVED_NOTE).exists()
 
 
+def test_a_sealed_link_rewrite_leaves_out_a_referrer_a_restricted_caller_cannot_see(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A curation link rewrite that filters only a connector-limited caller, so the plan of a
+    restricted caller outside any connector limit lists and binds a page withheld from it."""
+    from exomem import repoint_links
+    from exomem.governance import egress
+
+    hidden = "Knowledge Base/Notes/Withheld/tuning-draft.md"
+    _with_identity(vault, NOTE)
+    _write(vault, WRITABLE, f"---\ntype: note\n---\nSee {_link(NOTE)}.\n")
+    _write(vault, hidden, f"---\ntype: note\n---\nSee {_link(NOTE)}.\n")
+    monkeypatch.setattr(egress, "caller_restricted", lambda _root: True)
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda path: path != hidden)
+
+    sealed = repoint_links.prepare(vault, [(NOTE, MOVED_NOTE)], {})
+
+    assert [item["path"] for item in sealed["referrers"]] == [WRITABLE]
+    assert [page["path"] for page in sealed["pages"]] == [WRITABLE]
+
+
 def test_a_committed_move_repoints_an_evidence_body_link_and_records_the_old_one(
     vault: Path,
 ) -> None:

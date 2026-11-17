@@ -271,6 +271,54 @@ def test_a_comment_and_blank_line_after_a_sources_lineage_survive_a_relocation_a
     assert moved in pointer_write.operation_records(vault, operation)
 
 
+def test_a_comment_after_a_list_item_and_a_blank_line_after_a_block_scalar_survive_a_correction(
+    vault: Path,
+) -> None:
+    """A splice that ends a block list after its last item's inline comment, or a literal block
+    scalar after the blank line that follows it, so a correction drops the owner's bytes."""
+    path = vault / SOURCE
+    before = path.read_text(encoding="utf-8").replace(
+        "tags: [",
+        "project: |\n  harbour-survey\n\nprojects:\n  - harbour-survey  # merged later\ntags: [",
+    )
+    path.write_text(before, encoding="utf-8")
+
+    _correct(vault, SOURCE, "coastal-survey")
+    set_frontmatter_field.set_pointer_field(
+        vault, path=SOURCE, field="projects", value=["coastal-survey"], why="the survey merged",
+        expected_hash=None, today=TODAY,
+    )
+
+    assert path.read_text(encoding="utf-8") == before.replace(
+        "project: |\n  harbour-survey\n", "project: coastal-survey\n"
+    ).replace("projects:\n  - harbour-survey", "projects: [coastal-survey]")
+
+
+def test_a_pointer_write_that_drops_a_comment_inside_its_declared_field_refuses(
+    vault: Path,
+) -> None:
+    """A proof that compares only the bytes outside a declared field, so a rewrite of that
+    field silently drops a comment the owner wrote inside it."""
+    path = vault / SOURCE
+    before = path.read_text(encoding="utf-8").replace(
+        "ingested_into: []\n",
+        "ingested_into: []\nprojects:\n  # filed by hand\n  - harbour-survey\n",
+    )
+    path.write_text(before, encoding="utf-8")
+    after = before.replace(
+        "projects:\n  # filed by hand\n  - harbour-survey\n", "projects: [coastal-survey]\n"
+    )
+
+    with pytest.raises(pointer_write.PointerWriteError) as refused:
+        pointer_write.plan(
+            vault, SOURCE, before, after, pointer_write.Declared(fields={"projects"}),
+            reason="crafted",
+        )
+
+    assert refused.value.code == "APPEND_ONLY"
+    assert "comment" in refused.value.reason
+
+
 def _front(text: str) -> dict:
     from exomem.vault import parse_frontmatter
 

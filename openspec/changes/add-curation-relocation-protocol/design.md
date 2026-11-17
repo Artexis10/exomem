@@ -124,15 +124,16 @@ the per-request batch object of `collection_store.aliases.LinkTargets`.
 ### 3. Prior paths stay reserved
 
 `unique_path` and every create-only check treat a prior path that a live page
-claims as taken. A page may move back to a path in its own lineage. A holder
-that the caller may not see answers with `WRITE_REFUSED`, which names no
-claimant, path or content. The refusal still tells the caller one fact: some
-live page claims that exact path. A twin vault without the claim accepts the
-same create, and `unique_path` picks a different name. The reservation holds
-anyway. Without it, the caller's page would win exact-path resolution and
-capture the claimant's old links, an integrity loss that outweighs the
-disclosure. The disclosure is narrow: the path is in a folder the caller may
-write, where the claimant was visible before it moved.
+claims as taken. The reservation covers every spelling that names the same
+file: case and Unicode form variants of the path. A page may move back to a
+path in its own lineage. A holder that the caller may not see answers with
+`WRITE_REFUSED`, which names no claimant, path or content. The refusal still
+tells the caller that something holds that path. A twin vault without the
+claim accepts the same create, and `unique_path` picks a different name. A
+create at a path that a hidden page holds now discloses the same fact and
+refuses the same way, so the reservation adds no new class of disclosure. The
+reservation holds because without it the caller's page would win exact-path
+resolution and capture the claimant's old links.
 
 A file without an `exomem_id` at a reserved path does not take the address.
 Following a dead link in an editor creates exactly such an empty file. The

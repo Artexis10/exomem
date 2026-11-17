@@ -3741,7 +3741,13 @@ def _prior_path_findings(vault_root: Path) -> list[AuditFinding]:
     from . import prior_claims
     from .governance import egress
 
-    visible = egress.restricted_release_filter(vault_root)
+    # A bound store gives the owner a release filter too, so the filter's presence does not
+    # say whether the caller is restricted.
+    visible = (
+        egress.restricted_release_filter(vault_root)
+        if egress.caller_restricted(vault_root)
+        else None
+    )
     findings: list[AuditFinding] = []
     for item in prior_claims.issues(vault_root):
         request_budget.checkpoint()

@@ -24,8 +24,8 @@ _APPROVAL_CALL = "the curation plan's preview and approval"
 def _view(vault_root: Path) -> tuple[Any, Any]:
     """The caller's view and write admission, by the move's own rule (`move_file.mover_view`).
 
-    A connector-limited caller never reads, rewrites or lists a page it cannot see; such a page
-    keeps its old link, which resolves through the moved page's lineage.
+    A restricted caller never reads, rewrites or lists a page it cannot see (`MoverView.scope`);
+    such a page keeps its old link, which resolves through the moved page's lineage.
     """
     from .governance import connector_boundary
 

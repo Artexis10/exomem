@@ -226,15 +226,16 @@ two live pages claim as `prior_path_conflict`.
 ### Requirement: A prior path stays reserved while a live page claims it
 
 `unique_path` and every create-only check SHALL treat a prior path that a live
-page claims as taken. A move of a page to a path in its own lineage SHALL be
-permitted. When the claimant is withheld from the caller, the refusal SHALL be
-`WRITE_REFUSED` and SHALL NOT name the claimant, its current path or its
-content. The refusal, and the different name that `unique_path` then picks,
-SHALL still disclose one fact: that some live page claims that exact path.
-The reservation SHALL hold anyway, because without it the caller's page would
-win exact-path resolution and capture the claimant's old links. The disclosed
-path is in a folder the caller may write, where the claimant was visible
-before it moved.
+page claims as taken, under every spelling that names the same file: case and
+Unicode form variants of the path. A move of a page to a path in its own
+lineage SHALL be permitted. When the claimant is withheld from the caller, the
+refusal SHALL be `WRITE_REFUSED` and SHALL NOT name the claimant, its current
+path or its content. The refusal, and the different name that `unique_path`
+then picks, disclose that something holds the path. This SHALL be the same
+disclosure, and the same refusal, that a create at a path a hidden page
+currently holds already makes, so the reservation adds no new class of
+disclosure. The reservation SHALL hold because without it the caller's page
+would win exact-path resolution and capture the claimant's old links.
 
 A file without an `exomem_id` at a prior path that a live page claims SHALL
 NOT take that address: links to the path SHALL keep resolving to the lineage
@@ -249,6 +250,12 @@ may see every path it names, and SHALL NOT show `reserved_path_identified`.
 - **WHEN** a caller creates a page at a path that a moved page lists in
   `moved_from`
 - **THEN** the create refuses and names the claimant to a caller that may see it
+
+#### Scenario: A create spells a reserved path another way
+
+- **WHEN** a caller creates a page at a path that differs from a claimed prior
+  path only in case or Unicode form
+- **THEN** the create refuses as for the claimed spelling
 
 #### Scenario: A create lands on a relayout's old path
 

@@ -1821,12 +1821,8 @@ def prior_path_rows(rel: str, raw: bytes, relayout: Any | None) -> list[PriorRow
     # Without a relayout row, only the page's own lineage claims, so most pages skip the parse.
     if not relayout and not page_lineage.may_hold_lineage(raw):
         return []
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return []
-    fm, _, block = vault_module.parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
-    if block is None and not relayout:
+    fm, has_block = page_lineage.read_front_of_bytes(raw)
+    if not has_block and not relayout:
         return []
     claimed = page_lineage.iter_claims(rel, fm, normalize_id(fm.get(ID_FIELD)), relayout)
     return [(prior, rel, prior_stem(prior)) for prior in claimed]
@@ -1937,8 +1933,8 @@ def _scan_rows(
     """The identity and prior-path rows of every scanned page.
 
     The identity rows come from `_scan_pages`, the one corpus census. The prior rows read each
-    page again; `prior_path_rows` parses only a page that names a lineage key, unless the
-    vault holds a relayout record.
+    page again; `prior_path_rows` parses only a page that may hold a lineage key
+    (`page_lineage.may_hold_lineage`), unless the vault holds a relayout record.
     """
     from . import relayout_record
 

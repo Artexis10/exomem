@@ -215,7 +215,9 @@ def validate(
         # The caller's text gets the create preflight alone. The commit names its log archive from
         # the scaffolded manifest, so only that manifest's validation plans and authorizes the log
         # writes; planning them for the caller's text too would authorize another archive.
-        records._preflight_collection_create(root, root / manifest_path, manifest_text, scaffold=scaffold)
+        records._preflight_collection_create(
+            root, root / manifest_path, manifest_text, scaffold=scaffold, commit=False
+        )
         manifest = require_planning_profile(
             collections.parse_manifest_bytes(
                 root, root / manifest_path, manifest_text.encode("utf-8")

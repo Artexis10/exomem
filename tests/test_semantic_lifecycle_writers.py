@@ -3129,8 +3129,7 @@ def test_set_frontmatter_preliminary_block_does_not_register_project(
             why="must remain inert",
         )
 
-    # `project` is a pointer an append-only page may correct, so the semantic contract blocks.
-    assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert exc.value.code == "APPEND_ONLY"
     assert not registry_path.exists()
 
 

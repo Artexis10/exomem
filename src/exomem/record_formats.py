@@ -1533,11 +1533,22 @@ def _final_line_ending(yaml_text: str, newline: str) -> str:
     return _span_terminator(yaml_text, (0, len(yaml_text))) or newline
 
 
+def _line_end(yaml_text: str, at: int) -> int:
+    """`at` when it starts a line, else the start of the line after the one holding `at`."""
+    if not at or yaml_text[at - 1] == "\n":
+        return at
+    stop = yaml_text.find("\n", at)
+    return len(yaml_text) if stop == -1 else stop + 1
+
+
 def _value_end(yaml_text: str, node: Any) -> int:
     """Where a value's own bytes end.
 
-    The parser ends a block collection where the next token starts, past any comment and
-    blank line that follow it, so a block collection ends instead after its last item's line.
+    The parser ends a block collection where the next token starts, past any comment and blank
+    line that follow it, and a literal or folded scalar past the blank lines that follow it. A
+    block collection ends instead with its last item, taking that line's break only when no
+    comment follows the item on it. A block scalar ends with its last line that holds text.
+    Every comment and blank line after a value then stays outside its span.
     """
     if (
         isinstance(node, (vault.yaml.nodes.SequenceNode, vault.yaml.nodes.MappingNode))
@@ -1546,20 +1557,23 @@ def _value_end(yaml_text: str, node: Any) -> int:
     ):
         last = node.value[-1]
         end = _value_end(yaml_text, last[1] if isinstance(last, tuple) else last)
-        if end and yaml_text[end - 1] == "\n":
-            return end
-        stop = yaml_text.find("\n", end)
-        return len(yaml_text) if stop == -1 else stop + 1
-    return node.end_mark.index
+        stop = _line_end(yaml_text, end)
+        return stop if not yaml_text[end:stop].strip() else end
+    end = node.end_mark.index
+    if isinstance(node, vault.yaml.nodes.ScalarNode) and node.style in ("|", ">"):
+        # A blank line after the text is a separator, not the value's bytes, even when a keep
+        # chomping indicator reads it into the value: a field rewritten at this span keeps it.
+        return min(end, _line_end(yaml_text, len(yaml_text[:end].rstrip())))
+    return end
 
 
 def frontmatter_entry_spans(yaml_text: str) -> dict[str, tuple[int, int]]:
     """Each top-level key of a frontmatter block, mapped to the span of its own bytes.
 
-    A span runs from the key's first byte to its value's end. A block-style value's span
-    covers its own line ending, and a block collection's ends on its last item's line, so a
-    comment or blank line after it stays outside every span. A plain, flow or quoted
-    scalar's span stops at its last byte.
+    A span runs from the key's first byte to its value's end (`_value_end`), so a comment or
+    blank line after a value stays outside every span. A block-style value's span covers its
+    own line ending unless a comment follows its last item on that line. A plain, flow or
+    quoted scalar's span stops at its last byte.
     """
     try:
         document = vault.yaml.compose(yaml_text)
@@ -1755,7 +1769,8 @@ def append_markdown_sequence_item(text: str, key: str, item: Any) -> str | None:
     if found is None:
         return None
     start, end, yaml_text, before, node = found
-    at = _value_end(yaml_text, node)
+    # The new item starts the line after the last item's, past any comment that ends that line.
+    at = _line_end(yaml_text, _value_end(yaml_text, node))
     newline = _span_terminator(yaml_text, (0, at)) or vault.document_newline(text)
     indent = " " * node.start_mark.column
     # The serializer renders `key:` and then the one item at column 0.
@@ -1780,7 +1795,7 @@ def remove_last_markdown_sequence_item(text: str, key: str) -> str | None:
     first = yaml_text.rfind("\n", 0, node.value[-1].start_mark.index) + 1
     if not yaml_text[first : node.value[-1].start_mark.index].lstrip().startswith("-"):
         return None
-    patched = yaml_text[:first] + yaml_text[_value_end(yaml_text, node) :]
+    patched = yaml_text[:first] + yaml_text[_line_end(yaml_text, _value_end(yaml_text, node)) :]
     _reparsed(patched, {**before, key: before[key][:-1]}, key)
     return text[:start] + patched + text[end:]
 

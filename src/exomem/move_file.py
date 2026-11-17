@@ -379,8 +379,14 @@ class MoverView:
 
     @property
     def scope(self) -> Callable[[str], bool] | None:
-        """The filter for the pages the mover reads and rewrites, or None for every page."""
-        return self.visible if self.limited else None
+        """The filter for the pages a sealed link rewrite reads and lists, or None for every page.
+
+        It filters every restricted caller, not only a connector-limited one: a curation plan
+        lists each page it rewrites and its approval names them, so a page outside the caller's
+        view stays out of the plan and keeps its old link. A move filters its answer instead
+        (`shown`), so an unlimited restricted mover may still rewrite a hidden linker silently.
+        """
+        return self.visible if self.restricted else None
 
 
 def mover_view(vault_root: Path) -> MoverView:
