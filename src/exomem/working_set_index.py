@@ -49,7 +49,7 @@ from .collection_store.preview import (
     canonical_read,
     selected_writer,
 )
-from .kbdir import managed_root, managed_root_parts, managed_split, managed_state
+from .kbdir import managed_root, managed_root_parts, managed_split, managed_state, outside_managed_root
 from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
@@ -1074,9 +1074,11 @@ def _walk_kb(vault_root: Path, *, skip_folders: frozenset[str] = _SKIP_DIR_NAMES
             entries = sorted(directory.iterdir(), key=lambda item: item.name)
         except OSError:
             continue
+        top = directory is root
         for entry in entries:
             name = entry.name
-            if name.startswith(".") or name in skip_folders:
+            # The managed root's own entries: in a `root` vault, the ones that sit outside it (`kbdir`'s rule).
+            if name.startswith(".") or name in skip_folders or (top and outside_managed_root(name)):
                 continue
             if entry.is_dir():
                 stack.append(entry)

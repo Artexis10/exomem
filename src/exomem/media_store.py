@@ -479,12 +479,13 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
     from .backfill import iter_kb_files
     from .vault import parse_frontmatter
 
+    subtree = root is not None  # a caller's own folder is below the managed root, not the managed root
     root = root if root is not None else managed_root(vault)
     if not root.is_dir():
         return
     from .vault_store import read as store_read
 
-    for sidecar in iter_kb_files(root):
+    for sidecar in iter_kb_files(root, subtree=subtree):
         if sidecar.suffix.lower() != ".md":
             continue
         rel = sidecar.relative_to(vault).as_posix()

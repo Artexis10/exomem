@@ -37,7 +37,7 @@ from . import (
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
 from .cli_ops import OpError
-from .kbdir import managed_root, managed_root_rel
+from .kbdir import managed_root, managed_root_rel, outside_managed_root
 from .vault import (
     MISSING_CONTENT_HASH,
     VAULT_SCAN_SKIP_DIRS,
@@ -873,7 +873,8 @@ def _iter_governed_media(vault: Path, kb_root: Path):
             continue
         directories: list[Path] = []
         for child in children:
-            if child.name.startswith("."):
+            # The managed root's own listing, in a `root` vault, also holds what sits outside it.
+            if child.name.startswith(".") or (directory == kb_root and outside_managed_root(child.name)):
                 continue
             try:
                 rel = child.relative_to(vault).as_posix()

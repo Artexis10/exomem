@@ -20,7 +20,7 @@ import yaml
 
 from . import freshness, privacy_log, request_budget
 from .find_types import ParsedPage
-from .kbdir import managed_root, managed_split
+from .kbdir import managed_root, managed_split, outside_managed_root
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 from .vault import CORPUS_EXCLUDED_DIR_NAMES, relative_posix
 
@@ -695,6 +695,10 @@ def _classify_walk_entry(
         relative = relative_posix(child.absolute(), anchor.absolute())
     except ValueError:
         return None, None
+    # The anchor is the managed root. In a `root` vault that is the vault root, whose own entries
+    # include the ones that sit outside the managed root; below them the walk is as in `nested`.
+    if "/" not in relative and outside_managed_root(child.name):
+        return None, None
     if reserved_paths.classify_logical(relative).blocked:
         return None, None
     try:
@@ -728,7 +732,11 @@ def walk_md(
     on_error: Callable[[OSError], None] | None = None,
     skip: Callable[[Path], bool] | None = None,
 ):
-    """Yield every .md path under root, skipping excluded subtrees.
+    """Yield every .md path under root, the managed root, skipping excluded subtrees.
+
+    In a `root` vault the managed root is the vault root, so the walk also leaves out its top-level
+    entries that `kbdir.outside_managed_root` names. A caller that walks a folder below the managed
+    root would meet that rule on that folder's entries, so none does today.
 
     Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
     duplicates that would otherwise pollute the index and search results.

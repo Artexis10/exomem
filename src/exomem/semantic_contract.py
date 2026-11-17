@@ -46,7 +46,15 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError, relation_review_stable_id_remediation
-from .kbdir import Layout, is_in_managed_root, managed_join, managed_split_parts, managed_splitter
+from .kbdir import (
+    Layout,
+    is_in_managed_root,
+    managed_join,
+    managed_split_parts,
+    managed_splitter,
+    managed_state,
+    outside_managed_root,
+)
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
@@ -115,7 +123,8 @@ def _prune_identity_census_name(name: str, *, at_kb_root: bool) -> bool:
         return True
     if not at_kb_root:
         return False
-    if name in _IDENTITY_CENSUS_RESERVED_KB_DIRS:
+    # In a `root` vault the managed root's own listing also holds the entries that sit outside it.
+    if outside_managed_root(name) or name in _IDENTITY_CENSUS_RESERVED_KB_DIRS:
         return True
     if name.startswith(".graph-reset-"):
         return vault.is_graph_reset_runtime_dir_name(name)
@@ -2656,17 +2665,17 @@ def _stored_identity_member(split: Callable[[str], str | None], rel: str) -> boo
     if below is None or PurePosixPath(rel).suffix.casefold() != ".md":
         return False
     folder, _, name = below.rpartition("/")
-    return not _pruned_identity_folder(folder) and not _prune_identity_census_name(
+    return not _pruned_identity_folder(folder, managed_state()) and not _prune_identity_census_name(
         name, at_kb_root=not folder
     )
 
 
 @functools.lru_cache(maxsize=4096)
-def _pruned_identity_folder(folder: str) -> bool:
+def _pruned_identity_folder(folder: str, _managed: tuple[str, tuple[str, ...]]) -> bool:
     """Whether the identity census prunes a folder of the Knowledge Base ("" is the folder itself).
 
-    A census judges each stored page by its folder, and many pages share one; the name rules are
-    fixed, so the answer for a folder never changes.
+    A census judges each stored page by its folder, and many pages share a folder. The answer depends
+    only on the folder and on the managed root's state, which the key carries (`kbdir.managed_state`).
     """
     return bool(folder) and any(
         _prune_identity_census_name(name, at_kb_root=depth == 0)

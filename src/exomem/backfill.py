@@ -35,7 +35,7 @@ from . import (
     scene_frames,
     semantic_segments,
 )
-from .kbdir import managed_join, managed_root
+from .kbdir import managed_join, managed_root, outside_managed_root
 from .vault import VAULT_SCAN_SKIP_DIRS, in_append_only_tree
 
 log = logging.getLogger(__name__)
@@ -45,21 +45,28 @@ _PARENT_MEDIA_RE = re.compile(r"(?m)^parent_media:\s*\S")
 _NOT_DONE = {"none", "pending"}
 
 
-def iter_kb_files(root: Path):
+def iter_kb_files(root: Path, *, subtree: bool = False):
     """Yield every file under `root`, pruning config/cruft/index dirs.
 
     Replaces a bare `rglob("*")` so a whole-KB walk never descends into
     `.git`, the embedding sqlite dir, `_Schema`, etc. (`VAULT_SCAN_SKIP_DIRS`).
     Shared with the live media worker's KB scans.
+
+    `root` is the managed root unless `subtree` says it is a folder below it. In a `root` vault the
+    managed root's own entries then skip what `kbdir.outside_managed_root` names, so that no scan
+    here, and no sidecar a scan leads to, reaches content outside the managed root.
     """
     stack = [root]
     while stack:
         d = stack.pop()
+        top = d is root and not subtree
         try:
             children = list(d.iterdir())
         except OSError:
             continue
         for child in children:
+            if top and outside_managed_root(child.name):
+                continue
             if child.is_dir():
                 if child.name not in VAULT_SCAN_SKIP_DIRS:
                     stack.append(child)

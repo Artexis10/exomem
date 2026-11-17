@@ -5391,7 +5391,7 @@ def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
         "/".join(dirs)
     )
     below = managed_split_parts(rel_parts)
-    in_kb = bool(below) and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
+    in_kb = bool(below) and not any(d in find_module.EXCLUDED_DIR_NAMES for d in below[:-1])
     return in_kb, in_vault
 
 

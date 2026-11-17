@@ -112,6 +112,22 @@ def _outside_root(
     return folded == key(IMPORT_STAGE_DIRNAME) or any(folded == key(name) for name in unmanaged)
 
 
+def outside_managed_root(
+    name: str, *, layout: Layout | str | None = None, unmanaged: Collection[str] | None = None
+) -> bool:
+    """Whether the top-level entry ``name`` of the managed root's folder is not managed content.
+
+    The walk form of ``managed_split``, for a loop that lists the managed root and has only the
+    entry's name. In `nested` the managed root is the wrapper folder and everything in it is managed,
+    so it answers False. In `root` the managed root is the vault root, and the entries that
+    ``managed_split`` puts outside it (dot names, the import staging folder, the layout record's
+    ``unmanaged`` list) are the ones to leave out. It is a name test: a walk applies it to the entries
+    of the root's own listing only and takes no stat. Without ``layout`` and ``unmanaged`` it reads the
+    bound managed root.
+    """
+    return _is_root(layout) and _outside_root(name, _unmanaged(layout, unmanaged), None)
+
+
 def kb_dirname() -> str:
     """The KB folder name, a single folder (``EXOMEM_KB_DIRNAME`` override, else default).
 

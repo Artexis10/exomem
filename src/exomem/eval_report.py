@@ -43,6 +43,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .find import EXCLUDED_DIR_NAMES
+from .kbdir import outside_managed_root
 from .vault import VAULT_SCAN_SKIP_DIRS, kb_root
 
 # Media extensions — mirrors extract.py's audio/video/image/pdf buckets. Inlined
@@ -67,15 +68,23 @@ def _round_down(n: int) -> int:
     return (n // _ROUND_TO) * _ROUND_TO
 
 
-def _iter_files(root: Path, skip_dirs: frozenset[str]) -> Iterable[Path]:
-    """Yield every file under `root`, pruning any directory named in `skip_dirs`."""
+def _iter_files(root: Path, skip_dirs: frozenset[str], *, managed: bool = False) -> Iterable[Path]:
+    """Yield every file under `root`, pruning any directory named in `skip_dirs`.
+
+    `managed` says `root` is the managed root, whose own entries then skip the ones that sit outside it
+    in a `root` vault (`kbdir.outside_managed_root`).
+    """
     if not root.is_dir():
         return
     for dirpath, dirnames, filenames in os.walk(root):
+        top = managed and dirpath == str(root)
         # Prune in place so os.walk does not descend into skipped subtrees.
-        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        dirnames[:] = [
+            d for d in dirnames if d not in skip_dirs and not (top and outside_managed_root(d))
+        ]
         for name in filenames:
-            yield Path(dirpath) / name
+            if not (top and outside_managed_root(name)):
+                yield Path(dirpath) / name
 
 
 def count_corpus_stats(vault_root: Path) -> dict[str, int]:
@@ -102,7 +111,7 @@ def count_corpus_stats(vault_root: Path) -> dict[str, int]:
             media += 1
 
     notes = 0
-    for path in _iter_files(kb_root(vault_root), EXCLUDED_DIR_NAMES):
+    for path in _iter_files(kb_root(vault_root), EXCLUDED_DIR_NAMES, managed=True):
         if path.suffix.lower() == ".md" and ".sync-conflict-" not in path.name:
             notes += 1
 

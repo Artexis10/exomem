@@ -49,6 +49,7 @@ from . import (
     semantic_writes,
 )
 from .cli_ops import OpError
+from .kbdir import outside_managed_root
 from .vault import PlannedWrite, batch_atomic_write, content_hash, kb_root, read_guarded_text
 
 log = logging.getLogger(__name__)
@@ -478,7 +479,8 @@ def _iter_frame_dirs(kb: Path):
             except OSError:
                 continue
             child = Path(entry.path)
-            if child.name in VAULT_SCAN_SKIP_DIRS:
+            # A `root` vault's managed root also lists what sits outside it; the caller removes what it yields.
+            if child.name in VAULT_SCAN_SKIP_DIRS or (d == kb and outside_managed_root(child.name)):
                 continue
             if child.name.endswith(scene_frames.FRAMES_DIR_SUFFIX):
                 yield child

@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, overload
 
-from .kbdir import managed_root
+from .kbdir import managed_root, outside_managed_root
 
 log = logging.getLogger(__name__)
 
@@ -1372,7 +1372,9 @@ def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
     in_kb = False
     try:
         kb_parts = path.relative_to(managed_root(vault_root)).parts
-        in_kb = not any(d in EXCLUDED_DIR_NAMES for d in kb_parts[:-1])
+        in_kb = not any(d in EXCLUDED_DIR_NAMES for d in kb_parts[:-1]) and not (
+            kb_parts and outside_managed_root(kb_parts[0])
+        )
     except ValueError:
         in_kb = False
     return (in_kb, in_vault)

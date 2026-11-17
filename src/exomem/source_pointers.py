@@ -293,7 +293,7 @@ class Inspector:
 
 def _custody_files(vault_root: Path, tree: str) -> Iterator[Path]:
     root = kb_root(vault_root) / tree
-    return iter_kb_files(root) if root.is_dir() else iter(())
+    return iter_kb_files(root, subtree=True) if root.is_dir() else iter(())
 
 
 def _sha256(vault_root: Path, rel: str) -> str | None:
