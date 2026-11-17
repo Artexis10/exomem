@@ -1314,11 +1314,21 @@ class SemanticCorpusContext:
             prior_claims=prior_claims,
         )
 
-    def link_resolver(self) -> vault.WikilinkResolver:
-        """A resolver over these pages that resolves prior paths by the claims the corpus holds."""
-        resolver = vault.WikilinkResolver.from_entries(self.vault_root, self.resolver_entries)
-        resolver.bound_claims = self.prior_claims
-        return resolver
+    def link_resolver(self) -> Any:
+        """The resolver that every page judged over this corpus shares, built from no entries.
+
+        The corpus already holds the maps of the resolver it was built from, and a link to a path
+        some page left resolves by the claims the corpus holds. Typed `Any`: link resolution reads
+        only these attributes of a `vault.WikilinkResolver`.
+        """
+        return _WikilinkResolverView(
+            full_paths=self.resolver_full_paths,
+            kb_stripped=self.resolver_kb_stripped,
+            stems=self.resolver_stems,
+            titles=self.resolver_titles,
+            candidates_by_key=self.resolver_candidates_by_key,
+            bound_claims=self.prior_claims,
+        )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
         pages = dict(self.pages)
@@ -5515,14 +5525,7 @@ def _qualifying_body_wikilink_targets(
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """Resolve body links by normalized set membership without relation facts."""
-    resolver = _WikilinkResolverView(
-        full_paths=corpus.resolver_full_paths,
-        kb_stripped=corpus.resolver_kb_stripped,
-        stems=corpus.resolver_stems,
-        titles=corpus.resolver_titles,
-        candidates_by_key=corpus.resolver_candidates_by_key,
-        bound_claims=corpus.prior_claims,
-    )
+    resolver = corpus.link_resolver()
     targets: list[str] = []
     for raw_target, _line in page.body_wikilinks:
         status, resolved, _anchor, _alias = _resolve_target(
@@ -5593,8 +5596,8 @@ def writer_view_relations(
     also feeds the published graph, keeps every fact.
 
     A caller judging many pages of one corpus passes the writer's `visible`
-    (from `vault.writer_link_visibility`) and a `resolver` built from the
-    corpus once, rather than deciding them per page.
+    (from `vault.writer_link_visibility`) rather than deciding it per page. The
+    `resolver` defaults to the maps the corpus already holds, so no page builds one.
     """
     outbound = corpus.outbound.get(page.path, ())
     inbound = corpus.inbound.get(page.path, ())

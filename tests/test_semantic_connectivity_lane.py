@@ -369,6 +369,60 @@ def test_withheld_generic_target_and_absent_target_have_the_same_quality_feedbac
     assert "RELATION_AUTHORED_ALL_GENERIC" not in {finding["code"] for finding in results[0]}
 
 
+def test_a_restricted_writers_links_resolve_over_one_resolver_however_many_pages_it_judges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restricted writer's recovery builds the corpus's resolver again for every page it judges.
+
+    Its cost then grows with the square of the corpus; the filter still hides the withheld page."""
+    from dataclasses import replace
+
+    from exomem import vault
+
+    builds: list[int] = []
+    real = vault.WikilinkResolver.from_entries.__func__
+
+    def counting(cls, *arguments, **keywords):
+        builds.append(1)
+        return real(cls, *arguments, **keywords)
+
+    monkeypatch.setattr(vault.WikilinkResolver, "from_entries", classmethod(counting))
+    shown = _target(tmp_path)
+    withheld = _state(
+        tmp_path, "Knowledge Base/Notes/Patterns/withheld.md", _source(title="Withheld", page_type="pattern")
+    )
+
+    def builds_for(pages: int) -> tuple[int, list[tuple[str, str]]]:
+        linkers = [
+            _state(
+                tmp_path,
+                f"Knowledge Base/Notes/Insights/page-{n:02d}.md",
+                _source(
+                    title=f"Page {n:02d}",
+                    body=_OBS + "## Relations\n- relates_to [[Knowledge Base/Notes/Patterns/target]]\n"
+                    "- relates_to [[Knowledge Base/Notes/Patterns/withheld]]\n",
+                ),
+            )
+            for n in range(pages)
+        ]
+        corpus = replace(
+            _corpus(tmp_path, shown, withheld, *linkers),
+            writer_visibility=lambda path: path != withheld.path,
+        )
+        builds.clear()
+        facts = [fact for page in linkers for fact in semantic_contract.writer_authored_facts(page, corpus)]
+        return len(builds), sorted({(fact.raw_target, fact.target_status) for fact in facts})
+
+    few = builds_for(2)
+    many = builds_for(12)
+
+    assert few == many
+    assert few[1] == [
+        ("Knowledge Base/Notes/Patterns/target", "resolved"),
+        ("Knowledge Base/Notes/Patterns/withheld", "unresolved"),
+    ]
+
+
 def test_cited_provenance_alone_does_not_satisfy_the_disposition(
     tmp_path: Path,
 ) -> None:
