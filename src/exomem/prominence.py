@@ -253,9 +253,9 @@ _ADOPTION_TRIGGER = (
 #: Agents read the baseline's quiet list as a reason to drop a user's one-off or inconclusive
 #: file, so that list is scoped to notes and this line names custody as apart from it.
 _ORIGINAL_CAPTURE = (
-    "Keep every file the user hands you, and documents an answer rests on, as Sources by exact "
-    "bytes, conclusive or not: custody verifies no claim. Take a document's title, authors and "
-    "DOI from it; fix a wrong one with options.correction."
+    "Keep handed files and documents an answer rests on by exact bytes, conclusive or not: "
+    "custody verifies no claim. Take a document's title, authors and DOI from it; fix a wrong "
+    "one with options.correction."
 )
 
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
