@@ -10,12 +10,24 @@ a dismissal that outlives new evidence, and a date that passes with no write to 
 from __future__ import annotations
 
 import datetime as dt
+import time
 from pathlib import Path
 
 import dreamer_fixture as fx
 import pytest
 
-from exomem import commands, dreamer, dreamer_families, dreamer_store, freshness, review_state, upkeep
+from exomem import (
+    commands,
+    context_catalogue,
+    dreamer,
+    dreamer_families,
+    dreamer_store,
+    epistemic_graph,
+    freshness,
+    review_state,
+    upkeep,
+    working_set_index,
+)
 from exomem.writer_lease import invoke_command
 
 KB = fx.KB
@@ -55,7 +67,20 @@ def _clean():
     dreamer_store.clear_reader_memo()
 
 
+def _fold(vault: Path) -> None:
+    """As in the service: a turn's first read builds the catalogue, and the derived drain keeps it current."""
+    catalogue = context_catalogue.ContextCatalogue(vault)
+    try:
+        if not catalogue.built():
+            working_set_index.WorkingSetIndex(vault).rebuild()
+            catalogue.rebuild()
+    finally:
+        catalogue.close()
+    assert context_catalogue.keep_current(vault)
+
+
 def _quiet(vault: Path, now: float | None = None) -> None:
+    _fold(vault)
     results = fx.run_to_quiet(vault, now=now)
     assert all(result.stop_reason != "error" for result in results), results
 
@@ -116,6 +141,89 @@ def test_a_new_preference_on_a_page_of_a_descendant_domain_raises_one_item(tmp_p
         "tool": "edit_note",
         "args": {"path": PROFILE, "operation": {"kind": "replace_string", "validate_only": True}},
     }
+
+
+def _served(vault: Path, keep=None) -> dict | None:
+    """The profile's item as a caller whose predicate is `keep` is served it, recomputed from the vault."""
+    ctx = dreamer_families.Context(vault_root=vault, store=None, conn=None, now=time.time())
+    try:
+        row = {"family": dreamer_families.CURATION_FAMILY, "subject_path": PROFILE}
+        return dreamer_families.release(ctx, row, keep, withheld=True)
+    finally:
+        ctx.close()
+
+
+def _units(item: dict) -> set[str]:
+    return {entry["path"] for entry in item["evidence"] if entry["role"] == "unit"}
+
+
+def test_a_domain_page_is_found_behind_many_newer_units_of_other_domains(tmp_path: Path) -> None:
+    # A vault-wide candidate list cut at its limit before the domain filter would hold only travel pages.
+    vault = _vault(tmp_path)
+    for index in range(300):
+        fx.write(
+            vault, f"{KB}/Notes/Insights/a-{index:04d}.md",
+            _note(f"Travel {index}", f"- [constraint] Budget trip {index}. ^budget\n", topics="travel"),
+        )
+    games = f"{KB}/Notes/Insights/zz-games-sessions.md"
+    fx.edit(vault, games, _note("Games sessions", "- [preference] Prefer short sessions. ^brief\n", topics="games"))
+    _fold(vault)
+
+    item = _served(vault)
+
+    assert item is not None and _units(item) == {games}
+    assert item["measures"] == {"new_units": 1, "stale_lines": 0, "at_least": False}
+
+
+def test_pages_a_caller_may_not_see_do_not_use_up_the_count(tmp_path: Path) -> None:
+    # Withheld pages first in path order would fill the page limit before the caller's own page is reached.
+    vault = _vault(tmp_path)
+    hidden = {f"{KB}/Notes/Insights/a-{index:04d}.md" for index in range(300)}
+    for index, path in enumerate(sorted(hidden)):
+        fx.write(vault, path, _note(f"Hidden {index}", f"- [preference] Hidden {index}. ^hidden\n", topics="games"))
+    fx.edit(vault, SESSIONS, _note("Games sessions", "- [preference] Prefer short sessions. ^brief\n", topics="games"))
+    _fold(vault)
+
+    restricted = _served(vault, lambda path: path not in hidden)
+    owner = _served(vault)
+
+    assert restricted is not None and _units(restricted) == {SESSIONS}
+    assert restricted["measures"] == {"new_units": 1, "stale_lines": 0, "at_least": False}
+    # The owner sees more pages than one item counts: the count says it is partial, never the whole.
+    assert owner is not None and owner["measures"]["at_least"] is True
+
+
+def test_one_tick_over_several_pages_lists_the_profiles_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Listing the profiles and reading each one's scope again for every page makes a tick cost pages x profiles.
+    vault = _vault(tmp_path)
+    fx.edit(vault, GLOBAL_PROFILE, _profile(topics=None))
+    _quiet(vault)
+    pages = [vault / KB / "Notes" / "Insights" / f"g-{index}.md" for index in range(4)]
+    for index, path in enumerate(pages):
+        line = f"- [preference] Line {index}. ^l{index}\n"
+        fx.write(vault, str(path.relative_to(vault)), _note(f"Games {index}", line, topics="games"))
+    freshness.on_files_changed(vault, changed=pages)
+    fx.edit(vault, SESSIONS, _note("Games sessions", "- [preference] Prefer short sessions. ^brief\n", topics="games"))
+    _fold(vault)
+    statements: list[str] = []
+    real_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    def traced(self):
+        conn = real_open(self)
+        if conn is not None:
+            conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", traced)
+    tick = dreamer.run_once(vault, budget=dreamer.Budget(cpu=600.0, wall=600.0))
+
+    assert len(tick.processed) >= 5
+    listing = "SELECT path FROM graph_nodes WHERE kind = 'file' AND page_type IN"
+    listings = [sql for sql in statements if sql.startswith(listing)]
+    assert len(listings) == 1
+    assert _open(vault) is not None
 
 
 def test_a_category_the_vault_maps_to_preferences_raises_the_item(tmp_path: Path) -> None:

@@ -423,6 +423,26 @@ class ContextCatalogue:
         conn = self._connect()
         return [] if conn is None else [row[0] for row in conn.execute("SELECT entry_id FROM entries WHERE profile = 1")]
 
+    def paths_declaring(self, accepts: Callable[[str], bool]) -> set[str] | None:
+        """The paths of the entries whose own `topics` declare a value that `accepts` takes; None when unreadable.
+
+        Both reads use the `raw` index: the distinct declared values, then the entries of the accepted ones.
+        """
+        conn = self._connect()
+        if conn is None:
+            return None
+        declared = (str(row[0]) for row in conn.execute("SELECT DISTINCT raw FROM declared_topics_raw"))
+        values = [value for value in declared if accepts(value)]
+        paths: set[str] = set()
+        for start in range(0, len(values), SQL_VARIABLE_CHUNK):
+            chunk = values[start : start + SQL_VARIABLE_CHUNK]
+            paths.update(str(row[0]) for row in conn.execute(
+                "SELECT e.path FROM declared_topics_raw t JOIN entries e ON e.entry_id = t.entry_id "
+                f"WHERE t.raw IN ({', '.join('?' * len(chunk))})",
+                chunk,
+            ))
+        return paths
+
     def reached_ids(self, kind: str, match: str) -> list[str]:
         """The ids of the entries one carrier reaches: a project key, a folder (by `folder_reaches`) or a tag form."""
         conn = self._connect()
