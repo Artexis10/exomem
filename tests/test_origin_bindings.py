@@ -357,7 +357,7 @@ def test_note_commits_backlink_and_edits_preserve_existing_stale_attribution(vau
         )
         assert (vault / result.path).is_file()
         source = (vault / _PATH).read_text(encoding="utf-8")
-        assert "bound-writer-workflow" in source
+        assert result.path.removesuffix(".md") in source
         assert provenance.evidence_version(source) == binding["version"]
         _write(vault, "Later evidence.\n", metadata="ingested_into: []\n")
         edited = edit.edit(
@@ -422,7 +422,7 @@ def test_note_rolls_back_if_input_permission_narrows_after_publication(
     _write_source_rule(vault, ceiling=6)
     writer = _client_a_writer(vault, tmp_path, monkeypatch)
     rule = vault / "Knowledge Base/_Governance/rules/episode-source-client-a.yaml"
-    output = vault / "Knowledge Base/Notes/Insights/late-policy-change.md"
+    output = vault / "Knowledge Base/Notes/Insights/Late policy change.md"
 
     def narrow_after_install(destination: Path) -> None:
         if destination == output:
@@ -528,7 +528,7 @@ def test_note_refuses_an_authored_wrong_output_fingerprint(vault: Path) -> None:
                 status="draft",
             )
     assert failure.value.code == "ORIGIN_SCOPE_STALE"
-    assert not (vault / "Knowledge Base/Notes/Insights/wrong-output-fingerprint.md").exists()
+    assert not (vault / "Knowledge Base/Notes/Insights/Wrong output fingerprint.md").exists()
 
 
 @pytest.mark.parametrize("layout", ["compact", "rich"])
@@ -953,7 +953,9 @@ def test_link_normalization_leaves_a_carrier_reason_byte_identical(vault: Path) 
     reason = "Raised in the [[Linked page]] review."
     block = _carrier_with_reason(vault, reason)
     with request_scope(RequestPrincipal(audience_id="client-a")):
-        note.note(vault, content="Linked claim.\n", note_type="insight", title="Linked page", status="draft")
+        linked = note.note(
+            vault, content="Linked claim.\n", note_type="insight", title="Linked page", status="draft"
+        )
         created = note.note(
             vault,
             content=block + "\n\nSee [[Linked page]].\n",
@@ -964,7 +966,7 @@ def test_link_normalization_leaves_a_carrier_reason_byte_identical(vault: Path) 
 
     written = (vault / created.path).read_text(encoding="utf-8")
     assert provenance.parse_origin(written, managed=True).payload["assessments"][0]["reason"] == reason
-    assert "See [[Knowledge Base/Notes/Insights/linked-page]]." in written
+    assert f"See [[{linked.path.removesuffix('.md')}]]." in written
 
 
 def test_a_move_rewrites_the_prose_link_but_never_the_carrier(vault: Path) -> None:

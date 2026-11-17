@@ -109,4 +109,6 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
         "read_page", {"page": path}, run_middleware=True
     )).structured_content
     expected = commands.op_read_memory(vault, path=path)
+    # The public read leads with the page's title; the rest is the leaf's reply, path included.
+    assert read.pop("title") == "Retry with exponential backoff and full jitter"
     assert read == json.loads(json.dumps(expected, default=str))

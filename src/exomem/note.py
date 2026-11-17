@@ -32,11 +32,12 @@ the canonical H1; the optional ASCII slug controls only the new filename.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import os
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -59,6 +60,7 @@ from . import (
     source_coverage,
     tag_variants,
     temporal,
+    title_occupancy,
     vocabulary_resolution,
 )
 from . import (
@@ -82,11 +84,13 @@ from .vault import (
     content_hash,
     ensure_canonical_h1,
     escape_wikilinks_for_log,
+    filename_adjusted_warning,
     find_body_wikilinks,
     folder_split_warnings,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    numbered_stem,
     parse_frontmatter,
     plan_log_entries,
     read_guarded_text,
@@ -1257,10 +1261,7 @@ def _type_default(
         folder /= _medium_folder(medium)
     if definition.stem == "started":
         assert started  # validated above
-        return _Placement(folder, f"{started[:7]}-{slug}")  # YYYY-MM-<slug>
-    if definition.stem == "dated":
-        return _Placement(folder, f"{date_iso[:7]}-{slug}")  # YYYY-MM-<slug>
-    return _Placement(folder, slug)
+    return _Placement(folder, _stem_prefix(note_type, started=started, date_iso=date_iso) + slug)
 
 
 def _homes_warnings(home_set: homes_module.HomeSet) -> list[str]:
@@ -1398,6 +1399,7 @@ def _resolve_path(
     home_set: homes_module.HomeSet | None = None,
     topics: Sequence[str] = (),
     predecessor: str | None = None,
+    title_held: Callable[[str], bool] | None = None,
 ) -> Path:
     placement = _place(
         vault_root=vault_root,
@@ -1431,7 +1433,7 @@ def _resolve_path(
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error
     if create_parents:
         folder.mkdir(parents=True, exist_ok=True)
-    return unique_path(folder, stem, vault_root=vault_root)
+    return unique_path(folder, stem, vault_root=vault_root, title_held=title_held)
 
 
 def _domain_folder(domain: str) -> str:
@@ -1840,6 +1842,28 @@ def _frontmatter_lines(fields: Mapping[str, str | Sequence[str]]) -> str:
     return "\n".join(lines)
 
 
+def _stem_prefix(note_type: str, *, started: str | None, date_iso: str) -> str:
+    """The `YYYY-MM-` that a type's file name starts with; empty for a type named by its name alone.
+
+    A `started` stem takes the month the work started, a `dated` stem the month of the write.
+    """
+    definition = note_types.shipped_registry().types.get(note_type)
+    if definition is None:
+        return ""
+    if definition.stem == "started":
+        return f"{started[:7]}-" if started else ""
+    if definition.stem == "dated":
+        return f"{date_iso[:7]}-"
+    return ""
+
+
+def _numbered_slug(slug: str, name_prefix: str, number: int | None) -> str:
+    """`slug` with the collision number an import plan froze for it, counted in the byte cap with the prefix."""
+    if number is None:
+        return slug
+    return numbered_stem(name_prefix + slug, number).removeprefix(name_prefix)
+
+
 def planned_destination(
     vault_root: Path,
     *,
@@ -1849,16 +1873,24 @@ def planned_destination(
     project: str | None = None,
     domain: str | None = None,
     date_iso: str | None = None,
+    name_number: int | None = None,
 ) -> str:
     """The vault-relative path `note` would create for these inputs; nothing is written.
 
     It is the same placement `note` uses, so a caller that must freeze a target before
     it creates the page (an import plan) asks the leaf instead of computing a folder.
     `date_iso` is the day a dated folder or name uses, today by default; a caller that
-    creates the note later passes the same day to `note` as `_path_date`.
+    creates the note later passes the same day to `note` as `_path_date`. `name_number` is the
+    collision number that the plan gives a second page of one name, as `unique_path` would add it;
+    the caller passes the same number to `note` as `_name_number`.
     """
     root = Path(vault_root)
-    filename_slug, _warnings = resolve_filename_slug(title, slug, vault_root=root)
+    date_iso = date_iso or temporal.render_date(temporal.now())
+    name_prefix = _stem_prefix(note_type, started=None, date_iso=date_iso)
+    filename_slug, _warnings = resolve_filename_slug(
+        title, slug, vault_root=root, date_prefix=name_prefix
+    )
+    filename_slug = _numbered_slug(filename_slug, name_prefix, name_number)
     path = _resolve_path(
         vault_root=root,
         note_type=note_type,
@@ -1867,7 +1899,7 @@ def planned_destination(
         domain=domain,
         medium=None,
         started=None,
-        date_iso=date_iso or temporal.render_date(temporal.now()),
+        date_iso=date_iso,
         create_parents=False,
         home_set=homes_module.load(root),
     )
@@ -1921,6 +1953,7 @@ def note(
     _extra_frontmatter: Mapping[str, str | Sequence[str]] | None = None,
     _verbatim_body: bool = False,
     _path_date: str | None = None,
+    _name_number: int | None = None,
     _preflight_operation: str = "create",
     _predecessor_path: str | None = None,
     _predecessor_content_hash: str | None = None,
@@ -1955,10 +1988,6 @@ def note(
                 )
             raise NoteError(error.code, ["topics"], error.reason, error.details) from error
         topic_writes = topic_plan.writes
-    try:
-        filename_slug, slug_warnings = resolve_filename_slug(title, slug, vault_root=vault_root)
-    except InvalidSlugError as error:
-        raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
     if status is None:
         status = "planned" if note_type == "production-log" else "active"
 
@@ -1990,6 +2019,21 @@ def note(
             project_keys_module.ProjectKeyIntroduction(item.key, item.folder, item.category)
             for item in token_value.registrations
         )
+    # The draft token pins the *path* date across the draft->commit gap, so a
+    # note keeps its filename whichever side of midnight it is committed on.
+    # Knowledge time is stamped at commit instead: it records when the write
+    # actually happened, not when the draft was prepared.
+    now = today or temporal.now()
+    render_date = token_value.render_date if token_value is not None else temporal.render_date(now)
+    stamp_iso = token_value.stamp() if token_value is not None else temporal.stamp(now)
+    # A dated type's name starts with the date the path will carry, and the byte cap counts it.
+    name_prefix = _stem_prefix(note_type, started=started, date_iso=_path_date or render_date)
+    try:
+        filename_slug, slug_warnings = resolve_filename_slug(
+            title, slug, vault_root=vault_root, date_prefix=name_prefix
+        )
+    except InvalidSlugError as error:
+        raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
     try:
         key_plan = project_keys_module.plan_project_keys(
             root,
@@ -2043,24 +2087,33 @@ def note(
             raise NoteError(error.code, ["domain"], error.reason, error.details) from error
 
     identity = draft_id or memory_refs.new_id()
-    # The draft token pins the *path* date across the draft->commit gap, so a
-    # note keeps its filename whichever side of midnight it is committed on.
-    # Knowledge time is stamped at commit instead: it records when the write
-    # actually happened, not when the draft was prepared.
-    now = today or temporal.now()
-    render_date = token_value.render_date if token_value is not None else temporal.render_date(now)
-    stamp_iso = token_value.stamp() if token_value is not None else temporal.stamp(now)
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
         for item in key_plan.introductions
     )
     placement_domain = domain_binding.destination if domain_binding is not None else domain
+    # The snapshot that a note with links builds for them. A title check borrows it, so it is built
+    # once, and only when `unique_path` asks, after the refusals that precede it.
+    has_links = bool(sources or bridge_of or find_body_wikilinks(content))
+
+    @functools.cache
+    def link_snapshot() -> WikilinkResolver:
+        return find_module.writer_resolver_snapshot(root)
+
+    # A draft token and an import plan (`_path_date`) froze their target when the live titles were
+    # what they were then, so no title now may move it.
+    title_check = title_occupancy.TitleCheck(
+        root,
+        slug,
+        frozen=token_value is not None or _path_date is not None,
+        resolver=link_snapshot if has_links else None,
+    )
     if token_value is None:
         note_path = _resolve_path(
             vault_root=root,
             note_type=note_type,
             project=project,
-            slug=filename_slug,
+            slug=_numbered_slug(filename_slug, name_prefix, _name_number),
             domain=placement_domain,
             medium=medium,
             started=started,
@@ -2072,6 +2125,7 @@ def note(
             home_set=home_set,
             topics=topics or (),
             predecessor=_predecessor_path,
+            title_held=title_check.held,
         )
         # Re-spell the destination to the real on-disk casing *before* it is
         # bound into the draft token: creating into an existing but
@@ -2095,11 +2149,7 @@ def note(
     # Link-free preparation has no consumer for a vault-wide title snapshot.
     # Keep the detached pending destination and normalizers, but do not read
     # the corpus merely to resolve an empty set of links.
-    resolver = (
-        find_module.writer_resolver_snapshot(root)
-        if sources or bridge_of or find_body_wikilinks(content)
-        else WikilinkResolver.from_entries(root, ())
-    )
+    resolver = link_snapshot() if has_links else WikilinkResolver.from_entries(root, ())
     rel_note_no_ext = destination.removesuffix(".md")
     resolver.add_pending(rel_note_no_ext, title=title)
     sources_norm, source_warnings = _normalize_sources(sources, vault_root=root, resolver=resolver)
@@ -2212,8 +2262,17 @@ def note(
     preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
+    adjusted = filename_adjusted_warning(
+        title,
+        slug,
+        planned=name_prefix + filename_slug,
+        final=note_path.stem,
+        vault_root=vault_root,
+        date_prefix=name_prefix,
+    )
     warnings = (
-        list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
+        list(slug_warnings) + ([adjusted] if adjusted else []) + ([title_check.warning] if title_check.warning else [])
+        + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
         + home_warnings
         + folder_split_warnings(root, note_path.parent)
     )

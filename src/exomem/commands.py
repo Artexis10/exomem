@@ -4084,7 +4084,9 @@ def op_add(
         title: Unicode display title stored in frontmatter and the H1.
         source_type: What the artifact IS. Same axis as source_kind; supply
             either. Open vocabulary, not a closed set.
-        slug: Optional lowercase ASCII kebab-case filename component.
+        slug: Optional lowercase ASCII kebab-case filename component. It overrides the
+            derived name under every filename style; without it the name derives from
+            the title (a lowercase slug unless the vault sets the `title` style).
         url: Required for kinds that declare it, such as article, paper, video.
         tags: Lowercase dash-separated; the server normalizes case/spacing.
         why_captured: One short paragraph on why this is worth keeping.
@@ -5357,6 +5359,19 @@ def _leaf_error_message(error: Any) -> str:
     return message
 
 
+def _candidates_by_title(vault_root: Path, candidates: list[dict[str, str]]) -> list[Any]:
+    """Entity candidates as a refusal names them: by title and id, with no storage path for an agent.
+
+    The public tool shape names a page by title everywhere else, so a path here would be the one place
+    it leaks. The id is the handle that the caller's "update or link it instead" follows; an alias or
+    title match carries only a path, so it is named through the page it points at. REST and CLI
+    callers keep the whole candidate.
+    """
+    if not capabilities_module.shows_links_by_title():
+        return candidates
+    return page_names_module.candidates_by_handle(vault_root, candidates)
+
+
 def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
     """The origin a creation records for its `ref`; None when none was given.
 
@@ -5431,7 +5446,8 @@ def op_link(
             organization, concept, library, decision — plus any vault-defined type in
             `_Schema/entity-types.yaml`.
         name: Unicode display name stored in frontmatter and the H1.
-        slug: Optional lowercase ASCII kebab-case filename component.
+        slug: Optional lowercase ASCII kebab-case filename component. It overrides the
+            file name derived from `name` under every filename style.
         summary: One-paragraph description for the `## Summary` section.
         why_in_kb: Optional `## Why in the KB` paragraph — explains what
             this entity is relevant to in your work.
@@ -5501,7 +5517,7 @@ def op_link(
     except link_module.LinkError as e:
         msg = _leaf_error_message(e)
         if e.candidates:
-            msg += f" (candidates: {e.candidates})"
+            msg += f" (candidates: {_candidates_by_title(vault_root, e.candidates)})"
         if e.candidate_fingerprint is not None:
             msg += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(msg) from e
@@ -5789,7 +5805,9 @@ def op_note(
         note_type: One of research-note, insight, failure, pattern,
             experiment, production-log.
         title: Unicode display title stored in frontmatter and the H1.
-        slug: Optional lowercase ASCII kebab-case filename component.
+        slug: Optional lowercase ASCII kebab-case filename component. It overrides the
+            file name derived from the title under every filename style (without it the
+            name is the title unless the vault sets the `slug` style).
             Experiments and production-logs auto-prefix with YYYY-MM.
         project: REQUIRED for research-note. __PROJECT_KEYS_HINT__
         projects: List of project keys (plural). Optional for insight,
@@ -15002,7 +15020,7 @@ _COMMAND_OUTCOME_VERBS: Mapping[str, operation_entries.OutcomeVerb] = MappingPro
 # nosemgrep: ep-word-set -- the registry's own command names, not a customer vocabulary.
 _PAGE_NAMING_COMMANDS = frozenset({
     "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
-    "capture_source", "ask_memory",
+    "capture_source", "ask_memory", "read_memory",
 })
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})

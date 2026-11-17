@@ -16,9 +16,9 @@
 
 - [x] 2.1 Add `resolve_filename_style(vault_root)` with the documented
       precedence: explicit call argument, `EXOMEM_FILENAME_STYLE`,
-      `_Schema/project-keys.yaml`, built-in default `slug`.
+      `_Schema/project-keys.yaml`, built-in default (`slug` until task 7.1 made it `title`).
 - [x] 2.2 Test each precedence step in isolation, including an unset vault
-      returning `slug`, and an invalid value being refused rather than silently
+      returning the built-in default, and an invalid value being refused rather than silently
       falling back.
 - [x] 2.3 Read the key through `project_keys.py`'s existing reader; do not add a
       second YAML path.
@@ -39,9 +39,9 @@
 
 ## 4. Compatibility
 
-- [x] 4.1 Assert the default path is byte-identical to today: a vault with no
-      configuration derives the same names it derived before this change, over
-      the existing naming test corpus.
+- [x] 4.1 Assert the `slug` path is byte-identical to today: a vault that
+      configures `slug` derives the same names it derived before this change, over
+      the existing naming test corpus. Task 7.1 moved the default to `title`.
 - [x] 4.2 Assert no code path renames, moves, or rewrites an existing file when
       the style changes.
 - [x] 4.3 Assert a wikilink written as a frontmatter title resolves in a vault
@@ -53,10 +53,38 @@
 
 ## 5. Surfaces And Evidence
 
-- [ ] 5.1 Surface the resolved style in `exomem doctor` so a user can see which
+- [x] 5.1 Surface the resolved style in `exomem doctor` so a user can see which
       one a vault is on without reading YAML.
-- [ ] 5.2 Extend the tool-argument documentation for `slug` to say what it now
+- [x] 5.2 Extend the tool-argument documentation for `slug` to say what it now
       overrides.
 - [x] 5.3 Write a real vault under each style and record the resulting `ls`
       side by side in the PR, the way #598 states the problem.
 - [x] 5.4 Validate the OpenSpec change artifacts.
+
+## 6. Entity Filenames
+
+- [x] 6.1 Derive an entity filename through `resolve_filename_slug` and delete the
+      private sanitiser in `link.py`.
+- [x] 6.2 Refuse a destination that the folder already holds under case folding
+      and NFC, by listing the folder; keep the occupant's own spelling in the refusal.
+- [x] 6.3 Keep an entity in a vault that sets no style on `title`, so no entity
+      name changes on upgrade, through an entity-only default that task 7.1 removes.
+- [x] 6.4 Test diacritics, case, reserved characters, NFC and both clash cases
+      against a real vault.
+
+## 7. Default Style
+
+- [x] 7.1 Make `title` the default for new compiled notes and entities, with `slug`
+      as the opt-out, and delete the entity-only default of task 6.3. A Source
+      keeps its dated slug name when no style is set. An experiment and a
+      production log take `title` and keep their date prefix (`date_prefix`).
+- [x] 7.2 Name a title-style page through `corrected_title_name` and `fit_filename`,
+      so that no name breaks a wikilink or passes the byte cap, and warn once when
+      the final name differs from the title (`FILENAME_ADJUSTED`), built where the
+      name is final so that it names a collision number and a removed `|` or `/`.
+- [x] 7.3 Lead a public page read and each resolve-entity candidate with the title,
+      keeping the handle (`id`, `ref`) and the path, which clients read.
+- [x] 7.4 Count the collision number in the 200-byte cap by shortening the title
+      part in `unique_path`, with and without a date prefix.
+- [x] 7.5 Name the page that holds an alias or a title in an `ENTITY_EXISTS`
+      refusal by its title and `id`, with no storage path.

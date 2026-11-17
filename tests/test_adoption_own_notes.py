@@ -677,3 +677,30 @@ def test_own_note_adoption_uses_the_project_home_in_its_frozen_plan(tmp_path: Pa
     assert applied["phase"] == "applied"
     assert applied["outcomes"]["Coll/Journal/rig.md"]["note"]["target_path"] == target
     assert _page(vault, target)[0]["status"] == "draft"
+
+
+@pytest.mark.parametrize(
+    ("style", "names"),
+    [
+        (None, ["Entry.md", "Entry-2.md", "Entry-3.md"]),
+        ("slug", ["entry.md", "entry-2.md", "entry-3.md"]),
+    ],
+    ids=["default-title", "slug-vault"],
+)
+def test_notes_of_one_title_are_planned_and_made_as_a_numbered_family_in_the_vault_style(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, style: str | None, names: list[str]
+) -> None:
+    monkeypatch.delenv("EXOMEM_FILENAME_STYLE", raising=False)
+    if style is not None:
+        monkeypatch.setenv("EXOMEM_FILENAME_STYLE", style)
+    files = {f"Coll/Journal/{name}.md": f"# Entry\n\nText {name}.\n" for name in ("a", "b", "c")}
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=[JOURNAL_RULE])
+
+    targets = [item["note"]["target_path"] for item in planned["plan"]["items"]]
+    assert [Path(target).name for target in targets] == names
+
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert [applied["outcomes"][path]["note"]["target_path"] for path in files] == targets
+    assert sorted(path.name for path in _notes(vault)) == sorted(names)

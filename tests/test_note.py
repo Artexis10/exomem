@@ -6,6 +6,8 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import pytest
+
 from exomem import note as note_module
 from exomem import relation_review
 
@@ -65,7 +67,7 @@ def test_note_renders_links_for_kb_rooted_obsidian_vault(vault: Path) -> None:
     assert "[[Sources/Articles/2026-05-04-best-egcg-supplements]]" in written
     assert "[[Knowledge Base/" not in written
     source_text = (vault / f"{source}.md").read_text(encoding="utf-8")
-    assert "[[Notes/Insights/kb-rooted-obsidian-links]]" in source_text
+    assert f"[[Notes/Insights/{Path(result.path).stem}]]" in source_text
 
 
 def test_note_body_with_no_h1_gets_canonical_title(vault: Path) -> None:
@@ -191,13 +193,16 @@ def test_note_direct_leaf_canonicalizes_reviewed_none_hyphen_alias(vault: Path) 
     artifact = relation_review.review_artifact_path(vault, validation.draft_id)
     assert json.loads(artifact.read_text(encoding="utf-8"))["kind"] == "reviewed_none"
 
-def test_note_slug_truncation_emits_warning(vault: Path) -> None:
-    """A title that exceeds SLUG_MAX_LENGTH should produce a slug_warning."""
+def test_note_slug_truncation_emits_warning(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A title that exceeds SLUG_MAX_LENGTH should produce a slug_warning (in the `slug` style)."""
     very_long_title = (
         "Procedural pushback and evidentiary recording in "
         "opponent-controlled meetings spanning multiple jurisdictions "
         "and overlapping privilege regimes for the discovery period"
     )
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
     result = note_module.note(
         vault,
         content="# title H1\n\n## Claim\n\nBody.\n",
@@ -230,8 +235,13 @@ def test_note_short_title_no_truncation_warning(vault: Path) -> None:
     assert result.slug == Path(result.path).stem
 
 
-def test_note_returns_authoritative_slug_when_title_truncated(vault: Path) -> None:
+def test_note_returns_authoritative_slug_when_title_truncated(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The result carries the slug actually written, so a caller never guesses one.
+
+    The vault keeps the `slug` style: `SLUG_TRUNCATED` is that style's warning. A title-style
+    write reports a cut name as `FILENAME_ADJUSTED` (see test_default_filename_style).
 
     Regression: an agent linked to a note by re-deriving a slug from the title.
     The write had truncated it, so the relation named a slug that resolved to
@@ -243,6 +253,7 @@ def test_note_returns_authoritative_slug_when_title_truncated(vault: Path) -> No
         "opponent-controlled meetings spanning multiple jurisdictions "
         "and overlapping privilege regimes for the discovery period"
     )
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
     result = note_module.note(
         vault,
         content="# title H1\n\n## Claim\n\nBody.\n",

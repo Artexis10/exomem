@@ -29,6 +29,14 @@ Entity before you make a second one. When it returns `undeclared_referents`, cre
 the Entity from the returned route only for a durable referent (see
 [mutation-results](mutation-results.md)).
 
+Write a name as its source spells it. Keep the diacritics, the case and the
+punctuation, and never transliterate or "correct" a name to an ASCII form. The
+page title and the filename keep that spelling. When you infer or transcribe a
+name (from audio, an image or a partial mention), say so in the page body. Do
+not promote that guess to the canonical title. Link to a page by the title the
+tools return. For a name in another script, see
+[Names in another script](writing.md#names-in-another-script).
+
 ### Vocabulary consideration
 
 Before saving durable knowledge, consider whether the material calls for reuse,
