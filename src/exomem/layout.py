@@ -30,7 +30,9 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 import yaml
 
@@ -40,6 +42,7 @@ from .freshness import signature_from_stat
 from .held_fs import vault_name_key
 from .kbdir import Layout, Managed
 from .vault import corrected_title_name, fit_filename
+from .vocabulary import registry as vocabulary_registry
 
 
 class LayoutError(OpError):
@@ -293,8 +296,11 @@ def bind(vault_root: Path) -> Managed:
     reads another vault's layout (an import, a planner) must not move the process's own.
     Raises what `inspect` raises, and binds nothing then.
     """
+    global _SERVED, _AREAS
     managed = managed_of(vault_root)
     kbdir.bind(managed)
+    _SERVED = (managed, Path(vault_root))
+    _AREAS = None
     return managed
 
 
@@ -418,7 +424,13 @@ def load_registry(vault_root: Path) -> Registry:
     return Registry(basis, frozenset(areas), tuple(findings))
 
 
-def translate_path(value: str, target: Layout | str, registry: Registry) -> str:
+class AreaLookup(Protocol):
+    """What `translate_path` asks of the registered areas: whether a name is one."""
+
+    def has_area(self, name: str, *, exact: bool = False) -> bool: ...
+
+
+def translate_path(value: str, target: Layout | str, registry: AreaLookup) -> str:
     """An authored path selector, read in the `target` layout.
 
     In `root`, a leading managed-root segment drops, and `Notes/<Area>/...` reads as
@@ -436,6 +448,115 @@ def translate_path(value: str, target: Layout | str, registry: Registry) -> str:
     if separator and head == note_types.NOTES_FOLDER and registry.has_area(area, exact=True):
         return tail
     return rest
+
+
+# --------------------------------------------------------------------------- #
+# Path selectors read in the served layout
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class Areas:
+    """The registered area names, as `translate_path` asks for them, held for one read of the registries.
+
+    Equal area sets compare equal, so a memo that keys by an `Areas` value keeps its entries
+    while the registries still name the same areas.
+    """
+
+    names: frozenset[str] = frozenset()
+
+    def has_area(self, name: str, *, exact: bool = False) -> bool:
+        return name in self.names if exact else name.casefold() in {item.casefold() for item in self.names}
+
+
+#: The managed root that `bind` made current, with the vault root it was read from. A selector
+#: reads the registries of that vault, so the pair stays together: a managed root that something
+#: else bound (a test or a helper that calls `kbdir.bind` itself) has no vault to read.
+_SERVED: tuple[Managed, Path] | None = None
+#: `(registry generation, vault root, areas)` of the last read.
+_AREAS: tuple[int, Path, Areas] | None = None
+_READING = threading.local()
+
+
+def selector_areas() -> Areas | None:
+    """The areas that an authored path selector reads below `Notes/` in the vault this process serves.
+
+    None in `nested`: a selector is read as written there. In `root` the areas come from the
+    note-type and home registries, read once and read again only when a cached registry changes
+    (`vocabulary_registry.generation`). A caller that keys a memo by a selector's answer keys it by
+    this value.
+
+    Reading the registries is itself an admitted read, and admission evaluates path selectors, so
+    a read that starts here and reaches this function again must not read twice. It gets the areas
+    of the last read, else none. That answer only misses a `Notes/<Area>/` selector, and the page
+    under admission is a registry file that no such selector names.
+    """
+    global _AREAS
+    managed = kbdir.bound()
+    if managed.layout is not Layout.ROOT:
+        return None
+    served = _SERVED
+    if served is None or served[0] is not managed:
+        return Areas()
+    root = served[1]
+    kept = _AREAS
+    generation = vocabulary_registry.generation()
+    if kept is not None and kept[1] == root and kept[0] == generation:
+        return kept[2]
+    if getattr(_READING, "active", False):
+        return kept[2] if kept is not None and kept[1] == root else Areas()
+    _READING.active = True
+    try:
+        areas = _read_areas(root, kept[2] if kept is not None and kept[1] == root else None)
+    finally:
+        _READING.active = False
+    if kept is not None and kept[1] == root and kept[2] == areas:
+        areas = kept[2]  # the same object, so a memo keyed by it stays valid
+    _AREAS = (generation, root, areas)
+    return areas
+
+
+def _read_areas(root: Path, previous: Areas | None) -> Areas:
+    """The areas that the registries of `root` name, read as the owner.
+
+    The areas are shared state that every audience reads through: a caller's own view of the
+    registries must not decide which selector a page falls under. A registry that cannot be read in
+    full keeps the areas of the last read, so a selector that named one of them keeps selecting.
+    """
+    from .governance.principal import owner_local_producer
+
+    try:
+        with owner_local_producer(root, "selector_areas"):
+            registry = load_registry(root)
+    except (vocabulary_registry.RegistryError, vault.PathGuardError, OSError):
+        return previous if previous is not None else Areas()
+    names = registry.areas
+    if registry.findings and previous is not None:
+        names = names | previous.names
+    return Areas(frozenset(names))
+
+
+@lru_cache(maxsize=256)
+def _read_selectors(values: tuple[str, ...], areas: Areas) -> tuple[str, ...]:
+    return tuple(translate_path(value, Layout.ROOT, areas) for value in values)
+
+
+def read_selectors(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Authored path selector values, read in the layout that this process serves.
+
+    Every reader that matches a page by an authored path (a governance `paths` or `refs` value,
+    an `_access.yaml` tier, an instance binding, a topic carrier) reads it through this function,
+    and no file is rewritten. In `nested` the values come back as they are. In `root` each value
+    goes through `translate_path` with the areas of the served vault; the result is cached by
+    the values and the areas, so a policy or registry read translates once, not once per page.
+    """
+    areas = selector_areas()
+    return values if areas is None else _read_selectors(values, areas)
+
+
+def read_selector(value: str) -> str:
+    """One authored path selector value, read in the layout that this process serves."""
+    return read_selectors((value,))[0]
 
 
 # --------------------------------------------------------------------------- #

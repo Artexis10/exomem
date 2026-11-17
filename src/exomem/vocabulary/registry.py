@@ -386,6 +386,24 @@ class _Cached:
 
 _CACHE: dict[tuple[str, str, str, str, str], _Cached] = {}
 _CACHE_LOCK = threading.Lock()
+#: Advances whenever a cached registry changes its content or is dropped, so a reader that derives
+#: something from the registries (the layout's selector areas) knows when to read them again.
+_GENERATION = 0
+
+
+def generation() -> int:
+    """A counter that moves each time the cached registries may have changed."""
+    return _GENERATION
+
+
+def _remember(key: tuple[str, str, str, str, str], entry: _Cached) -> None:
+    """Cache `entry`, and advance `generation` when its content differs from what the key held."""
+    global _GENERATION
+    with _CACHE_LOCK:
+        previous = _CACHE.get(key)
+        _CACHE[key] = entry
+        if previous is None or previous.snapshot.content_hash != entry.snapshot.content_hash:
+            _GENERATION += 1
 
 
 def _cache_key(vault_root: Path, spec: RegistrySpec) -> tuple[str, str, str, str, str]:
@@ -450,8 +468,7 @@ def load(
     if stat is None:
         # A fresh leaf miss reads no override bytes; only shipped data may return.
         snapshot = _pack_only(spec)
-        with _CACHE_LOCK:
-            _CACHE[key] = _Cached(None, snapshot)
+        _remember(key, _Cached(None, snapshot))
         return snapshot
     try:
         root.lstat()
@@ -477,8 +494,7 @@ def load(
     after = _stat_key(path) if text is not None else None
     stat = after if after == stat else None
     guard.recheck(root)
-    with _CACHE_LOCK:
-        _CACHE[key] = _Cached(stat, snapshot)
+    _remember(key, _Cached(stat, snapshot))
     return snapshot
 
 
@@ -504,16 +520,14 @@ def _load_stored(
         page = None if meta is None else view.page(relative)
     if page is None:
         snapshot = _pack_only(spec)
-        with _CACHE_LOCK:
-            _CACHE[key] = _Cached(None, snapshot)
+        _remember(key, _Cached(None, snapshot))
         return snapshot
     text = page.body.decode("utf-8")
     if cached is not None and cached.snapshot.overlay_text == text:
         snapshot = cached.snapshot
     else:
         snapshot = _build(spec, text)
-    with _CACHE_LOCK:
-        _CACHE[key] = _Cached(("store", page.meta.revision, page.meta.sha256), snapshot)
+    _remember(key, _Cached(("store", page.meta.revision, page.meta.sha256), snapshot))
     return snapshot
 
 
@@ -543,7 +557,9 @@ def _pack_only(spec: RegistrySpec) -> Snapshot:
 
 def invalidate(vault_root: Path | None = None, *, path: Path | str | None = None) -> None:
     """Drop cached snapshots: all of them, one vault's, or those reading `path`."""
+    global _GENERATION
     with _CACHE_LOCK:
+        _GENERATION += 1
         if vault_root is None:
             _CACHE.clear()
             return
@@ -565,7 +581,9 @@ def clear_cache() -> None:
 
 def invalidate_registry(name: str) -> None:
     """Drop every vault's cached snapshot of one registry."""
+    global _GENERATION
     with _CACHE_LOCK:
+        _GENERATION += 1
         for cache_key in [key for key in _CACHE if key[1] == name]:
             _CACHE.pop(cache_key, None)
 
