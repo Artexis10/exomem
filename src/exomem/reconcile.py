@@ -591,7 +591,11 @@ def _cleanup_eligible(batch: relation_review.LifecyclePreparedBatch) -> tuple[re
 def _graph_quarantine_members(vault_root: Path) -> tuple[str, ...] | None:
     """The members a graph-lineage quarantine would move aside; `None` when the lineage is not unavailable."""
     from . import epistemic_graph
+    from .vault_store import mode as store_mode
 
+    # A store-mode run skips the graph phase, so it never moves file mode's lineage that a plan would name.
+    if store_mode.store_mode_for_reads(vault_root):
+        return None
     if epistemic_graph.graph_sync.classify_epoch(vault_root).kind != "unavailable":
         return None
     return tuple(
