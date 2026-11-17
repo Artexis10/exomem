@@ -1,8 +1,13 @@
-"""Import-light extension registry for locally extractable artifacts."""
+"""Import-light extension registry for locally extractable artifacts, and the PDF text-layer rule.
+
+The bounded identity read imports this module in a fresh child process for every captured PDF, so
+it stays free of heavy imports.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 AUDIO_EXTS = frozenset(
     {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".oga", ".aac", ".wma", ".opus"}
@@ -55,3 +60,18 @@ KINDS = frozenset(_KIND_BY_EXT.values())
 def media_type_for(path: str | Path) -> str | None:
     """Return the deterministic extraction kind for a filename extension."""
     return _KIND_BY_EXT.get(Path(path).suffix.lower())
+
+
+# A PDF page yielding fewer than this many characters of embedded text is treated as
+# scanned → rasterize + OCR fallback.
+_PDF_OCR_MIN_CHARS = 16
+
+
+def pdf_page_text(page: Any) -> str:
+    """The text a PDF page's own text layer holds, stripped. A short one means a scan."""
+    return page.get_text().strip()
+
+
+def has_text_layer(page_text: str) -> bool:
+    """Whether a page's embedded text is long enough to be read, not rasterized and OCR'd."""
+    return len(page_text) >= _PDF_OCR_MIN_CHARS

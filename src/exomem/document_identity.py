@@ -6,15 +6,24 @@ packet, then `check` compares the DOIs found there with the DOIs in the claimed
 identity": a citing work can print the cited work's title and DOI, so the calling
 agent compares the opening text the reply returns.
 
-`check` is pure. `read_pdf` is the one place that parses an untrusted PDF, and any
-failure there yields an `unavailable` reason instead of failing the capture.
+`check` is pure. `read_pdf` is the one place that parses an untrusted PDF. It runs only in a
+fresh child process that `read_pdf_bounded` caps in memory and time, so a hostile file costs the
+capture at most the deadline, and every failure yields an `unavailable` reason instead of failing
+the capture.
 """
 
 from __future__ import annotations
 
+import atexit
 import datetime as dt
+import importlib.util
 import json
+import os
 import re
+import subprocess
+import sys
+import threading
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,12 +45,29 @@ NO_EXTRACTOR = "no_extractor"
 ENCRYPTED = "encrypted"
 NO_TEXT_LAYER = "no_text_layer"
 UNREADABLE = "unreadable"
+#: Why the bounded read gave up: it outran its deadline, needed more memory than its cap, or its child died.
+TIMEOUT = "timeout"
+TOO_LARGE = "too_large"
+FAILED = "failed"
+_REASONS = frozenset({NO_EXTRACTOR, ENCRYPTED, NO_TEXT_LAYER, UNREADABLE, TIMEOUT, TOO_LARGE, FAILED})
+
+#: The bounds of the child process that reads a PDF. The deadline counts from the request, so the
+#: custody write never waits longer for the check.
+READ_DEADLINE_SECONDS = 3.0
+READ_MEMORY_BYTES = 512 * 1024 * 1024
+#: Each read may hold `READ_MEMORY_BYTES`, so a burst of captures waits for a slot within its own
+#: deadline instead of multiplying that memory.
+READ_SLOTS = 2
+_read_slots = threading.BoundedSemaphore(READ_SLOTS)
 
 #: The pages read at capture. Bounded so the cost is independent of the document's length.
 PAGES_READ = 2
 OPENING_CHARS = 600
 #: A packet larger than this is not parsed: XMP is a few kilobytes, so a larger one is hostile.
 MAX_XMP_CHARS = 1_000_000
+#: The child returns at most this much text per page and per metadata value, so its reply stays
+#: small. A real page holds a few thousand characters.
+MAX_PAGE_CHARS = 200_000
 #: At most this many DOIs and title characters are kept, so a crafted file cannot grow a Source page.
 MAX_DOIS = 20
 MAX_TITLE_CHARS = 300
@@ -248,36 +274,121 @@ def unavailable(reason: str, claimed_url: str | None = None) -> IdentityCheck:
 
 
 def inspect(path: Path, claimed_url: str | None) -> IdentityCheck:
-    """Read the PDF at `path` and check it against `claimed_url`. Never raises."""
-    evidence = read_pdf(path)
+    """Read the PDF at `path` in a bounded child process and check it against `claimed_url`. Never raises."""
+    evidence = read_pdf_bounded(path)
     if evidence.unavailable:
         return unavailable(evidence.unavailable, claimed_url)
     return check(evidence.pages, evidence.metadata_values, claimed_url, pdf_title=evidence.title)
 
 
+def read_pdf_bounded(path: Path) -> PdfEvidence:
+    """`read_pdf` in a child process capped at `READ_MEMORY_BYTES` and answered within `READ_DEADLINE_SECONDS`.
+
+    The deadline, the memory cap and a crash each yield their reason, so a hostile PDF never holds or
+    grows the service. Each child reads one PDF and exits.
+    """
+    if importlib.util.find_spec("fitz") is None:
+        # An install without PyMuPDF pays no process start for a read that cannot happen.
+        return PdfEvidence(unavailable=NO_EXTRACTOR)
+    deadline = time.monotonic() + READ_DEADLINE_SECONDS
+    if not _read_slots.acquire(timeout=READ_DEADLINE_SECONDS):
+        return PdfEvidence(unavailable=TIMEOUT)
+    try:
+        reader = _take_reader()
+        try:
+            output, _ = reader.communicate(os.fsencode(path), timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            reader.kill()
+            reader.communicate()
+            return PdfEvidence(unavailable=TIMEOUT)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return PdfEvidence(unavailable=FAILED)
+    finally:
+        _read_slots.release()
+    return _evidence_from_child(reader.returncode, output)
+
+
+#: One idle reader that has already imported PyMuPDF, about 100 ms of the read's cost, so a capture
+#: pays only the parse. It starts on the first read and is replaced as each read takes it.
+_spare: subprocess.Popen | None = None
+_spare_lock = threading.Lock()
+
+
+def _start_reader() -> subprocess.Popen:
+    # Its stderr is discarded: a damaged file can make MuPDF warn without end.
+    return subprocess.Popen(  # noqa: S603 - fixed interpreter and module; the path arrives on stdin
+        [sys.executable, "-P", "-m", "exomem.document_identity", str(READ_MEMORY_BYTES)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+
+
+def _take_reader() -> subprocess.Popen:
+    """The idle spare reader when it is alive, else a new one; either way the next spare starts now."""
+    global _spare
+    with _spare_lock:
+        reader, _spare = _spare, _start_reader()
+    if reader is None or reader.poll() is not None:
+        reader = _start_reader()
+    return reader
+
+
+@atexit.register
+def _retire_spare() -> None:
+    if _spare is not None and _spare.poll() is None:
+        _spare.kill()
+        _spare.wait()
+
+
+def _evidence_from_child(returncode: int, output: bytes) -> PdfEvidence:
+    """The evidence the child printed, or `failed` when it died or printed something else."""
+    try:
+        value = json.loads(output) if returncode == 0 else None
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        return PdfEvidence(unavailable=FAILED)
+    pages, metadata, title, reason = (value.get(key) for key in ("pages", "metadata_values", "title", "unavailable"))
+    if reason is not None:
+        return PdfEvidence(unavailable=reason if reason in _REASONS else FAILED)
+    if not (
+        isinstance(pages, list) and len(pages) <= PAGES_READ and all(isinstance(page, str) for page in pages)
+        and isinstance(metadata, list) and all(isinstance(entry, str) for entry in metadata)
+        and (title is None or isinstance(title, str))
+    ):
+        return PdfEvidence(unavailable=FAILED)
+    return PdfEvidence(pages=tuple(pages), metadata_values=tuple(metadata), title=title)
+
+
 def read_pdf(path: Path) -> PdfEvidence:
     """The first pages, document information and XMP text of a PDF, or why none could be read.
 
-    This is the only parse of an untrusted PDF in the request path. One boundary turns every
-    failure into a reason, so a hostile or damaged file costs the capture nothing but the check.
+    This is the only parse of an untrusted PDF, and it runs only in the child that
+    `read_pdf_bounded` starts. One boundary turns every failure into a reason.
     """
     try:
         import fitz  # PyMuPDF
     except ImportError:
         return PdfEvidence(unavailable=NO_EXTRACTOR)
-    from . import extract
 
     try:
         with fitz.open(path) as doc:
             if doc.needs_pass:
                 return PdfEvidence(unavailable=ENCRYPTED)
-            pages = tuple(extract.pdf_page_text(doc[number]) for number in range(min(PAGES_READ, doc.page_count)))
-            if not any(extract.has_text_layer(text) for text in pages):
+            pages = tuple(
+                media_types.pdf_page_text(doc[number])[:MAX_PAGE_CHARS]
+                for number in range(min(PAGES_READ, doc.page_count))
+            )
+            if not any(media_types.has_text_layer(text) for text in pages):
                 return PdfEvidence(unavailable=NO_TEXT_LAYER)
-            information = {name: value for name, value in (doc.metadata or {}).items() if isinstance(value, str)}
-            packet = doc.get_xml_metadata() or ""
-    except Exception:  # noqa: BLE001 - PyMuPDF raises many types for damaged input; each means unreadable
-        return PdfEvidence(unavailable=UNREADABLE)
+            information = {
+                name: value[:MAX_PAGE_CHARS] for name, value in (doc.metadata or {}).items() if isinstance(value, str)
+            }
+            try:
+                packet = doc.get_xml_metadata() or ""
+            except Exception:  # noqa: BLE001 - an XMP stream that inflates past the memory cap is hostile: no packet
+                packet = ""
+    except Exception as error:  # noqa: BLE001 - PyMuPDF raises many types for damaged input; each means unreadable
+        return PdfEvidence(unavailable=TOO_LARGE if _out_of_memory(error, fitz) else UNREADABLE)
     # A title is untrusted text that the Source page stores in frontmatter: keep printable characters only.
     title = "".join(ch for ch in " ".join((information.get("title") or "").split()) if ch.isprintable())
     title = title[:MAX_TITLE_CHARS].strip() or None
@@ -286,6 +397,22 @@ def read_pdf(path: Path) -> PdfEvidence:
         metadata_values=(*information.values(), *xmp_values(packet)),
         title=title,
     )
+
+
+def _out_of_memory(error: Exception, fitz: Any) -> bool:
+    """Whether a read failed because an allocation hit the child's memory cap.
+
+    MuPDF reports a failed allocation as its `FZ_ERROR_SYSTEM` code. Some PyMuPDF calls re-raise it as a
+    plain RuntimeError whose text leads with that code, so the code token is read from the library's
+    fixed `code=<n>:` rendering; nothing here interprets a message's words.
+    """
+    if isinstance(error, MemoryError):
+        return True
+    code = getattr(error, "m_code", None)
+    if code is None:
+        prefix = str(error).split(":", 1)[0]
+        code = prefix.removeprefix("code=") if prefix.startswith("code=") else None
+    return str(code) == str(fitz.mupdf.FZ_ERROR_SYSTEM)
 
 
 def xmp_values(packet: str) -> tuple[str, ...]:
@@ -309,3 +436,37 @@ def xmp_values(packet: str) -> tuple[str, ...]:
             values.append(node.text.strip())
         values.extend(value for value in node.attrib.values() if value.strip())
     return tuple(values)
+
+
+def _child(argv: Sequence[str]) -> int:
+    """A reader: cap the data segment, import PyMuPDF, then read the one PDF named on stdin and print JSON."""
+    from . import media_brakes
+
+    try:
+        media_brakes.cap_data_segment(int(argv[0]))
+    except ImportError:
+        pass  # No RLIMIT on this platform (Windows): the parent's deadline still bounds the read.
+    try:
+        import fitz  # noqa: F401 - imported before the request, so a spare reader answers at once
+    except ImportError:
+        pass
+    request = sys.stdin.buffer.read()
+    if not request:
+        return 0  # The parent exited before it needed this spare.
+    try:
+        evidence = read_pdf(Path(os.fsdecode(request)))
+    except MemoryError:
+        evidence = PdfEvidence(unavailable=TOO_LARGE)
+    payload = {
+        "pages": list(evidence.pages), "metadata_values": list(evidence.metadata_values),
+        "title": evidence.title, "unavailable": evidence.unavailable,
+    }
+    # ASCII escapes carry any code point, a lone surrogate included, through the pipe unchanged.
+    sys.stdout.buffer.write(json.dumps(payload, ensure_ascii=True).encode("ascii"))
+    sys.stdout.buffer.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    # The reply is written and flushed; skipping interpreter teardown saves the reader's exit a few milliseconds.
+    os._exit(_child(sys.argv[1:]))

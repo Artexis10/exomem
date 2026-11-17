@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+import time
 import uuid
 from pathlib import Path
 
 import pytest
 import yaml
-from _identity_pdf import make_pdf
+from _identity_pdf import make_pdf, nested_forms_pdf, text_bomb_pdf
 
-from exomem import client_artifacts, commands, document_forms, mutation_terminal, source_corrections
+from exomem import (
+    client_artifacts,
+    commands,
+    document_forms,
+    document_identity,
+    mutation_terminal,
+    source_corrections,
+)
 from exomem import schema as schema_module
 
 CLAIM = "https://doi.org/10.5555/bbb"
@@ -208,8 +216,10 @@ def _write(path: Path, payload: bytes) -> Path:
         (lambda path: make_pdf(path, [""]), "unavailable", "no_text_layer"),
         (lambda path: make_pdf(path, ["A study of harbour lanterns."], password="secret"), "unavailable", "encrypted"),
         (lambda path: _write(path, b"%PDF-1.7 not a pdf at all"), "unavailable", "unreadable"),
+        # Two million positioned glyph runs in a 400 KB file: about 540 MB to extract, past the read's cap.
+        (lambda path: text_bomb_pdf(path, runs=2_000_000), "unavailable", "too_large"),
     ],
-    ids=["no-text-layer", "encrypted", "malformed"],
+    ids=["no-text-layer", "encrypted", "malformed", "text-past-the-memory-cap"],
 )
 def test_an_unreadable_pdf_is_still_stored_with_the_reason(vault, source_schema, tmp_path, monkeypatch, owner_scope, builder, state, reason) -> None:
     _stage(monkeypatch, tmp_path, builder(tmp_path / "paper.pdf"))
@@ -220,6 +230,21 @@ def test_an_unreadable_pdf_is_still_stored_with_the_reason(vault, source_schema,
     assert (row["identity"]["state"], row["identity"]["reason"]) == (state, reason)
     assert (vault / row["stored_path"]).is_file()
     assert _frontmatter(vault, row["page"])["identity_check"]["reason"] == reason
+
+
+def test_a_pdf_that_outruns_the_read_deadline_is_stored_with_the_reason_within_the_deadline(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:
+    # Seven levels of form XObjects, each drawing the next ten times: ten million draws from a 4 KB file.
+    _stage(monkeypatch, tmp_path, nested_forms_pdf(tmp_path / "paper.pdf", depth=7, fanout=10))
+
+    started = time.monotonic()
+    row = _save_pdf(vault, source_schema, url=CLAIM)["files"][0]
+    elapsed = time.monotonic() - started
+
+    assert row["outcome"] == "stored"
+    assert (row["identity"]["state"], row["identity"]["reason"]) == ("unavailable", "timeout")
+    assert (vault / row["stored_path"]).is_file()
+    # The rest of the capture takes well under two seconds; reading the page to its end takes about ten.
+    assert elapsed < document_identity.READ_DEADLINE_SECONDS + 2
 
 
 def test_a_url_without_a_doi_makes_no_claim_and_asks_nothing_of_the_agent(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:

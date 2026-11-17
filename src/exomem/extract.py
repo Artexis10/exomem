@@ -49,7 +49,7 @@ import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from . import accel, asr_runtime, diarizer_sidecar, runtime_resources
 from .asr_facts import (
@@ -64,6 +64,10 @@ from .asr_facts import (
 )
 from .media_types import (
     DOC_READERS as _DOC_READERS,
+)
+from .media_types import (
+    has_text_layer,
+    pdf_page_text,
 )
 from .media_types import (
     media_type_for as _registry_media_type_for,
@@ -100,9 +104,6 @@ def _semantic_segments_module():
 # tiny native parsers — no dependency. Only formats the vault actually holds.
 
 WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
-# A PDF page yielding fewer than this many characters of embedded text is treated as
-# scanned → rasterize + OCR fallback.
-_PDF_OCR_MIN_CHARS = 16
 
 
 #: What `## Extracted text` holds when an extraction found no text at all.
@@ -1490,16 +1491,6 @@ def _maybe_image_tags(ocr_text: str, path: Path, engine: str) -> tuple[str, str]
         return ocr_text, engine
     text = f"{ocr_text}\n\n{line}" if ocr_text else line
     return text, f"{engine}+tags"
-
-
-def pdf_page_text(page: Any) -> str:
-    """The text a PDF page's own text layer holds, stripped. A short one means a scan."""
-    return page.get_text().strip()
-
-
-def has_text_layer(page_text: str) -> bool:
-    """Whether a page's embedded text is long enough to be read, not rasterized and OCR'd."""
-    return len(page_text) >= _PDF_OCR_MIN_CHARS
 
 
 def page_marker(number: int) -> str:
