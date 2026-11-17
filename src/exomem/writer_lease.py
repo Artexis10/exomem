@@ -6006,7 +6006,9 @@ class LeaseManager:
         capture_attempt_operation = capture_attempt_control or (
             command.name == "capture_source" and kwargs.get("capture_reservation") is not None
         )
-        bypass_generic_replay = authorization_issuance or capture_attempt_operation
+        # Erasure binds each operation_id to one target and reports fresh progress on every retry.
+        bypass_generic_replay = (authorization_issuance or capture_attempt_operation
+                                 or command.name == "erase_captured_source")
         capture_attempt_wire = None
         if capture_attempt_operation:
             from . import capture_attempts

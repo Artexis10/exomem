@@ -153,6 +153,32 @@ class NativeCopyCustody:
             outcome="no_effect" if outcome == "not_written" else "retired",
         )
 
+    def erase(self, copy: generated_fragment_store.Copy) -> Literal["retired", "no_effect", "unknown"]:
+        """Close one copy of a retired Source through its exact native allocation, never by path or bytes."""
+        if copy.owner.owner != source_native_custody.OWNER or copy.origin_ledger != self.ledger_id:
+            return "unknown"
+        bound = self.native.bound(copy.owner.version)
+        if bound is False and copy.outcome == "reserved":
+            # A binding precedes any byte, so this ledger never wrote the reserved copy.
+            self.store.ack_copy(copy.copy_id, owner=copy.owner, outcome="no_effect")
+            return "no_effect"
+        if bound is not True:
+            return "unknown"
+        try:
+            allocation = CopyAllocation(copy, self.native.get(copy.owner.version))
+            self._check_allocation(allocation)
+        except (ValueError, source_native_custody.NativeCustodyUnavailable):
+            return "unknown"
+        if allocation.native.destination_relative is not None and self.native.retire_installed(allocation.native):
+            self.store.ack_copy(copy.copy_id, owner=copy.owner, outcome="retired")
+            return "retired"
+        observed = self.native.cleanup(copy.owner.version)
+        if observed.state != "closed" or observed.outcome not in ("not_written", "removed"):
+            return "unknown"
+        outcome = "no_effect" if observed.outcome == "not_written" else "retired"
+        self.store.ack_copy(copy.copy_id, owner=copy.owner, outcome=outcome)
+        return outcome
+
     def stage_artifact(self, image: generated_fragment_store.ImageHeader, *, logical_path: Path,
                        temporary_parent: Path, check: Callable[[], None] | None = None) -> vault._ArtifactCustody:
         copies: dict[str, CopyAllocation] = {}

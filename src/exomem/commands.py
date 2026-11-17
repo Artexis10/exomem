@@ -14540,6 +14540,19 @@ def op_inspect_capture_erasure_policy(
     return inspect_policy(vault_root, system=system)
 
 
+def op_erase_captured_source(
+    vault_root: Path,
+    operation_id: Annotated[str, Field(min_length=1, max_length=128)],
+    source_identity: source_capture.SourceIdentity,
+    expected_source_ref: str,
+    expected_source_hash: str,
+) -> dict:
+    """Advance retirement of one captured Source incarnation and report each component's progress."""
+    from .source_eraser import erase
+
+    return erase(vault_root, operation_id, source_identity, expected_source_ref, expected_source_hash)
+
+
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
@@ -15144,6 +15157,12 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC, (),
         {"public_title": "Inspect Source erasure policy", "surface": "service", "actions": (), "first_run_safe": True,
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure_policy",)}},
+    ),
+    (
+        "erase_captured_source", op_erase_captured_source, 1, True, False, None,
+        _MCRC, (),
+        {"public_title": "Erase a captured Source", "surface": "service", "actions": ("update",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure",)}},
     ),
     (
         "coordination_status",

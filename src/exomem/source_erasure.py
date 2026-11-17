@@ -45,5 +45,8 @@ def inspect_policy(root: Path, *, system: str) -> dict:
     except OpError as error:
         return {"state": "unknown", "enabled": None, "policy_revision": None,
                 "failure": {"code": error.code}}
-    return {"state": "observed", "enabled": system in policy.enabled_systems,
-            "policy_revision": policy.revision(), "failure": None}
+    from .vault_store import mode
+
+    # Store-mode erasure belongs to a later change, so a store vault never advertises it as enabled.
+    enabled = system in policy.enabled_systems and not mode.store_mode_active(root)
+    return {"state": "observed", "enabled": enabled, "policy_revision": policy.revision(), "failure": None}

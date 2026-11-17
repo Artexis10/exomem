@@ -136,6 +136,47 @@ Current admitted matrices can serve resident scoring. Cold, lagging or capacity-
 Reader-held matrices retain their charge after replacement or eviction.
 The [passage reference](../benchmarks/passage-evidence/README.md) records the measured configuration and its limits.
 
+## Erasure
+
+A service caller erases one captured Source incarnation with `manage_memory` operation `sources.erase`.
+Agents do not see this operation. It runs only in the service tier and requires the `captured_source_erasure` capability.
+The arguments are `operation_id`, `source_identity`, `expected_source_ref` and `expected_source_hash`.
+
+Exomem erases per incarnation, not per identity. Each revision and each capture after an earlier erase is its own incarnation.
+To erase everything for one record, do these steps:
+
+1. List the record with `inspect_memory` operation `sources.inventory`, giving `system` and `record_id`.
+2. For each listed reference, call `sources.erase` with a fresh `operation_id`, the reference and its hash.
+3. Repeat each call with the same `operation_id` until its `status` is `complete`.
+4. List the record again. The result is an empty page with complete observations.
+
+Each call does a bounded amount of work and reports `pending`, `unknown`, `failed` or `complete`.
+The response names each component: `canonical`, `copies`, `attempts`, `derived`, `caches` and `host_logs`.
+`complete` means every component acknowledged removal. A partial or uncertain result stays `pending` or `unknown`.
+After `complete`, a repeat call, also with a new `operation_id`, returns `complete` from a content-free completion record.
+A later capture with the same identity creates a new Source reference.
+
+The call refuses with a code that names what to change:
+
+- `SOURCE_ERASURE_DISABLED`: the host policy does not enable the identity system.
+- `SOURCE_ERASURE_MODE_UNSUPPORTED`: the vault runs in store mode. Store-mode erasure is not available yet.
+- `SOURCE_ERASURE_NOT_ENROLLED`: the Source was captured outside erasure custody.
+- `SOURCE_ERASURE_STALE` or `SOURCE_ERASURE_TARGET_MISMATCH`: the incarnation changed. Read the inventory again.
+- `SOURCE_ERASURE_DEPENDENT`: another page cites or links the Source. Remove that dependency first.
+- `SOURCE_ERASURE_OPERATION_CONFLICT`: the `operation_id` already targets another incarnation.
+
+Before its cutoff, the call answers `unknown` with a `failure.code` when Exomem cannot prove the erase is safe.
+The codes are `custody_missing`, `coverage_incomplete`, `dependency_uncertain`, `canonical_page_unavailable` and `inbound_references_unavailable`.
+Without content-private logging, `host_logs` stays `unknown`, because process logs can name the page.
+
+`delete_file`, `move_file` and `delete_directory` refuse an enrolled Source with `SOURCE_ERASE_REQUIRED`.
+A trashed or moved copy would sit outside the copy census that lets an erase report `complete`.
+
+The host erasure policy is off by default.
+A local host enables it with `EXOMEM_SOURCE_ERASURE_POLICY`, for example `{"enabled_systems": ["archive"]}`.
+On Cloud, the operator adds the cell to the platform chart value `cellctl.sourceErasureCellIds` when its owner enables erasure.
+cellctl then renders the policy into that cell only.
+
 ## Cell discovery
 
 A Cloud cell exposes `GET /.well-known/exomem-cell` on its own listener without requiring a credential or tenant content.

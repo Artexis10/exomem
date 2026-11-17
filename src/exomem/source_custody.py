@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -45,6 +46,8 @@ class RetirementFence(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     operation_id: _Opaque
     source_hash: _Hash
+    # The content-free completion record lets a later operation answer without repeating cleanup.
+    complete: bool = False
 
 
 class OriginalBinding(BaseModel):
@@ -329,6 +332,30 @@ def issue_birth(root: Path, reference: str, allocate: Callable[[], ProducerBirth
 
 #: Lifecycle operations refuse an enrolled Source with this code and name its one removal operation.
 ERASE_REQUIRED = ("SOURCE_ERASE_REQUIRED", "this captured Source is held for erasure; remove it with sources.erase")
+
+
+_GENERATIONS: dict[str, int] = {}
+_GENERATIONS_LOCK = threading.Lock()
+
+
+def retirement_generation(root: Path) -> int:
+    """A per-vault counter that reusable caches capture before reading and check before inserting."""
+    with _GENERATIONS_LOCK:
+        return _GENERATIONS.get(str(Path(root).resolve()), 0)
+
+
+def retire(root: Path, reference: str, fence: RetirementFence) -> None:
+    """Persist the cutoff under the actual writer boundary, then invalidate reusable cache publication."""
+    _boundary(root)
+    manifest, guard = read_manifest(root, reference)
+    if manifest is None:
+        raise OpError("SOURCE_CUSTODY_UNAVAILABLE", "Source allocation custody is unavailable")
+    if manifest.retirement is None or manifest.retirement.complete != fence.complete:
+        updated = Manifest.model_validate({**manifest.model_dump(), "retirement": fence.model_dump()})
+        publish(root, PlannedCustody((_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES),)))
+    with _GENERATIONS_LOCK:
+        key = str(Path(root).resolve())
+        _GENERATIONS[key] = _GENERATIONS.get(key, 0) + 1
 
 
 def enrolled(root: Path, markdown: str) -> bool:
