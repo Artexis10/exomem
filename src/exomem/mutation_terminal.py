@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
-from . import capabilities, cloud_cell, operation_entries, page_ids, relation_registry
+from . import capabilities, cloud_cell, operation_entries, page_ids, relation_registry, source_result_attribution
 from . import curation as curation_module
 from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
@@ -281,7 +281,9 @@ def _operation_id(result: Any) -> str | None:
 
 def _without_graph_rebuild_handoff(result: Any) -> Any:
     if isinstance(result, Mapping) and "_graph_rebuild_handoff" in result:
-        return {key: value for key, value in result.items() if key != "_graph_rebuild_handoff"}
+        return source_result_attribution.carry(result, {
+            key: value for key, value in result.items() if key != "_graph_rebuild_handoff"
+        })
     return result
 
 
@@ -325,6 +327,20 @@ def _warning_count(result: Any) -> int:
     return 0
 
 
+def _carry_source_terminal(leaf: Any, terminal: dict[str, Any]) -> None:
+    if not source_result_attribution.active():
+        return
+    projection = _path_projection(leaf)
+    source_result_attribution.carry(projection, terminal)
+    artifact_receipt = _artifact_receipt_projection(leaf)
+    if artifact_receipt:
+        refs = source_result_attribution.recipe(artifact_receipt).sources
+    else:
+        refs = source_result_attribution.recipe(_warning_texts(leaf, has_artifact_receipt=False)).sources
+    if refs:
+        source_result_attribution.bind(terminal, refs, paths=(("warnings_count",),), action="count")
+
+
 def _warning_texts(result: Any, *, has_artifact_receipt: bool) -> list[str]:
     """The warnings behind ``warnings_count``, bounded for the compact envelope.
 
@@ -358,7 +374,11 @@ def _warning_texts(result: Any, *, has_artifact_receipt: bool) -> list[str]:
             candidates = [source_warnings]
         else:
             return []
-    return _bounded_warnings(candidates)
+    out = _bounded_warnings(candidates)
+    owner = result if result.get("warnings") else result.get("source")
+    if isinstance(owner, Mapping):
+        source_result_attribution.carry(owner, out, moves={("warnings",): ()})
+    return out
 
 
 def _bounded_warnings(candidates: Sequence[Any]) -> list[str]:
@@ -377,15 +397,20 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if artifact_receipt:
         # Only what this call stored. A duplicate names a path an earlier call
         # committed; reporting it here would claim this mutation wrote it.
-        paths = [
-            item["stored_path"]
-            for item in artifact_receipt["files"]
-            if _artifact_state(item) == "stored" and "stored_path" in item
-        ]
+        stored = [(index, item) for index, item in enumerate(artifact_receipt["files"])
+                  if _artifact_state(item) == "stored" and "stored_path" in item]
+        paths = [item["stored_path"] for _index, item in stored]
         if len(paths) == 1:
-            return {"path": paths[0]}
+            return source_result_attribution.carry(artifact_receipt, {"path": paths[0]}, moves={
+                ("files", stored[0][0]): ("path",),
+                ("files", stored[0][0], "stored_path"): ("path",),
+            })
         if paths:
-            return {"paths": paths}
+            moves = {}
+            for ordinal, (index, _item) in enumerate(stored):
+                moves[("files", index)] = ("paths", ordinal)
+                moves[("files", index, "stored_path")] = ("paths", ordinal)
+            return source_result_attribution.carry(artifact_receipt, {"paths": paths}, moves=moves)
     path = result.get("path")
     if isinstance(path, str):
         return {"path": path}
@@ -410,7 +435,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
             return {"paths": list(written)}
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
-        return {"path": source["path"]}
+        return source_result_attribution.carry(source, {"path": source["path"]}, moves={("path",): ("path",)})
     manifest = result.get("manifest")
     if isinstance(manifest, Mapping) and isinstance(manifest.get("path"), str):
         return {"path": manifest["path"]}
@@ -632,6 +657,7 @@ def settled_media_terminal(
     terminal.update(_path_projection(leaf_result))
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -646,7 +672,7 @@ def is_reused_capture(leaf_result: Any) -> bool:
 
 def as_reused(result: Mapping[str, Any]) -> dict[str, Any]:
     """`result` marked as a reuse that wrote nothing, which `is_reused_capture` reads: it settles and never commits."""
-    return {**result, "mutated": False, "capture_outcome": "reused"}
+    return source_result_attribution.carry(result, {**result, "mutated": False, "capture_outcome": "reused"})
 
 
 def reused_capture_terminal(
@@ -679,6 +705,7 @@ def reused_capture_terminal(
     terminal.update(_path_projection(leaf_result))
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -986,11 +1013,11 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 projected_summary["already_stored"] = raw_already_stored
             if raw_omitted is not None:
                 projected_summary["omitted"] = raw_omitted
-            return {"files": projected, "summary": projected_summary}
+            return source_result_attribution.carry(result, {"files": projected, "summary": projected_summary})
         recomputed = {"stored": counts["stored"], "failed": counts["failed"]}
         if counts["already_stored"] or raw_already_stored is not None:
             recomputed["already_stored"] = counts["already_stored"]
-        return {"files": projected, "summary": recomputed}
+        return source_result_attribution.carry(result, {"files": projected, "summary": recomputed})
     projected_summary: dict[str, int] = {}
     for outcome in ("stored", "already_stored", "replayed", "failed", "unselected"):
         value = summary.get(outcome)
@@ -1004,7 +1031,7 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         if not nonnegative_int(omitted):
             return {}
         projected_summary["omitted"] = omitted
-    return {"files": projected, "summary": projected_summary}
+    return source_result_attribution.carry(result, {"files": projected, "summary": projected_summary})
 
 
 #: Bounds on the advisory structural suggestion compact may carry. Same posture as
@@ -1089,7 +1116,7 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
             continue
         projected = _structure_suggestion_kind_projection(value)
         if projected is not None:
-            return projected
+            return source_result_attribution.carry(container, projected, moves={("structure_suggestion",): ()})
     return None
 
 
@@ -1605,11 +1632,13 @@ def _without_leaf_advisory(result: Any, advisory_key: str) -> Any:
             and isinstance(value, Mapping)
             and (advisory_key in value)
         ):
-            stripped[key] = {inner: value[inner] for inner in value if inner != advisory_key}
+            stripped[key] = source_result_attribution.carry(value, {
+                inner: value[inner] for inner in value if inner != advisory_key
+            })
             changed = True
             continue
         stripped[key] = value
-    return stripped if changed else result
+    return source_result_attribution.carry(result, stripped) if changed else result
 
 
 def _without_advisory_due_state(result: Any) -> Any:
@@ -1668,7 +1697,8 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
         if not isinstance(routes, (list, tuple)):
             return out
         paths: list[str] = []
-        for route in routes[:source_coverage.COMPILATION_SOURCES_LISTED]:
+        ordinals: list[int] = []
+        for index, route in enumerate(routes[:source_coverage.COMPILATION_SOURCES_LISTED]):
             args = route.get("args") if isinstance(route, Mapping) else None
             path = args.get("path") if isinstance(args, Mapping) else None
             if (
@@ -1677,10 +1707,16 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
                 and isinstance(path, str) and 0 < len(path) <= source_coverage.COMPILATION_PATH_CHARS
             ):
                 paths.append(path)
+                ordinals.append(index)
         out = source_coverage.compilation_routes(paths)
         if block.get("truncated") is True or len(paths) < len(routes):
             out["truncated"] = True
-        return out
+        moves = {}
+        for ordinal, index in enumerate(ordinals):
+            # Both route arrays use the producer's same Source order; rejected rows change the output ordinal.
+            moves[("full_source_reads", index)] = ("full_source_reads", ordinal)
+            moves[("preparation_route", "args", "sources", index)] = ("preparation_route", "args", "sources", ordinal)
+        return source_result_attribution.carry(block, out, moves=moves)
     return None
 
 
@@ -1854,15 +1890,15 @@ def _without_relation_advisory_context(result: Any) -> Any:
             changed = True
             continue
         if isinstance(value, Mapping) and "_relation_advisory_context" in value:
-            stripped[key] = {
+            stripped[key] = source_result_attribution.carry(value, {
                 inner: value[inner]
                 for inner in value
                 if inner != "_relation_advisory_context"
-            }
+            })
             changed = True
             continue
         stripped[key] = value
-    return stripped if changed else result
+    return source_result_attribution.carry(result, stripped) if changed else result
 
 
 #: A write's vocabulary receipt: at most this many lines of at most this many characters.
@@ -1932,6 +1968,7 @@ def committed_terminal(
     )
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -2000,7 +2037,7 @@ def with_fast_acknowledgement(
     ):
         raise ValueError("applicable advisory acknowledgement requires one stable result ref")
 
-    frozen = dict(terminal)
+    frozen = source_result_attribution.carry(terminal, dict(terminal))
     frozen["derived_sync"] = derived_sync
     if components:
         frozen["derived_sync_components"] = list(components)
@@ -2036,7 +2073,7 @@ def as_replay(terminal: Any) -> Any:
     """
     if not isinstance(terminal, Mapping) or terminal.get("_terminal") != _TERMINAL_MARKER:
         return terminal
-    return {**terminal, "replayed": True}
+    return source_result_attribution.carry(terminal, {**terminal, "replayed": True})
 
 
 def replayed_terminal(
@@ -2079,6 +2116,7 @@ def replayed_terminal(
     )
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -2481,6 +2519,7 @@ def project_terminal(
             # The agent tells the person how many items the run left unstored because those bytes were already stored.
             compact["skipped_duplicates"] = apply_result["skipped_duplicates"]
     compact.update(artifact_receipt)
+    source_result_attribution.carry(artifact_receipt, compact)
     if isinstance(leaf, Mapping) and leaf.get("state") == "already_stored":
         # A file handed over alone has no row; its outcome names the earlier copy and what it did not take.
         compact.update(_duplicate_outcome_projection(leaf) or {})
@@ -2611,6 +2650,24 @@ def project_terminal(
     warnings = _warning_texts(leaf, has_artifact_receipt=bool(artifact_receipt))
     if warnings:
         compact["warnings"] = warnings
+    compact.pop("source_projection", None)
+    for container in (result, leaf):
+        marker = container.get("source_projection") if isinstance(container, Mapping) else None
+        # Source retirement owns this content-free result marker protocol.
+        if (
+            isinstance(marker, Mapping)
+            and set(marker) == {"state", "reason"}  # nosemgrep: ep-word-set -- the fixed Source-result marker fields.
+            and marker.get("state") in ("partial", "unavailable")
+            and marker.get("reason") == "source_retired"
+        ):
+            compact["source_projection"] = {"state": marker["state"], "reason": marker["reason"]}
+            break
+    source_result_attribution.carry(result, compact)
+    source_result_attribution.carry(leaf, compact)
+    if "user_summary" in compact:
+        refs = source_result_attribution.recipe(artifact_receipt or _path_projection(leaf)).sources
+        if refs:
+            source_result_attribution.bind(compact, refs, paths=(("user_summary",),))
     reply, operational = _agent_reply(
         compact,
         result,
@@ -2629,7 +2686,7 @@ def project_terminal(
                 ),
             }
         elif isinstance(leaf, Mapping):
-            reply["diagnostics"] = {"operational": operational, **leaf}
+            reply["diagnostics"] = source_result_attribution.carry(leaf, {"operational": operational, **leaf})
         else:
             reply["diagnostics"] = {"operational": operational, "leaf_result": leaf}
         if capture_sweep is not None:
@@ -2702,10 +2759,12 @@ def _agent_reply(
     source = reply.get("source")
     if "capture_outcome" in reply and isinstance(source, Mapping) and "path" in source:
         # One identifier for the stored source: the path, which every read accepts.
-        reply["source"] = {"path": source["path"]}
+        reply["source"] = source_result_attribution.carry(source, {"path": source["path"]})
     if not reply:
         # A committed write that has no outcome verb and no receipt would otherwise answer `{}`.
         reply["user_summary"] = "Done."
+    source_result_attribution.carry(wide, reply)
+    source_result_attribution.carry(wide, operational)
     return reply, operational
 
 

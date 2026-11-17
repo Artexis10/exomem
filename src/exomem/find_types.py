@@ -228,9 +228,10 @@ class ParsedPage:
         sidecar keeps the OCR words under the confidence floor in a section of its
         own, which no search field reads.
         """
-        from . import provenance
+        from . import passage_evidence, provenance
 
         body = without_low_confidence_ocr(self.body, self.frontmatter)
+        body = passage_evidence.without_passage_keys(body, self.frontmatter, self.vault_root)
         return provenance.withheld_prose(body, owner_path=self.rel_path)
 
     @cached_property
