@@ -16,7 +16,7 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, vault  # noqa: F401
 from test_vault_store_read_write import put, stored, writer  # noqa: F401
 
-from exomem import commands, freshness, obsidian_links, reserved_paths
+from exomem import commands, freshness, obsidian_links, reserved_paths, semantic_contract
 from exomem import find as find_module
 from exomem import schema as schema_module
 from exomem import vault as vault_module
@@ -204,3 +204,39 @@ def test_a_writer_that_files_a_homonym_in_the_trash_changes_the_next_link_and_no
     assert reads_while_kept == 1
     assert len(walks) == 2
 
+
+def test_a_link_that_only_the_obsidian_rule_resolves_is_resolved_alike_by_the_contract_and_the_writer(
+    root_vault: Path,
+) -> None:
+    """A trailing-path link names no key an earlier step of the resolver holds, and Obsidian resolves it.
+
+    The semantic contract judges the same link against its corpus snapshot, so it must reach the same page.
+    """
+    live = "---\ntitle: {title}\ntype: {kind}\nstatus: active\n---\n\n{body}"
+    target = "Insights/Sub/pump-seal.md"
+    _write_markdown(root_vault, target, live.format(title="Pump seal", kind="insight", body=UNIT))
+    _write_markdown(root_vault, "Patterns/pump-seal.md", live.format(title="Seal pattern", kind="pattern", body=UNIT))
+    note = "Insights/summary.md"
+    _write_markdown(
+        root_vault, note, live.format(title="Summary", kind="insight", body=f"{UNIT}\n[[Sub/pump-seal]] [[Elsewhere/pump-seal]]\n")
+    )
+
+    resolver = vault_module.WikilinkResolver(root_vault)
+    corpus = semantic_contract.build_corpus_context(root_vault)
+    view = semantic_contract._WikilinkResolverView(
+        full_paths=corpus.resolver_full_paths,
+        kb_stripped=corpus.resolver_kb_stripped,
+        stems=corpus.resolver_stems,
+        titles=corpus.resolver_titles,
+        candidates_by_key=corpus.resolver_candidates_by_key,
+        rule_cache=corpus.obsidian_rule,
+    )
+
+    assert semantic_contract._resolve_target(root_vault, "Sub/pump-seal", resolver, None)[:2] == ("resolved", target)
+    assert semantic_contract._resolve_target(root_vault, "Sub/pump-seal", view, None)[:2] == ("resolved", target)  # type: ignore[arg-type]
+    assert semantic_contract._resolve_target(root_vault, "Elsewhere/pump-seal", view, None)[0] == "unresolved"  # type: ignore[arg-type]
+    reference = semantic_contract._resolve_reference_wikilink_from_context(corpus, "Sub/pump-seal")
+    assert (reference.status, reference.path) == ("resolved", target)
+    assert semantic_contract._resolve_reference_wikilink_from_context(corpus, "Elsewhere/pump-seal").status == "unresolved"
+    assert semantic_contract._qualifying_body_wikilink_targets(corpus.pages[note], corpus) == (target,)
+    assert len(corpus.obsidian_rule) == 1, "the contract builds Obsidian's index once per snapshot"

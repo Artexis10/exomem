@@ -36,6 +36,7 @@ from . import (
     memory_schema,
     metrics,
     note_types,
+    obsidian_links,
     relation_endpoints,
     relation_registry,
     request_budget,
@@ -1258,6 +1259,8 @@ class SemanticCorpusContext:
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
     writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
+    #: Obsidian's rule over this snapshot's pages, built on the first link that no earlier step resolves.
+    obsidian_rule: list = field(default_factory=list, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -2130,7 +2133,7 @@ def _resolve_reference_wikilink_from_context(
         # by `managed_join(cleaned)` in `full_paths`, which the second candidate above
         # already tried. Testing `kb_stripped` instead would let a hidden vault-root page
         # with the same name decide the result.
-        return ReferenceWikilinkResolution("unresolved")
+        return _obsidian_reference(context, cleaned, visible)
 
     matches = {
         candidate.path for candidate in vault.wikilink_candidates(
@@ -2148,8 +2151,23 @@ def _resolve_reference_wikilink_from_context(
     if len(matches) > 1:
         return ReferenceWikilinkResolution("ambiguous")
     if not matches:
-        return ReferenceWikilinkResolution("unresolved")
+        return _obsidian_reference(context, cleaned, visible)
     return ReferenceWikilinkResolution("resolved", next(iter(matches)))
+
+
+def _obsidian_reference(
+    context: SemanticCorpusContext, cleaned: str, visible: Callable[[str], bool] | None
+) -> ReferenceWikilinkResolution:
+    """Step 6 of the resolver's order for a link that no earlier step resolved: the writer's last step."""
+    found = vault.obsidian_candidate(
+        _obsidian_rule(context.obsidian_rule, context.resolver_candidates_by_key),
+        context.resolver_candidates_by_key,
+        cleaned,
+        visible=visible,
+    )
+    if found is None:
+        return ReferenceWikilinkResolution("unresolved")
+    return ReferenceWikilinkResolution("resolved", found.path)
 
 
 def resolve_reference_wikilink(
@@ -2222,6 +2240,7 @@ def borrow_link_snapshot(
             stems=context.resolver_stems,
             titles=context.resolver_titles,
             candidates_by_key=context.resolver_candidates_by_key,
+            rule_cache=context.obsidian_rule,
         ),
         snapshot.reference_owners,
     )
@@ -3709,6 +3728,7 @@ def build_corpus_context_with_census(
             stems=context.resolver_stems,
             titles=context.resolver_titles,
             candidates_by_key=context.resolver_candidates_by_key,
+            rule_cache=context.obsidian_rule,
         )
         enriched = None
         if memo is not None:
@@ -4510,11 +4530,15 @@ def _resolver_dependency_keys(root: Path, path: str, title: str) -> set[str]:
     case-sensitive match.
     """
     resolver = vault.WikilinkResolver.from_entries(root, ((path, title),))
-    return {
+    keys = {
         key.casefold()
         for keys in (resolver.full_paths, resolver.kb_stripped, resolver.stems, resolver.titles)
         for key in keys
     }
+    # Step 6 reaches a page through its basename under Obsidian's name key, which differs from a casefold when
+    # the two spellings normalise differently.
+    keys.add(obsidian_links.basename_key(path))
+    return keys
 
 
 def _patched_resolver_entries(
@@ -4582,6 +4606,7 @@ def _context_with_page_delta(
             stems=resolver_source.resolver_stems,
             titles=resolver_source.resolver_titles,
             candidates_by_key=resolver_source.resolver_candidates_by_key,
+            rule_cache=resolver_source.obsidian_rule,
         )
     elif any(
         path not in old or path not in pages or old[path].title != pages[path].title
@@ -4608,6 +4633,7 @@ def _context_with_page_delta(
             stems=base.resolver_stems,
             titles=base.resolver_titles,
             candidates_by_key=base.resolver_candidates_by_key,
+            rule_cache=base.obsidian_rule,
         )
 
     # A link resolves differently only through a key one of these pages held or
@@ -4701,7 +4727,8 @@ def _context_from_resolved_state(
     outbound: dict[str, list[RelationFact]] = {}
     dependencies: dict[str, list[str]] = {}
     for fact in facts:
-        dependencies.setdefault(_dependency_key(fact.raw_target), []).append(fact.identity)
+        for key in _dependency_keys(fact.raw_target):
+            dependencies.setdefault(key, []).append(fact.identity)
         if fact.logical_source_path in ordered_pages:
             outbound.setdefault(fact.logical_source_path, []).append(fact)
         if fact.logical_target_path in ordered_pages:
@@ -5102,6 +5129,15 @@ def _dependency_key(raw_target: str) -> str:
     return vault.wikilink_page_key(path).casefold()
 
 
+def _dependency_keys(raw_target: str) -> tuple[str, ...]:
+    """The keys under which a page change can alter what a link resolves to.
+
+    Step 6 resolves a link through the page's basename alone, so a link also depends on its own basename key.
+    """
+    path, _, _ = _target_parts(raw_target)
+    return tuple(dict.fromkeys((_dependency_key(raw_target), obsidian_links.basename_key(path))))
+
+
 def require_page_status(page: SemanticPageState | None) -> None:
     """Refuse a decision that needs the lifecycle class of an unclassifiable page."""
     if page is not None and page.status_unavailable:
@@ -5243,12 +5279,32 @@ class _WikilinkResolverView:
     stems: Mapping[str, tuple[str, ...]]
     titles: Mapping[str, tuple[str, ...]]
     candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
+    #: The snapshot's `obsidian_rule`, shared by every view of that snapshot so its index is built once.
+    rule_cache: list = field(default_factory=list, repr=False, compare=False)
 
     def obsidian_match(
         self, page: str, *, visible: Callable[[str], bool] | None = None
     ) -> vault.WikilinkCandidate | None:
-        """Step 6 of the resolver chain needs Obsidian's link index, which the corpus snapshot does not carry."""
-        return None
+        """Step 6 of the resolver chain, over the pages this snapshot holds: what a writer resolves, the guard does too."""
+        return vault.obsidian_candidate(
+            _obsidian_rule(self.rule_cache, self.candidates_by_key),
+            self.candidates_by_key,
+            page,
+            visible=visible,
+        )
+
+
+def _obsidian_rule(
+    cache: list, candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
+) -> obsidian_links.IndexResolver:
+    """Obsidian's rule over every page of a snapshot, built from the paths it holds the first time it is asked.
+
+    Callers that race to build it each build the same index, and every caller then reads the first entry.
+    """
+    if not cache:
+        paths = (candidate.path for group in candidates_by_key.values() for candidate in group)
+        cache.append(obsidian_links.IndexResolver(obsidian_links.build_index(paths)))
+    return cache[0]
 
 
 def _qualifying_body_wikilink_targets(
@@ -5263,6 +5319,7 @@ def _qualifying_body_wikilink_targets(
         stems=corpus.resolver_stems,
         titles=corpus.resolver_titles,
         candidates_by_key=corpus.resolver_candidates_by_key,
+        rule_cache=corpus.obsidian_rule,
     )
     targets: list[str] = []
     for raw_target, _line in page.body_wikilinks:
