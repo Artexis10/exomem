@@ -1484,6 +1484,7 @@ def _routing_targets(
                 ),
                 natural_key_values=frozenset(natural_values),
                 match=collection_claims.normalize_match(manifest.claim_match),
+                capture_method=manifest.capture_method,
             )
         )
     return targets

@@ -46,6 +46,8 @@ class RoutingTarget:
     natural_key_values: frozenset[str] = frozenset()
     #: Folded `claims.match` predicates: every key must hold, any value may match.
     match: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    #: `capture.method` as the author wrote it; unresolved here, because only a delivery needs the page.
+    capture_method: str | None = None
 
 
 def normalize_text(value: object) -> str:

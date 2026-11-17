@@ -91,6 +91,8 @@ _OCCURRENCE_INSTRUCTION = (
 _ASK_INSTRUCTION = (
     "Ask the question once, in these words or the user's own, and act only on a yes."
 )
+# Appended to an instruction that acts or asks, when the route names the collection's capture method.
+_METHOD_CLAUSE = " The collection declares a capture method: read method.read_ref and follow it when you act."
 _HOLD_INSTRUCTION = (
     "Do nothing now; the observation stays in the review surface until someone files it."
 )
@@ -447,12 +449,13 @@ def disposition(
     hold = {"disposition": "hold", "signal_version": signal_version, "instruction": _HOLD_INSTRUCTION}
     if level not in {"balanced", "maximal"}:
         return hold
+    follow = _METHOD_CLAUSE if routing.get("method") else ""
     if level == "balanced":
         asked = {
             "disposition": "ask",
             "signal_version": signal_version,
             "question": _question(title, str(manifest.title), recurrence),
-            "instruction": _ASK_INSTRUCTION,
+            "instruction": _ASK_INSTRUCTION + follow,
         }
         if not _fits(asked, collection):
             return None
@@ -474,7 +477,7 @@ def disposition(
     result = {
         "disposition": kind,
         "signal_version": signal_version,
-        "instruction": instruction.format(tool=tool),
+        "instruction": instruction.format(tool=tool) + follow,
         tool: arguments,
         **extra,
     }

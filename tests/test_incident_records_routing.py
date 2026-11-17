@@ -265,6 +265,48 @@ def test_malformed_match_predicates_refuse_naming_the_key(
     assert fragment in str(refused.value)
 
 
+_METHOD = 'capture:\n  method: "[[Dock capture method]]"\n'
+
+
+def test_manifest_capture_method_parses_and_is_described(tmp_path: Path) -> None:
+    text = _incident_manifest(claims=_INCIDENT_CLAIMS + _INCIDENT_MATCH + _METHOD)
+
+    manifest = collections.parse_manifest_bytes(tmp_path, tmp_path / INCIDENTS, text.encode("utf-8"))
+
+    assert manifest.capture_method == "[[Dock capture method]]"
+    assert collections.parse_manifest_bytes(
+        tmp_path, tmp_path / INCIDENTS, _incident_manifest().encode("utf-8")
+    ).capture_method is None
+    described = collections.manifest_authoring_contract()
+    assert set(described["json_schema"]["properties"]["capture"]["properties"]) == {"method"}
+    assert "method" in described["capture"]["purpose"]
+
+
+@pytest.mark.parametrize(
+    ("capture", "fragment"),
+    [
+        ("capture: [dock]\n", "capture must be a mapping"),
+        ("capture: {}\n", "capture.method is required"),
+        ("capture:\n  method: x\n  colour: red\n", "capture has unknown key: colour"),
+        # Unquoted, YAML reads a wiki link as a nested list.
+        ("capture:\n  method: [[Dock capture method]]\n", "capture.method must be a string"),
+        ("capture:\n  method: '  '\n", "capture.method must be a string"),
+        (f"capture:\n  method: {'x' * 600}\n", "capture.method exceeds 512 characters"),
+    ],
+    ids=["not-a-mapping", "no-method", "unknown-key", "unquoted-link", "blank", "too-long"],
+)
+def test_malformed_capture_refuses_naming_the_key(
+    tmp_path: Path, capture: str, fragment: str
+) -> None:
+    text = _incident_manifest(claims=_INCIDENT_CLAIMS + capture)
+
+    with pytest.raises(collections.CollectionError) as refused:
+        collections.parse_manifest_bytes(tmp_path, tmp_path / INCIDENTS, text.encode("utf-8"))
+
+    assert refused.value.code == "INVALID_COLLECTION_CAPTURE"
+    assert fragment in str(refused.value)
+
+
 def test_predicate_route_is_strong_without_any_word_overlap() -> None:
     incidents = _target(
         INCIDENTS,
@@ -1756,3 +1798,201 @@ def test_evidence_layer_type_is_silence_for_typed_collections(vault: Path) -> No
     routing = preserved.get("records_routing")
     assert routing is not None and routing["collection"] == INCIDENTS
     assert "matched_predicates" not in routing
+
+
+# --- Part 5: the collection's capture method --------------------------------
+
+METHOD = "Knowledge Base/Notes/Insights/dock-capture-method.md"
+METHOD_ID = "71111111-1111-4111-8111-111111111111"
+METHOD_REF = f"exomem://memory/{METHOD_ID}"
+_DECLARES_METHOD = _INCIDENT_CLAIMS + _INCIDENT_MATCH + 'capture:\n  method: "[[Dock capture method]]"\n'
+
+
+def _write_method_page(root: Path, *, title: str = "Dock capture method") -> None:
+    page = root / METHOD
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\n"
+        "type: insight\n"
+        f"exomem_id: {METHOD_ID}\n"
+        f"title: {title}\n"
+        "status: active\n"
+        "created: 2026-09-01\n"
+        "updated: 2026-09-01\n"
+        "tags: [capture]\n"
+        "sources: []\n"
+        "---\n\n"
+        f"# {title}\n\nPhotograph the pallet, then name the bay in the entry.\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "[[Dock capture method]]",
+        "[[Dock capture method|how we capture]]",
+        "[[Dock capture method#Steps]]",
+        METHOD_REF,
+        METHOD,
+    ],
+    ids=["title", "alias", "anchor", "ref", "path"],
+)
+def test_a_capture_method_resolves_to_its_pages_stable_identity(
+    vault: Path, reference: str
+) -> None:
+    from exomem import capture_method
+
+    _write_method_page(vault)
+
+    method = capture_method.resolve(vault, reference)
+
+    assert method == capture_method.CaptureMethod(
+        path=METHOD, ref=METHOD_REF, title="Dock capture method"
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["[[No such page]]", f"exomem://memory/{METHOD_ID[:-1]}9", "../outside.md", "  "],
+    ids=["unknown-title", "unknown-ref", "outside-the-vault", "blank"],
+)
+def test_a_capture_method_that_names_no_page_resolves_to_nothing(
+    vault: Path, reference: str
+) -> None:
+    from exomem import capture_method
+
+    _write_method_page(vault)
+    (vault.parent / "outside.md").write_text("---\ntitle: Elsewhere\n---\n", encoding="utf-8")
+
+    assert capture_method.resolve(vault, reference) is None
+
+
+def test_a_withheld_capture_method_resolves_like_a_missing_one(vault: Path) -> None:
+    """No answer here may show that a page the caller cannot read exists."""
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import capture_method
+    from exomem.governance import principal
+
+    _write_method_page(vault)
+    _withhold(vault, METHOD, ceiling=0)
+
+    with principal.request_scope(_external()):
+        withheld = [capture_method.resolve(vault, ref) for ref in ("[[Dock capture method]]", METHOD_REF, METHOD)]
+        missing = [capture_method.resolve(vault, ref) for ref in ("[[Gone method]]", f"exomem://memory/{METHOD_ID[:-1]}9", f"{METHOD}.gone")]
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        released = capture_method.resolve(vault, METHOD_REF)
+
+    assert withheld == missing == [None, None, None]
+    assert released is not None and released.ref == METHOD_REF
+
+
+def test_a_capture_method_title_is_bounded_and_carries_no_link(vault: Path) -> None:
+    from exomem import capture_method
+
+    _write_method_page(vault, title="Capture [[Other page]] " + "dock " * 80)
+
+    method = capture_method.resolve(vault, METHOD_REF)
+
+    assert method is not None
+    assert 0 < len(method.title) <= capture_method.TITLE_MAX_CHARS
+    assert "[[" not in method.title
+
+
+def test_a_routed_write_names_the_collections_capture_method(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_method_page(vault)
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    written = _remember_failure(vault, evidence, "Pallet bay mislabeled", "pallet-bay")
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["strength"] == "strong"
+    assert routing["method"] == {"title": "Dock capture method", "read_ref": METHOD_REF}
+    assert routing["disposition"] == "file" and "method.read_ref" in routing["instruction"]
+
+
+def test_a_partly_declared_route_still_names_the_capture_method(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_method_page(vault)
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    written = _remember_failure(vault, evidence, "Pallet bay mislabeled", "pallet-bay", project=None)
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["strength"] == "moderate"
+    assert routing["method"] == {"title": "Dock capture method", "read_ref": METHOD_REF}
+
+
+def test_an_unresolved_capture_method_costs_the_route_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route and its ready call survive; only the pointer is omitted, and inspection says why."""
+    from exomem import commands
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    written = _remember_failure(vault, evidence, "Pallet bay mislabeled", "pallet-bay")
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["disposition"] == "file"
+    assert "method" not in routing and "method.read_ref" not in routing["instruction"]
+    inspection = commands.op_record_memory(vault, action="inspect", collection=INCIDENTS)
+    assert {"code": "CAPTURE_METHOD_UNAVAILABLE", "reason": "declared capture method is unavailable"} in inspection["diagnostics"]
+    assert inspection["lifecycle_guards"]
+
+
+def test_a_resolved_capture_method_leaves_inspection_without_a_finding(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands
+
+    _write_method_page(vault)
+    _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    inspection = commands.op_record_memory(vault, action="inspect", collection=INCIDENTS)
+
+    assert "CAPTURE_METHOD_UNAVAILABLE" not in str(inspection["diagnostics"])
+
+
+@pytest.mark.parametrize(
+    ("level", "names_the_method"),
+    [("maximal", True), ("balanced", True), ("light", False)],
+    ids=["file", "ask", "hold"],
+)
+def test_only_a_disposition_that_acts_tells_the_agent_to_follow_the_method(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level: str, names_the_method: bool
+) -> None:
+    _write_method_page(tmp_path)
+    _write_incidents(tmp_path, claims=_DECLARES_METHOD)
+    due_state.reconcile(tmp_path, now=NOW)
+
+    delivered = _deliver(tmp_path, monkeypatch, level)
+
+    assert delivered is not None
+    assert delivered["method"] == {"title": "Dock capture method", "read_ref": METHOD_REF}
+    assert ("method.read_ref" in delivered["instruction"]) is names_the_method
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        {"title": "", "read_ref": METHOD_REF},
+        {"title": "t" * 161, "read_ref": METHOD_REF},
+        {"title": "Dock capture method", "read_ref": ""},
+        {"title": "Dock capture method", "read_ref": "r" * 513},
+        {"title": "Dock capture method"},
+        {"title": "Dock capture method", "read_ref": METHOD_REF, "body": "inline"},
+        "Dock capture method",
+    ],
+    ids=["empty-title", "long-title", "empty-ref", "long-ref", "no-ref", "extra-key", "not-a-mapping"],
+)
+def test_compact_terminal_drops_a_malformed_method(method: object) -> None:
+    ok = {"title": "Dock capture method", "read_ref": METHOD_REF}
+
+    assert _terminal_routing({**_FILED, "method": ok}) == {**_FILED, "method": ok}
+    assert _terminal_routing({**_FILED, "method": method}) is None

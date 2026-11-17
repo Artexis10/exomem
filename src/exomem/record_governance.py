@@ -1807,6 +1807,9 @@ def inspect_collection(
                     guards = records.lifecycle_guards(manifest, snapshot)
             except collections.CollectionError:
                 pass
+        # After the guards: a method that does not resolve costs the collection nothing, so it never
+        # suppresses them the way a template finding does.
+        _inspection_capture(root, manifest, diagnostics)
         payload = _RecordEnvelope(
             {
                 "kind": "collection",
@@ -2266,6 +2269,26 @@ def _inspection_templates(
             diagnostics.append(
                 {"code": "TEMPLATE_UNAVAILABLE", "reason": "declared template is unavailable"}
             )
+
+
+def _inspection_capture(
+    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]],
+    *, policy: Any | None = None, authorize_path: Callable[[str], bool] | None = None,
+) -> None:
+    """Report a declared capture method that this caller cannot be pointed to.
+
+    One reason covers an unresolved reference and a page the caller may not read, so the finding never
+    shows that a withheld page exists.
+    """
+    if manifest.capture_method is None or len(diagnostics) >= 64:
+        return
+    from . import capture_method
+
+    readable = authorize_path or (lambda path: _authorize(root, path, policy=policy))
+    if capture_method.resolve(root, manifest.capture_method, readable=readable) is None:
+        diagnostics.append(
+            {"code": "CAPTURE_METHOD_UNAVAILABLE", "reason": "declared capture method is unavailable"}
+        )
 
 
 def _inspection_audit(audit: Any) -> dict[str, Any]:
