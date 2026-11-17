@@ -155,9 +155,9 @@ def validate_case(case: dict) -> None:
         raise SystemExit(f"case {case['id']}: source_count needs an integer `equals`")
 
 
-def load_cases(selected: list[str] | None) -> list[dict]:
+def load_cases(selected: list[str] | None, cases_dir: Path = CASES_DIR) -> list[dict]:
     cases = []
-    for path in sorted(CASES_DIR.glob("*.json")):
+    for path in sorted(cases_dir.glob("*.json")):
         document = json.loads(path.read_text(encoding="utf-8"))
         # A case lists the files it uses by name; the file's `library` holds each spec once, for every case that shares it.
         library = document.get("library", {})
@@ -514,6 +514,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model", default=ACTOR_MODEL)
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
     parser.add_argument("--run-root", type=Path, required=True)
+    # A held-out set lives outside the repository, so no prompt, fixture or iterating session sees it.
+    parser.add_argument("--cases-dir", type=Path, default=CASES_DIR, help="directory of case files")
     args = parser.parse_args(argv)
     arms = {name: Path(path).resolve() for name, path in (item.split("=", 1) for item in args.arm)}
     for name, path in arms.items():
@@ -522,7 +524,7 @@ def main(argv: list[str] | None = None) -> None:
             or not (path / "plugins" / "claude-code").is_dir()
         ):
             raise SystemExit(f"--arm {name}: {path} holds no src/exomem and plugins/claude-code")
-    cases = load_cases(args.case)
+    cases = load_cases(args.case, args.cases_dir)
     # Refuses a credits declaration without a key before the run directory or any session exists.
     billing.require_billing_env(os.environ)
     try:
