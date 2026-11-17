@@ -462,7 +462,9 @@ def test_the_session_profile_is_live_state_only(monkeypatch):
         assert static_rules not in session
     for live in ("engagement", "governance", "active_capabilities", "sections", "authoring_contract"):
         assert live in session
-    assert len(_text(session)) < 22_000
+    # 22,000 -> 22,200 on 2026-11-17: the vocabulary section lists the new document-forms registry
+    # (147 B), which an agent reads to choose a Source's `document_form`.
+    assert len(_text(session)) < 22_200
 
 
 def test_the_bootstrap_names_the_store_it_reaches(monkeypatch):

@@ -264,11 +264,11 @@ _DELIVERY_CAPTURE = (
     "inference."
 )
 
+#: The identity rule rides the per-turn `capture_policy` only: the bootstrap core is at its byte
+#: ceiling, and the scaffold's research and ingest skills carry the full rule.
 _ARTIFACT_ADOPTION_CAPTURE = (
     " "
     + _ADOPTION_TRIGGER
-    + " "
-    + _ORIGINAL_CAPTURE
     + " No handle: non-committing handoff. "
     + _DELIVERY_CAPTURE
     + " Missing collection: structural_suggestions."
