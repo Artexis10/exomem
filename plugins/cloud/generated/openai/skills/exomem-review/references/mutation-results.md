@@ -134,6 +134,36 @@ confirmed; never say that it matched. `scope` and
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.
 
+A saved PDF Source carries an `identity` block in its file row. The block says where
+DOIs appear. It never says that the document
+is the work its title names. `state` is one of:
+
+- `no_claim`: the `url` names no DOI.
+- `declared`: the metadata of the PDF holds the DOI of the `url`.
+- `printed`: the first page prints that DOI.
+- `conflict`: the metadata and first page show only other DOIs.
+- `not_shown`: the metadata and first page show no DOI.
+- `unavailable`: the PDF could not be read, and `reason` says why. A scanned PDF is checked again after OCR.
+
+`opening` holds the first 600 characters of the pages read. `claimed_dois`,
+`declared_dois` and `printed_dois` list the DOIs found. Compare the opening text with
+the work the person asked for. On `conflict` or `not_shown`, the sentence in the reply
+names the finding, and `next_action` is the correction call when this connection may record
+corrections; otherwise it asks you to tell the person which value is wrong. Call `save_source` with no
+files, the same `title`, the right `url` and
+`options.correction = {supersedes: <ref>, expected_hash: <the page's content hash>, reason}`. The
+correction keeps the stored original, writes one successor Source and leaves the first
+page unchanged. Take the content hash from `read_page` on the Source's ref just before
+the call, because processing may have rewritten the page. A search hit for a corrected Source carries
+`corrected_by` as `{title, path}`, the page that now stands for it. A successor that the
+caller may not read adds nothing.
+
+A note or Evidence write that a Records collection should also hold says so. When the
+reply's `records_routing` files a new item, appends an occurrence or asks, the sentence
+ends "not filed in <collection title>", and `next_action` is the call or the question.
+The note is saved; the Record is not. Do not report the item as filed until the Record
+call returns committed.
+
 A file of a multi-file batch can end `failed` with `MUTATION_BUSY` when the
 boundary stayed busy past the wait before that file began; files stored before
 it keep their outcome. Once any file in a batch commits, the batch's identity is

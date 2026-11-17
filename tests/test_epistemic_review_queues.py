@@ -311,6 +311,11 @@ def test_default_attention_union_is_pinned() -> None:
     `original_fixity` joins after it by the verify-stored-originals contract: a
     missing or damaged original is what every note citing it rests on.
 
+    `source_identity_conflict` joins after `original_fixity` by the verify-research-source-identity
+    `attention-queue` delta: a Source whose document names a different work than
+    its metadata misleads every note that cites it. It reports only a recorded
+    `conflict`, so Sources captured before the check add nothing.
+
     `ownership_review` joins last by the add-ownership-review contract: a backlog whose
     intake the daily rotation bounds, shown to a client that names no category.
     """
@@ -329,6 +334,7 @@ def test_default_attention_union_is_pinned() -> None:
         "transient_state_review",
         "collection_view_corrections",
         "original_fixity",
+        "source_identity_conflict",
         "ownership_review",
     )
 

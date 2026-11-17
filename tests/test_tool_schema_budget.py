@@ -32,9 +32,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` 45 B. The wire measured 28,779 B
 # before the one `review` string that carries a profile preview's proof on `create_note`, `edit_note` and
 # `add_observation`; that string added 336 B, 112 B each. The door operation `maintenance.convert_originals`, the
-# owner's conversion into shared original storage, added the last 64 B to the two door enums. Raise a ceiling
-# deliberately, in the diff that needs it.
-TOTAL_BUDGET = 29_200
+# owner's conversion into shared original storage, added the last 64 B to the two door enums.
+# `save_source.document_form`, the form of a Source as a record of a work, added 121 B (compact JSON). Raise a
+# ceiling deliberately, in the diff that needs it.
+TOTAL_BUDGET = 29_325
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -58,7 +59,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "recall_context": 2800,
     "save_episode": 1100,
     "save_evidence": 1200,
-    "save_source": 1300,
+    "save_source": 1400,
     "search_memory": 1050,
     "supersede_note": 1300,
     "upload_files": 800,

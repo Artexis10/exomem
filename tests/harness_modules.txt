@@ -55,6 +55,7 @@ tests/test_hosted_platform_operations.py
 tests/test_hosted_secret_handoff.py
 tests/test_hosted_terraform_contract.py
 tests/test_incident_regressions.py
+tests/test_incident_source_checks.py
 tests/test_install_hook.py
 tests/test_learning_fresh_session_journey.py
 tests/test_lifecycle_checkpoint_host_contract.py

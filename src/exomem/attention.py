@@ -82,6 +82,10 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # are what every note citing it rests on, so the owner sees it unasked; a vault
     # whose originals all verify never sees it.
     "original_fixity",
+    # A captured document whose own metadata or opening shows a DOI other than the one its Source
+    # claims, and that nobody corrected. Everything citing it rests on that identity, so the owner
+    # sees it unasked; a vault whose captures agree with their documents never sees it.
+    "source_identity_conflict",
     # Last: a backlog, not an obligation, so every queue above it ranks first. It is in the
     # default union because the rotation bounds its intake (`rotation_daily` a day), so no
     # vault meets its whole population at once, and a client that lists review items without

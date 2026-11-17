@@ -30,6 +30,8 @@ from . import (
     call_spans,
     cli_ops,
     corpus_aware,
+    document_forms,
+    document_identity,
     duplicates,
     indexes,
     lexstore,
@@ -72,6 +74,7 @@ from .vault import (
     yaml_flow_list,
     yaml_scalar,
 )
+from .vocabulary import registry as vocabulary_registry
 
 log = logging.getLogger(__name__)
 
@@ -499,8 +502,11 @@ def add(
     capture_input_digest: str | None = None,
     passages: list[source_capture.DeclaredPassage] | None = None,
     expected_sha256: str | None = None,
-    correction: source_corrections.SourceCorrection | None = None,
+    correction: source_corrections.SourceCorrection | source_corrections.CorrectionPlan | None = None,
     reuse_payload: bool = False,
+    document_form: str | None = None,
+    identity_check: Mapping[str, object] | None = None,
+    ingested_into: Sequence[str] = (),
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -534,6 +540,15 @@ def add(
     of a Source the caller can read returns that Source (`capture_outcome` "reused") and writes nothing.
     A new capture with a URL also names earlier Sources that share the canonical URL.
 
+    `document_form` names what the document is as a record of a work, in the `document-forms` registry; a new
+    key registers in this capture's batch. `identity_check` is the record of what the document showed against its
+    claimed URL (`document_identity`), kept on the page as read. `ingested_into` seeds the page's backlinks, which a
+    metadata-only correction carries over from its predecessor.
+
+    `correction` is the call's correction, or the `CorrectionPlan` a caller already prepared for it. Preparing scans
+    every canonical Source, so a caller that read the predecessor first passes its plan; the plan's guards still fail
+    the commit when the predecessor page or its receipt changed since.
+
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     from .governance import raw_protection as raw_guard
@@ -543,7 +558,10 @@ def add(
         content = "\n\n".join(passage["text"] for passage in passages)
     if correction is not None and (source_identity is not None or adoption_seed is not None or supersede):
         raise ValueError("INVALID_SOURCE_CORRECTION: correction cannot coexist with source_identity, adoption, or episode revision")
-    correction_plan = source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    correction_plan = (
+        correction if isinstance(correction, source_corrections.CorrectionPlan)
+        else source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    )
     if expected_sha256 is not None:
         source_capture.validate_sha256(expected_sha256)
         if artifact is None:
@@ -576,7 +594,8 @@ def add(
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
                 passages=passages,
                 expected_sha256=expected_sha256,
-                correction=correction,
+                correction=correction_plan,
+                document_form=document_form, identity_check=identity_check, ingested_into=ingested_into,
                 _allocation=_allocation,
                 _prepare=prepare_raw if _prepare is not None else None,
                 _validate_inputs=_validate_inputs,
@@ -713,10 +732,15 @@ def add(
         )
     project_keys_clean = list(dict.fromkeys(projects or ()))
     project_plan = project_keys.plan_project_keys(vault_root, project_keys_clean)
+    try:
+        form_plan = document_forms.plan(vault_root, document_form)
+    except vocabulary_registry.RegistryError as error:
+        raise AddError(code="INVALID_SOURCE", missing=["document_form"], reason=str(error)) from error
     if raw_protection:
         # Private capture metadata does not enroll shared vocabulary.
         taxonomy_plan = replace(taxonomy_plan, writes=(), introductions=())
         project_plan = replace(project_plan, writes=(), introductions=())
+        form_plan = replace(form_plan, writes=(), introduced=False)
 
     supersede_targets = _supersede_targets(vault_root, folder_path, supersede)
     name_prefix = (raw_guard.PREFIX if raw_protection else "") + f"{date_iso}-"
@@ -808,6 +832,9 @@ def add(
         extra_lines=(*(episode_lines or ()), *(
             (f"supersedes: {yaml_scalar(correction_plan.old_ref)}",) if correction_plan is not None else ()
         )),
+        document_form=form_plan.key,
+        identity_check=identity_check,
+        ingested_into=ingested_into,
     )
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
@@ -829,10 +856,11 @@ def add(
     writes = [PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH)]
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
+    writes.extend(form_plan.writes)
     writes.extend(supersede_writes)
     if raw_protection:
         # Global index/log prose cannot carry the protected title or byte identity.
-        writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
+        writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes, *form_plan.writes]
         derived = []
     if correction_plan is not None:
         writes[0].create_only = True
@@ -858,6 +886,10 @@ def add(
     warnings.extend(
         _vocabulary_warnings(kind, domain_resolution, taxonomy_plan, project_plan)
     )
+    if form_plan.introduced:
+        warnings.append(
+            f"NEW_DOCUMENT_FORM: registered {form_plan.key!r}. Edit _Schema/document-forms.yaml to relabel it."
+        )
     # Cap-50 trim is recorded in log.md per SKILL.md trim discipline; no need
     # to also surface it as a per-write warning.
 
@@ -987,6 +1019,7 @@ def add(
             if _validate_inputs is not None:
                 _validate_inputs()
             taxonomy_plan.recheck_bindings(vault_root)
+            form_plan.recheck_bindings(vault_root)
             if source_identity is not None:
                 source_capture.require_authority(vault_root)
             if correction_plan is not None:
@@ -1115,7 +1148,7 @@ def add(
         ) if not count_errors else None,
         adoption=adoption_receipt,
         vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
-        vocabulary_receipt=taxonomy_plan.receipt(),
+        vocabulary_receipt=[*taxonomy_plan.receipt(), *form_plan.receipt()],
         capture_outcome="created" if source_identity is not None else None,
         same_url=same_url,
         duplicate_check_unavailable=duplicate_unavailable,
@@ -1123,7 +1156,8 @@ def add(
     )
 
 
-def _stored_why(page_text: str) -> str | None:
+
+def stored_why(page_text: str) -> str | None:
     """The reason a Source page records in its leading blockquote, in the shape `_render_source` writes it."""
     _, body, _ = parse_frontmatter(page_text)
     lines = body.split(f"\n{CAPTURE_HEADING}\n", 1)[0].splitlines()[1:]
@@ -1150,7 +1184,7 @@ def _reused_capture(
             ("source_kind", kind, kept.get("source_type")),
             ("url", provided_url, kept.get("url")),
             ("tags", tags or None, kept.get("tags") or None),
-            ("why_captured", why, _stored_why(hit.payload.text)),
+            ("why_captured", why, stored_why(hit.payload.text)),
             ("domain", domain, kept.get("domain")),
             ("projects", projects or None, kept.get("projects")),
         )
@@ -1657,6 +1691,9 @@ def _render_source(
     capture_input_digest: str | None = None,
     passages: list[source_capture.DeclaredPassage] | None = None,
     extra_lines: Sequence[str] = (),
+    document_form: str | None = None,
+    identity_check: Mapping[str, object] | None = None,
+    ingested_into: Sequence[str] = (),
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
 
@@ -1687,6 +1724,8 @@ def _render_source(
     if passages is not None:
         lines.append(f"declared_passages: {len(passages)}")
     lines.extend(extra_lines)
+    if document_form:
+        lines.append(f"document_form: {document_form}")
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
         # can differ (a Markdown original is stored under `.md.txt`; captures before it used `.md.bin`).
@@ -1707,6 +1746,8 @@ def _render_source(
             lines.append(f"binary_sha256: {artifact_digest}")
         if artifact_size is not None:
             lines.append(f"binary_size: {artifact_size}")
+    if identity_check is not None:
+        lines.append(f"identity_check: {document_identity.render(identity_check)}")
     if adoption_receipt is not None:
         from .preserve import _render_adoption_receipt_lines
 
@@ -1717,7 +1758,7 @@ def _render_source(
         lines.append("tags: " + yaml_flow_list(tags))
     else:
         lines.append("tags: []")
-    lines.append("ingested_into: []")
+    lines.append("ingested_into: " + yaml_flow_list(list(ingested_into)))
     lines.append("---")
     lines.append("")
     lines.append(f"# {title.strip()}")

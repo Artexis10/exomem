@@ -1390,6 +1390,10 @@
         "why": {
           "type": "string"
         },
+        "document_form": {
+          "type": "string",
+          "description": "The form of this record of the work, as an open slug such as abstract."
+        },
         "options": {
           "type": "object",
           "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction."

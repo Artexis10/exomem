@@ -11,6 +11,8 @@ Checks (all read-only; no writes ever):
   anywhere in `Knowledge Base/`
 - `unprocessed_source`: `type: source` page that no live note compiles: no page
   its `ingested_into:` names is live and cites it in its own `sources:`
+- `source_identity_conflict`: captured PDF Source whose `identity_check` found only DOIs other than the
+  one its `url` names, and that no correction has replaced; the fix is the metadata-only correction call
 - `uncompiled_episode` (optional): conversation recap whose live revision has a
   Decided line that no recap cited by a live page holds (citation only; items
   unassessed)
@@ -199,6 +201,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "collection_view_corrections",
     "original_fixity",
     "source_pointer_drift",
+    "source_identity_conflict",
 )
 # The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
 DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
@@ -852,6 +855,9 @@ def audit(
     with stage('source_pointer_drift') as run:
         if run:
             findings.extend(_check_source_pointers(vault_root, pages))
+    with stage('source_identity_conflict') as run:
+        if run:
+            findings.extend(_check_source_identity_conflicts(vault_root, pages))
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     with stage(semantic_categories) as run:
         if run:
@@ -920,6 +926,55 @@ def _check_original_fixity(vault_root: Path) -> tuple[list[AuditFinding], str | 
     from . import original_fixity
 
     return original_fixity.attention_findings(vault_root)
+
+
+@call_spans.timed("audit.source_identity_conflict")
+def _check_source_identity_conflicts(
+    vault_root: Path, pages: list[find_module.ParsedPage]
+) -> list[AuditFinding]:
+    """A Source whose capture-time identity check found a conflict that no correction has answered.
+
+    The check only compares where DOIs appear, so the finding asks the agent to compare, never says the
+    Source is wrong. `not_shown` is not reported: a correct document often prints no DOI on its opening pages.
+    The extra cost per Source is one frontmatter field read, plus one receipt lookup for a Source that conflicts.
+    """
+    from . import document_identity, memory_refs, source_corrections
+
+    type_basis = note_types.Basis(vault_root)
+    findings: list[AuditFinding] = []
+    for page in pages:
+        check = page.frontmatter.get("identity_check")
+        if (
+            not isinstance(check, dict)
+            or check.get("state") != document_identity.CONFLICT
+            or not type_basis.selects(page.page_type, note_types.captured_source)
+        ):
+            continue
+        request_budget.checkpoint()
+        try:
+            if source_corrections.has_correction(vault_root, page.frontmatter):
+                continue
+        except source_corrections.SourceCorrectionUnavailable:
+            # An unreadable receipt is the correction chain's own finding; it says nothing about this Source's identity.
+            continue
+        identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
+        reference = memory_refs.memory_ref(identity) if identity else page.rel_path
+        findings.append(
+            AuditFinding(
+                category="source_identity_conflict",
+                severity="warn",
+                path=page.rel_path,
+                detail=document_identity.finding(check) or "",
+                proposed_fix=document_identity.correction_call(reference, None),
+                meta={
+                    "state": check.get("state"),
+                    "claimed_dois": list(check.get("claimed_dois") or []),
+                    "declared_dois": list(check.get("declared_dois") or []),
+                    "printed_dois": list(check.get("printed_dois") or []),
+                },
+            )
+        )
+    return findings
 
 
 @call_spans.timed("audit.source_pointer_drift")

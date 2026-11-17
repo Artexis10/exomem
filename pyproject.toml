@@ -147,6 +147,7 @@ media-cpu = [
     "exomem[frame-codecs]",  # shared image/video codecs, without a model
     "onnx-asr[cpu]==0.12.0",  # pinned Whisper adapter and CPU execution provider
     "pymupdf>=1.24",
+    "defusedxml>=0.7.1",  # XMP packets of captured PDFs: parsed with entity expansion refused
     # docx/xlsx/pptx/html/epub → markdown (Microsoft MarkItDown, MIT). The per-format extras
     # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
     # PyMuPDF (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
