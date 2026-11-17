@@ -8,7 +8,7 @@ addressable through the public product commands. Markdown remains the source of
 truth; lexical, vector, and graph stores are rebuildable sidecars.
 
 <!-- BEGIN GENERATED SEMANTIC AUTHORING CONTRACT -->
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

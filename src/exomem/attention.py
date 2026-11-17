@@ -82,6 +82,11 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # are what every note citing it rests on, so the owner sees it unasked; a vault
     # whose originals all verify never sees it.
     "original_fixity",
+    # Last: a backlog, not an obligation, so every queue above it ranks first. It is in the
+    # default union because the rotation bounds its intake (`rotation_daily` a day), so no
+    # vault meets its whole population at once, and a client that lists review items without
+    # naming a queue is the only reader many sessions have; `note_cohesion` has no such bound.
+    "ownership_review",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -300,8 +305,10 @@ def _rank(
     """Compose findings into one ranked, deduped review surface. Pure — no vault access.
 
     Fuse each finding's intra-queue rank (emission order == rank) via weighted RRF, dedup
-    by anchor path (votes add → multi-flagged notes rise), drop+fold the contradiction
-    queue's trailing summary finding, then cap at `limit` with an explicit count.
+    by anchor path (votes add → multi-flagged notes rise; a finding with a
+    `review_partition` anchors on its partition, so it never dedups with another queue's
+    findings), drop+fold the contradiction queue's trailing summary finding, then cap at
+    `limit` with an explicit count.
     """
     selected = set(category_order) if categories is None else (
         set(categories) & set(category_order)
@@ -355,39 +362,11 @@ def _rank(
                 severity_by_path.get(anchor, 0), _SEVERITY_RANK.get(f.severity, 0)
             )
 
-    # Fold each path's UNPARTITIONED signals into that path's partitioned items.
-    #
-    # A partitioned finding anchors on `path\0partition` and shares no key with
-    # the same page's page-level findings, so without this the note takes TWO
-    # rows of the surface and its RRF votes never sum — breaking the additivity
-    # property that is the whole point of composing queues. That was latent
-    # while `bridge_review` was the only partitioned queue (it anchors on
-    # governance grant paths, which no page-level queue flags); `prediction_window`
-    # made it routine, because predictions live on exactly the insight and
-    # research-note pages `stale_review` and `relation_debt` already flag.
-    #
-    # Folding rather than dropping the partition keeps both properties: one row
-    # per note when it has one due prediction, and still N independently
-    # triageable rows when it has N — each carrying the page's context and its
-    # vote. `_apply_review_state` derives identity from the single partition on
-    # an item's reasons, and a folded page-level reason carries none, so review
-    # identities are unaffected.
-    partitioned_by_path: dict[str, list[str]] = {}
-    for anchor in scores:
-        base, separator, partition = anchor.partition("\0")
-        if separator and partition:
-            partitioned_by_path.setdefault(base, []).append(anchor)
-    for base, anchors in partitioned_by_path.items():
-        if base not in scores:
-            continue  # no page-level signal on this path — nothing to fold
-        base_score = scores.pop(base)
-        base_reasons = reasons_by_path.pop(base, [])
-        base_severity = severity_by_path.pop(base, 0)
-        display_path.pop(base, None)
-        for anchor in anchors:
-            scores[anchor] += base_score
-            reasons_by_path[anchor].extend(base_reasons)
-            severity_by_path[anchor] = max(severity_by_path[anchor], base_severity)
+    # A partitioned finding keeps its own row, id and fingerprint: it anchors on
+    # `path\0partition`, so it is never merged with the same page's page-level findings.
+    # The partition promises one item per page with its own id. Merging made the page-level
+    # queue's own ref match no row, and a decision on the merged row settled signals the
+    # person never saw.
 
     # Order: score desc, then category preference of the item's best reason, then path.
     ordered = sorted(
@@ -891,12 +870,11 @@ def item_by_ref(
 
     wider = _item_by_ref_fallback(vault_root, wanted, today=today)
     if expected_fingerprint and wider is not None and wider.fingerprint != expected_fingerprint:
-        # An explicitly requested partitioned category may share an anchor with
-        # an ordinary page-level queue.  The wider resolver folds those reasons
-        # for daily review, which changes the fused fingerprint.  When a caller
-        # round-trips the exact component fingerprint it was shown, resolve that
-        # category alone instead of converting the request into a different
-        # fused decision.
+        # Page-level queues that share the bare `target_ref` id fuse into one item, so the
+        # fused fingerprint differs from a due row's component fingerprint.  When a
+        # caller round-trips the exact component fingerprint it was shown, resolve that
+        # category alone instead of converting the request into a different fused
+        # decision.
         refs = review_state_module.refs_for_paths(
             vault_root, review_state_module.component_paths(wider)
         )

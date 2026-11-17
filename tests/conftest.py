@@ -1225,6 +1225,10 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # synchronous by default and let its focused recovery tests opt back into
     # the real background path.
     monkeypatch.setenv("EXOMEM_SYNC_DUE_STATE_WARM", "1")
+    # The ownership rotation asks about never-asked pages once a day, so any test that
+    # reads due state would otherwise gain items it did not create. Its own tests set a
+    # daily slice.
+    monkeypatch.setenv("EXOMEM_OWNERSHIP_ROTATION_DAILY", "0")
 
 
 @pytest.fixture
