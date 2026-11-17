@@ -54,4 +54,10 @@ The framing passage is therefore part of the contract, not decoration. It never 
 ## Alternatives considered
 
 - **Return a unit index first on long page reads.** This helps an agent that reads the page, but in the replay agents read the long page in 1 of 6 runs.
-- **A domain profile line per subject.** Domain profiles are curated pages per domain. A position on one subject is a unit on that subject's page. The trait serves both, and profile curation can use it to detect new preference or constraint units.
+- **A domain profile line per subject.** A profile line is the owner's confirmed standing instruction, which the agent applies. A position is a dated view, which the agent weighs. One framing for both would make the agent second-guess a rule, or apply an opinion as a rule. So profiles keep their own trait-free selection and framing.
+
+## Coordination
+
+- A unit that the same packet serves under `stance` or `domain_profiles` is skipped, so no unit arrives twice.
+- Unit admission, currency boundaries and egress pinning for session blocks are moving into a shared module on the domain-profiles branch. The positions block reuses that module rather than adding a third copy. Whichever branch merges second folds onto the other.
+- The populated bootstrap core is near its hard ceiling, so this change adds no bootstrap text. The scaffold skill carries the reading guidance.

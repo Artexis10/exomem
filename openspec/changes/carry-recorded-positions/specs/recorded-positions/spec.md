@@ -12,7 +12,7 @@ The system SHALL treat a semantic unit as a position unit only when its resolved
 - **THEN** recall does not treat that unit as a position unit
 
 ### Requirement: Recall Serves The Positions That Bear On A Turn
-When task discovery serves leads for a turn, a maps response SHALL carry a `positions` block. The block SHALL hold position units found on the served leads and on the pages those leads link to that the caller may see. It SHALL rank them by relevance to the turn and then by recency, and give each unit its text, its authored date where present, its page title and its unit reference. The block SHALL have its own bound, the vault budget `positions_max_chars`, and SHALL NOT draw on the turn allowance `max_chars`. Overflow SHALL become references, never a cut unit. A turn with no served leads, or with no position unit in reach, SHALL report the block's state and carry no items.
+When task discovery serves leads for a turn, a maps response SHALL carry a `positions` block. The block SHALL hold position units found on the served leads and on the pages those leads link to that the caller may see. It SHALL rank them by relevance to the turn and then by recency, and give each unit its text, its authored date where present, its page title and its unit reference. The block SHALL have its own bound, the vault budget `positions_max_chars`, and SHALL NOT draw on the turn allowance `max_chars`. Overflow SHALL become references, never a cut unit. The block SHALL omit a unit that the same response serves under `stance` or `domain_profiles`. A turn with no served leads, or with no position unit in reach, SHALL report the block's state and carry no items.
 
 #### Scenario: A position late on a linked long page reaches the agent
 - **WHEN** a turn's served lead is a short page that links to a long page, and the long page holds a position unit in its last fifth
@@ -21,6 +21,10 @@ When task discovery serves leads for a turn, a maps response SHALL carry a `posi
 #### Scenario: A hidden page contributes nothing
 - **WHEN** a served lead links to a page the caller may not see
 - **THEN** no unit of that page appears in the `positions` block and the block does not name the page
+
+#### Scenario: A unit already served as session context is not repeated
+- **WHEN** a position unit sits on a page that the same packet serves under `stance` or `domain_profiles`, and that unit is among the lines served there
+- **THEN** the `positions` block omits it
 
 #### Scenario: The block does not crowd out task leads
 - **WHEN** a turn's position units exceed `positions_max_chars`

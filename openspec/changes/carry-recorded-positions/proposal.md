@@ -37,4 +37,4 @@ A replay with a real model reproduced the gap. The replay judged replies blind, 
 
 The projection reuses task discovery's served leads and their listed links, and the semantic-unit store's batched query restricted to parent pages. It adds one query to recall, bounded by the number of served leads and their links, and its cost is proven on the recall latency instrument.
 The trait reuses the registry's reviewed-save path. A vault declares its own position categories without a code release.
-Domain profiles (`add-domain-profiles-and-curation`) can use the same trait to detect new preference or constraint units. This change adds no second mechanism for that.
+Domain profiles (`add-domain-profiles-and-curation`) stay separate on purpose. A profile line is the owner's confirmed standing instruction, which the agent applies. A position is a dated view, which the agent carries with attribution and weighs against evidence. A unit that the same packet already serves under `stance` or `domain_profiles` is not served again under `positions`.
