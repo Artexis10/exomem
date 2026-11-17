@@ -23,12 +23,12 @@ A binary Source is its original plus a Markdown page that holds frontmatter and 
 
 `document_identity.check(pages, metadata_values, claimed_url)` is pure. Capture calls it with the first two pages of a PDF, read with PyMuPDF without OCR, plus the document information values and the XMP text values. Media processing calls it again after OCR, and only for a Source whose recorded state is `unavailable` with reason `no_text_layer`.
 
-- **DOI syntax.** One expression matches the DOI syntax of the DOI Handbook (ISO 26324): `10.`, a registrant code, `/`, then a suffix. It is a format check over a fixed syntax, so it is sound under the repository's C6 rule, and the code says so in one line. Matching is case-insensitive, and trailing sentence punctuation is dropped. A break right after `10.` or right after `/` is joined first.
-- **Claimed DOIs** are the DOI-syntax matches in the `url`. This covers `doi.org` links and publisher paths alike, without a host list.
+- **DOI syntax.** One expression matches the DOI syntax of the DOI Handbook (ISO 26324): `10.`, a registrant code, `/`, then a suffix. It is a format check over a fixed syntax, so it is sound under the repository's C6 rule, and the code says so in one line. Matching is case-insensitive, and trailing sentence punctuation is dropped. A break right after `10.` or right after `/` is joined first. The suffix stops at closing quotes, typographic ones included, and at control, private-use and surrogate code points. Unicode dashes read as `-`, and invisible break and direction marks are dropped, because a text layer sets a DOI with them.
+- **Claimed DOIs** are the DOI-syntax matches in the `url`. This covers `doi.org` links and publisher paths alike, without a host list. A publisher path continues past the DOI to a rendition (`.pdf`, `v2`, `/full`), so a claimed DOI matches a found DOI that it equals or extends at `/`, `.` or `v<digits>`.
 - **Declared DOIs** are the matches in the XMP text values and the document information values. XMP is parsed with `defusedxml`. A citing work does not declare a cited DOI as its own, so this is the strongest signal.
-- **Printed DOIs** are the matches in the first two pages.
+- **Printed DOIs** are the matches on the first page. The second page feeds only the opening text, because a short paper can already list its references there.
 - **States**, decided in this order:
-  1. `unavailable`: not a PDF, no extractor, encrypted, no text layer or a parse error. The reason is named.
+  1. `unavailable`: not a PDF, no extractor, encrypted, no text layer, a parse error, the read deadline, the memory cap or a crashed read. The reason is named.
   2. `no_claim`: the `url` holds no DOI.
   3. `declared`: the metadata declares a claimed DOI.
   4. `conflict`: the metadata declares only other DOIs.
@@ -41,7 +41,7 @@ The Source page records `identity_check: {state, reason?, claimed_dois, declared
 
 The reply row gains `identity: {state, reason?, opening, pdf_title, declared_dois, printed_dois}`. `opening` is the first 600 characters of the two pages, with whitespace collapsed. On `conflict` or `not_shown`, the outcome sentence names the finding. `next_action` then becomes the metadata-only correction call, with the Source's ref and page hash filled in. That instruction replaces the capture-sweep sentence for that reply.
 
-The read costs one PDF open and two page reads per captured PDF, independent of vault size. PyMuPDF already parses these files in process in media processing, so untrusted parsing does not move to a weaker boundary. Any exception yields `unavailable` and the capture continues.
+The read costs one PDF open and two page reads per captured PDF, independent of vault size. The bytes are untrusted, so the read runs in a child process capped at 512 MiB of data segment with a 3-second deadline, as media processing caps its extraction. A deadline, a memory limit or a crash yields `unavailable` with reason `timeout`, `too_large` or `failed`, and the capture continues. One idle child with PyMuPDF already imported waits for the next read, so a capture does not pay the import.
 
 ### Document form is registry data
 

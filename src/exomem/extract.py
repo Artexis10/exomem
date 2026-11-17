@@ -1499,6 +1499,29 @@ def page_marker(number: int) -> str:
     return f"[page {number}]"
 
 
+# nosemgrep: ep-word-search -- reads back the marker line `page_marker` writes, a format this module owns.
+_PAGE_MARKER_LINE = re.compile(r"^\[page (\d+)\]\n", re.MULTILINE)
+
+
+def leading_pages(text: str, count: int) -> tuple[str, ...]:
+    """The text of pages 1 to `count` of a PDF extraction, read back from its `page_marker` lines.
+
+    A page that held no text has no marker and reads as "". Text with no marker at all reads as page 1.
+    """
+    pages = [""] * count
+    marks: list[re.Match[str]] = []
+    for mark in _PAGE_MARKER_LINE.finditer(text):
+        marks.append(mark)
+        if int(mark.group(1)) > count:
+            break
+    if not marks:
+        pages[0] = text.strip()
+    for mark, following in zip(marks, [*marks[1:], None], strict=True):
+        if 1 <= (number := int(mark.group(1))) <= count:
+            pages[number - 1] = text[mark.end():following.start() if following else None].strip()
+    return tuple(pages)
+
+
 def _extract_pdf(path: Path) -> ExtractResult:
     try:
         import fitz  # PyMuPDF

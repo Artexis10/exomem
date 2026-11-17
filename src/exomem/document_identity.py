@@ -78,11 +78,26 @@ MAX_DOI_CHARS = 3 + 9 + 1 + MAX_DOI_SUFFIX_CHARS
 
 # The DOI syntax of ISO 26324 (`10.`, a registrant code, `/`, a suffix) is fixed by that standard, so
 # this regex checks a format and decides nothing about meaning. A text layer may break the line right
-# after `10.` or `/`, which the optional breaks join. The suffix stops at whitespace, quotes and URL
-# query or fragment delimiters.
+# after `10.` or `/`, which the optional breaks join. The suffix stops at whitespace, ASCII and
+# typographic closing quotes, URL query or fragment delimiters, and at control, private-use and
+# surrogate code points: no DOI holds one, and a page or a metadata string can.
 _BREAK = r"(?:[ \t]*\r?\n[ \t]*)?"
-_DOI = re.compile(rf"(?<![0-9A-Za-z])10\.{_BREAK}(\d{{4,9}})/{_BREAK}([^\s\"'<>?#&]+)", re.IGNORECASE)
+_SUFFIX_STOPS = r"\s\"'<>?#&\u201d\u2019\u00bb\u203a\x00-\x1f\x7f-\x9f\ud800-\udfff\ue000-\uf8ff"
+_DOI = re.compile(rf"(?<![0-9A-Za-z])10\.{_BREAK}(\d{{4,9}})/{_BREAK}([^{_SUFFIX_STOPS}]+)", re.IGNORECASE)
 _TRAILING = ".,;:!]}"
+# Typesetting, not the DOI: a text layer sets a DOI's hyphens as Unicode dashes (U+2010 to U+2015) or a
+# minus sign (U+2212), and puts invisible break and direction marks inside a long one. Matching reads
+# the hyphens as `-` and drops the marks (soft hyphen, zero-width and bidi controls, word joiners, BOM).
+_TYPESET = str.maketrans(
+    dict.fromkeys([*map(chr, range(0x2010, 0x2016)), "\u2212"], "-")
+    | dict.fromkeys(["\u00ad", *map(chr, range(0x200B, 0x2010)), *map(chr, range(0x202A, 0x202F)),
+                     *map(chr, range(0x2060, 0x2070)), "\ufeff"])
+)
+# A publisher URL names a DOI and then a rendition of it: Springer `.../10.1007/x.pdf`, bioRxiv `...v2`
+# or `v1.full.pdf`, Frontiers `/full`, IOP `/pdf`, a trailing `/`. These are identifier and URL format
+# shapes (ISO 26324 plus publisher URL layouts), not meaning, so a claimed DOI that extends a found one
+# at `/`, `.` or `v<digits>` names that DOI.
+_RENDITION = re.compile(r"[/.]|v\d")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +199,7 @@ def is_pdf(filename: str) -> bool:
 def dois_in(text: str) -> tuple[str, ...]:
     """The DOIs a text names, lowercased, in order of appearance and without repeats."""
     found: dict[str, None] = {}
-    for match in _DOI.finditer(text):
+    for match in _DOI.finditer(text.translate(_TYPESET)):
         suffix = _trim(match.group(2))
         if suffix and len(suffix) <= MAX_DOI_SUFFIX_CHARS:
             found[f"10.{match.group(1)}/{suffix}".lower()] = None
@@ -214,6 +229,11 @@ def opening_text(pages: Sequence[str]) -> str:
     return " ".join(" ".join(pages).split())[:OPENING_CHARS]
 
 
+def names(claimed: str, found: str) -> bool:
+    """Whether a DOI claimed from a URL names the DOI a document shows: the same, or a rendition of it."""
+    return claimed == found or (claimed.startswith(found) and _RENDITION.match(claimed, len(found)) is not None)
+
+
 def check(
     pages: Sequence[str],
     metadata_values: Sequence[str],
@@ -221,25 +241,35 @@ def check(
     *,
     pdf_title: str | None = None,
 ) -> IdentityCheck:
-    """Compare the DOIs a document shows with the DOIs its claimed `url` names."""
+    """Compare the DOIs a document shows with the DOIs its claimed `url` names.
+
+    Only the first page counts as printing a DOI: a short paper's second page can already list its
+    references. Both pages feed the opening text. A result that cannot be stored as UTF-8, such as a
+    lone surrogate in a page's text, is `unavailable` instead.
+    """
     claimed = _all_dois([unquote(claimed_url)] if claimed_url else [])
-    opening = opening_text(pages)
+    found = {
+        "claimed_dois": claimed, "declared_dois": _all_dois(metadata_values), "printed_dois": _all_dois(pages[:1]),
+        "pdf_title": pdf_title, "opening": opening_text(pages),
+    }
+    result = IdentityCheck(_state(claimed, found["declared_dois"], found["printed_dois"]), **found)
+    try:
+        json.dumps(result.reply(), ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return unavailable(UNREADABLE, claimed_url)
+    return result
+
+
+def _state(claimed: Sequence[str], declared: Sequence[str], printed: Sequence[str]) -> str:
     if not claimed:
-        return IdentityCheck(NO_CLAIM, pdf_title=pdf_title, opening=opening)
-    declared = _all_dois(metadata_values)
-    printed = _all_dois(pages)
-    found = {"claimed_dois": claimed, "declared_dois": declared, "printed_dois": printed,
-             "pdf_title": pdf_title, "opening": opening}
+        return NO_CLAIM
     # Metadata is the document's own declaration, so it outranks a DOI that appears in running text.
-    if set(claimed) & set(declared):
-        return IdentityCheck(DECLARED, **found)
-    if declared:
-        return IdentityCheck(CONFLICT, **found)
-    if set(claimed) & set(printed):
-        return IdentityCheck(PRINTED, **found)
-    if printed:
-        return IdentityCheck(CONFLICT, **found)
-    return IdentityCheck(NOT_SHOWN, **found)
+    for shown, state in ((declared, DECLARED), (printed, PRINTED)):
+        if any(names(claim, doi) for claim in claimed for doi in shown):
+            return state
+        if shown:
+            return CONFLICT
+    return NOT_SHOWN
 
 
 def render(record: Mapping[str, Any]) -> str:
@@ -263,9 +293,8 @@ def after_extraction(metadata: Mapping[str, Any], text: str) -> dict[str, Any] |
         or not text.strip()
     ):
         return None
-    opening = text.split(f"\n{extract.page_marker(PAGES_READ + 1)}\n", 1)[0]
     url = metadata.get("url")
-    return check((opening,), (), url if isinstance(url, str) else None).frontmatter()
+    return check(extract.leading_pages(text, PAGES_READ), (), url if isinstance(url, str) else None).frontmatter()
 
 
 def unavailable(reason: str, claimed_url: str | None = None) -> IdentityCheck:

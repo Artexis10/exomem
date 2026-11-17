@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from _identity_pdf import make_pdf, nested_forms_pdf, text_bomb_pdf
+from _identity_pdf import make_pdf, nested_forms_pdf, raw_info_pdf, text_bomb_pdf
 
 from exomem import (
     client_artifacts,
@@ -245,6 +245,18 @@ def test_a_pdf_that_outruns_the_read_deadline_is_stored_with_the_reason_within_t
     assert (vault / row["stored_path"]).is_file()
     # The rest of the capture takes well under two seconds; reading the page to its end takes about ten.
     assert elapsed < document_identity.READ_DEADLINE_SECONDS + 2
+
+
+def test_a_pdf_whose_document_information_holds_a_lone_surrogate_is_stored(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:
+    # A UTF-16 subject of `10.5555/abc` followed by an unpaired high surrogate, as a broken producer writes it.
+    subject = "10.5555/abc".encode("utf-16-be").hex().upper().encode()
+    _stage(monkeypatch, tmp_path, raw_info_pdf(tmp_path / "paper.pdf", b"<< /Subject <FEFF" + subject + b"D800> >>"))
+
+    row = _save_pdf(vault, source_schema, url="https://doi.org/10.5555/abc")["files"][0]
+
+    assert row["outcome"] == "stored"
+    assert row["identity"]["state"] == "declared"
+    assert _frontmatter(vault, row["page"])["identity_check"]["declared_dois"] == ["10.5555/abc"]
 
 
 def test_a_url_without_a_doi_makes_no_claim_and_asks_nothing_of_the_agent(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:

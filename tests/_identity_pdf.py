@@ -51,8 +51,8 @@ def make_pdf(
     return path
 
 
-def _write_objects(path: Path, objects: dict[int, bytes]) -> Path:
-    """Write numbered PDF objects with their cross-reference table; object 1 is the catalog."""
+def _write_objects(path: Path, objects: dict[int, bytes], *, info: int | None = None) -> Path:
+    """Write numbered PDF objects with their cross-reference table; object 1 is the catalog, `info` the document information."""
     out = bytearray(b"%PDF-1.7\n")
     offsets: dict[int, int] = {}
     for number in sorted(objects):
@@ -63,7 +63,8 @@ def _write_objects(path: Path, objects: dict[int, bytes]) -> Path:
     out += b"xref\n0 %d\n" % size
     for number in range(size):
         out += b"%010d 00000 n \n" % offsets[number] if number in offsets else b"0000000000 65535 f \n"
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, table)
+    trailer = b"/Size %d /Root 1 0 R" % size + (b" /Info %d 0 R" % info if info else b"")
+    out += b"trailer\n<< " + trailer + b" >>\nstartxref\n%d\n%%%%EOF\n" % table
     path.write_bytes(bytes(out))
     return path
 
@@ -109,3 +110,10 @@ def text_bomb_pdf(path: Path, *, runs: int) -> Path:
     parts.append(compressor.compress(b"ET") + compressor.flush())
     content = _stream(b"/Filter /FlateDecode", b"".join(parts))
     return _write_objects(path, _one_page(content, b"<< /Font << /F1 5 0 R >> >>"))
+
+
+def raw_info_pdf(path: Path, info: bytes, page: bytes = b"A study of harbour lanterns.") -> Path:
+    """A one-page PDF whose document information dictionary is `info` as written, which can hold strings no PDF library writes."""
+    objects = _one_page(_stream(b"", b"BT /F1 10 Tf 72 720 Td (" + page + b") Tj ET"), b"<< /Font << /F1 5 0 R >> >>")
+    objects[6] = info
+    return _write_objects(path, objects, info=6)

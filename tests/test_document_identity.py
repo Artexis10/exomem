@@ -26,6 +26,10 @@ CLAIM = "https://doi.org/10.5555/aaa"
         ("first 10.5555/aaa then 10.5555/bbb then 10.5555/aaa", ("10.5555/aaa", "10.5555/bbb")),
         ("version 10.12 of the tool, ratio 3/4", ()),
         (f"10.5555/{'a' * 400}", ()),
+        ("cited as \u201c10.5555/aaa\u201d in the text", ("10.5555/aaa",)),
+        ("DOI 10.5555/aaa\u20101 set with a Unicode hyphen", ("10.5555/aaa-1",)),
+        ("DOI 10.5555/j.\u200baaa with a zero-width break", ("10.5555/j.aaa",)),
+        ("10.5555/abc\udced\udca0\udc80 as PyMuPDF decodes a lone surrogate", ("10.5555/abc",)),
     ],
 )
 def test_the_doi_syntax_is_read_from_running_text(text: str, expected: tuple[str, ...]) -> None:
@@ -54,6 +58,14 @@ def test_a_url_without_a_doi_makes_no_claim() -> None:
 
     assert result.state == identity.NO_CLAIM
     assert result.opening == "Harbour lanterns, 10.5555/aaa"
+
+
+def test_no_claim_still_lists_the_dois_the_document_shows() -> None:
+    result = identity.check(["Harbour lanterns, 10.5555/aaa"], ["doi:10.5555/zzz"], None)
+
+    assert result.state == identity.NO_CLAIM
+    assert result.declared_dois == ("10.5555/zzz",)
+    assert result.printed_dois == ("10.5555/aaa",)
 
 
 def test_no_url_makes_no_claim() -> None:
@@ -88,6 +100,44 @@ def test_pages_that_print_only_another_doi_are_a_conflict() -> None:
     assert result.state == identity.CONFLICT
     assert result.claimed_dois == ("10.5555/bbb",)
     assert result.printed_dois == ("10.5555/aaa",)
+
+
+@pytest.mark.parametrize(
+    ("url", "printed"),
+    [
+        pytest.param("https://publisher.example/content/pdf/10.5555/s0001-020-0001-1.pdf", "10.5555/s0001-020-0001-1", id="pdf-extension"),
+        pytest.param("https://preprints.example/content/10.5555/2020.01.01.900001v2", "10.5555/2020.01.01.900001", id="version"),
+        pytest.param("https://preprints.example/content/10.5555/2020.01.01.900001v1.full.pdf", "10.5555/2020.01.01.900001", id="version-full-pdf"),
+        pytest.param("https://journal.example/articles/10.5555/fpsyg.2020.00001/full", "10.5555/fpsyg.2020.00001", id="full-text-path"),
+        pytest.param("https://journal.example/article/10.5555/1742-6596/1/1/012001/pdf", "10.5555/1742-6596/1/1/012001", id="pdf-path"),
+        pytest.param("https://doi.org/10.5555/aaa/", "10.5555/aaa", id="trailing-slash"),
+    ],
+)
+def test_a_publisher_url_that_continues_past_the_doi_names_that_doi(url: str, printed: str) -> None:
+    result = identity.check([f"Harbour lanterns. https://doi.org/{printed}"], [], url)
+
+    assert result.state == identity.PRINTED
+
+
+def test_a_claimed_doi_that_only_starts_with_the_printed_one_is_a_conflict() -> None:
+    result = identity.check(["Harbour lanterns. https://doi.org/10.5555/aaa"], [], "https://doi.org/10.5555/aaab")
+
+    assert result.state == identity.CONFLICT
+
+
+def test_a_doi_on_the_second_page_feeds_the_opening_but_is_not_printed() -> None:
+    result = identity.check(["A short note on harbour lanterns.", "References. 10.5555/zzz"], [], CLAIM)
+
+    assert result.state == identity.NOT_SHOWN
+    assert result.printed_dois == ()
+    assert "References. 10.5555/zzz" in result.opening
+
+
+def test_page_text_that_cannot_be_stored_as_utf8_is_unavailable_not_an_error() -> None:
+    result = identity.check(["Harbour \udced\udca0\udc80 lanterns. 10.5555/aaa"], [], CLAIM)
+
+    assert result.state == identity.UNAVAILABLE
+    assert result.claimed_dois == ("10.5555/aaa",)
 
 
 def test_a_document_that_shows_no_doi_is_not_shown() -> None:
