@@ -359,6 +359,22 @@ def _sidecar_paths(artifact: Path, *, protected: bool, source: bool = False) -> 
     return (canonical,)
 
 
+def _pooled_sha256(vault_root: Path, artifact: Path) -> str | None:
+    """The SHA-256 that the shared object of a pooled filing holds now, else None.
+
+    A shared original keeps no file at its logical path. None also covers an object that cannot be read.
+    """
+    from . import held_fs, media_store, reserved_paths
+
+    try:
+        filing = originals.pooled(vault_root, artifact)
+        if filing is None:
+            return None
+        return media_store.pooled_head(vault_root, artifact.relative_to(vault_root).as_posix(), filing).sha256
+    except (OSError, ValueError, media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return None
+
+
 def stored_artifact(
     vault_root: Path, *, scope: str, category: str, filename: str, sha256: str, raw_protection: bool = False
 ) -> DuplicateArtifact | None:
@@ -374,13 +390,17 @@ def stored_artifact(
     sidecar = _sidecar_path(artifact, protected=protected)
     digest = hashlib.sha256()
     try:
-        with artifact.open("rb") as source:
-            while chunk := source.read(_STREAM_CHUNK):
-                digest.update(chunk)
+        try:
+            with artifact.open("rb") as source:
+                while chunk := source.read(_STREAM_CHUNK):
+                    digest.update(chunk)
+            stored_sha256 = digest.hexdigest()
+        except FileNotFoundError:
+            stored_sha256 = _pooled_sha256(vault_root, artifact)
         ref = memory_refs.ref_from_markdown(sidecar.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return None
-    if digest.hexdigest() != sha256 or not isinstance(ref, str) or not ref:
+    if stored_sha256 != sha256 or not isinstance(ref, str) or not ref:
         return None
     return DuplicateArtifact(
         hash=sha256,
