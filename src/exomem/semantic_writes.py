@@ -3442,23 +3442,10 @@ def _move_state_map(
     Without a moved page (`old_path` None), the rewrites alone: a relocation step that
     rewrites links after its moves committed.
     """
-    status_basis = status_basis or lifecycle_statuses.Basis(root)
-    states = dict(before_corpus.pages)
-    changed: dict[str, semantic_contract.SemanticPageState] = {}
-    moved_pages: dict[str, bytes | None] = {}
+    pages: dict[str, str | None] = {}
     if old_path is not None and new_path is not None and moved_source is not None:
-        states.pop(old_path, None)
-        moved = semantic_contract.build_page_state(
-            root,
-            new_path,
-            moved_source,
-            relation_registry=registry,
-            language_registry=language,
-            status_basis=status_basis,
-        )
-        states[new_path] = moved
-        changed[new_path] = moved
-        moved_pages = {old_path: None, new_path: moved_source.encode("utf-8")}
+        pages[old_path] = None
+        pages[new_path] = moved_source
     for write in rewrites:
         try:
             rel = write.path.relative_to(root).as_posix()
@@ -3467,38 +3454,56 @@ def _move_state_map(
                 "LIFECYCLE_TRANSITION_MISMATCH",
                 "move rewrite is outside the vault",
             ) from error
-        rewritten = semantic_contract.build_page_state(
+        pages[rel] = str(write.content)
+    return _corpus_with_pages(
+        root, before_corpus, pages, registry=registry, language=language, status_basis=status_basis
+    )
+
+
+def _corpus_with_pages(
+    root: Path,
+    corpus: semantic_contract.SemanticCorpusContext,
+    pages: Mapping[str, str | None],
+    *,
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> tuple[
+    semantic_contract.SemanticCorpusContext,
+    dict[str, semantic_contract.SemanticPageState],
+]:
+    """`corpus` once each page in `pages` holds its text, or is gone where it is None, with each
+    page that holds text.
+
+    A link that names a path some page left resolves by the lineage these pages hold, before the
+    index has refreshed: the claims are the index's with these pages applied.
+    """
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
+    states = dict(corpus.pages)
+    changed: dict[str, semantic_contract.SemanticPageState] = {}
+    for rel, text in pages.items():
+        if text is None:
+            states.pop(rel, None)
+            continue
+        state = semantic_contract.build_page_state(
             root,
             rel,
-            write.content,
+            text,
             relation_registry=registry,
             language_registry=language,
             status_basis=status_basis,
         )
-        states[rel] = rewritten
-        changed[rel] = rewritten
-
-    entries = tuple(
-        entry
-        for entry in before_corpus.identity_census.entries
-        if entry.path not in {*moved_pages, *changed}
-    )
+        states[rel] = state
+        changed[rel] = state
     identity_census = semantic_contract.StableIdentityCensus(
-        entries, before_corpus.identity_census.reference_only_entries
+        tuple(entry for entry in corpus.identity_census.entries if entry.path not in pages),
+        corpus.identity_census.reference_only_entries,
     )
     casefold_paths = vault.vault_casefolds(root)
     for state in changed.values():
         identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
-    # A link that still names the old path resolves by the lineage the move writes, before
-    # the index has refreshed.
     claims = prior_claims.current(root).with_pages(
-        {
-            **moved_pages,
-            **{
-                write.path.relative_to(root).as_posix(): str(write.content).encode("utf-8")
-                for write in rewrites
-            },
-        }
+        {rel: None if text is None else text.encode("utf-8") for rel, text in pages.items()}
     )
     return (
         semantic_contract.SemanticCorpusContext.from_states(
@@ -4138,16 +4143,75 @@ def _plan_relocation_lifecycle(
 
 def refuse_blocked_move(preflight: MovePreflight) -> None:
     """Refuse a move whose contract blocks, as its commit does."""
-    if preflight.should_block:
+    _refuse_blocked_evaluations(preflight.blocking_evaluations)
+
+
+def _refuse_blocked_evaluations(evaluations: Sequence[MovePageEvaluation]) -> None:
+    if any(item.contract_result.should_block for item in evaluations):
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
-            _blocking_reason_for_evaluations(preflight.blocking_evaluations),
+            _blocking_reason_for_evaluations(evaluations),
             tuple(
                 finding
-                for item in preflight.blocking_evaluations
+                for item in evaluations
                 for finding in item.contract_result.blocking_findings
             ),
         )
+
+
+def refuse_blocked_projected_move(
+    vault_root: Path,
+    *,
+    old_path: str,
+    new_path: str,
+    source: str,
+    moved_source: str,
+    projection: Mapping[str, str | None],
+) -> None:
+    """Refuse a move whose contract blocks once a plan's earlier steps have run.
+
+    `projection` maps each page those steps leave to its text, or to None where they remove
+    it, and the move takes `old_path` at `source` to `new_path` at `moved_source` from there.
+    An undo's inverse move runs after its link restore, so a page that linked the moved page
+    names its old path again by then; judged against the vault as it is, that link names the
+    path the inverse move vacates and seems lost.
+    """
+    root = Path(vault_root)
+    status_basis = lifecycle_statuses.Basis(root)
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    disk = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language, status_basis=status_basis
+    )
+    before_corpus, _held = _corpus_with_pages(
+        root, disk, {**projection, old_path: source},
+        registry=registry, language=language, status_basis=status_basis,
+    )
+    after_corpus, held = _corpus_with_pages(
+        root, disk, {**projection, old_path: None, new_path: moved_source},
+        registry=registry, language=language, status_basis=status_basis,
+    )
+    boundary = activation_manifest.plan_activation_boundary(
+        disk.activation_census, manifest=activation_manifest.load_manifest(root), vault_root=root
+    )
+    _refuse_blocked_evaluations(_evaluate_relocation(
+        root,
+        pairs=_move_evaluation_pairs(
+            old_path=old_path,
+            new_path=new_path,
+            changed={new_path: held[new_path]},
+            before_corpus=before_corpus,
+            after_corpus=after_corpus,
+        ),
+        moved_path=old_path,
+        pure_path_rewrites=set(),
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        loaded_contracts=memory_schema.load_saved_contracts(root),
+        language=language,
+        manifest=boundary.manifest,
+        status_basis=status_basis,
+    ))
 
 
 def commit_move(

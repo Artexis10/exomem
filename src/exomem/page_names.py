@@ -227,10 +227,10 @@ def resolve_page(
 ) -> str:
     """The path of the page `value` names, as a title or a short id when it is neither a ref nor a path.
 
-    Order: a memory ref; an existing file path; in a read, a path a moved page left, as a link to it
-    resolves; a short id; a title. A write keeps a path literal, so it never lands on the page that
-    left it. A value that names nothing is returned as the path it always was, so today's NOT_FOUND
-    and create-missing paths still apply.
+    Order: a memory ref; an existing file path; a short id; in a read, a path or a bare stem that a
+    moved page left, as a link to it resolves; a title. A write keeps its value literal, so it never
+    lands on the page that left it. A value that names nothing is returned as the path it always
+    was, so today's NOT_FOUND and create-missing paths still apply.
     `prefer` narrows several title matches to the pages it accepts (an edit prefers a page it can
     edit) before the call refuses. `field` is the command argument that held `value`, which the
     refusal's retry replaces with the id of the page the caller picks.
@@ -240,16 +240,6 @@ def resolve_page(
     visible = egress.visible_page_filter(root)
     if not raw or raw.lower().startswith("exomem://") or _names_a_file(root, raw, visible):
         return resolve_reference(root, value, serve_stale=serve_stale)
-    moved: list[str] = []
-    if "/" in raw and writer_lease.invocation_reads():
-        with egress.decide_without_receipt():
-            moved = vault.prior_path_pages(root, raw, find.shared_resolver(root), visible=visible)
-    if len(moved) > 1 and prefer is not None:
-        moved = [path for path in moved if prefer(path)] or moved
-    if len(moved) > 1:
-        raise _ambiguous(root, raw, moved, field, by_id=False)
-    if moved:
-        return resolve_reference(root, moved[0], serve_stale=serve_stale)
     if page_ids.is_page_id(raw):
         paths = _paths_for_head(root, raw.split(".", 1)[0], serve_stale=serve_stale)
         if len(paths) > 1:
@@ -264,8 +254,21 @@ def resolve_page(
         if paths:
             return resolve_reference(root, paths[0])
         # No page holds that id: the value may still be a title of the same shape.
-    key = vault.title_key(raw)
     resolver = find.shared_resolver(root)
+    moved: list[str] = []
+    if writer_lease.invocation_reads():
+        # The resolver's own lineage steps. A short id has already won; a live stem or title wins
+        # over a prior stem inside `prior_stem_pages`.
+        lineage = vault.prior_path_pages if "/" in raw else vault.prior_stem_pages
+        with egress.decide_without_receipt():
+            moved = lineage(root, raw, resolver, visible=visible)
+    if len(moved) > 1 and prefer is not None:
+        moved = [path for path in moved if prefer(path)] or moved
+    if len(moved) > 1:
+        raise _ambiguous(root, raw, moved, field, by_id=False)
+    if moved:
+        return resolve_reference(root, moved[0], serve_stale=serve_stale)
+    key = vault.title_key(raw)
     with egress.decide_without_receipt():
         matches = vault.wikilink_candidates(
             resolver.candidates_by_key,

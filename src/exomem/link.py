@@ -267,7 +267,8 @@ def _refuse_reserved(vault_root: Path, rel_entity: str, *, newest: bool) -> None
         prior_claims.require_unreserved(vault_root, rel_entity, newest=newest)
     except prior_claims.ReservedPathError as error:
         code = "ENTITY_EXISTS" if error.code == "FILE_EXISTS" else error.code
-        raise LinkError(code, ["name"], error.reason) from None
+        # The caller sent the name; another name is the remedy, not a missing field.
+        raise LinkError(code, [], error.reason) from None
 
 
 def _occupant_name(vault_root: Path, rel_entity: str) -> str:

@@ -18,6 +18,8 @@ from exomem.vault import content_hash, parse_frontmatter
 
 FOLDER = "Knowledge Base/Notes/Insights"
 HOME = "Knowledge Base/Notes/Insights/rehomed"
+#: A Source of the fixture vault, which a relocation's repoint rewrites as a referrer.
+SOURCE = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
 DAY = dt.date(2026, 7, 14)
 OBSERVATION = "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
 
@@ -159,6 +161,46 @@ def test_a_rehome_of_a_repointed_page_resumes_takes_edits_and_undoes(
     assert not (vault / rehomed).exists()
     assert {rel: (vault / rel).read_bytes() for rel in pre_rehome} == pre_rehome
 
+
+
+def test_the_undo_of_a_rehome_of_two_pages_that_link_to_each_other_restores_every_page(
+    vault: Path,
+) -> None:
+    """Catches an undo whose inverse moves are judged against the vault as it is.
+
+    The undo restores the links before it moves the pages back, so by the time it moves the first
+    page back, the second page's relation names the first page's old path again. Judged against
+    the vault as it is, that relation still named the path the inverse move vacates, so the undo
+    refused at proposal as RELATION_DISPOSITION_MISSING.
+    """
+    first, first_id = _note(
+        vault, "Mutual first", "Retries stay bounded under load.",
+        relation_disposition="reviewed_none", relation_review_reason="Nothing in the vault fits",
+    )
+    # The second page's only relation names the first, so a lost link leaves it no disposition.
+    second, second_id = _note(
+        vault, "Mutual second", f"Builds on the first.\n\n## Relations\n- supports {_link(first)}"
+    )
+    _edit(vault, first, "under load.", f"under load, as {_link(second)} measures.")
+    source = vault / SOURCE
+    source.write_text(
+        source.read_text(encoding="utf-8") + f"\nSee {_link(first)} for the limits.\n",
+        encoding="utf-8",
+    )
+    pages = (first, second, SOURCE)
+    before = {rel: (vault / rel).read_bytes() for rel in pages}
+    rehome = _plan(
+        vault, "Rehome", [(first, first.replace(FOLDER, HOME)), (second, second.replace(FOLDER, HOME))]
+    )
+    assert _run(vault, rehome)["phase"] == "completed"
+    assert (vault / SOURCE).read_bytes() != before[SOURCE]
+
+    undo = _compensate(vault, rehome["run_id"])
+
+    assert undo["phase"] == "compensated"
+    assert {rel: (vault / rel).read_bytes() for rel in pages} == before
+    assert _slot_state(vault, first_id, first) == "committed"
+    assert _slot_state(vault, second_id, second) == "committed"
 
 
 @pytest.mark.parametrize("changed_page", ["moved", "referrer"])

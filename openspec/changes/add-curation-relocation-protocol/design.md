@@ -97,9 +97,10 @@ Slash paths take the path steps and bare names take the name steps, as today.
 Write targets never follow lineage: the path argument of edit, move, delete or
 create names the file it acts on, so the guard and the executor judge the same
 path. The page-name step that a command's target passes through follows lineage
-only while the dispatcher runs a call that the command's declared access
-classifies as a read, the same classification that admits a call to the writer.
-Outside a dispatched read the path stays literal. Link resolution inside written content does follow lineage, and the
+only while the dispatcher runs a command declared read-only. A write-capable
+command keeps its target literal in every mode, so a `validate_only` or
+`dry_run` preview names the page its commit acts on. Outside a dispatched read
+the path stays literal. Link resolution inside written content does follow lineage, and the
 writer renders a link that names a prior path as a link to the current path.
 
 Lineage has two durable sources. The first is the page's own lineage. The
@@ -136,7 +137,7 @@ picks a different name.
 Under path-based scopes, admission refuses a create at a hidden page's current
 path before anything is disclosed. A create at its former path refuses in a
 vault with the claim and succeeds in a twin vault without it. So the
-reservation does disclose something new: that a page the writer cannot see
+reservation does disclose something new: that a live page the writer cannot see
 once lived at that exact path, or a spelling variant of it, in a folder the
 writer can write to. It never says which page. The decision stands, for
 integrity: without the reservation, the writer's page would win exact-path
@@ -331,7 +332,9 @@ returns each rewritten page to its sealed pre-step bytes, and each
 append-only page through the pointer write's revert. Compensating an `edit`
 step that corrected a pointer field on an append-only page also uses that
 revert. Compensation runs in reverse order, so referrers return before their
-target does.
+target does. The proposal judges each inverse move's contract from the state
+that the compensation's earlier steps leave: by then a referrer names the
+page's old path again.
 
 ## Risks / Trade-offs
 

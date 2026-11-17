@@ -260,7 +260,8 @@ def test_an_identified_page_at_a_prior_path_is_reported_to_the_owner_only(
 
 def test_an_entity_created_again_under_its_moved_and_retitled_name_refuses(vault: Path) -> None:
     """An entity create that skips the reservation, so a new page under a moved and retitled
-    entity's old name takes every link written to the entity before the move."""
+    entity's old name takes every link written to the entity before the move; or a refusal that
+    asks the caller for the name it already sent."""
     from exomem import link as link_module
 
     created = link_module.link(
@@ -285,6 +286,7 @@ def test_an_entity_created_again_under_its_moved_and_retitled_name_refuses(vault
         )
 
     assert refused.value.code == "ENTITY_EXISTS"
+    assert refused.value.missing == []
     assert not (vault / created.path).exists()
     assert _resolve(vault, created.path.removesuffix(".md")) == (renamed.removesuffix(".md"), None)
 
@@ -436,26 +438,71 @@ def test_reading_a_moved_page_by_a_path_it_left_finds_it_and_a_hidden_one_reads_
     assert str(hidden.value).split(":", 1)[0] == str(absent.value).split(":", 1)[0]
 
 
-#: Two write commands that name their target by `path`: each must keep that path literal.
-WRITES_BY_PATH = {
-    "edit_memory": {"why": "retag", "operation": {"kind": "replace_tags", "tags": ["moved"]}},
-    "observe_memory": {"operation": "add", "category": "result", "content": "Measured twice."},
-}
+def test_reading_a_moved_page_by_its_old_stem_finds_it(moved: Path) -> None:
+    """A read of a moved page's old bare stem that answers NOT_FOUND while a link by that stem finds
+    the page."""
+    assert _resolve(moved, STEM) == (C.removesuffix(".md"), None)
+    assert _dispatch(moved, "read_memory", path=STEM)["path"] == C
 
 
-@pytest.mark.parametrize("write", sorted(WRITES_BY_PATH))
+def test_reading_an_old_stem_that_two_pages_claim_picks_neither(vault: Path) -> None:
+    """A read by an old stem that picks one of two pages that claim it, while a link by the same
+    stem stays unresolved."""
+    from exomem import page_names
+
+    _write(
+        vault,
+        "Knowledge Base/Notes/second-claimant.md",
+        _claiming(f"Knowledge Base/Notes/Archive/{STEM}.md", "Second"),
+    )
+    (vault / C).parent.mkdir(parents=True, exist_ok=True)
+    _with_identity(vault, A)
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    _move(vault, A, C)
+
+    assert _resolve(vault, STEM)[1] is not None
+    with pytest.raises(page_names.AmbiguousTitle) as unresolved:
+        _dispatch(vault, "read_memory", path=STEM)
+    assert unresolved.value.code == "AMBIGUOUS_REFERENCE"
+
+
+#: Write commands, and previews of writes, that name their target by a path: each keeps it literal,
+#: so a preview names the page its commit acts on.
+EDIT = {"why": "retag", "operation": {"kind": "replace_tags", "tags": ["moved"]}}
+WRITES_BY_PATH = [
+    pytest.param("edit_memory", {"path": A, **EDIT}, "NOT_FOUND", id="edit"),
+    pytest.param(
+        "edit_memory", {"path": A, **EDIT, "validate_only": True}, "NOT_FOUND", id="edit-preview"
+    ),
+    pytest.param(
+        "observe_memory",
+        {"path": A, "operation": "add", "category": "result", "content": "Measured twice."},
+        "NOT_FOUND",
+        id="observe",
+    ),
+    pytest.param(
+        "replace_memory",
+        {"old_path": A, "title": "Autovacuum", "content": "A newer view.\n", "validate_only": True},
+        "OLD_NOT_FOUND",
+        id="replace-preview",
+    ),
+]
+
+
+@pytest.mark.parametrize(("write", "arguments", "code"), WRITES_BY_PATH)
 def test_a_write_by_a_path_a_page_left_refuses_while_a_read_by_it_finds_the_page(
-    moved: Path, write: str
+    moved: Path, write: str, arguments: dict, code: str
 ) -> None:
-    """A write whose target path follows the lineage, so a write aimed at a path that a page left
-    lands on that page instead of refusing as a write to a missing path."""
+    """A write, or the preview of one, whose target path follows the lineage: it lands on the page
+    that left the path instead of refusing as a write to a missing path, or its preview names a
+    page that its commit then refuses."""
     before = (moved / C).read_bytes()
 
     assert _dispatch(moved, "read_memory", path=A)["path"] == C
     with pytest.raises(ValueError) as refused:
-        _dispatch(moved, write, path=A, **WRITES_BY_PATH[write])
+        _dispatch(moved, write, **arguments)
 
-    assert str(refused.value).startswith("NOT_FOUND")
+    assert str(refused.value).split(":", 1)[0] == code
     assert (moved / C).read_bytes() == before
 
 
@@ -614,3 +661,71 @@ def test_a_page_a_reader_cannot_see_hides_no_relationship_by_an_old_path_from_th
 
     assert without_hidden == ("Knowledge Base/Notes/visible-claimant.md", "Visible")
     assert presented() == without_hidden
+
+
+def _scope(vault: Path, name: str, scope_id: str, rule_id: str, paths: str, ceiling: int) -> None:
+    """A scope over `paths` and the rule that releases it to the external audience at `ceiling`."""
+    _write(
+        vault, f"Knowledge Base/_Governance/scopes/{name}.yaml",
+        f"governance_version: 1\nid: {scope_id}\nname: {name}\npaths: {paths}\n",
+    )
+    _write(
+        vault, f"Knowledge Base/_Governance/rules/{name}.yaml",
+        f'governance_version: 1\nid: {rule_id}\nscope_ids: ["{scope_id}"]\n'
+        f"audience: external\nceiling: {ceiling}\n",
+    )
+
+
+def test_inspecting_a_relationship_by_an_old_path_records_only_its_target_in_the_receipt(
+    tmp_path: Path,
+) -> None:
+    """Counting the claimants of an old path through the receipt-writing check, so an inspection
+    writes a withheld row for a hidden claimant into the owner's disclosure ledger and claims rows
+    for pages it never released."""
+    from exomem import record_formats, record_governance
+    from exomem import structured_collections as collections
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    old = "Knowledge Base/Notes/Insights/retired-page.md"
+    visible = "Knowledge Base/Notes/visible-claimant.md"
+    _write(tmp_path, "Knowledge Base/log.md", "# Activity\n")
+    _write(
+        tmp_path,
+        LINKS_COLLECTION,
+        LINKS_MANIFEST.replace(
+            "item_schema:\n",
+            "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\n"
+            "item_schema:\n",
+        ),
+    )
+    _write(tmp_path, visible, _claiming(old, "Visible"))
+    memory_refs.ReferenceIndex(tmp_path).rebuild_all()
+    manifest = collections.load_manifest(tmp_path, tmp_path / LINKS_COLLECTION)
+    _write(
+        tmp_path,
+        "Knowledge Base/Records/Links/items/One.md",
+        record_formats.render_markdown_item(
+            manifest, {"title": "One", "related": old}, "11111111-1111-4111-8111-111111111111",
+            "Body\n",
+            resolve_relationship=record_formats.presentation_relationship_resolver(
+                tmp_path, manifest, None
+            ),
+        ),
+    )
+    _write(tmp_path, HIDDEN, _claiming(old, "Hidden"))
+    _scope(tmp_path, "open", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+           '["Records/**", "Notes/**"]', 6)
+    _scope(tmp_path, "withheld", "01ARZ3NDEKTSV4RRFFQ69G5FZZ", "01ARZ3NDEKTSV4RRFFQ69G5FZY",
+           '["Notes/Withheld/**"]', 0)
+    memory_refs.ReferenceIndex(tmp_path).rebuild_all()
+
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        with egress.disclosure_boundary(tmp_path, "inspect") as collector:
+            record_governance.inspect_collection(tmp_path, manifest)
+
+    claimants = {
+        (path, outcome) for path, outcome, _level in collector.path_outcomes
+        if path in (visible, HIDDEN)
+    }
+    assert claimants == {(visible, "release_authorized")}

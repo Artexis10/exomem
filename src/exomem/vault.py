@@ -9974,6 +9974,54 @@ def prior_path_pages(
     ]
 
 
+def prior_stem_pages(
+    vault_root: Path,
+    value: str,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> list[str]:
+    """The live pages whose lineage names the bare stem `value`, as a link to that stem resolves it.
+
+    A live page under that stem or title wins, so the answer is then empty. A page that `visible`
+    hides counts for nothing.
+    """
+    cleaned = wikilink_page_key(split_wikilink_target(value)[0])
+    if not cleaned or "/" in cleaned:
+        return []
+    matches, kind = _bare_name_matches(cleaned, vault_root, resolver, visible=visible)
+    return [candidate.path for candidate in matches] if kind == "prior stem" else []
+
+
+def _bare_name_matches(
+    cleaned: str,
+    vault_root: Path,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> tuple[list[WikilinkCandidate], str]:
+    """The pages the bare name `cleaned` names at the first step that finds any, and that step.
+
+    The steps run in order: the stem, the title, then a prior stem, so a prior stem never wins
+    over a live name. A page that `visible` hides counts for nothing.
+    """
+    stem_matches = wikilink_candidates(
+        resolver.candidates_by_key, resolver.stems.get(cleaned, ()), visible=visible
+    )
+    if stem_matches:
+        return stem_matches, "stem"
+    key = title_key(cleaned)
+    title_matches = wikilink_candidates(
+        resolver.candidates_by_key, resolver.titles.get(key, ()), title_key=key, visible=visible
+    )
+    if title_matches:
+        return title_matches, "title"
+    return _live_claimants(
+        _current_claims(resolver, vault_root).stem_claimants(cleaned),
+        resolver, resolver.full_paths.__contains__, targeted=False, visible=visible,
+    ), "prior stem"
+
+
 def _normalize_wikilink(
     target: str,
     vault_root: Path,
@@ -10071,20 +10119,9 @@ def _normalize_wikilink(
     # 3. Bare name (no `/`): stem match first, then frontmatter title, then a prior stem,
     # which never wins over a live name.
     if "/" not in cleaned:
-        stem_matches = _matches(resolver.stems.get(cleaned, ()))
-        if stem_matches:
-            return _selected(stem_matches, "stem")
-        title_matches = _matches(
-            resolver.titles.get(title_key(cleaned), ()), title_key=title_key(cleaned)
-        )
-        if title_matches:
-            return _selected(title_matches, "title")
-        stem_claimed = _live_claimants(
-            _current_claims(resolver, vault_root).stem_claimants(cleaned),
-            resolver, contains, targeted=targeted, visible=visible,
-        )
-        if stem_claimed:
-            return _selected(stem_claimed, "prior stem")
+        bare_matches, kind = _bare_name_matches(cleaned, vault_root, resolver, visible=visible)
+        if bare_matches:
+            return _selected(bare_matches, kind)
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result

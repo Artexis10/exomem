@@ -8516,7 +8516,7 @@ def record_caller_refusal(
 
 
 def invocation_reads() -> bool:
-    """Whether the dispatched command now running is a read, as its declared access classifies it.
+    """Whether the dispatched command now running is declared read-only (`Command.read_only`).
 
     False inside a write and outside a dispatched command (a CLI helper, the watcher, a direct
     call), so a step that only a read may take stays off wherever the access is not known.
@@ -9056,10 +9056,10 @@ def invoke_command(
         dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
-        # A write outside the writer skips only the lease; it is still a write, as the ledger says.
-        reads = _INVOCATION_READS.set(
-            read_only and not invocation_writes_outside_writer(command, kwargs)
-        )
+        # Only a command declared read-only reads by a page's prior path. A write-capable command
+        # keeps its target literal in every mode, so a preview (validate_only, dry_run) names the
+        # page its commit acts on, and a write outside the writer stays a write.
+        reads = _INVOCATION_READS.set(command.read_only)
         try:
             return _invoke_leaf()
         finally:

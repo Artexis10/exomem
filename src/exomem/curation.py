@@ -1666,11 +1666,13 @@ class _Chain:
     """What the earlier steps of a plan leave, for the steps that may bind it (`_CHAINED_STEP_KINDS`).
 
     `pages` holds each page an earlier step leaves at exact bytes, by path, with that step's id
-    and hash; `moves` holds the plan's forward moves in order.
+    and hash; `vacated` holds each path an earlier step removes and no later one writes; `moves`
+    holds the plan's forward moves in order.
     """
 
     moves: list[tuple[str, str]] = field(default_factory=list)
     pages: dict[str, tuple[str, str, str]] = field(default_factory=dict)
+    vacated: set[str] = field(default_factory=set)
 
     def text(self, vault_root: Path, path: str) -> str:
         """The page's text as the earlier steps leave it, else as the vault holds it now."""
@@ -1679,6 +1681,13 @@ class _Chain:
             return held[2]
         source, _hash = _read_target(vault_root, path)
         return source
+
+    def projection(self) -> dict[str, str | None]:
+        """Each page the earlier steps leave at exact bytes, and None at each path they vacate."""
+        return {
+            **dict.fromkeys(self.vacated),
+            **{path: text for path, (_step, _hash, text) in self.pages.items()},
+        }
 
 
 def _require_lifecycle_settled(vault_root: Path, pages: Mapping[str, str]) -> None:
@@ -2142,7 +2151,7 @@ def _prepare_step(
             prepared = folded["prepared"]
             effect_before, effect_after = folded["effect_before"], folded["effect_after"]
         elif kind in _RENAME_STEP_KINDS:
-            from . import duplicate_fold
+            from . import duplicate_fold, semantic_writes
 
             if kind == "move":
                 call = _move_call(vault_root, args)
@@ -2151,8 +2160,13 @@ def _prepare_step(
                 for key in ("old_path", "new_path"):
                     material[key] = normalize_target_path(material.get(key), field=f"move.{key}")
                 # The leaf judges the inverse move's policy; its bytes come from the sealed delta,
-                # applied below to the page as the plan's earlier steps leave it.
-                call = {**_unmove_call(material), "content_transform": lambda text: text}
+                # applied below to the page as the plan's earlier steps leave it, and its contract
+                # is judged from that state too.
+                call = {
+                    **_unmove_call(material),
+                    "content_transform": lambda text: text,
+                    "_caller_judges_contract": True,
+                }
             validation = move_module.move_file(vault_root, validate_only=True, **call)
             if not isinstance(validation, move_module.MoveFileValidation):
                 raise _error("CURATION_STEP_INVALID", "move leaf did not return a validation")
@@ -2194,6 +2208,16 @@ def _prepare_step(
                     raise _error(
                         "CURATION_BINDING_STALE", f"{path!r} no longer returns to its pre-step bytes"
                     )
+                # An undo restores the links before it moves the pages back, so a page that linked
+                # this one names its old path again by then.
+                semantic_writes.refuse_blocked_projected_move(
+                    vault_root,
+                    old_path=path,
+                    new_path=destination,
+                    source=current,
+                    moved_source=after_text,
+                    projection=chain.projection(),
+                )
                 prepared = {"destination": destination}
             expected_absent = True
             after_hash = text_content_hash(after_text)
@@ -2312,15 +2336,16 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     """Prepare each step with links to the pages the plan's earlier steps create.
 
     A later step may link to a page an earlier step creates, so its links are
-    rendered as they will be once that page exists. Only that rendering is
-    projected; the semantic checks still read the vault as it is. A plan that
-    projection cannot make run as sealed is refused here instead of stopping
-    part-way: a later step bound to a path an earlier step writes, a step that
-    links to a page an earlier step supersedes, and a step that gives a relation
-    disposition while it links to a page an earlier step creates (that link is
-    its relation once the page exists). A step whose leaf validation already blocks
-    is refused too (`_refuse_blocked`). Relocation steps, which remove pages, are
-    refused before any step runs (`_require_plan_relocation_history`).
+    rendered as they will be once that page exists. Only that rendering, and an
+    inverse move's contract, are projected; the other semantic checks still read
+    the vault as it is. A plan that projection cannot make run as sealed is
+    refused here instead of stopping part-way: a later step bound to a path an
+    earlier step writes, a step that links to a page an earlier step supersedes,
+    and a step that gives a relation disposition while it links to a page an
+    earlier step creates (that link is its relation once the page exists). A
+    step whose leaf validation already blocks is refused too
+    (`_refuse_blocked`). Relocation steps, which remove pages, are refused
+    before any step runs (`_require_plan_relocation_history`).
 
     A step of `_CHAINED_STEP_KINDS` may bind a page that an earlier step leaves at
     exact bytes (a move's destination, a pointer correction, an inverse's restored
@@ -2396,6 +2421,9 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
             chain.moves.append((str(item["path"]), str(item["postcondition"]["path"])))
         for path in after:
             chain.pages.pop(path, None)
+        chain.vacated = (chain.vacated - after) | {
+            str(entry["path"]) for entry in item["effect_after"] if entry.get("absent")
+        }
         for path, text in exact.items():
             chain.pages[path] = (str(step["step_id"]), text_content_hash(text), text)
         if duplicate:

@@ -673,6 +673,7 @@ def move_file(
     _preview_call: Mapping[str, object] = _MOVE_PREVIEW,
     _stage: Callable[[str], None] | None = None,
     _exact_content: bool = False,
+    _caller_judges_contract: bool = False,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file; see `_move_file_local`.
 
@@ -691,6 +692,9 @@ def move_file(
     `before-rename` immediately before the rename, `after-rename` after it and `after-batch`
     after the batch commits. `_exact_content` makes `content_transform` alone decide the moved
     bytes, with no lineage entry added or removed: curation's guarded inverse restores sealed bytes.
+    `_caller_judges_contract` leaves a validation's contract to its caller, which judges the move
+    from another state: curation's inverse move, from what the plan's earlier steps leave
+    (`semantic_writes.refuse_blocked_projected_move`). Its commit judges the vault as it is then.
     """
     manager = writer_lease.active_manager()
     validate_only = validate_only or preview
@@ -698,7 +702,7 @@ def move_file(
     # Protect semantic creation and rollback, then release before standalone index fan-out.
     with ExitStack() as mutation_context, ExitStack() as originals_context:
         mutation_context.enter_context(boundary(vault_root, operation="move_file"))
-        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content)
+        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content, _caller_judges_contract=_caller_judges_contract)
 
 
 def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: str) -> None:
@@ -869,6 +873,7 @@ def _move_file_local(
     _preview_call: Mapping[str, object] = _MOVE_PREVIEW,
     _stage: Callable[[str], None] | None = None,
     _exact_content: bool = False,
+    _caller_judges_contract: bool = False,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
@@ -1607,7 +1612,7 @@ def _move_file_local(
                     ) from error
 
             if validate_only:
-                if not preview:
+                if not (preview or _caller_judges_contract):
                     # A curation plan seals this validation, so a step that validates is one
                     # whose contract its commit accepts.
                     semantic_writes.refuse_blocked_move(preflight)

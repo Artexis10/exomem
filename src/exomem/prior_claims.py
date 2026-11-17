@@ -294,7 +294,7 @@ def require_unreserved(
 
     Under path-based scopes, admission refuses a create at a hidden page's current path before
     anything is disclosed. A create at its former path refuses here in one vault and succeeds in
-    a twin vault without the claim. So the reservation does disclose something new: that a page
+    a twin vault without the claim. So the reservation does disclose something new: that a live page
     the writer cannot see once lived at that exact path, or a spelling variant of it, in a folder
     the writer can write to. It never says which page. The reservation stands for integrity:
     without it, the writer's page would win exact-path resolution and take the owner's old links.
