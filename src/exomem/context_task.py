@@ -448,11 +448,17 @@ def _declared_methods(
 
     A lead's declaration is read from its own released frontmatter, so it names a page only to a caller who
     read the manifest. The named page is then projected by its own release decision, exactly as a lead is: a
-    page the caller may not read is omitted, and reads as a declaration that names no page. Each declaring
-    lead costs one reference lookup and one source projection. Returns the method page by lead, and whether
-    the deadline cut the projection short.
+    page the caller may not read is omitted, and reads as a declaration that names no page. A title or a stem
+    reference resolves only through the broad resolver that is already resident, since building it reads the
+    whole vault; a cold one costs this turn the method and schedules the build. A path or a ref costs one
+    lookup. Each declaring lead costs at most one source projection. The method is advisory, so a failure
+    on it costs the method and never the task context. Returns the method page by lead, and whether the
+    deadline cut the projection short.
     """
-    from . import capture_method, structured_collections
+    from . import capture_method, find, structured_collections
+
+    def resident_resolver():
+        return find.borrow_query_resolver(root, caller.visible, schedule_rebuild=True)
 
     declared: dict[str, str] = {}
     for lead in leads:
@@ -463,13 +469,19 @@ def _declared_methods(
             reference = structured_collections.parse_capture(source.public.get("frontmatter", {}).get("capture"))
         except structured_collections.CollectionError:
             continue  # a malformed declaration is the manifest's finding to report; it declares no method here
-        path = capture_method.locate(root, reference) if reference else None
-        if path is None or path == lead["source_ref"]:
+        if not reference:
             continue
         try:
+            # Checked before the lookup, so a withheld page and a missing one behave alike on a spent budget.
+            _deadline_check()
+            path = capture_method.locate(root, reference, resolver_for=resident_resolver)
+            if path is None or path == lead["source_ref"]:
+                continue
             method = project_source(root, path, caller, cache=sources)
         except TaskDeadline:
             return declared, True
+        except Exception:  # noqa: BLE001 -- the declared method is advisory: a transient failure on it costs the method, not the turn
+            continue
         if method is None:
             continue
         declared[lead["source_ref"]] = path

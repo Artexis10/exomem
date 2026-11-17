@@ -12,14 +12,17 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import memory_refs, page_names, reserved_paths, vault
 from .governance import egress
 
-log = logging.getLogger(__name__)
+# The compact write terminal validates what this module produces, so it owns the bounds: a method that
+# met them here is never the reason the terminal drops the whole advisory.
+from .mutation_terminal import _MAX_ROUTING_COLLECTION_CHARS as REF_MAX_CHARS
+from .mutation_terminal import _MAX_ROUTING_TITLE_CHARS as TITLE_MAX_CHARS
 
-#: The longest title a pointer carries; the compact write terminal validates the same bound.
-TITLE_MAX_CHARS = 160
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,18 +38,22 @@ class CaptureMethod:
     title: str
 
 
-def locate(vault_root: Path, reference: str) -> str | None:
+def locate(
+    vault_root: Path, reference: str, *, resolver_for: Callable[[], Any | None] | None = None
+) -> str | None:
     """The vault path of the page `reference` names, or None; it decides nothing about who may read it.
 
     Only the page's release decision for the caller asking admits it to anyone, so a caller of this
-    function owns that decision.
+    function owns that decision. A path or a memory ref needs no resolver. A title or a stem needs the
+    broad resolver, which `resolver_for` supplies (see `page_names.resolve_page`); a read on a request
+    path passes a lookup that never builds it, and a title it cannot resolve names nothing.
     """
     root = Path(vault_root)
     try:
         page, _anchor = vault.split_wikilink_target(reference)
         if not page:
             return None
-        path = page_names.resolve_page(root, page, serve_stale=True)
+        path = page_names.resolve_page(root, page, serve_stale=True, resolver_for=resolver_for)
         confined = (root / path).resolve()
         # A path that leaves the vault, or that a link spelled around, is no page of this vault.
         if (
@@ -69,7 +76,8 @@ def resolve(
     """The page `reference` names when `readable` admits it, else None.
 
     `readable` decides one vault path for the caller asking; left out, it is the release decision that
-    every page read makes.
+    every page read makes. A page whose reference does not fit the write terminal's bound resolves to
+    nothing, so the advisory it would ride on is never dropped for it.
     """
     root = Path(vault_root)
     path = locate(root, reference)
@@ -83,9 +91,12 @@ def resolve(
         title = " ".join(egress.without_wikilinks(identity.title).split())
         if not title:
             return None
+        ref = memory_refs.memory_ref(owner) if owner else path
+        if len(ref) > REF_MAX_CHARS:
+            return None
         return CaptureMethod(
             path=path,
-            ref=memory_refs.memory_ref(owner) if owner else path,
+            ref=ref,
             title=title if len(title) <= TITLE_MAX_CHARS else f"{title[: TITLE_MAX_CHARS - 1].rstrip()}\u2026",
         )
     except Exception:  # noqa: BLE001 -- a pointer that cannot be resolved is omitted, never an error

@@ -222,6 +222,7 @@ def resolve_page(
     prefer: Callable[[str], bool] | None = None,
     field: str = "path",
     serve_stale: bool = False,
+    resolver_for: Callable[[], Any | None] | None = None,
 ) -> str:
     """The path of the page `value` names, as a title or a short id when it is neither a ref nor a path.
 
@@ -232,6 +233,9 @@ def resolve_page(
     `prefer` narrows several title matches to the pages it accepts (an edit prefers a page it can
     edit) before the call refuses. `field` is the command argument that held `value`, which the
     refusal's retry replaces with the id of the page the caller picks.
+    `resolver_for` gives the broad resolver that the title steps read. Left out it is the shared one,
+    which a cold process builds in full, as a write may. A read on a request path passes a lookup that
+    never builds; when it returns None the title stays unresolved, as one that names nothing.
     """
     root = Path(root)
     raw = str(value or "").strip()
@@ -252,7 +256,9 @@ def resolve_page(
         if paths:
             return resolve_reference(root, paths[0])
         # No page holds that id: the value may still be a title of the same shape.
-    resolver = find.shared_resolver(root)
+    resolver = resolver_for() if resolver_for is not None else find.shared_resolver(root)
+    if resolver is None:
+        return resolve_reference(root, raw)
     moved: list[str] = []
     # The resolver's own lineage steps. A short id has already won; a live stem or title wins
     # over a prior stem inside `prior_stem_pages`.

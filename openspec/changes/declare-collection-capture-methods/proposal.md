@@ -31,6 +31,6 @@ Builds beside `recognize-situations-and-project-methods`: this change adds a poi
 The page stays user-authored governed knowledge; the manifest holds only the reference.
 Everything reuses the router, the link resolver, the method projection and the governance release decision.
 Egress is in scope: a declared page that the caller may not read is omitted whole, indistinguishably from a missing one, on the write advisory, in inspection and in the turn packet.
-The change adds no new retrieval lane. A route that declares a method costs one reference lookup, plus one source projection at turn time; a collection that declares nothing costs nothing.
+The change adds no new retrieval lane. A route that declares a method costs one reference lookup on the write receipt and one source projection at turn time, where a title never builds the link resolver; a collection that declares nothing costs nothing.
 The turn-time method has one boundary: removing the declaration while the method page stays unchanged does not reset what a client already holds, because the held method's own source is unchanged; the reset follows the page's next revision.
 `MIN_CLAIM_COVERAGE` and `FAILURE_SHAPES` are provisional constants that this change leaves as they are; the second is old debt kept only for undeclared routes.

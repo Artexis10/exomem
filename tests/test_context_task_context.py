@@ -15,8 +15,9 @@ from test_governance_egress import _external, write_rule
 from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
-from exomem import call_spans, commands, context_catalogue, freshness, lexstore, working_set_runtime
+from exomem import call_spans, commands, context_catalogue, find, freshness, lexstore, working_set_runtime
 from exomem.governance import principal
+from exomem.vault import WikilinkResolver
 from exomem.writer_lease import invoke_command
 
 
@@ -1040,6 +1041,25 @@ def _routed_to_depot_stock(packet: dict) -> bool:
     return DEPOT_MANIFEST in {item["path"] for item in packet["turn_slice"]["items"]}
 
 
+def _resident_resolver(vault: Path) -> None:
+    """Hold the broad resolver as the long-lived server does, so a title reference can resolve on a turn."""
+    find.evict_resolver_caches(vault)
+    find.shared_resolver(vault)
+
+
+def _resolver_builds(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """A record of every full vault build of the broad resolver from now on."""
+    builds: list[bool] = []
+    build = WikilinkResolver._build
+
+    def counted(self, *args, **kwargs):
+        builds.append(True)
+        return build(self, *args, **kwargs)
+
+    monkeypatch.setattr(WikilinkResolver, "_build", counted)
+    return builds
+
+
 def test_a_routed_collection_serves_its_declared_plain_page_as_a_read_required_method(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1049,6 +1069,7 @@ def test_a_routed_collection_serves_its_declared_plain_page_as_a_read_required_m
     _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    _resident_resolver(vault)
     packet = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
     assert _routed_to_depot_stock(packet)
     (method,) = _methods_of(packet, STOCKTAKE_METHOD)
@@ -1088,6 +1109,7 @@ def test_a_revised_capture_method_page_resets_the_methods_a_client_holds(
     _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    _resident_resolver(vault)
     first = _activate(vault, turn=DEPOT_TURN, max_chars=8000, client="fixture-a")
     (before,) = _methods_of(first, STOCKTAKE_METHOD)
     unchanged = _activate(vault, turn=DEPOT_TURN, max_chars=8000, continuity=first["continuity"], client="fixture-a")
@@ -1096,6 +1118,7 @@ def test_a_revised_capture_method_page_resets_the_methods_a_client_holds(
     page = vault / STOCKTAKE_METHOD
     page.write_text(page.read_text().replace("shelf number first", "aisle letter first"))
     freshness.on_files_changed(vault, [page])
+    _resident_resolver(vault)
     refreshed = _activate(vault, turn=DEPOT_TURN, max_chars=8000, continuity=first["continuity"], client="fixture-a")
     assert refreshed["task_context"]["methods"]["reset"] is True
     (after,) = _methods_of(refreshed, STOCKTAKE_METHOD)
@@ -1122,6 +1145,7 @@ def test_a_withheld_capture_method_page_is_served_to_no_one_who_may_not_read_it(
     for root in (vault, twin):
         _built(root).close()
         lexstore.ensure_fresh(root)
+        _resident_resolver(root)
     # The control: the owner, whom the rule does not bind, is served the page this vault holds.
     assert _methods_of(_activate(vault, turn=DEPOT_TURN, max_chars=8000), STOCKTAKE_METHOD)
     withheld = _activate(vault, _external(), turn=DEPOT_TURN, max_chars=8000)
@@ -1131,36 +1155,74 @@ def test_a_withheld_capture_method_page_is_served_to_no_one_who_may_not_read_it(
     assert "stocktake" not in str(withheld).lower()
 
 
-def test_a_routed_collection_resolves_its_declared_method_once_and_one_that_declares_none_never(
+def test_a_title_declared_method_builds_no_resolver_on_a_cold_turn_and_is_served_once_it_is_resident(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Serving the method costs one reference lookup for the routed lead, and nothing for a lead that declares none."""
-    from exomem import page_names
+    """The broad resolver is a vault-sized build: a turn borrows it, and a cold cache costs that turn the method."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _declare_capture_method(vault, "[[Stocktake recording method]]")
+    _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    find.evict_resolver_caches(vault)
+    builds = _resolver_builds(monkeypatch)
+
+    cold = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+
+    assert _routed_to_depot_stock(cold)
+    assert builds == []
+    assert _methods_of(cold, STOCKTAKE_METHOD) == []
+    _resident_resolver(vault)
+    builds.clear()
+    resident = _activate(vault, turn=DEPOT_TURN, max_chars=8000, client="fixture-b")
+    assert builds == []
+    assert _methods_of(resident, STOCKTAKE_METHOD)
+
+
+def test_a_path_declared_method_is_served_on_a_cold_resolver_without_building_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path names its page without any resolver, so a cold cache costs it nothing."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _declare_capture_method(vault, f"[[{STOCKTAKE_METHOD}]]")
+    _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    find.evict_resolver_caches(vault)
+    builds = _resolver_builds(monkeypatch)
+
+    packet = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+
+    assert builds == []
+    assert _methods_of(packet, STOCKTAKE_METHOD)
+
+
+def test_a_transient_failure_on_the_declared_method_costs_the_method_and_never_the_turn(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The method is advisory: a source that changes while it is projected must not make the whole task context unavailable."""
+    from exomem import context_task
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _declare_capture_method(vault, "[[Stocktake recording method]]")
     _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
-    lookups: list[str] = []
-    resolve = page_names.resolve_page
+    _resident_resolver(vault)
+    project = context_task.project_source
 
-    def counted(root, value, **kwargs):
-        lookups.append(value)
-        return resolve(root, value, **kwargs)
+    def changing(root, source_ref, *args, **kwargs):
+        if source_ref == STOCKTAKE_METHOD:
+            raise ValueError("semantic input changed during preparation")
+        return project(root, source_ref, *args, **kwargs)
 
-    monkeypatch.setattr(page_names, "resolve_page", counted)
-    _activate(vault, turn=DEPOT_TURN, max_chars=8000)
-    assert lookups == ["Stocktake recording method"]
+    monkeypatch.setattr(context_task, "project_source", changing)
 
-    manifest = vault / DEPOT_MANIFEST
-    manifest.write_text(manifest.read_text().replace('capture:\n  method: "[[Stocktake recording method]]"\n', ""))
-    freshness.on_files_changed(vault, [manifest])
-    lookups.clear()
-    undeclared = _activate(vault, turn=DEPOT_TURN, max_chars=8000, client="fixture-b")
-    assert _routed_to_depot_stock(undeclared)
-    assert lookups == []
-    assert _methods_of(undeclared, STOCKTAKE_METHOD) == []
+    packet = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+
+    assert packet["task_context"]["state"] != "unavailable"
+    assert _routed_to_depot_stock(packet)
+    assert _methods_of(packet, STOCKTAKE_METHOD) == []
 
 
 def test_a_declared_method_page_that_the_turn_also_leads_to_is_served_once(
@@ -1175,6 +1237,7 @@ def test_a_declared_method_page_that_the_turn_also_leads_to_is_served_once(
     )
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    _resident_resolver(vault)
     packet = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
     assert STOCKTAKE_METHOD in {item["source_ref"] for item in packet["task_context"]["candidates"]}
     (method,) = _methods_of(packet, STOCKTAKE_METHOD)
