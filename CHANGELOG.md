@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.188.0](https://github.com/Artexis10/exomem/compare/v0.187.0...v0.188.0) (2026-11-17)
+
+
+### Features
+
+* **ownership:** ask the connected agent whether a page belongs in its project ([#2903](https://github.com/Artexis10/exomem/issues/2903)) ([32e22c0](https://github.com/Artexis10/exomem/commit/32e22c042a64a1250aa91048b133c7b8805fdce8))
+* **storage:** keep one copy of identical originals in shared storage ([#2887](https://github.com/Artexis10/exomem/issues/2887)) ([fd2c06f](https://github.com/Artexis10/exomem/commit/fd2c06ff59d8ac807a58d85891a2a6d149fabcfd))
+
 ## [0.187.0](https://github.com/Artexis10/exomem/compare/v0.186.0...v0.187.0) (2026-11-17)
 
 
