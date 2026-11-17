@@ -26,12 +26,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
 # The surface is 24 typed tools and two doors, and every ceiling rounds up to 50 bytes. The complete local
-# wire measures 29,115 B, so the budget is 29,150 B; `recall_context`'s `native_skills`, which a hook fills so the
+# wire measures 29,115 B, so the budget is 29,150 B. `recall_context`'s `native_skills`, which a hook fills so the
 # skills catalogue omits what the client already loads, took 162 B. The door operations `imports.file`, `review.held` and
 # `maintenance.held_resolve` add 56 B to the two door enums. `cancel_uploads`, which frees a caller's own waiting
-# uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` 45 B. The one `review` string that
-# carries a profile preview's proof on `create_note`, `edit_note` and `add_observation` added the last 336 B, 112 B
-# each. Raise a ceiling deliberately, in the diff that needs it.
+# uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` 45 B. The wire measured 28,779 B
+# before the one `review` string that carries a profile preview's proof on `create_note`, `edit_note` and
+# `add_observation`; that string added 336 B, 112 B each. Raise a ceiling deliberately, in the diff that needs it.
 TOTAL_BUDGET = 29_150
 
 #: Per-tool ceilings for the tools that discovery lists.

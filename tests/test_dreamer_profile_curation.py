@@ -28,6 +28,7 @@ from exomem import (
     upkeep,
     working_set_index,
 )
+from exomem import vault as vault_module
 from exomem.writer_lease import invoke_command
 
 KB = fx.KB
@@ -191,6 +192,32 @@ def test_pages_a_caller_may_not_see_do_not_use_up_the_count(tmp_path: Path) -> N
     assert restricted["measures"] == {"new_units": 1, "stale_lines": 0, "at_least": False}
     # The owner sees more pages than one item counts: the count says it is partial, never the whole.
     assert owner is not None and owner["measures"]["at_least"] is True
+
+
+def test_one_view_reads_no_more_pages_than_it_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A view that reads every page of its domain before applying its page limit costs more as the domain grows.
+    vault = _vault(tmp_path)
+    for index in range(300):
+        line = f"- [preference] Line {index}. ^line\n"
+        fx.write(vault, f"{KB}/Notes/Insights/g-{index:04d}.md", _note(f"Games {index}", line, topics="games"))
+    fx.publish_graph(vault)
+    _fold(vault)
+    reads: list[str] = []
+    read = vault_module.read_guarded_text
+
+    def counted(root: Path, path: Path, *args, **kwargs):
+        reads.append(Path(path).name)
+        return read(root, path, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "read_guarded_text", counted)
+
+    item = _served(vault)
+
+    assert item is not None and item["measures"]["at_least"] is True
+    # Each page holds one unit, so the unit count is the number of pages the view counted.
+    counted = item["measures"]["new_units"]
+    assert counted < 300
+    assert len([name for name in reads if name.startswith("g-")]) <= counted + 1
 
 
 def test_one_tick_over_several_pages_lists_the_profiles_once(

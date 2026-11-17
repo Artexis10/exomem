@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -2315,11 +2315,11 @@ def _curation_scope(ctx: Context, subject: str, scope: Any, taxonomy: Any) -> _C
 
 def _curation_candidates(
     ctx: Context, subject: str, scope: Any, taxonomy: Any, since: str, categories: frozenset[str], keep
-) -> tuple[tuple[str, str, tuple[tuple[str, str, str, str], ...]], ...]:
+) -> Iterator[tuple[str, str, tuple[tuple[str, str, str, str], ...]]]:
     """The live pages of the profile's scope that hold a newer unit with a curation label, in path order.
 
-    Each is `(path, page date, units)`. `keep` decides each page before its content is read. The owner's view
-    (`keep=None`) is computed once per tick, so a tick over many pages of one domain reads each page once.
+    Each is `(path, page date, units)`. `keep` decides each page before its content is read. Pages are read one
+    at a time as the caller asks, so a caller that stops at its limit reads no page past it.
     """
     from . import (
         context_catalogue,
@@ -2328,34 +2328,27 @@ def _curation_candidates(
         vocabulary_resolution,
     )
 
-    memo: dict[str, Any] = ctx.shared.setdefault("curation_candidates", {}) if keep is None else {}
-    if subject in memo:
-        return memo[subject]
     evidence = _curation_scope(ctx, subject, scope, taxonomy)
     pages = evidence.linked | (evidence.members or frozenset())
     candidates = sorted(path for path in pages if path != subject and _visible(keep, path))
     plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
     labels, params = plan.predicate("u.unit_category", "u.unit_kind")
     graph = ctx.graph()
-    hits: list[tuple[str, str]] = []
+    in_domain = scope.kind == vocabulary_resolution.SCOPE_DOMAIN
+    # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
     for start in range(0, len(candidates), context_catalogue.SQL_VARIABLE_CHUNK):
         chunk = candidates[start : start + context_catalogue.SQL_VARIABLE_CHUNK]
         sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), newer=_NEWER_THAN, labels=labels)
         keys = [f"file:{path}" for path in chunk]
         rows = graph.execute(sql, (*keys, since, epistemic_graph.CANDIDATE_KIND, *params))
-        hits.extend((str(path), _date(updated, origin)) for path, updated, origin in rows)
-    in_domain = scope.kind == vocabulary_resolution.SCOPE_DOMAIN
-    found = []
-    for path, page_date in sorted(hits):
-        page = _unit_page(ctx, path)
-        if page is None:
-            continue
-        topics, units = page
-        # A member the catalogue named may have changed its topics since; the page itself decides.
-        if path in evidence.linked or (in_domain and _in_domain(taxonomy, topics, scope.domain)):
-            found.append((path, page_date, units))
-    memo[subject] = tuple(found)
-    return memo[subject]
+        for path, page_date in sorted((str(path), _date(updated, origin)) for path, updated, origin in rows):
+            page = _unit_page(ctx, path)
+            if page is None:
+                continue
+            topics, units = page
+            # A member the catalogue named may have changed its topics since; the page itself decides.
+            if path in evidence.linked or (in_domain and _in_domain(taxonomy, topics, scope.domain)):
+                yield path, page_date, units
 
 
 def _new_units(
@@ -2364,26 +2357,31 @@ def _new_units(
     """Live units of the curation categories dated after `since`, by page, and whether the count is partial.
 
     A unit with no date of its own takes its page's. Visibility and eligibility decide each page before the
-    page limit counts it, so pages the caller may not see or that are not live never use up the limit. A
-    domain whose pages the catalogue cannot name makes the count partial.
+    page limit counts it, so pages the caller may not see or that are not live never use up the limit. The
+    walk stops at the first page past the limit. A domain whose pages the catalogue cannot name makes the
+    count partial. The owner's view (`keep=None`) is computed once per tick.
     """
+    memo: dict[str, Any] = ctx.shared.setdefault("curation_new_units", {}) if keep is None else {}
+    if subject in memo:
+        return memo[subject]
     categories = _curation_categories(ctx)
     partial = _curation_scope(ctx, subject, scope, taxonomy).members is None
-    if not since or not categories:
-        return {}, partial
     found: dict[str, list[str]] = {}
-    for path, page_date, units in _curation_candidates(ctx, subject, scope, taxonomy, since, categories, keep):
-        refs = sorted(
-            ref
-            for ref, category, as_of, until in units
-            if category in categories and (as_of or page_date)[:10] > since and not _past(until, today)
-        )
-        if not refs:
-            continue
-        if len(found) == _CURATION_PAGES:
-            return found, True
-        found[path] = refs
-    return found, partial
+    if since and categories:
+        for path, page_date, units in _curation_candidates(ctx, subject, scope, taxonomy, since, categories, keep):
+            refs = sorted(
+                ref
+                for ref, category, as_of, until in units
+                if category in categories and (as_of or page_date)[:10] > since and not _past(until, today)
+            )
+            if not refs:
+                continue
+            if len(found) == _CURATION_PAGES:
+                partial = True
+                break
+            found[path] = refs
+    memo[subject] = (found, partial)
+    return memo[subject]
 
 
 def _dated_lines(ctx: Context, subject: str, today: date) -> frozenset[tuple[str, str, str]]:

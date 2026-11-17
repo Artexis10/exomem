@@ -544,7 +544,8 @@ def replace(
     try:
         semantic_writes.refuse_profile_supersession(root, old_parsed.frontmatter.get("type"), note_type)
     except semantic_writes.SemanticWriteError as error:
-        raise ReplaceError(error.code, ["old_path"], error.reason) from error
+        # Nothing is missing from the call, so the refusal names no field; its reason names the call to make.
+        raise ReplaceError(error.code, [], error.reason) from error
 
     status_basis = lifecycle_statuses.Basis(root)
     predecessor_class = status_basis.classify(
