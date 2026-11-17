@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -307,6 +307,51 @@ def register_owner(root: Path, reference: str, owner: OwnerLocator) -> None:
         return
     value = Manifest.model_validate({**manifest.model_dump(), "owners": {**manifest.owners, owner.owner: owner}})
     publish(root, PlannedCustody((_write(root, manifest_path(root, reference), value, guard, MAX_MANIFEST_BYTES),)))
+
+
+def issue_birth(root: Path, reference: str, allocate: Callable[[], ProducerBirth]) -> None:
+    """Checkpoint a fresh allocation before its first generated copy, so its copy census is definitive.
+
+    The caller proves that payload, result and native hooks all record this capture. An allocation that
+    already registered a producer, or already published, may hold copies from before its birth.
+    """
+    _boundary(root)
+    manifest, guard = read_manifest(root, reference)
+    if manifest is None:
+        raise OpError("SOURCE_CUSTODY_UNAVAILABLE", "Source allocation custody is unavailable")
+    require_publishable(root, reference)
+    if manifest.generated_birth is not None or manifest.owners or manifest.publication != "allocated":
+        return
+    updated = Manifest.model_validate({**manifest.model_dump(), "generated_birth": allocate(),
+                                       "coverage_complete": True})
+    publish(root, PlannedCustody((_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES),)))
+
+
+#: Lifecycle operations refuse an enrolled Source with this code and name its one removal operation.
+ERASE_REQUIRED = ("SOURCE_ERASE_REQUIRED", "this captured Source is held for erasure; remove it with sources.erase")
+
+
+def enrolled(root: Path, markdown: str) -> bool:
+    """Whether this page is an enrolled Source incarnation, which only ``sources.erase`` may move or remove.
+
+    A trashed or moved copy would sit outside the copy census that lets an erase report completion.
+    """
+    if not available():
+        return False
+    reference = memory_refs.ref_from_markdown(markdown)
+    return reference is not None and read_manifest(root, reference)[0] is not None
+
+
+def enrolled_path(root: Path, relative: str) -> bool:
+    """Read one file-mode page, or the page of the original that it names as ``<filename>.md``."""
+    if not available():
+        return False
+    page = relative if relative.lower().endswith(".md") else f"{relative}.md"
+    try:
+        markdown = reserved_paths.read_generic_bytes(root, page).data.decode("utf-8")
+    except (reserved_paths.ReservedPathLeafError, UnicodeDecodeError):
+        return False  # The caller's own read reports a missing, held or unreadable page.
+    return enrolled(root, markdown)
 
 
 def _exact_primary(root: Path, *, path: str, reference: str | None, source_hash: str) -> bool:

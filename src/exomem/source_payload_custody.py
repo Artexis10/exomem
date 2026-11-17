@@ -69,6 +69,11 @@ class _CaptureCopies:
         self.publications: list[native_copy_custody.NativePublication] = []
         try:
             head = self.store.initialize()
+            from .source_result_custody import active, record_target
+
+            if active(root):
+                # Payload, result and native hooks all record this capture, so its census starts complete here.
+                source_custody.issue_birth(root, reference, self.store.allocate_birth)
             # This locator names the catalogue protocol, rather than each retained physical copy.
             source_custody.register_owner(root, reference, source_custody.OwnerLocator(
                 owner=generated_fragment_store.OWNER, locator=head.catalogue_id, version=str(head.version),
@@ -77,8 +82,6 @@ class _CaptureCopies:
                 binding = payloads.get(write.path)
                 if binding is None:
                     continue
-                from .source_result_custody import record_target
-
                 record_target(reference, write.path.relative_to(root).as_posix())
                 if not write.create_only or write.expected_hash != vault.MISSING_CONTENT_HASH:
                     raise ValueError("fresh Source payload custody requires a missing destination")

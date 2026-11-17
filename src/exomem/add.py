@@ -864,6 +864,11 @@ def add(
             vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
             source_hash=content_hash(writes[0].content), identity=source_identity,
         )
+        if custody_started:
+            from . import call_ledger
+
+            # An erasable Source's paths name its content, so no call ledger row keeps them.
+            call_ledger.withhold_targets(path.relative_to(vault_root).as_posix() for path in core_paths)
         # An enrolled Source stays off the shared index and log pages; the captured-Source inventory lists it.
         if not raw_protection and not custody_started:
             activity_summary = _activity_summary(

@@ -35,6 +35,7 @@ from . import (
     reserved_paths,
     semantic_index,
     semantic_writes,
+    source_custody,
     source_taxonomy,
     trash_metadata,
     working_set_heat,
@@ -801,6 +802,9 @@ def _move_file_local(
             )
     else:
         _refuse_taken_destination(vault_root, new_rel)
+
+    if source_custody.enrolled_path(vault_root, old_rel):
+        raise MoveFileError(*source_custody.ERASE_REQUIRED)
 
     # Append-only guards. Rule 2 protects content *immutability*, not file
     # *location*: a move that stays WITHIN the same append-only tree

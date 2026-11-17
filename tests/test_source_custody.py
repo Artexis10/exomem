@@ -52,7 +52,8 @@ def test_capture_publishes_canonical_custody_before_a_lost_terminal(vault, attem
     assert manifest.allocated_hash == target["source_hash"]
     assert any(memory_refs.ref_from_markdown(path.read_text()) == target["source_ref"]
                for path in (vault / "Knowledge Base/Sources").rglob("*.md"))
-    assert manifest.coverage_complete is False
+    # The birth is canonical, so a lost terminal cannot leave the copy census unknown.
+    assert manifest.generated_birth is not None and manifest.coverage_complete is True
 
 
 def test_failure_after_allocation_keeps_absent_target_and_gc_recovery_link(vault, attempts, registered_custody, monkeypatch):
@@ -729,3 +730,123 @@ def test_lost_acknowledgement_phase_keeps_the_capture_and_its_copies_as_obligati
             assert {store.copy_record(copy_id).value.outcome for copy_id in acknowledged} == {"reserved"}
         finally:
             store.close()
+
+
+def test_reserved_capture_issues_a_birth_so_its_copy_lookup_is_definitive(vault, attempts, registered_custody):
+    """Without a birth every lookup reads unknown, so no erase of a fresh capture could ever finish."""
+    from exomem import generated_fragment_store
+
+    manager, call = attempts
+    args = authored()
+    ticket = reserve(call, args)
+    call("capture_source", **args, capture_reservation=ticket)
+    target = call("settle_source_capture", reservation=ticket)["owned_targets"][0]
+    pages = []
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        manifest, _ = source_custody.read_manifest(vault, target["source_ref"])
+        store = generated_fragment_store.GeneratedFragmentStore(vault)
+        try:
+            cursor = None
+            for _ in range(8):
+                pages.append(store.lookup(target["source_ref"], manifest.generated_birth, cursor=cursor))
+                cursor = pages[-1].cursor
+                if cursor is None:
+                    break
+        finally:
+            store.close()
+    assert manifest.generated_birth is not None and manifest.coverage_complete is True
+    assert [page.state for page in pages[:-1]] == ["pending"] * (len(pages) - 1) and pages[-1].state == "ready"
+    owners = sorted(copy.owner.owner for page in pages for copy in page.copies)
+    # The page itself and the retained capture receipt are the two present copies of this Source.
+    assert owners == ["source_native_custody", "source_result_custody"]
+
+
+def test_enrollment_outside_a_result_invocation_claims_no_coverage(vault, source_schema, registered_custody):
+    """A capture whose persisted result has no custody hook cannot claim that its copies are all known."""
+    from exomem import add
+
+    manager = writer_lease.active_manager()
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        result = add.add(vault, source_schema, content="A retained observation.", title="Unattended survey", source_type="session",
+                         source_identity={"system": "archive", "record_id": "unattended", "revision": "one"})
+        manifest, _ = source_custody.read_manifest(vault, result.ref)
+    assert manifest is not None
+    assert manifest.generated_birth is None and manifest.coverage_complete is False
+
+
+def test_call_ledger_withholds_an_enrolled_capture_path(vault, attempts, registered_custody, monkeypatch, tmp_path):
+    """A Source path names its content, so the ledger row of an erasable capture must not keep it."""
+    from test_call_ledger import _drive, _rows
+
+    from exomem import call_ledger
+
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "logs"))
+    monkeypatch.delenv("EXOMEM_DISABLE_CALL_LEDGER", raising=False)
+    monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
+    monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
+    call_ledger.reset_chain_cache()
+    _, call = attempts
+    args = authored()
+    ticket = reserve(call, args)
+
+    async def call_next(_context):
+        return call("capture_source", **args, capture_reservation=ticket)
+
+    captured = _drive("capture_source", {**args, "capture_reservation": ticket}, call_next)
+    row = _rows(tmp_path / "logs")[-1]
+    assert row["tool"] == "capture_source" and row["outcome"] == "ok"
+    assert row["target_paths"] == []
+    assert captured["source"]["path"] not in json.dumps(row)
+
+
+def _captured(vault, call):
+    args = authored()
+    ticket = reserve(call, args)
+    path = call("capture_source", **args, capture_reservation=ticket)["source"]["path"]
+    return path, (vault / path).read_bytes()
+
+
+def test_delete_file_refuses_an_enrolled_source_and_names_erase(vault, attempts, registered_custody):
+    """A trashed copy sits outside the copy census, so an erase could never prove the Source gone."""
+    from exomem import delete_file
+
+    manager, call = attempts
+    path, before = _captured(vault, call)
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with pytest.raises(delete_file.DeleteFileError) as refused:
+            delete_file.delete_file(vault, path=path, confirm=True)
+    assert refused.value.code == "SOURCE_ERASE_REQUIRED" and "sources.erase" in refused.value.reason
+    assert (vault / path).read_bytes() == before
+
+
+def test_move_file_refuses_an_enrolled_source_inside_its_own_tree(vault, attempts, registered_custody):
+    """A move within Sources/ is otherwise allowed, and would strand the copy the native ledger holds."""
+    from exomem import move_file
+
+    manager, call = attempts
+    path, before = _captured(vault, call)
+    destination = path.replace("/Sessions/", "/Sessions/Moved/")
+    with request_scope(owner_principal(surface="mcp")):
+        with pytest.raises(move_file.MoveFileError) as refused:
+            move_file.move_file(vault, old_path=path, new_path=destination)
+    assert refused.value.code == "SOURCE_ERASE_REQUIRED" and "sources.erase" in refused.value.reason
+    assert (vault / path).read_bytes() == before and not (vault / destination).exists()
+
+
+def test_delete_directory_refuses_a_folder_holding_an_enrolled_source(vault, registered_custody):
+    """A Source enrolled outside Sources/ has no append-only folder to protect it from a recursive trash."""
+    from exomem import delete_directory
+
+    folder = "Knowledge Base/Notes/Held"
+    page = vault / folder / "captured.md"
+    page.parent.mkdir(parents=True)
+    text = _original(vault, f"{folder}/captured.md").decode()
+    reference = memory_refs.ref_from_markdown(text)
+    manager = writer_lease.active_manager()
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        source_custody.publish(vault, source_custody.prepare_enrollment(
+            vault, reference=reference, source_hash=vault_module.content_hash(text)))
+        with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
+            delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True)
+    assert refused.value.code == "SOURCE_ERASE_REQUIRED" and "sources.erase" in refused.value.reason
+    assert page.read_text() == text
