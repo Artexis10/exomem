@@ -145,6 +145,20 @@ A profile write needs a reviewed preview. A governed write that creates or chang
 - **Why automation cannot replace the owner.** Only the owner knows whether a line is true of them. The hash proves only that the agent previewed the exact lines before writing them; the owner's confirmation stays in the conversation.
 - **What stays free.** Editing the profile file directly needs no preview. A profile is a note.
 
+The proof shows only that the agent previewed the lines, so a preview of a profile change also says when its proof may be used. Beside its `transition_token`, an in-place preview returns a `next_action`: show the owner the resulting lines, and commit only after the owner confirms them or when the owner's latest message asked for that change. A preference the owner only states is used in the answer and offered as a line, not committed.
+
+R4 result. Twelve cases, written by an independent lane, ran twice each on a GPT model against the built candidate, on a copy of a real vault. A script scored the keys it can check, and a blind judge from another model family scored the rest.
+
+| Case kind | Result |
+|---|---|
+| A domain question | The games profile shaped the answer in 4 of 4 runs; judged 1.0 |
+| An unrelated domain | No profile line was served or used in 4 of 4 runs |
+| A provider outage | No stored preference was claimed in 4 of 4 runs |
+| A curation proposal, asked for | The agent showed exact lines and waited; it committed with the preview's proof after confirmation in 4 of 4 runs |
+| A stated contradiction, or a preference stated before an explicit request | The agent committed an unconfirmed profile line in 7 of 8 runs |
+
+The `next_action` above was the repair. On the four cases that exposed the fault, it cut unconfirmed commits to 1 of 4 runs. The remaining run treated "for future reference" as a request to save. The harness cannot show an upkeep item reaching the agent, because delivery happens once, at a session's first activation, in a process that runs the upkeep worker. Installed acceptance checks that path on the live service.
+
 A vault may tag preferences with its own categories, such as `interface_preference`. Those count only when the vault's context-role overlay adds them to the `preferences` role. That mapping is vault data; the product holds no category list.
 
 ### D8. Routing tables
@@ -193,6 +207,7 @@ The generic scaffold teaches the convention. The catalogue and the skill method 
 - **Profiles drift from their long notes.** Curation raises new preference units and contradicted lines, and dismissals hold only until the evidence changes.
 - **A profile line names a withheld page.** The same unit egress applies as for stance. A test covers a release-gated vault.
 - **Latency.** Selection reads bounded data. A before-and-after on the recall latency instrument is required before release.
+- **An agent saves a stated preference to a profile unasked.** The preview's `next_action` tells it to wait, but the call stays a model's judgement, and a borderline phrasing such as "for future reference" can still commit. In the runs that did, the reply said the line was saved, so the owner can see it and edit the page directly. Curation flags a line that later notes contradict.
 - **Lexical floor portability.** The lexical score uses corpus statistics. On a vault with no resident encoder, or for a caller restricted to part of the vault, scores sit lower, and selection serves fewer profiles. A miss leaves the agent where it is today. The vault owns the value.
 
 ## Migration

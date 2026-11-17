@@ -43,13 +43,14 @@ This section was moved from task 3.3 of `deliver-session-context-and-skills`.
 
 ## 5. Verify and deliver
 
-- [ ] 5.1 Run real-model cases:
+- [x] 5.1 Run real-model cases:
   - a domain question uses the domain profile's preferences;
   - an unrelated domain gets none;
   - a curation proposal is correct on realistic notes and waits for confirmation;
   - a stated contradicting preference;
   - an explicit request to add a line;
   - a provider outage.
+  - Design D7 records the result. Use, unrelated domains, outage and an asked-for curation proposal passed. Unconfirmed profile commits on a stated preference led to the preview's `next_action`, which cut them from 7 of 8 runs to 1 of 4. An upkeep item reaching the agent is checked at installed acceptance in 5.3, because the harness cannot run the delivery path.
 - [x] 5.2 Measure recall latency before and after on the recall latency instrument.
   - On a production-sized vault copy (3,329 notes), 48 turns with 3 alternating repeats each: activation candidate/main 1.016 [1.003, 1.029]. The profiles stage takes a median 10.0 ms (p95 13.6 ms).
 - [ ] 5.3 Run the full corpus, then independent review, CI, merge, the ordinary release and installed acceptance.
