@@ -134,6 +134,17 @@ def method_link(vault: Path, path: str, title: str, form: str) -> str:
     return memory_refs.memory_ref(frontmatter["exomem_id"])
 
 
+def parses_capture() -> bool:
+    """Whether the arm's own manifest carries a declared capture method.
+
+    An arm from before the declaration shipped stores a `capture` block inertly and never reads it, so
+    seeding one would measure an arm that cannot see the method, and reading it back would fail.
+    """
+    from exomem import structured_collections
+
+    return hasattr(structured_collections.CollectionManifest, "capture_method")
+
+
 def manifest_method(vault: Path, path: str) -> str | None:
     """The ``capture.method`` that the arm's own manifest parser reads from the collection at ``path``."""
     from exomem import structured_collections
@@ -148,7 +159,8 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
     the knowledge base. ``manifest`` is the manifest's frontmatter (the arm's own serializer writes it) or its
     whole text. A method page is ``{title, note_type, content, revisions?, link?}``: it is written before the
     manifest, which then declares ``capture.method`` as the page's ``link`` form (``ref`` by default), so the
-    link resolves by construction. Each revision replaces the page's body through the arm's edit command, so
+    link resolves by construction. An arm that does not parse ``capture`` (``parses_capture``) gets the same page
+    as a note and a manifest without the block, and reports ``capture_supported: false``. Each revision replaces the page's body through the arm's edit command, so
     its current version is the last one. A refused write raises: a case whose seed is missing would measure
     nothing. The arm's own due-state heal then runs, as the maintenance job of a vault that has held its
     collections for a while would have run it: the write path routes by that projection.
@@ -163,7 +175,7 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
     )
 
     why = "seeded by the incident harness"
-    written = []
+    capture_supported, written = parses_capture(), []
     with request_scope(owner_principal(surface="mcp")):
         for spec in collections:
             page = spec.get("method_page")
@@ -192,7 +204,7 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
                         **edit,
                     )
             manifest = spec["manifest"]
-            if page:
+            if page and capture_supported:
                 manifest = {
                     **manifest,
                     "capture": {
@@ -221,7 +233,10 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
                 {
                     "path": path,
                     "method_page": note["path"] if page else None,
-                    "method_declared": manifest_method(vault, path) if page else None,
+                    "method_declared": manifest_method(vault, path)
+                    if page and capture_supported
+                    else None,
+                    "capture_supported": capture_supported,
                 }
             )
     due_state.reconcile(vault)

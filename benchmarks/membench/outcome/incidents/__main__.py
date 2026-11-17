@@ -32,7 +32,13 @@ before the session through the arm's own records command: ``manifest_path`` rela
 link resolves, each revision replacing its body, so the last one is the page's current version), a capture
 ``prominence`` (set through the arm's own preference path, so the declared-route ``file`` disposition is
 reachable; the shipped default applies when absent) and ``"transport": "http"``, which serves the arm over
-loopback HTTP so the agent can send a file's bytes (``server.py``). Stdio is the default.
+loopback HTTP (``server.py``): a long-lived server that the Claude actor's first turn waits to be warm, and
+the only transport over which an agent can send a file's bytes (a case with ``files`` also gets the handoff
+tools). Stdio is the default. ``"remote_owner": true`` makes the loopback sign-in act as the vault's owner,
+which the arm needs to serve a routed collection's declared method to it. Both actors begin only once
+``recall_context`` answers without an ``index_warming`` abstention (``warmup.py``); the unit records
+``warm_seconds``, and a server that does not warm in time makes the unit unknown. An arm whose manifest does
+not parse ``capture`` is seeded without the declaration and the unit records ``capture_supported: false``.
 
 An arm is a checkout: its ``src`` runs the MCP server, its ``plugins/claude-code`` supplies the skill
 and hooks, and its own docs and code supply the guidance text, in native MCP activation mode. Every
@@ -60,6 +66,7 @@ layers over the interpreter that has the product's dependencies):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -101,7 +108,7 @@ from ..isolation import (
 )
 from ..judging import Judge, JudgeSpec, grade_item
 from ..record import checkout_state
-from . import openai_actor
+from . import openai_actor, warmup
 from .fixtures import KINDS, build_files
 from .server import lay_exomem_command, loopback_mcp
 
@@ -164,6 +171,11 @@ def validate_case(case: dict) -> None:
         )
     if case.get("transport", "stdio") not in TRANSPORTS:
         raise SystemExit(f"case {case['id']}: transport must be one of {TRANSPORTS}")
+    # Only the loopback server has a sign-in whose principal could be the owner.
+    if "remote_owner" in case and (
+        type(case["remote_owner"]) is not bool or case.get("transport") != "http"
+    ):
+        raise SystemExit(f"case {case['id']}: `remote_owner` is a boolean of an http case")
     if "seed" not in case and "seed_corrected" in rule:
         raise SystemExit(f"case {case['id']}: `seed_corrected` needs a `seed` note")
     if {file["kind"] for file in files.values()} - KINDS:
@@ -522,6 +534,8 @@ def seed_unit(case: dict, arm: Path, root: Path) -> tuple[dict | None, dict, Pat
         record["collections"] = run_arm_side(
             arm, root, "seed_collections", str(vault), stdin=json.dumps(case["seed_collections"])
         )
+        # One property of the arm, read once by its own code: whether its manifest carries `capture`.
+        record["capture_supported"] = record["collections"][0]["capture_supported"]
     if reads_sources(case):
         before = run_arm_side(arm, root, "sources", str(vault))
         record["sources_before"] = [row["path"] for row in before["sources"]]
@@ -564,10 +578,10 @@ def play_claude(
     allowed = ["mcp__exomem", "Skill", "Read(./**)", plugin_read_allow(plugin)]
     # The server's native MCP activation mode: the hooks route through the tools, not inject text.
     env = {**claude_env()[0], **hook_env(root), "EXOMEM_RETRIEVE_INJECT": "mcp"}
-    if http:
+    if case.get("files"):
         # What the documented handoff needs from a client: a digest, a descriptor file, and a send. The upload
         # reply names a multipart POST as the send, so `curl` is allowed beside `exomem attach`; the server is
-        # loopback and its bearer dies with the run.
+        # loopback and its bearer dies with the run. A case with no file to hand over gets none of it.
         tools += ["Bash", "Write"]
         # An `Edit` rule covers the Write tool, and the descriptor goes into the work directory.
         allowed += ["Bash(exomem attach:*)", "Bash(sha256sum:*)", "Bash(curl:*)", "Edit(./**)"]
@@ -585,7 +599,19 @@ def play_claude(
     def mint(session: dict) -> str:
         return run_arm_side(arm, root, "mint", stdin=json.dumps(session))["token"]
 
-    with loopback_mcp(root, arm, mint) if http else nullcontext(mcp_server(root, arm)) as server:
+    serving = (
+        loopback_mcp(root, arm, mint, remote_owner=case.get("remote_owner", False))
+        if http
+        else nullcontext(mcp_server(root, arm))
+    )
+    with serving as server:
+        if http:
+            # The loopback server is the long-lived service that the client talks to, so the turn starts on a
+            # warm one. A stdio server is started by Claude Code itself and cannot be warmed beforehand.
+            try:
+                asyncio.run(warmup.await_warm(warmup.ask_over(server), record))
+            except warmup.StillWarming as error:
+                return {"answer": "", "tools": [], "calls": [], "fault": str(error)}
         mcp = root / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"exomem": server}}))
         argv = build_turn_argv(

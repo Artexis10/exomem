@@ -99,6 +99,58 @@ def test_the_method_page_is_written_first_and_its_last_revision_is_the_one_the_m
     assert METHOD_V2.strip() in page and "Version one" not in page
 
 
+def test_an_arm_that_parses_capture_declares_it_and_the_unit_records_that(seeded, tmp_path) -> None:
+    assert [item["capture_supported"] for item in seeded["written"]] == [True, True]
+    seed = incidents.load_cases(["existing-workflow"])[0]
+    seed = {"id": "x", "pass": seed["pass"], "seed_collections": seed["seed_collections"]}
+    record = incidents.seed_unit(seed, REPO_ROOT, tmp_path)[1]
+    assert record["capture_supported"] is True
+
+
+@pytest.fixture
+def arm_without_capture(tmp_path):
+    """An arm whose manifest does not carry `capture`, as the revision before the declaration shipped it.
+
+    The arm is this checkout's own product code, linked file by file, with the two modules that hold the
+    manifest field and its one reader on the seeding path copied minus `capture_method`: the harness meets a
+    real product that lacks the feature, and not a stub of its own seeding.
+    """
+    package = tmp_path / "arm" / "src" / "exomem"
+    package.mkdir(parents=True)
+    without = {
+        "structured_collections.py": (
+            "    capture_method: str | None = None\n",
+            "        capture_method=capture_method,\n",
+        ),
+        "due_state.py": ("                capture_method=manifest.capture_method,\n",),
+    }
+    for entry in (REPO_ROOT / "src" / "exomem").iterdir():
+        if entry.name not in (*without, "__pycache__"):
+            (package / entry.name).symlink_to(entry)
+    for name, lines in without.items():
+        text = (REPO_ROOT / "src" / "exomem" / name).read_text(encoding="utf-8")
+        for line in lines:
+            assert line in text, f"{name} no longer carries {line.strip()!r}"
+            text = text.replace(line, "")
+        (package / name).write_text(text, encoding="utf-8")
+    return tmp_path / "arm"
+
+
+def test_an_arm_that_does_not_parse_capture_is_seeded_without_the_declaration_and_the_unit_says_so(
+    arm_without_capture, tmp_path
+) -> None:
+    """Seeding a `capture` block that the arm ignores would measure an arm that cannot read the method, and
+    reading it back would crash the seed of every unit of that arm."""
+    case = incidents.load_cases(["existing-workflow"])[0]
+    case = {"id": "x", "pass": case["pass"], "seed_collections": case["seed_collections"]}
+    record = incidents.seed_unit(case, arm_without_capture, tmp_path / "unit")[1]
+    declaring = record["collections"][0]
+    assert record["capture_supported"] is False
+    assert declaring["method_page"] and declaring["method_declared"] is None
+    manifest = (tmp_path / "unit" / "vault" / declaring["path"]).read_text(encoding="utf-8")
+    assert "capture:" not in manifest
+
+
 @pytest.mark.parametrize(
     ("left", "spec", "expected"),
     [
@@ -262,6 +314,8 @@ def valid_case() -> dict:
     ("edit", "message"),
     [
         (lambda c: c.update(prominence="loud"), "prominence"),
+        (lambda c: c.update(remote_owner="yes"), "remote_owner"),
+        (lambda c: c.update(transport="stdio"), "remote_owner"),
         (
             lambda c: c["pass"]["collection_row"].update(collection="Records/Typo/_collection.md"),
             "collection_row names",

@@ -3,7 +3,7 @@
   "cases": [
     {
       "id": "existing-workflow",
-      "about": "A collection declares failures of one product, with a method page that files the row first. A same-product decoy shares more of the turn's words and declares nothing. The failure must be filed in the declared collection and only there.",
+      "about": "A collection declares failures of one product, with a method page that files the row first. A same-product collection of wins declares nothing. The failure must be filed in the declared collection and only there.",
       "prominence": "maximal",
       "seed_collections": [
         {
@@ -54,11 +54,15 @@
                 "failures"
               ],
               "terms": [
-                "mossgate",
                 "failure",
-                "stalls",
+                "error",
                 "crash",
-                "error"
+                "stall",
+                "regression",
+                "broken",
+                "lost",
+                "data loss",
+                "mossgate"
               ],
               "match": {
                 "type": [
@@ -125,18 +129,13 @@
               ],
               "terms": [
                 "mossgate",
-                "sync",
-                "upload",
-                "stalls",
-                "android",
-                "desktop",
-                "finish",
-                "error",
-                "autosave",
-                "edits",
-                "saved",
-                "fix",
-                "hang"
+                "win",
+                "wins",
+                "success",
+                "successes",
+                "worked",
+                "shipped",
+                "milestone"
               ]
             }
           },
@@ -190,7 +189,9 @@
             "claim_matches_committed": true
           }
         }
-      }
+      },
+      "transport": "http",
+      "remote_owner": true
     },
     {
       "id": "newly-introduced",
@@ -244,7 +245,9 @@
                 "germination",
                 "greenhouse",
                 "trial",
-                "compost"
+                "experiment",
+                "treatment",
+                "control"
               ],
               "match": {
                 "type": [
@@ -303,13 +306,14 @@
                 "harvests"
               ],
               "terms": [
-                "seedling",
-                "sowing",
-                "greenhouse",
-                "basil",
-                "compost",
-                "bench",
-                "depth"
+                "harvest",
+                "harvests",
+                "yield",
+                "crop",
+                "picked",
+                "success",
+                "worked",
+                "greenhouse"
               ]
             }
           },
@@ -337,7 +341,9 @@
             }
           ]
         }
-      }
+      },
+      "transport": "http",
+      "remote_owner": true
     },
     {
       "id": "changed-method",
@@ -392,11 +398,15 @@
                 "failures"
               ],
               "terms": [
-                "driftnote",
                 "failure",
-                "stalls",
+                "error",
                 "crash",
-                "error"
+                "stall",
+                "regression",
+                "broken",
+                "lost",
+                "data loss",
+                "driftnote"
               ],
               "match": {
                 "type": [
@@ -466,18 +476,13 @@
               ],
               "terms": [
                 "driftnote",
-                "sync",
-                "upload",
-                "stalls",
-                "android",
-                "desktop",
-                "finish",
-                "error",
-                "autosave",
-                "edits",
-                "saved",
-                "fix",
-                "hang"
+                "win",
+                "wins",
+                "success",
+                "successes",
+                "worked",
+                "shipped",
+                "milestone"
               ]
             }
           },
@@ -511,7 +516,9 @@
             }
           ]
         }
-      }
+      },
+      "transport": "http",
+      "remote_owner": true
     }
   ]
 }

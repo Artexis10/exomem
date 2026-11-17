@@ -171,7 +171,18 @@ writes:
   `manifest` (the frontmatter, or the whole text), and optional `body` and `rows`. A `method_page`
   (`title`, `note_type`, `content`, optional `revisions`) is written first, and the manifest's
   `capture.method` then links to it. Each revision replaces the page body, so the last one is the page
-  that the session reads.
+  that the session reads. An arm whose manifest does not parse `capture` is seeded without that block,
+  and its unit records `capture_supported: false`.
+- A decoy collection carries what a real one of its kind carries, never the prompt's own words. A
+  collection that declares a method carries the generic vocabulary of its kind (an incident collection:
+  failure, error, crash, stall) and the product's name.
+- Before its first turn, each actor waits until `recall_context` answers without an `index_warming`
+  abstention, so a unit never measures a cold start that a user of a long-lived service does not meet.
+  The unit records `warm_seconds`. A server that does not warm in 120 s makes the unit unknown. The
+  Claude actor needs `"transport": "http"` for this, because Claude Code starts a stdio server itself;
+  the OpenAI actor waits on its own stdio server. `"remote_owner": true` makes the loopback sign-in act
+  as the vault's owner, as the personal service is configured. Without it the sign-in is a separate
+  principal, and the product withholds the task context (declared methods and leads) from it.
 - `prominence` sets the capture prominence through the product's own preference file. A case that
   needs the declared route to file without asking uses `maximal`. The default is the shipped one.
 - `collection_row` passes when the named `collection` has `equals` new rows (default 1) that hold every

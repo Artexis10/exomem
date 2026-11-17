@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from ..isolation import mcp_server
+from . import warmup
 
 #: The default actor model; ``--model`` overrides it.
 OPENAI_MODEL = "gpt-6.1-sol"
@@ -30,9 +31,6 @@ OPENAI_MODEL = "gpt-6.1-sol"
 MAX_TURNS = 30
 #: The name that the spend of these runs is metered under (``harness openai-credits record``).
 CREDITS_CONSUMER = "capture-routing-eval"
-#: A fresh server answers "warming" to retrieval for a short while; the turn starts once it does not.
-WARM_SECONDS = 120
-WARM_POLL_SECONDS = 3
 SERVER_CALL_TIMEOUT_SECONDS = 180
 MODEL_TIMEOUT_SECONDS = 180
 MODEL_RETRIES = 2
@@ -139,21 +137,13 @@ def record_spend(model: str, usage: dict[str, int]) -> str:
     return text if done.returncode == 0 else f"not recorded (exit {done.returncode}): {text}"
 
 
-async def warm(server) -> float:
-    """Wait until the arm's retrieval no longer answers "warming". Returns the seconds it took."""
-    started = time.monotonic()
-    while time.monotonic() - started < WARM_SECONDS:
-        probe = await server.call_tool(
-            "search_memory", {"query": "warm-up probe", "detail": "compact"}
-        )
-        if "WARMING" not in json.dumps(probe.model_dump(), default=str).upper():
-            break
-        await asyncio.sleep(WARM_POLL_SECONDS)
-    return round(time.monotonic() - started, 1)
+async def converse(
+    spec: dict, instructions: str, prompt: str, model: str, max_turns: int, record: dict
+):
+    """One user turn to one agent on the arm's server, once that server is warm (``warmup``); the SDK's run result.
 
-
-async def converse(spec: dict, instructions: str, prompt: str, model: str, max_turns: int):
-    """One user turn to one agent on the arm's server. Returns the SDK's run result and the warm-up seconds."""
+    The server is this actor's own stdio process, so the wait runs on the connection that the session then uses.
+    """
     from agents import Agent, ModelSettings, OpenAIResponsesModel, Runner, set_tracing_disabled
     from agents.mcp import MCPServerStdio
     from openai import AsyncOpenAI
@@ -170,7 +160,13 @@ async def converse(spec: dict, instructions: str, prompt: str, model: str, max_t
             cache_tools_list=True,
             client_session_timeout_seconds=SERVER_CALL_TIMEOUT_SECONDS,
         ) as server:
-            warm_seconds = await warm(server)
+
+            async def ask() -> dict:
+                return warmup.answer_of(
+                    await server.call_tool("recall_context", {"turn": warmup.WARM_TURN})
+                )
+
+            await warmup.await_warm(ask, record)
             agent = Agent(
                 name="assistant",
                 model=OpenAIResponsesModel(model=model, openai_client=client),
@@ -178,7 +174,7 @@ async def converse(spec: dict, instructions: str, prompt: str, model: str, max_t
                 instructions=instructions,
                 model_settings=ModelSettings(include_usage=True),
             )
-            return await Runner.run(agent, prompt, max_turns=max_turns), warm_seconds
+            return await Runner.run(agent, prompt, max_turns=max_turns)
     finally:
         await client.close()
 
@@ -223,11 +219,15 @@ def play(
         f"{skill_text(arm, REPLAY_SUITE)}\n\n# Exomem server instructions\n\n{server_instructions}"
     )
     record["instructions_chars"] = len(instructions)
+    # This actor always runs its own stdio server, whatever transport the case names for a client that cannot.
+    record["transport"] = "stdio"
     started = time.monotonic()
     try:
-        result, warm_seconds = asyncio.run(
+        result = asyncio.run(
             asyncio.wait_for(
-                converse(mcp_server(root, arm), instructions, case["prompt"], model, max_turns),
+                converse(
+                    mcp_server(root, arm), instructions, case["prompt"], model, max_turns, record
+                ),
                 timeout,
             )
         )
@@ -248,7 +248,6 @@ def play(
             "fault": f"{type(error).__name__}: {str(error)[:300]}",
         }
     calls = keep_run(record, root, model, result.raw_responses, result.new_items, started)
-    record["warm_seconds"] = warm_seconds
     answer = str(result.final_output or "").strip()
     (root / "answer.txt").write_text(answer)
     return {
