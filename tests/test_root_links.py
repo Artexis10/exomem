@@ -86,9 +86,13 @@ def _remember(vault_root: Path, title: str, note_type: str, content: str = UNIT)
 def test_a_note_links_a_unique_page_by_its_name_and_a_homonym_by_its_shortest_path(
     root_vault: Path,
 ) -> None:
-    """Two areas share a name, a trash folder shares another, and a fourth page is the only page of its name."""
+    """An imported page shares a name with a note, a trash folder shares another, and a fourth page is the only one of its name.
+
+    The writer gives each new note a name that no page holds, so a shared name comes from a page the writer did not name.
+    """
     checklist_insight = _remember(root_vault, "Pump seal checklist", "insight")
-    checklist_pattern = _remember(root_vault, "Pump seal checklist", "pattern")
+    checklist_pattern = "Imported/Pump seal checklist.md"
+    _write_markdown(root_vault, checklist_pattern)
     trashed_twin = _remember(root_vault, "Restart order", "insight")
     _write_markdown(root_vault, f"_trash/{Path(trashed_twin).name}")
     only = _remember(root_vault, "Valve inventory", "insight")
