@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.189.0](https://github.com/Artexis10/exomem/compare/v0.188.0...v0.189.0) (2026-11-17)
+
+
+### Features
+
+* **sources:** check a document's identity at capture, correct Sources without re-upload, and keep write receipts honest ([#2902](https://github.com/Artexis10/exomem/issues/2902)) ([3f332ca](https://github.com/Artexis10/exomem/commit/3f332ca93180b6b1e8650afd09668c894adc6834))
+
+
+### Bug Fixes
+
+* **brief:** keep only the second-hop notes nearest the seed ([#2913](https://github.com/Artexis10/exomem/issues/2913)) ([690e55f](https://github.com/Artexis10/exomem/commit/690e55fde7df377af7c8e4a3ed5b362a93b0bd35))
+* **sources:** offer the correction call only to a caller who can record it ([#2915](https://github.com/Artexis10/exomem/issues/2915)) ([9ef9da6](https://github.com/Artexis10/exomem/commit/9ef9da6fc9ebe3ffeaa9df51134afa0119accd0b))
+
 ## [0.188.0](https://github.com/Artexis10/exomem/compare/v0.187.0...v0.188.0) (2026-11-17)
 
 
