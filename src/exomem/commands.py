@@ -11541,17 +11541,11 @@ def _validate_vocabulary_binding(
 def _with_ownership_question(vault_root: Path, previewed: dict[str, Any]) -> dict[str, Any]:
     """A curation preview beside the one ownership question of its placing steps.
 
-    Added to the reply only: the sealed plan and its fingerprint stay as they were. A quiet
-    ownership family or the `structural_suggestions` class set off withholds it, as on a write.
+    Added to the reply only: the sealed plan and its fingerprint stay as they were.
     """
-    from . import envelope, ownership_review, review_state
+    from . import ownership_review
 
-    if envelope.active().get("structural_suggestions") == "off":
-        return previewed
-    payload = review_state.ReviewStateStore(vault_root).load()
-    if review_state.disposition_for(ownership_review.CATEGORY, payload=payload) != "normal":
-        return previewed
-    asked = ownership_review.plan_question(vault_root, previewed["actions"])
+    asked = ownership_review.preview_question(vault_root, previewed["actions"])
     return {**previewed, "ownership_question": asked} if asked else previewed
 
 

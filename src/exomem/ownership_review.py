@@ -170,6 +170,7 @@ def plan_question(vault_root: Path, steps: list[Mapping[str, Any]]) -> dict[str,
     plan's steps and each moved page's frontmatter; it never changes the plan, so the
     plan fingerprint is the same with or without the question.
     """
+    from . import promotions
     from . import vault as vault_module
 
     basis = note_types.Basis(vault_root)
@@ -184,6 +185,10 @@ def plan_question(vault_root: Path, steps: list[Mapping[str, Any]]) -> dict[str,
             if project is not None and compiled:
                 placed.append((str(step["step_id"]), project))
         elif kind == "move":
+            # A page the caller may not see is never read: its project would reach the caller
+            # through the question. The preview already answers a withheld page as a missing one.
+            if not promotions.page_visible(vault_root, str(args["old_path"])):
+                continue
             try:
                 text = (vault_root / str(args["old_path"])).read_text(encoding="utf-8")
                 frontmatter = vault_module.parse_frontmatter(text)[0]
@@ -219,6 +224,27 @@ def plan_question(vault_root: Path, steps: list[Mapping[str, Any]]) -> dict[str,
             )
         ),
     }
+
+
+def preview_question(vault_root: Path, steps: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The question a curation preview carries, or None. Never raises.
+
+    A quiet ownership family or `structural_suggestions: off` withholds it, as on a write. A
+    failure to read the review state or a page asks nothing: the question must not block a
+    preview, so the preview arrives without it.
+    """
+    from . import envelope, review_state
+
+    try:
+        if envelope.active().get("structural_suggestions") == "off":
+            return None
+        payload = review_state.ReviewStateStore(vault_root).load_shared()
+        if review_state.disposition_for(CATEGORY, payload=payload) != "normal":
+            return None
+        return plan_question(vault_root, steps)
+    except Exception:  # noqa: BLE001 -- the preview never fails for an optional question
+        log.warning("ownership question left out of a preview", exc_info=True)
+        return None
 
 
 def keep_call(item_id: str = "<id>") -> str:
@@ -315,7 +341,7 @@ def suggestion_after_write(
     if envelope.active().get("structural_suggestions") == "off":
         return None
     store = review_state.ReviewStateStore(vault_root)
-    payload = store.load()
+    payload = store.load_shared()
     if review_state.disposition_for(CATEGORY, payload=payload) != "normal":
         return None
     reading = finding(state.path, subject=subject, asked_on=asked_on)

@@ -522,10 +522,9 @@ def test_a_relation_debt_dismissal_made_through_its_own_queue_holds_in_the_defau
 def test_a_dismissal_recorded_against_the_merged_row_still_binds_the_ownership_item(
     vault: Path,
 ) -> None:
-    """Before the rows were separate, answering the page's one row recorded the decision
-    under the ownership id, against the merged signals' fingerprint and against each signal's
-    own. Those records are in users' stores, and the ownership row's fingerprint must still
-    be one of them."""
+    """A row that fused the page's signals recorded the decision under the ownership id, against
+    the fused fingerprint and against each signal's own. A decision recorded that way must still
+    bind the ownership row, whose fingerprint is one of them."""
     _put(vault, PAGE, _text())
     _ask(vault, PAGE)
     [ownership] = [r for r in _rows(vault) if r["categories"] == ["ownership_review"]]
@@ -1191,3 +1190,123 @@ def test_a_move_that_assigns_a_project_is_named_with_that_project(vault: Path) -
     assert [(s["step_id"], s["project"]) for s in preview["ownership_question"]["steps"]] == [
         ("rehome", "project-alpha")
     ]
+
+
+# --- what a restricted caller learns, and what never blocks a preview ---------------------
+
+
+def test_a_restricted_preview_does_not_name_the_project_of_a_withheld_move_target(
+    vault: Path,
+) -> None:
+    withheld = "Knowledge Base/Notes/Insights/withheld-fare-rules.md"
+    _put(vault, withheld, _text(page_type="insight", number=9, project="secret-merger"))
+    move = {
+        "step_id": "rehome",
+        "kind": "move",
+        "args": {
+            "old_path": withheld,
+            "new_path": "Knowledge Base/Notes/Insights/secret-merger/withheld-fare-rules.md",
+            "fields": {"project": "secret-merger"},
+        },
+    }
+    command = _command("maintain_memory")
+    proposed = writer_lease.invoke_command(
+        command,
+        vault,
+        mode="curation",
+        curation_action="propose",
+        plan={"version": 1, "title": "Rehome", "steps": [move]},
+    )
+    _govern(vault, "client-a", scope="Notes/Insights/withheld-*.md")
+    _reset()
+
+    def preview() -> dict:
+        return writer_lease.invoke_command(
+            command, vault, mode="curation", curation_action="preview", run_id=proposed["run_id"]
+        )
+
+    owner = preview()
+    with request_scope(_audience("client-a")):
+        restricted = preview()
+
+    assert owner["ownership_question"]["steps"][0]["project"] == "secret-merger"
+    assert "ownership_question" not in restricted
+    assert "secret-merger" not in json.dumps(restricted)
+
+
+def test_a_restricted_caller_is_not_told_how_many_pages_were_never_asked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count covers every eligible page, withheld ones included, so only a caller with
+    whole-vault authority receives it."""
+    monkeypatch.setenv(ownership_rotation.ENV_ROTATION_DAILY, "1")
+    _put(vault, "Knowledge Base/Notes/Insights/withheld-fare-rules.md", _text(page_type="insight", number=9))
+    _generate(vault, "travel", 3, first=1300)
+    due_state.reconcile(vault, today=TODAY)
+    tomorrow = TODAY + dt.timedelta(days=1)
+    owner = due_state.served(vault, today=tomorrow)
+    _govern(vault, "client-a", scope="Notes/Insights/withheld-*.md")
+    _reset()
+
+    with request_scope(_audience("client-a")):
+        restricted = due_state.served(vault, today=tomorrow)
+
+    assert "ownership_never_asked" in owner
+    assert restricted is not None
+    assert "ownership_review" in restricted["categories"]
+    assert "ownership_never_asked" not in restricted
+
+
+def test_an_unreadable_review_state_leaves_the_question_out_of_a_preview(vault: Path) -> None:
+    review_state.state_path(vault).parent.mkdir(parents=True, exist_ok=True)
+    review_state.state_path(vault).write_text("{ not json", encoding="utf-8")
+
+    _, preview = _propose_and_preview(
+        vault, [_child_step("child-one", "Harbour fare notes", "project-alpha")]
+    )
+
+    assert preview["binding_health"] == "current"
+    assert "ownership_question" not in preview
+
+
+def test_a_failed_rotation_save_never_asks_more_than_the_days_slice(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _generate(vault, "travel", 6, first=1400)
+
+    def refuse(*_args, **_kwargs) -> None:
+        raise OSError("the mount refuses the replace")
+
+    monkeypatch.setattr(ownership_rotation, "_save_state", refuse)
+    for _ in range(4):
+        with pytest.raises(OSError):
+            _rotate(vault, paths, limit=2)
+
+    assert len(ownership_rotation.asked(vault)) == 0
+
+
+def test_a_write_to_an_asked_page_parses_the_review_state_once_per_file_version(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A review state of tens of thousands of decisions takes tens of milliseconds to parse, and
+    the write path reads it for the question and for the due-state block. One dismissal makes
+    the file exist, as it does in any vault where the family has been answered."""
+    other = f"{FOLDER}/another-fare-note.md"
+    _put(vault, other, _text("Another fare note", number=2))
+    _put(vault, PAGE, _text())
+    _ask(vault, other, PAGE)
+    due_state.reconcile(vault, today=TODAY)
+    _keep(vault, _suggestion(_grow(vault, other, 2)))
+    _grow(vault, PAGE, 2)
+    parses: list[int] = []
+    parse = review_state.ReviewStateStore.load
+
+    def counting(self, *args, **kwargs):
+        parses.append(1)
+        return parse(self, *args, **kwargs)
+
+    monkeypatch.setattr(review_state.ReviewStateStore, "load", counting)
+
+    _grow(vault, PAGE, 3)
+
+    assert parses == []

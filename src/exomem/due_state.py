@@ -3835,7 +3835,7 @@ def _build_served(
     """Build the served rows for `key` and memoise them; the key they were stored under."""
     with call_spans.span("recall.due_state.build", {}):
         try:
-            review_payload = review_state_module.ReviewStateStore(vault_root).load()
+            review_payload = review_state_module.ReviewStateStore(vault_root).load_shared()
         except ValueError:
             return [], None
         # Bind the memo to the review snapshot the build consumes, including a
@@ -4227,7 +4227,7 @@ def _served_entries_uncached(
     role_token: str | None = None
     store = review_state_module.ReviewStateStore(vault_root)
     try:
-        state_payload = store.load() if review_payload is None else review_payload
+        state_payload = store.load_shared() if review_payload is None else review_payload
     except ValueError:
         # Fail closed, exactly as the decision read does — but the carrier's
         # safe direction is SILENCE, not a raise. Every row below is filtered
@@ -4738,7 +4738,15 @@ def served(
     result = block(rows) or {"total": 0, "categories": {}, "top": []}
     from . import ownership_rotation
 
-    never_asked = ownership_rotation.never_asked_report(Path(vault_root))
+    # The count is vault-wide, so no filter can remove what a withheld page contributed to it:
+    # only a caller with whole-vault authority receives it, as with any whole-vault aggregate.
+    from .governance import egress
+
+    never_asked = (
+        ownership_rotation.never_asked_report(Path(vault_root))
+        if egress.owner_only_aggregate(Path(vault_root)) is None
+        else None
+    )
     return {
         **result,
         "outstanding_total": len(rows),

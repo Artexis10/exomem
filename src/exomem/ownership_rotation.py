@@ -123,6 +123,17 @@ class _Ledger:
 
 _LEDGERS: dict[str, _Ledger] = {}
 
+#: Most vaults one process keeps in these memos. One process can serve several vaults, and a
+#: vault's memo holds its whole ledger or order, so the oldest entry leaves first.
+_MEMO_CAP = 8
+
+
+def _remember(memo: dict[str, Any], key: str, value: Any) -> None:
+    """Store `value` under `key`, keeping at most `_MEMO_CAP` entries. Call under `_LOCK`."""
+    if key not in memo and len(memo) >= _MEMO_CAP:
+        memo.pop(next(iter(memo)))
+    memo[key] = value
+
 
 def asked(vault_root: Path) -> Mapping[str, dt.date]:
     """The pages that were asked, by `page_key`, each with the day it was first asked.
@@ -145,7 +156,7 @@ def asked(vault_root: Path) -> Mapping[str, dt.date]:
         if ledger is None or ledger.inode != info.st_ino or info.st_size < ledger.offset:
             ledger = _Ledger(info.st_ino, 0, {})
         if info.st_size == ledger.offset:
-            _LEDGERS[key] = ledger
+            _remember(_LEDGERS, key, ledger)
             return ledger.asked
         try:
             with path.open("rb") as handle:
@@ -164,7 +175,7 @@ def asked(vault_root: Path) -> Mapping[str, dt.date]:
             except (ValueError, KeyError, TypeError):
                 continue
         ledger = _Ledger(info.st_ino, ledger.offset + len(whole), merged)
-        _LEDGERS[key] = ledger
+        _remember(_LEDGERS, key, ledger)
         return ledger.asked
 
 
@@ -219,7 +230,7 @@ def state(vault_root: Path) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("version") != ROTATION_VERSION:
         return {}
     with _LOCK:
-        _STATE_MEMO[key] = (token, payload)
+        _remember(_STATE_MEMO, key, (token, payload))
     return payload
 
 
@@ -464,9 +475,13 @@ def _rotate_locked(
     picked, last = _take_in_turn(
         orders, already, limit=limit, after=previous.get("next_project")
     )
-    newly = mark_asked(vault_root, picked, on=today)
-    still_asked = asked(vault_root)
-    remaining = sum(1 for order in orders.values() for key in order if key not in still_asked)
+    # The day guard is saved before the ledger append. When the save fails nothing was asked, so
+    # the next serve tries again; when the append fails after it, the day asks too few pages. A
+    # failure either way never asks more than `rotation_daily` in a day.
+    chosen = set(picked)
+    remaining = sum(
+        1 for order in orders.values() for key in order if key not in already and key not in chosen
+    )
     _save_state(
         vault_root,
         {
@@ -478,4 +493,5 @@ def _rotate_locked(
             "projects": projects,
         },
     )
+    newly = mark_asked(vault_root, picked, on=today)
     return newly

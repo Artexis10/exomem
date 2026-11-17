@@ -55,9 +55,8 @@ Checks (all read-only; no writes ever):
 - `ownership_review`: a compiled page with one project key that was asked whether
   it belongs in its current home, because it was created or retitled in a project
   or because the daily rotation reached it. Reported at `info` as a question for
-  the connected agent, never as a claim that the page is misfiled, and kept out
-  of the default attention union because when a page is asked is the system's
-  choice. One item per page; a dismissal holds until the page's project key,
+  the connected agent, never as a claim that the page is misfiled, and listed
+  with the other backlog items after dated obligations. One item per page; a dismissal holds until the page's project key,
   home folder or title changes.
 - `supersession_integrity`: a `supersedes`/`superseded_by` pointer that does not
   resolve, and a supersession component with more than one current head. Both
