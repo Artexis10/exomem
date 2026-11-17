@@ -641,7 +641,8 @@ class NativeCustody:
 
     def _observe(self, value: _Binding, *, destination: bool = False) -> NativeObservation:
         handle = self._handle(value)
-        if value.outcome is not None and not destination:
+        # A removed binding drops its destination name, so its recorded outcome is all there is to observe.
+        if value.outcome is not None and (not destination or value.destination_relative is None):
             return NativeObservation("installed" if value.outcome == "installed" else "closed",
                                      value.binding_id, outcome=value.outcome, reservation=handle)
         with self._held(value, destination=destination) as (filesystem, parent, leaf):
