@@ -77,7 +77,7 @@ def test_writer_journey_in_store_mode_lands_at_the_root_areas(stored_root: Path)
         created = commands.op_remember(
             root, content=UNIT, status="draft", title="Why churn rose", note_type="insight"
         )
-        assert created["path"] == "Insights/why-churn-rose.md"
+        assert created["path"] == "Insights/Why churn rose.md"
         saved = commands.op_capture_source(
             root, schema, title="Pump maintenance handbook", content="Replace the seal every year.",
             source_kind="article", url="https://example.com/pump-handbook",
@@ -113,7 +113,7 @@ def test_writer_journey_in_store_mode_lands_at_the_root_areas(stored_root: Path)
     stored = _store_paths(root)
     for expected in (
         "Insights/churn-causes.md",
-        "Insights/why-churn-rose.md",
+        "Insights/Why churn rose.md",
         f"{saved['path']}",
         entity["path"],
         "Sources/index.md",

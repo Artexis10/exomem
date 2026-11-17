@@ -62,7 +62,7 @@ def test_a_typed_note_lands_in_its_area(root_vault: Path) -> None:
     """The typed writer joined the wrapper folder and `Notes/` in front of the area."""
     created = _remember(root_vault, title="Why churn rose", note_type="insight")
 
-    assert created["path"] == "Insights/why-churn-rose.md"
+    assert created["path"] == "Insights/Why churn rose.md"
     assert (root_vault / created["path"]).is_file()
     _assert_no_second_tree(root_vault)
 

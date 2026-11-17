@@ -62,7 +62,7 @@ def test_an_insight_lands_in_its_area_at_the_vault_root(root_vault: Path) -> Non
     """The writer joined the wrapper folder and `Notes/` in front of the area, so a root vault grew a second tree."""
     created = _remember(root_vault, title="Why churn rose", note_type="insight")
 
-    assert created["path"] == "Insights/why-churn-rose.md"
+    assert created["path"] == "Insights/Why churn rose.md"
     assert (root_vault / created["path"]).is_file()
     assert not (root_vault / KB).exists()
 
@@ -71,7 +71,7 @@ def test_a_project_partitioned_type_is_flat_in_a_root_vault(root_vault: Path) ->
     """A project folder in a root vault makes a project change move the file, and the area stops being flat."""
     created = _remember(root_vault, title="Pump notes", note_type="research-note", project="alpha")
 
-    assert created["path"] == "Research/pump-notes.md"
+    assert created["path"] == "Research/Pump notes.md"
     assert (root_vault / "_Schema/project-keys.yaml").is_file()
     assert not (root_vault / "Research/Alpha").exists()
 
@@ -80,7 +80,7 @@ def test_a_project_partitioned_type_stays_in_its_project_folder_in_a_nested_vaul
     """The flat rule must not leak into `nested`, which keeps a folder for each project."""
     created = _remember(vault, title="Pump notes", note_type="research-note", project="alpha")
 
-    assert created["path"] == f"{KB}/Notes/Research/Alpha/pump-notes.md"
+    assert created["path"] == f"{KB}/Notes/Research/Alpha/Pump notes.md"
 
 
 def test_a_domain_partitioned_type_is_flat_in_a_root_vault_and_creates_no_wrapper(root_vault: Path) -> None:
@@ -89,7 +89,7 @@ def test_a_domain_partitioned_type_is_flat_in_a_root_vault_and_creates_no_wrappe
         root_vault, title="Cold plunge trial", note_type="experiment", started="2026-11-01", duration="30 days", domain="health"
     )
 
-    assert created["path"] == "Experiments/2026-11-cold-plunge-trial.md"
+    assert created["path"] == "Experiments/2026-11-Cold plunge trial.md"
     assert not (root_vault / KB).exists()
 
 
@@ -104,7 +104,7 @@ def test_an_overlay_type_lands_in_its_own_top_level_area(root_vault: Path) -> No
 
     created = _remember(root_vault, title="Restart order", note_type="playbook")
 
-    assert created["path"] == "Playbooks/restart-order.md"
+    assert created["path"] == "Playbooks/Restart order.md"
 
 
 def test_a_home_is_a_vault_root_folder_and_receives_the_page(root_vault: Path) -> None:
@@ -118,7 +118,7 @@ def test_a_home_is_a_vault_root_folder_and_receives_the_page(root_vault: Path) -
 
     created = _remember(root_vault, title="Pump pressure holds", note_type="insight", topics=["equipment"])
 
-    assert created["path"] == "Equipment/pump-pressure-holds.md"
+    assert created["path"] == "Equipment/Pump pressure holds.md"
 
 
 def test_a_domain_only_reclassification_moves_no_file_in_a_root_vault(root_vault: Path) -> None:
