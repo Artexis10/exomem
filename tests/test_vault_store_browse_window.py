@@ -385,7 +385,7 @@ def window_plan(root, monkeypatch, **cell):
     real = store._serve_from_ready_catalog_result
     plans = []
 
-    def serve(scope, freshness, query, message):
+    def serve(scope, freshness, query, message, **options):
         def traced(conn):
             statements = []
             conn.set_trace_callback(statements.append)
@@ -398,7 +398,7 @@ def window_plan(root, monkeypatch, **cell):
                     plans.append([row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)])
             return value
 
-        return real(scope, freshness, traced, message)
+        return real(scope, freshness, traced, message, **options)
 
     monkeypatch.setattr(store, "_serve_from_ready_catalog_result", serve)
     browse(root, nullcontext, 15, cell)
