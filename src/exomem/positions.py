@@ -1,12 +1,12 @@
-"""The person's own recorded positions on the pages a turn's task context serves, framed as theirs.
+"""Positions recorded in the person's notes on the pages a turn's task context serves, attributed as each unit's text does.
 
 A unit is a position only when its category or its kind carries the registry trait `position`. One batched
 unit query over the served leads and the link targets they list finds the pages in that reach that hold one.
 `session_units` then admits those pages' position units from the pages' own bytes, under the same page
 lifecycle, supersession, expiry and egress rules as the stance and the domain profiles. A page that supplies the
 stance or a domain profile is never read here: it has its own block and framing. The block has its own bound, the
-vault's `budgets.positions_max_chars`, beside the turn allowance. Positions answer the turn, so the block is
-compiled on every turn and never marked held for the conversation.
+vault's `budgets.positions_max_chars`, beside the turn allowance, and a unit is served whole whenever it fits that
+bound. Positions answer the turn, so the block is compiled on every turn and never marked held for the conversation.
 """
 
 from __future__ import annotations
@@ -32,12 +32,16 @@ from . import (
 )
 from .governance import egress, principal
 
-#: The framing passage. It is part of the contract: it never asks the agent to agree with a position.
+#: The framing passage. It is part of the contract: it never asks the agent to agree with a position, and it never
+#: credits the person with a unit whose text does not name them, since an agent's own saved conclusion can carry a
+#: position category and would otherwise come back to it as the person's view.
 ABOUT = (
-    "The person's own recorded positions on this subject, from their notes. Where the turn bears on one, say how "
-    "the new evidence relates to it, attributed to them; judge the evidence yourself and say plainly where it does "
-    "not support or contradicts the position. A recorded position stays theirs for the rest of this conversation: "
-    "when they question your reading, re-examine the evidence, and keep their position, attributed to them, in view."
+    "Positions recorded in the person's notes on this subject. Attribute each one as its text does: to the person "
+    "where it states their view, to anyone else it names, and otherwise as a conclusion their notes record. Where "
+    "the turn bears on one, say how the new evidence relates to it; judge the evidence yourself and say plainly "
+    "where it does not support or contradicts the position. A position the person holds stays theirs for the rest "
+    "of this conversation: when they question your reading, re-examine the evidence, and keep their position, "
+    "attributed to them, in view."
 )
 TRAIT = "position"
 #: A resource bound, not vault vocabulary: the most position-unit rows one recall reads to find the pages in its
@@ -176,8 +180,9 @@ def _compile(
             line["date"] = item.updated
         if review_due:
             line["review_due"] = review_due
-        # Overflow is a reference, never a cut unit; a unit too long to serve whole is one too.
-        if len(item.text) <= working_set.MAX_UNIT_HARD_CHARS and chars({"items": [*block["items"], line]}) <= limit:
+        # Overflow is a reference, never a cut unit. The block's own bound is the only size test: a careful position
+        # runs long, and the working set's per-unit cap would turn exactly those into references.
+        if chars({"items": [*block["items"], line]}) <= limit:
             block["items"].append(line)
             served.append(working_set._served_unit(item))  # noqa: SLF001 - the shape admission decided
         else:
@@ -190,7 +195,8 @@ def _compile(
             served.append(working_set._served_unit(item))  # noqa: SLF001 - a ref names the unit, so egress decides it
     block["omitted"] = len(leftover) - len(block["overflow_refs"])
     if block["items"] or block["overflow_refs"] or block["omitted"]:
-        block.update(state="ready", about=ABOUT)
+        # The framing leads the block: a model reads the items in the light of what it read first.
+        block = {"about": ABOUT, **block, "state": "ready"}
     if len(hits) > ROWS_PER_RECALL:
         block.update(state="partial", reason="truncated")
     return block, served

@@ -12,6 +12,7 @@
 - [x] 2.2 Serve the `positions` block in maps responses with its state, its framing passage and its items (text, authored date, page title, unit reference). Record its references in the served-context row.
 - [x] 2.3 Add the vault budget `positions_max_chars`, pinned to the engineering bounds the hook reads. Overflow becomes references.
 - [x] 2.4 Teach the scaffold skill to read the block and to capture a person's position under a category that carries the trait. Refresh the skill contract stamps.
+- [x] 2.5 Serve a position whole when it fits the block's bound, end the maps response with the block, open it with its framing, and attribute each unit as its text does.
 
 ## 3. Proof
 

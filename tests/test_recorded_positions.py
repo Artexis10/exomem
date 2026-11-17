@@ -19,6 +19,7 @@ from exomem import (
     positions,
     semantic_language_registry,
     served_context,
+    working_set,
 )
 from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import principal
@@ -284,6 +285,41 @@ def test_a_position_on_a_superseded_page_is_not_served(vault: Path, monkeypatch:
 
     served = [item["ref"].rpartition("/")[2] for item in packet["positions"]["items"]] + packet["positions"]["overflow_refs"]
     assert served == ["kiln-notes.md#reduction"]
+
+
+def test_a_long_position_is_served_whole_beside_a_short_one_within_the_shipped_bound(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A careful causal attribution runs past the working set's per-unit cap; capped, it only ever became a ref."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    long_view = (
+        "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. "
+        + "The same recipe fired on the slow schedule in March showed no crazing, the kiln log puts the cool below "
+        "600 degrees at twice the usual rate, and the crazed pieces sat nearest the vent. " * 7
+        + "This is my working view from the March and April firings and the kiln log, and it is not proven."
+    )
+    short_view = "I prefer cone 6 for the stoneware body"
+    _lead_linking_to_a_long_page(
+        vault, f"- [preference] {long_view} (2026-03-02) ^crazing\n\n- [preference] {short_view} (2026-03-01) ^cone-six\n",
+    )
+    _ready(vault)
+
+    block = _activate(vault, turn=TURN, max_chars=8000)["positions"]
+
+    assert len(long_view) > working_set.MAX_UNIT_HARD_CHARS
+    assert sorted(item["text"] for item in block["items"]) == sorted([long_view, short_view])
+    assert block["overflow_refs"] == []
+
+
+def test_the_positions_block_ends_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real-model replays used the block when it was read last with its framing first, and mostly ignored it mid-packet."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert "served_context_id" in packet
+    assert list(packet)[-1] == "positions"
+    assert list(packet["positions"]) == ["about", "state", "items", "overflow_refs", "omitted"]
 
 
 def test_a_vault_category_that_declares_the_trait_is_selected(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

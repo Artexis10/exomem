@@ -4,9 +4,9 @@
 
 Task discovery serves pages as leads. A page's semantic units reach the agent only when the agent reads the page.
 A long page puts its late units behind every earlier section. Context engineering guidance names exactly this risk: give the model the minimum high-signal context it needs, and keep larger material behind references (Anthropic, "Effective context engineering for AI agents", 2025).
-The person's own recorded positions are high-signal and short. They belong in the packet itself, not behind a page read.
+The person's recorded positions are high-signal. They belong in the packet itself, not behind a page read.
 
-The decision rests on a replay of the failing conversation with a real model, judged blind. That follows the practice of diagnosing one production failure from its trace and keeping the failure as a regression case (Langfuse, "Evaluating LLM applications"; Anthropic, "Demystifying evals for AI agents", 2026).
+The design rests on replays of the failing conversation with a real model. Those replays reused one vault across repeats, so they show mechanisms, not rates; the blind held-out run decides. That follows the practice of diagnosing one production failure from its trace and keeping the failure as a regression case (Langfuse, "Evaluating LLM applications"; Anthropic, "Demystifying evals for AI agents", 2026).
 
 ## Decisions
 
@@ -39,23 +39,32 @@ Within the reached pages, every current position unit is ranked, and the bound a
 A block served on many turns must not draw on `max_chars`. An earlier block did, and task leads fell from 25 to 16 on a 23-turn replay until the block got its own bound.
 `positions_max_chars` is a vault budget, pinned to the engineering bounds that the hook reads. The overflow references count against it after the lines, and 0 turns the block off.
 
+### Serve a position whole when it fits
+
+A careful causal attribution runs far past the working set's per-unit cap, and in the replays exactly those positions became references the agent never read. The block's own bound is therefore the only size test: a unit is served whole when its line fits, and otherwise becomes a reference, never a cut unit. The shipped bound leaves room for one long position and a short one.
+
+### Read last, framing first
+
+In the replays the agent used the block far more often when the block was the last field of the maps response and its framing came before its items. Mid-packet, with the framing after the items, the block was mostly passed over. So terminal egress moves the block to the end once every other field, including the served-context fields, is in place, and the block opens with `about`. A test pins that order because it is the measured mechanism, not markup.
+
 ### Framing is the mechanism
 
-The replay separated surfacing from presentation.
-Raw units appended to the recall result changed nothing: 0 of 3 replies carried the position.
-The same units, framed as the person's recorded positions, did change the replies. The framing said to carry each position with attribution, to judge the evidence independently, and that each position stays theirs for the conversation.
-Labelled, 5 of 6 first replies and 3 of 6 challenged replies carried the position. No reply simply agreed with it.
+The replays separated surfacing from presentation.
+Raw units appended to the recall result changed nothing.
+The same units under a framing passage did change the replies, and no reply simply agreed with the position. The framing says to judge the evidence independently and that a position the person holds stays theirs for the conversation.
 The framing passage is therefore part of the contract, not decoration. It never asks for agreement, because agreement on command would turn a qualified hypothesis into an asserted fact.
+It attributes each unit as the unit's text does, not wholesale to the person, because a position category can also hold a conclusion that an agent saved.
 
 ## Risks
 
 - **Few position units.** A vault with few declared categories serves an empty block. The capture guidance and the agent-proposed declarations address that, and an empty block costs nothing.
 - **Agreement drift.** Framing could push the agent toward the person's view. The held-out set includes controls in which the saved position is wrong, withdrawn or contradicted by an outside fact. The decision run fails the change if those controls regress.
+- **Self-echo.** An agent's own conclusion, saved by capture under a position category, could come back next session as the person's view, and the agent would then agree with itself. Categories that agents mostly write, such as a core category a vault marks, widen that path. The framing attributes each unit as its text does, so an unnamed conclusion reads as one the notes record, and the capture guidance puts the agent's own analysis under a category without the trait and has a position name its holder.
 - **Latency.** The change adds one query. The latency task proves its cost before release.
 
 ## Alternatives considered
 
-- **Return a unit index first on long page reads.** This helps an agent that reads the page, but in the replay agents read the long page in 1 of 6 runs.
+- **Return a unit index first on long page reads.** This helps an agent that reads the page, but in the replays agents seldom read the long page.
 - **A domain profile line per subject.** A profile line is the owner's confirmed standing instruction, which the agent applies. A position is a dated view, which the agent weighs. One framing for both would make the agent second-guess a rule, or apply an opinion as a rule. So profiles keep their own trait-free selection and framing.
 
 ## Coordination

@@ -42,16 +42,34 @@ When task discovery serves leads for a turn, a maps response SHALL carry a `posi
 - **WHEN** a turn's position units exceed `positions_max_chars`
 - **THEN** the block carries whole units up to its bound and lists the rest as references, and the task leads keep the full turn allowance
 
-### Requirement: The Positions Block Frames Units As The Person's Own
-The `positions` block SHALL state, in one passage, that its units are the person's own recorded positions. Where the turn bears on one, the agent SHALL say how the new evidence relates to it, attributed to the person, and SHALL judge the evidence independently. The agent SHALL say plainly where the evidence does not support the position or contradicts it. A recorded position SHALL stay the person's for the rest of the conversation. The framing SHALL NOT instruct the agent to agree with a position, and SHALL NOT present a position as established fact.
+### Requirement: The Positions Block Attributes Each Unit As Its Text Does
+The `positions` block SHALL state, in one passage, that its units are positions recorded in the person's notes. A unit's own text names its holder. The passage SHALL ask the agent to attribute each unit as its text does: to the person where the text states their view, to anyone else the text names, and otherwise as a conclusion the notes record. The passage SHALL NOT present every unit as the person's view. Where the turn bears on a unit, the agent SHALL say how the new evidence relates to it and SHALL judge the evidence independently. The agent SHALL say plainly where the evidence does not support the position or contradicts it. A position the person holds SHALL stay theirs for the rest of the conversation. The framing SHALL NOT instruct the agent to agree with a position, and SHALL NOT present a position as established fact.
 
 #### Scenario: New evidence bears on a recorded position
-- **WHEN** a turn brings a measurement on a subject where the person recorded a qualified working attribution
-- **THEN** the served block presents that attribution as the person's recorded position with its qualifier, alongside the instruction to judge the evidence independently
+- **WHEN** a turn brings a measurement on a subject where the person recorded a qualified working attribution that names them
+- **THEN** the served block presents that attribution with its qualifier, attributed to the person, alongside the instruction to judge the evidence independently
+
+#### Scenario: An agent's saved conclusion does not come back as the person's view
+- **WHEN** a position-category unit that an agent's capture saved states a conclusion and names no holder
+- **THEN** the framing asks the agent to attribute it as a conclusion the notes record, not as the person's view
 
 #### Scenario: A later contradicting record is served beside the position
 - **WHEN** the same page holds the position and a later position unit in which the person withdrew it
 - **THEN** both units appear, newest first by date, and the framing asks the agent to judge rather than adopt either
+
+### Requirement: A Position Is Served Whole When It Fits The Block's Bound
+The `positions` block SHALL serve a position unit whole whenever its line fits the block's remaining bound, whatever the unit's length. No per-unit length cap SHALL turn a unit into a reference. A unit that does not fit SHALL become a reference, never a cut unit. The shipped `positions_max_chars` SHALL leave room for one long position and a short one.
+
+#### Scenario: A long causal attribution is served whole
+- **WHEN** a turn reaches a position unit of about 1,500 characters and a short position unit, under the shipped bound
+- **THEN** the block carries both units whole, and lists neither as a reference
+
+### Requirement: The Positions Block Ends The Maps Response And Leads With Its Framing
+A maps response SHALL carry the `positions` block as its last field, after every other field it carries, including the fields that terminal egress adds. The block's framing passage `about` SHALL be its first field, followed by `state`, `items`, `overflow_refs`, `omitted` and, where present, `reason`. A client that renders the block SHALL render the framing passage before the items.
+
+#### Scenario: The block is read last, framing first
+- **WHEN** a maps response serves a `positions` block with items
+- **THEN** `positions` is the response's last field, and `about` is the block's first field
 
 ### Requirement: The Positions Projection Proves Its Cost
 The projection SHALL add at most one batched semantic-unit query per recall, restricted to the served leads and their listed link targets, and SHALL read only the pages that query names. Its cost SHALL be proven with a before and after on the recall latency instrument before release.

@@ -11,17 +11,21 @@ Recall served a short linked page as the lead and never the long page that held 
 After the agent had read the long page in full, it still answered a challenge without the position.
 The person had to restate a position the vault already held.
 
-A replay with a real model reproduced the gap. The replay judged replies blind, and its findings were:
+Replays with a real model reproduced the gap and pointed at the mechanisms:
 - Appending the raw units to the recall result did not change the replies.
-- Presenting the same units as the person's recorded positions did change them. Labelled, the replies carried the position, attributed to the person, in 5 of 6 first replies and 3 of 6 challenged replies. Unlabelled arms carried it in none of 9.
-- No labelled reply simply agreed with the position.
+- Presenting the same units under a framing passage did change them, without making the replies simply agree.
+- Where the block sat and what it opened with mattered: a block read last, framing first, was used where the same block mid-packet mostly was not.
+- A careful position runs long, and a per-unit cap turned exactly those positions into references the agent did not read.
+
+Those replays reused one vault across repeats, so they guide the design but do not measure it. The blind held-out run decides.
 
 ## What Changes
 
 - Add a closed trait `position` to the kind-trait set, and let a category declare traits the way a kind does. A reviewed registry save declares which categories and kinds record positions. Code selects position units only through the trait, never by a category name.
 - Serve a turn-scoped `positions` block in maps responses. It holds the position units found on the served task leads and on the pages those leads link to, ranked by relevance to the turn and then by recency. The block has its own bound outside the turn allowance.
-- Frame the block as the person's recorded positions. The agent carries a position with attribution where the turn bears on it, judges the evidence independently, and says plainly where the evidence does not support the position or contradicts it. A recorded position stays the person's for the rest of the conversation. The framing never asks the agent to agree.
-- Teach capture to record a person's position under a category that carries the trait.
+- Frame the block as positions recorded in the person's notes, each attributed as its own text does: to the person where it states their view, otherwise as a conclusion the notes record. The agent carries a position where the turn bears on it, judges the evidence independently, and says plainly where the evidence does not support the position or contradicts it. A position the person holds stays theirs for the rest of the conversation. The framing never asks the agent to agree.
+- Serve a position whole whenever it fits the block's bound, with no per-unit cap. End the maps response with the block, and open the block with its framing.
+- Teach capture to record a person's position under a category that carries the trait, naming them, and the agent's own analysis under a category without it.
 
 ## Capabilities
 

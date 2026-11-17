@@ -6256,6 +6256,10 @@ def _postfilter(
                 vault_root, cleaned, session=(request_kwargs or {}).get("session"),
                 purpose=(request_kwargs or {}).get("purpose"),
             )
+        if "positions" in cleaned:
+            # Every other field is in place, so the block can end the response: real-model replays used the
+            # positions when they were read last and mostly passed over them mid-packet.
+            cleaned["positions"] = cleaned.pop("positions")
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     if material_projection is not None and isinstance(cleaned, dict):
