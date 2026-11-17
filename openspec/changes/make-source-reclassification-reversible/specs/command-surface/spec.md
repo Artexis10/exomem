@@ -4,11 +4,11 @@
 
 The operation SHALL rewrite every inbound reference held in a mutable page so that no reference dangles, including references held in other pages' frontmatter provenance lists. A reference counts as rewritten only when its bytes change.
 
-The operation SHALL leave references held in append-only pages unchanged. It SHALL refuse the move when an append-only reference would need a byte change to keep resolving. A reference that resolves unchanged, such as a basename or title link, SHALL NOT cause a refusal.
+A reference held in an append-only page that resolves unchanged, such as a basename or title link, SHALL keep its bytes and SHALL NOT cause a refusal. The operation SHALL repoint each path link held in an append-only page through the governed pointer write, so that only the link's target span changes. It SHALL refuse with `APPEND_ONLY` when such a link must change and the source carries no `exomem_id`. A reclassification that repoints an append-only page SHALL commit only with the digest of its preview, under the approval rule of the governed pointer write.
 
-The operation SHALL append the previous path, kind and domain to the source's `reclassified_from` list, and SHALL write it without changing the source's body bytes. A legacy scalar `reclassified_from` value SHALL read as one entry with an unknown classification.
+The operation SHALL append the previous path, kind and domain to the source's `moved_from` list, and SHALL write it without changing the source's body bytes. A `reclassified_from` value, the legacy spelling, SHALL read as entries older than every `moved_from` entry. A legacy scalar value SHALL read as one entry with an unknown classification.
 
-A reclassification SHALL be atomic: either the relocation, the companion move, the metadata correction, the history entry, and every reference rewrite all apply, or none of them do.
+A reclassification SHALL be atomic: either the relocation, the companion move, the metadata correction, the history entry, every reference rewrite and every pointer repoint all apply, or none of them do.
 
 #### Scenario: Inbound references follow the source
 
@@ -22,15 +22,22 @@ A reclassification SHALL be atomic: either the relocation, the companion move, t
 - **THEN** the move succeeds and the Evidence page is unchanged
 - **AND** the link still resolves to the source
 
-#### Scenario: An append-only path link blocks the move
+#### Scenario: An append-only path link is repointed
 
-- **WHEN** an Evidence page links a source by its full path and the source is reclassified to a new location
-- **THEN** the move is refused and nothing changes
+- **WHEN** an Evidence page links a source that carries an `exomem_id` by its full path, and the source is reclassified to a new location with its preview digest
+- **THEN** the move succeeds and the Evidence page's link names the new location
+- **AND** every other byte of the Evidence page is unchanged, and the pointer-write record holds the old link
+
+#### Scenario: A repoint without the preview digest
+
+- **WHEN** an Evidence page links a source by its full path and a caller reclassifies the source without the digest of its preview
+- **THEN** the reclassification refuses with `POINTER_PREVIEW_REQUIRED` and nothing changes
 
 #### Scenario: The previous path stays discoverable
 
 - **WHEN** a source is reclassified twice
 - **THEN** the source records both previous locations with their kinds and domains, oldest first
+- **AND** a link to either previous location resolves to the source
 
 #### Scenario: A failure part-way leaves nothing half-applied
 
@@ -40,7 +47,7 @@ A reclassification SHALL be atomic: either the relocation, the companion move, t
 
 ### Requirement: Reclassification reports what it would do before doing it
 
-The operation SHALL offer a read-only mode that reports the corrected classification, the location the source would move to, the mutable references that would be rewritten, the append-only references that stay unchanged grouped by link form, any refusal with its cause, and the evidence supporting each proposed value, without writing anything. The report SHALL name only pages the caller can see.
+The operation SHALL offer a read-only mode that reports the corrected classification, the location the source would move to, the mutable references that would be rewritten, the append-only references that it would repoint, the append-only references that stay unchanged grouped by link form, the digest that a commit needs when it repoints an append-only reference, any refusal with its cause, and the evidence supporting each proposed value, without writing anything. The report SHALL name only pages the caller can see.
 
 The read-only mode SHALL accept a caller-supplied kind and domain and preview that correction, so a caller that has read the source and decided can show the destination and affected references before anything is written. Supplied values SHALL be resolved through the same rules the correction applies, so a value the correction would refuse is refused during the preview rather than after approval.
 
@@ -55,9 +62,9 @@ When no values are supplied, evidence SHALL be limited to what is deterministica
 
 #### Scenario: A preview shows a refusal before approval
 
-- **WHEN** a preview is requested for a source that an append-only page links by full path
+- **WHEN** a preview is requested for a source whose destination a page that the caller can see already occupies
 - **THEN** the report states that the move would be refused and why
-- **AND** it names that referrer only when the caller can see it
+- **AND** it names that page
 
 #### Scenario: Evidence accompanies a proposed value
 
@@ -87,13 +94,14 @@ When no values are supplied, evidence SHALL be limited to what is deterministica
 
 ### Requirement: Reclassification can be reverted
 
-The operation SHALL offer a revert that restores the source's latest recorded previous path, kind and domain through the same atomic, reference-preserving relocation, and removes that history entry. Revert SHALL restore a recorded `other` classification. It SHALL refuse an entry whose classification is unknown, and a previous path that another page now occupies.
+The operation SHALL offer a revert that restores the source's latest recorded previous path, kind and domain through the same atomic, reference-preserving relocation, and removes that history entry. The revert SHALL restore each append-only page that the reclassification repointed from its pointer-write record, and SHALL refuse, changing nothing, when such a page no longer holds its recorded after hash. Revert SHALL restore a recorded `other` classification. It SHALL refuse an entry whose classification is unknown, and a previous path that another page now occupies.
 
 #### Scenario: A reclassification round trip restores the original
 
 - **WHEN** a source is reclassified and then reverted
 - **THEN** it is at its original location with its original kind and domain
 - **AND** its body bytes and every reference resolve as before the first move
+- **AND** each append-only page that the reclassification repointed holds its bytes from before the first move
 
 #### Scenario: A legacy history entry cannot be reverted automatically
 
@@ -163,7 +171,7 @@ Each finding SHALL name the card, the field, the recorded path and the problem, 
 
 ### Requirement: A Source's pointer to its bytes can be repaired and reverted
 
-The reclassification operation SHALL accept `artifact_path`, a vault path to the raw file the card describes. It SHALL set every scalar pointer the card records, or `evidence_file` when it records none, and SHALL record the previous values in the new `reclassified_from` entry so that a revert restores them. A repair that names no kind or domain SHALL NOT move the card or change its classification.
+The reclassification operation SHALL accept `artifact_path`, a vault path to the raw file the card describes. It SHALL set every scalar pointer the card records, or `evidence_file` when it records none, and SHALL record the previous values in the new `moved_from` entry so that a revert restores them. A repair that names no kind or domain SHALL NOT move the card or change its classification.
 
 It SHALL refuse a target that is not a vault-relative plain file under a custody tree, a target that does not exist, a target whose size or SHA-256 differs from the identity the card records (for an original the media store holds, the identity its binding records), and a card that follows its file by name: a pointer in a `raw_protection` or `governance_companion` descriptor, or a card at its file's companion path. For a caller other than the owner, it SHALL refuse a target that the caller may not see exactly as a missing one. A repair SHALL leave every classification field as the card states it.
 

@@ -324,7 +324,9 @@ class FixedPackAdapter:
             if not isinstance(raw_key, str) or self.normalize_key(raw_key) != raw_key:
                 raise RegistryError("INVALID_REGISTRY_KEY: overlay key is not canonical")
             if raw_key in entries:
-                raise RegistryError("PACK_ENTRY_FIXED: shipped entries cannot be overridden")
+                raise RegistryError(
+                    f"PACK_ENTRY_FIXED: shipped entry {raw_key} cannot be overridden"
+                )
             entry = _patch(self._spec(), raw_key, row, None)
             self._check(entry, entries)
             entries[raw_key] = entry

@@ -6356,6 +6356,8 @@ def op_move_file(
     update_wikilinks: bool = True,
     allow_curated: bool = False,
     promotion_reason: str | None = None,
+    validate_only: bool = False,
+    preview_digest: str | None = None,
 ) -> dict:
     """Tier 2: relocate a file, optionally rewriting inbound wikilinks.
 
@@ -6372,7 +6374,14 @@ def op_move_file(
     new location. Preserves full-form vs stripped-form per link. It also
     renames the exact old vault path where a page body cites it in prose,
     and leaves a Source or Evidence page that cites it as captured (a
-    warning counts those).
+    warning counts those). A link in a Source or Evidence page is repointed
+    through the governed pointer write when the moved page has an
+    `exomem_id`. A link that the move cannot rewrite still resolves through
+    the moved page's lineage.
+
+    `validate_only=true` previews the move: one outcome per referrer you may
+    see and a `preview_digest`. A move that repoints a Source or Evidence page
+    commits only with that digest.
 
     Args:
         old_path: Vault-relative source.
@@ -6382,12 +6391,17 @@ def op_move_file(
         promotion_reason: Required only for a Sources/ -> Evidence/ promotion;
             recorded in the activity log as the audit trail for the
             reclassification.
+        validate_only: Preview the move without writing.
+        preview_digest: The preview's digest, which approves its repoints.
 
     Returns: {old_path, new_path, wikilinks_updated, path_mentions_updated,
-    files_touched, warnings}.
+    files_touched, warnings[, pointer_writes]}; a preview adds referrers and
+    preview_digest, and store_rows, the one outcome of the rows the collection
+    store keeps without a page, when the vault keeps collections in the store.
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
-            CURATED_PROTECTED; PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH
-            (either end is a store collection's view path).
+            POINTER_PREVIEW_REQUIRED; CURATED_PROTECTED;
+            PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH (either end is a
+            store collection's view path).
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
     try:
@@ -6398,6 +6412,8 @@ def op_move_file(
             update_wikilinks=update_wikilinks,
             allow_curated=allow_curated,
             promotion_reason=promotion_reason,
+            preview=validate_only,
+            preview_digest=preview_digest,
         )
     except move_file_module.MoveFileError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -14052,6 +14068,7 @@ def op_reclassify_source(
     domain: str | None = None,
     artifact_path: str | None = None,
     reason: str | None = None,
+    preview_digest: str | None = None,
 ) -> dict:
     """Correct a captured source's classification and relocate it to match.
 
@@ -14077,6 +14094,9 @@ def op_reclassify_source(
     file moved. It names an existing file under Sources/ or Evidence/ that fits the
     size and SHA-256 the source records. Alone it leaves the source where it is; revert
     restores the earlier pointer.
+
+    A relocation that repoints links in other Source or Evidence pages needs the
+    `preview_digest` of the propose-reclassification preview.
     """
     from . import reclassify_source as reclassify_module
 
@@ -14088,6 +14108,7 @@ def op_reclassify_source(
             domain=domain,
             artifact_path=artifact_path,
             reason=reason,
+            preview_digest=preview_digest,
         )
     except reclassify_module.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
@@ -14184,14 +14205,15 @@ def op_manage_memory_file(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     promotion_reason: str | None = None,
+    preview_digest: str | None = None,
 ) -> dict:
     """Manage files when typed tools do not fit.
 
     Destructive operations need explicit flags.
 
     Args:
-        operation: list, trash-list and propose-reclassification read; create and append
-            read with validate_only; the others write.
+        operation: list, trash-list and propose-reclassification read; create, append
+            and move read with validate_only; the others write.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
@@ -14201,7 +14223,8 @@ def op_manage_memory_file(
         reason: Required for reclassify and revert-reclassification.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
-        validate_only: Validate a Markdown create or append without writing.
+        validate_only: Validate a Markdown create or append, or preview a move, without
+            writing.
         draft_token: The overwrite preview's `draft_token`, replayed unchanged on
             commit.
         semantic_transition_token: The append transition token from validate_only.
@@ -14209,6 +14232,8 @@ def op_manage_memory_file(
         relation_review_hash: Draft or transition hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
+        preview_digest: A move or reclassify that repoints Source or Evidence pages passes
+            its preview's `preview_digest`.
     """
     creation_review_requested = any(
         value is not None
@@ -14219,7 +14244,7 @@ def op_manage_memory_file(
         )
     )
     append_review_requested = semantic_transition_token is not None
-    shared_review_requested = validate_only or any(
+    shared_review_requested = (validate_only and operation != "move") or any(
         value is not None
         for value in (
             relation_disposition,
@@ -14286,6 +14311,8 @@ def op_manage_memory_file(
             update_wikilinks=update_wikilinks,
             allow_curated=allow_curated,
             promotion_reason=promotion_reason,
+            validate_only=validate_only,
+            preview_digest=preview_digest,
         )
     if operation == "delete":
         return op_delete(
@@ -14315,6 +14342,7 @@ def op_manage_memory_file(
             domain=domain,
             artifact_path=artifact_path,
             reason=reason,
+            preview_digest=preview_digest,
         )
     if operation == "trash-list":
         return op_list_trash(vault_root, date=date)

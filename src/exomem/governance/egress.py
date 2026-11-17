@@ -6677,7 +6677,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "list": "structure",
         "create": "validation",
         "append": "validation",
-        "move": "mutation",
+        # A move with `validate_only` is its preview, which writes nothing.
+        "move": "validation",
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",

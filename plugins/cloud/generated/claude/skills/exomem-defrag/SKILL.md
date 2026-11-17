@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: 83814804dbd620b9af799275eff56b0a0a5ad1eb242940e1921c17dfdcd6b6e1
+  skill_contract: c46c24d063dd7a37149f66b03a3407425f5aa207e5f9ad9ba14ef50ff40264a4
   version: "0.1.0"
 ---
 
@@ -24,8 +24,9 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Content outside the managed Knowledge Base is
+read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.

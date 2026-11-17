@@ -107,12 +107,9 @@ def test_store_publication_boundary_refuses_relocation_before_any_run_artifact(
         "title": "Unsupported relocation",
         "steps": [
             {
-                "step_id": "move",
-                "kind": "move",
-                "args": {
-                    "old_path": "Knowledge Base/Notes/Insights/old.md",
-                    "new_path": "Knowledge Base/Notes/Insights/new.md",
-                },
+                "step_id": "delete",
+                "kind": "delete",
+                "args": {"path": "Knowledge Base/Notes/Insights/old.md", "confirm": True},
             }
         ],
     }

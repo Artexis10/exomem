@@ -517,7 +517,8 @@ def test_move_trash_and_recovery_keep_all_unit_sidecars_on_the_live_parent(
     move_file_module.move_file(tmp_path, old_path=live_rel, new_path=moved_rel)
 
     moved = semantic_index.build_parent_index_state(tmp_path, tmp_path / moved_rel)
-    assert moved.parent_generation == state.parent_generation
+    # The move appends the page's lineage, so the same parent holds new bytes.
+    assert moved.parent_ref == state.parent_ref
     for sidecar in ("lexical", "vector", "graph"):
         assert not any(
             item.sidecar == sidecar

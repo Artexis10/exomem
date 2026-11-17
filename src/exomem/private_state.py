@@ -41,11 +41,15 @@ def remove(*paths: Path) -> None:
             pass
 
 
-def write_record(store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False) -> None:
+def write_record(
+    store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False,
+    create_only: bool = False,
+) -> None:
     """Write `<stem>.json` whole through a temp named `<stem>.*<temp_suffix>`, which the store's sweep owns.
 
     A `durable` record reaches the disk before the rename that publishes it. The store's folder entry is
-    the caller's to flush, once for a batch of records, with `sync_directory`.
+    the caller's to flush, once for a batch of records, with `sync_directory`. A `create_only` record is
+    published by a hard link, so it never replaces one already there (`FileExistsError`).
     """
     descriptor, raw = tempfile.mkstemp(prefix=f"{stem}.", suffix=temp_suffix, dir=store)
     try:
@@ -54,7 +58,11 @@ def write_record(store: Path, stem: str, record: dict, *, temp_suffix: str, dura
             if durable:
                 sink.flush()
                 os.fsync(sink.fileno())
-        os.replace(raw, store / f"{stem}.json")
+        if create_only:
+            os.link(raw, store / f"{stem}.json")
+            remove(Path(raw))
+        else:
+            os.replace(raw, store / f"{stem}.json")
     except BaseException:
         remove(Path(raw))
         raise

@@ -4071,6 +4071,26 @@ def search_substring_result(
     )
 
 
+def search_substrings_result(
+    vault_root: Path, queries: Sequence[str], *, scope: str = "kb"
+) -> CatalogQueryResult[dict[str, list[str]]]:
+    """`search_substring_result` for several queries under one readiness proof and snapshot.
+
+    Each proof walks the vault, so a caller with many queries pays for one walk, not one each.
+    """
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    tokens = {query: query.split() for query in queries}
+    empty = {query: [] for query, words in tokens.items() if not words}
+    asked = {query: words for query, words in tokens.items() if words}
+    if not asked:
+        return CatalogQueryResult(empty, CatalogReadiness("available", True, backend()))
+    answer = get_store(vault_root).search_substrings_result(asked, scope)
+    if answer.value is None:
+        return answer
+    return CatalogQueryResult({**empty, **answer.value}, answer.readiness)
+
+
 def search_keyword_groups_result(
     vault_root: Path, query_norm: str, *, scope: str, freshness: tuple | None,
     limit: int, allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
@@ -13198,6 +13218,18 @@ class LexicalStore:
             scope,
             freshness,
             lambda conn: self._substring_query(conn, tokens, scope, k, allowed_paths),
+            "lexical sidecar substring query failed (%s)",
+        )
+
+    def search_substrings_result(
+        self, tokens: Mapping[str, list[str]], scope: str
+    ) -> CatalogQueryResult[dict[str, list[str]]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            None,
+            lambda conn: {
+                query: self._substring_query(conn, words, scope) for query, words in tokens.items()
+            },
             "lexical sidecar substring query failed (%s)",
         )
 

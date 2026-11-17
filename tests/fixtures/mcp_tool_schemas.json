@@ -677,6 +677,7 @@
             "files.reclassify",
             "files.create",
             "files.append",
+            "files.move",
             "episodes.material",
             "episodes.inspect",
             "episodes.candidates",
