@@ -40,7 +40,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, semantic_contract, source_taxonomy, temporal
+from . import (
+    indexes,
+    memory_refs,
+    originals,
+    privacy_log,
+    semantic_contract,
+    source_taxonomy,
+    temporal,
+)
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .kbdir import managed_join, managed_relative
 from .ocr_facts import OcrFacts
@@ -555,7 +563,8 @@ def preserve(
     if _allocation is not None and _allocation["artifact"] != artifact_path.relative_to(vault_root).as_posix():
         raise ValueError("native preservation destination changed")
 
-    if artifact_path.exists():
+    # A pooled filing has no file at its logical name, which stays taken while its companion binds it.
+    if artifact_path.exists() or originals.pooled(vault_root, artifact_path) is not None:
         if _allocation is not None:
             raise DefiniteNoEffect.destination_exists(_allocation["destination"])
         return _raise(
