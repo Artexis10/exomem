@@ -1200,6 +1200,111 @@ def test_declared_winners_rank_by_predicates_held_then_coverage() -> None:
     assert route(["Panel froze on load"], [narrow, twin], facets=facets) is None
 
 
+def _declared_and_undeclared() -> tuple[RoutingTarget, RoutingTarget]:
+    """One collection that declares membership and shares 2 words, one that declares none and shares 3."""
+    declaring = _target(
+        INCIDENTS,
+        {"panel", "render"},
+        match={"type": frozenset({"failure"}), "project": frozenset({"widget-app"})},
+    )
+    undeclared = _target(LEDGER, {"cache", "login", "sync"})
+    return declaring, undeclared
+
+
+_PAGE = ["Panel render cache login sync"]
+_TYPE_AND_PROJECT = {"type": frozenset({"failure"}), "project": frozenset({"widget-app"})}
+
+
+def test_a_partly_held_declaration_outranks_a_wider_undeclared_word_route() -> None:
+    declaring, undeclared = _declared_and_undeclared()
+
+    # The page states its type but no project: the declaration is only partly held.
+    advisory = route(_PAGE, [undeclared, declaring], facets={"type": ["failure"]})
+
+    assert advisory is not None
+    assert advisory["collection"] == INCIDENTS
+    # A partial declaration ranks; only a full one is `strong`.
+    assert advisory["strength"] == "moderate"
+    assert "matched_predicates" not in advisory
+
+
+def test_a_partly_held_declaration_still_needs_its_own_word_route() -> None:
+    """Held predicates outrank words only for a collection that is itself a valid word route."""
+    below_floor = _target(
+        INCIDENTS,
+        {"panel"},
+        match={"type": frozenset({"failure"}), "project": frozenset({"widget-app"})},
+    )
+    no_words = _target(
+        LEDGER,
+        {"unrelated", "terms"},
+        match={"type": frozenset({"failure"}), "project": frozenset({"widget-app"})},
+    )
+    undeclared = _target("Knowledge Base/Records/Other/_collection.md", {"cache", "login", "sync"})
+
+    advisory = route(_PAGE, [below_floor, no_words, undeclared], facets={"type": ["failure"]})
+
+    # Sharing one word is under the coverage floor and none is under it too: today's winner stays.
+    assert advisory is not None
+    assert advisory["collection"] == undeclared.collection
+    assert advisory["strength"] == "moderate"
+
+
+def test_a_partly_held_declaration_needs_a_subject_signal_too() -> None:
+    # `panel` and `render` are claimed by every collection, so they say nothing about this one.
+    declaring = _target(INCIDENTS, {"panel", "render"}, match=_TYPE_AND_PROJECT)
+    twin = _target("Knowledge Base/Records/Twin/_collection.md", {"panel", "render"})
+    undeclared = _target(LEDGER, {"panel", "render", "cache", "login", "sync"})
+
+    advisory = route(_PAGE, [declaring, twin, undeclared], facets={"type": ["failure"]})
+
+    assert advisory is not None
+    assert advisory["collection"] == LEDGER
+
+
+def test_partly_held_declarations_rank_by_predicates_held_then_coverage_and_tie_silent() -> None:
+    three = {
+        "type": frozenset({"failure"}),
+        "category": frozenset({"ux"}),
+        "project": frozenset({"widget-app"}),
+    }
+    two_held = _target(INCIDENTS, {"panel", "render"}, match=three)
+    one_held = _target(LEDGER, {"cache", "login", "sync"}, match=_TYPE_AND_PROJECT)
+    facets = {"type": ["failure"], "category": ["ux"]}
+
+    # Two predicates held beat one held with more words.
+    ranked = route(_PAGE, [one_held, two_held], facets=facets)
+    assert ranked is not None and ranked["collection"] == INCIDENTS
+    assert ranked["strength"] == "moderate"
+
+    # With the held count equal, coverage decides.
+    wider = _target(
+        "Knowledge Base/Records/Wider/_collection.md", {"cache", "login", "sync"}, match=three
+    )
+    by_coverage = route(_PAGE, [two_held, wider], facets=facets)
+    assert by_coverage is not None and by_coverage["collection"] == wider.collection
+
+    # Equal held count and equal coverage stay silent.
+    twin = _target("Knowledge Base/Records/Twin/_collection.md", {"cache", "login", "sync"}, match=three)
+    assert route(_PAGE, [wider, twin], facets=facets) is None
+
+
+def test_a_contradicted_declaration_never_outranks_words() -> None:
+    declaring, undeclared = _declared_and_undeclared()
+
+    advisory = route(_PAGE, [declaring, undeclared], facets={"type": ["failure"], "project": ["gadget"]})
+
+    assert advisory is not None and advisory["collection"] == LEDGER
+
+
+def test_turn_routing_without_facets_ignores_declarations() -> None:
+    declaring, undeclared = _declared_and_undeclared()
+
+    advisory = route(_PAGE, [declaring, undeclared])
+
+    assert advisory is not None and advisory["collection"] == LEDGER
+
+
 def _write_record(
     tmp_path: Path, name: str, record_id: str, incident: str, extra: str = ""
 ) -> None:
