@@ -673,6 +673,7 @@ def _check_filename_style(vault_root: Path | None) -> list[DoctorCheck]:
     """
     if vault_root is None:
         return []
+    from .layout import LayoutError
     from .vault import (
         FILENAME_STYLES,
         InvalidSlugError,
@@ -682,6 +683,17 @@ def _check_filename_style(vault_root: Path | None) -> list[DoctorCheck]:
 
     try:
         style, source = filename_style_source(vault_root)
+    except LayoutError:
+        # The registry that holds the style sits in the schema folder, which an unsettled layout cannot locate.
+        return [
+            _check(
+                "vault.filename_style",
+                "warn",
+                "The filename style was not read: the vault layout is not resolved, so the registry that holds it cannot be found.",
+                "Fix vault.layout first; the style is checked once the layout resolves.",
+                details={"style": None, "depends_on": "vault.layout"},
+            )
+        ]
     except UnparseableFilenameStyleError as error:
         return [
             _check(
