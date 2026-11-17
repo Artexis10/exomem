@@ -14,5 +14,6 @@
 
 ## 3. Prove the workflow on real models
 
-- [ ] 3.1 Run the capture journey end to end on real models: a note that routes to a declaring collection, the agent reads the method and files the record.
-- [ ] 3.2 Replay routing over a read-only copy of a production-sized vault and compare the collections each note routes to before and after.
+- [x] 3.1 Run the capture journey end to end on real models: a note that routes to a declaring collection, the agent reads the method and files the record. (`cases/capture-routing.json`, three cases, 3 repeats per arm on an OpenAI actor: the changed arm passes 9/9; the base arm also passes 9/9 on these small seeded vaults, so this run shows no difference and claims none.)
+- [x] 3.2 Replay routing over a read-only copy of a production-sized vault and compare the collections each note routes to before and after. (3,314 compiled notes: 17 routes change, all failure notes moving at `moderate` to the one collection that declares failures; strong routes and dispositions unchanged.)
+- [ ] 3.3 On the installed release, declare a capture method on a real collection and check that a routed write names it and that a turn routed to the collection serves it.
