@@ -17,6 +17,7 @@ from exomem import (
     document_forms,
     document_identity,
     mutation_terminal,
+    source_capture,
     source_corrections,
 )
 from exomem import schema as schema_module
@@ -145,6 +146,18 @@ def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_sou
         "session", "urban-planning", ["riverside"], "full-text",
     )
     assert "> Cited in the harbour survey." in (vault / successor["page"]).read_text(encoding="utf-8")
+
+
+def test_a_metadata_only_correction_scans_the_canonical_sources_once(vault, source_schema, saved, monkeypatch) -> None:
+    # Each scan reads every canonical Source page: seconds at the load target of 20,000 pages.
+    scans = []
+    scan = source_capture.canonical_pages
+    monkeypatch.setattr(source_capture, "canonical_pages", lambda *args, **kwargs: scans.append(args) or scan(*args, **kwargs))
+
+    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))
+
+    assert successor["files"][0]["outcome"] == "stored"
+    assert len(scans) == 1
 
 
 def test_a_changed_original_refuses_the_correction_and_writes_nothing(vault, source_schema, saved) -> None:

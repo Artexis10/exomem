@@ -461,7 +461,7 @@ def add(
     capture_input_digest: str | None = None,
     passages: list[source_capture.DeclaredPassage] | None = None,
     expected_sha256: str | None = None,
-    correction: source_corrections.SourceCorrection | None = None,
+    correction: source_corrections.SourceCorrection | source_corrections.CorrectionPlan | None = None,
     reuse_payload: bool = False,
     document_form: str | None = None,
     identity_check: Mapping[str, object] | None = None,
@@ -504,6 +504,10 @@ def add(
     claimed URL (`document_identity`), kept on the page as read. `ingested_into` seeds the page's backlinks, which a
     metadata-only correction carries over from its predecessor.
 
+    `correction` is the call's correction, or the `CorrectionPlan` a caller already prepared for it. Preparing scans
+    every canonical Source, so a caller that read the predecessor first passes its plan; the plan's guards still fail
+    the commit when the predecessor page or its receipt changed since.
+
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     from .governance import raw_protection as raw_guard
@@ -513,7 +517,10 @@ def add(
         content = "\n\n".join(passage["text"] for passage in passages)
     if correction is not None and (source_identity is not None or adoption_seed is not None or supersede):
         raise ValueError("INVALID_SOURCE_CORRECTION: correction cannot coexist with source_identity, adoption, or episode revision")
-    correction_plan = source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    correction_plan = (
+        correction if isinstance(correction, source_corrections.CorrectionPlan)
+        else source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    )
     if expected_sha256 is not None:
         source_capture.validate_sha256(expected_sha256)
         if artifact is None:
@@ -546,7 +553,7 @@ def add(
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
                 passages=passages,
                 expected_sha256=expected_sha256,
-                correction=correction,
+                correction=correction_plan,
                 document_form=document_form, identity_check=identity_check, ingested_into=ingested_into,
                 _allocation=_allocation,
                 _prepare=prepare_raw if _prepare is not None else None,

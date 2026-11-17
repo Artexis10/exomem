@@ -1926,7 +1926,8 @@ def capture_source_correction(
         vault_root, source_schema=source_schema, title=title, staged={0: staged}, outcomes=[None],
         source_fields={
             **source_fields,
-            "correction": correction,
+            # The plan read above, so `add` commits it without scanning every canonical Source again.
+            "correction": plan,
             # A successor is never less protected than its predecessor.
             "raw_protection": bool(source_fields.get("raw_protection")) or raw_guard.marked(plan.old_path),
             "ingested_into": [str(entry) for entry in ingested] if isinstance(ingested, list) else [],
