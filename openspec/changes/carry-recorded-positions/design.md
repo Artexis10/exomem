@@ -51,15 +51,15 @@ In the replays the agent used the block far more often when the block was the la
 
 The replays separated surfacing from presentation.
 Raw units appended to the recall result changed nothing.
-The same units under a framing passage did change the replies, and no reply simply agreed with the position. The framing says to judge the evidence independently and that a position the person holds stays theirs for the conversation.
+The same units, framed as the person's recorded positions, did change the replies, and no reply simply agreed with the position. The framing says to carry each position with attribution, to judge the evidence independently, and that each position stays theirs for the conversation.
 The framing passage is therefore part of the contract, not decoration. It never asks for agreement, because agreement on command would turn a qualified hypothesis into an asserted fact.
-It attributes each unit as the unit's text does, not wholesale to the person, because a position category can also hold a conclusion that an agent saved.
+In replays, a framing that asked the agent to attribute each line as its text does suppressed carrying the person's positions. The framing therefore names the units as the person's own, and capture keeps the agent's own analysis out of position categories.
 
 ## Risks
 
 - **Few position units.** A vault with few declared categories serves an empty block. The capture guidance and the agent-proposed declarations address that, and an empty block costs nothing.
 - **Agreement drift.** Framing could push the agent toward the person's view. The held-out set includes controls in which the saved position is wrong, withdrawn or contradicted by an outside fact. The decision run fails the change if those controls regress.
-- **Self-echo.** An agent's own conclusion, saved by capture under a position category, could come back next session as the person's view, and the agent would then agree with itself. Categories that agents mostly write, such as a core category a vault marks, widen that path. The framing attributes each unit as its text does, so an unnamed conclusion reads as one the notes record, and the capture guidance puts the agent's own analysis under a category without the trait and has a position name its holder.
+- **Self-echo.** This stays a residual risk. An agent's own conclusion misfiled under a position category would be presented as the person's view, and the agent would then agree with itself. Three things mitigate it: the capture step records the agent's own analysis under a category without the trait, the owner chooses which categories carry the trait and avoids ones that agents mostly write, and the held-out controls for agreement drift catch a regression.
 - **Excerpt-level callers.** A caller served a page only as an excerpt gets a longer unit of that page as a reference, using the excerpt bound that page reads use. The stance and domain profile blocks still serve such a caller a whole long unit; they remain as old debt.
 - **Latency.** The change adds one query. The latency task proves its cost before release.
 

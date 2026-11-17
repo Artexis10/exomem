@@ -42,16 +42,16 @@ When task discovery serves leads for a turn, a maps response SHALL carry a `posi
 - **WHEN** a turn's position units exceed `positions_max_chars`
 - **THEN** the block carries whole units up to its bound and lists the rest as references, and the task leads keep the full turn allowance
 
-### Requirement: The Positions Block Attributes Each Unit As Its Text Does
-The `positions` block SHALL state, in one passage, that its units are positions recorded in the person's notes. A unit's own text names its holder. The passage SHALL ask the agent to attribute each unit as its text does: to the person where the text states their view, to anyone else the text names, and otherwise as a conclusion the notes record. The passage SHALL NOT present every unit as the person's view. Where the turn bears on a unit, the agent SHALL say how the new evidence relates to it and SHALL judge the evidence independently. The agent SHALL say plainly where the evidence does not support the position or contradicts it. A position the person holds SHALL stay theirs for the rest of the conversation. The framing SHALL NOT instruct the agent to agree with a position, and SHALL NOT present a position as established fact.
+### Requirement: The Positions Block Frames Units As The Person's Own
+The `positions` block SHALL state, in one passage, that its units are the person's own recorded positions. That claim rests on the owner's trait declaration: a category or kind carries the trait `position` because it records the person's own positions. Where the turn bears on one, the agent SHALL say how the new evidence relates to it, attributed to the person, and SHALL judge the evidence independently. The agent SHALL say plainly where the evidence does not support the position or contradicts it. A recorded position SHALL stay the person's for the rest of the conversation. The framing SHALL NOT instruct the agent to agree with a position, and SHALL NOT present a position as established fact. The capture guidance SHALL record the agent's own analysis under a category without the trait `position`.
 
 #### Scenario: New evidence bears on a recorded position
-- **WHEN** a turn brings a measurement on a subject where the person recorded a qualified working attribution that names them
-- **THEN** the served block presents that attribution with its qualifier, attributed to the person, alongside the instruction to judge the evidence independently
+- **WHEN** a turn brings a measurement on a subject where the person recorded a qualified working attribution
+- **THEN** the served block presents that attribution as the person's recorded position with its qualifier, alongside the instruction to judge the evidence independently
 
-#### Scenario: An agent's saved conclusion does not come back as the person's view
-- **WHEN** a position-category unit that an agent's capture saved states a conclusion and names no holder
-- **THEN** the framing asks the agent to attribute it as a conclusion the notes record, not as the person's view
+#### Scenario: The agent's own analysis is captured outside the position categories
+- **WHEN** the agent records its own analysis of a subject during capture
+- **THEN** it records the unit under a category without the trait `position`, so the positions block does not serve that unit as the person's
 
 #### Scenario: A later contradicting record is served beside the position
 - **WHEN** the same page holds the position and a later position unit in which the person withdrew it

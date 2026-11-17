@@ -1,4 +1,4 @@
-"""Positions recorded in the person's notes on the pages a turn's task context serves, attributed as each unit's text does.
+"""The person's own recorded positions on the pages a turn's task context serves, framed as theirs.
 
 A unit is a position only when its category or its kind carries the registry trait `position`. One batched
 unit query over the served leads and the link targets they list finds the pages in that reach that hold one.
@@ -32,16 +32,14 @@ from . import (
 )
 from .governance import egress, principal
 
-#: The framing passage. It is part of the contract: it never asks the agent to agree with a position, and it never
-#: credits the person with a unit whose text does not name them, since an agent's own saved conclusion can carry a
-#: position category and would otherwise come back to it as the person's view.
+#: The framing passage. It is part of the contract: it never asks the agent to agree with a position. It names the
+#: units as the person's own because the owner gives the trait only to categories that record their positions; in
+#: replays, asking the agent to attribute each line as its text does suppressed carrying the person's position.
 ABOUT = (
-    "Positions recorded in the person's notes on this subject. Attribute each one as its text does: to the person "
-    "where it states their view, to anyone else it names, and otherwise as a conclusion their notes record. Where "
-    "the turn bears on one, say how the new evidence relates to it; judge the evidence yourself and say plainly "
-    "where it does not support or contradicts the position. A position the person holds stays theirs for the rest "
-    "of this conversation: when they question your reading, re-examine the evidence, and keep their position, "
-    "attributed to them, in view."
+    "The person's own recorded positions on this subject, from their notes. Where the turn bears on one, say how "
+    "the new evidence relates to it, attributed to them; judge the evidence yourself and say plainly where it does "
+    "not support or contradicts the position. A recorded position stays theirs for the rest of this conversation: "
+    "when they question your reading, re-examine the evidence, and keep their position, attributed to them, in view."
 )
 TRAIT = "position"
 #: A resource bound, not vault vocabulary: the most position-unit rows one recall reads to find the pages in its
