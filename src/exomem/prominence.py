@@ -236,7 +236,7 @@ _BASELINE_CAPTURE = (
     "there, else one concise compiled observation; Records only for a compatible existing "
     "measurement. Before an affiliation facet, check the relation queue: a match the user "
     "confirms goes to link_acceptance; else save the facet. Fleeting preferences, one-offs, "
-    "incidental associations, trivia, and tentative claims stay out of notes."
+    "incidental associations, trivia, and tentative claims stay quiet."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
@@ -250,8 +250,6 @@ _ADOPTION_TRIGGER = (
 #: What an incoming original is worth as a save, and what custody does not prove. An agent that
 #: took a document's identity from a search hit stored a citing work as the article it cites, and
 #: a remembered DOI as another Source's URL; the capture reply now shows the document's own.
-#: Agents read the baseline's quiet list as a reason to drop a user's one-off or inconclusive
-#: file, so that list is scoped to notes and this line names custody as apart from it.
 _ORIGINAL_CAPTURE = (
     "Keep every file the user hands you, and documents an answer rests on, as Sources by exact "
     "bytes, conclusive or not: custody verifies no claim. Take a document's title, authors and "

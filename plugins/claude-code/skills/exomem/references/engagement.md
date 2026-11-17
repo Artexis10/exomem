@@ -61,7 +61,7 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   Entity; otherwise save one concise compiled observation. Use Records only for an
   observed measurement accepted by a compatible existing collection. Fleeting
   preferences, one-off activity, incidental associations, trivial metrics, and
-  tentative events stay out of notes. Durable interpretations may be preserved with
+  tentative events stay quiet. Durable interpretations may be preserved with
   explicit attribution and uncertainty; they are not established facts or
   observed events. Eligibility never creates an Entity, collection, or
   schema: a new Entity or your own affiliation edge follows `proactive_capture`;
