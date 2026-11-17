@@ -14,16 +14,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_connector_boundary import configured_boundary  # noqa: F401
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_browse_drill import CELLS as DRILL_CELLS
 from test_vault_store_browse_drill import HUB_LINKS, commit_drill_pages, run_probe
 from test_vault_store_migration import build_indexes, migrate_apply, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
-from test_vault_store_readers import EXTERNAL, restrict_external
 
 from exomem import commands, lexstore, readiness, structured_filters
 from exomem import find as find_module
 from exomem.cli_ops import OpError
+from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
 NOTES = "Knowledge Base/Notes/Browse"
@@ -32,12 +33,10 @@ HUB = f"{NOTES}/Hub.md"
 SECRET_FRAME_TEXT = "confidential frame excerpt"
 
 
-def page(title, *, kind="note", updated=None, tags=(), body=None, **frontmatter):
+def page(title, *, kind="note", updated=None, body=None, **frontmatter):
     lines = ["---", f"title: {title}", f"type: {kind}"]
     if updated:
         lines.append(f"updated: {updated}")
-    if tags:
-        lines.append("tags: [" + ", ".join(tags) + "]")
     lines += [f"{key}: {value}" for key, value in frontmatter.items()]
     lines += ["---", f"# {title}", "", body or f"A note about {title}.", ""]
     return "\n".join(lines).encode()
@@ -69,7 +68,6 @@ def plain_pages():
             f"Plain {index}",
             kind=("note", "insight")[index % 2],
             updated=f"2026-03-0{1 + index % 4}",
-            tags=["secret"] if index in (2, 13) else (),
             body=("It follows [[Hub]]." if index < 10 else f"The lamp {index} burns.") + unit,
         )
     pages[HUB] = page("Hub", updated="2026-03-02")
@@ -92,9 +90,7 @@ def clean_families():
             frame(one, "scene-000-005.000", 5.0, "2026-03-04"),  # newer than its parent
             frame(one, "scene-001-010.000", 10.0, "2026-02-01"),  # older than its parent
             video(two, "2026-03-03"),
-            frame(
-                two, "scene-000-001.000", 1.0, "2026-03-04", tags=["secret"], body=SECRET_FRAME_TEXT
-            ),
+            frame(two, "scene-000-001.000", 1.0, "2026-03-04", body=SECRET_FRAME_TEXT),
             frame(two, "scene-001-002.000", 2.0, "2026-02-15"),
             # The child matches no type that the parent does, so only the parent's columns admit it.
             video(six, "2026-03-01"),
@@ -150,13 +146,31 @@ CELLS = {
 }
 LIMITS = (3, 7, 100)
 
-OWNER = (None, nullcontext)
-EXTERNAL_CALLER = lambda: request_scope(EXTERNAL)  # noqa: E731
-CALLERS = {
-    "owner": OWNER,
-    "few withheld": ('tags: ["secret"]', EXTERNAL_CALLER),
-    "most withheld": (f'paths: ["{NOTES}/**"]', EXTERNAL_CALLER),
-}
+SECRET_FRAME = f"{NOTES}/Clip-Two.mp4.frames/scene-000-001.000.jpg.md"
+#: The project that `configured_boundary` denies its limited client: a page in it is withheld by a
+#: content floor, which is what a browse's admitted set decides.
+PRIVATE_PROJECT = "private-project"
+#: The connector client that reads each world.
+CLIENTS = {"owner": "full", "few withheld": "limited", "most withheld": "limited"}
+
+
+def withheld_pages(world):
+    """The pages that the limited client is denied: a few, or most, with a withheld parent."""
+    if world == "owner":
+        return set()
+    few = {f"{NOTES}/Plain-02.md", f"{NOTES}/Plain-13.md", SECRET_FRAME}
+    if world == "few withheld":
+        return few
+    # A withheld parent hides its children, whatever their own verdict.
+    return (
+        few
+        | {f"{NOTES}/Plain-{index:02d}.md" for index in range(4, 24)}
+        | {f"{NOTES}/Clip-Six.mp4.md"}
+    )
+
+
+def in_private_project(body):
+    return body.replace(b"\n---\n#", f"\nproject: {PRIVATE_PROJECT}\n---\n#".encode(), 1)
 
 
 def browse(root, caller, limit, cell):
@@ -172,18 +186,23 @@ def browse(root, caller, limit, cell):
     return [asdict(hit) for hit in hits]
 
 
+#: Scene-frame parents. File mode takes a parent's excerpt and frame from the first of its pages in
+#: directory-listing order (`walk_vault_md` does not sort), the store from the newest, so the two
+#: agree on a parent's path, title and date and not on which child it shows.
+FAMILY_PARENTS = {rel.split(".frames/")[0] + ".md" for rel in clean_families() if ".frames/" in rel}
+
+
 def file_view(answer):
-    """What file mode and store mode must agree on: the page, its excerpt and its scene frame."""
+    """What file mode and store mode must agree on: the page and its date, and its excerpt and
+    scene frame where one page decides them."""
     if isinstance(answer, tuple):
         return answer
     return [
-        (
-            hit["path"],
-            hit["title"],
-            hit["updated"],
-            hit["excerpt"],
-            hit["scene_frame"],
-            hit["scene_frame_ts"],
+        (hit["path"], hit["title"], hit["updated"])
+        + (
+            ()
+            if hit["path"] in FAMILY_PARENTS
+            else (hit["excerpt"], hit["scene_frame"], hit["scene_frame_ts"])
         )
         for hit in answer
     ]
@@ -216,12 +235,16 @@ def answers(root, caller):
     return found
 
 
-def build_world(vault, caller_name, families):  # noqa: F811
-    selector, caller = CALLERS[caller_name]
-    if selector:
-        restrict_external(vault, selector)
-    write_files(vault, plain_pages())
-    write_files(vault, families)
+def build_world(vault, authenticate, name, families):  # noqa: F811
+    withheld = withheld_pages(name)
+    pages = {**plain_pages(), **families}
+    write_files(
+        vault,
+        {rel: in_private_project(body) if rel in withheld else body for rel, body in pages.items()},
+    )
+    owner, limited = authenticate("full"), authenticate("limited")
+    who = owner if CLIENTS[name] == "full" else limited
+    caller = lambda: request_scope(who)  # noqa: E731
     build_indexes(vault)
     file_mode = {
         key: file_view(answer)
@@ -229,12 +252,19 @@ def build_world(vault, caller_name, families):  # noqa: F811
         if key[1] != "categories=config"
     }
     assert migrate_apply(vault) == 0
-    return SimpleNamespace(name=caller_name, root=vault, caller=caller, file_mode=file_mode)
+    return SimpleNamespace(
+        name=name,
+        root=vault,
+        caller=caller,
+        owner=lambda: request_scope(owner),
+        withheld=withheld,
+        file_mode=file_mode,
+    )
 
 
-@pytest.fixture(params=CALLERS)
-def world(request, vault):  # noqa: F811
-    return build_world(vault, request.param, clean_families())
+@pytest.fixture(params=CLIENTS)
+def world(request, vault, configured_boundary):  # noqa: F811
+    return build_world(vault, configured_boundary[1], request.param, clean_families())
 
 
 def test_the_window_answers_as_the_exhaustive_browse_and_file_mode_do(world, routes, monkeypatch):
@@ -251,16 +281,21 @@ def test_the_window_answers_as_the_exhaustive_browse_and_file_mode_do(world, rou
         assert answer == exhaustive[key], key
         if key[1] != "categories=config":
             assert file_view(answer) == world.file_mode[key], key
-    # A comparison of two empty answers proves nothing.
+    # A comparison of two empty answers proves nothing, nor does one in which no page is withheld.
     assert all(windowed[(100, name)] for name in CELLS), {
         name: windowed[(100, name)] for name in CELLS
     }
+    seen = {hit["path"] for hit in windowed[(100, "no filter")]}
+    for index in (2, 5, 13):
+        rel = f"{NOTES}/Plain-{index:02d}.md"
+        assert (rel in seen) == (rel not in world.withheld), rel
 
 
-def test_a_hostile_parent_gives_the_exhaustive_answer(vault, routes, monkeypatch):  # noqa: F811
+def test_a_hostile_parent_answers_as_exhaustive(vault, configured_boundary, routes, monkeypatch):  # noqa: F811
     """A parent outside the knowledge base, or in a skipped directory, is reported where the
     exhaustive browse reports it, whichever route answers."""
-    world = build_world(vault, "few withheld", {**clean_families(), **hostile_families()})
+    families = {**clean_families(), **hostile_families()}
+    world = build_world(vault, configured_boundary[1], "few withheld", families)
     windowed = answers(world.root, world.caller)
     declined_window(monkeypatch)
     exhaustive = answers(world.root, world.caller)
@@ -304,7 +339,7 @@ def test_a_withheld_frame_never_reaches_a_visible_parents_hit(world):
     changes which pages the caller sees or in which order."""
     if world.name == "owner":
         pytest.skip("the owner is withheld nothing")
-    owner = browse(world.root, nullcontext, 100, {})
+    owner = browse(world.root, world.owner, 100, {})
     clip = next(hit for hit in owner if hit["path"] == f"{NOTES}/Clip-Two.mp4.md")
     # The control: the newer, secret child is what the parent shows to a caller who may see it.
     assert clip["scene_frame_ts"] == 1.0
@@ -320,15 +355,15 @@ def test_a_withheld_frame_never_reaches_a_visible_parents_hit(world):
         assert [hit["path"] for hit in seen] == everyone[:limit], limit
 
 
-def test_the_user_sees_no_withheld_frame_in_the_final_answer(vault):  # noqa: F811
+def test_the_user_sees_no_withheld_frame_in_the_final_answer(vault, configured_boundary):  # noqa: F811
     """The same, through the tool that a caller uses, which applies egress after the browse."""
-    world = build_world(vault, "few withheld", clean_families())
-    with request_scope(EXTERNAL):
+    world = build_world(vault, configured_boundary[1], "few withheld", clean_families())
+    with world.caller():
         answer = commands.op_find(world.root, query="", limit=100, graph=False)
     text = json.dumps(answer, default=str)
-    assert "Clip-Two.mp4.md" in text
+    assert f"{NOTES}/Clip-Two.mp4.md" in text
     assert SECRET_FRAME_TEXT not in text
-    assert "scene-000-001.000" not in text
+    assert SECRET_FRAME.removesuffix(".md") not in text
 
 
 def test_the_window_runs_only_where_the_store_can_answer_it_whole(stored, monkeypatch):  # noqa: F811
@@ -420,19 +455,22 @@ def test_the_window_walks_the_browse_index_without_sorting(stored, writer, monke
 @pytest.mark.parametrize("pages", [400, 1600])
 def test_a_browse_reads_what_its_limit_needs_whatever_the_vault_holds(stored, writer, pages):  # noqa: F811
     """A browse whose catalogue rows plus view decodes grow with the pages in the vault: it must
-    stay within four times its limit (the drill's pages have no children), at both sizes."""
+    stay within four times its own limit (the drill's pages have no children), at both sizes."""
     commit_drill_pages(writer, pages)
     limit = 15
+    # `op_find` asks a governed vault's browse for a pool of pages beyond the limit, then releases.
+    _policy, over_fetch = egress.gate_state(stored)
+    browse_limit = egress.pool_limit(limit) if over_fetch else limit
     source = str(Path(__file__).resolve().parents[1] / "src")
     figures = run_probe(stored, source)
     for name in ("types=note", "types=insight", "no filter"):
         for state in ("cold", "warm"):
             read = figures[name][state]
             assert read["hits"], name
-            assert read["rows"] + read["decodes"] <= 4 * limit, (pages, name, state, read)
+            assert read["rows"] + read["decodes"] <= 4 * browse_limit, (pages, name, state, read)
     # A relation browse reads its relation set (fixed here), and decodes what its limit needs.
     for state in ("cold", "warm"):
         read = figures["relation_of hub"][state]
         assert read["hits"]
-        assert read["decodes"] <= 4 * limit, (pages, state, read)
-        assert read["rows"] <= HUB_LINKS + 4 * limit, (pages, state, read)
+        assert read["decodes"] <= 4 * browse_limit, (pages, state, read)
+        assert read["rows"] <= HUB_LINKS + 4 * browse_limit, (pages, state, read)
