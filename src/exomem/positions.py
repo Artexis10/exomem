@@ -1,8 +1,10 @@
 """The person's own recorded positions on the pages a turn's task context serves, framed as theirs.
 
-A unit is a position only when its category or its kind carries the registry trait `position`. The block
-reads the served leads and the link targets they list, in one batched unit query, and has its own bound,
-the vault's `budgets.positions_max_chars`, beside the turn allowance. Positions answer the turn, so the
+A unit is a position only when its category or its kind carries the registry trait `position`. One batched
+unit query over the served leads and the link targets they list finds the pages in that reach that hold one.
+`session_units` then admits those pages' position units from the pages' own bytes, under the same page
+lifecycle, supersession, expiry and egress rules as the stance and the domain profiles. The block has its own
+bound, the vault's `budgets.positions_max_chars`, beside the turn allowance. Positions answer the turn, so the
 block is compiled on every turn and never marked held for the conversation.
 """
 
@@ -11,7 +13,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping, Sequence
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +22,8 @@ from . import (
     activation_conventions,
     lexstore,
     semantic_language_registry,
+    session_units,
     working_set,
-    working_set_currency,
     working_set_runtime,
 )
 from .governance import egress, principal
@@ -33,25 +36,41 @@ ABOUT = (
     "when they question your reading, re-examine the evidence, and keep their position, attributed to them, in view."
 )
 TRAIT = "position"
-#: A resource bound, not vault vocabulary: the most position units one recall reads from its reach.
-UNITS_PER_RECALL = 32
-#: The stored date of a page that declares none.
-_UNDATED_PAGE = "0000-00-00"
+#: A resource bound, not vault vocabulary: the most position-unit rows one recall reads to find the pages in its
+#: reach that hold one. The reach is a few dozen pages, so only hundreds of positions on them reach it, and the
+#: block then says `partial`.
+ROWS_PER_RECALL = 512
 
 
 def item_line(item: Mapping[str, Any]) -> str:
     """One item as the block's bound counts it."""
     dated = f"{item['date']}, " if item.get("date") else ""
-    return f"- position ({dated}{item['title']}): {item['text']} [{item['ref']}]"
+    due = f" (review due {item['review_due']})" if item.get("review_due") else ""
+    return f"- position ({dated}{item['title']}): {item['text']}{due} [{item['ref']}]"
+
+
+def overflow_line(refs: Sequence[str], omitted: int = 0) -> str:
+    """The line for the positions the bound left out: their refs, then a count of those it could not name."""
+    if not refs:
+        return f"- positions not shown: {omitted} more"
+    more = f" (+{omitted} more)" if omitted else ""
+    return f"- positions not shown, read by ref: {', '.join(f'[{ref}]' for ref in refs)}{more}"
 
 
 def chars(block: Mapping[str, Any]) -> int:
+    """What the bound counts: the position lines and the refs of those left out.
+
+    The framing line and the count of positions left unnamed ride outside it, so a full block still says that more
+    exist; together they add the framing passage and a few characters.
+    """
     lines = [item_line(item) for item in block.get("items", ())]
+    if block.get("overflow_refs"):
+        lines.append(overflow_line(block["overflow_refs"]))
     return len("\n".join(lines)) + (1 if lines else 0)
 
 
 def _empty(state: str = "empty", reason: str | None = None) -> dict[str, Any]:
-    block: dict[str, Any] = {"state": state, "items": [], "overflow_refs": []}
+    block: dict[str, Any] = {"state": state, "items": [], "overflow_refs": [], "omitted": 0}
     if reason:
         block["reason"] = reason
     return block
@@ -69,20 +88,34 @@ def _limit(root: Path) -> int:
 
 def compile_block(
     root: Path, caller: Any, *, reach: Mapping[str, str], turn: str, focus: str, snapshot: Any,
-    skip: Collection[str] = (),
+    today: date | None = None,
 ) -> dict[str, Any]:
-    """The position units on `reach` ({page path: title}) that this caller may see, ranked for `turn` and `focus`.
+    """The current position units on `reach` ({page path: title}) that this caller may see, ranked for the turn.
 
-    `skip` holds the unit refs the same response already serves as session context.
+    A unit that a session block compiled earlier in this invocation covers (`session_units.covered`) is not
+    repeated, whether that block sends it or the caller already holds it. Every outcome is pinned for terminal
+    egress, so an empty or unavailable block reaches the wire with its own state and reason.
     """
-    if not reach:
-        return _empty()
+    block, served = _compile(root, caller, reach=reach, query=f"{turn}\n{focus}", snapshot=snapshot, today=today or date.today())
+    _pin(root, caller, block, served)
+    return block
+
+
+def _compile(
+    root: Path, caller: Any, *, reach: Mapping[str, str], query: str, snapshot: Any, today: date,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    limit = _limit(root)
+    if limit == 0:
+        return _empty(reason="disabled"), []
+    parents = {path for path in reach if caller.sees(path)}
+    if not parents:
+        return _empty(), []
     registry = semantic_language_registry.load_admitted(root) or semantic_language_registry.core_registry()
     categories, kinds = registry.categories_with(TRAIT), registry.kinds_with(TRAIT)
     if not categories and not kinds:
-        return _empty()
+        return _empty(), []
     if working_set.budget_exhausted("working_set.positions"):
-        return _empty("unavailable", "budget")
+        return _empty("unavailable", "budget"), []
     from . import context_task
     from .structured_filters import IndexCandidateClause
 
@@ -93,98 +126,83 @@ def compile_block(
             IndexCandidateClause(None, frozenset(kinds)) if kinds else None,
         ) if clause is not None
     )
-    parents = set(reach)
     # A caller that reads raw sources passes its reach as released; any other has the store apply its release filter.
     released = parents if context_task.full_source_access(root, caller) else None
     with lexstore.stopping_at_budget():
-        # No query terms: the store lists every position unit on these parents, so a unit that shares no word
-        # with the turn is still served by recency.
+        # The rows only name the pages that hold a position; the pages' own bytes decide every unit below.
         result = lexstore.get_store(root).search_semantic_units_result(
-            [], UNITS_PER_RECALL + 1, (), (), "kb", snapshot.for_scope("kb"),
+            [], ROWS_PER_RECALL + 1, (), (), "kb", snapshot.for_scope("kb"),
             clauses=clauses,
             allowed_parent_paths=parents, admitted_parent_paths=parents,
             released_parent_paths=released,
-            recall_checkpoint=snapshot.lexical_checkpoint("kb"), allow_delta=False,
+            recall_checkpoint=snapshot.lexical_checkpoint("kb"), allow_delta=False, parents_first=True,
         )
     if result.readiness.status == lexstore.DEADLINE_STATUS:
         working_set.note_stopped("working_set.positions")
-        return _empty("unavailable", "budget")
+        return _empty("unavailable", "budget"), []
     if not result.readiness.complete:
-        return _empty("unavailable", "lane_failed")
+        return _empty("unavailable", "lane_failed"), []
     hits = list(result.value or ())
-    truncated = len(hits) > UNITS_PER_RECALL
-    candidates = [(hit, _lane_item(hit, reach)) for hit in hits[:UNITS_PER_RECALL] if hit.unit_ref not in skip]
-    wire = [working_set._served_unit(item) for _hit, item in candidates]  # noqa: SLF001 - exactly the existing unit admission shape
-    verdicts = egress.classify_units(root, wire, purpose=caller.purpose)
-    admitted = [pair for pair, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT]
+    page_dates = {hit.parent_path: hit.parent_updated for hit in hits}
+    admitted, basis = session_units.admit(
+        root, caller, set(page_dates), lambda page: True,
+        units=lambda unit: unit.category in categories or unit.kind in kinds,
+    )
+    order = {item.ref: index for index, item in enumerate(admitted)}
+    covered = session_units.covered(root, caller)
+    current = session_units.current([item for item in admitted if item.ref not in covered], basis, today=today)
     block = _empty()
     served: list[dict[str, Any]] = []
-    used, limit = 0, _limit(root)
-    for item in _ranked(admitted, f"{turn}\n{focus}"):
+    leftover: list[working_set.LaneItem] = []
+    for item, review_due in _ranked(current.items, query, page_dates, order):
         line = {"ref": item.ref, "text": item.text, "title": item.title}
         if item.updated:
             line["date"] = item.updated
-        cost = len(item_line(line)) + 1
+        if review_due:
+            line["review_due"] = review_due
         # Overflow is a reference, never a cut unit; a unit too long to serve whole is one too.
-        if len(item.text) > working_set.MAX_UNIT_HARD_CHARS or used + cost > limit:
-            block["overflow_refs"].append(item.ref)
-        else:
+        if len(item.text) <= working_set.MAX_UNIT_HARD_CHARS and chars({"items": [*block["items"], line]}) <= limit:
             block["items"].append(line)
-            used += cost
-        served.append(working_set._served_unit(item))  # noqa: SLF001 - the shape compile admitted
-    if block["items"] or block["overflow_refs"]:
-        block["about"] = ABOUT
-        block["state"] = "ready"
-    if truncated:
+            served.append(working_set._served_unit(item))  # noqa: SLF001 - the shape admission decided
+        else:
+            leftover.append(item)
+    # The references share the bound, after every line that fits.
+    for item in leftover:
+        refs = [*block["overflow_refs"], item.ref]
+        if chars({**block, "overflow_refs": refs}) <= limit:
+            block["overflow_refs"] = refs
+            served.append(working_set._served_unit(item))  # noqa: SLF001 - a ref names the unit, so egress decides it
+    block["omitted"] = len(leftover) - len(block["overflow_refs"])
+    if block["items"] or block["overflow_refs"] or block["omitted"]:
+        block.update(state="ready", about=ABOUT)
+    if len(hits) > ROWS_PER_RECALL:
         block.update(state="partial", reason="truncated")
-    _pin(root, caller, block, served)
-    return block
+    return block, served
 
 
-def _lane_item(hit: Any, reach: Mapping[str, str]) -> working_set.LaneItem:
-    return working_set.LaneItem(
-        role="", level="unit", ref=hit.unit_ref, path=hit.parent_path, title=reach.get(hit.parent_path) or hit.parent_path,
-        text=working_set.bounded_text(hit.content), lifecycle="",
-        # The unit's own authored date only: the page changes whenever any unit on it does.
-        updated=hit.as_of or working_set_currency.own_time(hit.context), anchor=hit.parent_path,
-        provenance={"category": hit.category, "kind": hit.kind, "source_hash": hit.source_hash},
-    )
-
-
-def _ranked(admitted: list[tuple[Any, working_set.LaneItem]], query: str) -> list[working_set.LaneItem]:
-    """Units that share a content word with the turn first; within each group the newest first.
+def _ranked(
+    current: list[tuple[working_set.LaneItem, str | None]], query: str, page_dates: Mapping[str, str],
+    order: Mapping[str, int],
+) -> list[tuple[working_set.LaneItem, str | None]]:
+    """Units that share more content words with the turn first; on a tie the newest first.
 
     A unit is read with its page title, because a unit is about its page's subject. The date is the unit's own,
     else its page's. On one date the later line on the page comes first, since a later line revises an earlier one.
     """
     wanted = set(working_set_runtime.content_stems(query))
 
-    def key(pair: tuple[Any, working_set.LaneItem]) -> tuple:
-        hit, item = pair
-        stems = set(working_set_runtime.content_stems(f"{item.title}\n{item.text}"))
-        page = "" if hit.parent_updated == _UNDATED_PAGE else hit.parent_updated
-        return (not (wanted & stems), _descending(item.updated or page), -hit.source_order)
+    def key(entry: tuple[working_set.LaneItem, str | None]) -> tuple:
+        item = entry[0]
+        shared = len(wanted & set(working_set_runtime.content_stems(f"{item.title}\n{item.text}")))
+        return (-shared, _descending(item.updated or page_dates.get(item.path, "")), -order[item.ref])
 
-    return [item for _hit, item in sorted(admitted, key=key)]
+    return sorted(current, key=key)
 
 
 def _descending(day: str) -> tuple[int, ...]:
     """An ISO date as a key that sorts the newest first and an undated unit last."""
     digits = [int(part) for part in day[:10].split("-") if part.isdigit()] if day else []
     return tuple(-part for part in digits) if len(digits) == 3 else (1,)
-
-
-def skip_refs(packet: Mapping[str, Any]) -> frozenset[str]:
-    """The unit refs this response already serves as session context, which the block does not repeat."""
-    # nosemgrep: ep-word-set -- the packet's own session-block keys, a closed wire set this module reads
-    keys = ("stance", "domain_profiles")
-    return frozenset(
-        str(item["ref"])
-        for key in keys
-        if isinstance(packet.get(key), Mapping)
-        for item in packet[key].get("items") or ()
-        if isinstance(item, Mapping) and item.get("ref")
-    )
 
 
 def _pin(root: Path, caller: Any, block: dict[str, Any], served: list[dict[str, Any]]) -> None:

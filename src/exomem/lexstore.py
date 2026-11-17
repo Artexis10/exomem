@@ -1355,12 +1355,12 @@ class SemanticUnitLexicalHit:
     fingerprint: str | None
     source_order: int
     lexical_score: float | None
-    #: The unit's own rich `as_of` date, when its interpretation carries one.
-    as_of: str | None = None
-    #: The parent page's stored `updated` date (`0000-00-00` when the page has none).
+    #: The parent page's stored `updated` date, or empty when the page declares none.
     parent_updated: str = ""
 
 
+#: The `updated` the store keeps for a page that declares no date, so date order puts it last.
+UNDATED = "0000-00-00"
 #: Stored occurrence columns a served unit hit reads, in `_unit_hit` order.
 _OCCURRENCE_COLUMNS = (
     "u.unit_ref, u.parent_path, u.parent_ref, u.parent_generation, u.parent_source_hash, "
@@ -1397,8 +1397,7 @@ def _unit_hit(row: tuple, unit: Any, score: float | None) -> SemanticUnitLexical
         fingerprint=unit.fingerprint,
         source_order=int(row[16]),
         lexical_score=float(score) if score is not None else None,
-        as_of=getattr(unit, "as_of", None),
-        parent_updated=str(row[17] or ""),
+        parent_updated="" if row[17] in (None, UNDATED) else str(row[17]),
     )
 
 
@@ -5295,7 +5294,7 @@ def page_rows(
         title_lower = page.title_norm if title else ""
         body_lower = page.body_norm
         stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.search_body))
-        updated = page.updated or "0000-00-00"
+        updated = page.updated or UNDATED
         # Scene-frame children carry the parent video they collapse into;
         # unparseable rows (page is None) stay NULL like ordinary pages.
         emitted_parent_path = page.emitted_parent
@@ -5306,7 +5305,7 @@ def page_rows(
     else:
         title = None
         title_lower = body_lower = stemmed = ""
-        updated = "0000-00-00"
+        updated = UNDATED
         emitted_parent_path = None
         # An unparseable page has no frontmatter to filter on. Every axis is
         # NULL, which is exactly "matches no positive constraint" — the same
@@ -12710,11 +12709,16 @@ class LexicalStore:
         term_budget: QueryTermBudget | None = None,
         retained_query_units: list | None = None,
         registry_scope: str | None = None,
+        parents_first: bool = False,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Ready-catalogue unit query, optionally ranking bounded material terms.
 
         `retained_query_units` receives the MATCH's selected units on the same
         read snapshot, for request-local allocation within the returned pool.
+        `parents_first` drives an unranked read from the parent index, for a
+        caller whose `allowed_parent_paths` are a few pages and whose categories
+        span the corpus; without statistics the planner reads every unit of the
+        categories first.
         """
         if not (categories or kinds or clauses or query_units):
             return CatalogQueryResult(
@@ -12752,7 +12756,7 @@ class LexicalStore:
                 released_parent_paths=released_parent_paths,
                 excluded_categories_by_parent=excluded_categories_by_parent,
                 registry_scope=registry_scope,
-                selected_units=view, statistics=statistics,
+                selected_units=view, statistics=statistics, parents_first=parents_first,
             )
 
         return self._serve_from_ready_catalog_result(
@@ -12783,6 +12787,7 @@ class LexicalStore:
         registry_scope: str | None = None,
         selected_units: _SelectedUnits | None = None,
         statistics: _AdmittedStatisticsEntry | None = None,
+        parents_first: bool = False,
     ) -> list[SemanticUnitLexicalHit]:
         """Units whose own selected meaning matches, ranked, then limited to `k`.
 
@@ -12895,8 +12900,9 @@ class LexicalStore:
                     [match, *params],
                 )
             else:
+                driver = " INDEXED BY semantic_units_parent" if parents_first and allowed_parent_paths is not None else ""
                 rows = conn.execute(
-                    f"SELECT {_OCCURRENCE_COLUMNS}, NULL AS lexical_score FROM semantic_units u "
+                    f"SELECT {_OCCURRENCE_COLUMNS}, NULL AS lexical_score FROM semantic_units u{driver} "
                     f"WHERE {where} ORDER BY u.updated DESC, u.parent_path DESC, u.source_order",
                     params,
                 )

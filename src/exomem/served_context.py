@@ -119,7 +119,8 @@ def metadata(packet: dict[str, Any]) -> dict[str, Any]:
         } if task else {},
         # Unit refs only, never the position text or the page title.
         "positions": {
-            "state": positions.get("state"), "refs": [item["ref"] for item in positions.get("items", ())],
+            "state": positions.get("state"), **({"reason": positions["reason"]} if positions.get("reason") else {}),
+            "refs": [item["ref"] for item in positions.get("items", ())],
             "overflow_refs": list(positions.get("overflow_refs", ())),
         } if positions else {},
         "map_generation": map_block.get("generation", (packet.get("generation") or {}).get("map_generation")),

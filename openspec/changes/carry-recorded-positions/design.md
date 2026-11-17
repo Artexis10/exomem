@@ -26,16 +26,17 @@ The shipped pack declares `position` only on `preference`. The shipped `constrai
 
 The incident's position sat on a page that the served lead linked to, not on the lead itself.
 The projection reads the served leads and their listed link targets, which task discovery already resolves for the caller. That gives one batched semantic-unit query, restricted to those parent pages, with the trait's categories as its filter.
+The query only names the pages that hold a position. The shared session-unit admission then reads those pages' own bytes, as the stance and the domain profiles do, so page lifecycle, supersession, expiry and egress decide each unit the same way for all three blocks.
 A deeper walk would multiply cost for a case not yet observed.
 
 ### Rank within reach by relevance, then recency
 
-Within the reached pages, units that match the turn come first. Among equals, the newer unit comes first, so a later withdrawal or correction sits above the position it revises.
+Within the reached pages, every current position unit is ranked, and the bound applies after ranking. Units that share more words with the turn come first. Among equals, the newer unit comes first, so a later withdrawal or correction sits above the position it revises; on one date the later line on the page comes first.
 
 ### Own bound, outside the turn allowance
 
 A block served on many turns must not draw on `max_chars`. An earlier block did, and task leads fell from 25 to 16 on a 23-turn replay until the block got its own bound.
-`positions_max_chars` is a vault budget, pinned to the engineering bounds that the hook reads.
+`positions_max_chars` is a vault budget, pinned to the engineering bounds that the hook reads. The overflow references count against it after the lines, and 0 turns the block off.
 
 ### Framing is the mechanism
 
@@ -58,6 +59,6 @@ The framing passage is therefore part of the contract, not decoration. It never 
 
 ## Coordination
 
-- A unit that the same packet serves under `stance` or `domain_profiles` is skipped, so no unit arrives twice.
-- Unit admission, currency boundaries and egress pinning for session blocks are moving into a shared module on the domain-profiles branch. The positions block reuses that module rather than adding a third copy. Whichever branch merges second folds onto the other.
+- A unit that the `stance` or `domain_profiles` block covers in the same response is skipped, so no unit arrives twice. Those blocks record the units they cover in the invocation, including the lines a caller already holds, because a held block carries no lines on the wire.
+- Unit admission, currency and egress pinning for session blocks live in the shared `session_units` module, which the positions block reuses rather than adding a third copy.
 - The populated bootstrap core is near its hard ceiling, so this change adds no bootstrap text. The scaffold skill carries the reading guidance.

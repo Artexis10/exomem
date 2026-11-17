@@ -8083,11 +8083,11 @@ def _op_activate_context_body(
                 reach=reach,
             )
 
-        def recorded_positions(caller, skip):
+        def recorded_positions(caller):
             from . import positions
 
             return positions.compile_block(
-                vault_root, caller, reach=reach, turn=turn, focus=task_conversation.focus, snapshot=snapshot, skip=skip,
+                vault_root, caller, reach=reach, turn=turn, focus=task_conversation.focus, snapshot=snapshot,
             )
 
         try:

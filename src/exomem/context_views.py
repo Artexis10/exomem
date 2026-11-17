@@ -1269,7 +1269,7 @@ def activation_packet(
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
-    positions: Callable[[CallerView, frozenset[str]], dict[str, Any]] | None = None,
+    positions: Callable[[CallerView], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1295,9 +1295,9 @@ def activation_packet(
     that takes nothing from `max_chars`. `snapshot` is the request's freshness snapshot: the keyword query reads the
     lexical catalogue at its pinned checkpoint, as the turn slice does, and walks no vault. Without one it does not run.
 
-    `positions` compiles the recorded-positions block once the task context is served, from the caller view and
-    the unit refs the packet already serves as session context. The block has its own bound and takes nothing
-    from `max_chars`.
+    `positions` compiles the recorded-positions block once the task context is served, from the caller view, after
+    the stance and the domain profiles, whose covered units it does not repeat. The block has its own bound and
+    takes nothing from `max_chars`.
     """
     with working_set_runtime.turn_vector_scope():
         if purpose is not None:
@@ -1325,7 +1325,7 @@ def _activation_packet(
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
-    positions: Callable[[CallerView, frozenset[str]], dict[str, Any]] | None = None,
+    positions: Callable[[CallerView], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1474,11 +1474,11 @@ def _activation_packet(
         if positions is not None:
             from . import positions as positions_block
 
-            # The block has its own bound, the vault's `positions_max_chars`, so it neither reduces `max_chars` nor
-            # counts as spent from it.
+            # Compiled after the stance and the profiles, so it can skip the units they cover. The block has its own
+            # bound, the vault's `positions_max_chars`, so it neither reduces `max_chars` nor counts as spent from it.
             with find_types.timing_span(timings, "working_set.positions"):
                 try:
-                    packet["positions"] = positions(prepared.caller, positions_block.skip_refs(packet))
+                    packet["positions"] = positions(prepared.caller)
                 except Exception:  # noqa: BLE001 - optional positions must leave the map and the task context available
                     log.warning("positions unavailable", exc_info=True)
                     packet["positions"] = positions_block._empty("unavailable")  # noqa: SLF001
