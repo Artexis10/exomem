@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 import uuid
 from pathlib import Path
@@ -103,6 +104,9 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
     hits = found["hits"] if isinstance(found, dict) else found
     hit = next(hit for hit in hits if hit.get("path") == predecessor_page)
     assert hit["corrected_by"]["path"] == successor["page"]
+    # The OpenAI-compatible search keeps string metadata only, so it carries the successor as JSON.
+    result = next(result for result in commands.op_search(vault, query="harbour lanterns")["results"] if result["id"] == predecessor_page)
+    assert json.loads(result["metadata"]["corrected_by"])["path"] == successor["page"]
 
 
 # --- the correction route: guards and what it leaves behind ----------------------------------------
@@ -418,9 +422,9 @@ def test_a_withheld_successor_adds_no_corrected_by_to_the_predecessor_hit(vault,
     successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))["files"][0]
     monkeypatch.setattr(source_corrections, "_authorizer", lambda _root: lambda path: path != successor["page"])
 
-    assert source_corrections.corrected_by(vault, saved["ref"], saved["page"]) is None
+    assert source_corrections.corrected_by(vault, {saved["page"]: saved["ref"]}) == {}
     monkeypatch.undo()
-    assert source_corrections.corrected_by(vault, saved["ref"], saved["page"])["path"] == successor["page"]
+    assert source_corrections.corrected_by(vault, {saved["page"]: saved["ref"]})[saved["page"]]["path"] == successor["page"]
 
 
 def test_a_corrected_source_never_counts_as_unprocessed_while_a_live_note_cites_the_predecessor(vault, source_schema, saved) -> None:

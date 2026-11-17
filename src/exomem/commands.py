@@ -3297,15 +3297,18 @@ def op_find(
                     [str(hit.get("path") or "") for hit in hit_dicts]
                 )
             basis = note_types.Basis(vault_root)
+            source_refs: dict[str, str] = {}
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:
                     hit["ref"] = ref
-                    # One receipt lookup per Source hit, so a reader of a stale Source learns its successor.
-                    if basis.selects(hit.get("type"), note_types.captured_source) and (
-                        successor := source_corrections.corrected_by(vault_root, ref, str(hit["path"]))
-                    ):
-                        hit["corrected_by"] = successor
+                    if basis.selects(hit.get("type"), note_types.captured_source):
+                        source_refs[str(hit["path"])] = ref
+            # One receipt lookup per Source hit, so a reader of a stale Source learns its successor.
+            successors = source_corrections.corrected_by(vault_root, source_refs) if source_refs else {}
+            for hit in hit_dicts:
+                if successor := successors.get(str(hit.get("path") or "")):
+                    hit["corrected_by"] = successor
         if retrieval_trace is not None:
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
@@ -3525,6 +3528,7 @@ def _search_result_from_hit(hit: dict) -> SearchResult:
         media_type=hit.get("media_type"),
         media_file=hit.get("media_file"),
         ref=hit.get("ref"),
+        corrected_by=hit.get("corrected_by"),
     )
     return {"id": path, "title": title, "url": _citation_url(path), "metadata": metadata}
 

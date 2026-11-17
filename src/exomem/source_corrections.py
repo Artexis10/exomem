@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -153,25 +153,32 @@ def has_correction(root: Path, metadata: dict) -> bool:
         raise SourceCorrectionUnavailable from None
 
 
-def corrected_by(root: Path, ref: str, path: str) -> dict[str, str] | None:
-    """`{title, path}` of the page that now stands for the Source at `path`, else None.
+def corrected_by(root: Path, sources: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """`{title, path}` of the page that now stands for each Source in `sources`, keyed by that Source's path.
 
-    One receipt lookup decides an uncorrected Source; only a corrected one resolves its chain. A chain
-    the caller may not read, or one that does not validate, adds nothing, as a page read of it refuses.
+    `sources` maps the path of each Source on one page of results to its ref. One receipt lookup decides an
+    uncorrected Source; only a corrected one resolves its chain, and every chain is read under one release
+    filter built for the page. A Source with no successor, or whose chain the caller may not read or that
+    does not validate, is absent, as a page read of that chain refuses.
     """
-    try:
-        entry, _guard = _receipt(root, ref)
-        if entry is None:
-            return None
-        current = resolve_current(root, path)
-        metadata, _body, _marker = vault.parse_frontmatter(current.source)
-    except (OSError, ValueError, TypeError, KeyError, memory_refs.ReferenceError, reserved_paths.ReservedPathLeafError):
-        return None
-    if current.selected_path == current.requested_path:
-        return None
-    title = metadata.get("title")
-    return {"title": title if isinstance(title, str) and title else Path(current.selected_path).stem,
-            "path": current.selected_path}
+    authorize: Callable[[str], bool] | None = None
+    found: dict[str, dict[str, str]] = {}
+    for path, ref in sources.items():
+        try:
+            entry, _guard = _receipt(root, ref)
+            if entry is None:
+                continue
+            authorize = authorize or _authorizer(root)
+            current = resolve_current(root, path, authorize_path=authorize)
+            metadata, _body, _marker = vault.parse_frontmatter(current.source)
+        except (OSError, ValueError, TypeError, KeyError, memory_refs.ReferenceError, reserved_paths.ReservedPathLeafError):
+            continue
+        if current.selected_path == current.requested_path:
+            continue
+        title = metadata.get("title")
+        found[path] = {"title": title if isinstance(title, str) and title else Path(current.selected_path).stem,
+                       "path": current.selected_path}
+    return found
 
 
 @dataclass(frozen=True, slots=True)

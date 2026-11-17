@@ -316,3 +316,25 @@ def test_original_content_type_keeps_recovery_header_bounds(vault, source_schema
     with request_scope(who), pytest.raises(artifact_recovery.RecoveryUnavailable):
         with artifact_recovery.stage(vault, captured.path, who):
             pytest.fail("invalid MIME reached original delivery")
+
+
+def test_a_page_of_corrected_sources_builds_one_release_filter(vault, source_schema, monkeypatch):
+    from exomem import record_governance
+
+    predecessors = {}
+    for name in ("first", "second"):
+        old = add.add(vault, source_schema, source_type="session", title=f"Transcript {name}", content=f"The {name} timestamp is 09:01.")
+        add.add(
+            vault, source_schema, source_type="session", title=f"Corrected transcript {name}", content=f"The {name} timestamp is 09:02.",
+            correction={"supersedes": old.path, "expected_hash": vault_module.content_hash((vault / old.path).read_text()), "reason": "Timestamp restored"},
+        )
+        predecessors[old.path] = old.ref
+    # Each build loads the release policy and the tombstones, so one per corrected hit grows with the page.
+    builds = []
+    build = record_governance.full_release_filter
+    monkeypatch.setattr(record_governance, "full_release_filter", lambda root: builds.append(root) or build(root))
+
+    successors = source_corrections.corrected_by(vault, predecessors)
+
+    assert set(successors) == set(predecessors)
+    assert len(builds) == 1
