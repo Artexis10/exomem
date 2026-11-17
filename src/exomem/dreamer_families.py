@@ -2138,6 +2138,9 @@ CURATION_KIND = "profile.curation"
 #: Pages with a newer preference or constraint unit counted per profile, after visibility and eligibility. Past it
 #: the item says "at least".
 _CURATION_PAGES = 256
+#: Pages read per profile view, counted or not. A live page whose labelled units all fail the date or eligibility
+#: checks still costs its read, so the view stops at twice the page limit and says "at least".
+_CURATION_READS = 2 * _CURATION_PAGES
 #: Typed relation rows counted per profile, after visibility. Past it the item says "at least".
 _CURATION_RELATION_ROWS = 64
 #: The day the profiles were last queued for the date checks below.
@@ -2150,7 +2153,7 @@ _CURATION_PROFILES_SQL = (
 #: Of the candidate evidence pages, those that hold a unit with one of the role labels and were updated after the
 #: profile, with their dates. The labels only propose candidates; the page's own interpretation decides each unit.
 _CURATION_UNIT_PAGES_SQL = (
-    "SELECT f.path, f.updated_date, f.origin_date FROM graph_nodes f "
+    "SELECT f.path, f.updated_date, f.origin_date, f.lifecycle_status FROM graph_nodes f "
     "WHERE f.node_key IN ({keys}) AND f.kind = 'file' AND {newer} "
     "AND EXISTS (SELECT 1 FROM graph_nodes u WHERE u.path = f.path AND u.kind = ? AND {labels})"
 )
@@ -2315,18 +2318,14 @@ def _curation_scope(ctx: Context, subject: str, scope: Any, taxonomy: Any) -> _C
 
 def _curation_candidates(
     ctx: Context, subject: str, scope: Any, taxonomy: Any, since: str, categories: frozenset[str], keep
-) -> Iterator[tuple[str, str, tuple[tuple[str, str, str, str], ...]]]:
-    """The live pages of the profile's scope that hold a newer unit with a curation label, in path order.
+) -> Iterator[tuple[str, str]]:
+    """`(path, page date)` of each live page in the profile's scope with a newer curation-labelled unit, in path order.
 
-    Each is `(path, page date, units)`. `keep` decides each page before its content is read. Pages are read one
-    at a time as the caller asks, so a caller that stops at its limit reads no page past it.
+    `keep` and the page's lifecycle status decide each page from the graph row, so no page is read here; a
+    superseded or archived page, whose supersession dated it newer, never costs a read. Rows come one chunk at a time
+    as the caller asks, so a caller that stops early queries no further chunk.
     """
-    from . import (
-        context_catalogue,
-        epistemic_graph,
-        semantic_language_registry,
-        vocabulary_resolution,
-    )
+    from . import context_catalogue, epistemic_graph, semantic_language_registry
 
     evidence = _curation_scope(ctx, subject, scope, taxonomy)
     pages = evidence.linked | (evidence.members or frozenset())
@@ -2334,21 +2333,17 @@ def _curation_candidates(
     plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
     labels, params = plan.predicate("u.unit_category", "u.unit_kind")
     graph = ctx.graph()
-    in_domain = scope.kind == vocabulary_resolution.SCOPE_DOMAIN
     # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
     for start in range(0, len(candidates), context_catalogue.SQL_VARIABLE_CHUNK):
         chunk = candidates[start : start + context_catalogue.SQL_VARIABLE_CHUNK]
         sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), newer=_NEWER_THAN, labels=labels)
         keys = [f"file:{path}" for path in chunk]
         rows = graph.execute(sql, (*keys, since, epistemic_graph.CANDIDATE_KIND, *params))
-        for path, page_date in sorted((str(path), _date(updated, origin)) for path, updated, origin in rows):
-            page = _unit_page(ctx, path)
-            if page is None:
-                continue
-            topics, units = page
-            # A member the catalogue named may have changed its topics since; the page itself decides.
-            if path in evidence.linked or (in_domain and _in_domain(taxonomy, topics, scope.domain)):
-                yield path, page_date, units
+        yield from sorted(
+            (str(path), _date(updated, origin))
+            for path, updated, origin, status in rows
+            if ctx.live_status(status, str(path))
+        )
 
 
 def _new_units(
@@ -2358,17 +2353,34 @@ def _new_units(
 
     A unit with no date of its own takes its page's. Visibility and eligibility decide each page before the
     page limit counts it, so pages the caller may not see or that are not live never use up the limit. The
-    walk stops at the first page past the limit. A domain whose pages the catalogue cannot name makes the
-    count partial. The owner's view (`keep=None`) is computed once per tick.
+    walk stops at the first page past the limit, or once it has read `_CURATION_READS` pages. A domain whose
+    pages the catalogue cannot name makes the count partial. The owner's view (`keep=None`) is computed once
+    per tick.
     """
+    from . import vocabulary_resolution
+
     memo: dict[str, Any] = ctx.shared.setdefault("curation_new_units", {}) if keep is None else {}
     if subject in memo:
         return memo[subject]
     categories = _curation_categories(ctx)
-    partial = _curation_scope(ctx, subject, scope, taxonomy).members is None
+    evidence = _curation_scope(ctx, subject, scope, taxonomy)
+    partial = evidence.members is None
+    in_domain = scope.kind == vocabulary_resolution.SCOPE_DOMAIN
     found: dict[str, list[str]] = {}
+    reads = 0
     if since and categories:
-        for path, page_date, units in _curation_candidates(ctx, subject, scope, taxonomy, since, categories, keep):
+        for path, page_date in _curation_candidates(ctx, subject, scope, taxonomy, since, categories, keep):
+            if reads == _CURATION_READS:
+                partial = True
+                break
+            reads += 1
+            page = _unit_page(ctx, path)
+            if page is None:
+                continue
+            topics, units = page
+            # A member the catalogue named may have changed its topics since; the page itself decides.
+            if path not in evidence.linked and not (in_domain and _in_domain(taxonomy, topics, scope.domain)):
+                continue
             refs = sorted(
                 ref
                 for ref, category, as_of, until in units

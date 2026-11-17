@@ -194,14 +194,8 @@ def test_pages_a_caller_may_not_see_do_not_use_up_the_count(tmp_path: Path) -> N
     assert owner is not None and owner["measures"]["at_least"] is True
 
 
-def test_one_view_reads_no_more_pages_than_it_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A view that reads every page of its domain before applying its page limit costs more as the domain grows.
-    vault = _vault(tmp_path)
-    for index in range(300):
-        line = f"- [preference] Line {index}. ^line\n"
-        fx.write(vault, f"{KB}/Notes/Insights/g-{index:04d}.md", _note(f"Games {index}", line, topics="games"))
-    fx.publish_graph(vault)
-    _fold(vault)
+def _page_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The file names of the vault pages read from now on, in read order."""
     reads: list[str] = []
     read = vault_module.read_guarded_text
 
@@ -210,14 +204,66 @@ def test_one_view_reads_no_more_pages_than_it_counts(tmp_path: Path, monkeypatch
         return read(root, path, *args, **kwargs)
 
     monkeypatch.setattr(vault_module, "read_guarded_text", counted)
+    return reads
+
+
+def test_one_view_reads_no_more_pages_than_it_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A view that reads every page of its domain before applying its page limit costs more as the domain grows.
+    vault = _vault(tmp_path)
+    for index in range(300):
+        line = f"- [preference] Line {index}. ^line\n"
+        fx.write(vault, f"{KB}/Notes/Insights/g-{index:04d}.md", _note(f"Games {index}", line, topics="games"))
+    fx.publish_graph(vault)
+    _fold(vault)
+    reads = _page_reads(monkeypatch)
 
     item = _served(vault)
 
     assert item is not None and item["measures"]["at_least"] is True
     # Each page holds one unit, so the unit count is the number of pages the view counted.
-    counted = item["measures"]["new_units"]
-    assert counted < 300
-    assert len([name for name in reads if name.startswith("g-")]) <= counted + 1
+    units = item["measures"]["new_units"]
+    assert units < 300
+    assert len([name for name in reads if name.startswith("g-")]) <= units + 1
+
+
+def test_superseded_pages_of_the_domain_are_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A supersession dates the old page after the profile, so a view that checks status only after reading pays one
+    # read for every page ever superseded in the domain.
+    vault = _vault(tmp_path)
+    for index in range(3):
+        old = _note(f"Old games {index}", f"- [preference] Old line {index}. ^old\n", topics="games")
+        old = old.replace("status: active\n", 'status: superseded\nsuperseded_by: "[[Games sessions]]"\n')
+        fx.write(vault, f"{KB}/Notes/Insights/g-old-{index}.md", old)
+    fx.write(vault, f"{KB}/Notes/Insights/g-sessions.md", _note("Games sessions", "- [preference] Short. ^brief\n", topics="games"))
+    fx.publish_graph(vault)
+    _fold(vault)
+    reads = _page_reads(monkeypatch)
+
+    item = _served(vault)
+
+    assert item is not None and item["measures"] == {"new_units": 1, "stale_lines": 0, "at_least": False}
+    assert len([name for name in reads if name.startswith("g-")]) <= 2
+
+
+def test_a_view_stops_reading_pages_whose_units_all_fail_at_its_read_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Live pages whose labelled units are past their date never count, so only a read budget bounds them.
+    vault = _vault(tmp_path)
+    fx.write(vault, f"{KB}/Notes/Insights/g-0.md", _note("Games sessions", "- [preference] Short. ^brief\n", topics="games"))
+    expired = "\n## Claim\n- id: expired\n- category: preference\n- until: 2026-06-15\n\nPlay long campaigns.\n"
+    for index in range(1, 6):
+        fx.write(vault, f"{KB}/Notes/Insights/g-{index}.md", _note(f"Games {index}", "", topics="games", extra=expired))
+    fx.publish_graph(vault)
+    _fold(vault)
+    # The budget scales with the page limit; a small one keeps the fixture small and the bound the same.
+    monkeypatch.setattr(dreamer_families, "_CURATION_READS", 3)
+    reads = _page_reads(monkeypatch)
+
+    item = _served(vault)
+
+    assert len([name for name in reads if name.startswith("g-")]) == 3
+    assert item is not None and item["measures"] == {"new_units": 1, "stale_lines": 0, "at_least": True}
 
 
 def test_one_tick_over_several_pages_lists_the_profiles_once(
