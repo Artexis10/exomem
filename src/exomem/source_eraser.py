@@ -318,13 +318,20 @@ class _Eraser:
         heat = self._heat(path, reused, progress)
         if heat != "acknowledged":
             pending.append("working_set_heat")
+        from . import epistemic_graph
+
+        if "epistemic_graph" in pending and not epistemic_graph.graph_enabled():
+            # A disabled graph index never drops its stored rows, so a repeat cannot progress: answer unknown and
+            # settled instead of pending forever. Re-enabling the index lets a later call finish the erase.
+            return {"state": "unknown", "owners": owners, "pending": pending, "reason": "graph_index_disabled"}
         state = "unknown" if heat == "unknown" else "pending" if pending else "acknowledged"
         return {"state": state, "owners": owners, "pending": pending}
 
     def _caches(self, progress: dict[str, Any], derived: dict[str, Any]) -> dict[str, Any]:
         """Reusable caches check the retirement generation; one advance after the derived rows are gone voids them."""
         if derived["state"] != "acknowledged":
-            return {"state": "pending"}
+            # The fence waits for the derived rows; while they cannot go, a repeat cannot fence either.
+            return {"state": "unknown" if derived["state"] == "unknown" else "pending"}
         if not progress.get("caches_fenced"):
             if not source_custody.advance_retirement_generation(self.root):
                 return {"state": "unknown"}

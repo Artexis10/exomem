@@ -472,6 +472,24 @@ def test_host_without_content_private_logs_reports_unknown(vault, attempts, eras
     assert json.dumps(result).count(reference) == 1
 
 
+def test_an_erase_whose_graph_index_was_disabled_settles_as_unknown(vault, attempts, erasable, monkeypatch):
+    """A disabled graph index never drops the rows it stored, so the answer must settle rather than loop."""
+    from exomem import epistemic_graph
+
+    _manager, call = attempts
+    path, reference, source_hash = capture(vault, call)
+    deadline = time.monotonic() + 30.0
+    while not epistemic_graph.holds_page(vault, path, source_hash=source_hash, reference=reference):
+        assert time.monotonic() < deadline, "the graph never indexed the captured page"
+        time.sleep(0.2)
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    result = drive(call, reference, source_hash, seconds=20.0)
+    derived = result["components"]["derived"]
+    assert result["status"] == "unknown" and result["settled"] is True, json.dumps(result)
+    assert derived["state"] == "unknown" and derived["reason"] == "graph_index_disabled"
+    assert result["retry_after_ms"] is None
+
+
 def published(vault) -> bool:
     """The service's maintained warm-up, run inline: the service's own catalogue repair can win the race once."""
     try:
