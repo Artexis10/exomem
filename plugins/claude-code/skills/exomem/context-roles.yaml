@@ -201,3 +201,8 @@ roles:
     # it), which is why it does not also need to be added above.
     evidence_cues: ["?", "what about", "why does"]
     evidence_categories: [question, problem]
+
+  connections:
+    description: Typed connections of this anchor and why each matters.
+    lane: graph
+    anchor_defaults: [entity, resource, hub, collection, plan, project, page]

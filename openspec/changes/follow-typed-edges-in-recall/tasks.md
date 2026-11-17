@@ -1,19 +1,19 @@
 ## 1. Connection read
 
-- [ ] 1.1 Add one connection read in `working_set` over `EpistemicGraphIndex.neighbors_for` (both directions, caller `keep`, catalogue view), returning per seed the relation key, direction, target ref, title, tier and why; budget-gated, soft-failing to no connections. Check: unit tests for the tier order by behaviours and `generic` only (an invented vault relation with `replaces` ranks first, an invented `associative` one last), inbound `replaces` first, open planning target first within its tier, withheld targets never named, graph unavailable returns none.
-- [ ] 1.2 Build the `why`: relation and direction, then the authoring line's sentence (seed page for outbound, other page for inbound), wikilinks stripped, egress-released, at most 140 characters on a word boundary; a bare relation bullet falls back to the target's lede. Check: tests for prose links, relation bullets, inbound context, a sentence that names a withheld page (no why quotes it) and the length bound.
-- [ ] 1.3 Replace `_task_links` with the shared read for task leads.
+- [x] 1.1 Add one connection read in `working_set` over `EpistemicGraphIndex.neighbors_for` (both directions, caller `keep`, catalogue view), returning per seed the relation key, direction, target ref, title, tier and why; budget-gated, soft-failing to no connections. Check: unit tests for the tier order by behaviours and `generic` only (an invented vault relation with `replaces` ranks first, an invented `associative` one last), inbound `replaces` first, open planning target first within its tier, withheld targets never named, graph unavailable returns none.
+- [x] 1.2 Build the `why`: relation and direction, then the authoring line's sentence (seed page for outbound, other page for inbound), wikilinks stripped, egress-released, at most 140 characters on a word boundary; a bare relation bullet falls back to the target's lede. Check: tests for prose links, relation bullets, inbound context, a sentence that names a withheld page (no why quotes it) and the length bound.
+- [x] 1.3 Replace `_task_links` with the shared read for task leads.
 
 ## 2. Allocation and agent default
 
-- [ ] 2.1 In `context_task.compile_context`, admit each lead with its first connection when both fit; leftover connections fill the remaining room in lead order; count omissions. Check: the four-versus-six allowance scenario, a lead served without its connection when only it fits, methods never displaced.
-- [ ] 2.2 Render the connection line with its why and the read-when-relevant instruction in `item_line` and the hook renderer; one line in the scaffold skill text. Check: hook tests, scaffold leak test, schema byte budgets unchanged or raised with a recorded reason.
-- [ ] 2.3 Record each offered connection's relation, target ref and tier in `served_context`. Check: the record test lists both connections of a two-connection lead.
+- [x] 2.1 In `context_task.compile_context`, admit each lead with its first connection when both fit; leftover connections fill the remaining room in lead order; count omissions. Check: the four-versus-six allowance scenario, a lead served without its connection when only it fits, methods never displaced.
+- [x] 2.2 Render the connection line with its why and the read-when-relevant instruction in `item_line` and the hook renderer; one line in the scaffold skill text. Check: hook tests, scaffold leak test, schema byte budgets unchanged or raised with a recorded reason.
+- [x] 2.3 Record each offered connection's relation, target ref and tier in `served_context`. Check: the record test lists both connections of a two-connection lead.
 
 ## 3. Anchors and profile
 
-- [ ] 3.1 Ship `recall` in `packs/core/traversal-profiles.yaml` and set the activation neighbourhood profile to it. Check: recall traverses `derived_from` and `links_to` and excludes `implements`; a vault overlay can extend it.
-- [ ] 3.2 Ship the `connections` role (lane `graph`, every anchor kind) and rewrite `_graph_lane` to serve up to four ranked connections per resolved anchor as `pointers[]` with why. Check: the anchor scenario; a withheld page never takes a pointer slot.
+- [x] 3.1 Ship `recall` in `packs/core/traversal-profiles.yaml` and set the activation neighbourhood profile to it. Check: recall traverses `derived_from` and `links_to` and excludes `implements`; a vault overlay can extend it.
+- [x] 3.2 Ship the `connections` role (lane `graph`, every anchor kind) and rewrite `_graph_lane` to serve up to four ranked connections per resolved anchor as `pointers[]` with why. Check: the anchor scenario; a withheld page never takes a pointer slot.
 
 ## 4. Reconcile overlapping changes
 

@@ -36,6 +36,7 @@ SHIPPED_VOCABULARY = (
     "baseline",
     "evidence",
     "open_questions",
+    "connections",
 )
 
 
@@ -60,7 +61,7 @@ def test_shipped_registry_loads_with_the_declared_vocabulary() -> None:
     assert registry.source == "shipped"
     assert registry.findings == ()
     assert tuple(registry.roles) == SHIPPED_VOCABULARY
-    assert len(registry.roles) == 16
+    assert len(registry.roles) == 17
     for role in registry.roles.values():
         assert role.description
         assert role.lane in context_roles.LANES
