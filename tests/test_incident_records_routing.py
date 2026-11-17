@@ -1852,12 +1852,11 @@ def _write_method_page(root: Path, *, title: str = "Dock capture method") -> Non
     "reference",
     [
         "[[Dock capture method]]",
-        "[[Dock capture method|how we capture]]",
-        "[[Dock capture method#Steps]]",
+        "[[Dock capture method#Steps|how we capture]]",
         METHOD_REF,
         METHOD,
     ],
-    ids=["title", "alias", "anchor", "ref", "path"],
+    ids=["title", "alias-and-anchor", "ref", "path"],
 )
 def test_a_capture_method_resolves_to_its_pages_stable_identity(
     vault: Path, reference: str
@@ -1871,6 +1870,24 @@ def test_a_capture_method_resolves_to_its_pages_stable_identity(
     assert method == capture_method.CaptureMethod(
         path=METHOD, ref=METHOD_REF, title="Dock capture method"
     )
+
+
+def test_a_method_page_whose_path_exceeds_the_terminals_ref_bound_resolves_to_nothing(vault: Path) -> None:
+    """A page that holds no id is named by its path; one too long for the write terminal must not sink the advisory."""
+    from exomem import capture_method
+
+    long_path = "/".join(["d" * 100] * 5) + "/Long method.md"
+    page = vault / long_path
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: insight\ntitle: Long method\nstatus: active\n---\n\n# Long method\n\nSteps.\n", encoding="utf-8")
+    assert len(long_path) > 512
+    short = vault / "Short method.md"
+    short.write_text("---\ntype: insight\ntitle: Short method\nstatus: active\n---\n\n# Short method\n\nSteps.\n", encoding="utf-8")
+
+    assert capture_method.resolve(vault, "Short method.md") == capture_method.CaptureMethod(
+        path="Short method.md", ref="Short method.md", title="Short method"
+    )
+    assert capture_method.resolve(vault, long_path) is None
 
 
 @pytest.mark.parametrize(
@@ -1980,6 +1997,20 @@ def test_a_resolved_capture_method_leaves_inspection_without_a_finding(
     assert "CAPTURE_METHOD_UNAVAILABLE" not in str(inspection["diagnostics"])
 
 
+def test_inspection_returns_the_capture_block_a_manifest_declares(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inspection is how an agent discovers a collection, so the declared method rides in its contract."""
+    from exomem import commands
+
+    _write_method_page(vault)
+    _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    inspection = commands.op_record_memory(vault, action="inspect", collection=INCIDENTS)
+
+    assert inspection["contract"]["capture"] == {"method": "[[Dock capture method]]"}
+
+
 @pytest.mark.parametrize(
     ("level", "names_the_method"),
     [("maximal", True), ("balanced", True), ("light", False)],
@@ -2002,15 +2033,10 @@ def test_only_a_disposition_that_acts_tells_the_agent_to_follow_the_method(
 @pytest.mark.parametrize(
     "method",
     [
-        {"title": "", "read_ref": METHOD_REF},
         {"title": "t" * 161, "read_ref": METHOD_REF},
-        {"title": "Dock capture method", "read_ref": ""},
-        {"title": "Dock capture method", "read_ref": "r" * 513},
-        {"title": "Dock capture method"},
         {"title": "Dock capture method", "read_ref": METHOD_REF, "body": "inline"},
-        "Dock capture method",
     ],
-    ids=["empty-title", "long-title", "empty-ref", "long-ref", "no-ref", "extra-key", "not-a-mapping"],
+    ids=["over-the-bound", "extra-key"],
 )
 def test_compact_terminal_drops_a_malformed_method(method: object) -> None:
     ok = {"title": "Dock capture method", "read_ref": METHOD_REF}

@@ -2900,7 +2900,11 @@ def _records_routing_from_terms(
         )
         # Naming the method is a courtesy of the route, never a condition of it: a method that does not
         # resolve for this caller leaves the route as it was.
-        method = capture_method.resolve(vault_root, declared) if declared else None
+        method = (
+            capture_method.resolve(vault_root, declared, readable=due_state.routing_visibility(vault_root))
+            if declared
+            else None
+        )
         if method is None:
             return routed
         return {**routed, "method": {"title": method.title, "read_ref": method.ref}}

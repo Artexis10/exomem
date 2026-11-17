@@ -781,6 +781,7 @@ class CollectionWriter:
         if declared.kind == "intended" and facade_profile != "records":
             payload["contract"].pop("plans")
             payload["contract"].pop("claims", None)
+            payload["contract"].pop("capture", None)
             return planning._project_inspection(payload, manifest), selection
         observations = due_state.collection_observation_coverage(
             self.root, manifest.path, authorize_path=self._operation.allows_file,

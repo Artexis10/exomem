@@ -92,7 +92,7 @@ _CLAIM_MATCH_KEYS = ("type", "category", "project", "tags")
 _MAX_CLAIM_MATCH_VALUES = 24
 #: `capture` keys. One today: the vault page that holds how to capture into this collection.
 _CAPTURE_KEYS = ("method",)
-_MAX_CAPTURE_METHOD_CHARS = 512
+MAX_CAPTURE_METHOD_CHARS = 512
 _MUTABLE_FILENAME_FIELDS = frozenset(
     {
         "status",
@@ -761,7 +761,7 @@ def _capture_json_schema() -> dict[str, Any]:
         "type": "object",
         "required": list(_CAPTURE_KEYS),
         "properties": {
-            "method": {"type": "string", "minLength": 1, "maxLength": _MAX_CAPTURE_METHOD_CHARS},
+            "method": {"type": "string", "minLength": 1, "maxLength": MAX_CAPTURE_METHOD_CHARS},
         },
         "additionalProperties": False,
     }
@@ -3449,9 +3449,9 @@ def parse_capture(value: object) -> str | None:
             "INVALID_COLLECTION_CAPTURE",
             f"capture.method must be a string naming one page (quote a wiki link); offending entry: {method!r}",
         )
-    if len(method) > _MAX_CAPTURE_METHOD_CHARS:
+    if len(method) > MAX_CAPTURE_METHOD_CHARS:
         raise CollectionError(
-            "INVALID_COLLECTION_CAPTURE", f"capture.method exceeds {_MAX_CAPTURE_METHOD_CHARS} characters"
+            "INVALID_COLLECTION_CAPTURE", f"capture.method exceeds {MAX_CAPTURE_METHOD_CHARS} characters"
         )
     return method.strip()
 
