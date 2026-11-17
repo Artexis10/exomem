@@ -138,14 +138,15 @@ The new family is `upkeep_profile_curation`, with kind `profile.curation`. The n
 
 Confirmation stays conversational, as the stance design chose. The agent shows the exact lines, and the owner confirms them or has explicitly asked for them.
 
-A profile write needs a reviewed preview. A governed write that creates or changes a profile page commits only with the review hash from a preview of the same resulting content.
+A profile write needs a reviewed preview. A governed write that creates or changes a profile page commits only with the proof from a preview of the same resulting content. The preview returns the proof as one opaque `review_token`, and the typed tools take it back in a `review` string. One string keeps the tool schemas within their byte budget, and an agent copies one value. The name ends in `_token` because the egress scrubber passes round-tripped values only under that suffix.
 
 - **What it prevents.** A one-call profile rewrite that the owner never saw, made on an agent's own initiative or under injected content. A profile is served on every turn of its domain, so one silent wrong line costs more than a wrong line in an ordinary note.
 - **What it costs when it fires wrongly.** One preview call, paid by the agent. The owner pays nothing.
 - **Why automation cannot replace the owner.** Only the owner knows whether a line is true of them. The hash proves only that the agent previewed the exact lines before writing them; the owner's confirmation stays in the conversation.
 - **What stays free.** Editing the profile file directly needs no preview. A profile is a note.
+- **What is refused outright.** Page supersession into or out of a profile. A successor page cannot carry the profile's domain, so it would become the global profile. `edit_note` replaces a profile's body in place, under the same preview proof, and `create_note` starts a new profile.
 
-The proof shows only that the agent previewed the lines, so a preview of a profile change also says when its proof may be used. Beside its `transition_token`, an in-place preview returns a `next_action`: show the owner the resulting lines, and commit only after the owner confirms them or when the owner's latest message asked for that change. A preference the owner only states is used in the answer and offered as a line, not committed.
+The proof shows only that the agent previewed the lines, so a preview of a profile change also says when its proof may be used. Beside its `review_token`, a profile preview, in place or of a creation, returns a `next_action`: show the owner the resulting lines, and commit only after the owner confirms them or when the owner's latest message asked for that change. A preference the owner only states is used in the answer and offered as a line, not committed.
 
 R4 result. Twelve cases, written by an independent lane, ran twice each on a GPT model against the built candidate, on a copy of a real vault. A script scored the keys it can check, and a blind judge from another model family scored the rest.
 

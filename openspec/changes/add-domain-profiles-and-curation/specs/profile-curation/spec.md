@@ -62,10 +62,10 @@ A profile edit SHALL commit only with the owner's confirmation of those exact li
 
 ### Requirement: Profile writes need a reviewed preview
 
-A governed write that creates a profile page, replaces one, or changes the content of one, SHALL commit only with the proof returned by a preview of the same resulting content.
-The proof of an in-place change is the preview's `transition_token`. The proof of a creation or a replacement is the preview's `draft_id`, `draft_hash` and `draft_token`.
-A preview SHALL return that proof beside the resulting lines. The typed tools `create_note`, `edit_note`, `add_observation` and `supersede_note` SHALL take it in an optional `review` field.
-An in-place preview of a profile change SHALL also return a `next_action`: commit with the proof only after the owner confirms the resulting lines, or when the owner's latest message asked for that change.
+A governed write that creates a profile page or changes the content of one SHALL commit only with the proof returned by a preview of the same resulting content.
+A preview of a profile page SHALL return that proof beside the resulting lines as one opaque `review_token`. For an in-place change it carries the preview's transition token; for a creation it carries the draft's id, hash and token. The typed tools `create_note`, `edit_note` and `add_observation` SHALL take it unchanged in an optional `review` string, and SHALL refuse a value that is not such a token.
+The preview SHALL also return a `next_action`: commit with the proof only after the owner confirms the resulting lines, or when the owner's latest message asked for that change.
+A page supersession whose predecessor or successor is a profile SHALL be refused at its first call, preview included, with the code `PROFILE_SUPERSESSION_REFUSED`. The refusal SHALL name `edit_note` for a change in place and `create_note` for a new profile.
 A commit with no proof, or with a proof that does not match the content it would write, SHALL be refused and change nothing. The refusal for missing proof SHALL carry the code `PROFILE_PREVIEW_REQUIRED` and name the preview as the remedy.
 A removal of a profile line has no preview of its own, so it SHALL be refused with the same code and name the `edit_note` preview as the route.
 Writes to other page types SHALL be unaffected.
@@ -85,6 +85,11 @@ Editing a profile file directly in the vault SHALL need no preview. The next act
 
 - **WHEN** an agent previews a change to the games profile
 - **THEN** the preview returns its proof together with a `next_action` to commit only on the owner's confirmation of those lines or the owner's request for that change
+
+#### Scenario: Superseding a profile page is refused
+
+- **WHEN** an agent asks to supersede the games profile with a new page, or to supersede an ordinary note with a profile
+- **THEN** the call is refused before any preview, nothing changes, and the refusal names `edit_note` and `create_note`
 
 #### Scenario: A stale review is refused
 

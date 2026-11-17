@@ -65,7 +65,7 @@ Selection:
 - Selected pages SHALL rank by the sum of their scores, and the response SHALL keep at most `budgets.profile_domains_max` touched domains. Ancestors follow after that cap, so they do not count against it.
 - The three limits are vault-owned activation conventions with shipped defaults of 0.50, 8.5 and 2. The floors accept a number in 0..1 and 0..100, and the cap accepts a whole number in 1..8.
 - `selection` SHALL be `semantic` when the vector reading ran, `lexical` when it could not run and only the keyword reading did, and `none` when neither reading could run.
-- A caller who sees only part of the vault SHALL receive the keyword reading alone, with statistics taken over the profile pages that caller can see, so that no hidden page moves a score.
+- For a caller who sees only part of the vault, each reading SHALL score only the profile pages that caller can see, and the keyword reading SHALL take its statistics over those pages, so that no hidden page moves a score.
 - It SHALL make no model call.
 - It SHALL hold no list of domains or words, and no limit, in code.
 - A turn that touches no domain with a profile SHALL receive no domain profile.
