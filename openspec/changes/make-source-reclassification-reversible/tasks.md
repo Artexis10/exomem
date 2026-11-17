@@ -29,7 +29,13 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 
 ## 4. Phase 2, delivered by `add-curation-relocation-protocol`
 
-- [ ] 4.1 After `add-curation-relocation-protocol` ships, prove that a reclassification writes `moved_from`, that a Source linked by path from an Evidence page moves with only that page's link span changed, and that a revert restores the Evidence page's exact bytes.
+- [x] 4.1 After `add-curation-relocation-protocol` ships, prove that a reclassification writes `moved_from`, that a Source linked by path from an Evidence page moves with only that page's link span changed, and that a revert restores the Evidence page's exact bytes.
+
+  Evidence, delivered by `add-curation-relocation-protocol` (PR #2883, archived 2026-11-17):
+  - `tests/test_reclassify_source.py::test_the_correction_records_its_reason_and_previous_path` asserts that the reclassified Source carries a `moved_from` entry with the previous path, kind and domain, and no `reclassified_from`.
+  - `tests/test_relocation_repoint.py::test_a_reclassification_repoints_an_evidence_link_and_its_revert_restores_the_bytes` asserts that an Evidence page linking the Source by path differs after the move only in that link's target, and that the revert restores the Evidence page's exact bytes.
+  - `tests/test_relocation_repoint.py::test_a_reclassified_source_does_not_say_how_many_pages_it_repointed` asserts that the lineage entry is the same whether the correction repointed two Evidence pages or none, and that the revert restores both pages.
+  - The three tests pass on main.
 - [ ] 4.2 Archive this change with `openspec archive` after `add-curation-relocation-protocol` is archived, with shipped evidence.
 
 ## 5. Source pointer custody

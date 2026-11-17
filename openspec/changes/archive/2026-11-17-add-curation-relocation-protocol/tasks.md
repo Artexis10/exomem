@@ -46,10 +46,18 @@
 
 ## 6. Outcome check
 
-- [ ] 6.1 On a disposable copy of a real vault, in an isolated state root with no running service, preview and apply a rehome plan through the connected-agent path. Record the referrer outcomes, the resolution of every old link, and the audit findings before and after.
+- [x] 6.1 On a disposable copy of a real vault, in an isolated state root with no running service, preview and apply a rehome plan through the connected-agent path. Record the referrer outcomes, the resolution of every old link, and the audit findings before and after.
+
+  Evidence, 2026-11-17: disposable copies of a real vault, isolated state roots, no running service, MCP over stdio. A rename plan and a 23-page rehome plan were previewed and applied. The rehome had 97 referrers: 62 pointer-repointed in append-only pages and 35 rewritten, and every referrer changed as previewed. All 301 old links resolved to the same identity as before, the audit found 0 new broken links or forward references, and append-only pages changed only in declared pointer spans. Compensating the completed rehome restored all 98 changed pages to exact bytes, and proposing the compensation held the vault mutation boundary for at most 8.8 s.
 
 ## 7. Closure
 
-- [ ] 7.1 Run `openspec validate --all --strict` before and after each artifact change and at archive.
-- [ ] 7.2 After this change ships, archive it with `openspec archive`; then close `make-source-reclassification-reversible` Phase 2 with this change as its delivery evidence.
-- [ ] 7.3 Confirm with the owner of `adopt-root-vault-layout` that its `command-surface` delta of "Append-Only Tree Relocation" is dropped and that its relayout record carries the agreed row shape, before either change archives.
+- [x] 7.1 Run `openspec validate --all --strict` before and after each artifact change and at archive.
+
+  Evidence, 2026-11-17, with the CI-pinned OpenSpec 1.14.0: `validate --all --strict` passed 281 of 281 items before and after the task edits, and `scripts/check_openspec_archive_discipline.py` reported none task-complete. The run at archive is recorded under 7.2.
+- [x] 7.2 After this change ships, archive it with `openspec archive`; then close `make-source-reclassification-reversible` Phase 2 with this change as its delivery evidence.
+
+  Evidence, 2026-11-17: shipped in PR #2883 (merge `6e0f2e813`) with later rounds on main. Archived with `openspec archive` as `2026-11-17-add-curation-relocation-protocol`: `command-surface` gained 6 requirements and had 1 modified, `governed-curation-lane` gained 3 and had 6 modified, and the new `page-field-registry` spec holds 2. The requirements that later work added to those specs stayed in place. `validate --all --strict` passed 281 of 281 items after the archive. Task 4.1 of `make-source-reclassification-reversible` is closed with this change as evidence; its tasks 3.1, 3.2, 4.2 and 5.5 stay open.
+- [x] 7.3 Confirm with the owner of `adopt-root-vault-layout` that its `command-surface` delta of "Append-Only Tree Relocation" is dropped and that its relayout record carries the agreed row shape, before either change archives.
+
+  Evidence, 2026-11-17: the owner of `adopt-root-vault-layout` confirmed that change carries no `command-surface` delta for "Append-Only Tree Relocation", and that its relayout record uses the agreed row shape (`schema_version: 1`; rows of `exomem_id`, `old_path`, `new_path`). The change has `specs/adoption-studio` and `specs/vault-layout` deltas only.
