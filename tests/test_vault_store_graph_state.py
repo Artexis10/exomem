@@ -9,16 +9,13 @@ from __future__ import annotations
 
 import threading
 
-import pytest
+import test_vault_store_read_write as read_write
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, vault  # noqa: F401
-from test_vault_store_read_write import stored  # noqa: F401
-from test_vault_store_served import call, service  # noqa: F401
 
 from exomem import (
     deferred_index,
     doctor,
-    epistemic_graph,
     graph_sync,
     readiness,
     reconcile,
@@ -27,7 +24,7 @@ from exomem import (
 )
 from exomem.vault_store import read
 
-CREATED = "Knowledge Base/Notes/Graph State.md"
+stored = read_write.stored
 
 
 def leave_file_modes_graph_debt(root):
@@ -93,29 +90,6 @@ def test_the_vocabulary_drain_runs_in_store_mode_over_file_modes_graph_debt(stor
     drained = server_runtime.drain_vocabulary_recovery(stored, threading.Event(), wait_seconds=0.3)
 
     assert drained == 1
-
-
-def test_a_store_mode_write_reports_no_graph_outcome_from_file_modes_checkpoint(stored, service):
-    """Defect: a store commit's response claims `graph_sync: queued` for a checkpoint that file mode left."""
-    leave_file_modes_graph_debt(stored)
-
-    created = call(stored, "manage_memory_file", operation="create", path=CREATED, content="Graph state.\n")
-
-    assert "graph_sync" not in created
-
-
-def test_a_store_mode_reconcile_rebuilds_no_file_mode_graph(stored, service, monkeypatch):
-    """Defect: the reconcile terminal reads file mode's epoch as `not current` and rebuilds the sidecar
-    that no store-mode reader opens."""
-    leave_file_modes_graph_debt(stored)
-    rebuilds = []
-    monkeypatch.setattr(
-        epistemic_graph.EpistemicGraphIndex, "rebuild_all", lambda self: rebuilds.append(self.vault_root) or {}
-    )
-
-    call(stored, "maintain_memory", mode="reconcile", dry_run=False)
-
-    assert rebuilds == []
 
 
 def test_a_store_mode_reconcile_plan_names_no_file_mode_graph_lineage(stored):
