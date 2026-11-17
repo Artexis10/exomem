@@ -34,9 +34,7 @@ from exomem import commands
 #: `tests/test_bootstrap_core.py`. Reference detail goes in a section, which has its own
 #: ceiling there. `tests/test_bootstrap_core.py` also asserts the per-level, per-surface
 #: ceiling; this module keeps the original headroom and profile-ratio checks.
-#: Raised to 15,012 on 2026-11-18 for keep-handed-files-as-sources: the "out of
-#: notes" baseline wording added 12 bytes to the served doctrine.
-COMPACT_BYTE_CEILING = 15_012
+COMPACT_BYTE_CEILING = 15_000
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.

@@ -624,20 +624,18 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
         assert "Never save chat transcripts." in block, name
 
     # 2026-11-18, keep-handed-files-as-sources: "chat transcripts" and
-    # "out of notes" cost 12 bytes per block, from 1483/1485 to 1495/1497.
-    assert sizes == {"maximal": 1495, "balanced": 1497}, sizes
+    # "get no note" cost 6 bytes per block, from 1483/1485 to 1489/1491.
+    assert sizes == {"maximal": 1489, "balanced": 1491}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
-    assert 1500 - sizes["maximal"] >= 5, sizes
+    assert 1500 - sizes["maximal"] >= 11, sizes
     assert all(1500 - size < 100 for size in sizes.values()), sizes
 
 
 def test_the_compact_bootstrap_budget_is_not_raised() -> None:
     from tests.test_bootstrap_compact_budget import COMPACT_BYTE_CEILING
 
-    # 2026-11-18, keep-handed-files-as-sources: raised 15,000 -> 15,012 for the
-    # "out of notes" doctrine wording (+12 bytes on the served payload).
-    assert COMPACT_BYTE_CEILING == 15_012
+    assert COMPACT_BYTE_CEILING == 15_000
 
 
 # ----------------------------------------------------- registry exclusion (D6)

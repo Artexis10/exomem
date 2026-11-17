@@ -32,9 +32,7 @@ from exomem import (
 
 #: Core ceiling at maximal on the worst-case surface. Ruled 15,000; measured
 #: 14,407 (claude-code, maximal) when set, i.e. about 590 bytes of margin.
-#: Raised to 15,012 on 2026-11-18 for keep-handed-files-as-sources: the "out of
-#: notes" baseline wording added 12 bytes to the served doctrine.
-CORE_BYTE_CEILING = 15_012
+CORE_BYTE_CEILING = 15_000
 CORE_HEADROOM_WARNING_BYTES = 512
 
 #: Per-section ceilings: the measured size on the largest surface plus about 10%, on a

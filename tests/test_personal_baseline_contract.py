@@ -546,9 +546,7 @@ def test_every_actual_copyable_instruction_fits_the_web_byte_budget() -> None:
     )
     for name, block in blocks:
         size = len(block.rstrip().encode("utf-8"))
-        # 2026-11-18, keep-handed-files-as-sources: cap raised 1,500 -> 1,512 for the
-        # "out of notes" wording (+12 bytes); the assistant-guide block sits at 1,501.
-        assert size <= 1_512, f"{name} is {size} bytes, over the 1,512-byte web cap"
+        assert size <= 1_500, f"{name} is {size} bytes, over the 1,500-byte web cap"
 
 
 def _assert_baseline_authority_mapping(name: str, block: str) -> None:
