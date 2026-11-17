@@ -6054,14 +6054,16 @@ def _structural_verdicts(
 def _holds_planned_bytes(root: Path, write: vault.PlannedWrite) -> bool:
     """Whether `write`'s page holds exactly the text this batch planned for it.
 
-    A store-mode page is the store's, and its file is only a projection that lags the commit.
+    A store-mode page is the store's, and its file is only a projection that lags the commit. The
+    probe runs inside the write's own error handler, so any failure of it reads as "not proven
+    written" and the write's own error is raised.
     """
     try:
         return isinstance(write.content, str) and (
             vault.read_bytes_without_pinning(Path(write.path), root)
             == write.content.encode("utf-8")
         )
-    except OSError:
+    except Exception:  # noqa: BLE001 - a failed probe must not replace the error it runs under.
         return False
 
 
