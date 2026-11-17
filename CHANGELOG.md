@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.187.0](https://github.com/Artexis10/exomem/compare/v0.186.0...v0.187.0) (2026-11-17)
+
+
+### Features
+
+* **curation:** move and rename pages with lineage, governed pointer writes and undo ([#2883](https://github.com/Artexis10/exomem/issues/2883)) ([6e0f2e8](https://github.com/Artexis10/exomem/commit/6e0f2e813707d2f6a65b791acc08d59344af7081))
+* **profiles:** serve domain profiles, curate them with the owner, and carry routing tables as vault skills ([#2897](https://github.com/Artexis10/exomem/issues/2897)) ([2c31896](https://github.com/Artexis10/exomem/commit/2c31896222d16887b9e328fa8accee3a7fb29891))
+* **sources:** erase a captured Source in file mode ([#2898](https://github.com/Artexis10/exomem/issues/2898)) ([0618f47](https://github.com/Artexis10/exomem/commit/0618f474479168eaec410e72c4a8d3ca15bdc743))
+
+
+### Bug Fixes
+
+* **reconcile:** ignore trash of files outside the Knowledge Base when proving lifecycle cleanup ([#2896](https://github.com/Artexis10/exomem/issues/2896)) ([26d7d8e](https://github.com/Artexis10/exomem/commit/26d7d8ee2eeb0585e8fa5d8e3b4af25e9a5b0be6))
+* **vault-store:** report store-mode state from the store and fence the CLI before the registry path ([#2894](https://github.com/Artexis10/exomem/issues/2894)) ([01cd0fb](https://github.com/Artexis10/exomem/commit/01cd0fbde884af88665b689ba8cc6226c29dd389))
+
 ## [0.186.0](https://github.com/Artexis10/exomem/compare/v0.185.0...v0.186.0) (2026-11-17)
 
 

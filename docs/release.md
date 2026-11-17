@@ -204,7 +204,8 @@ Before you downgrade the service of an archive:
 1. Look for `_Originals/format.json` in the archive's Knowledge Base.
 2. If the file does not exist, downgrade as usual. This floor does not apply.
 3. If the older release then refuses the archive, upgrade the service again.
-   A start that did not finish turning on shared storage left the format recorded.
+   A start or a conversion that did not finish turning on shared storage left
+   the format recorded.
 4. If the file exists, do not downgrade the service. Fix forward instead.
 5. If the archive must move to an older release, make a compatibility export
    ("Export for a release without shared storage" in `docs/deployment.md`).
