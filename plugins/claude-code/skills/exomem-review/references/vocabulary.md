@@ -69,8 +69,9 @@ Words such as "my position" in a unit's text do not make it a position.
 
 1. Capture a view that the person states as theirs under a category with the trait, within the live engagement policy.
 2. Keep their wording and qualifier, and put the date in the context slot: `- [preference] Prefers a slow cool for celadon; not proven (2026-03-02)`.
-3. To mark a vault category as holding positions, propose `traits: [position]` on it through the save steps above.
-4. Read the preview findings before you save; a trait outside the closed set is refused with `unknown_trait`.
+3. To mark a category as holding positions, propose `traits: [position]` on it through the save steps above.
+4. For a shipped category, propose only `traits`; its description and aliases stay fixed.
+5. Read the preview findings before you save; a trait outside the closed set is refused with `unknown_trait`.
 
 The next turn whose leads reach that page then carries the unit in the `positions` block.
 
