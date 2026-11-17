@@ -113,8 +113,9 @@ def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
                 for piece in embeddings._split_by_characters(text)[:-1]:
                     cursor = text.index(piece, cursor) + len(piece)
                     cuts.append(cursor)
-            else:
+            elif len(text.split()) > embeddings.MAX_WORDS_PER_CHUNK:
                 # Whitespace tokens define the fixed chunk cap; no prose meaning is inferred.
+                # str.split and \S share one whitespace definition, so a passage under the cap has no cut.
                 cuts.extend(
                     word.start()
                     for number, word in enumerate(re.finditer(r"\S+", text))

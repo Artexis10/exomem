@@ -678,6 +678,39 @@ def test_frontmatter_size_is_independent_of_declaration_and_capture_text_is_exac
     assert frontmatters[0] == frontmatters[1]
 
 
+def test_spaced_passage_cuts_skip_the_per_character_script_scan(vault, passage_tools, monkeypatch):
+    """Classifying each character of each long spaced passage made every passage search re-pay seconds."""
+    from exomem import text_scripts
+    from exomem.passage_evidence import declared_chunks
+
+    over_cap = " ".join(f"lantern{number}" for number in range(embeddings.MAX_WORDS_PER_CHUNK + 1))
+    at_cap = " ".join(f"harbour{number}" for number in range(embeddings.MAX_WORDS_PER_CHUNK))
+    saved = commands.op_capture_source(
+        vault,
+        schema.load_source_schema(vault),
+        title="Spaced records",
+        source_kind="session",
+        passages=[dict(key="over", text=over_cap), dict(key="at", text=at_cap)],
+    )
+    assert "error" not in saved, saved
+    page = find_corpus.CACHE.get(vault / saved["source"]["path"], vault)
+    page.__dict__.pop("_declared_passage_chunks", None)
+    scanned = []
+    real = text_scripts.is_scriptio_continua
+    monkeypatch.setattr(
+        text_scripts, "is_scriptio_continua", lambda character: scanned.append(character) or real(character)
+    )
+
+    chunks = declared_chunks(page)
+
+    assert scanned == []
+    assert [(chunk.key, chunk.text.split()[0]) for chunk in chunks] == [
+        ("over", "lantern0"),
+        ("over", f"lantern{embeddings.MAX_WORDS_PER_CHUNK}"),
+        ("at", "harbour0"),
+    ]
+
+
 def test_same_heading_in_an_ordinary_note_stays_searchable(vault):
     """A format-based global strip would erase authored text in an ordinary note."""
     from exomem.find_types import ParsedPage
