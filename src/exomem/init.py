@@ -321,10 +321,10 @@ def init_vault(
     force: bool = False,
     initialize_state: bool = True,
 ) -> dict:
-    """Create `<vault_root>/Knowledge Base/` with the starter scaffold.
+    """Create the managed root under `vault_root` with the starter scaffold.
 
     Copies the bundled scaffold (index.md, log.md, _Schema/) and lays down the
-    typed folder tree. Raises ``FileExistsError`` if `Knowledge Base/` already
+    typed folder tree. Raises ``FileExistsError`` if the managed root already
     exists, unless ``force=True`` (which overlays the scaffold without deleting
     any existing files). A genuinely new vault also receives its empty external
     state manifest, which records that the vault starts in shared original
