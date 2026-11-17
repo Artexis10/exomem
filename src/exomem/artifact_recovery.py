@@ -302,6 +302,14 @@ def stage(
                     if error.code != "MISSING":
                         raise
                     # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
+                    # Only an object the pool already holds is read: an ordinary file that went missing is
+                    # unavailable, and this read never fetches another copy.
+                    try:
+                        pooled = originals.pooled(root, path) is not None
+                    except originals.RetirementUnconfirmed:
+                        pooled = False
+                    if not pooled:
+                        raise
                     held = stack.enter_context(
                         media_store.hold_original(root, path, recorded_sha256=recorded, deadline=deadline)
                     )
