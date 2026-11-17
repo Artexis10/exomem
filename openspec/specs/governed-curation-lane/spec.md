@@ -55,14 +55,28 @@ with different bytes MUST be refused as a collision.
 ### Requirement: Curation exposes only governed step kinds
 
 The v1 forward step vocabulary SHALL be exactly `create-note`, `create-entity`,
-`accept-relation`, `edit`, `supersede`, `move`, `delete`, `recover`, `fold-duplicate`, and `fold-recap-revisions`. Each
+`accept-relation`, `edit`, `supersede`, `move`, `repoint-links`, `delete`, `recover`, `fold-duplicate`, and `fold-recap-revisions`. Each
 kind SHALL have a closed per-kind argument schema and SHALL dispatch through
 the matching governed leaf. The two fold kinds are the only steps that retire a Source or Evidence page, and they dispatch through their own leaf, so `supersede`, `move` and `delete` keep refusing Sources and Evidence. A plan MUST NOT contain a command name,
 raw filesystem operation, callable, shell fragment, or free-form patch program.
+A `move` step SHALL accept an optional `fields` patch. Each key of that patch
+SHALL be a field that the `page-fields` registry declares with `role: pointer`,
+and proposal SHALL refuse any other key with `CURATION_STEP_INVALID`. A `move`
+step SHALL NOT take `update_wikilinks`: the plan's `repoint-links` step
+rewrites links.
+An `edit` step whose operation is `patch_frontmatter` MAY target a page in
+`Sources/` or `Evidence/` only for a field that the `page-fields` registry
+declares with `role: pointer`. That step SHALL run as the governed pointer
+write that corrects a pointer field in place, and it is the only route for
+such a correction. The plan approval SHALL be the write's approval. The step
+SHALL set no `updated`, and its sealed postcondition SHALL be its exact after
+bytes. Proposal SHALL refuse the same operation on any other field of such a
+page with `APPEND_ONLY`, and on a pointer field whose registry entry names a
+`writer` with `POINTER_FIELD_OWNED`, naming that operation.
 All existing leaf confirmation, draft, content-hash, relation, source/evidence,
 protected-tree, and path-confinement checks SHALL remain authoritative at plan
-validation and immediately before commit. An edit's transition alone SHALL be
-minted when its step runs, never taken from the plan, so the edited page
+validation and immediately before commit. Except in a pointer correction on an
+append-only page, an edit's transition alone SHALL be minted when its step runs, never taken from the plan, so the edited page
 carries the commit instant in `updated` and the transition's age never refuses
 an approved edit. Before any byte is written, the executor SHALL refuse with
 `CURATION_BINDING_STALE` a planned page that, with `updated` set back to the
@@ -130,6 +144,27 @@ leaf still refuses the step there.
 - **WHEN** a plan step has kind `delete` or `supersede` and targets a Source or Evidence page
 - **THEN** the step is refused exactly as before this capability
 
+#### Scenario: A plan corrects pointer fields on Sources
+
+- **WHEN** a plan carries `edit` steps whose `patch_frontmatter` operations
+  change the `project` field of several Sources, and the owner approves it
+- **THEN** each Source differs only in its `project` value span, with
+  `updated` unchanged
+- **AND** each step's evidence holds its pointer-write record
+
+#### Scenario: A plan patches a Source's classification
+
+- **WHEN** a plan carries an `edit` step whose `patch_frontmatter` operation
+  changes a Source's `domain`
+- **THEN** proposal refuses with `POINTER_FIELD_OWNED`, names reclassification,
+  and stores no plan
+
+#### Scenario: A rehome patches a field that is not a pointer
+
+- **WHEN** a `move` step's `fields` patch names a field that the `page-fields`
+  registry does not declare as a pointer, such as `title`
+- **THEN** proposal refuses with `CURATION_STEP_INVALID` and stores no plan
+
 ### Requirement: Curation leaves typed administrative domains to their owners
 
 The curation executor SHALL refuse direct step targets in Planning, Records,
@@ -179,7 +214,10 @@ another writer creates, edits or removes after proposal SHALL still make the
 affected step refuse through its leaf. Proposal SHALL refuse with `CURATION_STEP_CONFLICT`
 these plans, which could not then run as sealed:
 
-- a later step bound to a path that an earlier step writes;
+- a later step bound to a path that an earlier step writes, except a
+  `repoint-links` step, which SHALL bind a page that an earlier `move` step
+  writes, or that an earlier `edit` step writes as a pointer correction of an
+  append-only page, at that step's sealed after hash;
 - a step that links to a page an earlier step supersedes;
 - a step that gives a relation disposition while it links to a page an earlier
   step creates, because that link is its relation once the page exists.
@@ -203,10 +241,24 @@ refuses through its leaf when it runs.
 
 #### Scenario: Plan a projection cannot make run
 
-- **WHEN** a later step is bound to a path an earlier step writes, links to a
-  page an earlier step supersedes, or gives a relation disposition while it
-  links to a page an earlier step creates
+- **WHEN** a later step other than `repoint-links` is bound to a path an
+  earlier step writes, links to a page an earlier step supersedes, or gives a
+  relation disposition while it links to a page an earlier step creates
 - **THEN** proposal refuses with `CURATION_STEP_CONFLICT` and stores no plan
+
+#### Scenario: A rehome corrects a Source that links to a moved note
+
+- **WHEN** a plan moves a note, corrects the `project` field of a Source that
+  links to it through an `edit` step, and ends with `repoint-links`
+- **THEN** proposal accepts the plan, and `repoint-links` binds the Source at
+  the sealed after hash of the `edit` step that corrected it
+
+#### Scenario: Moved pages link to each other
+
+- **WHEN** a plan moves two pages that link to each other and ends with
+  `repoint-links`
+- **THEN** proposal accepts the plan, and `repoint-links` binds each moved page
+  at the sealed after hash of the step that moved it
 
 ### Requirement: Every committed step has exact reconstructible commit evidence
 
@@ -217,18 +269,18 @@ step_id]`. The encoding SHALL preserve the ordinal as a number and MUST NOT use
 ambiguous field concatenation.
 
 Content-write leaves SHALL commit one content-free curation witness in the same
-atomic batch as their canonical effect.
+atomic batch as their canonical effect. A `move` step SHALL commit its witness
+in the batch that writes the moved page's destination bytes, and SHALL publish
+its intent record before its rename, as the requirement "A move step records
+its intent before its rename and recovers without renaming" states.
 
-Relocation steps (`move`, `delete`, `recover`) remain valid in the plan schema
-so a reviewer can express them, but until the held filesystem exposes durable
-monotonic parent-namespace generation tokens the executor SHALL refuse them.
-The refusal SHALL occur at proposal, preview, and apply, before any transition
-record is published and before any rename is attempted, and SHALL be reported as
-`CURATION_RENAME_HISTORY_UNPROVABLE`. A refused relocation step SHALL leave no
-rename, no rollback, no trash write, no relocation candidate or authorization,
-no witness, and no terminal receipt, and SHALL create no governed run store. The
-prepared-relocation protocol that would lift this refusal is specified by the
-`add-curation-relocation-protocol` change and is out of scope for v1.
+`delete` and `recover` steps remain valid in the plan schema so a reviewer can
+express them, but the executor SHALL refuse them. The refusal SHALL occur at
+proposal, preview, and apply, before any record is published and before any
+rename is attempted, and SHALL be reported as
+`CURATION_RENAME_HISTORY_UNPROVABLE`. A refused step SHALL leave no rename, no
+rollback, no trash write, no intent record, no witness, and no terminal
+receipt, and SHALL create no governed run store.
 
 Every curation witness SHALL bind the run, plan, ordinal, step, operation id,
 exact before/after target manifest, governed leaf identity, result digest, and
@@ -249,13 +301,12 @@ threat model requires a separate portable signing-root design.
 
 #### Scenario: Reviewed plan contains a relocation step
 
-- **WHEN** a plan containing a `move`, `delete`, or `recover` step is proposed,
-  previewed, or applied on a filesystem without durable parent-namespace
-  generation tokens
+- **WHEN** a plan containing a `delete` or `recover` step is proposed,
+  previewed, or applied
 - **THEN** the request fails with `CURATION_RENAME_HISTORY_UNPROVABLE` before any
-  transition record is published and before any rename is attempted
-- **AND** no rename, rollback, trash write, relocation candidate, authorization,
-  witness, terminal receipt, or governed run store is created
+  record is published and before any rename is attempted
+- **AND** no rename, rollback, trash write, intent record, witness, terminal
+  receipt, or governed run store is created
 
 #### Scenario: Process stops after the leaf commit
 
@@ -275,7 +326,7 @@ threat model requires a separate portable signing-root design.
 ### Requirement: Run phases report partial truth and exact replay
 
 The system SHALL derive run phase from the immutable plan, create-only approval,
-verified relocation candidates and authorizations, witnesses, and terminal
+verified move intent records, witnesses, and terminal
 receipts and SHALL expose at least `proposed`, `approved`, `executing`,
 `partial`, `failed`, `completed`, `blocked`, `compensating`, `compensation-partial`,
 and `compensated`. It MUST NOT report a multi-step atomic commit. Exact replay
@@ -300,8 +351,14 @@ The system SHALL derive compensation only from committed step receipts,
 matching witnesses, and sealed pre-step material. It SHALL create a new
 immutable compensation plan linked to the forward plan and reverse committed
 steps in descending order. Creation effects SHALL move to governed trash;
-deletions SHALL recover their exact trash entries; moves SHALL use a guarded
-inverse move; edits and accepted relations SHALL create a superseding
+a pointer correction on an append-only page SHALL be reversed through the
+governed pointer write's revert;
+deletions SHALL recover their exact trash entries; a move SHALL be reversed by
+a guarded inverse move that restores the page's sealed pre-step bytes, so its
+lineage entry and its `fields` patch are removed and no lineage entry is
+added; a `repoint-links` step SHALL be reversed by returning each page that it
+rewrote to its sealed pre-step bytes, and each append-only page through the
+governed pointer write's revert; other edits and accepted relations SHALL create a superseding
 correction from the sealed pre-step document; supersessions SHALL be corrected
 by superseding the committed successor; and recovered items SHALL be deleted
 through the governed delete leaf. Compensation SHALL require its own exact
@@ -332,6 +389,21 @@ plans, witnesses, receipts, trash history, and supersession chains. A fold step 
 - **WHEN** the owner approves the compensation plan of an applied `fold-recap-revisions` step
 - **THEN** every revision file is back at its path with its pre-step bytes and the step's history entries are in trash
 - **AND** every citation of those revisions resolves
+
+#### Scenario: A pointer correction is undone
+
+- **WHEN** the owner approves the compensation plan of an applied plan that
+  corrected the `project` field of several Sources
+- **THEN** each Source hashes to its recorded before hash
+- **AND** no superseding correction is created
+
+#### Scenario: A rehome is undone
+
+- **WHEN** the owner approves the compensation plan of an applied plan that
+  moved three pages with a `project` patch and ended with `repoint-links`
+- **THEN** each moved page is back at its old path with its pre-step bytes,
+  each rewritten referrer holds its pre-step bytes, and each repointed
+  append-only page hashes to its recorded before hash
 
 ### Requirement: Plan execution is content-language-neutral
 
@@ -409,7 +481,7 @@ The step SHALL NOT change the head. It SHALL seal the history entry paths as exp
 
 ### Requirement: Fold steps move only bytes that remain held elsewhere
 
-The refusal of `move`, `delete` and `recover` for unprovable relocation history SHALL stay in force. The two fold kinds are not those kinds. They SHALL move a file to the vault trash only after the step has re-verified, immediately before the move, that identical bytes remain held elsewhere: the canonical page's original for `fold-duplicate`, the history entry for `fold-recap-revisions`. They SHALL refuse the move when that verification fails. An uncertain rename state therefore cannot lose content, which is why the fold leaf does not need namespace lineage. When a crash leaves the state unknown, resume SHALL decide from the live state: bytes at the recorded trash identity mean the move committed; bytes in place mean it did not; neither or both SHALL block the run with `CURATION_OUTCOME_UNCERTAIN`.
+The refusal of `delete` and `recover` for unprovable relocation history SHALL stay in force. The two fold kinds are not those kinds. They SHALL move a file to the vault trash only after the step has re-verified, immediately before the move, that identical bytes remain held elsewhere: the canonical page's original for `fold-duplicate`, the history entry for `fold-recap-revisions`. They SHALL refuse the move when that verification fails. An uncertain rename state therefore cannot lose content, which is why the fold leaf does not need namespace lineage. When a crash leaves the state unknown, resume SHALL decide from the live state: bytes at the recorded trash identity mean the move committed; bytes in place mean it did not; neither or both SHALL block the run with `CURATION_OUTCOME_UNCERTAIN`.
 
 #### Scenario: The retained copy vanishes before the move
 
@@ -418,7 +490,7 @@ The refusal of `move`, `delete` and `recover` for unprovable relocation history 
 
 #### Scenario: The plain relocation kinds stay refused
 
-- **WHEN** a plan contains `delete` or `move`
+- **WHEN** a plan contains `delete` or `recover`
 - **THEN** the executor still refuses it with `CURATION_RENAME_HISTORY_UNPROVABLE`
 
 ### Requirement: A fold reads references from the disk and rereads only the pages that changed
@@ -469,3 +541,117 @@ A curation work item opened with the `review_ref` of a review item that is not a
 
 - **WHEN** a client opens a curation work item with the `review_ref` of a recurring-identity candidate
 - **THEN** the work item carries the candidate binding and its allowed step kinds, as before
+
+### Requirement: A move step records its intent before its rename and recovers without renaming
+
+Immediately before the rename of a `move` step, the executor SHALL publish and
+flush one create-only intent record. The record SHALL bind the operation id,
+the old and new paths, the sealed before hash, and the sealed rename-after
+state: the old path absent and the new path holding the sealed before bytes.
+The executor SHALL publish the record from a seam that runs once per step, not
+from a hook that the child batch also calls.
+
+Recovery MUST NOT issue a rename. It SHALL decide from the intent record and
+the live state:
+
+- with no intent record and the page at its old path with the sealed bytes,
+  the step SHALL be retried exactly when every guard still matches;
+- with an intent record and the page at its old path with the sealed bytes,
+  the run SHALL block with `CURATION_RENAME_HISTORY_UNPROVABLE`, and the owner
+  re-proposes the remaining work;
+- with an intent record, the old path absent and the new path holding the
+  sealed before bytes, recovery SHALL adopt the rename and roll the step
+  forward: it SHALL commit the destination bytes, the lineage entry, the
+  `fields` patch and the witness in one batch, and SHALL publish the semantic,
+  catalog, graph and index effects of the move without a rename;
+- with a witness and a new path that match the sealed postcondition, the step
+  SHALL be recovered as committed through the witness;
+- with the page at its old path holding other bytes, the step SHALL refuse
+  with `CURATION_BINDING_STALE`;
+- in any other state, including the page at neither path or at both, the run
+  SHALL block with `CURATION_OUTCOME_UNCERTAIN`.
+
+In store mode, a move SHALL commit in one store transaction, and recovery
+SHALL read the outcome from the store.
+
+#### Scenario: Process stops after the rename
+
+- **WHEN** a crash occurs after a `move` step's rename and before its batch
+- **THEN** status reports that the step needs a roll forward
+- **AND** the next resume adopts the rename, commits the batch, and leaves the
+  page indexed, cataloged and graphed at the new path with one lineage entry
+- **AND** no second rename runs
+
+#### Scenario: Someone renames the page back during the crash window
+
+- **WHEN** a crash occurs after the intent record and the page is found at its
+  old path with the sealed bytes
+- **THEN** the run blocks with `CURATION_RENAME_HISTORY_UNPROVABLE` and no rename
+  runs
+
+#### Scenario: Process stops before the intent record
+
+- **WHEN** a crash occurs before the intent record is durable
+- **THEN** the next resume retries the step exactly when every guard still
+  matches
+
+#### Scenario: The page is at both paths
+
+- **WHEN** recovery finds the page's bytes at the old path and at the new path
+- **THEN** the run blocks with `CURATION_OUTCOME_UNCERTAIN` and nothing changes
+
+### Requirement: A repoint-links step rewrites the plan's referrers once
+
+A `repoint-links` step SHALL take no arguments, SHALL be the last step of its
+plan, and SHALL appear at most once. Proposal SHALL refuse with
+`CURATION_STEP_INVALID` a `repoint-links` step that is not last, that repeats,
+or that follows no `move` step.
+
+At proposal, the step SHALL seal every referrer of every earlier `move` step
+with its exact before hash and its rewritten bytes. A referrer that an earlier
+`move` step writes, or that an earlier `edit` step corrects as a pointer write,
+SHALL be bound at that step's sealed after hash. The step
+SHALL give each referrer exactly one outcome, as a move preview does:
+`rewritten`, `pointer-repointed (append-only page)`,
+`unchanged: resolves via prior path`, `unchanged: keeps the old path`, or
+`refused`. A `refused` outcome SHALL
+refuse the plan at proposal.
+
+At execution, the step SHALL write every rewritten page and every pointer
+repoint in one atomic batch with its witness. Each append-only page SHALL
+change only through the governed pointer write, and the plan approval SHALL be
+that write's approval. A referrer whose bytes differ from its sealed binding
+SHALL refuse the step with `CURATION_BINDING_STALE`, and nothing SHALL be
+written.
+
+#### Scenario: Three notes are rehomed with a Source referrer
+
+- **WHEN** an approved plan moves three notes to another project's folder with
+  a `project` patch and ends with `repoint-links`, and a Source links one of
+  them by path
+- **THEN** each note is at its new path with one lineage entry and the new
+  `project`
+- **AND** each writable referrer links the new paths, the Source's link names
+  the new path, and every other byte of the Source is unchanged
+
+#### Scenario: A referrer changes after proposal
+
+- **WHEN** another writer edits a sealed referrer before `repoint-links` runs
+- **THEN** the step refuses with `CURATION_BINDING_STALE`, writes nothing, and
+  every old link still resolves through lineage
+
+### Requirement: Curation teaches its relocation plan shapes
+
+`read_instructions(topic="curation.propose")` SHALL return worked plan
+examples: a split whose child notes each declare their `project`, a single
+`move` with its per-referrer preview outcomes, and a rehome of several notes
+with a `fields` patch, `edit` steps that correct the `project` field of the
+Sources that belong with them, and a final `repoint-links` step. Each example SHALL pass
+proposal validation against the shipped plan schema.
+
+#### Scenario: An agent asks how to rehome notes
+
+- **WHEN** a connected agent reads the `curation.propose` instructions
+- **THEN** the response holds a rehome example
+- **AND** proposal accepts that example's plan in a vault that holds the pages
+  it names
