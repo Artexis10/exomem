@@ -298,6 +298,12 @@ def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
     `original_pool.ObjectMismatch` or hashes to other bytes. Any other path, a missing or unsafe one included,
     is not pooled.
     """
+    from . import original_pool
+
+    # Pool objects exist only once the pool's marker is published, so an ordinary archive answers from the marker
+    # alone and never opens its identity catalogue for this question.
+    if not original_pool.enabled(vault):
+        return None
     shared = digest_addressed(vault, path)
     return shared if shared is not None and shared.local_path is not None else None
 
