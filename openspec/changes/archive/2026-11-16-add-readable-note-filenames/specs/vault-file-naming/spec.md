@@ -224,14 +224,18 @@ named by the same title would take over every bare link to that title. When a ne
 page's name is chosen, Exomem SHALL count a live page's title (in NFC, case
 folded) as taking that stem, and the new page SHALL take the collision number, so
 that a bare link finds no stem match and reaches the title step, which reports the
-duplicate as ambiguous. The lookup SHALL NOT scan the vault: it SHALL use the
-title index that a running process already holds. A process that holds none
-names the page from its folder alone, and the write SHALL carry one
-`title_check_unavailable` warning that says the title check could not run and the
-name came from its folder alone. An entity SHALL follow the same rule: a name
-that is free as a file but is another page's title takes the collision number,
-and an entity file that already exists still refuses with `ENTITY_EXISTS`. An
-explicit per-call `slug`, a vault in the `slug` style, and a note whose name an
+duplicate as ambiguous. The lookup SHALL NOT add a vault scan to a write. It
+SHALL read the writer snapshot that the write builds for its own links, when it
+builds one, and otherwise the title index that a running process already holds.
+A write that finds neither names the page from its folder alone, and SHALL carry
+one `title_check_unavailable` warning that says the title check could not run and
+the name came from its folder alone. A managed service that finds no resident
+index SHALL start one background rebuild, so the next write is checked; a
+one-shot command SHALL NOT. An entity SHALL follow the same rule, answered from
+the writer snapshot that it builds after its refusals: a name that is free as a
+file but is another page's title takes the collision number, and an entity file
+that already exists still refuses with `ENTITY_EXISTS`. An explicit per-call
+`slug`, a vault in the `slug` style, and a note whose name a draft token or an
 adoption plan froze SHALL NOT be moved by a live title and SHALL NOT carry the
 warning.
 
@@ -245,11 +249,27 @@ warning.
 
 #### Scenario: A process without a title index names the page from its folder and says so
 
-- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, and a process that holds no title index
-- **WHEN** a second note with that title is written
+- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, and a one-shot process that holds no title index
+- **WHEN** a second note with that title and no links is written
 - **THEN** the write builds no title index and scans no vault
 - **AND** the file is named `Brûlerie Ötzberg.md`
 - **AND** the write carries a `title_check_unavailable` warning that says the name came from its folder alone
+- **AND** no background rebuild starts
+
+#### Scenario: A managed service that finds no index starts the rebuild
+
+- **GIVEN** a managed service whose title index was dropped
+- **WHEN** a note with no links is written
+- **THEN** the write carries the `title_check_unavailable` warning
+- **AND** one background rebuild starts, so the next write is checked
+
+#### Scenario: A note with links is checked by the snapshot that its links need
+
+- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, and a process that holds no title index
+- **WHEN** a second note with that title is written with a link in its body
+- **THEN** the file is named `Brûlerie Ötzberg-2.md`
+- **AND** the write carries no `title_check_unavailable` warning
+- **AND** the write builds one writer snapshot, which serves both the link and the title check
 
 #### Scenario: A write that names nothing by a title carries no title check warning
 
@@ -259,10 +279,18 @@ warning.
 
 #### Scenario: An entity does not take the stem of an older page with its title
 
-- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, and a running process that holds the title index
+- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, with or without a resident title index
 - **WHEN** an entity named `Brûlerie Ötzberg` is created
 - **THEN** the entity file is named `Brûlerie Ötzberg-2.md`
+- **AND** the write carries no `title_check_unavailable` warning
 - **AND** a bare link to `Brûlerie Ötzberg` is reported as matching two files by title
+
+#### Scenario: A refused entity write builds no writer snapshot
+
+- **GIVEN** an entity named `Brûlerie Ötzberg` exists
+- **WHEN** an entity named `brûlerie ötzberg` is created
+- **THEN** the write is refused with `ENTITY_EXISTS`
+- **AND** the write builds no writer snapshot
 
 ### Requirement: Derived-Name Length Is Capped
 

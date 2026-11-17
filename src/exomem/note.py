@@ -32,6 +32,7 @@ the canonical H1; the optional ASCII slug controls only the new filename.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import os
 import re
@@ -2091,13 +2092,23 @@ def note(
         for item in key_plan.introductions
     )
     placement_domain = domain_binding.destination if domain_binding is not None else domain
-    title_warning: str | None = None
+    # The snapshot that a note with links builds for them. A title check borrows it, so it is built
+    # once, and only when `unique_path` asks, after the refusals that precede it.
+    has_links = bool(sources or bridge_of or find_body_wikilinks(content))
+
+    @functools.cache
+    def link_snapshot() -> WikilinkResolver:
+        return find_module.writer_resolver_snapshot(root)
+
+    # A draft token and an import plan (`_path_date`) froze their target when the live titles were
+    # what they were then, so no title now may move it.
+    title_check = title_occupancy.TitleCheck(
+        root,
+        slug,
+        frozen=token_value is not None or _path_date is not None,
+        resolver=link_snapshot if has_links else None,
+    )
     if token_value is None:
-        # A plan froze its target (`_path_date`) when the live titles were what they were then,
-        # so a plan's leaf must land there whatever the titles are now.
-        title_held, title_warning = title_occupancy.occupancy(
-            root, slug, frozen=_path_date is not None
-        )
         note_path = _resolve_path(
             vault_root=root,
             note_type=note_type,
@@ -2114,7 +2125,7 @@ def note(
             home_set=home_set,
             topics=topics or (),
             predecessor=_predecessor_path,
-            title_held=title_held,
+            title_held=title_check.held,
         )
         # Re-spell the destination to the real on-disk casing *before* it is
         # bound into the draft token: creating into an existing but
@@ -2138,11 +2149,7 @@ def note(
     # Link-free preparation has no consumer for a vault-wide title snapshot.
     # Keep the detached pending destination and normalizers, but do not read
     # the corpus merely to resolve an empty set of links.
-    resolver = (
-        find_module.writer_resolver_snapshot(root)
-        if sources or bridge_of or find_body_wikilinks(content)
-        else WikilinkResolver.from_entries(root, ())
-    )
+    resolver = link_snapshot() if has_links else WikilinkResolver.from_entries(root, ())
     rel_note_no_ext = destination.removesuffix(".md")
     resolver.add_pending(rel_note_no_ext, title=title)
     sources_norm, source_warnings = _normalize_sources(sources, vault_root=root, resolver=resolver)
@@ -2264,7 +2271,7 @@ def note(
         date_prefix=name_prefix,
     )
     warnings = (
-        list(slug_warnings) + ([adjusted] if adjusted else []) + ([title_warning] if title_warning else [])
+        list(slug_warnings) + ([adjusted] if adjusted else []) + ([title_check.warning] if title_check.warning else [])
         + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
         + home_warnings
         + folder_split_warnings(root, note_path.parent)

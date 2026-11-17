@@ -766,10 +766,7 @@ def link(
     except InvalidSlugError as error:
         raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
     folder = kb_root(vault_root) / "Entities" / definition.folder
-    from . import title_occupancy
     from .governance import connector_boundary
-
-    title_held, title_warning = title_occupancy.occupancy(vault_root, slug)
 
     def place(path: Path) -> str:
         """The destination's checked vault-relative path: the boundary admits it and it is in this registry."""
@@ -799,6 +796,7 @@ def link(
     declared_facets = _validated_facets(registry, definition, facets)
     from . import find as find_module
     from . import project_keys as project_keys_module
+    from . import title_occupancy
 
     try:
         key_plan = project_keys_module.plan_project_keys(
@@ -913,10 +911,14 @@ def link(
         if accepted_decision is not None:
             reason += " A distinct identity needs its own `slug`."
         raise LinkError("ENTITY_EXISTS", ["name"], reason)
-    if title_held is not None and title_held(entity_path.stem):
+    # The writer snapshot that this write builds for its links also answers which titles are taken. It
+    # is acquired here, after every refusal above, so a refused write pays nothing new.
+    resolver = find_module.writer_resolver_snapshot(vault_root)
+    title_check = title_occupancy.TitleCheck(vault_root, slug, resolver=lambda: resolver)
+    if title_check.held(entity_path.stem):
         # The name is free as a file but is another page's title: taking it would move every bare link
         # to that title here. The refusal above stays for a file that exists; this only numbers the name.
-        entity_path = unique_path(folder, entity_path.stem, vault_root=vault_root, title_held=title_held)
+        entity_path = unique_path(folder, entity_path.stem, vault_root=vault_root, title_held=title_check.held)
         rel_entity = place(entity_path)
     type_resolution = vocabulary_resolution.entity_type_record(
         requested_type,
@@ -925,7 +927,6 @@ def link(
         destination=rel_entity.rsplit("/", 2)[-2],
     )
     rel_entity_no_ext = rel_entity.removesuffix(".md")
-    resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)
     connections_norm, connection_warnings = _normalize_connections(
         connections, vault_root=vault_root, resolver=resolver,
@@ -1046,7 +1047,6 @@ def link(
     warnings = (
         list(slug_warnings)
         + ([adjusted] if adjusted else [])
-        + ([title_warning] if title_warning else [])
         + list(connection_warnings)
         + list(summary_warnings)
         + list(why_warnings)

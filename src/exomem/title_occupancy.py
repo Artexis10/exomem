@@ -1,8 +1,8 @@
-"""Whether a new page's name is another live page's title, answered with no vault scan.
+"""Whether a new page's name is another live page's title, answered with no extra vault scan.
 
 A stem match beats a title match when a bare wikilink resolves, so a page named by another page's
 title would take over every bare link to it. `unique_path` numbers such a name when it is given
-the lookup that this module builds.
+`TitleCheck.held`.
 """
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from . import find
-from .vault import derives_title_name, title_key
+from . import find, readiness
+from .vault import WikilinkResolver, derives_title_name, title_key
 
-#: The warning a write carries when no resident title index could answer. Same shape as
+#: The warning a write carries when no title index could answer. Same shape as
 #: `duplicates.unavailable_warning`: a code, then what could not run and what the write did instead.
 UNAVAILABLE_WARNING = (
     "title_check_unavailable: the title index could not answer, so this file name came from its "
@@ -21,23 +21,55 @@ UNAVAILABLE_WARNING = (
 )
 
 
-def occupancy(
-    vault_root: Path, slug: str | None, *, frozen: bool = False
-) -> tuple[Callable[[str], bool] | None, str | None]:
-    """The title lookup for a name that is derived from a title, and the warning when it cannot run.
+class TitleCheck:
+    """The title lookup for one write, and whether it could be answered.
 
-    Returns `(held, warning)`. `held(stem)` says whether the stem is a live page's title. Both are
-    None when no title-derived name is being chosen: an explicit `slug`, a slug-style vault, or a
-    `frozen` name (an import plan froze its target, so no live title may move it). When a title name
-    is chosen and no index answers, `held` is None and `warning` is `UNAVAILABLE_WARNING`.
+    `held(stem)` says whether the stem is a live page's title. It is False, and asks nothing, when no
+    title-derived name is being chosen: an explicit `slug`, a slug-style vault, or a `frozen` name (a
+    draft token or an import plan fixed its target, so no live title may move it).
 
-    The answer is the title index that the running server keeps resident. Borrowing never builds one,
-    so a write scans no vault; a cold process (a one-shot command) or one behind its watcher names the
-    page from its folder alone and says so.
+    The answer comes from the first source that has one, and never from a new vault scan:
+    1. `resolver`, a callable for the writer snapshot that this write builds anyway for its own links.
+       It is called on the first question only, so a refusal that comes first never pays for it.
+    2. The title index the running process keeps resident, borrowed and never built. A managed
+       service that finds none schedules the one background rebuild, so the next write is checked; a
+       one-shot command never does, because its process ends before the build would.
+
+    A write that neither source could answer names the page from its folder alone, and `warning` says so.
     """
-    if frozen or not derives_title_name(slug, vault_root):
-        return None, None
-    resolver = find.borrow_query_resolver(vault_root, schedule_rebuild=False)
-    if resolver is None:
-        return None, UNAVAILABLE_WARNING
-    return (lambda stem: bool(resolver.titles.get(title_key(stem)))), None
+
+    def __init__(
+        self,
+        vault_root: Path,
+        slug: str | None,
+        *,
+        frozen: bool = False,
+        resolver: Callable[[], WikilinkResolver] | None = None,
+    ) -> None:
+        self._root = Path(vault_root)
+        self._applies = not frozen and derives_title_name(slug, vault_root)
+        self._source = resolver
+        self._asked = False
+        self._answerer: WikilinkResolver | None = None
+
+    def _resolver(self) -> WikilinkResolver | None:
+        if not self._asked:
+            self._asked = True
+            if self._source is not None:
+                self._answerer = self._source()
+            else:
+                self._answerer = find.borrow_query_resolver(
+                    self._root, schedule_rebuild=readiness.runtime_managed()
+                )
+        return self._answerer
+
+    def held(self, stem: str) -> bool:
+        if not self._applies:
+            return False
+        resolver = self._resolver()
+        return resolver is not None and bool(resolver.titles.get(title_key(stem)))
+
+    @property
+    def warning(self) -> str | None:
+        """`UNAVAILABLE_WARNING` when a title name was chosen and no source answered, else None."""
+        return UNAVAILABLE_WARNING if self._applies and self._asked and self._answerer is None else None

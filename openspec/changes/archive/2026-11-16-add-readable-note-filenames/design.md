@@ -141,15 +141,21 @@ A stem match beats a title match, so a new page named by a title that an older,
 slug-named page holds would move every bare link to that title. The write counts
 a live title as taking its stem and adds the collision number. The lookup borrows
 the title index of a running process, which never builds one, so a write does no
-vault scan. A process with no index names from the folder alone and says so in a
+vault scan. A write that builds a writer snapshot for its own links (a note with
+links, and every entity) answers from that snapshot, so the title check costs it
+nothing. The snapshot is requested on the first question only, so a refusal that
+comes first pays nothing new; an entity requests it after its refusals. A note
+with no links keeps its link-free preparation and borrows the resident index. A
+write that finds neither names the page from its folder alone and says so in a
 `title_check_unavailable` warning, shaped like `duplicate_check_unavailable`: an
-unchecked name is a visible state, not silence. A one-shot command is always in
-that state, and a server that dropped its index after a bulk graph rebuild is
-until a read warms it again. An entity follows the same rule, and the refusal of
-an existing entity file stays. A plan's leaf skips the check, because the plan
-froze its target and must land there. A plan checks titles when it is made and
-has no per-note warning channel, so a plan made in a cold process is unchecked
-without a warning.
+unchecked name is a visible state, not silence. A managed service that finds no
+resident index starts the one background rebuild, so only that write is
+unchecked. A one-shot command never starts it, because its process ends first,
+and its link-free writes always carry the warning. An entity keeps the refusal of
+an existing entity file. A draft token and a plan's leaf skip the check, because
+they froze their target and must land there. A plan checks titles when it is made
+and has no per-note warning channel, so a plan made in a cold process is
+unchecked without a warning.
 
 ### A style that cannot be read refuses
 

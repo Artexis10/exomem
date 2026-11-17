@@ -15,7 +15,7 @@ import yaml
 from exomem import add as add_module
 from exomem import doctor as doctor_module
 from exomem import find as find_module
-from exomem import freshness
+from exomem import freshness, readiness
 from exomem import note as note_module
 from exomem import schema as schema_module
 from exomem import vault as vault_module
@@ -52,6 +52,26 @@ def _hold_the_title_index(vault_root: Path) -> None:
         [(str(page), freshness.stat_signature(page)) for page in vault_module.walk_vault_md(vault_root)],
     )
     find_module.shared_resolver(vault_root)
+
+
+def _count_snapshots(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record each writer snapshot that a write builds, and still build it."""
+    builds: list[int] = []
+    real = find_module.writer_resolver_snapshot
+
+    def counted(*args: object, **kwargs: object):  # noqa: ANN202
+        builds.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", counted)
+    return builds
+
+
+def _scheduled_rebuilds(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record each background title-index rebuild that a write starts, and start none."""
+    scheduled: list[Path] = []
+    monkeypatch.setattr(find_module, "_schedule_query_resolver_rebuild", scheduled.append)
+    return scheduled
 
 
 def _choose_slug_in_the_vault(vault_root: Path) -> None:
@@ -360,12 +380,52 @@ def test_a_write_without_a_resident_title_index_builds_none_and_names_the_page_b
 
     monkeypatch.setattr(vault_module.WikilinkResolver, "_build", scanned)
 
+    scheduled = _scheduled_rebuilds(monkeypatch)
+
     new = _insight(vault, "Brûlerie Ötzberg")
 
     assert Path(new.path).name == "Brûlerie Ötzberg.md"
     # The name was not checked against live titles, and the write says so.
     (unchecked,) = _unchecked(new)
     assert "folder alone" in unchecked
+    # A one-shot command exits before a background build would finish, so it starts none.
+    assert scheduled == []
+
+
+def test_a_managed_service_write_without_a_resident_title_index_starts_the_one_rebuild(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    scheduled = _scheduled_rebuilds(monkeypatch)
+
+    first = _insight(vault, "Brûlerie Ötzberg")
+
+    # This write was unchecked and says so; the rebuild means the next write is checked.
+    assert _unchecked(first)
+    assert scheduled == [vault]
+
+
+def test_a_note_with_links_checks_titles_from_the_snapshot_that_its_links_need(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+    _insight(vault, "Brûlerie Ötzberg")
+    monkeypatch.delenv("EXOMEM_FILENAME_STYLE")
+    builds = _count_snapshots(monkeypatch)
+
+    new = note_module.note(
+        vault,
+        content="## Claim\n\nSee [[brulerie-otzberg]] for the invented background.\n",
+        note_type="insight",
+        title="Brûlerie Ötzberg",
+        status="draft",
+        today=TODAY,
+    )
+
+    # No resident index, yet the title is known: the snapshot for the link answers it, built once.
+    assert Path(new.path).name == "Brûlerie Ötzberg-2.md"
+    assert not _unchecked(new)
+    assert builds == [1]
 
 
 def test_a_write_that_names_nothing_by_a_title_carries_no_title_check_warning(

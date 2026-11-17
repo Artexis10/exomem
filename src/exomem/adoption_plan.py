@@ -903,7 +903,7 @@ def plan_note(
     # A page of a taken name takes the collision number that the leaf adds, so a retry keeps the vault's
     # style. The plan freezes the number, and the leaf applies it, so a plan lands where it was made.
     try:
-        held, _unchecked = title_occupancy.occupancy(root, None)
+        title_check = title_occupancy.TitleCheck(root, None)
     except InvalidSlugError as error:
         return {"code": "WRITE_REFUSED", "reason": f"the note target is unavailable: {error}"}
     number = 1
@@ -917,7 +917,7 @@ def plan_note(
         except (NoteError, InvalidSlugError, ValueError) as error:
             return {"code": getattr(error, "code", "WRITE_REFUSED"),
                     "reason": f"the note target is unavailable: {error}"}
-        if not destinations.taken(target) and not (held is not None and held(Path(target).stem)):
+        if not destinations.taken(target) and not title_check.held(Path(target).stem):
             break
         number += 1
     reason = access.writable_reason(root, target)

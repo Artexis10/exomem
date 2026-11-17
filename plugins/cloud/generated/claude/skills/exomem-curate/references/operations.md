@@ -428,10 +428,13 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
    - Research / insight / failure / pattern: `<Title>.md` (no date prefix).
    - Experiment / production-log: `YYYY-MM-<Title>.md` (start month prefix).
    A reply warning `FILENAME_ADJUSTED` names the file name when it differs from
-   the title; link to the note by that name. Under the `slug` style the name is
-   a lowercase ASCII slug that may use language-blind transliteration; for a
-   non-Latin title, prefer an explicit meaningful ASCII slug. The real title is
-   always stored in frontmatter and the H1.
+   the title; link to the note by that name. A reply warning
+   `title_check_unavailable` means no title index could answer, so the name came
+   from its folder alone. Another page with the same title may exist, and a bare
+   link to that title then reaches this note. Link to this note by its file name.
+   Under the `slug` style the name is a lowercase ASCII slug that may use
+   language-blind transliteration; for a non-Latin title, prefer an explicit
+   meaningful ASCII slug. The real title is always stored in frontmatter and the H1.
 3. Resolve every non-empty `sources:` entry to an authorized captured Source or
    Evidence page. If an external original is missing, capture it explicitly and
    then cite the returned governed path or stable ref. If the original cannot be

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from test_default_filename_style import _hold_the_title_index
+from test_default_filename_style import _count_snapshots, _hold_the_title_index
 
 from exomem import link as link_module
 from exomem import note as note_module
@@ -131,13 +131,28 @@ def test_an_entity_does_not_take_the_stem_of_an_older_page_with_its_title(
     assert ambiguity is not None and "matches 2 files by title" in ambiguity
 
 
-def test_an_entity_written_without_a_resident_title_index_says_its_name_was_not_checked(
+def test_an_entity_is_checked_against_titles_by_its_own_writer_snapshot_when_no_index_is_resident(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _older_note_named_by_its_slug(vault, "Brûlerie Ötzberg", monkeypatch)
+    builds = _count_snapshots(monkeypatch)
 
     result = _create(vault, "Brûlerie Ötzberg")
 
-    assert Path(result.path).name == "Brûlerie Ötzberg.md"
-    (unchecked,) = [warning for warning in result.warnings if warning.startswith("title_check_unavailable")]
-    assert "folder alone" in unchecked
+    # The snapshot that the entity's own link checks need answers the title lookup: one build, no warning.
+    assert Path(result.path).name == "Brûlerie Ötzberg-2.md"
+    assert builds == [1]
+    assert not [warning for warning in result.warnings if warning.startswith("title_check_unavailable")]
+
+
+def test_a_refused_entity_write_builds_no_writer_snapshot(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _create(vault, "Brûlerie Ötzberg")
+    builds = _count_snapshots(monkeypatch)
+
+    with pytest.raises(link_module.LinkError) as refused:
+        _create(vault, "brûlerie ötzberg")
+
+    # A refusal that precedes the snapshot must not pay for a cold vault-sized build it never paid before.
+    assert refused.value.code == "ENTITY_EXISTS"
+    assert builds == []
+
