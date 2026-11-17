@@ -52,6 +52,7 @@ def worker(root, socket_path, standby=False):
     from exomem import readiness, service_standby
     from exomem.server import ExomemFastMCP
     from exomem.server_transport import PrimeMcpSSEMiddleware
+    from exomem.service_ingress import WORKER_KEEP_ALIVE_SECONDS
     from exomem.session_oauth import ExomemSessionOAuthProxy
 
     if (root / "fail-start").exists():
@@ -173,7 +174,7 @@ else:
         transport="http",
         stateless_http=True,
         middleware=[Middleware(PrimeMcpSSEMiddleware)],
-        uvicorn_config={"uds": str(socket_path)},
+        uvicorn_config={"uds": str(socket_path), "timeout_keep_alive": WORKER_KEEP_ALIVE_SECONDS},
         show_banner=False,
     )
 
