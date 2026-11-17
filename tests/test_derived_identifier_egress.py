@@ -682,6 +682,63 @@ def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
     assert "[[Knowledge Base/Notes/beta]]" in written["B"]["body"]
 
 
+_TITLE_DOORS: dict[str, tuple[str, dict[str, Any]]] = {
+    "remember": (
+        "remember",
+        {
+            "content": "A page about plans. See [[other]].\n\n## Observations\n\n"
+            "- [operating constraint] Keep retries bounded #reliability\n",
+            "title": "Hidden Plan",
+            "note_type": "insight",
+        },
+    ),
+    "create-entity": (
+        "connect_memory",
+        {
+            "operation": "create-entity",
+            "entity_type": "concept",
+            "name": "Hidden Plan",
+            "summary": "A concept named like a withheld page's title.",
+        },
+    ),
+}
+
+
+def _named(vault: Path, principal: RequestPrincipal | None, door: str) -> dict[str, Any]:
+    command, kwargs = _TITLE_DOORS[door]
+    answer = _call(vault, principal, command, **kwargs)
+    assert "__error__" not in answer, answer
+    return {"path": answer["path"], "warnings": answer.get("warnings")}
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("door", sorted(_TITLE_DOORS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_names_its_page_as_if_a_withheld_title_were_absent(
+    tmp_path: Path, audience: str, door: str
+) -> None:
+    base, withheld = _writer_fixture()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
+    }
+
+    named = {variant: _named(vault, _writer(audience), door) for variant, vault in vaults.items()}
+
+    assert _text(named["A"]) == _text(named["B"])
+    assert Path(named["B"]["path"]).name == "Hidden Plan.md"
+
+
+@pytest.mark.parametrize("door", sorted(_TITLE_DOORS))
+def test_the_owner_still_numbers_a_name_against_a_withheld_title(tmp_path: Path, door: str) -> None:
+    base, withheld = _writer_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    named = _named(vault, None, door)
+
+    assert Path(named["path"]).name == "Hidden Plan-2.md"
+
+
 _CANDIDATE_NAME = "Zed Corp"
 _CANDIDATE_SCOPE = "Notes/Insights/hidden-*,Entities/Organizations/Zed*,Notes/Withheld/**"
 

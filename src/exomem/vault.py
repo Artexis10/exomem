@@ -108,19 +108,30 @@ _RESERVED_DEVICE_NAMES = frozenset(
     | {f"com{digit}" for digit in range(1, 10)}
     | {f"lpt{digit}" for digit in range(1, 10)}
 )
-#: The two styles a vault may name derived files in. `slug` is the historical
-#: behaviour and stays the default: the filename is the note's identity here
-#: (there is no permalink field), so changing the default would change the
-#: address of every note written after an upgrade in vaults nobody asked.
+#: The two styles a vault may name derived files in. `title` is the default, so a
+#: new page carries the name its author wrote; `slug` is the opt-out. The style
+#: governs new names only: no file is renamed, and a link to an existing one keeps
+#: resolving, so changing the default changes nothing already written.
 FILENAME_STYLES = ("slug", "title")
-DEFAULT_FILENAME_STYLE = "slug"
+DEFAULT_FILENAME_STYLE = "title"
 _FILENAME_STYLE_ENV = "EXOMEM_FILENAME_STYLE"
+#: Where the filename style in force came from. Closed: `filename_style_source` returns one of these.
+FILENAME_STYLE_FROM_ENVIRONMENT = "environment"
+FILENAME_STYLE_FROM_PROJECT_KEYS = "project-keys.yaml"
+FILENAME_STYLE_FROM_DEFAULT = "default"
 _EXPLICIT_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
 
 class InvalidSlugError(ValueError):
     """An explicit filename slug violated the portable ASCII contract."""
+
+
+class UnparseableFilenameStyleError(InvalidSlugError):
+    """`project-keys.yaml` is not parseable, so the style the vault chose is unknown.
+
+    A write does not refuse for it (`derived_filename_style`); doctor fails.
+    """
 
 
 # Legacy hardcoded curated-tree list — now EMPTY by default. Curated /
@@ -695,8 +706,8 @@ def fit_filename(
     return date_prefix + shown + tail, shown != title
 
 
-def resolve_filename_style(vault_root: Path | None = None) -> str:
-    """The filename style in force, by documented precedence.
+def filename_style_source(vault_root: Path | None = None) -> tuple[str, str]:
+    """The filename style in force and where it came from, by documented precedence.
 
     Environment first so a run can be pinned without editing the vault, then the
     vault's own key, then the default. An unrecognised value is refused rather
@@ -704,21 +715,26 @@ def resolve_filename_style(vault_root: Path | None = None) -> str:
     means "carry on" is how a user concludes the setting does not work.
     """
     configured = os.environ.get(_FILENAME_STYLE_ENV)
-    source = "environment"
+    source = FILENAME_STYLE_FROM_ENVIRONMENT
     if configured is None and vault_root is not None:
         from . import project_keys
 
         configured = project_keys.filename_style(vault_root)
-        source = "project-keys.yaml"
+        source = FILENAME_STYLE_FROM_PROJECT_KEYS
     if configured is None:
-        return DEFAULT_FILENAME_STYLE
+        return DEFAULT_FILENAME_STYLE, FILENAME_STYLE_FROM_DEFAULT
     normalized = str(configured).strip().lower()
     if normalized not in FILENAME_STYLES:
         raise InvalidSlugError(
             f"filename style {configured!r} from {source} is not one of "
             f"{', '.join(FILENAME_STYLES)}"
         )
-    return normalized
+    return normalized, source
+
+
+def resolve_filename_style(vault_root: Path | None = None) -> str:
+    """The filename style in force; `filename_style_source` also says where it came from."""
+    return filename_style_source(vault_root)[0]
 
 
 def slugify_title(title: str, max_length: int = SLUG_MAX_LENGTH) -> str:
@@ -745,8 +761,92 @@ def slugify_with_truncation_check(
     return slug, None
 
 
+def derived_filename_style(vault_root: Path | None, *, dated: bool = False) -> tuple[str, str | None]:
+    """The style that derives a new page's name, and a warning when the vault's own choice was unreadable.
+
+    The vault's style, except that a dated Source keeps `slug` by default. A `project-keys.yaml`
+    that cannot be parsed does not stop the write: capture matters more than a name in the vault's
+    style, so the write takes the default style and carries a warning that names the parse error.
+    A file that parses but holds no valid style still refuses, as `filename_style_source` does.
+    """
+    warning = None
+    try:
+        style, source = filename_style_source(vault_root)
+    except UnparseableFilenameStyleError as error:
+        style, source = DEFAULT_FILENAME_STYLE, FILENAME_STYLE_FROM_DEFAULT
+        warning = (
+            f"FILENAME_STYLE_UNPARSEABLE: {error}; this page was named in the default style. "
+            "Fix the file, then run doctor."
+        )
+    return ("slug" if dated and source == FILENAME_STYLE_FROM_DEFAULT else style), warning
+
+
+def derives_title_name(slug: str | None, vault_root: Path | None = None, *, dated: bool = False) -> bool:
+    """Whether a page without a caller-chosen `slug` is named by its title in this vault."""
+    return slug is None and derived_filename_style(vault_root, dated=dated)[0] == "title"
+
+
+def filename_adjusted_warning(
+    title: str,
+    slug: str | None,
+    *,
+    planned: str,
+    final: str,
+    vault_root: Path | None = None,
+    dated: bool = False,
+    date_prefix: str = "",
+) -> str | None:
+    """The one warning for a title-derived file name that is not its title, or None.
+
+    It is built where the name is final, after `unique_path` has added a number, so it names
+    the stem that the page is linked by. `planned` is the stem that `resolve_filename_slug`
+    gave, date prefix included, and `final` is the stem that was written. A caller-chosen
+    `slug` and a slug-style vault are not title names and carry their own slug warnings.
+    """
+    if not derives_title_name(slug, vault_root, dated=dated):
+        return None
+    given = unicodedata.normalize("NFC", title).strip()
+    if final == date_prefix + given:
+        return None
+    name = corrected_title_name(title).name
+    # Two caps can cut a name, and each says so itself: `fit_filename` at the byte cap, and the
+    # sanitiser at its character cap, which it applies unless it is given none.
+    fitted = fit_filename(name, date_prefix=date_prefix) if name else None
+    cut = (fitted is not None and fitted[1]) or (
+        sanitize_title_filename(title) != sanitize_title_filename(title, max_length=0)
+    )
+    reasons = []
+    if not name:
+        reasons.append("no part of the title can name a file, so the name comes from its slug")
+    elif name != given:
+        removed = given[len(name):] if given.startswith(name) else None
+        # A dot or space at the end is the one removal that the rule names apart from the unsafe characters.
+        if cut and removed is not None:
+            pass  # what follows the name is what the cut dropped, and the cut reason below says so
+        elif removed is not None and not removed.strip(". "):
+            reasons.append("a trailing dot or space was removed")
+        else:
+            reasons.append("characters that a file name or a link cannot hold were changed")
+    numbered = final != planned
+    # `unique_path` shortens the stem when its number would pass the byte cap.
+    shortened_for_number = numbered and not final.startswith(f"{planned}-")
+    if cut or shortened_for_number:
+        reasons.append("the name was shortened to fit the length limit")
+    if numbered:
+        reasons.append("a number was added because another page already holds that name or title")
+    return (
+        f"FILENAME_ADJUSTED: the file name is {final!r} ({'; '.join(reasons)}); "
+        "the title is stored as given. Link to this note by that name."
+    )
+
+
 def resolve_filename_slug(
-    title: str, slug: str | None = None, *, vault_root: Path | None = None
+    title: str,
+    slug: str | None = None,
+    *,
+    vault_root: Path | None = None,
+    dated: bool = False,
+    date_prefix: str = "",
 ) -> tuple[str, list[str]]:
     """Resolve a new filename component without conflating it with display title.
 
@@ -757,8 +857,13 @@ def resolve_filename_slug(
     `vault_root` selects the vault's filename style for the DERIVED branch only.
     An explicit `slug` keeps its contract under every style, because it is how a
     caller pins a name it already intends to link to. Omitting `vault_root`
-    resolves the style from the environment alone, which keeps every existing
-    caller on today's behaviour.
+    resolves the style from the environment alone.
+
+    `dated` marks a Source's name. A vault that configured no style keeps the slug
+    form there, so the default change renames no Source; a configured style applies
+    as it always did. A note whose name starts with a date follows the style like any
+    other note: its caller passes the text it puts before the name as `date_prefix`,
+    so the byte cap counts it. The name returned never includes the prefix.
     """
     if slug is not None:
         if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
@@ -769,26 +874,25 @@ def resolve_filename_slug(
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
-    if resolve_filename_style(vault_root) == "title":
-        readable = sanitize_title_filename(title)
-        if readable:
+    style, style_warning = derived_filename_style(vault_root, dated=dated)
+    style_warnings = [style_warning] if style_warning else []
+    if style == "title":
+        corrected = corrected_title_name(title)
+        fitted = fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
+        if fitted is not None:
             # No transliteration warning here: nothing was transliterated. That
             # warning exists because the slug path is lossy for non-ASCII text,
-            # and this path is what a vault sets to stop paying that cost.
-            warnings = []
-            if readable != sanitize_title_filename(title, max_length=0):
-                warnings.append(
-                    f"SLUG_TRUNCATED: filename truncated to {readable!r}; link to "
-                    "this note using that name or its frontmatter title -- "
-                    "re-deriving a name from the full title will not resolve."
-                )
-            return readable, warnings
-        # A title that is entirely reserved characters has no readable form, so
-        # fall through to the slug path rather than failing the write. One note
-        # named the old way beats a refused write.
+            # and this path is what a vault sets to stop paying that cost. A name
+            # that differs from its title is reported by `filename_adjusted_warning`,
+            # once the final name is known.
+            return fitted[0].removeprefix(date_prefix), style_warnings
+        # A title with no usable name (all reserved characters, or no bytes left
+        # under the cap) has no readable form, so fall through to the slug path
+        # rather than failing the write. One note named the old way beats a
+        # refused write.
 
     resolved, truncation_warning = slugify_with_truncation_check(title)
-    warnings = [truncation_warning] if truncation_warning else []
+    warnings = [*style_warnings, *([truncation_warning] if truncation_warning else [])]
     if any(ord(char) > 127 for char in title):
         warnings.append(
             "automatic filename slug used lossy, language-blind ASCII "
@@ -865,7 +969,14 @@ def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
     return title_key(title) if title else None
 
 
-def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
+def unique_path(
+    directory: Path,
+    stem: str,
+    suffix: str = ".md",
+    *,
+    vault_root: Path | None = None,
+    title_held: Callable[[str], bool] | None = None,
+) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
     Collision is tested case-INSENSITIVELY on every platform, not with
@@ -882,6 +993,12 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
 
     With `vault_root`, a name that a live page's lineage still claims is taken too, so a new
     page never takes the links of a page that moved away (`prior_claims`).
+
+    A number added to a long name shortens the name, so the file keeps the byte cap.
+
+    `title_held` says whether a stem is another live page's title. A page named by that stem
+    would take over every bare link to the title, because a stem match beats a title match, so
+    such a stem counts as taken even when no file has the name.
     """
     reserved: frozenset[str] = frozenset()
     if vault_root is not None:
@@ -896,7 +1013,10 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
         )
         stored = _stored_folder_keys(vault_root, directory, f"{stem}{suffix}")
         if stored is not None:
-            return directory / _first_free_name(stem, suffix, stored | reserved)
+            held = stored | reserved
+            return directory / _first_free_name(
+                stem, suffix, lambda name: vault_name_key(name) in held, title_held
+            )
     try:
         taken = {vault_name_key(entry.name) for entry in directory.iterdir()} | reserved
     except OSError:
@@ -905,23 +1025,40 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
         # available without a listing, and it must still be applied rather than
         # assumed to pass, or an unlistable-but-populated directory would hand
         # back a path that already holds another note.
-        candidate = directory / f"{stem}{suffix}"
-        i = 2
-        while candidate.exists() or vault_name_key(candidate.name) in reserved:
-            candidate = directory / f"{stem}-{i}{suffix}"
-            i += 1
-        return candidate
-    return directory / _first_free_name(stem, suffix, taken)
+        return directory / _first_free_name(
+            stem,
+            suffix,
+            lambda name: (directory / name).exists() or vault_name_key(name) in reserved,
+            title_held,
+        )
+    return directory / _first_free_name(
+        stem, suffix, lambda name: vault_name_key(name) in taken, title_held
+    )
 
 
-def _first_free_name(stem: str, suffix: str, taken: set[str]) -> str:
-    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... with no name key in ``taken``."""
-    candidate = f"{stem}{suffix}"
-    i = 2
-    while vault_name_key(candidate) in taken:
-        candidate = f"{stem}-{i}{suffix}"
-        i += 1
-    return candidate
+def numbered_stem(stem: str, number: int, suffix: str = ".md") -> str:
+    """``stem-<number>``, with the stem cut so that the name with its extension keeps the byte cap.
+
+    This is the one place a collision number is added. `fit_filename` does the cut: its
+    `extension` counts the number and the real extension, at a code point.
+    """
+    tail = f"-{number}"
+    fitted = fit_filename(stem, extension=tail + suffix)
+    return f"{fitted[0] if fitted else stem}{tail}"
+
+
+def _first_free_name(
+    stem: str,
+    suffix: str,
+    name_taken: Callable[[str], bool],
+    title_held: Callable[[str], bool] | None = None,
+) -> str:
+    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... that no file and no other page's title holds."""
+    candidate, number = stem, 2
+    while name_taken(f"{candidate}{suffix}") or (title_held is not None and title_held(candidate)):
+        candidate = numbered_stem(stem, number, suffix)
+        number += 1
+    return f"{candidate}{suffix}"
 
 
 def _stored_folder_keys(vault_root: Path, directory: Path, name: str) -> set[str] | None:
