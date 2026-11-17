@@ -1,6 +1,6 @@
 # Page Types
 
-The page types in the Knowledge Base. Each has a required location, naming
+The page types in the managed root. Each has a required location, naming
 convention, and content shape. See `frontmatter.md` for the YAML spec per type.
 
 For every active compiled-note type below, the fenced content shape includes a
@@ -73,7 +73,7 @@ status: active
 created: 2026-05-09
 updated: 2026-05-09
 sources:
-  - "[[Knowledge Base/Sources/Articles/2026-05-09-retrieval-patterns]]"
+  - "[[Sources/Articles/2026-05-09-retrieval-patterns]]"
 tags: [agentic-rag, retrieval, knowledge-graph]
 ---
 
@@ -93,7 +93,7 @@ The substance. Multiple subsections OK.
 
 ## Relations
 
-- about_entity [[Knowledge Base/Entities/Concepts/Agentic RAG]]
+- about_entity [[Entities/Concepts/Agentic RAG]]
 
 ## Open threads
 
@@ -117,7 +117,7 @@ status: active
 created: 2026-05-09
 updated: 2026-05-09
 sources:
-  - "[[Knowledge Base/Notes/Research/Project Alpha/agentic-rag-retrieval-budget]]"
+  - "[[Notes/Research/Project Alpha/agentic-rag-retrieval-budget]]"
 projects: [project-alpha, project-beta]
 tags: [retrieval, evaluation]
 ---
@@ -350,7 +350,7 @@ duration: "30 days"
 n: 1
 hypothesis: "Batching code review into one daily slot cuts context-switching"
 sources:
-  - "[[Knowledge Base/Sources/Books/2026-04-deep-work]]"
+  - "[[Sources/Books/2026-04-deep-work]]"
 tags: [workflow, batching, focus]
 ---
 
@@ -404,7 +404,7 @@ give it the two governed metadata rows that make it checkable:
 Batching review into one daily slot will cut context switches by half.
 
 ## Evidence
-- relations: contradicts: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
+- relations: contradicts: [[Notes/Experiments/Workflow/2026-05-batching]]
 
 Switch count fell 12%, well short of the predicted halving.
 ```
@@ -450,7 +450,7 @@ A level, stated by the holder:
 ## Belief
 - credence_holder: Dana
 - credence: likely
-- relations: assesses: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
+- relations: assesses: [[Notes/Experiments/Workflow/2026-05-batching]]
 
 Dana thinks the daily review slot will cut context switches.
 ```
@@ -462,7 +462,7 @@ A probability, with its basis:
 - credence_holder: Dana
 - credence: 0.7
 - credence_basis: Three of the last four batching trials cut switches by a third.
-- relations: assesses: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
+- relations: assesses: [[Notes/Experiments/Workflow/2026-05-batching]]
 
 Dana puts the chance that the daily review slot halves context switches at 0.7.
 ```
@@ -510,10 +510,10 @@ projects: [project-alpha]
 host: the host
 editor: a teammate
 sources:
-  - "[[Knowledge Base/Sources/Sessions/2026-05-09-launch-planning]]"
+  - "[[Sources/Sessions/2026-05-09-launch-planning]]"
 related:
-  - "[[Knowledge Base/Notes/Research/Project Alpha/launch-messaging]]"
-  - "[[Knowledge Base/Notes/Patterns/short-form-post-template]]"
+  - "[[Notes/Research/Project Alpha/launch-messaging]]"
+  - "[[Notes/Patterns/short-form-post-template]]"
 tags: [posts, launch, batch-01]
 ---
 

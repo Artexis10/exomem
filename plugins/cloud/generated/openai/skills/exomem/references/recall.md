@@ -21,7 +21,7 @@ Modes:
 Empty queries degrade to filtered-most-recent regardless of mode.
 
 **Scope — the vault is bigger than the KB:**
-- `scope="kb"` (default) searches only `Knowledge Base/`.
+- `scope="kb"` (default) searches only the managed root.
   For a non-empty query, `widen_outside_kb=true` reserves up to `limit - 1`
   result slots for eligible sibling pages, even when KB matches fill `limit`.
   Widened hits carry `outside_kb: true`.

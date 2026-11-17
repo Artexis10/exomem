@@ -36,7 +36,7 @@ Read those revisions with `read_page(part="history")`; the `revision_history` en
    created: 2026-05-09
    updated: 2026-05-09
    sources: [...]
-   supersedes: "[[Knowledge Base/Notes/Research/Project Alpha/agentic-rag-retrieval-budget]]"
+   supersedes: "[[Notes/Research/Project Alpha/agentic-rag-retrieval-budget]]"
    tags: [...]
    ---
    ```
@@ -50,7 +50,7 @@ Read those revisions with `read_page(part="history")`; the `revision_history` en
 
    ```markdown
    > [!warning] Superseded
-   > This page has been replaced by [[Knowledge Base/Notes/Research/Project Alpha/agentic-rag-retrieval-budget-v2]] on 2026-05-09.
+   > This page has been replaced by [[Notes/Research/Project Alpha/agentic-rag-retrieval-budget-v2]] on 2026-05-09.
    > Reason: <one-line reason>
    ```
 

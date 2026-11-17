@@ -14,7 +14,7 @@
 # your agent makes on your explicit request (subject `activation-conventions`).
 #
 # YOUR OVERRIDE: copy this file's shape (not its shipped values) to
-# `<vault>/<Knowledge Base>/_Schema/activation-conventions.yaml` and edit it
+# `<vault>/<managed root>/_Schema/activation-conventions.yaml` and edit it
 # there. The override grammar is different from the shipped shape below: it
 # names what to ADD and, where allowed, what to DROP.
 #

@@ -2,7 +2,7 @@
 name: exomem-continue
 description: Resume prior project or session context from Exomem when the user wants to continue, pick something back up, or remember what was happening on a topic.
 metadata:
-  skill_contract: c46c24d063dd7a37149f66b03a3407425f5aa207e5f9ad9ba14ef50ff40264a4
+  skill_contract: c8cf5c6361d711d36d8ae6995d8cd11555388f6634ea3e58f3dcf4a52a4b9e87
   version: "0.1.0"
 ---
 
@@ -99,7 +99,7 @@ Resuming reads Planning; it never moves it. Route explicit user intent to Planni
 ## Mistakes to avoid
 Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.
 
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v11 sha256:cf1305b2bd39ddad73c5d17b177a3ac0b60949251c965a058b2d41d2983ab7a1 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -147,7 +147,7 @@ Rich example:
 ## Decision
 - id: commit-to-morning-training
 - tags: health
-- relations: supports: [[Notes/Health/Morning training]]
+- relations: supports: [[Morning training]]
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```

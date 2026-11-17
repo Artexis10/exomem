@@ -62,21 +62,21 @@ out-of-band — the upload endpoint (or the prefilled upload page when you're on
 claude.ai web), a file-sync drop (e.g. Obsidian Sync), or a direct disk write from Claude Code.
 Full detail: `references/operations.md` § preserve.
 
-## Writeable paths (Knowledge Base only)
+## Writeable paths (managed root only)
 
-The skill may write to anything inside `<vault>/Knowledge Base/`, subject to
+The skill may write to anything inside the managed root, subject to
 per-operation rules:
 
 | Path | Operations | Notes |
 |---|---|---|
-| `Knowledge Base/Sources/**` | add | Append-only; never edit existing files. `_attachments/` subfolders may hold binary originals (append-only). |
-| `Knowledge Base/Notes/**` | note, replace | Follow the live engagement policy, operation envelope, and standing authority. `_attachments/` subfolders may hold binary outputs (append-only). |
-| `Knowledge Base/Entities/**` | link, replace | Follow the live engagement policy, operation envelope, and standing authority. |
-| `Knowledge Base/Evidence/**` | preserve | Append-only proof-bearing and handed-over artifacts; never edit existing files; no frontmatter required on binaries |
-| `Knowledge Base/index.md` | any write | Catalog of what exists; auto-updated as part of every governed write |
-| `Knowledge Base/log.md` | any write | Chronological activity log; appended (never edited) on every governed write |
-| `Knowledge Base/<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |
-| `Knowledge Base/_Schema/**` | governed schema and registry writers | Follow the operation envelope and any active holds. Instruction changes require an explicit user request; never rewrite the skill autonomously. |
+| `Sources/**` | add | Append-only; never edit existing files. `_attachments/` subfolders may hold binary originals (append-only). |
+| `Notes/**` | note, replace | Follow the live engagement policy, operation envelope, and standing authority. `_attachments/` subfolders may hold binary outputs (append-only). |
+| `Entities/**` | link, replace | Follow the live engagement policy, operation envelope, and standing authority. |
+| `Evidence/**` | preserve | Append-only proof-bearing and handed-over artifacts; never edit existing files; no frontmatter required on binaries |
+| `index.md` | any write | Catalog of what exists; auto-updated as part of every governed write |
+| `log.md` | any write | Chronological activity log; appended (never edited) on every governed write |
+| `<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |
+| `_Schema/**` | governed schema and registry writers | Follow the operation envelope and any active holds. Instruction changes require an explicit user request; never rewrite the skill autonomously. |
 
 ## A legacy page `add_observation` refuses
 
@@ -91,13 +91,13 @@ Migrate the legacy page into a compiled type only on request
 
 ## Read-only paths (rest of the vault)
 
-The skill **reads from** any folders in the vault outside `Knowledge Base/` to
+The skill **reads from** any folders in the vault outside the managed root to
 inform compiled notes (links, citations, context). It **never writes to** them.
 Examples of folders you might keep alongside the KB:
 
 - Hand-authored reference or strategy material (`Reference/`, `Strategy/`, …)
 - Personal trackers, datasets, or admin folders
-- Any other top-level folder in the vault that is not `Knowledge Base/`
+- Any other top-level folder in the vault that is not the managed root
 
 If you explicitly ask the skill to write to one of these paths, it **declines and
 explains** that those are read-only inputs, and offers to compile the finding into
@@ -112,13 +112,13 @@ accidental modification, not deliberate human intent.
 ## Per-subtree access overrides (`_access.yaml`)
 
 The location rules above are the defaults. To carve out **exceptions** — a curated
-hand-thinking folder you keep inside `Knowledge Base/` but never want the skill to
+hand-thinking folder you keep inside the managed root but never want the skill to
 write, a specific read-only sibling outside it, or a private subtree that shouldn't
-even be searchable — add an optional `Knowledge Base/_access.yaml`:
+even be searchable — add an optional `_access.yaml`:
 
 ```yaml
 # Both lists are optional. Each entry is a subtree prefix — a top-level sibling
-# folder, or a KB-relative path (a leading "Knowledge Base/" is allowed and ignored).
+# folder, or a managed-root-relative path (a leading wrapper folder name is allowed and ignored).
 readonly:          # findable + indexed, but every write is refused
   - Reference
   - Notes/Research/Frozen Report
@@ -141,19 +141,19 @@ excluded:          # hidden from find + embeddings AND unwritable (truly private
 
 This is the config behind the "read-only / excluded subtrees are write-protected" line
 in SKILL.md — it gives a subtree the same write-refusal that everything outside
-`Knowledge Base/` gets by location.
+the managed root gets by location.
 
 ## Why hand-authored paths are read-only
 
 LLM-compiled material has different epistemic status from hand-authored material.
 Mixing them blurs which claims you stand behind vs. which the model produced. The
-Knowledge Base exists as a separate layer precisely so this distinction stays
+managed root exists as a separate layer precisely so this distinction stays
 sharp. Compiled research can and should **link** into hand-authored material —
 that's how the layers connect — but should never **modify** it.
 
 ## Sources are append-only
 
-Within `Knowledge Base/Sources/`, files are never edited after creation. If a
+Within `Sources/`, files are never edited after creation. If a
 source needs correction:
 
 - For factual error: capture a new source, supersede the compiled notes that drew on the old one.

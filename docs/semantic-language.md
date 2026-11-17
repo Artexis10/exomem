@@ -8,7 +8,7 @@ addressable through the public product commands. Markdown remains the source of
 truth; lexical, vector, and graph stores are rebuildable sidecars.
 
 <!-- BEGIN GENERATED SEMANTIC AUTHORING CONTRACT -->
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v11 sha256:cf1305b2bd39ddad73c5d17b177a3ac0b60949251c965a058b2d41d2983ab7a1 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -56,7 +56,7 @@ Rich example:
 ## Decision
 - id: commit-to-morning-training
 - tags: health
-- relations: supports: [[Knowledge Base/Notes/Health/Morning training]]
+- relations: supports: [[Morning training]]
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```

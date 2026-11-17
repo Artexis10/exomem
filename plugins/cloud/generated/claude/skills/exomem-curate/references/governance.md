@@ -115,7 +115,7 @@ a handle cannot restore it.
 ## Reserved administration paths
 
 `_Governance/**` and Exomem's internal state files, including
-`Knowledge Base/.governance.sqlite` and its transactional siblings, are reserved
+`.governance.sqlite` and its transactional siblings, are reserved
 administration state. Generic browse, read, move, delete, transfer, dataset, and
 media commands intentionally hide or refuse them. Use `governance tools` for policy
 inspection and lifecycle changes; do not retry a reserved-path refusal with a

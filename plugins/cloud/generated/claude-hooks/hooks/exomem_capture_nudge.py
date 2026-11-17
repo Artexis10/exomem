@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stop hook: nudge a Knowledge Base capture when a turn looks like a landing.
+"""Stop hook: nudge an Exomem capture when a turn looks like a landing.
 
 The KB skill already says to auto-capture at stepping-stones, but skill prose is
 *passive* — over a long thread the model forgets to check, so "auto-save" quietly
@@ -746,7 +746,7 @@ def _successful_landing(tool: dict) -> bool:
 #: is not loaded until the client restarts — so on a fresh install the very
 #: first thing the product does is ask for `create_note` / `edit_note` /
 #: `save_episode`, none of which exist yet, and there is no CLI fallback for
-#: the write side. The nudge's own escape hatch ("no Knowledge Base configured,
+#: the write side. The nudge's own escape hatch ("no Exomem vault configured,
 #: do nothing") cannot detect this case.
 PENDING_RESTART_MARKER = "pending-restart"
 

@@ -184,7 +184,7 @@ restatement of what specs/commits already capture.
 
 These rules are non-negotiable.
 
-1. **Read-only paths.** Never write to anything outside `Knowledge Base/`. Any
+1. **Read-only paths.** Never write to anything outside the managed root. Any
    sibling folders in the vault are inputs only. Compiled notes may **link to**
    them but never modify them.
 
@@ -200,7 +200,7 @@ These rules are non-negotiable.
    authority or a named procedure requires it. An explicit request or approved
    batch keeps its existing scope; neither lifts an action-class ceiling or grant.
 
-4. **Frontmatter is mandatory.** Every file written under `Knowledge Base/` must
+4. **Frontmatter is mandatory.** Every file written under the managed root must
    carry frontmatter conforming to `frontmatter.md`. Exceptions:
    `index.md`, `log.md`, and sub-folder `index.md` files. Non-markdown binaries
    carry frontmatter in a sidecar `.md` if one is needed.
@@ -240,7 +240,7 @@ For the full read-only / writeable path map see `write-scope.md`.
 
 ## Page types
 
-The page types under `Knowledge Base/`, each with a required frontmatter shape,
+The page types under the managed root, each with a required frontmatter shape,
 naming rule, and location. **Full per-type spec: `page-types.md`;
 frontmatter: `frontmatter.md`.** The behaviorally-load-bearing
 distinctions:
@@ -376,9 +376,9 @@ a junk drawer into a graph. The obligation is to record the connections you know
 about, not to reach a count: a page with nothing to link to is finished, and a
 fabricated edge is worse than none.
 
-**Canonical wikilink form: full vault-rooted.** Every wikilink resolves cleanly
-under the vault root with no prefix guessing:
-`[[Knowledge Base/Entities/Concepts/Profile]]`. Link back to the originating
+**Canonical wikilink form: full path from the managed root.** Every wikilink resolves
+cleanly from the managed root with no prefix guessing:
+`[[Entities/Concepts/Profile]]`. Link back to the originating
 `Sources/` file via the `sources:` frontmatter list (mirrors the source's
 `ingested_into:` list).
 
@@ -387,8 +387,8 @@ under the vault root with no prefix guessing:
 
 ```markdown
 ## Relations
-- refines [[Knowledge Base/Notes/Insights/Earlier Conclusion]]
-- depends_on [[Knowledge Base/Entities/Decisions/Architecture Decision]]
+- refines [[Notes/Insights/Earlier Conclusion]]
+- depends_on [[Entities/Decisions/Architecture Decision]]
 ```
 
 Use semantic-block metadata such as
@@ -465,7 +465,7 @@ Read-only recall and review follow the live retrieval policy.
   (`save_source`, `save_evidence`, `save_evidence`) and cite its
   governed path or stable ref. With no external source, pass an honest empty
   list. An unresolved citation returns `UNRESOLVED_SOURCE_CITATION` and writes
-  nothing. Brackets and the leading `Knowledge Base/` are tolerated in paths.
+  nothing. Brackets and a leading wrapper folder name are tolerated in paths.
 - **Back-references.** Each cited source gets the new note's wikilink appended
   to its `ingested_into:` frontmatter, atomically with the citation. A live citing
   derivative clears the citation backlog only; semantic compilation remains unassessed.

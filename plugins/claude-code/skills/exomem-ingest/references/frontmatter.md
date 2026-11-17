@@ -1,6 +1,6 @@
 # Frontmatter Spec
 
-Every file in `Knowledge Base/` (except `index.md` files; sources also carry
+Every file in the managed root (except `index.md` files; sources also carry
 frontmatter) carries YAML frontmatter at the top. The frontmatter is the metadata
 layer; without it, audit cannot do its job (and optional Obsidian tooling — Dataview, base
 files — can't scope). Frontmatter is required regardless of viewer; Dataview/bases are a nicety on top.
@@ -209,13 +209,13 @@ The following fields are deliberately **not** in the spec:
 
 ## Wikilink format in frontmatter
 
-YAML strings, double-quoted, using **full vault-rooted paths** without the `.md`
-extension. For KB material this is `Knowledge Base/<rest>`:
+YAML strings, double-quoted, using paths **relative to the managed root** without the `.md`
+extension:
 
 ```yaml
 sources:
-  - "[[Knowledge Base/Sources/Articles/2026-05-09-retrieval-patterns]]"
-  - "[[Knowledge Base/Sources/Sessions/2026-05-04-architecture-debate]]"
+  - "[[Sources/Articles/2026-05-09-retrieval-patterns]]"
+  - "[[Sources/Sessions/2026-05-04-architecture-debate]]"
 ```
 
 This is plain-markdown wikilink syntax; it is also Obsidian-compatible and survives optional Dataview queries. The exomem
@@ -241,9 +241,9 @@ status: active
 created: 2026-05-09
 updated: 2026-05-12
 sources:
-  - "[[Knowledge Base/Sources/Articles/2026-05-09-retrieval-patterns]]"
-  - "[[Knowledge Base/Sources/Sessions/2026-05-09-architecture-debate]]"
-supersedes: "[[Knowledge Base/Notes/Research/Project Alpha/old-rag-stub]]"
+  - "[[Sources/Articles/2026-05-09-retrieval-patterns]]"
+  - "[[Sources/Sessions/2026-05-09-architecture-debate]]"
+supersedes: "[[Notes/Research/Project Alpha/old-rag-stub]]"
 tags: [retrieval, agentic-rag, knowledge-graph, governance]
 ---
 ```
@@ -263,7 +263,7 @@ duration: "30 days"
 n: 1
 hypothesis: "Batching code review into one daily slot cuts context-switching"
 sources:
-  - "[[Knowledge Base/Sources/Books/2026-04-deep-work]]"
+  - "[[Sources/Books/2026-04-deep-work]]"
 tags: [workflow, batching, focus]
 ---
 ```
@@ -283,10 +283,10 @@ projects: [project-alpha]
 host: the host
 editor: a teammate
 sources:
-  - "[[Knowledge Base/Sources/Sessions/2026-05-09-launch-planning]]"
+  - "[[Sources/Sessions/2026-05-09-launch-planning]]"
 related:
-  - "[[Knowledge Base/Notes/Research/Project Alpha/launch-messaging]]"
-  - "[[Knowledge Base/Notes/Patterns/short-form-post-template]]"
+  - "[[Notes/Research/Project Alpha/launch-messaging]]"
+  - "[[Notes/Patterns/short-form-post-template]]"
 tags: [posts, launch, batch-01]
 ---
 ```

@@ -1,6 +1,6 @@
 # Operations
 
-Detailed specs for the Knowledge Base operations. Read on first use of an operation.
+Detailed specs for the Exomem operations. Read on first use of an operation.
 
 ## Plain-language routing
 
@@ -54,7 +54,7 @@ own fields; `read_instructions(topic=<tool>)` shows them.
 Use `query_plan_items()` without `collection` to discover Planning
 collections. Copy a returned `manifest_path` to inspect one collection.
 Canonical Planning is one ordinary Markdown item file per plan under
-`Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
+`Planning/`; the authored horizon is never auto-rebucketed.
 Outcomes, initiatives, and work items may form an explicit hierarchy; areas are
 separate membership. Records evidence and external execution pointers remain
 opaque. Review, dashboards, and UI workflows are separate product work.
@@ -157,7 +157,7 @@ Expected result: the back-link field is gone; inverse expansion answers the same
 question and stays current as source rows change.
 
 Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
-The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
+The intended Obsidian template root is `Templates/`: users keep
 their normal **Templates → Insert template** workflow. Exomem does not require
 Obsidian or a plugin and does not edit `.obsidian`; editing a template never
 rewrites historical records.
@@ -677,7 +677,7 @@ with the optional validation envelope:
 
 ```text
 add_record(collection="...", item={...}, why="...", delivery={
-    "evidence_page": "Knowledge Base/Evidence/.../<artifact>.md",
+    "evidence_page": "Evidence/.../<artifact>.md",
     "link_field": "<declared-link-field>",
     "reported_remote_ref": "<reported-platform-reference>",
     "reported_remote_field": "<declared-string-field>",
@@ -744,7 +744,7 @@ header-only and cannot become clickable grants.
 
 ## find
 
-**Goal:** Type-aware search across the Knowledge Base. Read-only. See SKILL.md §
+**Goal:** Type-aware search across the managed root. Read-only. See SKILL.md §
 Search for modes, scope, and ranking knobs.
 
 ### Triggers
@@ -1078,7 +1078,7 @@ Older strict readers refuse those plans before applying them; legacy unmarked pl
 
 ## Collection adoption
 
-A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `inspect_memory` carries `status` and `work-item`. `manage_memory` carries the other operations, including `plan` and `finish`. `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
+A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `inspect_memory` carries `status` and `work-item`. `manage_memory` carries the other operations, including `plan` and `finish`. `start` is guarded (`initialize_kb` bootstraps a missing managed root, otherwise `KB_NOT_INITIALIZED`).
 
 Every selected file is imported or refused with a per-path code; none is dropped silently. A UTF-8 text file becomes a Source that holds the exact text in a verbatim fence, with its links, embeds, tags and aliases kept outside the fence as graph structure. Any other file, and a text file that is not valid UTF-8, becomes a Source that keeps the original bytes as its artifact; media extraction then runs through the media job path.
 
@@ -1095,7 +1095,7 @@ Every selected file is imported or refused with a per-path code; none is dropped
 2. `select` materializes a folder-rule selection server-side (`include`, `exclude`, `overrides`, `include_junk`). An `include` entry is a folder path, or a rule object. `{path, source_kind, domain}` files that folder's items under a registered Source kind and domain. `{path, adopt_as: "note", note_type, project?, domain?}` also makes each Markdown file there a draft note of that registered compiled type (`project` or `domain` where the note leaf needs one for that type; the leaf picks the folder). An unregistered kind or note type, or a type the leaf cannot place, is refused with the selection unchanged.
 3. `plan` previews exact targets, titles, hashes, frontmatter and resolved or unresolved links. It reports `existing_ref` for an item whose bytes a Source already holds, and plans that item as `already-imported`: no second Source or artifact is written. A repeat of one file inside the plan is a `duplicate-of` item that plans no write. An own-note item also shows its note target, title, front matter and links, `existing_note` when an earlier run made the note, and `previous_note` when the original changed (the new Source then stands alone).
 4. `apply` copies the validated subset into governed Sources with provenance (`plan_id`; `retry_failed` and `only_paths` narrow a retry). An item whose bytes a Source already holds is `already-applied`: the existing Source records the new path in `also_imported_from` (`mapped: true`, counted in the reply's `duplicates.mapped`), and a re-run writes nothing. When the Source the plan named for those bytes is missing or changed at apply time, and no other Source holds them, the item stores its own copy instead and its outcome carries `stored_own_copy`. `duplicates.check_unavailable` counts items stored as new because the check could not run. Apply then creates each own-note item's draft note. An own-note item is complete only when its Source and its note exist; `source-applied` marks one whose note is still owed. A note target taken by another page fails the item with `TARGET_OCCUPIED`. A draft note leaves its Source in the review backlog until the note is promoted to live.
-5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, reports `coverage` (imported, refused, pending extraction, unresolved links, hidden folders counted, notes created, found and failed) and optionally writes a run manifest under `Knowledge Base/_Adoption/` (`write_manifest`, default true). For a staged import it also reports `residual`, the files still staged by reason, and the discard route once the last page is done.
+5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, reports `coverage` (imported, refused, pending extraction, unresolved links, hidden folders counted, notes created, found and failed) and optionally writes a run manifest under `_Adoption/` (`write_manifest`, default true). For a staged import it also reports `residual`, the files still staged by reason, and the discard route once the last page is done.
 
 `plan` and `apply` stop inside the request budget. While a result carries `continuation`, call the same action again with that `continuation` and the unchanged other arguments. The run is done when no `continuation` returns and `phase` is `applied`; a stopped call leaves the remaining work in `status`.
 
@@ -1108,4 +1108,4 @@ Per-run `status` defaults to a compact summary. Detail views (`inventory`, `sele
 
 ## One-shot adoption
 
-One-shot adoption preserves originals. Use `inspect_memory(operation="imports.scan")` to inspect first. Use `manage_memory` with `operation` set to `imports.save_manifest`, `imports.copy_as_sources` or `imports.compile_selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. `imports.copy_as_sources` skips a file whose bytes the vault already stores (`ALREADY_IMPORTED`, with the existing Source's ref) or an earlier selected file holds (`DUPLICATE_IN_SELECTION`), and records no import mapping. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.
+One-shot adoption preserves originals. Use `inspect_memory(operation="imports.scan")` to inspect first. Use `manage_memory` with `operation` set to `imports.save_manifest`, `imports.copy_as_sources` or `imports.compile_selected` to write under the managed root, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. `imports.copy_as_sources` skips a file whose bytes the vault already stores (`ALREADY_IMPORTED`, with the existing Source's ref) or an earlier selected file holds (`DUPLICATE_IN_SELECTION`), and records no import mapping. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.

@@ -3,7 +3,7 @@
 ## Vault layout
 
 ```
-<vault>/Knowledge Base/
+<managed root>/
 ├── index.md                      Top-level catalog; updated on every write
 ├── log.md                        Append-only activity log; most recent first
 ├── _access.yaml                  (optional) per-subtree readonly/excluded — see references/write-scope.md
@@ -40,17 +40,16 @@
     └── <scope>/                  Per-incident binary/document/factual preservation
 ```
 
-**This tree is the `Knowledge Base/` layer only — not the shape of your whole vault.**
+**This tree is the managed root only — not the shape of your whole vault.**
 The vault around it is yours: any top-level folders you keep (`Daily/`, `Projects/`,
-`Reference/`, a journal — whatever) sit *beside* `Knowledge Base/` and are **read-only
+`Reference/`, a journal — whatever) sit *beside* the managed root and are **read-only
 input** to this skill. Don't infer a fixed vault shape from the tree above. On your
 first engagement in a vault, run `inspect_memory` once to learn its real top-level layout
 (see § Assessing or adopting a vault you didn't build), then treat everything outside
-`Knowledge Base/` as read-only. Only `Knowledge Base/` is governed and writeable.
+the managed root as read-only. Only the managed root is governed and writeable.
 
-`<vault>` resolves to your markdown vault root (Obsidian optional) — the folder that
-contains `Knowledge Base/`, set via `EXOMEM_VAULT_PATH`. Verify allowed filesystem
-paths before writing.
+`<vault>` resolves to your markdown vault root (Obsidian optional), set via
+`EXOMEM_VAULT_PATH`. Verify allowed filesystem paths before writing.
 
 The research scopes are an open set you grow over time, registered in
 `_Schema/project-keys.yaml` (see § Research scope keys). New users start with a
@@ -58,7 +57,7 @@ small set (e.g. `personal`, `project-alpha`, `work`) and add their own.
 
 ### Assessing or adopting a vault you didn't build
 
-**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **inspect_memory(operation="imports.scan")** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, reports a bounded semantic census, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance. `compile-selected` returns a proposal, not a compiled note: review it, then call `note()` so the normal semantic precommit contract still applies.
+**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **inspect_memory(operation="imports.scan")** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, reports a bounded semantic census, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under the managed root and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance. `compile-selected` returns a proposal, not a compiled note: review it, then call `note()` so the normal semantic precommit contract still applies.
 
 For structural questions —
 "what does this vault look like," "how is this vault organized," "is there junk in
@@ -66,9 +65,9 @@ here" — and simply to learn the layout before you write, run **inspect_memory*
 read-only report of folder structure, counts, frontmatter coverage, naming
 patterns, and junk candidates (zero-byte files, sync-conflict duplicates). It
 works on any folder under the vault root, including trees outside
-`Knowledge Base/` (a `Daily/` or `Journal/` folder), and on vaults with no KB at
-all. The folders it reports *outside* `Knowledge Base/` are read-only input — link
-to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `inspect_memory` on folders of interest,
+the managed root (a `Daily/` or `Journal/` folder), and on vaults with no KB at
+all. The folders it reports *outside* the managed root are read-only input — link
+to them, never write them; only the managed root is governed. Drill down from there: `inspect_memory` on folders of interest,
 `search_memory scope="vault"` for content, targeted `read_page` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
 bulk-read a vault file-by-file to answer a structural question** — the report
 answers in one call what would otherwise cost hundreds of reads.
@@ -126,7 +125,7 @@ is in **`audit-checks.md`**.
 
 ## What this skill does NOT do
 
-- Touch anything outside `Knowledge Base/`.
+- Touch anything outside the managed root.
 - Auto-compile *blindly* after every capture. Compilation is a deliberate step
   taken at a stepping-stone; it's always reported, never a silent dump of raw
   transcripts or every passing remark. "No silent dump" targets *noise* —

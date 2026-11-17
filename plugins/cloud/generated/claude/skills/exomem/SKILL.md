@@ -1,8 +1,8 @@
 ---
 name: exomem
-description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; content outside the managed Knowledge Base stays read-only.
+description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; content outside the managed root stays read-only.
 metadata:
-  skill_contract: c46c24d063dd7a37149f66b03a3407425f5aa207e5f9ad9ba14ef50ff40264a4
+  skill_contract: c8cf5c6361d711d36d8ae6995d8cd11555388f6634ea3e58f3dcf4a52a4b9e87
   version: "0.32.0"
 ---
 
@@ -14,8 +14,11 @@ MCP calls use the typed tools shown by discovery; each takes its own fields.
 for the arguments and one example. REST and CLI calls keep their grouped command
 selectors. Keep file attachments in the top-level `files` field.
 
-Exomem is the connector/MCP; the Knowledge Base is the governed layer inside a
-markdown vault (Obsidian optional). Keep temporary working context in the current
+Exomem is the connector/MCP; the managed root is the governed layer of a
+markdown vault (Obsidian optional). Paths in this skill and its references are relative
+to the managed root. In a `nested` vault that root is a folder inside the vault; in a
+`root` vault it is the vault root, and compiled areas sit at the top level instead of
+below `Notes/`. Keep temporary working context in the current
 conversation. Exomem holds durable preferences, feedback, personal baselines,
 project knowledge, sourced conclusions, decisions, failures, and proof-bearing records.
 Capture follows the live engagement policy. Use native assistant memory only as
@@ -26,7 +29,7 @@ Raw inputs go to `Sources/`; proof-bearing artifacts to `Evidence/`; conclusions
 to `Notes/`; stable reusable identities to `Entities/`. Sources/Evidence are
 append-only: their content never changes, and their links and registered pointer
 fields such as `project` change only through governed moves and pointer
-corrections. Everything outside `Knowledge Base/` is read-only input, and
+corrections. Everything outside the managed root is read-only input, and
 in-vault readonly/excluded paths remain protected. Prefer supersession over
 removal; never invent IDs, sources, relations, or numeric confidence scores.
 A degree of belief is a `## Belief` unit that records what its holder stated, with
@@ -75,7 +78,7 @@ If a required reference cannot be read, obtain the portable contract through
 | Save intent or observed events; interpret an ambiguous action | `query_plan_items`, `add_plan_item`, `edit_plan_item`, `query_records`, `add_record`, `edit_record`, `inspect_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
 | Record what a conversation worked on, decided and left open | `save_episode`, `inspect_memory` (`episodes.*`) | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
-| Bring a folder, ZIP or notes export into the Knowledge Base | `inspect_memory` and `manage_memory` (`imports.*`); on Cloud also `observe_transfer` and `transfer_memory` | [importing](references/importing.md); [operation details](references/operations.md); [mutation results](references/mutation-results.md) before any mutation |
+| Bring a folder, ZIP or notes export into the managed root | `inspect_memory` and `manage_memory` (`imports.*`); on Cloud also `observe_transfer` and `transfer_memory` | [importing](references/importing.md); [operation details](references/operations.md); [mutation results](references/mutation-results.md) before any mutation |
 | Review, adopt, audit, restructure, or maintain a vault | `list_review_items`, `decide_review_item`, `inspect_memory` and `manage_memory` (`review.*`, `imports.*`, `maintenance.*`) | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
 | Infer/change vocabulary or schema | `inspect_memory` and `manage_memory` (`schema.*`) | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Give maps topics, or file unfiled pages under topics | `list_review_items(queue="vocabulary")` topic-carrier items, then `manage_memory` (`schema.*`) with `subject="topic-carriers"` | [vocabulary](references/vocabulary.md), section "Topic carriers"; never edit pages one by one for this |
@@ -108,7 +111,7 @@ Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence content is immutable; their pointers change only through governed
-moves and pointer corrections. Content outside the managed Knowledge Base is
+moves and pointer corrections. Content outside the managed root is
 read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
