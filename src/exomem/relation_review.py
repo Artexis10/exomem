@@ -22,6 +22,7 @@ from . import (
     call_spans,
     lifecycle_statuses,
     memory_schema,
+    mutation_lock,
     relation_registry,
     semantic_contract,
     semantic_language_registry,
@@ -3918,7 +3919,14 @@ def _detach_auxiliaries(
                 raise RelationReviewError(
                     "INVALID_AUXILIARY_WRITE", "auxiliary guard target does not match"
                 )
-            value.guard.recheck(root)
+            try:
+                value.guard.recheck(root)
+            except vault.PathGuardError as error:
+                # A writer ahead in line committed between this write's plan
+                # and its pre-boundary prepare: the auxiliary it moved is
+                # re-planned on the absorbed retry, as it already is when the
+                # in-boundary commit reports the same race.
+                raise mutation_lock.planned_write_moved_busy() from error
         else:
             try:
                 from .vault_store import read as store_read
