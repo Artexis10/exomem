@@ -1855,16 +1855,31 @@ def capture_source_correction(
 ) -> dict:
     """Correct a binary Source's metadata with no new upload: its stored original becomes the successor's.
 
-    The predecessor's original is copied under a held handle and hashed as it is copied. A copy whose
-    SHA-256 differs from the one the predecessor recorded is refused with `SOURCE_ORIGINAL_CHANGED` and nothing
-    is written. The successor then commits through the ordinary capture, so every correction guard applies:
-    the historical page hash, one successor per predecessor, canonical identity, authority and egress.
+    A field the call sets wins, and every field it omits (kind, url, domain, projects, tags, document form
+    and the reason for capture) carries over from the predecessor, so a call that names only what was wrong
+    keeps the rest. The predecessor's original is copied under a held handle and hashed as it is copied. A copy
+    whose SHA-256 differs from the one the predecessor recorded is refused with `SOURCE_ORIGINAL_CHANGED` and
+    nothing is written. The successor then commits through the ordinary capture, so every correction guard
+    applies: the historical page hash, one successor per predecessor, canonical identity, authority and egress.
     """
+    from . import add as add_module
     from . import reserved_paths, source_capture, source_corrections
     from .governance import raw_protection as raw_guard
 
     plan = source_corrections.prepare_correction(vault_root, correction)
     metadata, _body, _front = parse_frontmatter(plan.old_source)
+    # The frontmatter keys `add._render_source` writes for these capture fields, read back with their types.
+    carried: dict[str, object] = {
+        **{name: metadata[name] for name in ("source_type", "url", "domain", "document_form")
+           if isinstance(metadata.get(name), str) and metadata[name]},
+        **{name: [str(item) for item in metadata[name]] for name in ("tags", "projects")
+           if isinstance(metadata.get(name), list) and metadata[name]},
+    }
+    if why := add_module.stored_why(plan.old_source):
+        carried["why_captured"] = why
+    source_fields = {**source_fields, **{name: value for name, value in carried.items() if source_fields.get(name) is None}}
+    if source_fields.get("source_type") is None:
+        raise add_module.kind_required(vault_root, supplied=None)
     recorded, stored, filename = (metadata.get(name) for name in ("binary_sha256", "evidence_file", "original_filename"))
     if (
         not all(isinstance(value, str) and value for value in (recorded, stored, filename))

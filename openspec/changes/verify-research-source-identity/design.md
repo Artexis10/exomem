@@ -54,7 +54,7 @@ A correction with no `files`, `content` or `passages` is metadata-only. It appli
 1. The capture reads the original at the predecessor's `evidence_file`. It refuses with `SOURCE_ORIGINAL_CHANGED` when the SHA-256 differs from `binary_sha256`.
 2. The bytes are staged as the successor's original, under the original filename and content type.
 3. The duplicate check is skipped for every correction, because a correction is an explicit successor of named bytes.
-4. The successor takes title, `url`, kind, domain, projects, tags and `document_form` from the call. It takes `ingested_into` from the predecessor and gets a fresh identity check.
+4. The successor takes its title from the call. It takes `url`, kind, domain, projects, tags, `document_form` and the reason for capture from the call when the call sets them, and from the predecessor when the call omits them, so a call that names only what was wrong keeps the rest. It takes `ingested_into` from the predecessor and gets a fresh identity check.
 
 The existing guards apply unchanged: the historical page hash, one successor per predecessor, canonical identity, authority and egress. A text Source still corrects with `content`.
 

@@ -122,6 +122,31 @@ def saved(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> dict:  # 
     return _save_pdf(vault, source_schema, url=CLAIM)["files"][0]
 
 
+@pytest.mark.usefixtures("owner_scope")
+def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_source(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    row = _save_pdf(
+        vault, source_schema, url=CLAIM, source_kind="session", domain="urban-planning", projects=["riverside"],
+        tags=["lanterns", "harbours"], document_form="full-text", why_captured="Cited in the harbour survey.",
+    )["files"][0]
+
+    # What `next_action` asks for: no files, the same title, the right url and the correction; tags set anew.
+    successor = _save_pdf(
+        vault, source_schema, upload=False, source_kind=None, url="https://doi.org/10.5555/aaa", tags=["lighthouses"],
+        correction=_correction(row),
+    )["files"][0]
+
+    kept = _frontmatter(vault, successor["page"])
+    assert kept["url"] == "https://doi.org/10.5555/aaa"
+    assert kept["tags"] == ["lighthouses"]
+    assert (kept["source_type"], kept["domain"], kept["projects"], kept["document_form"]) == (
+        "session", "urban-planning", ["riverside"], "full-text",
+    )
+    assert "> Cited in the harbour survey." in (vault / successor["page"]).read_text(encoding="utf-8")
+
+
 def test_a_changed_original_refuses_the_correction_and_writes_nothing(vault, source_schema, saved) -> None:
     (vault / saved["stored_path"]).write_bytes(b"replaced bytes")
     before = _sources(vault)

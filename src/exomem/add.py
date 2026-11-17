@@ -1096,7 +1096,7 @@ def _committed_page_hash(page: Path) -> str | None:
         return None
 
 
-def _stored_why(page_text: str) -> str | None:
+def stored_why(page_text: str) -> str | None:
     """The reason a Source page records in its leading blockquote, in the shape `_render_source` writes it."""
     _, body, _ = parse_frontmatter(page_text)
     lines = body.split(f"\n{CAPTURE_HEADING}\n", 1)[0].splitlines()[1:]
@@ -1123,7 +1123,7 @@ def _reused_capture(
             ("source_kind", kind, kept.get("source_type")),
             ("url", provided_url, kept.get("url")),
             ("tags", tags or None, kept.get("tags") or None),
-            ("why_captured", why, _stored_why(hit.payload.text)),
+            ("why_captured", why, stored_why(hit.payload.text)),
             ("domain", domain, kept.get("domain")),
             ("projects", projects or None, kept.get("projects")),
         )

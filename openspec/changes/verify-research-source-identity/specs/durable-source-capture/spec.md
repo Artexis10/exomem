@@ -5,7 +5,9 @@
 `capture_source` SHALL accept a correction without `files`, `content` or `passages` when the predecessor has a stored original.
 It SHALL read that original and refuse with `SOURCE_ORIGINAL_CHANGED` when its SHA-256 differs from the predecessor's recorded hash.
 It SHALL store those bytes as the successor's original under the predecessor's original filename and content type.
-The successor SHALL take its title, URL, kind, domain, projects, tags and document form from the call, and its compiled-note backlinks from the predecessor.
+The successor SHALL take its title from the call.
+It SHALL take its URL, kind, domain, projects, tags, document form and reason for capture from the call when the call sets them, and from the predecessor when the call omits them.
+It SHALL take its compiled-note backlinks from the predecessor.
 The successor SHALL receive its own identity check.
 A correction SHALL NOT be answered with an earlier Source that holds the same bytes.
 The predecessor page and its original SHALL remain byte-identical, and every existing correction guard SHALL apply.
@@ -16,6 +18,12 @@ The predecessor page and its original SHALL remain byte-identical, and every exi
 - **THEN** one successor and one receipt are written
 - **AND** the successor's original has the predecessor's SHA-256 and the successor lists the predecessor's backlinks
 - **AND** the predecessor page and original are unchanged
+
+#### Scenario: A correction that names only what was wrong keeps the rest
+
+- **WHEN** an agent corrects a binary Source with no file, the same title, a new URL, new tags and the correction, and omits every other field
+- **THEN** the successor has the new URL and tags
+- **AND** the successor keeps the predecessor's kind, domain, projects, document form and reason for capture
 
 #### Scenario: The stored original no longer matches
 

@@ -9290,7 +9290,7 @@ def op_capture_source(
         source_identity: Durable text-capture identity.
         expected_sha256: Original SHA-256 (UTF-8 for content).
         correction: Correct a Source; expected_hash is its page hash. With no files, content or
-            passages it keeps the stored original and takes the call's metadata.
+            passages it keeps the stored original; fields the call omits carry over.
         capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
         document_form: What the document is as a record of a work; a new key registers.
     """
@@ -9323,8 +9323,12 @@ def op_capture_source(
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
         source_identity = source_capture.validate_identity(source_identity)
         source_capture.require_authority(vault_root)
-    # Resolved before any byte is fetched or written, for files and text alike.
-    kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    # Resolved before any byte is fetched or written, for files and text alike. A metadata-only correction
+    # that names no kind keeps its predecessor's (`client_artifacts.capture_source_correction`).
+    kind = (
+        None if metadata_only and not (source_type or "").strip() and not (source_kind or "").strip()
+        else _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    )
     from . import source_result_attribution
 
     out: dict
