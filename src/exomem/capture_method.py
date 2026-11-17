@@ -35,13 +35,11 @@ class CaptureMethod:
     title: str
 
 
-def resolve(
-    vault_root: Path, reference: str, *, readable: Callable[[str], bool] | None = None
-) -> CaptureMethod | None:
-    """The page `reference` names when `readable` admits it, else None.
+def locate(vault_root: Path, reference: str) -> str | None:
+    """The vault path of the page `reference` names, or None; it decides nothing about who may read it.
 
-    `readable` decides one vault path for the caller asking; left out, it is the release decision that
-    every page read makes.
+    Only the page's release decision for the caller asking admits it to anyone, so a caller of this
+    function owns that decision.
     """
     root = Path(vault_root)
     try:
@@ -57,20 +55,38 @@ def resolve(
             or confined.relative_to(root.resolve()).as_posix() != path
             or not confined.is_file()
             or reserved_paths.classify_logical(path).blocked
-            or not (readable(path) if readable is not None else egress.quick_page_visible(root, path))
         ):
             return None
+        return path
+    except Exception:  # noqa: BLE001 -- a pointer that cannot be resolved is omitted, never an error
+        log.debug("capture method resolution failed (non-fatal)", exc_info=True)
+        return None
+
+
+def resolve(
+    vault_root: Path, reference: str, *, readable: Callable[[str], bool] | None = None
+) -> CaptureMethod | None:
+    """The page `reference` names when `readable` admits it, else None.
+
+    `readable` decides one vault path for the caller asking; left out, it is the release decision that
+    every page read makes.
+    """
+    root = Path(vault_root)
+    path = locate(root, reference)
+    if path is None or not (readable(path) if readable is not None else egress.quick_page_visible(root, path)):
+        return None
+    try:
         identity = page_names.read_identity(root, path)
         if identity is None:
             return None
-        owner = memory_refs.read_reference_owner(root, confined)
+        owner = memory_refs.read_reference_owner(root, root / path)
         title = " ".join(egress.without_wikilinks(identity.title).split())
         if not title:
             return None
         return CaptureMethod(
             path=path,
             ref=memory_refs.memory_ref(owner) if owner else path,
-            title=title if len(title) <= TITLE_MAX_CHARS else f"{title[: TITLE_MAX_CHARS - 1].rstrip()}…",
+            title=title if len(title) <= TITLE_MAX_CHARS else f"{title[: TITLE_MAX_CHARS - 1].rstrip()}\u2026",
         )
     except Exception:  # noqa: BLE001 -- a pointer that cannot be resolved is omitted, never an error
         log.debug("capture method resolution failed (non-fatal)", exc_info=True)

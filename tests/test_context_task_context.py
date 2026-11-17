@@ -1009,3 +1009,173 @@ def test_the_short_activation_door_still_runs_the_method_search(vault: Path, mon
         request_budget.reset_current(token)
     assert searched
     assert {"role": "task_context", "reason": "budget"} not in packet["task_context"]["missing"]
+
+
+# A collection manifest that declares a capture method serves that page when a turn routes to the collection.
+DEPOT_MANIFEST = "Knowledge Base/Records/Depot Stock/_collection.md"
+DEPOT_TURN = "Where can I query depot stock observations?"
+STOCKTAKE_METHOD = "Knowledge Base/Notes/Insights/stocktake-recording-method.md"
+STOCKTAKE_PAGE = (
+    "---\ntype: insight\nstatus: active\n---\n\n# Stocktake recording method\n\n"
+    "Count each shelf before the shipment arrives, then note the shelf number first.\n"
+)
+
+
+def _declare_capture_method(vault: Path, reference: str) -> None:
+    """Seed the structure, then have the Depot Stock manifest declare `reference` as its capture method."""
+    _seed_structure(vault)
+    manifest = vault / DEPOT_MANIFEST
+    text = manifest.read_text()
+    declared = text.replace("claims:\n", f'capture:\n  method: "{reference}"\nclaims:\n', 1)
+    assert declared != text
+    manifest.write_text(declared)
+
+
+def _methods_of(packet: dict, source_ref: str) -> list[dict]:
+    return [item for item in packet["task_context"]["methods"]["items"] if item["source_ref"] == source_ref]
+
+
+def _routed_to_depot_stock(packet: dict) -> bool:
+    """Whether the turn slice carries the collection lead that the turn routed to."""
+    return DEPOT_MANIFEST in {item["path"] for item in packet["turn_slice"]["items"]}
+
+
+def test_a_routed_collection_serves_its_declared_plain_page_as_a_read_required_method(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's method page reaches the turn that routes to the collection, though the turn never names it."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _declare_capture_method(vault, "[[Stocktake recording method]]")
+    _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    packet = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+    assert _routed_to_depot_stock(packet)
+    (method,) = _methods_of(packet, STOCKTAKE_METHOD)
+    assert method["applicability"] == "read_required"
+    assert method["read_ref"] == STOCKTAKE_METHOD
+    assert method["source_version"]
+    held = working_set_runtime.decode_continuity(packet["continuity"])["method_versions"]
+    assert [item["source_ref"] for item in held] == [STOCKTAKE_METHOD]
+
+
+def test_a_routed_collection_serves_a_declared_skill_page_as_a_skill(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    skill = "Knowledge Base/Skills/stocktake/SKILL.md"
+    _declare_capture_method(vault, f"[[{skill}]]")
+    _write(
+        vault, skill,
+        "---\nname: stocktake\ndescription: Count each shelf in a fixed order before logging a stock line.\n---\n\n# Stocktake\n\n"
+        + "Count each shelf in a fixed order.\n",
+    )
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    packet = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+    (method,) = _methods_of(packet, skill)
+    assert method["kind"] == "skill"
+    assert method["name"] == "stocktake"
+    assert method["description"] == "Count each shelf in a fixed order before logging a stock line."
+
+
+def test_a_revised_capture_method_page_resets_the_methods_a_client_holds(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revising the method delivers the new one at the next activation, and an untouched method keeps the held set."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _declare_capture_method(vault, "[[Stocktake recording method]]")
+    _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    first = _activate(vault, turn=DEPOT_TURN, max_chars=8000, client="fixture-a")
+    (before,) = _methods_of(first, STOCKTAKE_METHOD)
+    unchanged = _activate(vault, turn=DEPOT_TURN, max_chars=8000, continuity=first["continuity"], client="fixture-a")
+    assert unchanged["task_context"]["methods"]["reset"] is False
+
+    page = vault / STOCKTAKE_METHOD
+    page.write_text(page.read_text().replace("shelf number first", "aisle letter first"))
+    freshness.on_files_changed(vault, [page])
+    refreshed = _activate(vault, turn=DEPOT_TURN, max_chars=8000, continuity=first["continuity"], client="fixture-a")
+    assert refreshed["task_context"]["methods"]["reset"] is True
+    (after,) = _methods_of(refreshed, STOCKTAKE_METHOD)
+    assert after["source_version"] != before["source_version"]
+    assert after["ref"] == before["ref"]
+
+
+@pytest.mark.parametrize("reference", ["[[Stocktake recording method]]", f"[[{STOCKTAKE_METHOD}]]"], ids=["title", "path"])
+def test_a_withheld_capture_method_page_is_served_to_no_one_who_may_not_read_it(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    """A withheld method page and a declaration that names no page leave the caller the same packet.
+
+    A title resolves only to a page the caller may see; a path names the page whether or not it may be read,
+    so the path form reaches the page's own release decision.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    twin = _second_vault(tmp_path)
+    for root in (vault, twin):
+        _declare_capture_method(root, reference)
+    _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)  # the twin declares the same page and has none
+    _withhold(vault, STOCKTAKE_METHOD, ceiling=0)
+    for root in (vault, twin):
+        _built(root).close()
+        lexstore.ensure_fresh(root)
+    # The control: the owner, whom the rule does not bind, is served the page this vault holds.
+    assert _methods_of(_activate(vault, turn=DEPOT_TURN, max_chars=8000), STOCKTAKE_METHOD)
+    withheld = _activate(vault, _external(), turn=DEPOT_TURN, max_chars=8000)
+    missing = _activate(twin, _external(), turn=DEPOT_TURN, max_chars=8000)
+    assert _routed_to_depot_stock(withheld)
+    assert _without_response_id(withheld) == _without_response_id(missing)
+    assert "stocktake" not in str(withheld).lower()
+
+
+def test_a_routed_collection_resolves_its_declared_method_once_and_one_that_declares_none_never(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serving the method costs one reference lookup for the routed lead, and nothing for a lead that declares none."""
+    from exomem import page_names
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _declare_capture_method(vault, "[[Stocktake recording method]]")
+    _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    lookups: list[str] = []
+    resolve = page_names.resolve_page
+
+    def counted(root, value, **kwargs):
+        lookups.append(value)
+        return resolve(root, value, **kwargs)
+
+    monkeypatch.setattr(page_names, "resolve_page", counted)
+    _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+    assert lookups == ["Stocktake recording method"]
+
+    manifest = vault / DEPOT_MANIFEST
+    manifest.write_text(manifest.read_text().replace('capture:\n  method: "[[Stocktake recording method]]"\n', ""))
+    freshness.on_files_changed(vault, [manifest])
+    lookups.clear()
+    undeclared = _activate(vault, turn=DEPOT_TURN, max_chars=8000, client="fixture-b")
+    assert _routed_to_depot_stock(undeclared)
+    assert lookups == []
+    assert _methods_of(undeclared, STOCKTAKE_METHOD) == []
+
+
+def test_a_declared_method_page_that_the_turn_also_leads_to_is_served_once(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _declare_capture_method(vault, "[[Stocktake recording method]]")
+    _write(
+        vault, STOCKTAKE_METHOD,
+        "---\ntype: insight\nstatus: active\n---\n\n# Stocktake recording method\n\n"
+        "- [technique] Count each shelf before logging depot stock observations ^count\n",
+    )
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    packet = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+    assert STOCKTAKE_METHOD in {item["source_ref"] for item in packet["task_context"]["candidates"]}
+    (method,) = _methods_of(packet, STOCKTAKE_METHOD)
+    assert method["ref"].endswith("#count")
