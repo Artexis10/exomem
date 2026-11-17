@@ -736,16 +736,15 @@ def _stored_listing(vault_root: Path, folder: Path) -> tuple[dict[str, int], lis
     if not (ownership.owns_folder(relative) and mode.store_mode_for_reads(root)):
         return None
     prefix = f"{relative}/"
-    files: dict[str, int] = {}
-    folders: set[str] = set()
     with read.snapshot(root) as view:
-        for meta in view.pages(prefix):
-            name, _, rest = meta.path[len(prefix) :].partition("/")
-            if rest:
-                folders.add(name)
-            elif name.endswith(".md"):
-                files[name] = meta.size
-    return files, sorted(folders, key=str.casefold)
+        children = list(view.children(relative))
+        sized = view.page_metas([prefix + c.name for c in children if not c.is_dir])
+    files = {
+        c.name: sized[prefix + c.name].size
+        for c in children
+        if not c.is_dir and c.name.endswith(".md")
+    }
+    return files, sorted((c.name for c in children if c.is_dir), key=str.casefold)
 
 
 def inspect_contract(vault_root: Path, name: str) -> dict[str, Any]:
