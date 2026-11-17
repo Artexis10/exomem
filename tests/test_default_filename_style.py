@@ -14,6 +14,8 @@ import yaml
 
 from exomem import add as add_module
 from exomem import doctor as doctor_module
+from exomem import find as find_module
+from exomem import freshness
 from exomem import note as note_module
 from exomem import schema as schema_module
 from exomem import vault as vault_module
@@ -41,6 +43,15 @@ def _insight(vault_root: Path, title: str) -> note_module.NoteResult:
 def _stored_title(vault_root: Path, result_path: str) -> str:
     text = (vault_root / result_path).read_text(encoding="utf-8")
     return yaml.safe_load(text.split("\n---\n")[0].removeprefix("---\n"))["title"]
+
+
+def _hold_the_title_index(vault_root: Path) -> None:
+    """Hold the shared resolver in memory and current, as the running server's watcher keeps it."""
+    freshness.seed(
+        vault_root, "vault",
+        [(str(page), freshness.stat_signature(page)) for page in vault_module.walk_vault_md(vault_root)],
+    )
+    find_module.shared_resolver(vault_root)
 
 
 def _choose_slug_in_the_vault(vault_root: Path) -> None:
@@ -308,3 +319,116 @@ def test_doctor_fails_an_unrecognised_style_instead_of_raising(
 
     assert check.status == "fail"
     assert "environment" in check.message and "slug, title" in (check.remediation or "")
+
+
+def test_a_new_page_does_not_take_over_a_bare_link_to_an_older_page_with_its_title(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An older page: slug-named, so a bare link to its title finds it only by the title.
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+    older = _insight(vault, "BRÛLERIE ÖTZBERG")
+    monkeypatch.delenv("EXOMEM_FILENAME_STYLE")
+    assert Path(older.path).name == "brulerie-otzberg.md"
+    before, warning = vault_module.normalize_wikilink("BRÛLERIE ÖTZBERG", vault)
+    assert warning is None and before.endswith("/brulerie-otzberg")
+    _hold_the_title_index(vault)
+
+    new = _insight(vault, "Brûlerie Ötzberg")
+
+    # A stem match beats a title match, so the plain name would have moved the link to this page.
+    assert Path(new.path).name == "Brûlerie Ötzberg-2.md"
+    (adjusted,) = _adjusted(new)
+    assert "'Brûlerie Ötzberg-2'" in adjusted and "a number was added" in adjusted
+    _after, ambiguity = vault_module.normalize_wikilink("BRÛLERIE ÖTZBERG", vault)
+    assert ambiguity is not None and "matches 2 files by title" in ambiguity
+
+
+def test_a_write_without_a_resident_title_index_builds_none_and_names_the_page_by_its_title(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+    _insight(vault, "Brûlerie Ötzberg")
+    monkeypatch.delenv("EXOMEM_FILENAME_STYLE")
+
+    def scanned(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a link-free write scanned the vault for titles")
+
+    monkeypatch.setattr(vault_module.WikilinkResolver, "_build", scanned)
+
+    new = _insight(vault, "Brûlerie Ötzberg")
+
+    assert Path(new.path).name == "Brûlerie Ötzberg.md"
+
+
+def _write_project_keys(vault_root: Path, text: str) -> Path:
+    keys = vault_module.kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    keys.parent.mkdir(parents=True, exist_ok=True)
+    keys.write_text(text, encoding="utf-8")
+    return keys
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "projects: {}\n",
+        "# nothing chosen yet\n",
+        "",
+    ],
+    ids=["no-key", "comments-only", "empty-file"],
+)
+def test_a_file_that_sets_no_style_takes_the_default(vault: Path, text: str) -> None:
+    _write_project_keys(vault, text)
+
+    assert vault_module.filename_style_source(vault) == ("title", "default")
+
+
+def test_a_missing_project_keys_file_takes_the_default(vault: Path) -> None:
+    keys = vault_module.kb_root(vault) / "_Schema" / "project-keys.yaml"
+    keys.unlink(missing_ok=True)
+
+    assert vault_module.filename_style_source(vault) == ("title", "default")
+
+
+@pytest.mark.parametrize(
+    ("text", "named"),
+    [
+        ("filename_style: [slug]\n", "['slug']"),
+        ("filename_style: 7\n", "7"),
+        ("filename_style:\n", "None"),
+        ("filename_style: ''\n", "''"),
+        ("filename_style: slug: [\n", "cannot be read"),
+        ("- filename_style\n- slug\n", "not a mapping"),
+    ],
+    ids=["list", "number", "empty-value", "empty-string", "unparseable", "not-a-mapping"],
+)
+def test_a_style_key_that_cannot_be_read_refuses_instead_of_taking_the_default(
+    vault: Path, text: str, named: str
+) -> None:
+    _write_project_keys(vault, text)
+
+    with pytest.raises(vault_module.InvalidSlugError) as refused:
+        vault_module.filename_style_source(vault)
+    assert "project-keys.yaml" in str(refused.value) and named in str(refused.value)
+    with pytest.raises(note_module.NoteError) as write:
+        _insight(vault, "Brûlerie Ötzberg")
+    assert write.value.code == "INVALID_SLUG"
+    check = _style_check(vault)
+    assert check.status == "fail" and "project-keys.yaml" in check.message
+
+
+def test_a_project_keys_file_that_cannot_be_opened_refuses_instead_of_taking_the_default(vault: Path) -> None:
+    keys = vault_module.kb_root(vault) / "_Schema" / "project-keys.yaml"
+    keys.unlink(missing_ok=True)
+    keys.mkdir(parents=True)
+
+    with pytest.raises(vault_module.InvalidSlugError, match="cannot be read"):
+        vault_module.filename_style_source(vault)
+
+
+def test_the_environment_style_applies_without_reading_a_malformed_project_keys_file(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_project_keys(vault, "filename_style: [slug]\n")
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+
+    assert vault_module.filename_style_source(vault) == ("slug", "environment")

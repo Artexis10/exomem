@@ -755,6 +755,11 @@ def _derived_style(vault_root: Path | None, dated: bool) -> str:
     return "slug" if dated and source == FILENAME_STYLE_FROM_DEFAULT else style
 
 
+def derives_title_name(slug: str | None, vault_root: Path | None = None, *, dated: bool = False) -> bool:
+    """Whether a page without a caller-chosen `slug` is named by its title in this vault."""
+    return slug is None and _derived_style(vault_root, dated) == "title"
+
+
 def filename_adjusted_warning(
     title: str,
     slug: str | None,
@@ -772,7 +777,7 @@ def filename_adjusted_warning(
     gave, date prefix included, and `final` is the stem that was written. A caller-chosen
     `slug` and a slug-style vault are not title names and carry their own slug warnings.
     """
-    if slug is not None or _derived_style(vault_root, dated) != "title":
+    if not derives_title_name(slug, vault_root, dated=dated):
         return None
     given = unicodedata.normalize("NFC", title).strip()
     if final == date_prefix + given:
@@ -790,7 +795,7 @@ def filename_adjusted_warning(
     if (name and cut) or shortened_for_number:
         reasons.append("the name was shortened to fit the length limit")
     if numbered:
-        reasons.append("a number was added because a page already has that name")
+        reasons.append("a number was added because another page already holds that name or title")
     return (
         f"FILENAME_ADJUSTED: the file name is {final!r} ({'; '.join(reasons)}); "
         "the title is stored as given. Link to this note by that name."
@@ -831,7 +836,7 @@ def resolve_filename_slug(
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
-    if _derived_style(vault_root, dated) == "title":
+    if derives_title_name(None, vault_root, dated=dated):
         corrected = corrected_title_name(title)
         fitted = fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
         if fitted is not None:
@@ -924,7 +929,14 @@ def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
     return title_key(title) if title else None
 
 
-def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
+def unique_path(
+    directory: Path,
+    stem: str,
+    suffix: str = ".md",
+    *,
+    vault_root: Path | None = None,
+    title_held: Callable[[str], bool] | None = None,
+) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
     Collision is tested case-INSENSITIVELY on every platform, not with
@@ -940,6 +952,10 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
     class that only appears after a sync to another machine.
 
     A number added to a long name shortens the name, so the file keeps the byte cap.
+
+    `title_held` says whether a stem is another live page's title. A page named by that stem
+    would take over every bare link to the title, because a stem match beats a title match, so
+    such a stem counts as taken even when no file has the name.
     """
     if vault_root is not None:
         from .governance import connector_boundary
@@ -949,7 +965,9 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
         )
         stored = _stored_folder_keys(vault_root, directory, f"{stem}{suffix}")
         if stored is not None:
-            return directory / _first_free_name(stem, suffix, stored)
+            return directory / _first_free_name(
+                stem, suffix, lambda name: vault_name_key(name) in stored, title_held
+            )
     try:
         taken = {vault_name_key(entry.name) for entry in directory.iterdir()}
     except OSError:
@@ -958,34 +976,37 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
         # available without a listing, and it must still be applied rather than
         # assumed to pass, or an unlistable-but-populated directory would hand
         # back a path that already holds another note.
-        candidate = directory / f"{stem}{suffix}"
-        i = 2
-        while candidate.exists():
-            candidate = directory / _numbered_name(stem, i, suffix)
-            i += 1
-        return candidate
-    return directory / _first_free_name(stem, suffix, taken)
+        return directory / _first_free_name(
+            stem, suffix, lambda name: (directory / name).exists(), title_held
+        )
+    return directory / _first_free_name(
+        stem, suffix, lambda name: vault_name_key(name) in taken, title_held
+    )
 
 
-def _numbered_name(stem: str, number: int, suffix: str) -> str:
-    """``stem-<number>`` and the extension, with the stem cut so that the whole name keeps the byte cap.
+def numbered_stem(stem: str, number: int, suffix: str = ".md") -> str:
+    """``stem-<number>``, with the stem cut so that the name with its extension keeps the byte cap.
 
     This is the one place a collision number is added. `fit_filename` does the cut: its
     `extension` counts the number and the real extension, at a code point.
     """
-    tail = f"-{number}{suffix}"
-    fitted = fit_filename(stem, extension=tail)
+    tail = f"-{number}"
+    fitted = fit_filename(stem, extension=tail + suffix)
     return f"{fitted[0] if fitted else stem}{tail}"
 
 
-def _first_free_name(stem: str, suffix: str, taken: set[str]) -> str:
-    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... with no name key in ``taken``."""
-    candidate = f"{stem}{suffix}"
-    i = 2
-    while vault_name_key(candidate) in taken:
-        candidate = _numbered_name(stem, i, suffix)
-        i += 1
-    return candidate
+def _first_free_name(
+    stem: str,
+    suffix: str,
+    name_taken: Callable[[str], bool],
+    title_held: Callable[[str], bool] | None = None,
+) -> str:
+    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... that no file and no other page's title holds."""
+    candidate, number = stem, 2
+    while name_taken(f"{candidate}{suffix}") or (title_held is not None and title_held(candidate)):
+        candidate = numbered_stem(stem, number, suffix)
+        number += 1
+    return f"{candidate}{suffix}"
 
 
 def _stored_folder_keys(vault_root: Path, directory: Path, name: str) -> set[str] | None:

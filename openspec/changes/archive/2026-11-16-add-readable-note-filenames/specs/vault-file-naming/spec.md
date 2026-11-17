@@ -18,6 +18,14 @@ the built-in default. An explicit per-call `slug` SHALL keep its current strict
 contract — lowercase ASCII kebab-case — under every style, because it is how a
 caller pins a name it intends to link to.
 
+A configured style that Exomem cannot use SHALL refuse the write with
+`INVALID_SLUG`, naming the source, and SHALL NOT fall back to the default,
+because the default would silently name pages in a style that the vault did not
+choose. A style value that is not one of the known styles, is not a string, or is
+empty, and a `project-keys.yaml` that cannot be read or is not a mapping of keys,
+all refuse. Only a missing file, or a file with no style key, means "no style
+set". The environment value, when set, applies without reading the file.
+
 #### Scenario: A vault with no configuration names a new note by its title
 
 - **WHEN** a note titled `Brûlerie Ötzberg` is written to a vault that sets no filename style anywhere
@@ -61,6 +69,14 @@ caller pins a name it intends to link to.
 - **WHEN** a caller passes `slug="quarterly-review"` alongside a different title
 - **THEN** the file is named `quarterly-review.md`
 - **AND** a non-kebab explicit slug is still rejected as invalid
+
+#### Scenario: A style key that cannot be read refuses instead of taking the default
+
+- **GIVEN** a vault whose `project-keys.yaml` sets `filename_style` to a list, a number or an empty value, or cannot be parsed
+- **WHEN** a note is written with no explicit `slug`
+- **THEN** the write is refused with `INVALID_SLUG`
+- **AND** the reason names `project-keys.yaml` and the value or the read failure
+- **AND** a vault with no `project-keys.yaml`, or one without the key, still takes the default
 
 #### Scenario: Environment overrides the vault key
 
@@ -169,15 +185,21 @@ a storage path.
 ### Requirement: Doctor Reports The Filename Style
 
 `exomem doctor` SHALL report the filename style in force and its source: the
-environment, the vault's `project-keys.yaml`, or the default. An unrecognised
-configured value SHALL appear as a failed check, not as an error from the
-command.
+environment, the vault's `project-keys.yaml`, or the default. A configured value
+that Exomem cannot use SHALL appear as a failed check that names the source, not
+as an error from the command.
 
 #### Scenario: The report names the style and where it came from
 
 - **GIVEN** a vault that sets no filename style
 - **WHEN** `exomem doctor` runs
 - **THEN** the report says new pages are named in the `title` style, from the default
+
+#### Scenario: A malformed style key is a failed check
+
+- **GIVEN** a vault whose `project-keys.yaml` sets `filename_style` to a list
+- **WHEN** `exomem doctor` runs
+- **THEN** the `vault.filename_style` check fails and says that the value in `project-keys.yaml` is not one of the styles
 
 ### Requirement: Case-Insensitive Collision Detection
 
@@ -193,6 +215,34 @@ never silently overwrites an unrelated note.
 - **WHEN** a note titled `budget review` is written
 - **THEN** the existing file's content is unchanged
 - **AND** the new note is written under a disambiguated name
+
+### Requirement: A New Name Does Not Take A Live Page's Title
+
+A stem match beats a title match when a bare wikilink resolves. In `title` style,
+a page whose file is named by its old slug still holds its title, so a new page
+named by the same title would take over every bare link to that title. When a new
+page's name is chosen, Exomem SHALL count a live page's title (in NFC, case
+folded) as taking that stem, and the new page SHALL take the collision number, so
+that a bare link finds no stem match and reaches the title step, which reports the
+duplicate as ambiguous. The lookup SHALL NOT scan the vault: it SHALL use the
+title index that a running process already holds, and a process that holds none
+names the page from its folder alone. An explicit per-call `slug`, and a note
+whose name an adoption plan froze, SHALL NOT be moved by a live title.
+
+#### Scenario: A new page does not take over a link to an older page with its title
+
+- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug `brulerie-otzberg.md`, and a running process that holds the title index
+- **WHEN** a second note titled `Brûlerie Ötzberg` is written in `title` style
+- **THEN** the second file is named `Brûlerie Ötzberg-2.md`
+- **AND** its `FILENAME_ADJUSTED` warning names `Brûlerie Ötzberg-2` and says that a number was added
+- **AND** a bare link to `Brûlerie Ötzberg` is reported as matching two files by title, and is not moved to the second page
+
+#### Scenario: A process without a title index names the page from its folder
+
+- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, and a process that holds no title index
+- **WHEN** a second note with that title is written
+- **THEN** the write builds no title index and scans no vault
+- **AND** the file is named `Brûlerie Ötzberg.md`
 
 ### Requirement: Derived-Name Length Is Capped
 
@@ -214,6 +264,27 @@ title, so it is the name a caller must link to. Under `title` style the
 
 - **WHEN** a vault's `project-keys.yaml` carries any length setting
 - **THEN** derived names are still capped at 100 characters and 200 bytes
+
+### Requirement: An Adoption Plan Keeps The Vault Style On A Taken Name
+
+A note that an adoption plan names, where its target is already taken or already
+planned, SHALL be named through the same path as a live write: the vault's style
+and then the collision number. The plan SHALL freeze that number with the target,
+and applying the plan SHALL land the note at the frozen target.
+
+#### Scenario: Three files with one title are planned as a numbered family
+
+- **GIVEN** a vault that sets no filename style
+- **WHEN** an adoption plan covers three files whose title is `Entry`
+- **THEN** the planned notes are `Entry.md`, `Entry-2.md` and `Entry-3.md`
+- **AND** applying the plan creates those three files
+- **AND** each numbered note carries the `FILENAME_ADJUSTED` warning that a live write would carry
+
+#### Scenario: A slug vault plans the slug family
+
+- **GIVEN** a vault configured with filename style `slug`
+- **WHEN** an adoption plan covers three files whose title is `Entry`
+- **THEN** the planned notes are `entry.md`, `entry-2.md` and `entry-3.md`
 
 ### Requirement: No Existing File Is Renamed
 

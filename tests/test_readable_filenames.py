@@ -207,22 +207,28 @@ def test_an_unrecognised_style_is_refused_not_ignored(
     assert "project-keys.yaml" in str(caught.value)
 
 
-def test_an_unreadable_key_file_means_no_preference_not_a_choice(
+def test_a_missing_key_file_or_key_means_no_preference_and_a_malformed_one_is_refused(
     tmp_path: Path,
 ) -> None:
     """Distinct from `load_project_registry`, which falls back to a real registry.
 
     A vault with no project keys still has to route writes somewhere, so that
     reader invents a registry. Here inventing anything would be claiming the
-    vault chose a style it never mentioned.
+    vault chose a style it never mentioned, and falling back on a key it did
+    mention but got wrong would flip a vault that meant `slug`.
     """
     assert project_keys.filename_style(tmp_path) is None
 
-    _write_keys(tmp_path, "projects: [this is not a mapping\n")
+    _write_keys(tmp_path, "projects: {}\n")
     assert project_keys.filename_style(tmp_path) is None
 
     _write_keys(tmp_path, "filename_style: 4\n")
-    assert project_keys.filename_style(tmp_path) is None
+    with pytest.raises(vault.InvalidSlugError, match="project-keys.yaml"):
+        project_keys.filename_style(tmp_path)
+
+    _write_keys(tmp_path, "projects: [this is not a mapping\n")
+    with pytest.raises(vault.InvalidSlugError, match="cannot be read"):
+        project_keys.filename_style(tmp_path)
 
 
 # ------------------------------------------------------------- end to end

@@ -36,7 +36,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -80,6 +80,7 @@ from .vault import (
     batch_atomic_write,
     canonical_vault_rel,
     content_hash,
+    derives_title_name,
     ensure_canonical_h1,
     escape_wikilinks_for_log,
     filename_adjusted_warning,
@@ -88,6 +89,7 @@ from .vault import (
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    numbered_stem,
     parse_frontmatter,
     plan_log_entries,
     read_guarded_text,
@@ -95,6 +97,7 @@ from .vault import (
     resolve_filename_slug,
     respell_new_path,
     rotate_log_if_needed,
+    title_key,
     unique_path,
     writer_link_visibility,
     yaml_flow_list,
@@ -1396,6 +1399,7 @@ def _resolve_path(
     home_set: homes_module.HomeSet | None = None,
     topics: Sequence[str] = (),
     predecessor: str | None = None,
+    title_held: Callable[[str], bool] | None = None,
 ) -> Path:
     placement = _place(
         vault_root=vault_root,
@@ -1429,7 +1433,7 @@ def _resolve_path(
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error
     if create_parents:
         folder.mkdir(parents=True, exist_ok=True)
-    return unique_path(folder, stem, vault_root=vault_root)
+    return unique_path(folder, stem, vault_root=vault_root, title_held=title_held)
 
 
 def _domain_folder(domain: str) -> str:
@@ -1853,6 +1857,27 @@ def _stem_prefix(note_type: str, *, started: str | None, date_iso: str) -> str:
     return ""
 
 
+def _numbered_slug(slug: str, name_prefix: str, number: int | None) -> str:
+    """`slug` with the collision number an import plan froze for it, counted in the byte cap with the prefix."""
+    if number is None:
+        return slug
+    return numbered_stem(name_prefix + slug, number).removeprefix(name_prefix)
+
+
+def title_holder(vault_root: Path) -> Callable[[str], bool] | None:
+    """Whether a stem is another live page's title, answered by the title index that is resident now.
+
+    A page named by another page's title takes over every bare link to it, because a stem match beats
+    a title match; `unique_path` therefore numbers such a name. The answer needs no vault scan: the
+    borrowed resolver is the one the server keeps resident, and borrowing never builds one. A process
+    whose resolver is cold or behind its watcher gets None, and the name is chosen from the folder alone.
+    """
+    resolver = find_module.borrow_query_resolver(vault_root, schedule_rebuild=False)
+    if resolver is None:
+        return None
+    return lambda stem: bool(resolver.titles.get(title_key(stem)))
+
+
 def planned_destination(
     vault_root: Path,
     *,
@@ -1862,22 +1887,24 @@ def planned_destination(
     project: str | None = None,
     domain: str | None = None,
     date_iso: str | None = None,
+    name_number: int | None = None,
 ) -> str:
     """The vault-relative path `note` would create for these inputs; nothing is written.
 
     It is the same placement `note` uses, so a caller that must freeze a target before
     it creates the page (an import plan) asks the leaf instead of computing a folder.
     `date_iso` is the day a dated folder or name uses, today by default; a caller that
-    creates the note later passes the same day to `note` as `_path_date`.
+    creates the note later passes the same day to `note` as `_path_date`. `name_number` is the
+    collision number that the plan gives a second page of one name, as `unique_path` would add it;
+    the caller passes the same number to `note` as `_name_number`.
     """
     root = Path(vault_root)
     date_iso = date_iso or temporal.render_date(temporal.now())
+    name_prefix = _stem_prefix(note_type, started=None, date_iso=date_iso)
     filename_slug, _warnings = resolve_filename_slug(
-        title,
-        slug,
-        vault_root=root,
-        date_prefix=_stem_prefix(note_type, started=None, date_iso=date_iso),
+        title, slug, vault_root=root, date_prefix=name_prefix
     )
+    filename_slug = _numbered_slug(filename_slug, name_prefix, name_number)
     path = _resolve_path(
         vault_root=root,
         note_type=note_type,
@@ -1940,6 +1967,7 @@ def note(
     _extra_frontmatter: Mapping[str, str | Sequence[str]] | None = None,
     _verbatim_body: bool = False,
     _path_date: str | None = None,
+    _name_number: int | None = None,
     _preflight_operation: str = "create",
     _predecessor_path: str | None = None,
     _predecessor_content_hash: str | None = None,
@@ -2083,7 +2111,7 @@ def note(
             vault_root=root,
             note_type=note_type,
             project=project,
-            slug=filename_slug,
+            slug=_numbered_slug(filename_slug, name_prefix, _name_number),
             domain=placement_domain,
             medium=medium,
             started=started,
@@ -2095,6 +2123,13 @@ def note(
             home_set=home_set,
             topics=topics or (),
             predecessor=_predecessor_path,
+            # A plan froze its target (`_path_date`) when the live titles were what they were then,
+            # so a plan's leaf must land there whatever the titles are now.
+            title_held=(
+                title_holder(vault_root)
+                if _path_date is None and derives_title_name(slug, vault_root)
+                else None
+            ),
         )
         # Re-spell the destination to the real on-disk casing *before* it is
         # bound into the draft token: creating into an existing but

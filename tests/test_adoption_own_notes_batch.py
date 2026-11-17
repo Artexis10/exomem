@@ -24,13 +24,18 @@ COLLECTION = "Coll"
 KB = "Knowledge Base"
 
 
-def _chunk(tmp_path: Path, count: int = 3) -> tuple[Path, list[adopt.DraftNote], str]:
+def _chunk(
+    tmp_path: Path, count: int = 3, *, one_heading: str | None = None
+) -> tuple[Path, list[adopt.DraftNote], str]:
     """A vault whose chunk has its Sources on disk and no note yet, as an import leaves it.
 
     The notes are held back through the run's own per-note step, so the Sources and the
-    plan are the real ones; nothing else is faked.
+    plan are the real ones; nothing else is faked. `one_heading` gives every file that heading.
     """
-    files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(count)}
+    files = {
+        f"Coll/Journal/entry-{n}.md": f"# {one_heading or f'Entry {n}'}\n\nText {n}.\n"
+        for n in range(count)
+    }
     root = _vault(tmp_path, files)
     run_id, planned = _import(root, path="Coll", include=[JOURNAL_RULE])
     held_back = pytest.MonkeyPatch()
@@ -371,3 +376,18 @@ def test_a_manifest_in_a_tuple_refuses_a_write_whose_bytes_differ_from_its_claim
 
     with pytest.raises(ValueError, match="VOCABULARY_AUXILIARY_CHANGED"):
         vocabulary_auxiliaries.validate(tmp_path, images, (first, second))
+
+
+def test_a_note_numbered_by_its_plan_carries_the_file_name_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_FILENAME_STYLE", raising=False)
+    root, notes, date_iso = _chunk(tmp_path, count=2, one_heading="Entry")
+
+    outcomes = adopt.create_draft_notes(root, notes, collection=COLLECTION, date_iso=date_iso)
+
+    first, second = (outcome.created for outcome in outcomes)
+    assert [Path(first.path).name, Path(second.path).name] == ["Entry.md", "Entry-2.md"]
+    assert not [warning for warning in first.warnings if warning.startswith("FILENAME_ADJUSTED")]
+    (adjusted,) = [warning for warning in second.warnings if warning.startswith("FILENAME_ADJUSTED")]
+    assert "'Entry-2'" in adjusted and "a number was added" in adjusted

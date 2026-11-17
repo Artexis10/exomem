@@ -135,6 +135,24 @@ warning fire on more notes. The derived-name cap stays at 100 characters and the
 file name stays within 200 bytes. Neither is a vault setting: the shipped code has
 no key for it, and a key can be added if a vault asks for one.
 
+### A new name does not take a live page's title
+
+A stem match beats a title match, so a new page named by a title that an older,
+slug-named page holds would move every bare link to that title. The write counts
+a live title as taking its stem and adds the collision number. The lookup borrows
+the title index of a running process, which never builds one, so a write does no
+vault scan. A process with no index names from the folder alone and says nothing:
+a warning on every cold write would be noise, and the duplicate stays reported as
+ambiguous by the resolver. A plan's leaf skips the check, because the plan froze
+its target and must land there.
+
+### A style that cannot be read refuses
+
+A key that is present but unusable is a vault setting that Exomem cannot honour.
+Falling back to `title` would flip a vault that meant `slug`, so the write refuses
+and the doctor check fails with the reason. Only a missing file or key means the
+default.
+
 ## Risks / Trade-offs
 
 - **A mixed-style vault.** Real, and accepted: it is the direct cost of never
