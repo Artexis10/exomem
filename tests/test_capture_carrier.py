@@ -264,18 +264,17 @@ def test_stateless_http_sends_the_block_once_per_token_and_again_after_a_change(
 
 
 def test_the_worst_case_block_is_ascii_and_fits_the_rendered_ceiling(served) -> None:
-    """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,575 bytes.
+    """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,560 bytes.
 
     1,200 -> 1,320 on 2026-11-09: the block carries the correction of advice the user says failed.
     1,320 -> 1,560 on 2026-11-17: the block carries the incoming-original custody and identity rule.
-    1,560 -> 1,575 on 2026-11-17: custody of handed files leads the silent disposition sentence.
     """
     from test_retrieve_nudge_working_set import hook
 
     rendered = hook._capture_policy_text(prominence.capture_policy("silent", "confirm-shortcut"))
 
     assert rendered.isascii()
-    assert 0 < len(rendered.encode("ascii")) <= 1575
+    assert 0 < len(rendered.encode("ascii")) <= 1560
 
 
 @pytest.mark.parametrize("disposition", ("advisory", "silent"))

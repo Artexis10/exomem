@@ -80,11 +80,7 @@ RANGES: dict[str, tuple[str, ...]] = {
 #: a model needs the disposition in words, and the key set cannot grow without a spec change.
 #: Holds no ". ": the hook's over-cap fallback keeps the block's first sentence, which this opens.
 PROACTIVE_CAPTURE_MEANING: dict[str, str] = {
-    # Custody leads: agents weighed a handed-over file against "durable material" and dropped it.
-    "silent": (
-        "keep files the user hands you as Sources and save durable material without asking, "
-        "then report the write in one line"
-    ),
+    "silent": "save durable material without asking, then report the write in one line",
     "advisory": "offer the save in one line and stop",
     "off": "write only on an explicit request",
 }
