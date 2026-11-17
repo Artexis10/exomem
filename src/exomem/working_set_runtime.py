@@ -1564,9 +1564,9 @@ def _is_raw_material(path: str) -> bool:
     disagree about what raw material is. Backslashes are folded first, so a
     row written on Windows is recognised too.
     """
-    from .kbdir import kb_prefix
+    from .kbdir import managed_relative
 
-    inside = str(path).replace("\\", "/").removeprefix(kb_prefix())
+    inside = managed_relative(str(path).replace("\\", "/"))
     return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
 
 

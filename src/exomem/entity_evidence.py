@@ -49,7 +49,7 @@ from .entity_recurrence import (
     Wikilink,
 )
 from .entity_types import EntityTypeRegistry
-from .kbdir import kb_prefix
+from .kbdir import managed_join
 from .vault import (
     WikilinkResolver,
     kb_root,
@@ -122,7 +122,7 @@ def _meta(vault_root: Path) -> dict[str, str]:
         "grammar": entity_recurrence.GRAMMAR_VERSION,
         "predicates": entity_recurrence.PREDICATE_TABLE_DIGEST,
         "vault": str(Path(vault_root).resolve()),
-        "kb_prefix": kb_prefix(),
+        "kb_prefix": managed_join(""),
         # Identities are NFKC-casefolded; a new Unicode database can fold a name differently.
         "unicode": unicodedata.unidata_version,
     }

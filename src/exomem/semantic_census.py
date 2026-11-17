@@ -17,7 +17,7 @@ from . import (
     semantic_writes,
     vault,
 )
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_root_rel, managed_split
 from .memory_refs import ID_FIELD, normalize_id
 from .vault_store import directory as store_directory
 from .vault_store import mode as store_mode
@@ -360,7 +360,7 @@ def _governance_report(
     complete_root_scan: bool,
 ) -> tuple[dict[str, Any], set[str]]:
     metadata_work: set[str] = set()
-    kb_present = store_directory.is_dir(root, kb_dirname())
+    kb_present = store_directory.is_dir(root, managed_root_rel())
     unavailable = {
         "kb_present": kb_present,
         "saved_contracts": {
@@ -380,7 +380,7 @@ def _governance_report(
         return unavailable, metadata_work
 
     kb_states = tuple(
-        state for state in states if state.path.startswith(kb_prefix())
+        state for state in states if managed_split(state.path) is not None
     )
     try:
         # Reference lookup can use a path when an ID is malformed; a governance

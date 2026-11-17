@@ -1081,7 +1081,11 @@ def test_conditionally_supporting_candidate_skips_unchanged_physical_families(
 def test_served_context_keeps_earlier_application_state_compatible(
     tmp_path, monkeypatch, candidate_runtime,
 ):
-    """A new external sidecar must not require migration during a compatible rollback."""
+    """A new external sidecar must not require migration during a compatible rollback.
+
+    The brief watermark sidecar is the same kind of state: it is rebuilt from nothing (a missing
+    watermark reads as a first read), so an earlier application that lacks it needs no migration.
+    """
     from exomem import state_migration
 
     vault = tmp_path / "vault"
@@ -1092,7 +1096,8 @@ def test_served_context_keeps_earlier_application_state_compatible(
     async def scenario():
         runtime, actual = candidate_runtime
         actual["state_descriptors"] = [
-            name for name in actual["state_descriptors"] if name != "served-context"
+            name for name in actual["state_descriptors"]
+            if name not in {"served-context", "brief-watermarks"}
         ]
         target = await runtime.inspect({"python": sys.executable, "version": "1.2.3"})
         assert runtime.migration_required(target) == (False, "declared_none")

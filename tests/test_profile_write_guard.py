@@ -96,14 +96,16 @@ def test_a_new_profile_needs_its_preview_hash(vault: Path, owner_scope: None) ->
     page = {"content": CHEAP, "title": "Games", "note_type": "profile", "status": "draft", "topics": ["games"]}
     with pytest.raises(ValueError, match="PROFILE_PREVIEW_REQUIRED"):
         commands.op_remember(vault, **page)
-    assert not (vault / PROFILE).exists()
+    # The writer names a new page from its title, so the test finds it in the profile area.
+    assert not list((vault / KB / "Notes" / "Profiles").glob("*.md"))
     preview = commands.op_remember(vault, **page, validate_only=True)
 
     commands.op_remember(
         vault, **page, draft_id=preview["draft_id"], draft_hash=preview["draft_hash"], draft_token=preview["draft_token"],
     )
 
-    assert (vault / PROFILE).read_text(encoding="utf-8").endswith(CHEAP)
+    (created,) = (vault / KB / "Notes" / "Profiles").glob("*.md")
+    assert created.read_text(encoding="utf-8").endswith(CHEAP)
 
 
 def test_a_profile_is_not_replaced_by_another_page_without_a_preview(pages: Path) -> None:
@@ -183,4 +185,5 @@ def test_a_connected_agent_creates_a_profile_with_the_review_its_preview_returne
 
     _public(mcp, "create_note", **page, review={key: preview[key] for key in ("draft_id", "draft_hash", "draft_token")})
 
-    assert (vault / PROFILE).read_text(encoding="utf-8").endswith(CHEAP)
+    (created,) = (vault / KB / "Notes" / "Profiles").glob("*.md")
+    assert created.read_text(encoding="utf-8").endswith(CHEAP)

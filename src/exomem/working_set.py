@@ -56,6 +56,7 @@ from . import (
     working_set_state,
 )
 from .governance import policy as governance_policy
+from .kbdir import managed_split
 from .runtime_resources import SEMANTIC_PREPARATION_BYTES as TASK_CORPUS_MAX_BYTES
 
 if TYPE_CHECKING:
@@ -2865,7 +2866,7 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
        `posixpath.normpath` would write differently — one rule that covers a
        leading `./`, a doubled slash, a trailing slash, and a literal `.`/
        `..` segment together, rather than one pattern for each.
-    3. Under the knowledge-base folder (`kbdir.kb_prefix()`).
+    3. Under the knowledge-base folder (`kbdir.managed_split`).
     4. A row the LEXICAL catalogue already holds under this EXACT string —
        one indexed lookup (`lexstore.page_content_hashes`), never a search
        and never a directory read.
@@ -2891,9 +2892,8 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
         return None
     if posixpath.normpath(text) != text:
         return None
-    from .kbdir import kb_prefix
 
-    if not text.startswith(kb_prefix()):
+    if managed_split(text) is None:
         return None
     from . import lexstore
 
@@ -6325,12 +6325,11 @@ def _recent_reason_for(
     names the recap folder of each configured capture path (`recap_folder.inbox_folders`).
     """
     from . import find_corpus
-    from .kbdir import kb_prefix
+    from .kbdir import managed_relative
 
     if not rel.lower().endswith(".md"):
         return ""
-    prefix = kb_prefix()
-    inner = rel[len(prefix) :] if rel.startswith(prefix) else rel
+    inner = managed_relative(rel)
     parts = inner.split("/")
     if any(part.startswith(".") or part in find_corpus.EXCLUDED_DIR_NAMES for part in parts[:-1]):
         return ""

@@ -45,7 +45,7 @@ from . import (
     source_taxonomy,
     vocabulary_resolution,
 )
-from .kbdir import kb_dirname
+from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
     PathGuard,
@@ -187,7 +187,7 @@ class ReclassifyResult:
 
 
 def _sources_root() -> str:
-    return f"{kb_dirname()}/{source_taxonomy.SOURCES_ROOT}"
+    return managed_join(source_taxonomy.SOURCES_ROOT)
 
 
 def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
@@ -195,8 +195,8 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
     rel = str(path).replace("\\", "/").strip().lstrip("/")
     if not rel:
         raise ReclassifyError("PATH_REQUIRED", "supply the source page to reclassify.")
-    if not rel.startswith(f"{kb_dirname()}/"):
-        rel = f"{kb_dirname()}/{rel}"
+    if managed_split(rel) is None:
+        rel = managed_join(rel)
     if not rel.lower().endswith(".md"):
         rel = f"{rel}.md"
     try:
@@ -427,8 +427,8 @@ def _plan_pointer(
     path) is refused: the repair there is to move the file back beside the card.
     """
     target = artifact_path.replace("\\", "/").strip().lstrip("/")
-    if target and not target.startswith(f"{kb_dirname()}/"):
-        target = f"{kb_dirname()}/{target}"
+    if target:
+        target = managed_form(target)
     found = source_pointers.pointers(front)
     if any(source_pointers.bound(rel, pointer.field, pointer.path) for pointer in found):
         raise ReclassifyError(
@@ -468,7 +468,7 @@ def _restorable_pointer(entry: Any) -> dict[str, str | None]:
 
 def _destination(vault_root: Path, rel: str, kind, domain) -> str:
     segments = source_taxonomy.source_segments(kind, domain)
-    return "/".join((kb_dirname(), *segments, rel.rsplit("/", 1)[-1]))
+    return managed_join("/".join((*segments, rel.rsplit("/", 1)[-1])))
 
 
 def _projection(
@@ -507,7 +507,7 @@ def _projection(
             domain_resolution,
             _destination(vault_root, rel, kind_resolution, domain_resolution),
         )
-    destination = "/".join((kb_dirname(), *binding.segments, rel.rsplit("/", 1)[-1]))
+    destination = managed_join("/".join((*binding.segments, rel.rsplit("/", 1)[-1])))
     return binding.kind, binding.domain, destination
 
 

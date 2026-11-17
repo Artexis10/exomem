@@ -24,6 +24,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from . import workflow_skills
+from .kbdir import managed_root
 
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 _HOOKS_SRC = Path(__file__).parent / "_hooks"
@@ -162,7 +163,7 @@ def _core_payload(vault: Path | None) -> dict[str, str]:
     for name in _CORE_FILES:
         # Overlay the real registry when a vault is given, so a personal upload
         # advertises real project scopes; otherwise ship the generic starter.
-        override = (vault / "Knowledge Base" / "_Schema" / name) if vault else None
+        override = (managed_root(vault) / "_Schema" / name) if vault else None
         source = override if (override and override.is_file()) else (_SKILL_SRC / name)
         if source.is_file():
             payload[name] = source.read_text(encoding="utf-8")
@@ -416,7 +417,7 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
     vault = Path(vault).expanduser() if vault is not None else None
     if out_dir is None:
         out_dir = (
-            vault / "Knowledge Base" / "_Schema" / "private-skills"
+            managed_root(vault) / "_Schema" / "private-skills"
             if vault is not None
             else Path.cwd() / "dist" / "skills"
         )

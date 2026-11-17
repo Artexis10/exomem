@@ -960,6 +960,9 @@ class MediaJobStore:
             conn.execute("ALTER TABLE media_access ADD COLUMN pid_start TEXT")
         if "temporary_name" not in access:
             conn.execute("ALTER TABLE media_access ADD COLUMN temporary_name TEXT")
+        if "source_custody_json" not in access:
+            conn.execute("ALTER TABLE media_access ADD COLUMN source_custody_json TEXT "
+                         "CHECK(source_custody_json IS NULL OR json_valid(source_custody_json))")
         if "pinned" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         # Whether the worker hydrated the original when it claimed the job.

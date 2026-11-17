@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +33,20 @@ from synth_vault import gen_collection_fixture, gen_reference_vault  # noqa: E40
 
 CONTRACT_SHA = "c" * 64
 PROFILE_SHA = "9" * 64
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="the worker CPU observer uses Linux procfs")
+def test_exited_worker_cannot_qualify_as_quiet():
+    """An unreaped worker has a flat CPU counter after an OOM kill or ordinary exit."""
+    worker = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        os.waitid(os.P_PID, worker.pid, os.WEXITED | os.WNOWAIT)
+        arm = object.__new__(gate.Arm)
+        arm.name, arm.worker = "candidate", worker
+        with pytest.raises(MeasurementRefused, match="arm-worker-exited"):
+            asyncio.run(arm.quiesce(limit=3, window=1))
+    finally:
+        worker.wait(timeout=5)
 
 
 def reference(*groups: str, allowance_ms: float | None = None, lists: tuple[str, ...] = ()) -> dict:

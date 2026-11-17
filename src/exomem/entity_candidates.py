@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import memory_refs
 from .entity_types import load_entity_types
-from .kbdir import kb_prefix
+from .kbdir import managed_join
 from .vault import PathGuardError, kb_root, parse_frontmatter, read_guarded_text
 
 
@@ -243,7 +243,7 @@ def resolve_entity_candidate(
         "status": status,
         "candidates": candidates,
         "omitted_candidate_count": max(0, len(matches) - len(candidates)),
-        "scope": f"{kb_prefix()}Entities",
+        "scope": managed_join("Entities"),
     }
 
 

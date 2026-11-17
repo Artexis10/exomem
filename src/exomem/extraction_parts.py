@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 
 from . import media_engines, media_types, memory_refs, preserve, runtime_resources, temporal
 from .governance import raw_protection
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .vault import (
     MISSING_CONTENT_HASH,
     PlannedWrite,
@@ -678,7 +678,7 @@ def _knowledge_base_pages(root: Path) -> Iterator[tuple[Path, Callable[[], int]]
     from . import find_corpus
 
     corpus = find_corpus.corpus_paths(
-        root, "kb", lambda **walk: find_corpus.walk_md(root / kb_dirname(), **walk)
+        root, "kb", lambda **walk: find_corpus.walk_md(managed_root(root), **walk)
     )
     disk: Iterable[Path] = corpus
     if isinstance(corpus, find_corpus.StoreCorpus):

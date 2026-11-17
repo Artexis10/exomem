@@ -61,7 +61,7 @@ from . import (
     semantic_units,
     sidecar_store,
 )
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 
 log = logging.getLogger(__name__)
 
@@ -669,7 +669,7 @@ class ClaimIndex:
             or not self._connected_space_current()
         ):
             return [], np.zeros((0, recall_space.current_dim()), dtype=np.float32)
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         if not kb.is_dir():
             return [], np.zeros((0, recall_space.current_dim()), dtype=np.float32)
         admitted = [
@@ -790,7 +790,7 @@ class ClaimIndex:
         from . import find as find_module
         from . import freshness, recall_policy
 
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         if not kb.is_dir():
             return (recall_policy.recall_policy_identity(self.vault_root), ())
         identity = recall_policy.recall_policy_identity(self.vault_root)
@@ -871,7 +871,7 @@ class ClaimIndex:
         from . import find as find_module
         from . import freshness, recall_policy
 
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         if not kb.is_dir():
             return 0
         claim_types = _claim_types(producer_basis(self.vault_root))

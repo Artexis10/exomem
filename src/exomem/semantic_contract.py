@@ -46,7 +46,7 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError, relation_review_stable_id_remediation
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_split_parts
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
@@ -136,7 +136,7 @@ def _reference_only_directory_names() -> tuple[str, ...]:
         sorted(
             name
             for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
-            if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+            if not vault.in_excluded_scan_dir(managed_join(name))
         )
     )
 
@@ -144,11 +144,8 @@ def _reference_only_directory_names() -> tuple[str, ...]:
 def _is_reference_only_path(rel_path: str) -> bool:
     """Whether a vault-relative path lies under a reference-only directory."""
     segments = PurePosixPath(rel_path).parts
-    return (
-        len(segments) > 2
-        and segments[0] == kb_dirname()
-        and segments[1] in _reference_only_directory_names()
-    )
+    below = managed_split_parts(segments)
+    return below is not None and len(below) > 1 and below[0] in _reference_only_directory_names()
 
 
 def _reference_only_entries(root: Path) -> tuple[StableIdentityEntry, ...]:
@@ -979,9 +976,10 @@ def _route_name(path: str) -> str | None:
     if _path_excluded_from_compiled_destination(path):
         return None
     parts = _path_parts(path)
-    if len(parts) < 4 or parts[:2] != (kb_dirname().casefold(), note_types.NOTES_FOLDER.casefold()):
+    below = managed_split_parts(parts, key=str.casefold)
+    if below is None or len(below) < 3 or below[0] != note_types.NOTES_FOLDER.casefold():
         return None
-    return parts[2]
+    return below[1]
 
 
 def _type_basis(page: SemanticPageState) -> note_types.Basis:
@@ -1099,7 +1097,7 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             span=None,
             detail=(
                 f"compiled frontmatter type {normalized_compiled_type(page.page_type)!r} "
-                f"sits outside a {kb_dirname()}/{note_types.NOTES_FOLDER}/<Folder> destination"
+                f"sits outside a {managed_join(f'{note_types.NOTES_FOLDER}/')}<Folder> destination"
             ),
             remediation=(
                 f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
@@ -1216,6 +1214,7 @@ class SemanticCorpusContext:
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
     writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
+    capture_inventory: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1412,6 +1411,15 @@ def build_page_state(
 
 #: The registry subjects whose instance definitions reinterpret a page's units.
 _PAGE_DEFINITION_SUBJECTS = ("relations", "categories")
+
+
+def page_definitions_dependency(root: Path) -> tuple:
+    """What interpreting a page's units reads besides the page: the relations and categories of every instance.
+
+    A result kept per page must be dropped when this changes, since a private instance can reinterpret a page
+    that no edit touched.
+    """
+    return instances.definitions_dependency(root, _PAGE_DEFINITION_SUBJECTS)
 
 
 def enrich_page_state(
@@ -2075,7 +2083,7 @@ def _resolve_reference_wikilink_from_context(
         return ReferenceWikilinkResolution("unresolved")
 
     if "/" in cleaned:
-        for key in (cleaned, f"{vault.kb_prefix()}{cleaned}"):
+        for key in (cleaned, managed_join(cleaned)):
             matches = vault.wikilink_candidates(
                 context.resolver_candidates_by_key, (key,), visible=visible
             )
@@ -2084,7 +2092,7 @@ def _resolve_reference_wikilink_from_context(
             if matches:
                 return ReferenceWikilinkResolution("resolved", matches[0].path)
         # No Knowledge-Base-relative step follows: `normalize_wikilink` matches that form
-        # by `kb_prefix() + cleaned` in `full_paths`, which the second candidate above
+        # by `managed_join(cleaned)` in `full_paths`, which the second candidate above
         # already tried. Testing `kb_stripped` instead would let a hidden vault-root page
         # with the same name decide the result.
         return ReferenceWikilinkResolution("unresolved")
@@ -2138,6 +2146,185 @@ class LinkSnapshot:
 
     resolver: _WikilinkResolverView
     reference_owners: Mapping[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedCorpusSnapshot:
+    """Proved resident pages; a store revision covers only store-owned paths."""
+
+    _corpus: SemanticCorpusContext = field(repr=False)
+    census: tuple
+    checkpoint: freshness.FreshnessCheckpoint | None
+    _owns: Callable[[str], bool] | None = field(default=None, repr=False)
+
+    def pages(self) -> Iterator[tuple[str, SemanticPageState]]:
+        """Expose only pages covered by this publication's proof."""
+        for path, page in self._corpus.pages.items():
+            if self._owns is None or self._owns(path):
+                yield path, page
+
+
+def _resident_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple[tuple, SemanticCorpusContext], freshness.FreshnessCheckpoint | None] | None:
+    """Share configuration, store revision and registry proofs without a corpus walk."""
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+        language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+    if (
+        entry is not None
+        and language_hash == f"{language.schema_version}:{language.content_hash}"
+        and _config_census(root) == _stored_config_census(entry[0])
+        and (entry[1].registry.core_version, entry[1].registry.extension_hash)
+        == (registry.core_version, registry.extension_hash)
+    ):
+        return entry, caption
+    return None
+
+
+def _published_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    checkpoint: freshness.FreshnessCheckpoint,
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple, SemanticCorpusContext] | None:
+    """An ordinary event hit also requires its exact publication caption."""
+    resident = _resident_corpus_entry(root, cache_key, registry, language)
+    return resident[0] if resident is not None and resident[1] == checkpoint else None
+
+
+def borrow_published_corpus(vault_root: Path) -> PublishedCorpusSnapshot | None:
+    """Borrow an immutable generation without serializing readers behind its publisher."""
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    owned = _store_census_owns(root)
+    checkpoint = None
+    if owned is None:
+        if not freshness.is_live(root, "vault"):
+            return None
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if checkpoint.triple is None:
+            return None
+
+    cache_key = _corpus_cache_key(root)
+    language = semantic_language_registry.core_registry()
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), language)
+    if resident is None:
+        return None
+    entry, caption = resident
+    if owned is None and caption != checkpoint:
+        return None
+    # Publishers replace immutable entries. Readers need only revalidate their selected generation.
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if (
+            _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+            or _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+            != f"{language.schema_version}:{language.content_hash}"
+            or owned is None and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) != caption
+        ):
+            return None
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    # Check after the cache identity: a publisher can advance events before replacing its entry.
+    if owned is None:
+        if (
+            not freshness.is_live(root, "vault")
+            or freshness.consumer_checkpoint(root, "vault") != checkpoint
+        ):
+            return None
+    return PublishedCorpusSnapshot(entry[1], entry[0], checkpoint, owned)
+
+
+def borrow_capture_inventory(vault_root: Path):
+    """Borrow complete raw metadata with an O(1) publisher-witness recheck."""
+    from . import capture_inventory
+    from .collection_store.views import store_identity
+    from .vault_store import read
+
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    cache_key = _corpus_cache_key(root)
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), semantic_language_registry.core_registry())
+    if resident is None:
+        return None
+    entry, _caption = resident
+    inventory = entry[1].capture_inventory
+    if (inventory is None or inventory.type_dependency is None or inventory.type_dependency[0] == "unavailable"
+            or note_types.Basis(root).loaded_dependency() != inventory.type_dependency):
+        return None
+    if inventory.store_identity is not None:
+        with read.snapshot(root) as view:
+            identity = store_identity(view.connection)
+            witness = (identity["store_id"], identity["instance_id"], view.revision)
+            if inventory.store_identity != witness:
+                return None
+            generation = hashlib.sha256(repr(witness).encode()).hexdigest()
+    else:
+        witness = capture_inventory.raw_witness(root)
+        if witness is None or not witness.current(inventory.raw_stamp):
+            return None
+        generation = hashlib.sha256(repr(inventory.raw_stamp).encode()).hexdigest()
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry:
+            return None
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    if inventory.store_identity is None and not witness.current(inventory.raw_stamp):
+        return None
+    return inventory, generation
+
+
+def publish_capture_inventory(root: Path, witness, *, census: bool = False, excluded=frozenset()) -> bool:
+    """Publish raw-only deltas without admitting excluded pages to semantic fan-out."""
+    from . import capture_inventory
+
+    if capture_inventory.raw_witness(root) is not witness or not witness.live:
+        return False
+    if census:
+        # A strict reconciliation is a new raw observation, including previously missed events.
+        witness.withdraw()
+    epoch, pending, seeded = witness.snapshot()
+    try:
+        cache_key = _corpus_cache_key(root)
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        if entry is None or _config_census(root) != _stored_config_census(entry[0]):
+            witness.withdraw()
+            return False  # The existing corpus warm owns cold work after lexical publication.
+        if not census and not pending and seeded:
+            if entry[1].capture_inventory is not None and witness.current(entry[1].capture_inventory.raw_stamp):
+                return True
+            witness.withdraw()
+            epoch, pending, seeded = witness.snapshot()
+            census = True
+        with _CORPUS_CONTEXT_UPDATE_LOCK:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if entry is None or entry[1].capture_inventory is None:
+                witness.withdraw()
+                return False
+            inventory, covered = capture_inventory.refreshed(root, entry[1].capture_inventory, pending,
+                                                            census=census or not seeded, excluded=excluded)
+            inventory = replace(inventory, raw_stamp=(witness.instance, epoch))
+            context = replace(entry[1], capture_inventory=inventory)
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if (_CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+                        or capture_inventory.raw_witness(root) is not witness or not witness.live):
+                    return False
+                _CORPUS_CONTEXT_CACHE[cache_key] = (entry[0], context)
+                witness.acknowledge(epoch, covered, seeded=census or not seeded)
+        return True
+    except Exception:  # noqa: BLE001 - raw proof failure never withdraws ordinary recall.
+        witness.withdraw()
+        log.warning("canonical raw inventory publication is incomplete")
+        return False
 
 
 def borrow_link_snapshot(
@@ -2914,6 +3101,9 @@ def _reconcile_markdown_delta(
     it, and judged by the cold build's rules for a stored page, its strict
     frontmatter parse included.
     """
+    from . import capture_inventory
+
+    raw_changes = {}
     request_budget.checkpoint()
     states = dict(context.pages)
     previous_identities = {entry.path: entry for entry in context.identity_census.entries}
@@ -2976,6 +3166,9 @@ def _reconcile_markdown_delta(
                     source = _read_corpus_source(root, source_path)
                 except FileNotFoundError:
                     source = None
+        if capture_inventory.raw_path(root, rel_path):
+            raw_changes[rel_path] = (capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
+                                     if source is not None else None)
         if source is None:
             states.pop(rel_path, None)
             identities.pop(rel_path, None)
@@ -3015,15 +3208,25 @@ def _reconcile_markdown_delta(
         identity_census=identity_census,
         writer_visibility=context.writer_visibility,
     )
-    if candidate is not None:
-        return candidate
-
-    return _context_from_state_map(
+    if candidate is None:
+        candidate = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
+
+    inventory = context.capture_inventory
+    if inventory is not None:
+        inventory = inventory.with_delta(raw_changes)
+        if inventory.store_identity is not None:
+            from .collection_store.views import store_identity
+            from .vault_store import read
+
+            with read.snapshot(root) as view:
+                identity = store_identity(view.connection)
+                inventory = replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
+    return replace(candidate, capture_inventory=inventory)
 
 
 def on_corpus_files_changed(
@@ -3558,6 +3761,12 @@ def warm_corpus_context(vault_root: Path) -> None:
             "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
         )
 
+    from . import capture_inventory
+
+    witness = capture_inventory.raw_witness(root)
+    if witness is not None and witness.live:
+        publish_capture_inventory(root, witness, census=not witness.seeded)
+
 
 def build_corpus_context_with_census(
     vault_root: Path,
@@ -3786,24 +3995,10 @@ def _build_corpus_context_with_census(
         cache_key = _corpus_cache_key(root)
         event_checkpoint = freshness.consumer_checkpoint(root, "vault")
         if event_checkpoint.triple is not None:
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                event_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
-                cached_language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
-            if (
-                event_entry is not None
-                and cached_checkpoint == event_checkpoint
-                and cached_language_hash == f"{language.schema_version}:{language.content_hash}"
-                and _config_census(root) == _stored_config_census(event_entry[0])
-                and (
-                    event_entry[1].registry.core_version,
-                    event_entry[1].registry.extension_hash,
-                )
-                == (
-                    relation_definitions.core_version,
-                    relation_definitions.extension_hash,
-                )
-            ):
+            event_entry = _published_corpus_entry(
+                root, cache_key, event_checkpoint, relation_definitions, language
+            )
+            if event_entry is not None:
                 log.info(
                     "semantic corpus context event-hit pages=%d",
                     len(event_entry[1].pages),
@@ -4105,6 +4300,9 @@ def _build_corpus_context_uncached(
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> SemanticCorpusContext:
     request_budget.checkpoint()
+    from . import capture_inventory
+
+    raw_inputs = {}
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
     eligible: dict[str, Path] = {}
@@ -4127,6 +4325,8 @@ def _build_corpus_context_uncached(
             eligible[rel_path] = disk_path
 
     def consume(rel_path: str, source: str) -> None:
+        if capture_inventory.raw_path(root, rel_path):
+            raw_inputs[rel_path] = capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
         if rel_path in eligible:
             states[rel_path] = _parse_page_state(
                 root,
@@ -4160,13 +4360,15 @@ def _build_corpus_context_uncached(
         identity_census = identity_census.with_page(
             candidate, casefold_paths=vault.vault_casefolds(root)
         )
-    return _context_from_state_map(
+    context = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
 
+
+    return replace(context, capture_inventory=capture_inventory.collect(root, raw_inputs))
 
 
 def _read_corpus_source(root: Path, path: Path) -> str:

@@ -12,6 +12,9 @@ from typing import Any
 
 from . import operation_entries
 
+# This vendor metadata key declares fixed service protocol features on their command owner.
+SERVICE_CAPABILITIES_META_KEY = "io.exomem/service-capabilities"
+
 
 @dataclass(frozen=True, slots=True)
 class ActiveSurfaceDescriptor:
@@ -97,7 +100,7 @@ class ActiveSurfaceDescriptor:
         from .public_surface import DOORS, public_surface
 
         surface = public_surface()
-        doors = {door: sorted(op.name for op in surface.door_operations(door, self.contributing_commands))
+        doors = {door: sorted(op.name for op in surface.door_operations(door, self.contributing_commands, listed=True))
                  for door in DOORS.values()}
         return {"tool_shape": self.tool_shape,
                 **({"available_operations": {door: ops for door, ops in doors.items() if ops}}

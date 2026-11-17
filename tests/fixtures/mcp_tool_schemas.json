@@ -1038,10 +1038,11 @@
           "enum": [
             "text",
             "history",
-            "units"
+            "units",
+            "brief"
           ],
           "type": "string",
-          "description": "text (default), history, or units: observations with their ids."
+          "description": "text (default), history, units: observations with ids, or brief: a topic's brief."
         },
         "more": {
           "type": "string",

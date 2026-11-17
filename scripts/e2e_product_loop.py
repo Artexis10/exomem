@@ -2183,7 +2183,8 @@ def _owner_cli(
     run_env = dict(env)
     if operator:
         run_env["EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"] = _STORE_OPERATOR_TOKEN
-    deadline = time.monotonic() + _LEASE_TTL * 3 + 10
+    term = float(run_env.get("EXOMEM_WRITER_LEASE_TTL") or _LEASE_TTL)
+    deadline = time.monotonic() + term * 3 + 10
     retries = 0
     while True:
         done = subprocess.run(

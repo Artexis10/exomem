@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import state_paths
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 
 INDEX_SCOPES = ("kb", "vault")
 
@@ -119,7 +119,7 @@ def governance_sidecar_path(vault_root: Path) -> Path:
 
 def kb_index_root(vault_root: Path) -> Path:
     """Historical KB-only semantic-index root."""
-    return vault_root / kb_dirname()
+    return managed_root(vault_root)
 
 
 def index_scope() -> str:

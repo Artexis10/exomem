@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.185.0](https://github.com/Artexis10/exomem/compare/v0.184.1...v0.185.0) (2026-11-16)
+
+
+### Features
+
+* **brief:** read the brief of a researched subject through read_page ([#2879](https://github.com/Artexis10/exomem/issues/2879)) ([14385db](https://github.com/Artexis10/exomem/commit/14385db21c077bcc7d35851055b654cefbfd9212))
+* **cloud:** size the catalogue build from the rehearsal's measurements ([#2877](https://github.com/Artexis10/exomem/issues/2877)) ([5dc2d08](https://github.com/Artexis10/exomem/commit/5dc2d08a8cf08760e75c581db7c5d3143db0d11b))
+* **layout:** report the vault layout in status and doctor without refusing ([#2881](https://github.com/Artexis10/exomem/issues/2881)) ([d4ca590](https://github.com/Artexis10/exomem/commit/d4ca590cc9031b0c61ce2dfcc120c0bc8965f1ee))
+* **relayout:** plan the move to the root vault layout without writing ([#2876](https://github.com/Artexis10/exomem/issues/2876)) ([dd9484d](https://github.com/Artexis10/exomem/commit/dd9484dca1bd66af34f36be5da6e8082f63dfe0d))
+
+
+### Bug Fixes
+
+* **artifacts:** name every unread receipt field and count every saved file ([#2875](https://github.com/Artexis10/exomem/issues/2875)) ([a924b14](https://github.com/Artexis10/exomem/commit/a924b14debc5f3af6fb70141a359fd9eac44324a))
+* **auth:** refuse credential writes when the working-directory .env swaps an exported store ([#2880](https://github.com/Artexis10/exomem/issues/2880)) ([1e51740](https://github.com/Artexis10/exomem/commit/1e51740ac302e47fbaa70f1f49db460813a0812e))
+* **relayout:** keep sidecar names and plan links to .md.md pages correctly ([#2884](https://github.com/Artexis10/exomem/issues/2884)) ([5112892](https://github.com/Artexis10/exomem/commit/5112892e3ffb736115115f812436a066a78b16ba))
+* **vault-store:** list just-saved pages at once in store mode and harden the real-vault rehearsal ([#2882](https://github.com/Artexis10/exomem/issues/2882)) ([cffdb5e](https://github.com/Artexis10/exomem/commit/cffdb5e6b0230741faacf44f407407c7e8372612))
+
+## [0.184.1](https://github.com/Artexis10/exomem/compare/v0.184.0...v0.184.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **artifacts:** never report a committed file as failed ([#2872](https://github.com/Artexis10/exomem/issues/2872)) ([730d91e](https://github.com/Artexis10/exomem/commit/730d91e428aa98bd2feba8af4453f35095ea627c))
+* **vault-store:** run the store-mode suites on native Windows, fix six Windows defects and add the rehearsal driver ([#2861](https://github.com/Artexis10/exomem/issues/2861)) ([570259a](https://github.com/Artexis10/exomem/commit/570259af2dd6c854e459dcc7732a56a81ccd386a))
+
+## [0.184.0](https://github.com/Artexis10/exomem/compare/v0.183.0...v0.184.0) (2026-11-16)
+
+
+### Features
+
+* **cloud:** rehearse the catalogue pre-warm and clear a patched upgrade hold ([#2857](https://github.com/Artexis10/exomem/issues/2857)) ([6458f65](https://github.com/Artexis10/exomem/commit/6458f65fd777f956a0632150595276bf07fba50c))
+* **context:** send the stance once per conversation until it changes ([#2863](https://github.com/Artexis10/exomem/issues/2863)) ([2947313](https://github.com/Artexis10/exomem/commit/2947313c34347ce82c42b16e2c1ea949354c90b9))
+* **upload:** cancel waiting held uploads ([#2854](https://github.com/Artexis10/exomem/issues/2854)) ([0be21e4](https://github.com/Artexis10/exomem/commit/0be21e4a9930c4e438f533fed55faa3a436a8da0))
+
+
+### Bug Fixes
+
+* **context:** explain a held stance to clients and keep the held-block rule in one place ([#2866](https://github.com/Artexis10/exomem/issues/2866)) ([e3ffb7a](https://github.com/Artexis10/exomem/commit/e3ffb7ad0115885b13a49b6b5c4af7b5e700d787))
+* **context:** give the stance its own bound and scope per-subject recall ([#2862](https://github.com/Artexis10/exomem/issues/2862)) ([cd42207](https://github.com/Artexis10/exomem/commit/cd422072eb65f43df26f8a33d4d979f7ecb06fb1))
+* **records:** keep import status honest about unknown and unread counts ([#2867](https://github.com/Artexis10/exomem/issues/2867)) ([1737f6b](https://github.com/Artexis10/exomem/commit/1737f6b21153e54fc616ea400099c99b7628dc39))
+* **sources:** keep a Source card's pointer to its bytes true, or make the drift visible ([#2851](https://github.com/Artexis10/exomem/issues/2851)) ([9c4151e](https://github.com/Artexis10/exomem/commit/9c4151ecbcbe3f8f6f3d82cba2d0064261639109))
+
+
+### Performance
+
+* **egress:** walk only the placement layers in the owner's aggregate check ([#2855](https://github.com/Artexis10/exomem/issues/2855)) ([22492a4](https://github.com/Artexis10/exomem/commit/22492a4918651129bac09ea9866fd74ea47661b0))
+* **records:** bound import batch steps and answer import status beside the store thread ([#2865](https://github.com/Artexis10/exomem/issues/2865)) ([3b6ebee](https://github.com/Artexis10/exomem/commit/3b6ebee79fdbdb2bcfc56d50013cfbeb6b02b624))
+* **records:** select store query rows in SQL under a CPU deadline ([#2859](https://github.com/Artexis10/exomem/issues/2859)) ([cdf68c9](https://github.com/Artexis10/exomem/commit/cdf68c9b3707906cb50decb7bd781a3f21df2052))
+
+## [0.183.0](https://github.com/Artexis10/exomem/compare/v0.182.0...v0.183.0) (2026-11-15)
+
+
+### Features
+
+* **hook:** deliver changed session context on every native turn ([#2845](https://github.com/Artexis10/exomem/issues/2845)) ([0c58ddb](https://github.com/Artexis10/exomem/commit/0c58ddbf64dad3722df4eb8fae14c3f5b786e097))
+
+
+### Bug Fixes
+
+* **cellctl:** yield waiting catalogue builds before same-node stops ([#2843](https://github.com/Artexis10/exomem/issues/2843)) ([e25f1d0](https://github.com/Artexis10/exomem/commit/e25f1d010e56047b8aaaf47b25a420b3a9245028))
+* **context:** project found leads before their links are read ([#2856](https://github.com/Artexis10/exomem/issues/2856)) ([ea7d237](https://github.com/Artexis10/exomem/commit/ea7d2378c51ef7834340d446789cf892a5c3fd01))
+* **mcp:** show a misplaced-argument refusal in the text a host reads ([#2847](https://github.com/Artexis10/exomem/issues/2847)) ([3810d8f](https://github.com/Artexis10/exomem/commit/3810d8fe7af0c5e9ab7ef7b849ca4431c7290927))
+* **media:** count the eviction margin in a retained store's shortfall ([#2850](https://github.com/Artexis10/exomem/issues/2850)) ([11db346](https://github.com/Artexis10/exomem/commit/11db3462f51ff553027eb5b2b389cc7ef1187f1d))
+* **records:** reject null required values, preview the whole import source, and bind a row id in one read ([#2853](https://github.com/Artexis10/exomem/issues/2853)) ([306d89b](https://github.com/Artexis10/exomem/commit/306d89b063966094264942f9cc7b0ac3389ec849))
+* **recovery:** admit a trash recovery as a move for a restricted writer ([#2826](https://github.com/Artexis10/exomem/issues/2826)) ([6958d2a](https://github.com/Artexis10/exomem/commit/6958d2a48b0e52d481f633647246d0d4d3c77f9b))
+* **server:** run the shutdown on SIGTERM and let a store-mode rollback project its queue ([#2805](https://github.com/Artexis10/exomem/issues/2805)) ([58dc949](https://github.com/Artexis10/exomem/commit/58dc94907eefe1c71e97621be0a12dd82ea38678))
+* **vault-store:** bring a trashed note back in store mode, project only where a process can record, and keep derived rows equal to file mode ([#2818](https://github.com/Artexis10/exomem/issues/2818)) ([7aaa8cd](https://github.com/Artexis10/exomem/commit/7aaa8cd34c8b38a97c6293d862aecd78bf1f162d))
+
+
+### Performance
+
+* **governance:** keep scope sets across restricted store-mode reads ([#2846](https://github.com/Artexis10/exomem/issues/2846)) ([802e246](https://github.com/Artexis10/exomem/commit/802e2462e7e7f28ef52103925229e5e7caf56c8d))
+* **vault-store:** make a store commit a delta of the semantic corpus context ([#2824](https://github.com/Artexis10/exomem/issues/2824)) ([46553c9](https://github.com/Artexis10/exomem/commit/46553c97e01e3b392b91cc7c6f100af7665f8da0))
+
 ## [0.182.0](https://github.com/Artexis10/exomem/compare/v0.181.0...v0.182.0) (2026-11-15)
 
 

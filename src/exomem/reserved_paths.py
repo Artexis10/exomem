@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING
 
 from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root_rel, managed_split_parts
 
 if TYPE_CHECKING:
     from .vault_store import read
@@ -95,6 +95,11 @@ _COLLECTION_EXPORTED_RE = re.compile(
     r"^collections(?:-derived)?\.sqlite\.exported-[0-9]{8}t[0-9]{6}z$", re.ASCII
 )
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
+
+
+def _fold(text: str) -> str:
+    """The comparison key of a path component: compatibility-normalised, then case-folded."""
+    return unicodedata.normalize("NFKC", text).casefold()
 
 
 class PathDisposition(StrEnum):
@@ -448,8 +453,26 @@ _REGISTRY = (
         exact=_sqlite_family(".served-context.sqlite"),
     ),
     InternalStateDescriptor(
+        "brief-watermarks", "brief_watermarks", StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".brief-watermarks.sqlite"),
+    ),
+    InternalStateDescriptor(
         "source-corrections", "source_corrections", StatePlacement.VAULT_CANONICAL,
         trees=("_sources/corrections",),
+    ),
+    InternalStateDescriptor(
+        "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/custody",),
+    ),
+    InternalStateDescriptor(
+        "generated-fragments", "generated_fragment_store", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/generated",),
+    ),
+    InternalStateDescriptor(
+        "generated-fragments-index", "generated_fragment_store", StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".generated-fragments.sqlite"),
     ),
     InternalStateDescriptor(
         "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
@@ -1226,9 +1249,9 @@ def _reserved_after_bounded_dot_collapse(value: object) -> PathClassification | 
     parts = text.split("/")
     if not parts or any(not part for part in parts):
         return None
-    knowledge_base = unicodedata.normalize("NFKC", kb_dirname()).casefold()
-    if parts[0].casefold() == knowledge_base:
-        parts = parts[1:]
+    below = managed_split_parts(parts, key=_fold)
+    if below is not None:
+        parts = list(below)
     collapsed: list[str] = []
     for part in parts:
         if part == ".":
@@ -3057,18 +3080,15 @@ def _normalized_parts(
         return _invalid("alternate stream or URI spelling is forbidden")
     if any(part.endswith((".", " ")) for part in parts):
         return _invalid("platform-aliased components are forbidden")
-    folded = tuple(unicodedata.normalize("NFKC", part).casefold() for part in parts)
-    knowledge_base = unicodedata.normalize("NFKC", kb_dirname()).casefold()
-    if folded and folded[0] == knowledge_base:
-        folded = folded[1:]
-    return folded
+    below = managed_split_parts(parts, key=_fold)
+    return tuple(_fold(part) for part in (parts if below is None else below))
 
 
 def classify_logical(value: object) -> PathClassification:
     """Classify one KB-relative or vault-prefixed spelling without touching disk."""
 
     if type(value) is str:
-        return _classify_logical_text(value, kb_dirname(), id(_REGISTRY))
+        return _classify_logical_text(value, managed_root_rel(), id(_REGISTRY))
     return _classify_logical(value)
 
 
@@ -3155,7 +3175,7 @@ def _prefilter() -> _Prefilter:
 
 
 def _classify_parts(parts: tuple[str, ...]) -> PathClassification:
-    canonical = kb_dirname() if not parts else f"{kb_dirname()}/{'/'.join(parts)}"
+    canonical = managed_root_rel() if not parts else managed_join("/".join(parts))
     if not _prefilter().may_match(parts):
         return PathClassification(PathDisposition.ORDINARY, canonical=canonical)
     replica = _DESCRIPTOR_BY_ID["collection-replica"]
@@ -3258,7 +3278,7 @@ class IdentityCatalogue:
                     add(
                         record.identity,
                         descriptor_id,
-                        f"{kb_dirname()}/{relative}",
+                        managed_join(relative),
                     )
                 if record.identity.kind != "directory":
                     continue
@@ -3267,7 +3287,7 @@ class IdentityCatalogue:
                     raise RuntimeError(
                         "reserved identity catalogue encountered a directory cycle"
                     )
-                child = filesystem.parent(f"{kb_dirname()}/{relative}")
+                child = filesystem.parent(managed_join(relative))
                 if not child.ok:
                     raise RuntimeError(
                         "reserved identity catalogue could not retain a KB directory"
@@ -3284,7 +3304,7 @@ class IdentityCatalogue:
                         seen_directories.remove(key)
 
         with acquired.require() as filesystem:
-            kb_parent = filesystem.parent(kb_dirname())
+            kb_parent = filesystem.parent(managed_root_rel())
             if not kb_parent.ok:
                 if kb_parent.error is not None and kb_parent.error.code == "MISSING":
                     return cls(
@@ -4684,10 +4704,8 @@ def classify_physical(
     assert isinstance(value, (str, os.PathLike))
     physical_text = unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
     physical_parts = tuple(physical_text.split("/"))
-    if physical_parts[0].casefold() == unicodedata.normalize("NFKC", kb_dirname()).casefold():
-        physical_parts = (kb_dirname(), *physical_parts[1:])
-    else:
-        physical_parts = (kb_dirname(), *physical_parts)
+    below = managed_split_parts(physical_parts, key=_fold)
+    physical_parts = (managed_root_rel(), *(physical_parts if below is None else below))
     candidate = root.joinpath(*physical_parts)
 
     try:

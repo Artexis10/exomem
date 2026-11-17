@@ -490,15 +490,21 @@ def test_existing_json_store_gains_the_spine_without_rewriting_history(tmp_path,
     writer = connection.open_writer(path, lease_check=lambda: True)
     try:
         row_id = _populated(writer)["row_id"]
-        old = {table: writer.connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
-               for table in ("item_versions", "item_sources", "txns", "audit_effects")}
+        # Later schemas add columns with defaults; every column that the schema-4 rows hold keeps its bytes.
+        columns = {table: ",".join(name for (name,) in writer.connection.execute(
+                       "SELECT name FROM pragma_table_info(?)", (table,)))
+                   for table in ("item_versions", "item_sources", "txns", "audit_effects")}
+        old = {table: writer.connection.execute(f"SELECT {names} FROM {table}").fetchall()  # noqa: S608
+               for table, names in columns.items()}
         old_items = writer.connection.execute("SELECT * FROM items").fetchall()
     finally:
         writer.close()
     monkeypatch.undo()
     with connection.open_writer(path, lease_check=lambda: True) as upgraded:
         conn = upgraded.connection
-        assert {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in old} == old  # noqa: S608
+        assert {table: conn.execute(f"SELECT {names} FROM {table}").fetchall()  # noqa: S608
+                for table, names in columns.items()} == old
+        assert conn.execute("SELECT event_version FROM txns").fetchall() == [(1,)]
         assert [row[:-1] for row in conn.execute("SELECT * FROM items")] == old_items
         assert conn.execute("SELECT encoding FROM items").fetchall() == [("json-v1",)]
         assert conn.execute("SELECT * FROM version_identity").fetchall() == [

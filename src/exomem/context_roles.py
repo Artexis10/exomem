@@ -27,7 +27,7 @@ from typing import Any
 import yaml
 
 from . import context_intents, registry_history, semantic_language_registry, vault
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 
 log = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ def shipped_registry_text() -> str:
 
 def override_path(vault_root: Path) -> Path:
     """Where a vault's own registry lives, if the owner authored one."""
-    return Path(vault_root) / kb_dirname() / "_Schema" / REGISTRY_FILENAME
+    return managed_root(Path(vault_root)) / "_Schema" / REGISTRY_FILENAME
 
 
 def clear_cache() -> None:

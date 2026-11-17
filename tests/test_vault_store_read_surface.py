@@ -11,7 +11,6 @@ import base64
 import copy
 import datetime as dt
 import json
-import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -58,10 +57,7 @@ from exomem.governance.principal import request_scope
 from exomem.vault_store import mode, ownership, read
 from exomem.writer_lease import invoke_command
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(180),
-]
+pytestmark = pytest.mark.timeout(180)
 
 SOURCE = "Knowledge Base/Sources/Beacon Survey.md"
 DATA = "Knowledge Base/Records/dataset/readings.csv"
@@ -76,6 +72,8 @@ SAMPLES = {
     "served_context": {},
     "configure_memory:inspect": {"action": "inspect"},
     "coordination_status": {},
+    "inspect_captured_sources": {"system": "archive"},
+    "inspect_capture_erasure_policy": {"system": "archive"},
     "bootstrap": {},
     "search": {"query": "lighthouse"},
     "fetch": {"id": CLAIM},

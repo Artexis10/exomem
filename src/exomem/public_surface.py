@@ -53,6 +53,9 @@ _AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed area names o
     "maintain_memory": "maintenance", "triage_memory": "review", "schema_memory": "schema", "govern_memory": "governance",
     "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures",
     "observe_memory": "observations", "bootstrap": "instructions",
+    "inspect_captured_sources": "sources",
+    "inspect_capture_erasure_policy": "sources",
+    "reserve_source_capture": "sources", "settle_source_capture": "sources",
 }
 #: Renderings that sit in another area than their command's.
 _RENDERING_AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed rendering names whose area differs.
@@ -184,12 +187,17 @@ class PublicSurface:
     def _served(tool: WireTool, available: set[str]) -> bool:
         return all(route.command in available for route in tool.routes)
 
-    def door_operations(self, door: str, commands: Iterable[object]) -> tuple[DoorOp, ...]:
+    def door_operations(self, door: str, commands: Iterable[object], *, listed: bool = False) -> tuple[DoorOp, ...]:
+        """The operations a door serves for these commands; `listed` keeps the ones an agent's listing names.
+
+        A service command's operations stay callable and are left out of every listing.
+        """
         # A served command can carry fewer variants than the registry holds (Cloud and remote
         # admission withhold some), so an operation stays only while its variant is served.
         served = {
             command.name: {(rendering.name, kind) for rendering in command.renderings for kind in rendering.kinds}
             for command in commands
+            if not listed or command.agent_listed
         }
         return tuple(
             op for op in self.doors[door].values() if (op.rendering, op.kind) in served.get(op.command, ())
@@ -234,7 +242,8 @@ class PublicSurface:
         operations = {op.name: op for op in self.door_operations(name, commands)}
         elsewhere = {op.name: other for other in DOORS.values() if other != name
                      for op in self.door_operations(other, commands)}
-        operation, fields, tool_fields = _door_call(name, body, operations, elsewhere)
+        shown = [op.name for op in self.door_operations(name, commands, listed=True)]
+        operation, fields, tool_fields = _door_call(name, body, operations, elsewhere, shown)
         op = operations[operation]
         nested = {"operation": {"kind": op.kind, **fields}, **tool_fields}
         wire = {**nested, **carried}
@@ -405,11 +414,13 @@ def _wire_refusal(name: str, error: Exception, *, tool: WireTool | None = None):
 
 def _door_call(
     door: str, body: Mapping[str, Any], operations: Mapping[str, DoorOp], elsewhere: Mapping[str, str] | None = None,
+    shown: Sequence[str] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     """The operation name, its fields and the tool-level fields of one door call.
 
     `elsewhere` maps an operation of the other door to that door, so a read sent to the write door
-    (or the reverse) is refused with the tool that serves it.
+    (or the reverse) is refused with the tool that serves it. `shown` names the operations that a
+    refusal may suggest, so a misspelt call never teaches a service operation.
     """
     from .cli_ops import OpError
 
@@ -426,13 +437,14 @@ def _door_call(
         refusal.writes = writes
         raise refusal
     if operation not in operations:
+        suggested = operations if shown is None else shown
         served_by = (elsewhere or {}).get(operation)
         refusal = OpError("INVALID_OPERATION",
                           f"{operation} is an operation of {served_by}." if served_by
                           else f"{door} has no operation {operation!r}.",
                           details=None if served_by else {
-                              "candidates": get_close_matches(operation, sorted(operations), n=5)
-                              or sorted(operations)[:5]})
+                              "candidates": get_close_matches(operation, sorted(suggested), n=5)
+                              or sorted(suggested)[:5]})
         refusal.writes = writes
         raise refusal
     fields = body.get("arguments")
@@ -464,14 +476,26 @@ _IMPORT_GUIDE = (
     "Send a folder to a personal server as one archive, in three steps, from a client that can run a shell command or has a networked sandbox. "
     "A client with neither cannot: give the person `exomem import <folder>`. Exomem Cloud refuses lane `import`; its folders go through `exomem cloud import <folder>`. "
     "1. From the folder's parent, pack the folder as one archive, such as `tar -czf folder.tgz folder`, and take its SHA-256. "
-    "2. Call upload_files with lane `import` and that expected_sha256, then run the `shell` line of the reply's `next` to send the archive. "
+    "2. Call upload_files with lane `import` and that expected_sha256, then run the `shell` line of the reply's `next` send step, "
+    "with `<token>` and `<archive>` filled in, to send the archive. "
     "The token is a secret: never show it to the person. "
     "3. Call manage_memory with operation `imports.file` and arguments `{\"upload\": \"<token>\"}`, using the token of step 2, "
     "and repeat it until `filing` is `done`. A repeat, or a call that was cut short, carries on the same import and unpacks nothing again. "
     "A refused archive names the member and leaves nothing unpacked."
 )
+_FILE_GUIDE = (
+    "Keep one file from this client's disk, not an attached file handle, as its original bytes, in four steps. "
+    "1. Take the file's SHA-256. "
+    "2. Call upload_files with lane `source` (an original) or `evidence` (proof) and that expected_sha256. "
+    "The digest holds the upload for this session, so `hold` is optional. The reply is a handoff that stores nothing yet. "
+    "3. Send the bytes: save the reply as JSON and run `exomem attach <file> --handoff-file <json> --root .`, "
+    "or, from a sandbox with no `exomem`, run the `shell` line of the reply's `next` send step with `<token>` and `<file>` filled in. "
+    "The token is a secret: never show it to the person. The send returns a held `file` handle. "
+    "4. Call save_source or save_evidence with that handle in `files`. A held upload lasts an hour and only the same session can redeem it. "
+    "The save's receipt proves the file is kept: check each row's `hash` against the digest of step 1 before you tell the person it is saved. "
+)
 #: Teaching that read_instructions adds to a topic whose use takes more than its arguments show.
-_GUIDES = {"upload_files": _IMPORT_GUIDE, "imports.file": _IMPORT_GUIDE}
+_GUIDES = {"upload_files": f"{_FILE_GUIDE}{_IMPORT_GUIDE}", "imports.file": _IMPORT_GUIDE}
 
 
 def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
@@ -482,7 +506,7 @@ def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
     listed = surface.listed_names(commands)
     if topic is None:
         return {"topics": list(listed), "doors": {
-            door: sorted({op.name.split(".")[0] for op in surface.door_operations(door, commands)})
+            door: sorted({op.name.split(".")[0] for op in surface.door_operations(door, commands, listed=True)})
             for door in (d for d in DOORS.values() if d in listed)
         }}
     if topic in surface.tools and topic in listed:
@@ -491,20 +515,22 @@ def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
                 **({"example": dict(tool.example)} if tool.example else {}),
                 **({"guide": _GUIDES[topic]} if topic in _GUIDES else {})}
     if topic in DOORS.values() and topic in listed:
-        ops = surface.door_operations(topic, commands)
+        ops = surface.door_operations(topic, commands, listed=True)
         areas: dict[str, list[str]] = {}
         for op in ops:
             area, action = op.name.split(".", 1)
             areas.setdefault(area, []).append(action)
         return {"tool": topic, "operations": areas,
                 "next": "read_instructions(topic='<area>.<action>') lists one operation's arguments."}
-    served = [op for door in DOORS.values() for op in surface.door_operations(door, commands) if op.name == topic]
+    served = [op for door in DOORS.values() for op in surface.door_operations(door, commands, listed=True)
+              if op.name == topic]
     if len(served) == 1:
         return _door_help(surface, served[0], commands)
     if served:
         # An operation that both doors carry reads on one and writes on the other: show each its own arguments.
         return {"operation": topic, "tools": [_door_help(surface, op, commands) for op in served]}
-    names = sorted({*listed, *(op.name for door in DOORS.values() for op in surface.door_operations(door, commands))})
+    names = sorted({*listed, *(op.name for door in DOORS.values()
+                               for op in surface.door_operations(door, commands, listed=True))})
     raise OpError("INVALID_OPERATION", f"{topic!r} is not a tool or an operation of this server.",
                   details={"candidates": get_close_matches(topic, names, n=5) or list(listed)[:5]})
 
@@ -644,7 +670,7 @@ def build_tools(commands: Sequence[Any]) -> dict[str, Any]:
     for effect, door in DOORS.items():
         if door not in listed:
             continue
-        operations = surface.door_operations(door, commands)
+        operations = surface.door_operations(door, commands, listed=True)
         title, description = _DOOR_TEXT[effect]
         destructive = any(
             v.destructive for op in operations for r in surface._renderings[op.command] if r.name == op.rendering

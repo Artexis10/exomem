@@ -26,6 +26,101 @@ def _module():
 
 
 @_requires_native_route
+@pytest.mark.parametrize("retained", ["reader", "alias", "moved"])
+def test_replacement_retirement_requires_zero_names_and_allows_an_overlapping_reader(tmp_path, monkeypatch, retained):
+    held_fs = _module()
+    target = tmp_path / "current.txt"
+    target.write_bytes(b"old bytes")
+    witnesses = []
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        durable = fs.name_changes_flush_parents or fs.flush_directory(parent).ok
+        with fs.file(parent, "current.txt").require() as reader:
+            before = reader.version()
+            rename = fs.rename
+
+            def retain_old(source, destination, leaf, **options):
+                if retained == "alias":
+                    os.link(target, tmp_path / "retained.txt")
+                elif retained == "moved":
+                    target.rename(tmp_path / "retained.txt")
+                return rename(source, destination, leaf, **options)
+
+            monkeypatch.setattr(fs, "rename", retain_old)
+            held_fs.publish_bytes(fs, parent, "current.txt", b"new bytes", expected_identity=before.identity,
+                                  after_retire=witnesses.append).require()
+            state = reader.retirement_state().require()
+            assert state.identity.link_count == (0 if retained == "reader" else 1)
+            assert os.read(reader.descriptor, 100) == b"old bytes"
+            if retained == "reader" and durable:
+                assert len(witnesses) == 1 and witnesses[0].authentic()
+                assert witnesses[0].before == before and witnesses[0].observed.identity.link_count == 0
+            else:
+                assert witnesses == []
+                if retained != "reader":
+                    assert (tmp_path / "retained.txt").read_bytes() == b"old bytes"
+    assert target.read_bytes() == b"new bytes"
+
+
+@_requires_native_route
+@pytest.mark.parametrize("publication", ["bytes", "temporary"])
+def test_retirement_is_reported_after_old_close_even_when_new_installation_callback_fails(tmp_path, monkeypatch, publication):
+    held_fs = _module()
+    (tmp_path / "current.txt").write_bytes(b"before")
+    original_files = []
+    witnesses = []
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        durable = fs.name_changes_flush_parents or fs.flush_directory(parent).ok
+        file = fs.file
+
+        def opened(directory, leaf, **options):
+            result = file(directory, leaf, **options)
+            if result.ok and leaf == "current.txt":
+                original_files.append(result.require())
+            return result
+
+        def installed(witness):
+            raise RuntimeError("new acknowledgement unavailable")
+
+        def retired(witness):
+            assert original_files[0].closed
+            witnesses.append(witness)
+
+        with file(parent, "current.txt").require() as original:
+            expected = original.version()
+        if publication == "temporary":
+            with file(parent, "prepared.txt", access="write", create=True, exclusive=True).require() as prepared:
+                fs.write(prepared, b"after").require()
+                version = prepared.version()
+        monkeypatch.setattr(fs, "file", opened)
+        with pytest.raises(RuntimeError, match="new acknowledgement unavailable"):
+            if publication == "bytes":
+                held_fs.publish_bytes(fs, parent, "current.txt", b"after", expected_identity=expected.identity,
+                                      after_install=installed, after_retire=retired)
+            else:
+                held_fs.install_temporary(fs, parent, "prepared.txt", "current.txt", expected_identity=version.identity,
+                                          expected_version=version, expected_destination=expected,
+                                          after_install=installed, after_retire=retired)
+        assert bool(witnesses) == durable
+    assert (tmp_path / "current.txt").read_bytes() == b"after"
+
+
+@_requires_native_route
+def test_missing_retirement_evidence_keeps_publication_successful(tmp_path, monkeypatch):
+    held_fs = _module()
+    (tmp_path / "current.txt").write_bytes(b"before")
+    witnesses = []
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "current.txt").require() as original:
+            expected = original.identity
+            monkeypatch.setattr(type(original), "retirement_state", lambda self: held_fs.HeldResult(
+                error=held_fs.HeldFsError("UNSUPPORTED", "native retirement observation is unavailable"),
+            ))
+        held_fs.publish_bytes(fs, parent, "current.txt", b"after", expected_identity=expected,
+                              after_retire=witnesses.append).require()
+    assert (tmp_path / "current.txt").read_bytes() == b"after" and witnesses == []
+
+
+@_requires_native_route
 def test_bounded_read_rejects_oversized_input_without_returning_truncated_bytes(tmp_path):
     """A growing candidate must not become a truncated held correction or an unbounded allocation."""
     held_fs = _module()
@@ -217,6 +312,20 @@ def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
 
 
 @_requires_native_route
+def test_a_held_file_reports_its_write_time_as_a_stat_does(tmp_path: Path) -> None:
+    """The store records this time in a SQLite INTEGER and compares it with a stat later."""
+    held_fs = _module()
+    (tmp_path / "page.md").write_bytes(b"page")
+    stat_ns = (tmp_path / "page.md").stat().st_mtime_ns
+    with held_fs.acquire(tmp_path).require() as filesystem, filesystem.parent(".").require() as parent:
+        with filesystem.file(parent, "page.md").require() as held:
+            version = held.version()
+    assert version.mtime_ns < 2**63
+    assert abs(version.mtime_ns - stat_ns) < 1_000_000_000
+    assert version.change_time_ns < 2**63
+
+
+@_requires_native_route
 def test_directory_flush_requires_flush_capable_access(tmp_path: Path) -> None:
     held_fs = _module()
     with held_fs.acquire(tmp_path).require() as filesystem:
@@ -320,6 +429,223 @@ def test_retained_directory_name_survives_its_own_child_creation(
                 pass
 
             assert filesystem.validate_directory(container).ok
+
+
+@_requires_native_route
+def test_verified_temporary_replaces_exact_destination_without_recopied_bytes(tmp_path, monkeypatch):
+    """Finishing a bounded rewrite must not reread or copy an arbitrarily large image."""
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+            fs.write(current, b"before").require()
+            destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"after").require()
+            verified = stage.version()
+        with monkeypatch.context() as patch:
+            patch.setattr(fs, "read", lambda *a, **k: pytest.fail("installation reread completed content"))
+            patch.setattr(fs, "write", lambda *a, **k: pytest.fail("installation copied completed content"))
+            installed = held_fs.install_temporary(
+                fs, parent, "rewritten.tmp", "current.md",
+                expected_identity=verified.identity, expected_version=verified,
+                expected_destination=destination,
+            )
+        assert installed.ok
+        assert not (tmp_path / "rewritten.tmp").exists()
+        assert (tmp_path / "current.md").read_bytes() == b"after"
+
+
+@_requires_native_route
+@pytest.mark.parametrize("changed", ["temporary", "destination"])
+def test_verified_temporary_refuses_content_drift_at_same_file_identity(tmp_path, changed):
+    """A stale rewrite must not install changed staged bytes or overwrite a newer destination."""
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+            fs.write(current, b"before").require()
+            destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"after").require()
+            verified = stage.version()
+        name = "rewritten.tmp" if changed == "temporary" else "current.md"
+        (tmp_path / name).write_bytes(b"changed")
+        installed = held_fs.install_temporary(
+            fs, parent, "rewritten.tmp", "current.md",
+            expected_identity=verified.identity, expected_version=verified,
+            expected_destination=destination,
+        )
+        assert not installed.ok and installed.error.code == "IDENTITY_CHANGED"
+        assert (tmp_path / "rewritten.tmp").read_bytes() == (b"changed" if changed == "temporary" else b"after")
+        assert (tmp_path / "current.md").read_bytes() == (b"changed" if changed == "destination" else b"before")
+
+
+@_requires_native_route
+def test_verified_temporary_preserves_a_replacement_that_arrives_during_install(tmp_path, monkeypatch):
+    """Holding the old destination does not prove that its name still identifies that file."""
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+            fs.write(current, b"before").require()
+            destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"after").require()
+            verified = stage.version()
+        original = fs.file
+
+        def replace_destination(held_parent, name, **options):
+            if name == "rewritten.tmp":
+                # Another writer replaces the held destination with POSIX rename semantics; a plain
+                # Windows replace cannot rename onto a file that another handle holds open.
+                with original(held_parent, "newer.tmp", access="write", create=True, exclusive=True).require() as newer:
+                    fs.write(newer, b"newer").require()
+                with original(held_parent, "newer.tmp", access="mutate").require() as newer:
+                    fs.rename(newer, held_parent, "current.md", replace=True).require()
+            return original(held_parent, name, **options)
+
+        monkeypatch.setattr(fs, "file", replace_destination)
+        installed = held_fs.install_temporary(
+            fs, parent, "rewritten.tmp", "current.md",
+            expected_identity=verified.identity, expected_version=verified,
+            expected_destination=destination,
+        )
+        assert not installed.ok and installed.error.code == "IDENTITY_CHANGED"
+        assert (tmp_path / "rewritten.tmp").read_bytes() == b"after"
+        assert (tmp_path / "current.md").read_bytes() == b"newer"
+
+
+@_requires_native_route
+@pytest.mark.parametrize("replace", [False, True])
+def test_publication_revoked_during_copy_preserves_the_destination(tmp_path, replace):
+    """A retired publication right must stop bytes that were already being copied."""
+    held_fs = _module()
+    allowed = True
+
+    def copied_then_retired():
+        nonlocal allowed
+        yield b"obsolete source bytes"
+        allowed = False
+
+    def check_publication():
+        if not allowed:
+            raise RuntimeError("publication retired")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        expected = None
+        if replace:
+            with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+                fs.write(current, b"before").require()
+                expected = current.identity
+        with pytest.raises(RuntimeError, match="publication retired"):
+            held_fs.publish_bytes(
+                fs, parent, "current.md", held_fs.Chunks(copied_then_retired),
+                expected_identity=expected, before_install=check_publication,
+            )
+    assert (tmp_path / "current.md").read_bytes() == b"before" if replace else not (tmp_path / "current.md").exists()
+    assert not any(held_fs.is_publish_temporary(path.name) for path in tmp_path.iterdir())
+
+
+@_requires_native_route
+@pytest.mark.parametrize("replace", [False, True])
+def test_revoked_verified_install_keeps_its_owned_temporary(tmp_path, replace):
+    """A cancelled rewrite keeps its known temporary for cleanup without overwriting current bytes."""
+    held_fs = _module()
+
+    def check_publication():
+        raise RuntimeError("publication retired")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        destination = None
+        if replace:
+            with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+                fs.write(current, b"before").require()
+                destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"obsolete source bytes").require()
+            verified = stage.version()
+        with pytest.raises(RuntimeError, match="publication retired"):
+            held_fs.install_temporary(
+                fs, parent, "rewritten.tmp", "current.md",
+                expected_identity=verified.identity, expected_version=verified,
+                expected_destination=destination, before_install=check_publication,
+            )
+    assert (tmp_path / "rewritten.tmp").read_bytes() == b"obsolete source bytes"
+    assert (tmp_path / "current.md").read_bytes() == b"before" if replace else not (tmp_path / "current.md").exists()
+
+
+@_requires_native_route
+def test_partial_publish_retains_custody_when_native_temporary_cleanup_fails(tmp_path, monkeypatch):
+    """A full-disk copy plus refused cleanup must leave a known outstanding copy, never clean custody."""
+    import json
+
+    held_fs = _module()
+    receipt = tmp_path / "custody.json"
+    evidence = {}
+    allocation = []
+
+    def reserve(name):
+        assert not (tmp_path / name).exists()
+        evidence.update(name=name, state="reserved")
+        receipt.write_text(json.dumps(evidence))
+
+    def bind(name, file):
+        allocation.append(file)
+        evidence.update(state="bound", inode=file.identity.inode)
+        receipt.write_text(json.dumps(evidence))
+
+    def release(name, identity, outcome):
+        evidence.update(state="closed", outcome=outcome)
+        receipt.write_text(json.dumps(evidence))
+
+    def interrupted_bytes():
+        durable = json.loads(receipt.read_text())
+        assert durable["state"] == "bound"
+        assert (tmp_path / durable["name"]).stat().st_ino == durable["inode"]
+        yield b"retained fragment"
+        raise OSError(errno.ENOSPC, "copy interrupted")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        def refuse_cleanup(file):
+            # The original allocation must still be held when cleanup reopens its name.
+            assert allocation[0].version().identity == file.identity
+            return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "temporary cleanup refused"))
+
+        monkeypatch.setattr(fs, "unlink", refuse_cleanup)
+        result = held_fs.publish_bytes(
+            fs, parent, "destination.md", held_fs.Chunks(interrupted_bytes),
+            custody=held_fs.TemporaryCustody(reserve, bind, release),
+        )
+        assert not result.ok
+    durable = json.loads(receipt.read_text())
+    assert durable["state"] == "bound"
+    assert (tmp_path / durable["name"]).read_bytes() == b"retained fragment"
+    assert not (tmp_path / "destination.md").exists()
+
+
+@_requires_native_route
+def test_copy_acknowledgement_failure_preserves_durable_reservation_after_publication(tmp_path):
+    """An unavailable custody acknowledgement cannot turn an installed file into an unrecorded copy."""
+    held_fs = _module()
+    outstanding = tmp_path / "reserved-copy"
+
+    def reserve(name):
+        outstanding.write_text(name)
+
+    def bind(name, file):
+        assert outstanding.read_text() == name
+
+    def release(name, identity, outcome):
+        assert outcome == "installed"
+        raise held_fs.CustodyAcknowledgementPending("acknowledgement unavailable")
+
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        result = held_fs.publish_bytes(
+            fs, parent, "destination.md", b"retained fragment",
+            custody=held_fs.TemporaryCustody(reserve, bind, release),
+        )
+        assert result.ok
+    assert outstanding.exists()
+    assert (tmp_path / "destination.md").read_bytes() == b"retained fragment"
+    assert not (tmp_path / outstanding.read_text()).exists()
 
 
 @_requires_native_route

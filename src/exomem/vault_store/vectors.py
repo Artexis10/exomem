@@ -189,10 +189,9 @@ def embeddable(rel: str) -> bool:
     if index_paths.index_scope() == "vault":
         inside = rel
     else:
-        prefix = kbdir.kb_prefix()
-        if not rel.startswith(prefix):
+        inside = kbdir.managed_split(rel)
+        if inside is None:
             return False
-        inside = rel[len(prefix) :]
         *folders, name = inside.split("/")
         if not walk_name_admits(name, directory=False) or not all(
             walk_name_admits(folder, directory=True) for folder in folders

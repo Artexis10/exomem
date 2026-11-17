@@ -294,6 +294,11 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
 #: budgets, and refuses a call that reaches it. A closed protocol set, not vocabulary.
 EXECUTORS: tuple[str, ...] = ("cell", "control_plane")
 
+#: Where a product command is listed. `primary` and `advanced` order an agent's listings;
+#: `service` marks a calling system's protocol command that no agent listing names
+#: (`Command.agent_listed`). A closed set that this module implements, not vocabulary.
+PRODUCT_SURFACES: tuple[str, ...] = ("primary", "advanced", "service")  # nosemgrep: ep-word-set -- closed listing tiers.
+
 # These operations fetch caller-supplied temporary HTTPS artifact handles.
 # A URL recorded only as source provenance does not make a tool open-world.
 OPEN_WORLD_OPS: frozenset[str] = frozenset({"capture_source", "preserve_artifacts"})
@@ -393,6 +398,17 @@ class Command:
             raise ValueError(f"a command with renderings needs argument rules: {self.name}")
         if self.executor not in EXECUTORS:
             raise ValueError(f"unknown command executor {self.executor!r}: {self.name}")
+        if self.product_surface not in PRODUCT_SURFACES:  # nosemgrep: ep-word-membership -- closed listing tiers.
+            raise ValueError(f"unknown product surface {self.product_surface!r}: {self.name}")
+
+    @property
+    def agent_listed(self) -> bool:
+        """False for a service command: a calling system's protocol step that no agent listing names.
+
+        The command stays callable on every surface that serves it, and the service discovery
+        route still reports its features; only the listings that teach an agent omit it.
+        """
+        return self.product_surface != "service"
 
     @property
     def cloud_only(self) -> bool:
@@ -476,8 +492,10 @@ def listed_names(command: Command, shape: str) -> tuple[str, ...]:
     """The names MCP discovery lists for a command on a surface of this shape.
 
     On the `public` shape these are the typed tools and doors that carry the command; on the
-    `grouped` shape the command is listed under its public name.
+    `grouped` shape the command is listed under its public name. A service command lists none.
     """
+    if not command.agent_listed:
+        return ()
     if shape == "public":
         return operation_entries.listed_tools(command.name, shape)
     return (command.public_name,)

@@ -68,7 +68,7 @@ from ..collection_store.preview import (
     projection_decision,
 )
 from ..find_types import Hit, SemanticUnitHit
-from ..kbdir import kb_dirname
+from ..kbdir import managed_form, managed_root_rel, managed_split
 from ..published_admission import (
     Admission,
     AdmittedPredicate,
@@ -1298,8 +1298,8 @@ def _canonical_reference(
 
 def _kb_stripped(key: str) -> str:
     """The same key without a leading Knowledge-Base directory component."""
-    prefix = f"{kb_dirname().casefold()}/"
-    return key[len(prefix) :] if key.startswith(prefix) else key
+    below = managed_split(key, key=str.casefold)
+    return key if below is None else below
 
 
 @functools.lru_cache(maxsize=256)
@@ -5042,13 +5042,22 @@ def guard_view_response(
     vault_root = Path(vault_root)
     policy, release_gate_active = gate_state(vault_root)
     who = principal if principal is not None else effective_principal()
+    target = context_views.parse_view_ref(str(response.get("ref") or ""))
+    brief = target is not None and target.kind == context_views.VIEW_BRIEF
     if policy.blocked or (not policy.empty and not who.resolved):
         _record_blocked_outcome(who.audience_id)
+        if brief:
+            from .. import topic_brief
+
+            return topic_brief.unavailable(response)
         return {**response, "items": [], "continuation": None}
     guarded = copy.deepcopy(dict(response))
     # The caller's view the compile built: the same principal argument, so the same binding.
     caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
-    target = context_views.parse_view_ref(str(guarded.get("ref") or ""))
+    if brief:
+        from .. import topic_brief
+
+        return topic_brief.guard_response(vault_root, caller, guarded)
     if target is not None and target.profile:
         guarded["items"] = context_views.pinned_items(vault_root, guarded, caller)
         packet = {
@@ -5897,13 +5906,12 @@ def _resolve_reference_targets(vault_root: Path, targets: Iterable[str]) -> set[
     set of things that must be decided.
     """
     out: set[str] = set()
-    kb_prefix = f"{kb_dirname()}/"
     for token in targets:
         candidate = token if token.lower().endswith(".md") else f"{token}.md"
         if (vault_root / candidate).is_file():
             out.add(candidate)
             continue
-        prefixed = candidate if candidate.startswith(kb_prefix) else kb_prefix + candidate
+        prefixed = managed_form(candidate)
         out.add(prefixed if (vault_root / prefixed).is_file() else candidate)
     return out
 
@@ -6134,6 +6142,13 @@ def _postfilter(
     """
     if result is None:
         return None
+    inventory_projection = result if command_name == "inspect_captured_sources" and isinstance(result, dict) else None
+    capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
+    if inventory_projection is not None or capture_attempt or command_name == "inspect_capture_erasure_policy":
+        from ..source_capture import require_authority
+
+        # Reuse whole-namespace authority at release; revocation cannot become a partial identity leak.
+        require_authority(Path(vault_root))
     evidence_projection = (
         result if isinstance(result, dict) and "evidence_version" in result else None
     )
@@ -6243,6 +6258,9 @@ def _postfilter(
         from ..episode_recovery import EpisodeInputOwner
 
         cleaned = EpisodeInputOwner(vault_root).release_material(material_projection, cleaned)
+    if inventory_projection is not None and isinstance(cleaned, dict) and cleaned != inventory_projection:
+        cleaned = {**cleaned, "state": "partial", "complete": False, "next_cursor": None,
+                   "summary": "Captured Source inventory is incomplete after release filtering."}
     from .. import origin_bindings
 
     cleaned = origin_bindings.release_origin_response(vault_root, cleaned)
@@ -6443,6 +6461,11 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "preserve",
         "remember",
         "capture_source",
+        # Attempt receipts require whole-namespace authority at lookup and release.
+        "reserve_source_capture",
+        "settle_source_capture",
+        # Host policy metadata contains no Source content; namespace authority still gates lookup and release.
+        "inspect_capture_erasure_policy",
         "preserve_evidence",
         "preserve_artifacts",
         "compile_source",
@@ -6497,6 +6520,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "attention": "structure",
     "audit": "structure",
     "overview": "structure",
+    "inspect_captured_sources": "structure",
     "list_directory": "structure",
     "list_inbound_links": "structure",
     "evolution": "structure",
@@ -6546,6 +6570,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     },
     "record_memory": "structure",
     "plan_memory": "structure",
+    "inspect_captured_sources": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
     "served_context": "structure",
@@ -7476,7 +7501,7 @@ class _ArtifactReferenceGate:
         self._index_entered = True
         self.census = artifact_census.request_census(self.vault_root)
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
-            self.tombstones, kb_dirname()
+            self.tombstones, managed_root_rel()
         )
 
     def _paths_for(self, alias: str) -> tuple[str, ...]:
@@ -8037,7 +8062,7 @@ def owner_only_aggregate(
                     checkpoint()
                 path = authority._knowledge_base_spelling(vault_root, entry.relative_path)
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
-                if entry.kind != "file" or not path.startswith(f"{kb_dirname()}/"):
+                if entry.kind != "file" or managed_split(path) is None:
                     continue
                 canonical = operation.projection_decision(path)
                 if canonical is None:

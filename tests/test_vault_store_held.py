@@ -12,7 +12,6 @@ file, and the row records both.
 from __future__ import annotations
 
 import hashlib
-import sys
 from datetime import UTC, datetime
 
 import pytest
@@ -24,10 +23,6 @@ from exomem import state_paths
 from exomem.cli_ops import OpError
 from exomem.curation import MAX_WHY_CHARS
 from exomem.vault_store import held, projector, read, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 EXOMEM = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe page that Exomem changed.\n"
 MINE = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe edit that a person made in the file.\n"

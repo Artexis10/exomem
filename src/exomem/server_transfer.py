@@ -694,6 +694,15 @@ class _OriginalDownloadResponse(Response):
 
 async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> JSONResponse:
     """Receive one claimed ticket's file into a held upload; the ticket fixes lane and limit."""
+    status, body = await _hold_ticket_upload(vault_root, request, ticket)
+    if status != 201:
+        # The claim spent the ticket, so a refusal must say that a retry needs a new upload.
+        body = {**body, "reason": f"{body['reason']}. {upload_handoff.SPENT_REMEDY}"}
+    return JSONResponse(body, status_code=status)
+
+
+async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> tuple[int, dict]:
+    """The status and body of one claimed ticket's send: 201 with the held upload, or a refusal."""
     from . import held_uploads
 
     maximum = ticket["max_bytes"]
@@ -713,14 +722,14 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
     bounded = Request(request.scope, receive=bounded_receive)
     declared = _header_count(request.headers.get("content-length", ""))
     if declared is not None and declared > maximum + _FORM_OVERHEAD_BYTES:
-        return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}, status_code=413)
+        return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}
     # Content-Length less the framing allowance is the least the file can hold. With no name yet, only a
     # Source upload can be refused here; any other request reads its form and asks again below.
     if declared is not None and declared > _FORM_OVERHEAD_BYTES:
         refused = await _allowance_refused(
             vault_root, declared - _FORM_OVERHEAD_BYTES, None, ticket["lane"], most_bytes=declared)
         if refused is not None:
-            return JSONResponse(refused, status_code=413)
+            return 413, refused
     try:
         async with bounded.form(max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES) as form:
             # The ticket-upload protocol fixes these fields; none can select a commit target.
@@ -728,15 +737,17 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
                     or _flag(str(form.get("hold") or "")) is not True
                     or set(form) - {"file", "lane", "hold", "filename"}
                     or any(len(form.getlist(key)) != 1 for key in form)):
-                return JSONResponse({"code": "INVALID_UPLOAD", "reason": "handoff fields cannot change its lane or hold mode"}, status_code=400)
+                return 400, {"code": "INVALID_UPLOAD",
+                             "reason": f"send only the form fields file, lane={ticket['lane']} and hold=1"}
             upload = form.get("file")
             if not hasattr(upload, "file"):
-                return JSONResponse({"code": "INVALID_UPLOAD", "reason": "multipart field `file` is required"}, status_code=400)
+                return 400, {"code": "INVALID_UPLOAD", "reason": "multipart field `file` is required"}
             if not await upload_handoff._active(vault_root, ticket["principal"]):
-                return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
+                # The cause alone: the refusal's remedy is the spent ticket's, which the caller adds.
+                return 401, {"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}
             filename = str(form.get("filename") or upload.filename or "")
             if (refused := await _allowance_refused(vault_root, upload.size, filename, ticket["lane"])) is not None:
-                return JSONResponse(refused, status_code=413)
+                return 413, refused
             with principal_module.request_scope(ticket["principal"]):
                 held = await run_in_threadpool(
                     held_uploads.hold, vault_root, upload.file,
@@ -748,16 +759,15 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
                     secret=(upload_handoff.hold_secret(ticket["nonce"])
                             if ticket["lane"] == held_uploads.IMPORT_LANE else None),
                 )
-        return JSONResponse(held, status_code=201)
+        return 201, held
     except (MultiPartException, HTTPException, ClientDisconnect, ValueError):
-        return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}, status_code=413)
+        return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}
     except held_uploads.HeldUploadError as exc:
-        return JSONResponse({"code": exc.code, "reason": exc.reason},
-            status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400))
+        return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400), {"code": exc.code, "reason": exc.reason}
 
 
 def _handoff_unavailable() -> JSONResponse:
-    return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
+    return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.TICKET_UNUSABLE_REASON}, status_code=401)
 
 
 def register_cloud_upload_route(mcp_app: FastMCP, *, vault_root: Path, cell_bearer: Any) -> None:

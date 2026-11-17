@@ -40,6 +40,7 @@ from .collection_store.preview import (
 )
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
+from .kbdir import managed_split
 
 _PUBLIC_LINK_INDEX_RAW_CANDIDATES = 512
 _INTERNAL_LINK_INDEX_RAW_CANDIDATES = 4_096
@@ -1275,7 +1276,7 @@ class _LinkProjector:
                 frontmatter, body, _marker = vault.parse_frontmatter(text)
                 display_title = vault.resolve_display_title(frontmatter, body, path)
                 title = display_title.lower() if display_title else None
-                if relative.startswith(f"{vault.kb_dirname()}/"):
+                if managed_split(relative) is not None:
                     identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
             except (UnicodeDecodeError, vault.PathGuardError, vault.FrontmatterError):
                 complete = False

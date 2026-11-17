@@ -49,7 +49,7 @@ from typing import Any, NamedTuple
 
 from . import __version__, audit, entity_types, relation_registry, request_budget
 from .collection_store.ownership import reader
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative, managed_splitter
 
 CENSUS_VERSION = 1
 AUDIENCE_RESTRICTED = "audience_restricted"
@@ -393,7 +393,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         data = entry.get("provenance")
         legacy_path = entry["path"].removesuffix(".md") + ".md"
         if legacy_path not in reader.pages:
-            legacy_path = kb_prefix() + legacy_path
+            legacy_path = managed_join(legacy_path)
         path = data.get("path", legacy_path) if data else legacy_path
         if not isinstance(path, str) or not reader.author_ok(path):
             continue
@@ -647,7 +647,7 @@ def generic_share_review(vault_root: Path) -> tuple[list[audit.AuditFinding], di
     finding = audit.AuditFinding(
         category=audit.RELATION_GENERIC_SHARE_CATEGORY,
         severity="info",
-        path=f"{kb_prefix()}index.md",
+        path=managed_join("index.md"),
         detail=(
             f"Recorded edges that touch an entity: {numerator}/{denominator} generic "
             f"over {days} days; review target {target * 100:g}%. Coverage: {coverage['status']}."
@@ -737,9 +737,9 @@ def infer_counts(
             return None
         denominators = {"sampled": 0, "included": 0, "undated": 0, "excluded": 0}
         included: set[str] = set()
-        prefix = kb_prefix()
+        under = managed_splitter()
         for page in reader.pages.values():
-            if not page.admitted or not page.path.startswith(prefix):
+            if not page.admitted or under(page.path) is None:
                 continue
             if page_type and page.page_type != page_type:
                 continue
@@ -1513,7 +1513,7 @@ def _check_row(
     # Debt (K7): the key and its target kinds are one census-only check; see `_EVIDENTIAL_KINDS`.
     if row.relation == "evidenced_by":
         if row.dst_kind == "file":
-            relative = dst_page.removeprefix(kb_prefix())
+            relative = managed_relative(dst_page)
             evidential = relative.startswith(_EVIDENCE_FOLDERS) or dst_page in pages_with_sources
         else:
             evidential = row.dst_kind in _EVIDENTIAL_KINDS
@@ -1540,11 +1540,11 @@ def _eligible_cohort(
     end: dt.date | None = None,
 ) -> tuple[set[str], int, int]:
     """Admitted pages that pass the shared relation-debt predicate, date-scoped."""
-    prefix = kb_prefix()
+    under = managed_splitter()
     eligible: set[str] = set()
     undated = outside = 0
     for page in reader.pages.values():
-        if not page.admitted or not page.path.startswith(prefix):
+        if not page.admitted or under(page.path) is None:
             continue
         if not audit.relation_debt_eligible(
             vault_root,

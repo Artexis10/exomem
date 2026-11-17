@@ -24,7 +24,7 @@ from pathlib import Path
 from . import access, call_spans, privacy_log, procedure_approval, reserved_paths
 from . import find as find_module
 from .governance import principal
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_split
 from .vault import (
     VaultPathError,
     VaultPathResolution,
@@ -258,7 +258,7 @@ def spellings(path: str) -> tuple[str, ...]:
     Only auto-append .md if the path has NO extension (`missing_path_for`).
     """
     rel = missing_path_for(path.strip().replace("\\", "/").lstrip("/"))
-    return (rel,) if rel.startswith(kb_prefix()) else (rel, kb_prefix() + rel)
+    return (rel,) if managed_split(rel) is not None else (rel, managed_join(rel))
 
 
 def missing_path_for(path: str) -> str:

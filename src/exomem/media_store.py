@@ -37,6 +37,7 @@ from . import (
     reserved_paths,
     trash_metadata,
 )
+from .kbdir import managed_root
 from .media_jobs import (
     OFFLOAD_MEDIA_TYPE,
     STATUS_JOB_LIMIT,
@@ -345,6 +346,9 @@ def _clear_dead_access(conn, store: MediaJobStore, rows) -> int:
     for row in rows:
         if holder_alive(row["pid"], row["pid_start"]):
             continue
+        if row["source_custody_json"] is not None:
+            # Native custody must prove this allocation; a reusable temporary name cannot authorize deletion.
+            continue
         # Only a reserved publish name is removed, so a damaged row cannot name an original.
         temporary = row["temporary_name"]
         if temporary is not None and held_fs.is_publish_temporary(temporary) and not _remove_temporary(
@@ -476,10 +480,9 @@ def managed_event(vault: Path, path: Path) -> str | None:
 def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[OriginalSnapshot]:
     """Discover sidecar bindings, including unsupported or physically absent originals."""
     from .backfill import iter_kb_files
-    from .kbdir import kb_dirname
     from .vault import parse_frontmatter
 
-    root = root if root is not None else vault / kb_dirname()
+    root = root if root is not None else managed_root(vault)
     if not root.is_dir():
         return
     from .vault_store import read as store_read
@@ -884,8 +887,24 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     with reserved_paths.open_generic_binary(vault, relative) as source:
         if source.stream.read() != rendered.encode("utf-8"):
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
-        os.fsync(source.stream.fileno())
+        try:
+            os.fsync(source.stream.fileno())
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+            # Windows flushes a handle opened for writing only, and this stream is read-only.
+            _flush_through_writer(vault, relative, source.version.identity)
     held_fs.flush_directory_path(snapshot.sidecar_path.parent).require()
+
+
+def _flush_through_writer(vault: Path, relative: str, expected: held_fs.StableIdentity) -> None:
+    """Flush the file at ``relative`` through a write handle, once it is the file that was read."""
+    with held_fs.acquire(vault).require() as filesystem:
+        with filesystem.parent(PurePosixPath(relative).parent.as_posix()).require() as parent:
+            with filesystem.file(parent, PurePosixPath(relative).name, access="write").require() as writable:
+                if (writable.identity.device, writable.identity.inode) != (expected.device, expected.inode):
+                    raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
+                os.fsync(writable.descriptor)
 
 
 def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:
@@ -1269,11 +1288,24 @@ def _hydrate(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, tok
     The reservation names the temporary before it exists, so a stop at any point
     leaves a row that names its file, and nothing at the original's path.
     """
+    from . import source_original_custody
+
     temporary = held_fs.publish_temporary_name()
-    try:
-        _hydrate_reserved(vault, snapshot, ledger, token, temporary)
-    finally:
-        _release(ledger, token, temporary_gone=_remove_temporary(vault, ledger._relative(snapshot.path), temporary))
+    custody = None
+    with ExitStack() as lifetime:
+        try:
+            custody = source_original_custody.prepare(vault, snapshot, ledger, token)
+            _hydrate_reserved(vault, snapshot, ledger, token, temporary, lifetime=lifetime, custody=custody)
+        finally:
+            if custody is not None:
+                gone = custody.finish(temporary)
+            else:
+                with closing(ledger._connect()) as conn:
+                    row = conn.execute("SELECT source_custody_json FROM media_access WHERE token=?", (token,)).fetchone()
+                # Interrupted preparation retains uncertainty, even when its owner object never returned.
+                gone = bool(row is not None and row[0] is None and
+                            _remove_temporary(vault, ledger._relative(snapshot.path), temporary))
+            _release(ledger, token, temporary_gone=gone)
 
 
 def _release(ledger: MediaJobStore, token: str, *, temporary_gone: bool = True) -> None:
@@ -1287,14 +1319,15 @@ def _release(ledger: MediaJobStore, token: str, *, temporary_gone: bool = True) 
         with conn:
             conn.execute("UPDATE media_access SET hydrating = 0, temporary_bytes = "
                          "CASE WHEN :gone THEN 0 ELSE temporary_bytes END, temporary_name = "
-                         "CASE WHEN :gone THEN NULL ELSE temporary_name END WHERE token = :token",
+                         "CASE WHEN :gone THEN NULL ELSE temporary_name END, source_custody_json = "
+                         "CASE WHEN :gone THEN NULL ELSE source_custody_json END WHERE token = :token",
                          {"gone": temporary_gone, "token": token})
     finally:
         conn.close()
 
 
 def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, token: str,
-                      temporary: str) -> None:
+                      temporary: str, *, lifetime: ExitStack, custody=None) -> None:
     from .vault import PathGuard, recheck_path_guards
 
     config = _settings(vault)
@@ -1306,40 +1339,50 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
     _reserve(ledger, token, snapshot.binary_size, limits, hydration=True, temporary=temporary)
     backend = store_for(vault)
     guard = PathGuard.capture(vault, relative.as_posix(), leaf_policy="absent")
-    with held_fs.acquire(vault).require() as filesystem:
-        with filesystem.parent(relative.parent.as_posix(), access="mutate").require() as parent:
-            try:
-                with filesystem.file(parent, temporary, access="write", create=True, exclusive=True).require() as file:
-                    written = file.identity
-                    with os.fdopen(os.dup(file.descriptor), "wb") as sink:
-                        plaintext = _decrypt_into(backend, snapshot.reference, str(config["identity_path"]), sink)
-                    os.fsync(file.descriptor)
-                if plaintext != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
-                    raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original failed authenticated verification")
-                # Only the link runs under the vault guard; the download and the decryption ran outside it.
-                with _guard(vault, "media_store_hydrate"):
-                    if original_state(vault, snapshot.path) != snapshot:
-                        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed during hydration")
-                    recheck_path_guards(vault, (guard,))
-                    held_fs.install_temporary(filesystem, parent, temporary, relative.name,
-                                              expected_identity=written).require()
-                    filesystem.flush_directory(parent).require()
-                    with reserved_paths.open_generic_binary(vault, relative.as_posix()) as placed:
-                        # The verified temporary is now the original; its inode proves it without a second hash.
-                        if (placed.version.identity.device, placed.version.identity.inode) != (written.device, written.inode):
-                            raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the placed original changed")
-                        conn = ledger._connect()
-                        try:
-                            with conn:
-                                _record_cache(conn, ledger, original_state(vault, snapshot.path), placed)
-                        finally:
-                            conn.close()
-            except BaseException:
-                # The held folder reaches the temporary even after a move renamed its path.
-                with suppress(held_fs.HeldFsError, OSError):
-                    with filesystem.file(parent, temporary, access="mutate").require() as file:
-                        filesystem.unlink(file).require()
-                raise
+    filesystem = lifetime.enter_context(held_fs.acquire(vault).require())
+    parent = lifetime.enter_context(filesystem.parent(relative.parent.as_posix(), access="mutate").require())
+    if custody is not None:
+        custody.reserve(temporary, ledger, token)
+    file = lifetime.enter_context(filesystem.file(parent, temporary, access="write", create=True, exclusive=True).require())
+    written = file.identity
+    if custody is not None:
+        custody.bind(temporary, file)
+    try:
+        with os.fdopen(os.dup(file.descriptor), "wb") as sink:
+            plaintext = _decrypt_into(backend, snapshot.reference, str(config["identity_path"]), sink)
+        os.fsync(file.descriptor)
+        if plaintext != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+            raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original failed authenticated verification")
+        verified_version = file.version()
+
+        def install(owner=None):
+            if original_state(vault, snapshot.path) != snapshot:
+                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed during hydration")
+            recheck_path_guards(vault, (guard,))
+            held_fs.install_temporary(filesystem, parent, temporary, relative.name, expected_identity=written,
+                expected_version=verified_version, before_install=owner.before_install if owner else None,
+                after_install=owner.installed if owner else None).require()
+            filesystem.flush_directory(parent).require()
+            with reserved_paths.open_generic_binary(vault, relative.as_posix()) as placed:
+                if (placed.version.identity.device, placed.version.identity.inode) != (written.device, written.inode):
+                    raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the placed original changed")
+                with closing(ledger._connect()) as conn, conn:
+                    _record_cache(conn, ledger, original_state(vault, snapshot.path), placed)
+
+        # Downloads and decryption run outside the boundary; only verified installation enters it.
+        if custody is not None:
+            custody.install(file, plaintext.sha256, install)
+        else:
+            with _guard(vault, "media_store_hydrate"):
+                install()
+    except BaseException:
+        if custody is None:
+            # The held parent still reaches an unregistered temporary after its folder moves.
+            with suppress(held_fs.HeldFsError, OSError):
+                with filesystem.file(parent, temporary, access="mutate").require() as remainder:
+                    if remainder.identity == written:
+                        filesystem.unlink(remainder).require()
+        raise
 
 
 def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
@@ -1496,10 +1539,24 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
             relative = snapshot.path.relative_to(root).as_posix()
             if not any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes):
                 continue
-            ledger, token = stack.enter_context(_pin(root, snapshot.path, read=read))
-            current = original_state(root, snapshot.path)
-            if current.state == "evicted":
-                _hydrate(root, current, ledger, token)
+            stack.enter_context(pin_original(root, snapshot.path, read=read))
+        yield
+
+
+@contextmanager
+def pin_original(vault: Path, path: str | Path, *, read: bool = False):
+    """Acquire one resolved original and retain its eviction pin without keeping a file handle."""
+    if originals.binding_for(vault) is None:
+        yield
+        return
+    root = Path(vault).resolve()
+    target = Path(path)
+    if not target.is_absolute():
+        target = root / target
+    with _pin(root, target, read=read) as (ledger, token):
+        snapshot = original_state(root, target)
+        if snapshot.state == "evicted":
+            _hydrate(root, snapshot, ledger, token)
         yield
 
 

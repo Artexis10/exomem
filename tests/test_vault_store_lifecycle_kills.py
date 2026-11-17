@@ -19,8 +19,6 @@ import hashlib
 import json
 import multiprocessing
 import os
-import signal
-import sys
 import time
 from collections.abc import Callable
 from contextlib import closing, contextmanager
@@ -29,6 +27,7 @@ from pathlib import Path
 
 import pytest
 import test_vault_store_read_write as read_write
+from hard_kill import KILLED, kill_self
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import RELEASED, vault  # noqa: F401
 
@@ -46,10 +45,6 @@ from exomem.governance import membership, policy
 from exomem.governance.principal import library_scope
 from exomem.vault_store import binaries, governed, importer, ownership, projector, write
 from exomem.vault_store import media as store_media
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 stored = read_write.stored
 
@@ -309,7 +304,7 @@ def _as_the_vault_fixture_runs(environment: dict[str, str]) -> None:
 
 
 def _die() -> None:
-    os.kill(os.getpid(), signal.SIGKILL)
+    kill_self()
 
 
 def _after(module, name: str, *, nth: int = 1, counts: Callable[..., bool] | None = None) -> None:
@@ -519,7 +514,7 @@ def kill_each(root: Path, cases: list[Case]) -> None:
         child = context.Process(target=_write_and_die, args=(dict(os.environ), root, case))
         child.start()
         child.join(300)
-        assert child.exitcode == -signal.SIGKILL, f"{case.name}: the kill at {case.kill!r} landed"
+        assert child.exitcode == KILLED, f"{case.name}: the kill at {case.kill!r} landed"
 
 
 def restart(root: Path, cases: list[Case], tmp_path: Path, order: str) -> dict:

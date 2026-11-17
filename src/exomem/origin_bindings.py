@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +34,10 @@ class OriginInputProof:
     journal_guard: PathGuard | None = None
 
     @property
+    def source_reference(self) -> str:
+        return self.retained.canonical
+
+    @property
     def guards(self) -> tuple[PathGuard, ...]:
         assert self.retained.guard is not None
         return (self.retained.guard,) + (
@@ -47,23 +52,29 @@ class OriginalInputProof:
     root: str
     version: str
     size: int
+    materialize: bool = True
+
+    @property
+    def source_reference(self) -> str:
+        return self.root
 
     def recheck(self, vault_root: Path) -> None:
-        _resolve_original(vault_root, {"reference": self.root, "version": self.version, "size": self.size})
+        _resolve_original(vault_root, {"reference": self.root, "version": self.version, "size": self.size},
+                          materialize=self.materialize)
 
 
-def _resolve_original(vault_root: Path, spec: Mapping) -> OriginalInputProof:
+def _resolve_original(vault_root: Path, spec: Mapping, *, materialize: bool = True) -> OriginalInputProof:
     try:
         snapshot = retained_inputs._read_snapshot(vault_root, spec["reference"])  # noqa: SLF001
         if not source_closure._eligible_path(snapshot.page.path):  # noqa: SLF001
             raise _unavailable()
         who = replace(effective_principal(), administrative_ingress=False)
-        with artifact_recovery.stage(vault_root, snapshot.page.path, who) as (held, _descriptor):
+        with artifact_recovery.stage(vault_root, snapshot.page.path, who, materialize=materialize) as (held, _descriptor):
             stale = (held.sha256, held.size) != (spec["version"], spec["size"])
             artifact_recovery.require_current(vault_root, held, who)
         if stale:
             raise provenance.OriginError("ORIGIN_INPUT_STALE", "original input binding changed")
-        return OriginalInputProof(snapshot.canonical, spec["version"], spec["size"])
+        return OriginalInputProof(snapshot.canonical, spec["version"], spec["size"], materialize)
     except (retained_inputs.RetainedInputError, artifact_recovery.RecoveryUnavailable, OSError, ValueError) as error:
         if isinstance(error, provenance.OriginError):
             raise
@@ -77,10 +88,17 @@ class PreparedOriginInputs:
     source: str
     inputs: tuple[tuple[str, OriginInputProof | OriginalInputProof], ...]
 
+    @property
+    def source_references(self) -> tuple[str, ...]:
+        """Source incarnations differ from an episode's shared provenance grouping digest."""
+        return tuple(dict.fromkeys(proof.source_reference for _label, proof in self.inputs))
+
     def revalidate(self, vault_root: Path) -> None:
         document = provenance.parse_origin(self.source, managed=True, authoring=True, strict=True)
         if document.payload is None:
             raise _unavailable()
+        from . import source_custody
+        from .cli_ops import OpError
         from .governance import policy
 
         bindings = document.payload["inputs"]
@@ -88,9 +106,14 @@ class PreparedOriginInputs:
         with policy.outside_request_policy_snapshot():
             try:
                 for label, prior in self.inputs:
-                    current = resolve_origin_input(vault_root, bindings[label])
+                    current = resolve_origin_input(vault_root, bindings[label],
+                        materialize_originals=prior.materialize if isinstance(prior, OriginalInputProof) else True)
                     if current.root != prior.root:
                         raise provenance.OriginError("ORIGIN_INPUT_STALE", "retained input root changed")
+                    try:
+                        source_custody.require_publishable(vault_root, current.source_reference)
+                    except OpError as error:
+                        raise provenance.OriginError(error.code, error.message) from error
             except provenance.OriginError as error:
                 failure = error
         # Frozen domain errors cannot cross a generator context manager's traceback assignment.
@@ -157,7 +180,7 @@ def _text_refused(vault_root: Path, verdict: str) -> provenance.OriginError:
 
 
 def resolve_origin_input(
-    vault_root: Path, binding: object, *, disclosure: bool = False
+    vault_root: Path, binding: object, *, disclosure: bool = False, materialize_originals: bool = True
 ) -> OriginInputProof | OriginalInputProof:
     """Validate one parsed binding against the current released page/unit/span."""
     # The envelope owner defines this grammar; do not create a second validator.
@@ -165,7 +188,7 @@ def resolve_origin_input(
         {"inputs": {"input": binding}, "assessments": [], "bindings": []}, authoring=False
     )["inputs"]["input"]
     if spec.get("representation") == "original":
-        return _resolve_original(vault_root, spec)
+        return _resolve_original(vault_root, spec, materialize=materialize_originals)
     try:
         retained = retained_inputs.resolve_retained_input(
             vault_root, spec["reference"], disclosure=disclosure
@@ -428,3 +451,43 @@ def prepare_origin_inputs(
         for label, binding in metadata.payload["inputs"].items()
     )
     return PreparedOriginInputs(source, inputs)
+
+
+def acquire_origin_inputs(
+    vault_root: Path, source: str, *, before_source: str | None = None, lifetime: ExitStack,
+) -> PreparedOriginInputs | None:
+    """Acquire originals outside SQL; keep only their eviction pins through the caller's commit."""
+    from . import media_store, source_custody
+    from .cli_ops import OpError
+
+    metadata = _authored_origin(source, before_source)
+    if metadata is None:
+        return None
+    assert metadata.payload is not None
+    held = ExitStack()
+    inputs, pinned = [], set()
+    try:
+        for label, binding in metadata.payload["inputs"].items():
+            if binding.get("representation") == "original":
+                snapshot = retained_inputs._read_snapshot(vault_root, binding["reference"])  # noqa: SLF001
+                if not source_closure._eligible_path(snapshot.page.path):  # noqa: SLF001
+                    raise _unavailable()
+                source_custody.require_publishable(vault_root, snapshot.canonical)
+                path, _description = artifact_recovery._resolve(vault_root, snapshot.page.path)  # noqa: SLF001
+                if path not in pinned:
+                    held.enter_context(media_store.pin_original(vault_root, path, read=True))
+                    pinned.add(path)
+            inputs.append((label, resolve_origin_input(vault_root, binding, materialize_originals=False)))
+    except (retained_inputs.RetainedInputError, artifact_recovery.RecoveryUnavailable,
+            media_store.MediaStoreError, OSError, ValueError, OpError) as error:
+        held.close()
+        if isinstance(error, provenance.OriginError):
+            raise
+        if isinstance(error, OpError):
+            raise provenance.OriginError(error.code, error.message) from error
+        raise _unavailable() from error
+    except BaseException:
+        held.close()
+        raise
+    lifetime.callback(held.close)
+    return PreparedOriginInputs(source, tuple(inputs))

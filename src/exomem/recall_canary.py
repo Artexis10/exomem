@@ -164,8 +164,10 @@ def load_cases(raw: bytes):
             except OpError as refusal:
                 # The refusal names what to change; the case's own arguments are already in pydantic's error.
                 raise ValueError(f"collection case is not a valid read: {refusal}") from None
-            # The door carries every read; a case may only inspect or query a Records or Planning
-            # collection, which are the observer protocol's closed collection operation tokens.
+            # This registry-resolved command is the observer's closed Source inventory read protocol.
+            if command.name == "inspect_captured_sources":
+                return self
+            # Other door cases only inspect or query Records or Planning collections.
             collections = (operation_entries.RECORDS.command, operation_entries.PLANS.command)
             # nosemgrep: ep-word-membership -- closed collection action tokens of the operation entries.
             if command.name not in collections or leaf.get("action") not in ("inspect", "query"):

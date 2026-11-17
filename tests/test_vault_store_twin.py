@@ -12,7 +12,6 @@ from __future__ import annotations
 import datetime as dt
 import shutil
 import sqlite3
-import sys
 from contextlib import closing
 
 import pytest
@@ -30,7 +29,6 @@ from exomem.collection_store import connection
 from exomem.vault_store import importer, ownership, projector, verify
 
 pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
     pytest.mark.timeout(300),
 ]
 

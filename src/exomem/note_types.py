@@ -17,6 +17,7 @@ code fixed before the registry existed:
 - G, the source rank penalty: `ranks_as_source`.
 - H, raw and append-only pages: `raw`.
 - I, captured Sources whose compilation the attention queue tracks: `captured_source`.
+- J, pages whose file name follows their frontmatter title: `titled_name`.
 
 The lookup is exact. Each call site keeps its own normalisation of the
 authored value before the lookup, and the lookup adds none.
@@ -162,8 +163,17 @@ def captured_source(note_type: NoteType) -> bool:
 
 
 def profile(note_type: NoteType) -> bool:
-    """Set J: preference profiles, one domain each or the global one, served as session context."""
+    """Set K: preference profiles, one domain each or the global one, served as session context."""
     return note_type.profile
+
+
+def titled_name(note_type: NoteType) -> bool:
+    """Set J: pages whose file name is built from their frontmatter title.
+
+    Evidence keeps the name of its original, and a type without a role has no naming rule, so
+    both stay out. The root layout re-derives the names of this set and keeps every other name.
+    """
+    return note_type.role == "compiled" or note_type.role == "entity" or note_type.role == "source"
 
 
 Predicate = Callable[[NoteType], bool]

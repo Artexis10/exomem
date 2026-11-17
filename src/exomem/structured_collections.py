@@ -22,6 +22,7 @@ from urllib.parse import quote, unquote
 
 from . import call_spans, item_keys, memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import profile_for
+from .kbdir import managed_join, managed_split, managed_split_parts
 from .planning_values import PlanningValues, Unavailable
 
 if TYPE_CHECKING:
@@ -298,7 +299,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
     return {
         "contract_version": COLLECTION_VERSION,
         "manifest_filename": MANIFEST_FILENAME,
-        "records_path": f"{vault.kb_dirname()}/Records/",
+        "records_path": managed_join("Records/"),
         "records_action_constraint": {"semantic_profile": "records"},
         "closed_values": {
             "semantic_profile": profiles,
@@ -622,12 +623,12 @@ One item records the state observed for one identity on one effective date.
 """
     examples = {
         "minimal": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Events/_collection.md",
+            "manifest_path": managed_join("Records/Examples/Events/_collection.md"),
             "manifest_text": minimal_text,
             "append_item": {"occurred_on": "2026-01-01", "label": "Example event"},
         },
         "laboratory_panel": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Laboratory/_collection.md",
+            "manifest_path": managed_join("Records/Examples/Laboratory/_collection.md"),
             "manifest_text": laboratory_text,
             "child_item_shape": {
                 "name": "string",
@@ -666,7 +667,7 @@ One item records the state observed for one identity on one effective date.
             },
         },
         "readable_nested_records": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Observations/_collection.md",
+            "manifest_path": managed_join("Records/Examples/Observations/_collection.md"),
             "manifest_text": readable_text,
             "record_presentation": {
                 "version": 1,
@@ -695,7 +696,7 @@ One item records the state observed for one identity on one effective date.
             },
         },
         "state_ledger": {
-            "manifest_path": f"{vault.kb_dirname()}/Records/Examples/States/_collection.md",
+            "manifest_path": managed_join("Records/Examples/States/_collection.md"),
             "manifest_text": state_ledger_text,
             "append_item": {
                 "identity": "example-subject",
@@ -1237,7 +1238,7 @@ def parse_manifest_bytes(
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
         ) from error
-    if not rel.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(rel):
+    if managed_split(rel) is None or _unsafe_relative(rel):
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
         )
@@ -3672,7 +3673,7 @@ def _reference_key(root: Path, raw: str) -> str | None:
         except ValueError:
             return None
     normalized = candidate.as_posix()
-    if not normalized.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(normalized):
+    if managed_split(normalized) is None or _unsafe_relative(normalized):
         return None
     return normalized
 
@@ -3782,7 +3783,7 @@ def _declared_candidate_rel(root: Path, candidate: Path) -> str | None:
         rel = candidate.relative_to(root).as_posix()
     except ValueError:
         return None
-    if not rel.startswith(f"{vault.kb_dirname()}/") or _unsafe_relative(rel):
+    if managed_split(rel) is None or _unsafe_relative(rel):
         return None
     if reserved_paths.classify_logical(rel).blocked:
         return None
@@ -3823,11 +3824,11 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
     if type(value) is not str or not value or len(value.encode("utf-8")) > _MAX_PATH_BYTES:
         raise CollectionError("INVALID_COLLECTION_PATH", f"{name} must be a bounded relative path")
     raw = value.replace("\\", "/")
-    if raw.startswith(f"{vault.kb_dirname()}/"):
+    if managed_split(raw) is not None:
         rel = raw
     else:
         rel = (Path(manifest_rel).parent / raw).as_posix()
-    if _unsafe_relative(rel) or not rel.startswith(f"{vault.kb_dirname()}/"):
+    if _unsafe_relative(rel) or managed_split(rel) is None:
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under the Knowledge Base"
         )
@@ -3840,7 +3841,8 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
 def _require_records_layer(path: str, name: str) -> None:
     """Keep Records paths in the exact portable layer used by recall policy."""
     parts = path.split("/")
-    if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != "Records":
+    below = managed_split_parts(parts)
+    if below is None or len(below) < 2 or below[0] != "Records":
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/Records"
         )
@@ -3849,7 +3851,8 @@ def _require_records_layer(path: str, name: str) -> None:
 def _require_profile_layer(profile: str, path: str, name: str) -> None:
     layer = profile_for(profile).placement_layer
     parts = path.split("/")
-    if len(parts) < 3 or parts[0] != vault.kb_dirname() or parts[1] != layer:
+    below = managed_split_parts(parts)
+    if below is None or len(below) < 2 or below[0] != layer:
         raise CollectionError(
             "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/{layer}"
         )

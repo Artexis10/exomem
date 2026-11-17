@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import cli_ops
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root
 
 _LEAN_FALLBACK_VARS = (
     "EXOMEM_DISABLE_EMBEDDINGS",
@@ -487,7 +487,7 @@ class ExomemBackend:
         from ..vault_store import mode as store_mode
 
         root = Path(self._vault)
-        kb = root / kb_dirname()
+        kb = managed_root(root)
         if store_mode.store_mode_for_reads(root):
             # The corpus holds a stored page whether or not its file exists yet.
             corpus = tuple(

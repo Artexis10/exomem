@@ -40,7 +40,7 @@ from . import (
     trash_metadata,
 )
 from .governance import catalog_publication, lifecycle
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_split
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .trash_metadata import original_path as trash_original_path
 from .vault import (
@@ -784,15 +784,13 @@ def _recover_from_trash_local(
 
 def _refuse_outside_trash(trash_rel: str) -> None:
     """Refuse a path that is not a trash entry: recovery moves out of the trash only."""
-    parts = trash_rel.split("/")
-    in_trash = (
-        len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH
-    )
+    below = managed_split(trash_rel)
+    in_trash = below is not None and below.split("/")[0] == TRASH_SUBPATH
     if not in_trash:
         raise RecoverError(
             code="NOT_IN_TRASH",
             reason=(
-                f"{trash_rel} is not under {kb_prefix()}{TRASH_SUBPATH}/. "
+                f"{trash_rel} is not under {managed_join(f'{TRASH_SUBPATH}/')}. "
                 f"Use `move_file` for general relocations."
             ),
         )
@@ -1001,8 +999,8 @@ def _restore_destination(
         raise RecoverError(code=error.code, reason=error.reason) from error
 
     # The destination must not be inside the trash (recovery, not re-trashing).
-    rparts = restore_rel.split("/")
-    if len(rparts) >= 2 and rparts[0] == kb_dirname() and rparts[1] == TRASH_SUBPATH:
+    restore_below = managed_split(restore_rel)
+    if restore_below is not None and restore_below.split("/")[0] == TRASH_SUBPATH:
         raise RecoverError(
             code="RESTORE_INTO_TRASH",
             reason=(

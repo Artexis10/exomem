@@ -10,7 +10,6 @@ registry re-derivation for a write that changes no registry input.
 from __future__ import annotations
 
 import os
-import sys
 import threading
 from collections import Counter
 from contextlib import closing
@@ -27,10 +26,6 @@ from exomem.collection_store import governance as store_governance
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import egress, policy
 from exomem.vault_store import rederive, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
 
