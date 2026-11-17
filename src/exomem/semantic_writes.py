@@ -1024,6 +1024,7 @@ class CreationPreflight:
             value["relation_review_fields"] = fields
         if self.profile:
             value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
+            value["review_token"] = creation_review(self.draft_id, self.draft_hash, self.draft_token)
         return value
 
 
@@ -1172,6 +1173,8 @@ class ExistingPreflight:
             value["draft_token"] = self.transition_token
         if self.profile:
             value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
+            # An in-place change's proof is its transition token alone, so the token is its `review_token`.
+            value["review_token"] = self.transition_token
         return value
 
 
@@ -1848,10 +1851,31 @@ def _existing_applicability(
 PROFILE_PREVIEW_REQUIRED = "PROFILE_PREVIEW_REQUIRED"
 # The proof shows the preview happened, not that the owner agreed, so the preview says when its proof may be used.
 PROFILE_PREVIEW_NEXT_ACTION = (
-    "This changes a profile page. Show the owner the resulting lines. Commit with `review` only after the owner "
-    "confirms these exact lines, or when the owner's latest message asked for this profile change. A preference "
-    "the owner only states is not that request: use it in your answer and offer the line."
+    "This changes a profile page. Show the owner the resulting lines. Send the same call with `review` set to this "
+    "preview's `review_token` only after the owner confirms these exact lines, or when the owner's latest message "
+    "asked for this profile change. A preference the owner only states is not that request: use it in your answer "
+    "and offer the line."
 )
+
+
+def creation_review(draft_id: str | None, draft_hash: str | None, draft_token: str) -> str:
+    """A creation preview's one proof value: its draft fields as a base64url JSON array.
+
+    A profile preview returns its proof as `review_token`, because the egress scrubber leaves a `_token` field,
+    which the caller echoes back, unchanged.
+    """
+    return base64.urlsafe_b64encode(json.dumps([draft_id, draft_hash, draft_token]).encode()).decode()
+
+
+def creation_review_fields(review: str) -> tuple[str, str, str] | None:
+    """The draft_id, draft_hash and draft_token that `creation_review` packed; None for any other value."""
+    try:
+        fields = json.loads(base64.urlsafe_b64decode(review.encode("ascii")))
+    except ValueError:
+        return None
+    if not (isinstance(fields, list) and len(fields) == 3 and all(isinstance(f, str) and f for f in fields)):
+        return None
+    return fields[0], fields[1], fields[2]
 
 
 def _is_profile(vault_root: Path, *page_types: object) -> bool:
@@ -1872,8 +1896,8 @@ def require_profile_preview(vault_root: Path, *page_types: object, previewed: bo
             PROFILE_PREVIEW_REQUIRED,
             "a profile page changes only from a reviewed preview: preview this exact change first "
             "(preview=true), show the owner the resulting lines, then send the same call with `review` "
-            "set to the preview's transition_token, or to its draft_id, draft_hash and draft_token when "
-            "creating a page. To remove a line, preview an edit_note change that deletes it.",
+            "set to the preview's `review_token`. To remove a line, preview an edit_note change that "
+            "deletes it.",
         )
 
 

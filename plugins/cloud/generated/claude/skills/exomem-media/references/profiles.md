@@ -39,8 +39,8 @@ without this table.
    confirmed. Write no line the owner has not stated or confirmed.
 3. Show the owner the draft lines, as they would read on the page, and ask which to keep.
 4. Preview the creation with `create_note(type="profile", preview=true)`. Show the resulting page.
-5. After the owner confirms, send the same call with `review` set to the preview's `draft_id`,
-   `draft_hash` and `draft_token`. The write is refused without them.
+5. After the owner confirms, send the same call with `review` set to the preview's
+   `review_token`. The write is refused without it.
 
 An explicit request from the owner for that exact page supplies the confirmation in step 3.
 
@@ -66,7 +66,7 @@ refused with `PROFILE_PREVIEW_REQUIRED` and changes nothing.
 1. Preview the change with `edit_note` or `add_observation`, with `preview=true`.
 2. Show the owner the resulting lines.
 3. After the owner confirms, send the same call with `review` set to the preview's
-   `semantic.transition_token`. A different change than the previewed one is refused.
+   `semantic.review_token`. A different change than the previewed one is refused.
 
 To remove a line, preview an `edit_note` change that deletes it. `remove_observation` has no preview,
 so it is refused on a profile page. To replace a line the owner changed their mind about, use

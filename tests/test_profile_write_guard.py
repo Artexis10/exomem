@@ -153,11 +153,10 @@ def test_a_connected_agent_edits_a_profile_with_the_review_its_preview_returned(
     edit = {"note": PROFILE, "why": "change a rule", "action": "replace_text", "old_text": "Tactical", "new_text": "Slow"}
     assert _public(mcp, "edit_note", **edit)["error"]["code"] == "PROFILE_PREVIEW_REQUIRED"
     preview = _public(mcp, "edit_note", **edit, preview=True)["semantic"]
-    # The proof alone does not show the owner agreed; the preview must say so where the agent reads the token.
+    # The proof alone does not show the owner agreed; the preview must say so where the agent reads the proof.
     assert preview["next_action"] == semantic_writes.PROFILE_PREVIEW_NEXT_ACTION
-    token = preview["transition_token"]
 
-    _public(mcp, "edit_note", **edit, review={"transition_token": token})
+    _public(mcp, "edit_note", **edit, review=preview["review_token"])
 
     assert b"- [rule] Slow cooperative play only." in _bytes(pages, PROFILE)
 
@@ -165,9 +164,9 @@ def test_a_connected_agent_edits_a_profile_with_the_review_its_preview_returned(
 def test_a_connected_agent_adds_a_profile_line_with_the_review_its_preview_returned(pages: Path, mcp) -> None:
     line = {"note": PROFILE, "category": "rule", "text": "Prefer short sessions."}
     assert _public(mcp, "add_observation", **line)["error"]["code"] == "PROFILE_PREVIEW_REQUIRED"
-    token = _public(mcp, "add_observation", **line, preview=True)["semantic"]["transition_token"]
+    review = _public(mcp, "add_observation", **line, preview=True)["semantic"]["review_token"]
 
-    _public(mcp, "add_observation", **line, review={"transition_token": token})
+    _public(mcp, "add_observation", **line, review=review)
 
     assert b"Prefer short sessions." in _bytes(pages, PROFILE)
 
@@ -184,8 +183,11 @@ def test_a_connected_agent_creates_a_profile_with_the_review_its_preview_returne
     assert _public(mcp, "create_note", **page)["error"]["code"] == "PROFILE_PREVIEW_REQUIRED"
     preview = _public(mcp, "create_note", **page, preview=True)
     assert preview["next_action"] == semantic_writes.PROFILE_PREVIEW_NEXT_ACTION
+    # A value the preview did not return is refused before it reaches the writer, and names the preview.
+    refusal = _public(mcp, "create_note", **page, review=preview["review_token"][:-4])["error"]
+    assert refusal["code"] == "INVALID_ARGUMENT" and "preview" in refusal["message"]
 
-    _public(mcp, "create_note", **page, review={key: preview[key] for key in ("draft_id", "draft_hash", "draft_token")})
+    _public(mcp, "create_note", **page, review=preview["review_token"])
 
     (created,) = (vault / KB / "Notes" / "Profiles").glob("*.md")
     assert created.read_text(encoding="utf-8").endswith(CHEAP)

@@ -204,43 +204,35 @@ class FileHandle(Wire):
 _UNLINKED = Field(default=None, description="Why your review found no useful link; never added to note text.")
 _PREVIEW = Field(default=None)
 _DETAIL = Field(default=None)
-
-
-class Review(Wire):
-    """What the preview of this exact call returned: the proof a profile page's write needs."""
-
-    transition_token: str | None = Field(default=None, description="An edit preview's semantic.transition_token.")
-    draft_id: str | None = Field(default=None, description="A creation preview's draft_id.")
-    draft_hash: str | None = Field(default=None, description="A creation preview's draft_hash.")
-    draft_token: str | None = Field(default=None, description="A creation preview's draft_token.")
-
-
-_REVIEW = Field(default=None, description="From the preview of this exact call; a profile page's write needs it.")
+_REVIEW = Field(default=None, description="This call's preview `review_token`; a profile page's write needs it.")
 _DRAFT_FIELDS = ("draft_id", "draft_hash", "draft_token")
 
 
 def _edit_review(wire: Mapping[str, Any]) -> dict[str, Any]:
-    """The leaf `transition_token` of an edit's `review`, which its preview returned."""
+    """The leaf `transition_token` of an edit's `review`: an edit preview's `review_token` is that token."""
     review = wire.get("review")
-    if review is None:
-        return {}
-    if review.get("transition_token") is None or any(review.get(key) is not None for key in _DRAFT_FIELDS):
-        raise Refusal("INVALID_ARGUMENT", "an edit's review is the transition_token of its preview.")
-    return {"transition_token": review["transition_token"]}
+    return {} if review is None else {"transition_token": review}
 
 
 def _creation_review(wire: Mapping[str, Any]) -> dict[str, Any]:
-    """The leaf draft fields of a creation's `review`, each None when the call has none.
+    """The leaf draft fields that a creation's `review` packs, each None when the call has none.
 
     A reviewed-none decision on the draft binds the draft's own hash, as a leaf caller copies it.
     """
+    from .semantic_writes import creation_review_fields
+
     review = wire.get("review")
     if review is None:
         return dict.fromkeys(_DRAFT_FIELDS)
-    if any(review.get(key) is None for key in _DRAFT_FIELDS) or review.get("transition_token") is not None:
-        raise Refusal("INVALID_ARGUMENT", "a creation's review is the draft_id, draft_hash and draft_token of its preview.")
-    draft = {key: review[key] for key in _DRAFT_FIELDS}
-    return {**draft, **({"relation_review_hash": review["draft_hash"]} if wire.get("unlinked_reason") is not None else {})}
+    fields = creation_review_fields(review)
+    if fields is None:
+        raise Refusal(
+            "INVALID_ARGUMENT",
+            "review is not a creation preview's `review_token`. "
+            "Preview this exact call and send its `review_token` unchanged.",
+        )
+    draft = dict(zip(_DRAFT_FIELDS, fields, strict=True))
+    return {**draft, **({"relation_review_hash": draft["draft_hash"]} if wire.get("unlinked_reason") is not None else {})}
 
 
 # --- Reads ----------------------------------------------------------------------------------
@@ -359,7 +351,7 @@ class CreateNote(Wire):
     unlinked_reason: str | None = _UNLINKED
     vocabulary_decision: VocabularyDecision | None = None
     suggest_links: bool | None = Field(default=None, description="Also return pages to link.")
-    review: Review | None = _REVIEW
+    review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
@@ -394,7 +386,7 @@ class AddObservation(Wire):
     until: str | None = Field(default=None, description="ISO date this stops holding.")
     check_by: str | None = Field(default=None, description="ISO date to revisit.")
     unlinked_reason: str | None = _UNLINKED
-    review: Review | None = _REVIEW
+    review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
@@ -470,7 +462,7 @@ class EditNote(Wire):
     context: str | None = Field(default=None, description="edit_observation.")
     links: list[Link] | None = Field(default=None, description="edit_observation: the full list.")
     unlinked_reason: str | None = _UNLINKED
-    review: Review | None = _REVIEW
+    review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
