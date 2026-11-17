@@ -5695,43 +5695,33 @@ def _emission_rule(
     caller may not see, is dropped. A child is reported as its emitted parent when that parent has a
     view and is a recall candidate, else as itself; the page it is reported as must be visible too.
     `proven` holds the paths that the catalogue's projection already admitted for recall; the
-    symlink and access walk runs only for the others.
+    symlink and access walk runs only for the others, once per path, in one batch pass over the
+    rows of `metadata`, under one read of the access policy.
     """
     from . import access
 
-    seen: dict[str, bool] = {}
+    def viewed(rel: str | None) -> bool:
+        row = metadata.get(rel) if rel is not None else None
+        return row is not None and row.view is not None
+
+    admitted = recall_policy.admitted_among(
+        vault_root, (rel for rel in metadata if viewed(rel) and rel not in proven)
+    )
+    _fingerprint, indexable = access.indexable_filter(vault_root)
+
+    def recall_admitted(rel: str) -> bool:
+        return rel in proven or rel in admitted
 
     def visible(rel: str) -> bool:
-        if rel not in seen:
-            row = metadata.get(rel)
-            seen[rel] = bool(
-                row is not None
-                and row.view is not None
-                and (
-                    rel in proven
-                    or (
-                        recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-                        and access.is_indexable(vault_root, rel)
-                    )
-                )
-            )
-        return seen[rel]
+        return viewed(rel) and (
+            rel in proven or (rel in admitted and (indexable is None or indexable(rel)))
+        )
 
     def emitted_as(rel: str) -> str | None:
         if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not visible(rel):
             return None
-        row = metadata[rel]
-        parent = metadata.get(row.parent)
-        emitted = (
-            row.parent
-            if parent is not None
-            and parent.view is not None
-            and (
-                row.parent in proven
-                or recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
-            )
-            else rel
-        )
+        parent = metadata[rel].parent
+        emitted = parent if viewed(parent) and recall_admitted(parent) else rel
         return emitted if visible(emitted) else None
 
     return emitted_as
