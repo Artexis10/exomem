@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1221,6 +1222,62 @@ def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolve
     assert migrate_apply(vault) == 0
 
     assert body() == file_mode
+
+
+@pytest.mark.timeout(300)
+def test_a_resolver_built_across_a_commit_shows_a_pinned_restricted_reader_no_withheld_title(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A resolver is keyed at the revision whose key it read. Built from a later revision under that
+    key, it lets a reader still pinned at the key's revision borrow it, and the reader's filter,
+    which asks its own revision whether a path is a page, then shows a page that a policy withholds
+    from it as a title."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Notes/Secret/**"]')
+    linker = "Knowledge Base/Notes/Linker.md"
+    secret = "Knowledge Base/Notes/Secret/Plan.md"
+    write.commit(
+        writer,
+        put(
+            linker,
+            b"---\ntitle: Linker\ntype: note\n---\n# Linker\n\n"
+            b"See [[Knowledge Base/Notes/Beta]] and [[Knowledge Base/Notes/Secret/Plan]] soon.\n",
+        ),
+    )
+    find_module.evict_resolver_caches(stored)
+    keyed, committed, errors = threading.Event(), threading.Event(), []
+    real_vault_key = find_module.FreshnessSnapshot.vault
+
+    def vault_key(self):
+        key = real_vault_key(self)
+        if threading.current_thread().name == "resolver-builder":
+            keyed.set()
+            assert committed.wait(60)
+        return key
+
+    def build():
+        try:
+            find_module._get_query_resolver(stored)
+        except BaseException as error:  # noqa: BLE001 - the test thread reports it.
+            errors.append(error)
+            keyed.set()
+
+    monkeypatch.setattr(find_module.FreshnessSnapshot, "vault", vault_key)
+    with read.request_snapshot(stored):  # the reader's revision, before the commit below
+        builder = threading.Thread(target=build, name="resolver-builder")
+        builder.start()
+        assert keyed.wait(60)
+        write.commit(
+            writer,
+            put(secret, b"---\ntitle: Merger Plan Codename\ntype: note\n---\n# Plan\n\nThe plan.\n"),
+        )
+        committed.set()
+        builder.join(60)
+        assert not errors, errors
+        with request_scope(EXTERNAL), capabilities.active_surface(PUBLIC_SHAPE):
+            body = commands.op_read_memory(stored, path=linker)["body"]
+
+    assert "[[Beta]]" in body, f"the read never borrowed the resolver: {body!r}"
+    assert "Merger Plan Codename" not in body
 
 
 #: Who asks, and whether an active policy withholds a page from the external audience. A caller

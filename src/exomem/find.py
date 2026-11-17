@@ -8264,27 +8264,31 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     """
     from . import freshness as freshness_module
     from .vault import WikilinkResolver
+    from .vault_store import read as store_read
 
     root = Path(vault_root)
-    if freshness is None:
-        freshness = FreshnessSnapshot(root).vault()
-    checkpoint = freshness_module.consumer_checkpoint(root, "vault")
-    if checkpoint.triple != freshness:
-        checkpoint = None
-    cached = _RESOLVER_CACHE.get(root)
-    if cached and cached[0] == freshness:
-        return cached[1]
-    with _RESOLVER_LOCK:
+    # A store-mode key is the revision that it read, so the key and the build read one revision: a resolver
+    # keyed at R1 that listed the pages of R1+1 would show a reader still pinned at R1 a page it cannot see.
+    with store_read.request_snapshot(root):
+        if freshness is None:
+            freshness = FreshnessSnapshot(root).vault()
+        checkpoint = freshness_module.consumer_checkpoint(root, "vault")
+        if checkpoint.triple != freshness:
+            checkpoint = None
         cached = _RESOLVER_CACHE.get(root)
         if cached and cached[0] == freshness:
             return cached[1]
-        resolver = WikilinkResolver(root)
-        _RESOLVER_CACHE[root] = (freshness, resolver)
-        if checkpoint is not None:
-            _RESOLVER_CHECKPOINTS[root] = checkpoint
-        else:
-            _RESOLVER_CHECKPOINTS.pop(root, None)
-    return resolver
+        with _RESOLVER_LOCK:
+            cached = _RESOLVER_CACHE.get(root)
+            if cached and cached[0] == freshness:
+                return cached[1]
+            resolver = WikilinkResolver(root)
+            _RESOLVER_CACHE[root] = (freshness, resolver)
+            if checkpoint is not None:
+                _RESOLVER_CHECKPOINTS[root] = checkpoint
+            else:
+                _RESOLVER_CHECKPOINTS.pop(root, None)
+        return resolver
 
 
 def borrow_query_resolver(
