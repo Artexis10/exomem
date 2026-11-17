@@ -1922,7 +1922,7 @@ def op_bootstrap(
             "preflight": {
                 tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
                 "near_duplicate_warnings": (
-                    "if they fire, consider edit or replace instead of a parallel page; a write advisory "
+                    "if they fire, prefer edit or replace over a parallel page; a write advisory "
                     "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
                     "signal stays quiet until "
                     + (
@@ -8108,6 +8108,8 @@ def _op_activate_context_body(
                     known_generation=(held_map or {}).get("map_generation"),
                     native_skills=native_skills, known_skills=(held_map or {}).get("skills_generation"),
                     known_stance=(held_map or {}).get("stance_generation"),
+                    known_profiles=(held_map or {}).get("profile_generations"),
+                    turn=turn, snapshot=snapshot,
                     task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                     spent_after=reserved_chars,
@@ -8144,6 +8146,9 @@ def _op_activate_context_body(
                 refs=(), roles=(), map_generation=map_generation,
                 skills_generation=working_set_runtime_module.held_session_generation(packet.get("skills")),
                 stance_generation=working_set_runtime_module.held_session_generation(packet.get("stance")),
+                profile_generations=working_set_runtime_module.held_profile_generations(
+                    packet.get("domain_profiles"), (held_map or {}).get("profile_generations"),
+                ),
             )
             packet["task_context"] = context_task.pin(
                 vault_root, context_views_module.CallerView.current(vault_root, purpose=purpose),

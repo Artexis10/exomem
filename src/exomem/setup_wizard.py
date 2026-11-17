@@ -38,6 +38,7 @@ from . import overview as overview_module
 from . import personalize as personalize_module
 from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
+from .vault_store import cli_fence
 
 _SKILL_NAME_MARKER = "name: exomem"
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
@@ -726,6 +727,7 @@ def run_setup(
             print_fn("setup: a vault path is required.")
             return 2
     vault_path = Path(vault).expanduser()
+    cli_fence.require("setup", vault_path)
     if not vault_path.exists():
         if yes or _ask_yn(input_fn, f"{vault_path} does not exist. Create it?", True):
             vault_path.mkdir(parents=True, exist_ok=True)

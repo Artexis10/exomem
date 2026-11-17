@@ -256,6 +256,16 @@ def check_graph_recovery_age(vault_root: Path | None) -> DoctorCheck:
             "No vault selected; graph recovery state not evaluated.",
             details=details,
         )
+    from .vault_store import mode as store_mode
+
+    if store_mode.store_mode_for_reads(vault_root):
+        # A store commit derives its graph rows itself: no checkpoint and no recovery clock exist to read.
+        return _check(
+            "write_path.graph_recovery",
+            "pass",
+            "The vault is in store mode and derives its graph with each commit, so graph recovery does not apply.",
+            details=details,
+        )
     checkpoint = graph_sync.read_checkpoint(vault_root)
     age = graph_sync.recovery_age_seconds(vault_root)
     clock_state = graph_sync.recovery_clock_state(vault_root)
@@ -1159,7 +1169,37 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
             "No vault configured; graph_sync state was not inspected.",
         )
     from . import graph_sync
+    from .vault_store import graph_state
 
+    store_graph = graph_state.read(vault_root)
+    if store_graph is not None:
+        details = {
+            "state": "current" if store_graph.current else "unavailable",
+            "vault_store_revision": store_graph.revision,
+        }
+        if store_graph.current:
+            return _check(
+                "graph_sync.state",
+                "pass",
+                f"The graph is served from the store, at store revision {store_graph.revision}.",
+                details=details,
+            )
+        details["reason"] = store_graph.reason
+        if store_graph.reason == "graph_disabled":
+            return _check(
+                "graph_sync.state",
+                "warn",
+                "The graph is disabled, so the store serves no graph rows.",
+                "Unset EXOMEM_DISABLE_GRAPH_INDEX and restart the service to serve the graph.",
+                details=details,
+            )
+        return _check(
+            "graph_sync.state",
+            "fail",
+            f"The store cannot be read for the graph ({store_graph.reason}).",
+            "Fix the store failure that the vault store checks in this report name.",
+            details=details,
+        )
     status = graph_sync.status(vault_root)
     state = status.get("state")
     generation = status.get("generation")

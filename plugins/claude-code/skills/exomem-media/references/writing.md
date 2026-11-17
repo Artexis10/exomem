@@ -240,7 +240,7 @@ For the full read-only / writeable path map see `write-scope.md`.
 
 ## Page types
 
-Nine page types under `Knowledge Base/`, each with a required frontmatter shape,
+The page types under `Knowledge Base/`, each with a required frontmatter shape,
 naming rule, and location. **Full per-type spec: `page-types.md`;
 frontmatter: `frontmatter.md`.** The behaviorally-load-bearing
 distinctions:

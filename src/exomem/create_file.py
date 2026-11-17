@@ -351,6 +351,8 @@ def create_file(
     if is_markdown and not existing_file:
         token = creation_token
         try:
+            if not validate_only:
+                semantic_writes.require_profile_preview(vault_root, fm.get("type"), previewed=draft_hash is not None)
             preflight = semantic_writes.preflight_creation(
                 vault_root,
                 path=rel_path,

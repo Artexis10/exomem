@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -2054,12 +2055,15 @@ def _subject_family(
     kind: str,
     view: Callable[..., dict[str, Any] | None],
     *,
-    linked_from: Callable[[Context, str], bool],
+    linked_from: Callable[[Context, str], bool] | None = None,
+    subjects_of: Callable[[Context, str], list[str]] | None = None,
 ) -> Family:
     """A family whose one proposal per subject page is `view` of that page.
 
     A changed page recomputes its own proposal, and those of the governed
     pages it links when `linked_from(ctx, path)` says it can count toward them.
+    A family whose evidence comes from pages that do not link its subject
+    names the subjects a change reaches with `subjects_of(ctx, path)` instead.
     """
 
     def refresh(ctx: Context, subject: str) -> None:
@@ -2077,7 +2081,10 @@ def _subject_family(
         )
 
     def on_page(ctx: Context, rel_path: str) -> None:
-        subjects = _linked_subjects(ctx, rel_path) if linked_from(ctx, rel_path) else [rel_path]
+        if subjects_of is not None:
+            subjects = subjects_of(ctx, rel_path)
+        else:
+            subjects = _linked_subjects(ctx, rel_path) if linked_from(ctx, rel_path) else [rel_path]
         for subject in subjects:
             refresh(ctx, subject)
 
@@ -2117,6 +2124,461 @@ PROFILE = _subject_family(
 )
 
 
+# ----------------------------------------------------------------------
+# profile curation: `upkeep_profile_curation`
+# ----------------------------------------------------------------------
+#
+# A profile page is the owner's own statement of how to treat them in a domain, served on every turn of that
+# domain. This family only notices that it may be out of date and names the governed edit route. It loads no
+# model and writes nothing: the owner confirms the exact lines in conversation, then the agent commits them.
+
+CURATION_FAMILY = "upkeep_profile_curation"
+CURATION_KIND = "profile.curation"
+
+#: Pages with a newer preference or constraint unit counted per profile, after visibility and eligibility. Past it
+#: the item says "at least".
+_CURATION_PAGES = 256
+#: Pages read per profile view, counted or not. A live page whose labelled units all fail the date or eligibility
+#: checks still costs its read, so the view stops at twice the page limit and says "at least".
+_CURATION_READS = 2 * _CURATION_PAGES
+#: Typed relation rows counted per profile, after visibility. Past it the item says "at least".
+_CURATION_RELATION_ROWS = 64
+#: The day the profiles were last queued for the date checks below.
+_CURATION_DAY_META = "curation_day"
+
+_CURATION_PROFILES_SQL = (
+    "SELECT path FROM graph_nodes WHERE kind = 'file' AND page_type IN ({marks}) ORDER BY path"
+)
+
+#: Of the candidate evidence pages, those that hold a unit with one of the role labels and were updated after the
+#: profile, with their dates. The labels only propose candidates; the page's own interpretation decides each unit.
+_CURATION_UNIT_PAGES_SQL = (
+    "SELECT f.path, f.updated_date, f.origin_date, f.lifecycle_status FROM graph_nodes f "
+    "WHERE f.node_key IN ({keys}) AND f.kind = 'file' AND {newer} "
+    "AND EXISTS (SELECT 1 FROM graph_nodes u WHERE u.path = f.path AND u.kind = ? AND {labels})"
+)
+
+#: Live typed relations that supersede or oppose a unit on the profile page. The first branch has the profile unit
+#: as target; the second has it as source, which only a contradiction reads.
+_CURATION_RELATIONS_SQL = (
+    "SELECT 'target', e.dst_key, e.source_path, "
+    "exomem_edge_behaves({columns}, 'replaces'), exomem_edge_behaves({columns}, 'opposes') "
+    "FROM graph_nodes u JOIN graph_edges e ON e.dst_key = u.node_key "
+    "WHERE u.path = ? AND u.kind <> 'file' AND e.origin <> 'wikilink' AND e.src_key <> e.dst_key AND {live} "
+    "UNION ALL "
+    "SELECT 'source', e.src_key, e.dst_page_key, "
+    "exomem_edge_behaves({columns}, 'replaces'), exomem_edge_behaves({columns}, 'opposes') "
+    "FROM graph_nodes u JOIN graph_edges e ON e.src_key = u.node_key "
+    "WHERE u.path = ? AND u.kind <> 'file' AND e.origin <> 'wikilink' AND e.src_key <> e.dst_key AND {live} "
+    "ORDER BY 1, 2, 3"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _CurationScope:
+    """The pages that may hold evidence about one profile, read once per tick."""
+
+    #: The pages the profile links.
+    linked: frozenset[str]
+    #: The pages that declare a topic in the profile's domain or below it, with the pages the catalogue has
+    #: not folded yet. Empty for the global profile; None when the catalogue cannot be read.
+    members: frozenset[str] | None
+
+
+def _past(value: str | None, today: date) -> bool:
+    """Whether an authored ISO date is before `today`; an unreadable one is not a date."""
+    try:
+        return bool(value) and date.fromisoformat(str(value)[:10]) < today
+    except ValueError:
+        return False
+
+
+def _curation_state(ctx: Context, rel_path: str) -> Any | None:
+    """The page's parsed semantic state, or None when it cannot be read."""
+    from . import semantic_contract
+    from . import vault as vault_module
+
+    try:
+        source, _guard = vault_module.read_guarded_text(ctx.vault_root, ctx.vault_root / rel_path)
+    except (OSError, ValueError):
+        return None
+    return semantic_contract.build_page_state(ctx.vault_root, rel_path, source)
+
+
+def _unit_page(ctx: Context, rel_path: str) -> tuple[object, tuple[tuple[str, str, str, str], ...]] | None:
+    """A live page's `topics` and its units as `(ref, category, as_of, until)`, parsed once per tick.
+
+    None when the page cannot be read, is not a live compiled page, or is superseded. Only these fields are
+    kept, so a tick that reads many pages holds no parsed documents.
+    """
+    memo = ctx.shared.setdefault("curation_pages", {})
+    if rel_path not in memo:
+        state = _curation_state(ctx, rel_path)
+        memo[rel_path] = (
+            None
+            if state is None or not state.eligible_compiled or state.frontmatter.get("superseded_by")
+            else (
+                state.frontmatter.get("topics"),
+                tuple(
+                    (unit.unit_ref, unit.category, unit.as_of or "", unit.until or "")
+                    for unit in state.document.units
+                    if unit.unit_ref
+                ),
+            )
+        )
+    return memo[rel_path]
+
+
+def _in_domain(taxonomy: Any, topics: object, domain: str) -> bool:
+    """Whether declared topics resolve to `domain` or to a domain below it."""
+    from . import vocabulary_resolution
+
+    found = vocabulary_resolution.resolve_topics(taxonomy, vocabulary_resolution.declared_topics(topics))
+    return any(domain == key or domain in taxonomy.domain_ancestors(key) for key in found.resolved)
+
+
+def _curation_categories(ctx: Context) -> frozenset[str]:
+    """The categories of the context roles that curation reads, once per tick."""
+    if "curation_categories" not in ctx.shared:
+        from . import context_roles
+
+        roles = context_roles.load_roles(ctx.vault_root)
+        ctx.shared["curation_categories"] = context_roles.projection_categories(roles, "curation")
+    return ctx.shared["curation_categories"]
+
+
+def _profile_paths(ctx: Context) -> list[str]:
+    """Every profile page in the graph, listed once per tick."""
+    if "curation_profiles" not in ctx.shared:
+        keys = ctx.type_basis.keys(note_types.profile)
+        ctx.shared["curation_profiles"] = [
+            str(row[0])
+            for row in ctx.graph().execute(_CURATION_PROFILES_SQL.format(marks=",".join("?" for _ in keys)), keys)
+        ] if keys else []
+    return ctx.shared["curation_profiles"]
+
+
+def _profile_scopes(ctx: Context, taxonomy: Any) -> dict[str, Any]:
+    """Each profile page's scope from its `topics`, parsed once per tick; a page that cannot be read has none."""
+    if "curation_profile_scopes" not in ctx.shared:
+        from . import vocabulary_resolution
+
+        scopes = {}
+        for profile in _profile_paths(ctx):
+            page = ctx.page(profile)
+            if page is not None:
+                scopes[profile] = vocabulary_resolution.profile_scope(taxonomy, page.frontmatter.get("topics"))
+        ctx.shared["curation_profile_scopes"] = scopes
+    return ctx.shared["curation_profile_scopes"]
+
+
+def _domain_members(ctx: Context, taxonomy: Any, domain: str) -> frozenset[str] | None:
+    """The pages the catalogue holds with a topic in `domain` or below it, plus its unfolded pages.
+
+    The catalogue indexes each page's declared topics, so this reads no page. None when it cannot be read:
+    switched off, never built, or unreadable. Opening it never creates it.
+    """
+    from . import context_catalogue
+
+    if context_catalogue.disabled() or not context_catalogue.sidecar_path(ctx.vault_root).exists():
+        return None
+    catalogue = context_catalogue.ContextCatalogue(ctx.vault_root)
+    try:
+        if not catalogue.built():
+            return None
+        found = catalogue.paths_declaring(lambda raw: _in_domain(taxonomy, raw, domain))
+        return None if found is None else frozenset({*found, *catalogue.pending()})
+    finally:
+        catalogue.close()
+
+
+def _curation_scope(ctx: Context, subject: str, scope: Any, taxonomy: Any) -> _CurationScope:
+    """The pages that may hold evidence about `subject`, read once per tick.
+
+    Pages the profile links count, because a vault rarely tags its notes with a domain and the profile already
+    links its detail notes. A domain profile also counts the pages of its domain and of the domains below it.
+    """
+    from . import vocabulary_resolution
+
+    memo = ctx.shared.setdefault("curation_scopes", {})
+    if subject not in memo:
+        ctx.graph_view()
+        linked = frozenset(
+            str(row[0])
+            for row in ctx.graph().execute(
+                _LINKED_SUBJECTS_SQL.format(link=_authored_link("e")), (subject, subject)
+            )
+        )
+        members: frozenset[str] | None = frozenset()
+        if scope.kind == vocabulary_resolution.SCOPE_DOMAIN:
+            members = _domain_members(ctx, taxonomy, scope.domain)
+        memo[subject] = _CurationScope(linked=linked, members=members)
+    return memo[subject]
+
+
+def _curation_candidates(
+    ctx: Context, subject: str, scope: Any, taxonomy: Any, since: str, categories: frozenset[str], keep
+) -> Iterator[tuple[str, str]]:
+    """`(path, page date)` of each live page in the profile's scope with a newer curation-labelled unit, in path order.
+
+    `keep` and the page's lifecycle status decide each page from the graph row, so no page is read here; a
+    superseded or archived page, whose supersession dated it newer, never costs a read. Rows come one chunk at a time
+    as the caller asks, so a caller that stops early queries no further chunk.
+    """
+    from . import context_catalogue, epistemic_graph, semantic_language_registry
+
+    evidence = _curation_scope(ctx, subject, scope, taxonomy)
+    pages = evidence.linked | (evidence.members or frozenset())
+    candidates = sorted(path for path in pages if path != subject and _visible(keep, path))
+    plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
+    labels, params = plan.predicate("u.unit_category", "u.unit_kind")
+    graph = ctx.graph()
+    # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
+    for start in range(0, len(candidates), context_catalogue.SQL_VARIABLE_CHUNK):
+        chunk = candidates[start : start + context_catalogue.SQL_VARIABLE_CHUNK]
+        sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), newer=_NEWER_THAN, labels=labels)
+        keys = [f"file:{path}" for path in chunk]
+        rows = graph.execute(sql, (*keys, since, epistemic_graph.CANDIDATE_KIND, *params))
+        yield from sorted(
+            (str(path), _date(updated, origin))
+            for path, updated, origin, status in rows
+            if ctx.live_status(status, str(path))
+        )
+
+
+def _new_units(
+    ctx: Context, subject: str, scope: Any, taxonomy: Any, since: str, today: date, keep
+) -> tuple[dict[str, list[str]], bool]:
+    """Live units of the curation categories dated after `since`, by page, and whether the count is partial.
+
+    A unit with no date of its own takes its page's. Visibility and eligibility decide each page before the
+    page limit counts it, so pages the caller may not see or that are not live never use up the limit. The
+    walk stops at the first page past the limit, or once it has read `_CURATION_READS` pages. A domain whose
+    pages the catalogue cannot name makes the count partial. The owner's view (`keep=None`) is computed once
+    per tick.
+    """
+    from . import vocabulary_resolution
+
+    memo: dict[str, Any] = ctx.shared.setdefault("curation_new_units", {}) if keep is None else {}
+    if subject in memo:
+        return memo[subject]
+    categories = _curation_categories(ctx)
+    evidence = _curation_scope(ctx, subject, scope, taxonomy)
+    partial = evidence.members is None
+    in_domain = scope.kind == vocabulary_resolution.SCOPE_DOMAIN
+    found: dict[str, list[str]] = {}
+    reads = 0
+    if since and categories:
+        for path, page_date in _curation_candidates(ctx, subject, scope, taxonomy, since, categories, keep):
+            if reads == _CURATION_READS:
+                partial = True
+                break
+            reads += 1
+            page = _unit_page(ctx, path)
+            if page is None:
+                continue
+            topics, units = page
+            # A member the catalogue named may have changed its topics since; the page itself decides.
+            if path not in evidence.linked and not (in_domain and _in_domain(taxonomy, topics, scope.domain)):
+                continue
+            refs = sorted(
+                ref
+                for ref, category, as_of, until in units
+                if category in categories and (as_of or page_date)[:10] > since and not _past(until, today)
+            )
+            if not refs:
+                continue
+            if len(found) == _CURATION_PAGES:
+                partial = True
+                break
+            found[path] = refs
+    memo[subject] = (found, partial)
+    return memo[subject]
+
+
+def _dated_lines(ctx: Context, subject: str, today: date) -> frozenset[tuple[str, str, str]]:
+    """The profile's lines past their `until` or `check_by`, parsed once per tick."""
+    memo = ctx.shared.setdefault("curation_dated", {})
+    if subject not in memo:
+        lines: set[tuple[str, str, str]] = set()
+        state = _curation_state(ctx, subject)
+        for unit in state.document.units if state is not None else ():
+            if not unit.unit_ref:
+                continue
+            if _past(unit.until, today):
+                lines.add(("expired", unit.unit_ref, str(unit.until)))
+            elif _past(unit.check_by, today):
+                lines.add(("review_due", unit.unit_ref, str(unit.check_by)))
+        memo[subject] = frozenset(lines)
+    return memo[subject]
+
+
+def _stale_lines(
+    ctx: Context, subject: str, today: date, keep
+) -> tuple[set[tuple[str, str, str]], dict[str, str], bool]:
+    """The profile's lines that something has outdated, the other pages that outdated them, and whether partial.
+
+    A line is `(reason, unit ref, detail)`: a typed relation supersedes or opposes it (detail names the page that
+    does), its `until` has passed, or its `check_by` has passed (detail is the date). A relation from a page the
+    caller may not see is skipped before the row limit counts it.
+    """
+    from . import epistemic_graph
+
+    graph = ctx.graph()
+    view = ctx.graph_view()
+    sql = _CURATION_RELATIONS_SQL.format(columns=epistemic_graph.edge_columns("e"), live=_live_edge("e"))
+    lines: set[tuple[str, str, str]] = set()
+    others: dict[str, str] = {}
+    counted = 0
+    partial = False
+    for side, key, other, replaces, opposes in graph.execute(sql, (subject, subject)):
+        if side == "target" and replaces == 1:
+            reason, role = "superseded", "superseding"
+        elif opposes == 1:
+            reason, role = "contradicted", "contradicting"
+        else:
+            continue
+        other = str(other).removeprefix("file:")
+        if other != subject and _governed(ctx, other, keep) is None:
+            continue
+        if counted == _CURATION_RELATION_ROWS:
+            partial = True
+            break
+        counted += 1
+        ref = ((view.node(str(key)) or {}).get("metadata") or {}).get("unit_ref")
+        if ref:
+            lines.add((reason, str(ref), other))
+            if other != subject:
+                others.setdefault(other, role)
+    return lines | _dated_lines(ctx, subject, today), others, partial
+
+
+def _curation_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
+    """The curation proposal on one profile page, as a caller whose predicate is `keep` sees it.
+
+    Two kinds of evidence, both structural. A live unit of a `preferences` or `constraints` role category,
+    dated after the profile's own update, on a page the profile links or (for a domain profile) a page of its
+    domain. And a line of the profile that a typed relation supersedes or opposes, whose `until` has passed or
+    whose `check_by` has passed. A global profile reads the pages it links alone, so a new unit elsewhere is
+    no evidence about it. A count that stopped at a limit, or a domain whose pages are unknown, is partial.
+    """
+    from . import activation, source_taxonomy, vocabulary_resolution
+
+    node = _subject_node(ctx, subject, keep)
+    if node is None:
+        return None
+    page = ctx.page(subject)
+    if page is None or not ctx.type_basis.selects(activation.normalized_page_type(page.page_type), note_types.profile):
+        return None
+    taxonomy = source_taxonomy.load_taxonomy(ctx.vault_root)
+    scope = vocabulary_resolution.profile_scope(taxonomy, page.frontmatter.get("topics"))
+    if scope.kind not in (vocabulary_resolution.SCOPE_GLOBAL, vocabulary_resolution.SCOPE_DOMAIN):
+        return None
+    today = date.fromtimestamp(ctx.now)
+    new, units_partial = _new_units(ctx, subject, scope, taxonomy, _date(node[1], node[2]), today, keep)
+    stale, counterparts, lines_partial = _stale_lines(ctx, subject, today, keep)
+    if not new and not stale:
+        return None
+    roles = {**dict.fromkeys(new, "unit"), **counterparts}
+    subject_entry = _member_entry(ctx, subject, "subject")
+    entries = [_member_entry(ctx, path, roles[path]) for path in sorted(roles)[:_OTHER_MEMBERS]]
+    refs = {entry["path"]: entry["ref"] for entry in entries}
+    for path in counterparts.keys() - refs.keys():
+        refs[path] = _member_entry(ctx, path, counterparts[path])["ref"]
+    # Each reference is one piece of evidence: a new unit, or a profile line with the reason and the page or
+    # date behind it. A dismissal holds until this set changes.
+    evidence = sorted(
+        [f"new:{unit}" for units in new.values() for unit in units]
+        + [f"{reason}:{unit}:{refs.get(detail, detail)}" for reason, unit, detail in stale]
+    )
+    signal = review_state_digest([subject, evidence])
+    return {
+        "family": CURATION_FAMILY,
+        "kind": CURATION_KIND,
+        "subject_path": subject,
+        "subject_ref": subject_entry["ref"],
+        "proposal_key": "",
+        "evidence": [subject_entry, *entries],
+        "evidence_count": len(roles) + 1,
+        "route": {
+            "tool": "edit_note",
+            "args": {"path": subject, "operation": {"kind": "replace_string", "validate_only": True}},
+        },
+        "reason_code": "profile_evidence_since_update",
+        "signal_version": signal,
+        "fingerprint": _basis_fingerprint(CURATION_FAMILY, subject_entry["ref"], signal),
+        "measures": {
+            "new_units": sum(len(units) for units in new.values()),
+            "stale_lines": len({unit for _reason, unit, _detail in stale}),
+            "at_least": units_partial or lines_partial,
+        },
+    }
+
+
+def _curation_subjects(ctx: Context, rel_path: str) -> list[str]:
+    """The profile pages a change to `rel_path` may change the item of.
+
+    The page itself when it is a profile, the profiles that link it, and the domain profiles whose domain
+    holds it or sits above its domain. A superset: each is decided on its own view.
+    """
+    from . import source_taxonomy, vocabulary_resolution
+
+    profiles = _profile_paths(ctx)
+    if not profiles:
+        return []
+    graph = ctx.graph()
+    ctx.graph_view()
+    marks = ",".join("?" for _ in profiles)
+    linking = {
+        str(row[0])
+        for row in graph.execute(
+            f"SELECT DISTINCT e.source_path FROM graph_edges e WHERE e.dst_page_key = ? "
+            f"AND e.source_path IN ({marks}) AND {_live_edge('e')}",
+            (f"file:{rel_path}", *profiles),
+        )
+    }
+    taxonomy = source_taxonomy.load_taxonomy(ctx.vault_root)
+    changed = ctx.page(rel_path)
+    topics = (
+        vocabulary_resolution.resolve_topics(
+            taxonomy, vocabulary_resolution.declared_topics(changed.frontmatter.get("topics"))
+        ).resolved
+        if changed is not None
+        else ()
+    )
+    domains = {*topics, *(above for key in topics for above in taxonomy.domain_ancestors(key))}
+    scopes = _profile_scopes(ctx, taxonomy)
+    subjects = []
+    for profile in profiles:
+        scope = scopes.get(profile)
+        covered = (
+            scope is not None and scope.kind == vocabulary_resolution.SCOPE_DOMAIN and scope.domain in domains
+        )
+        if profile == rel_path or profile in linking or covered:
+            subjects.append(profile)
+    return subjects
+
+CURATION = _subject_family(CURATION_FAMILY, CURATION_KIND, _curation_view, subjects_of=_curation_subjects)
+
+
+def _queue_profiles_daily(ctx: Context) -> None:
+    """Queue every profile page once a day: its `until` and `check_by` dates change a line's currency with no write."""
+    today = date.fromtimestamp(ctx.now).isoformat()
+    if ctx.store.get_meta(ctx.conn, _CURATION_DAY_META) == today:
+        return
+    try:
+        profiles = list(_profile_paths(ctx))
+    except (sqlite3.Error, Deferred):
+        # The graph is not readable now; the next tick asks again.
+        return
+    finally:
+        ctx.close()
+    with ctx.store.write(ctx.conn):
+        if profiles:
+            ctx.store.pending_add(ctx.conn, profiles)
+        ctx.store.set_meta(ctx.conn, _CURATION_DAY_META, today)
+
+
 def tick_start(ctx: Context) -> None:
     """Once per tick: resume after the size cap, and follow a registry change.
 
@@ -2124,9 +2586,12 @@ def tick_start(ctx: Context) -> None:
     is back under it: every indexed page is queued again and the families
     report incomplete until that drains. A category row's signal is anchored
     on the registry's content hash, which no page change reports, so its
-    pages are queued again when the hash moves. Writes only on either change.
+    pages are queued again when the hash moves. Profile pages are queued
+    again once a day, because a date passing is no write. Writes only on
+    those changes.
     """
     store, conn = ctx.store, ctx.conn
+    _queue_profiles_daily(ctx)
     if store.get_meta(conn, CAPACITY_BEHIND_META) and not store.capacity_exceeded(conn):
         with store.write(conn):
             store.pending_add(conn, sorted(store.seen_map(conn)))
@@ -2186,7 +2651,7 @@ def release(
 
 
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE]
+REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE, CURATION]
 
 
 def family_names() -> tuple[str, ...]:

@@ -2786,6 +2786,35 @@ class EmbeddingIndex:
             defer_cold_load=defer_cold_load, defer_text=True, incomplete_out=incomplete_out,
         )
 
+    def best_scores_for_paths(self, query_vec: np.ndarray, paths: AbstractSet[str]) -> dict[str, float] | None:
+        """The best chunk score of each of `paths` that has rows, or None when no resident matrix serves them.
+
+        Profile scoring must cost O(profile chunks), not O(vault): this scores only those paths' rows, where
+        `_search` scores the whole matrix and masks afterwards. A path `_search` would mask scores nothing: one a
+        lagging matrix holds stale rows for, or the store does not vouch for. It never loads the matrix on the
+        calling thread: a cold one starts the one background load and raises `recall_space.CorpusMatrixCold`.
+        The disk-scoring profile keeps no matrix, so it answers None.
+
+        `metadata` is sorted by file_path, so each path's rows are one block that bisection finds
+        (`_without_paths` relies on the same order); no row pass and no memo is needed.
+        """
+        withheld = self._withheld()
+        if withheld.everything:
+            return None
+        resident = self.require_resident_matrix()
+        if resident is None:
+            return None
+        metadata, matrix = resident.metadata, resident.matrix
+        query = np.asarray(query_vec, dtype=np.float32).reshape(-1)
+        best: dict[str, float] = {}
+        for path in set(paths) - withheld.paths - (resident.stale_paths or frozenset()):
+            low = bisect_left(metadata, path, key=itemgetter(0))
+            high = bisect_right(metadata, path, key=itemgetter(0))
+            if low < high:
+                best[path] = float((matrix[low:high] @ query).max())
+        return best
+
+
     def select_passage_chunks(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE,

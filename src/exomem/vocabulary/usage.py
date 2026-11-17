@@ -307,6 +307,8 @@ def domain_references(vault_root: Path, snapshot: Snapshot) -> Usage:
             domain_path = domain_spec.overlay(root).relative_to(root).as_posix()
             for entry in snapshot.entries.values():
                 record(entry.replaced_by, domain_path)
+                # A parent stays registered while a child names it: removing it would orphan the child's chain.
+                record(entry.parent, domain_path)
         except Exception:  # noqa: BLE001 - incomplete reference proof cannot establish non-use
             return _unavailable("domain_reference_census_unavailable", source)
         holders = {key: tuple(sorted(values)) for key, values in paths.items()}

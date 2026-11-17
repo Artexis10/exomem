@@ -8,18 +8,17 @@ import json
 import os
 import threading
 from collections import OrderedDict
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from . import (
+    activation,
     activation_conventions,
     context_catalogue,
-    lifecycle_statuses,
-    semantic_contract,
-    vault,
-    working_set,
-    working_set_currency,
+    note_types,
+    session_units,
+    vocabulary_resolution,
 )
 from .governance import egress, principal
 
@@ -52,6 +51,13 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
 
 
+def _is_global_profile(page: Any, types: note_types.Basis) -> bool:
+    """A page of a profile type that declares no topics: the global profile, which supplies stance as a marked page does."""
+    return types.selects(activation.normalized_page_type(page.page_type), note_types.profile) and not (
+        vocabulary_resolution.declared_topics(page.frontmatter.get("topics"))
+    )
+
+
 def compile_block(
     root: Path, caller: Any, max_chars: int | None = None, *, today: date | None = None, catalogue: Any = None,
     known_generation: str | None = None,
@@ -60,60 +66,30 @@ def compile_block(
 
     The block's own bound is the vault's `budgets.stance_max_chars`; `max_chars` only tightens it.
     `known_generation` is the stance generation the caller holds: a block still at it repeats no line.
+    A page marked `stance: true` and a profile page with no topics both supply it, under the same rules.
     """
     today = today or date.today()
     own_catalogue = catalogue is None
     catalogue = catalogue or context_catalogue.ContextCatalogue(root)
     try:
         pending = set(catalogue.pending())
-        paths = {entry.path for entry in catalogue.entries_by_id(catalogue.stance_ids()) if entry.path and entry.path not in pending and caller.sees(entry.path)}
+        # The catalogue marks both kinds of page; a profile that names a topic is a domain's, not the stance's.
+        paths = {
+            entry.path for entry in catalogue.entries_by_id([*catalogue.stance_ids(), *catalogue.profile_ids()])
+            if (entry.stance or not entry.topics) and entry.path and entry.path not in pending and caller.sees(entry.path)
+        }
     finally:
         if own_catalogue:
             catalogue.close()
-    basis = lifecycle_statuses.Basis(root)
-    candidates = []
-    guards = {}
-    for path in sorted(paths):
-        # The catalogue narrows the read to marked admitted pages; never walk the corpus on activation.
-        source, guard = vault.read_guarded_text(root, root / path)
-        guards[path] = guard
-        page = semantic_contract.build_page_state(root, path, source)
-        if not page.eligible_compiled or page.frontmatter.get("stance") is not True:
-            continue
-        # Page supersession is an existing authored lifecycle signal, including legacy pages.
-        if page.frontmatter.get("superseded_by"):
-            continue
-        for unit in page.document.units:
-            if not unit.unit_ref or any(
-                unit.span.start_line <= error.line <= unit.span.end_line
-                for error in page.document.errors if error.line is not None
-            ):
-                continue
-            candidates.append(working_set.LaneItem(
-                role="", level="unit", ref=unit.unit_ref, path=path, title=page.title,
-                text=working_set.bounded_text(unit.content), lifecycle=page.status or "",
-                updated=unit.as_of or "", anchor=path,
-                # The language schema fixes these fields; relation families come from the registry.
-                provenance={
-                    **{key: getattr(unit, key) for key in ("as_of", "until", "check_by") if getattr(unit, key)},
-                    "supersedes_targets": working_set_currency.relation_targets(
-                        [relation.to_dict() for relation in unit.relations], registry=page.definitions.snapshots["relations"].typed if page.definitions is not None else None,
-                    ),
-                },
-            ))
-    wire = [working_set._served_unit(item) for item in candidates]  # noqa: SLF001 - exactly the existing unit admission shape
-    verdicts = egress.classify_units(root, wire, purpose=caller.purpose)
-    admitted = tuple(item for item, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT)
-    vault.recheck_path_guards(root, (guards[path] for path in {item.path for item in admitted}))
-    admitted = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
+    types = note_types.Basis(root)
+    admitted, basis = session_units.admit(
+        root, caller, paths, lambda page: page.frontmatter.get("stance") is True or _is_global_profile(page, types),
+    )
     configured = activation_conventions.load_conventions(root).conventions.budget("stance_max_chars")
     bounds = [value for value in (configured, max_chars) if value is not None]
     # The shipped conventions file always sets the budget; the range's top only caps a broken install.
     limit = max(0, min(bounds) if bounds else activation_conventions.BUDGET_BOUNDS["stance_max_chars"][1])
-    # The source path and anchor join the key: terminal egress re-decides the page they name, so a
-    # rename must not leave a cached entry pointing at whatever page now holds the old path.
-    inputs = [(item.ref, item.text, item.lifecycle, dict(item.provenance), item.path, item.anchor) for item in admitted]
-    key = (str(root), caller.binding, _digest(inputs), limit)
+    key = (str(root), caller.binding, _digest(session_units.identity(admitted)), limit)
     with _LOCK:
         cached = _CACHE.get(key)
         if cached is not None and (cached[0] is None or today < cached[0]):
@@ -123,42 +99,18 @@ def compile_block(
             return block
     block = _empty()
     # Terminal egress re-decides the unit shape compile admitted, path included, not the bare served line.
-    served: list[dict[str, Any]] = []
-    boundaries = []
-    used = 0
-    for item in admitted:
-        ordering = basis.ordering(item.lifecycle, path=item.path)
-        if ordering is None or ordering.historical:
-            continue
-        for field in ("until", "check_by"):  # Closed typed date fields; each changes currency the following day.
-            if value := item.provenance.get(field):
-                authored_date = date.fromisoformat(value)
-                if authored_date < date.max:
-                    boundary = authored_date + timedelta(days=1)
-                    if boundary > today:
-                        boundaries.append(boundary)
-        history, review_due = working_set_currency.state(item, today=today, status_basis=basis)
-        if history:
-            block["expired"] += 1
-            continue
-        line = {"ref": item.ref, "text": item.text}
-        if review_due:
-            line["review_due"] = review_due
-        cost = len(item_line(line)) + 1
-        if not item.text or used + cost > limit:
-            block["omitted"] += 1
-            continue
-        block["items"].append(line)
-        served.append(working_set._served_unit(item))  # noqa: SLF001 - the shape compile admitted
-        used += cost
+    result = session_units.serve(admitted, basis, cost=lambda line: len(item_line(line)), limit=limit, today=today)
+    block.update(items=result.lines, omitted=result.omitted, expired=result.expired)
     block["state"] = "ready" if block["items"] else "empty"
     block["generation"] = _digest(block)
     with _LOCK:
-        _CACHE[key] = (min(boundaries) if boundaries else None, copy.deepcopy(block), copy.deepcopy(served))
+        _CACHE[key] = (
+            min(result.boundaries) if result.boundaries else None, copy.deepcopy(block), copy.deepcopy(result.units),
+        )
         _CACHE.move_to_end(key)
         while len(_CACHE) > CACHE_SIZE:
             _CACHE.popitem(last=False)
-    block, served = _as_held(block, served, known_generation)
+    block, served = _as_held(block, result.units, known_generation)
     _pin(root, caller, block, served)
     return block
 

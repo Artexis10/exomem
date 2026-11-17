@@ -71,6 +71,10 @@
           "type": "string",
           "description": "Why your review found no useful link; never added to note text."
         },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
+        },
         "preview": {
           "type": "boolean"
         },
@@ -271,6 +275,10 @@
         "suggest_links": {
           "type": "boolean",
           "description": "Also return pages to link."
+        },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
         },
         "preview": {
           "type": "boolean"
@@ -511,6 +519,10 @@
         "unlinked_reason": {
           "type": "string",
           "description": "Why your review found no useful link; never added to note text."
+        },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
         },
         "preview": {
           "type": "boolean"
