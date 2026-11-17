@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import functools
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -694,6 +695,16 @@ class _OriginalDownloadResponse(Response):
 
 async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> JSONResponse:
     """Receive one claimed ticket's file into a held upload; the ticket fixes lane and limit."""
+    response = await _hold_ticket_upload(vault_root, request, ticket)
+    if response.status_code == 201:
+        return response
+    # The claim spent the ticket, so a refusal must say that a retry needs a new upload.
+    refusal = json.loads(response.body)
+    refusal["reason"] = f"{refusal.get('reason') or 'upload refused'}. {upload_handoff.SPENT_REMEDY}"
+    return JSONResponse(refusal, status_code=response.status_code)
+
+
+async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> JSONResponse:
     from . import held_uploads
 
     maximum = ticket["max_bytes"]
@@ -728,7 +739,8 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
                     or _flag(str(form.get("hold") or "")) is not True
                     or set(form) - {"file", "lane", "hold", "filename"}
                     or any(len(form.getlist(key)) != 1 for key in form)):
-                return JSONResponse({"code": "INVALID_UPLOAD", "reason": "handoff fields cannot change its lane or hold mode"}, status_code=400)
+                return JSONResponse({"code": "INVALID_UPLOAD", "reason": (
+                    f"send only the form fields file, lane={ticket['lane']} and hold=1")}, status_code=400)
             upload = form.get("file")
             if not hasattr(upload, "file"):
                 return JSONResponse({"code": "INVALID_UPLOAD", "reason": "multipart field `file` is required"}, status_code=400)
@@ -757,7 +769,7 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
 
 
 def _handoff_unavailable() -> JSONResponse:
-    return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
+    return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.TICKET_UNUSABLE_REASON}, status_code=401)
 
 
 def register_cloud_upload_route(mcp_app: FastMCP, *, vault_root: Path, cell_bearer: Any) -> None:

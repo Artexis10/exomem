@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shlex
 from dataclasses import replace
 from io import BytesIO
+from pathlib import Path
 
 import httpx
 import pytest
@@ -454,7 +456,7 @@ def test_ticket_cannot_cross_deployments(upload_env, monkeypatch):
     monkeypatch.setattr(upload_handoff.artifact_recovery, "deployment", lambda _: "another-deployment")
     response = _post(upload_env, ticket)
     assert response.status_code == 401
-    assert response.json()["reason"] == upload_handoff.UNAVAILABLE_REASON
+    assert response.json()["reason"] == upload_handoff.TICKET_UNUSABLE_REASON
 
 
 def test_only_one_concurrent_request_can_claim_a_ticket(upload_env):
@@ -671,3 +673,51 @@ def test_an_operator_can_finish_cancellations_without_a_launcher_deadline(upload
     ]) == 0
     assert json.loads(capsys.readouterr().out) == {"success": True, "data": {"completed": 0}}
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_a_source_reply_names_the_send_that_holds_the_file(upload_env, tmp_path):
+    # An agent that ran a send without the ticket's form fields got a 400 and lost the ticket.
+    descriptor = _prepare(upload_env)
+    original = tmp_path / "original.txt"
+    original.write_bytes(b"exact original\n")
+    send, save = descriptor["next"]
+    words = iter(shlex.split(send["shell"].replace("<file>", str(original))))
+    assert next(words) == "curl"
+    headers: dict[str, str] = {}
+    fields: dict[str, str] = {}
+    files: dict[str, tuple[str, bytes, str]] = {}
+    url = ""
+    for word in words:
+        if word == "-H":
+            name, _, value = next(words).partition(": ")
+            headers[name] = value
+        elif word == "-F":
+            name, _, value = next(words).partition("=")
+            if value.startswith("@"):
+                files[name] = (original.name, Path(value[1:]).read_bytes(), "text/plain")
+            else:
+                fields[name] = value
+        elif word != "-sS":
+            url = word
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=upload_env[-1])) as client:
+            return await client.post(url, headers=headers, data=fields, files=files)
+
+    response = asyncio.run(run())
+    assert response.status_code == 201, response.text
+    assert response.json()["state"] == "held"
+    assert save["tool"] == "save_source"
+
+
+def test_a_refused_send_says_a_retry_needs_a_new_upload(upload_env):
+    # The claim spends the ticket, so an agent that retries it unaided is refused again with no way on.
+    from exomem import upload_handoff
+    descriptor = _prepare(upload_env)
+    refused = _post(upload_env, descriptor, lane="")
+    assert refused.status_code == 400
+    assert "lane=source" in refused.json()["reason"]
+    assert upload_handoff.SPENT_REMEDY in refused.json()["reason"]
+    retried = _post(upload_env, descriptor)
+    assert retried.status_code == 401
+    assert retried.json()["reason"] == upload_handoff.TICKET_UNUSABLE_REASON

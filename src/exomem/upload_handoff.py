@@ -37,6 +37,12 @@ _TICKET_BYTES = 32
 MAX_BYTES = 100 * 1024 * 1024
 STORE_DIRNAME = "upload-handoffs"
 UNAVAILABLE_REASON = "no usable upload handoff"
+#: The upload route's content-free refusal for a ticket it cannot use: a new upload is always a valid way on.
+TICKET_UNUSABLE_REASON = "no usable upload handoff; request a new one with upload_files"
+#: A claimed ticket is spent whatever the send's outcome, so every refusal after the claim says so.
+SPENT_REMEDY = "This upload is used now; a retry needs a new one from upload_files."
+#: The public tool that saves each file lane's held upload. Lanes are the protocol's closed set.
+_SAVE_TOOL = {"source": "save_source", "evidence": "save_evidence"}
 _now = time.time
 
 
@@ -125,6 +131,19 @@ def _import_steps(token: str, endpoint: str) -> list[dict]:
         {"step": "import", "tool": "manage_memory",
          "arguments": {"operation": "imports.file", "arguments": {"upload": token}},
          "text": "Repeat this call until `filing` is `done`; a call that is cut short resumes where it stopped."},
+    ]
+
+
+def _file_steps(token: str, endpoint: str, lane: str) -> list[dict]:
+    """The two steps after a source or evidence ticket: send the file once, then save the held handle."""
+    header = shlex.quote(f"Authorization: Bearer {token}")
+    return [
+        {"step": "send", "text": "Send the file once, as multipart form fields. Replace <file> with its path. "
+                                 "A refused send also uses up this upload.",
+         "shell": f"curl -sS -H {header} -F lane={lane} -F hold=1 -F 'file=@<file>' {shlex.quote(endpoint)}"},
+        {"step": "save", "tool": _SAVE_TOOL[lane],
+         "text": "Pass the `file` that the send returns in `files`. Check each saved row's `hash` against "
+                 "expected_sha256 before you tell the person it is saved."},
     ]
 
 
@@ -224,8 +243,8 @@ def prepare_upload(
             "expected_sha256": expected, "max_bytes": limit,
             "handoff_status": "handoff_prepared", "committed": False,
         }
-        if lane == held_uploads.IMPORT_LANE:
-            descriptor["next"] = _import_steps(token, endpoint)
+        descriptor["next"] = (_import_steps(token, endpoint) if lane == held_uploads.IMPORT_LANE
+                              else _file_steps(token, endpoint, lane))
         return descriptor
 
     try:
