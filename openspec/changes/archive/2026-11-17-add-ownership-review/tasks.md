@@ -26,5 +26,5 @@
 
 ## 5. Closure
 
-- [ ] 5.1 Run `openspec validate --all --strict` before and after each artifact change and at archive.
-- [ ] 5.2 After this change ships, archive it with `openspec archive`.
+- [x] 5.1 Run `openspec validate --all --strict` before and after each artifact change and at archive.
+- [x] 5.2 After this change ships, archive it with `openspec archive`.
