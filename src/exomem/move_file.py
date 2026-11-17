@@ -169,10 +169,11 @@ def _admit_destination(vault_root: Path, rel: str) -> None:
     """Admit a move destination before any existence check.
 
     A limited caller may create only in a capture namespace, and this policy answers first. A
-    hidden page can still change the later answer: a file at the name refuses with
-    `DEST_EXISTS`, and a withheld page that claims it as a prior path refuses with
-    `WRITE_REFUSED`. Neither names the page, and both disclose that the path is taken
-    (`prior_claims.require_unreserved` says why the reservation holds).
+    hidden page can still change the later answer, and the two cases answer differently: a
+    hidden file at the name refuses with `DEST_EXISTS`, and a withheld page that claims the name
+    as a prior path refuses with `WRITE_REFUSED`. Neither names the page. The second tells the
+    caller that a page it cannot see once lived at that path (`prior_claims.require_unreserved`
+    says what that discloses and why the reservation holds).
     """
     from .governance import connector_boundary
 

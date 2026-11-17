@@ -220,6 +220,8 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 )
 # True only inside ``progress_check``: a check that need not ask the coordinator itself.
 _PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
+# True only while `invoke_command` runs a command its declared access classifies as a read.
+_INVOCATION_READS: ContextVar[bool] = ContextVar("exomem_invocation_reads", default=False)
 
 
 @contextmanager
@@ -8513,6 +8515,15 @@ def record_caller_refusal(
         pass
 
 
+def invocation_reads() -> bool:
+    """Whether the dispatched command now running is a read, as its declared access classifies it.
+
+    False inside a write and outside a dispatched command (a CLI helper, the watcher, a direct
+    call), so a step that only a read may take stays off wherever the access is not known.
+    """
+    return _INVOCATION_READS.get()
+
+
 def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
@@ -9045,6 +9056,16 @@ def invoke_command(
         dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
+        # A write outside the writer skips only the lease; it is still a write, as the ledger says.
+        reads = _INVOCATION_READS.set(
+            read_only and not invocation_writes_outside_writer(command, kwargs)
+        )
+        try:
+            return _invoke_leaf()
+        finally:
+            _INVOCATION_READS.reset(reads)
+
+    def _invoke_leaf() -> Any:
         with _owner_authority_scope(command.name):
             # This fixed capture field gates cached terminals and key mismatch, too.
             if command.name == "capture_source" and kwargs.get("source_identity") is not None:

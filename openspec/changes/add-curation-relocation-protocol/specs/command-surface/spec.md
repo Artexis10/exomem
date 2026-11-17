@@ -181,7 +181,10 @@ A prior stem SHALL never win over a live name.
 
 Read commands, link rendering inside written content, the graph, the audit and
 inbound-link checks SHALL use this resolution. The target path argument of a
-write command SHALL stay literal and SHALL NOT follow lineage. Inbound-link
+write command SHALL stay literal and SHALL NOT follow lineage. A call counts as
+a read or a write by the access that its command declares for it, the same
+classification that admits it to the writer. A call outside the command
+dispatcher SHALL keep the path literal. Inbound-link
 checks for a delete or a move SHALL read the target's lineage from its own
 bytes. The prior-path lookup SHALL read an indexed derived table. The identity
 writers SHALL refill that table from page bytes and the relayout record, and a
@@ -222,6 +225,7 @@ two live pages claim as `prior_path_conflict`.
 - **WHEN** a caller edits a page by a path that only a lineage entry names
 - **THEN** the edit acts on that literal path and does not follow the lineage
   to the moved page
+- **AND** a read by the same path returns the moved page
 
 ### Requirement: A prior path stays reserved while a live page claims it
 
@@ -230,12 +234,16 @@ page claims as taken, under every spelling that names the same file: case and
 Unicode form variants of the path. A move of a page to a path in its own
 lineage SHALL be permitted. When the claimant is withheld from the caller, the
 refusal SHALL be `WRITE_REFUSED` and SHALL NOT name the claimant, its current
-path or its content. The refusal, and the different name that `unique_path`
-then picks, disclose that something holds the path. This SHALL be the same
-disclosure, and the same refusal, that a create at a path a hidden page
-currently holds already makes, so the reservation adds no new class of
-disclosure. The reservation SHALL hold because without it the caller's page
-would win exact-path resolution and capture the claimant's old links.
+path or its content.
+
+Under path-based scopes, admission refuses a create at a hidden page's current
+path before anything is disclosed. A create at its former path refuses in a
+vault with the claim and succeeds in a twin vault without it. The refusal, and
+the different name that `unique_path` then picks, therefore disclose something
+new: that a page the writer cannot see once lived at that exact path, or a
+spelling variant of it, in a folder the writer can write to. They SHALL NOT say
+which page. The reservation SHALL hold for integrity: without it, the writer's
+page would win exact-path resolution and take the owner's old links.
 
 A file without an `exomem_id` at a prior path that a live page claims SHALL
 NOT take that address: links to the path SHALL keep resolving to the lineage

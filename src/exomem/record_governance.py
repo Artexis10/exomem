@@ -1366,10 +1366,11 @@ class _LinkProjector:
                     return False
                 # A bare title resolves over the borrowed generation filtered to the pages
                 # this reader may see. A path-shaped link never reads the borrowed index, so
-                # its verdict does not depend on which value came first.
+                # its verdict does not depend on which value came first; the pages that claim
+                # its path through their lineage count only when this reader may see them.
                 lend = self.borrowed is not None and bare
                 resolver = self.borrowed.resolver if lend else self.resolver
-                visible = self._visible if lend else None
+                visible = self._visible if lend or not bare else None
                 try:
                     canonical, _warning = vault.normalize_wikilink(
                         inner.split("|", 1)[0].strip(),
@@ -1391,7 +1392,8 @@ class _LinkProjector:
             elif "/" in raw and not raw.startswith(("/", "\\")):
                 canonical, _warning = vault.normalize_wikilink(
                     raw, self.root, resolver=self.resolver,
-                    targeted_namespace_contains=self._names_file, retired=self._retired_target,
+                    targeted_namespace_contains=self._names_file, visible=self._visible,
+                    retired=self._retired_target,
                 )
                 if not canonical or "#" in canonical:
                     return False

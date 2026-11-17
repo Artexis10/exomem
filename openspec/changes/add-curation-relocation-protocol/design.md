@@ -96,7 +96,10 @@ Slash paths take the path steps and bare names take the name steps, as today.
 
 Write targets never follow lineage: the path argument of edit, move, delete or
 create names the file it acts on, so the guard and the executor judge the same
-path. Link resolution inside written content does follow lineage, and the
+path. The page-name step that a command's target passes through follows lineage
+only while the dispatcher runs a call that the command's declared access
+classifies as a read, the same classification that admits a call to the writer.
+Outside a dispatched read the path stays literal. Link resolution inside written content does follow lineage, and the
 writer renders a link that names a prior path as a link to the current path.
 
 Lineage has two durable sources. The first is the page's own lineage. The
@@ -127,13 +130,17 @@ the per-request batch object of `collection_store.aliases.LinkTargets`.
 claims as taken. The reservation covers every spelling that names the same
 file: case and Unicode form variants of the path. A page may move back to a
 path in its own lineage. A holder that the caller may not see answers with
-`WRITE_REFUSED`, which names no claimant, path or content. The refusal still
-tells the caller that something holds that path. A twin vault without the
-claim accepts the same create, and `unique_path` picks a different name. A
-create at a path that a hidden page holds now discloses the same fact and
-refuses the same way, so the reservation adds no new class of disclosure. The
-reservation holds because without it the caller's page would win exact-path
-resolution and capture the claimant's old links.
+`WRITE_REFUSED`, which names no claimant, path or content, and `unique_path`
+picks a different name.
+
+Under path-based scopes, admission refuses a create at a hidden page's current
+path before anything is disclosed. A create at its former path refuses in a
+vault with the claim and succeeds in a twin vault without it. So the
+reservation does disclose something new: that a page the writer cannot see
+once lived at that exact path, or a spelling variant of it, in a folder the
+writer can write to. It never says which page. The decision stands, for
+integrity: without the reservation, the writer's page would win exact-path
+resolution and take the owner's old links.
 
 A file without an `exomem_id` at a reserved path does not take the address.
 Following a dead link in an editor creates exactly such an empty file. The

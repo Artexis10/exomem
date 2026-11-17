@@ -1443,11 +1443,14 @@ def presentation_relationship_resolver(
         if relative is None:
             try:
                 target = memory_refs.resolve_identifier_read_only(root, raw)
+                # The reader's filter runs before candidates are counted, so a page it may not
+                # see never makes a name ambiguous or takes a path another page left.
                 canonical, _warning = vault.normalize_wikilink(
                     target,
                     root,
                     resolver_factory=get_wikilinks,
                     targeted_namespace_contains=targeted_namespace_contains,
+                    visible=authorize_path,
                     strict=True,
                 )
                 relative = canonical.split("#", 1)[0] + ".md"

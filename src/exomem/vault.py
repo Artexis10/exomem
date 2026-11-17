@@ -9693,7 +9693,9 @@ def normalize_wikilink(
     pages it admits; `None` matches over every page.
 
     `targeted_namespace_contains` answers exact resolver keys for explicit
-    paths. Bare names use `resolver` or lazily call `resolver_factory`.
+    paths. Bare names use `resolver` or lazily call `resolver_factory`. With it,
+    the caller authorizes the file an explicit path names, and `visible` filters
+    only the pages that claim the path through their lineage.
 
     `retired` answers the item path that a converted collection retired for
     an unresolved path, or None; `None` checks each link on its own. A caller
@@ -9743,11 +9745,12 @@ def _live_claimants(
     if not wanted:
         return []
     if targeted:
-        # A targeted caller has no visibility filter; namespace membership proves liveness.
+        # Namespace membership proves liveness. Each path is an exact page path from the
+        # lineage index, so `visible` can judge it before the count.
         return [
             WikilinkCandidate(path, None)
             for path in sorted(wanted)
-            if contains(_wikilink_path_key(path))
+            if contains(_wikilink_path_key(path)) and (visible is None or visible(path))
         ]
     return [
         candidate
@@ -9775,7 +9778,8 @@ def _squatter_claimants(
     if not claimants:
         return []
     held = (
-        [key + ".md"]
+        # The caller's namespace holds `key`; a file the caller may not see holds no name.
+        [path for path in (key + ".md",) if visible is None or visible(path)]
         if targeted
         else [
             match.path
@@ -9861,8 +9865,10 @@ def _normalize_wikilink(
 
     # Explicit paths need namespace membership only; bare names need the full
     # stem/title index and retain its ambiguity rules.
-    # Boolean membership cannot prove which physical owner passes visibility.
-    targeted = targeted_namespace_contains is not None and "/" in cleaned and visible is None
+    # Boolean membership cannot prove which physical owner of a path passes `visible`, so a
+    # targeted caller authorizes the link's final target itself. The lineage claimants that
+    # a path resolves through are exact index paths, which `visible` filters before counting.
+    targeted = targeted_namespace_contains is not None and "/" in cleaned
     if not targeted and resolver is None:
         resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
     contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__

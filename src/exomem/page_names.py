@@ -21,7 +21,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import find, find_corpus, memory_refs, page_ids, reserved_paths, semantic_contract, vault
+from . import (
+    find,
+    find_corpus,
+    memory_refs,
+    page_ids,
+    reserved_paths,
+    semantic_contract,
+    vault,
+    writer_lease,
+)
 from .cli_ops import OpError
 from .governance import egress
 from .kbdir import kb_page_target, managed_join, managed_root
@@ -217,9 +226,10 @@ def resolve_page(
 ) -> str:
     """The path of the page `value` names, as a title or a short id when it is neither a ref nor a path.
 
-    Order: a memory ref; an existing file path; a path a moved page left, as a link to it resolves;
-    a short id; a title. A value that names nothing is returned as the path it always was, so
-    today's NOT_FOUND and create-missing paths still apply.
+    Order: a memory ref; an existing file path; in a read, a path a moved page left, as a link to it
+    resolves; a short id; a title. A write keeps a path literal, so it never lands on the page that
+    left it. A value that names nothing is returned as the path it always was, so today's NOT_FOUND
+    and create-missing paths still apply.
     `prefer` narrows several title matches to the pages it accepts (an edit prefers a page it can
     edit) before the call refuses. `field` is the command argument that held `value`, which the
     refusal's retry replaces with the id of the page the caller picks.
@@ -230,7 +240,7 @@ def resolve_page(
     if not raw or raw.lower().startswith("exomem://") or _names_a_file(root, raw, visible):
         return resolve_reference(root, value, serve_stale=serve_stale)
     moved: list[str] = []
-    if "/" in raw:
+    if "/" in raw and writer_lease.invocation_reads():
         with egress.decide_without_receipt():
             moved = vault.prior_path_pages(root, raw, find.shared_resolver(root), visible=visible)
     if len(moved) > 1 and prefer is not None:

@@ -290,12 +290,17 @@ def require_unreserved(
     The reservation covers every spelling of `rel` that names the same file: case and Unicode
     form variants (`reservation_key`). A caller that may see a claimant hears which page holds
     the path. A caller that may see none gets the refusal that any unavailable target gets,
-    which names no claimant, path or content. The refusal still tells the caller that something
-    holds the path. A create at a path that a hidden page holds now refuses the same way, so the
-    reservation adds no new class of disclosure; it holds because the caller's page would
-    otherwise win exact-path resolution and capture the claimant's old links. A commit reads the
-    newest claims, because no commit guard rechecks a reservation made after its request began;
-    a validation passes `newest=False` and reads its request's revision.
+    which names no claimant, path or content.
+
+    Under path-based scopes, admission refuses a create at a hidden page's current path before
+    anything is disclosed. A create at its former path refuses here in one vault and succeeds in
+    a twin vault without the claim. So the reservation does disclose something new: that a page
+    the writer cannot see once lived at that exact path, or a spelling variant of it, in a folder
+    the writer can write to. It never says which page. The reservation stands for integrity:
+    without it, the writer's page would win exact-path resolution and take the owner's old links.
+
+    A commit reads the newest claims, because no commit guard rechecks a reservation made after
+    its request began; a validation passes `newest=False` and reads its request's revision.
     """
     from .governance import egress
 

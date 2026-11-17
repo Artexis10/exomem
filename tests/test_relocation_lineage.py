@@ -407,26 +407,56 @@ def test_a_move_judges_and_indexes_a_link_to_the_old_path_as_a_link_to_the_new_o
     assert edges == [(f"file:{B}",)]
 
 
+def _dispatch(vault: Path, name: str, **arguments):
+    """Run the product command `name` through the one dispatcher, as every surface does."""
+    from exomem import commands, writer_lease
+
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == name)
+    return writer_lease.invoke_command(command, vault, **arguments)
+
+
 def test_reading_a_moved_page_by_a_path_it_left_finds_it_and_a_hidden_one_reads_as_missing(
     moved: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A read of an old path that answers NOT_FOUND while a link to the same path finds the page,
     or that finds a page the caller may not see and so tells them it exists."""
-    from exomem import commands
     from exomem.governance import egress
 
-    assert commands.read_memory_stored(moved, A)["path"] == C
-    assert commands.read_memory_stored(moved, A.removesuffix(".md"))["path"] == C
+    assert _dispatch(moved, "read_memory", path=A)["path"] == C
+    assert _dispatch(moved, "read_memory", path=A.removesuffix(".md"))["path"] == C
 
     monkeypatch.setattr(egress, "caller_restricted", lambda _root, **_kw: True)
     monkeypatch.setattr(
         egress, "restricted_release_filter", lambda _root, **_kw: lambda path: path != C
     )
     with pytest.raises(ValueError) as hidden:
-        commands.read_memory_stored(moved, A)
+        _dispatch(moved, "read_memory", path=A)
     with pytest.raises(ValueError) as absent:
-        commands.read_memory_stored(moved, "Knowledge Base/Notes/Insights/never-there.md")
+        _dispatch(moved, "read_memory", path="Knowledge Base/Notes/Insights/never-there.md")
     assert str(hidden.value).split(":", 1)[0] == str(absent.value).split(":", 1)[0]
+
+
+#: Two write commands that name their target by `path`: each must keep that path literal.
+WRITES_BY_PATH = {
+    "edit_memory": {"why": "retag", "operation": {"kind": "replace_tags", "tags": ["moved"]}},
+    "observe_memory": {"operation": "add", "category": "result", "content": "Measured twice."},
+}
+
+
+@pytest.mark.parametrize("write", sorted(WRITES_BY_PATH))
+def test_a_write_by_a_path_a_page_left_refuses_while_a_read_by_it_finds_the_page(
+    moved: Path, write: str
+) -> None:
+    """A write whose target path follows the lineage, so a write aimed at a path that a page left
+    lands on that page instead of refusing as a write to a missing path."""
+    before = (moved / C).read_bytes()
+
+    assert _dispatch(moved, "read_memory", path=A)["path"] == C
+    with pytest.raises(ValueError) as refused:
+        _dispatch(moved, write, path=A, **WRITES_BY_PATH[write])
+
+    assert str(refused.value).startswith("NOT_FOUND")
+    assert (moved / C).read_bytes() == before
 
 
 def _link_findings(vault: Path, linker: str) -> list[str]:
@@ -453,3 +483,134 @@ def test_a_link_to_a_path_a_page_left_is_no_forward_reference_unless_the_page_is
         egress, "restricted_release_filter", lambda _root, **_kw: lambda path: path != C
     )
     assert _link_findings(moved, linker) == ["forward_reference"]
+
+
+#: A Records collection whose rows hold one link, as a restricted reader's query projects it.
+LINKS_COLLECTION = "Knowledge Base/Records/Links/_collection.md"
+LINKS_MANIFEST = """---
+type: collection
+exomem_id: 6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b
+title: Links
+semantic_profile: records
+collection_version: 1
+lifecycle: active
+schema_version: 1
+storage:
+  strategy: markdown-items
+  format_version: 1
+  source: items
+item_schema:
+  natural_key: [title]
+  fields:
+    title: {type: string}
+    related: {type: link, link_kind: memory}
+---
+"""
+HIDDEN = "Knowledge Base/Notes/Withheld/claimant.md"
+
+
+def _shown_to_restricted_reader(vault: Path, value: str) -> bool:
+    """Whether a reader who may not see HIDDEN sees a row's link `value`, or has it withheld."""
+    from exomem import record_governance
+    from exomem import structured_collections as collections
+
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    manifest = collections.load_manifest(vault, vault / LINKS_COLLECTION)
+
+    def visible(path: str) -> bool:
+        return path != HIDDEN
+
+    projector = record_governance._LinkProjector.create(
+        vault, manifest, authorize_path=visible, visible_path=visible
+    )
+    return "related" in projector({"title": "One", "related": value})
+
+
+def _claiming(old: str, title: str) -> str:
+    return f"---\ntitle: {title}\ntype: note\nmoved_from:\n  - path: {old}\n---\nBody.\n"
+
+
+@pytest.mark.parametrize("value_form", ["path", "wikilink"])
+def test_a_page_a_reader_cannot_see_makes_no_link_value_ambiguous_for_them(
+    vault: Path, value_form: str
+) -> None:
+    """A hidden page that claims the same old path as a visible one, counted before the visibility
+    filter, withholds the link from a reader who could see it and tells them a hidden page
+    exists."""
+    old = "Knowledge Base/Notes/Insights/retired-page.md"
+    value = old if value_form == "path" else f"[[{old.removesuffix('.md')}]]"
+    _write(vault, LINKS_COLLECTION, LINKS_MANIFEST)
+    _write(vault, "Knowledge Base/Notes/visible-claimant.md", _claiming(old, "Visible"))
+    without_hidden = _shown_to_restricted_reader(vault, value)
+
+    _write(vault, HIDDEN, _claiming(old, "Hidden"))
+    with_hidden = _shown_to_restricted_reader(vault, value)
+
+    assert without_hidden is True
+    assert with_hidden is True
+
+
+def test_a_page_a_reader_cannot_see_takes_no_link_value_from_a_file_they_can(vault: Path) -> None:
+    """A hidden page that claims the path of a visible file without an id, counted before the
+    visibility filter, takes the link from that file and withholds it from the reader."""
+    _write(vault, LINKS_COLLECTION, LINKS_MANIFEST)
+    assert "exomem_id" not in _frontmatter(vault, A)
+    without_hidden = _shown_to_restricted_reader(vault, A)
+
+    _write(vault, HIDDEN, _claiming(A, "Hidden"))
+    with_hidden = _shown_to_restricted_reader(vault, A)
+
+    assert without_hidden is True
+    assert with_hidden is True
+
+
+def test_a_page_a_reader_cannot_see_at_a_path_another_page_left_keeps_no_link_from_them(
+    vault: Path,
+) -> None:
+    """A hidden page with an id at a path a visible page left, held as the live name before the
+    visibility filter, withholds the link to the visible page and tells the reader it exists."""
+    _write(vault, LINKS_COLLECTION, LINKS_MANIFEST)
+    _write(vault, "Knowledge Base/Notes/visible-claimant.md", _claiming(HIDDEN, "Visible"))
+    without_hidden = _shown_to_restricted_reader(vault, HIDDEN)
+
+    _with_identity(vault, HIDDEN)
+    with_hidden = _shown_to_restricted_reader(vault, HIDDEN)
+
+    assert without_hidden is True
+    assert with_hidden is True
+
+
+def test_a_page_a_reader_cannot_see_hides_no_relationship_by_an_old_path_from_them(
+    vault: Path,
+) -> None:
+    """A hidden page that claims the same old path as a visible one, counted before the reader's
+    filter, drops the relationship from their item presentation and tells them a hidden page
+    exists."""
+    from exomem import record_formats
+    from exomem import structured_collections as collections
+
+    old = "Knowledge Base/Notes/Insights/retired-page.md"
+    _write(
+        vault,
+        LINKS_COLLECTION,
+        LINKS_MANIFEST.replace(
+            "item_schema:\n",
+            "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\n"
+            "item_schema:\n",
+        ),
+    )
+    _write(vault, "Knowledge Base/Notes/visible-claimant.md", _claiming(old, "Visible"))
+
+    def presented() -> tuple[str, str] | None:
+        memory_refs.ReferenceIndex(vault).rebuild_all()
+        manifest = collections.load_manifest(vault, vault / LINKS_COLLECTION)
+        resolve = record_formats.presentation_relationship_resolver(
+            vault, manifest, None, authorize_path=lambda path: path != HIDDEN
+        )
+        return resolve("memory", old)
+
+    without_hidden = presented()
+    _write(vault, HIDDEN, _claiming(old, "Hidden"))
+
+    assert without_hidden == ("Knowledge Base/Notes/visible-claimant.md", "Visible")
+    assert presented() == without_hidden
