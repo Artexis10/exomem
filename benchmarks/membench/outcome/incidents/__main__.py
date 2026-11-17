@@ -35,6 +35,7 @@ judge error is unknown, never a failure.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -47,7 +48,6 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
-    DEFAULT_MAX_TURNS,
     Arm,
     JourneySetupError,
     build_turn_argv,
@@ -81,6 +81,13 @@ CASES_DIR = Path(__file__).parent / "cases"
 ARM_SIDE = Path(__file__).with_name("arm_side.py")
 ARM_SIDE_TIMEOUT_SECONDS = 300
 SESSION_TIMEOUT_SECONDS = 900
+#: A handed-file custody turn costs 5-6 tool calls and a 2026-11-17 unit hit the 12-turn cap.
+INCIDENT_MAX_TURNS = 20
+#: An HTTP unit polls `recall_context` until it stops abstaining `index_warming`, or the unit faults.
+RECALL_WARM_TIMEOUT_SECONDS = 300
+RECALL_WARM_POLL_SECONDS = 2
+#: The abstention reason both the readiness poll and the transcript check fault on.
+INDEX_WARMING = "index_warming"
 JUDGE_TIMEOUT_SECONDS = 300
 SOURCE_CHECKS = ("source_saved", "source_count", "current_source", "compiled_with_backlinks")
 #: The checks this runner implements; a case's `pass` names a subset.
@@ -341,8 +348,105 @@ def reads_sources(case: dict) -> bool:
     )
 
 
+def recall_probe(server: dict, turn: str) -> dict:
+    """One ``recall_context`` call against the unit's HTTP server, through the minted session."""
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    async def call() -> dict:
+        transport = StreamableHttpTransport(server["url"], headers=server["headers"])
+        async with Client(transport) as client:
+            result = await client.call_tool("recall_context", {"turn": turn})
+        if result.structured_content:
+            return result.structured_content
+        return json.loads(result.content[0].text)
+
+    return asyncio.run(call())
+
+
+def recall_warming(packet: dict) -> bool:
+    """Whether a ``recall_context`` reply abstained because the recall index is still warming."""
+    return (
+        isinstance(packet, dict)
+        and packet.get("abstained")
+        and packet.get("reason") == INDEX_WARMING
+    )
+
+
+def await_recall_warm(
+    server: dict,
+    *,
+    timeout: float = RECALL_WARM_TIMEOUT_SECONDS,
+    poll: float = RECALL_WARM_POLL_SECONDS,
+) -> float | None:
+    """Seconds until ``recall_context`` stops abstaining ``index_warming``, or None past ``timeout``.
+
+    The server's entity registry warms in the background after it reports ready; a session that
+    starts cold would score a warming abstention as the product's answer, so the actor waits.
+    """
+    start = time.monotonic()
+    deadline = start + timeout
+    while True:
+        if not recall_warming(recall_probe(server, "readiness probe")):
+            return time.monotonic() - start
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(poll, remaining))
+
+
+def _tool_result_text(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
+def transcript_index_warming(stdout: str) -> bool:
+    """Whether any ``recall_context`` tool result in the session abstained ``index_warming``.
+
+    The abstention is a harness fault, not an answer: the session ran before the index warmed.
+    """
+    recall_calls = set()
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        blocks = (event.get("message") or {}).get("content") or []
+        if event.get("type") == "assistant":
+            recall_calls |= {
+                block.get("id")
+                for block in blocks
+                if isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == "mcp__exomem__recall_context"
+            }
+        elif event.get("type") == "user" and any(
+            isinstance(block, dict)
+            and block.get("type") == "tool_result"
+            and block.get("tool_use_id") in recall_calls
+            and INDEX_WARMING in _tool_result_text(block)
+            for block in blocks
+        ):
+            return True
+    return False
+
+
 def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max_turns: int):
-    """Seed the arm's vault and guidance, then run one session. Returns (seeded note, finished process, record)."""
+    """Seed the arm's vault and guidance, then run one session. Returns (seeded note, finished process, record).
+
+    ``done`` is None when the HTTP unit's recall index never warmed: ``record`` then carries
+    ``harness_fault`` and no session ran.
+    """
     work, block = root / "work", root / "custom-instructions.txt"
     plugin, vault = arm / "plugins" / "claude-code", fresh_vault(root, arm)
     work.mkdir(parents=True)
@@ -389,6 +493,13 @@ def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max
         return run_arm_side(arm, root, "mint", stdin=json.dumps(session))["token"]
 
     with loopback_mcp(root, arm, mint) if http else nullcontext(mcp_server(root, arm)) as server:
+        if http:
+            record["upload_token"] = "set"
+            warm = await_recall_warm(server)
+            record["recall_warm_seconds"] = None if warm is None else round(warm, 1)
+            if warm is None:
+                record["harness_fault"] = INDEX_WARMING
+                return seeded, None, record
         mcp = root / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"exomem": server}}))
         argv = build_turn_argv(
@@ -445,6 +556,8 @@ def judge_answer(
 def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> dict:
     """One fresh session. `passed` is true, false or null; null always comes with a `reason`."""
     seeded, done, record = play(case, arm, root, **session)
+    if done is None:
+        return {**record, "passed": None, "reason": f"harness fault: {record['harness_fault']}"}
     transcript = parse_stream_json_transcript(done.stdout.splitlines())
     init = init_event(done.stdout)
     record |= {
@@ -453,8 +566,10 @@ def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> d
         "api_key_source": init.get("apiKeySource"),
         "billing": billing.of_key_source(init.get("apiKeySource")),
     }
-    fault = fault_reason(done, transcript) or "; ".join(
-        init_faults(init, model=session["model"], exomem=True)
+    fault = (
+        fault_reason(done, transcript)
+        or (INDEX_WARMING if transcript_index_warming(done.stdout) else None)
+        or "; ".join(init_faults(init, model=session["model"], exomem=True))
     )
     if fault:
         return {**record, "passed": None, "reason": f"harness fault: {fault}"}
@@ -513,7 +628,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--case", action="append", help="case id to run; default all")
     parser.add_argument("--model", default=ACTOR_MODEL)
-    parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
+    parser.add_argument("--max-turns", type=int, default=INCIDENT_MAX_TURNS)
     parser.add_argument("--run-root", type=Path, required=True)
     # A held-out set lives outside the repository, so no prompt, fixture or iterating session sees it.
     parser.add_argument("--cases-dir", type=Path, default=None, help="directory of case files")

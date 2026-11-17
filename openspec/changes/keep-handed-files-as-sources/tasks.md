@@ -13,8 +13,8 @@
 
 ## 3. Harness
 
-- [ ] 3.1 Wait until recall stops abstaining with `index_warming`, and count a unit that starts while warming as a harness fault.
-- [ ] 3.2 Raise the actor's turn cap to 20 and use the production upload configuration.
+- [x] 3.1 Wait until recall stops abstaining with `index_warming`, and count a unit that starts while warming as a harness fault.
+- [x] 3.2 Raise the actor's turn cap to 20 and use the production upload configuration.
 - [ ] 3.3 Add the two negative cases and a held-out positive written outside the iterating session.
 
 ## 4. Proof and delivery

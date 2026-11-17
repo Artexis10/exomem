@@ -104,6 +104,9 @@ def loopback_mcp(root: Path, arm: Path, mint: Callable[[dict], str]) -> Iterator
         "EXOMEM_GITHUB_USERNAME": login,
         "EXOMEM_GITHUB_USER_ID": str(user_id),
         "EXOMEM_JWT_SIGNING_KEY": signing_root,
+        # The production upload configuration, on a fresh token per unit: `transfer_artifact`
+        # must not answer UPLOAD_DISABLED. The value never enters the run record.
+        "EXOMEM_UPLOAD_TOKEN": secrets.token_urlsafe(32),
     }
     token = mint(
         {
