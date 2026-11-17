@@ -147,12 +147,15 @@ To erase everything for one record, do these steps:
 
 1. List the record with `inspect_memory` operation `sources.inventory`, giving `system` and `record_id`.
 2. For each listed reference, call `sources.erase` with a fresh `operation_id`, the reference and its hash.
-3. Repeat each call with the same `operation_id` until its `status` is `complete`.
+3. Repeat each call with the same `operation_id`, after `retry_after_ms` milliseconds, until `settled` is true.
 4. List the record again. The result is an empty page with complete observations.
 
 Each call does a bounded amount of work and reports `pending`, `unknown`, `failed` or `complete`.
 The response names each component: `canonical`, `copies`, `attempts`, `derived`, `caches` and `host_logs`.
 `complete` means every component acknowledged removal. A partial or uncertain result stays `pending` or `unknown`.
+`settled` is true when a repeat of the call cannot change the answer by itself.
+An answer that is not settled gives `retry_after_ms`, the time before a repeat can see progress.
+While `derived` waits on the graph index, that time runs to the graph drain's next pass. Otherwise it is 0, because the next call continues the work.
 After `complete`, a repeat call, also with a new `operation_id`, returns `complete` from a content-free completion record.
 A later capture with the same identity creates a new Source reference.
 

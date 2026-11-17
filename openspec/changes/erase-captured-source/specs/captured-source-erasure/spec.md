@@ -120,7 +120,7 @@ Complete retirement SHALL include canonical data, owned originals and staging, t
 
 ### Requirement: Retirement exposes honest resumable progress
 
-The result SHALL name the target reference, status, settled and target_retired. Status SHALL be complete, pending, failed or unknown. Settled SHALL be false while status is pending or a failed read leaves the answer open, and true otherwise. A caller SHALL repeat the operation until settled is true, then read status. Only complete acknowledged cleanup SHALL set target_retired true. Progress SHALL survive restart and remain bounded per invocation. Missing reads and partial owner evidence MUST NOT become empty success. An operation admitted before host policy disables erasure SHALL finish its cleanup; the policy SHALL refuse only new operations.
+The result SHALL name the target reference, status, settled and target_retired. Status SHALL be complete, pending, failed or unknown. Settled SHALL be false while status is pending or a failed read leaves the answer open, and true otherwise. A result that is not settled SHALL carry retry_after_ms, the wait before a repeat can observe progress, derived from what the operation waits on. A caller SHALL repeat the operation after that wait until settled is true, then read status. Only complete acknowledged cleanup SHALL set target_retired true. Progress SHALL survive restart and remain bounded per invocation. Missing reads and partial owner evidence MUST NOT become empty success. An operation admitted before host policy disables erasure SHALL finish its cleanup; the policy SHALL refuse only new operations.
 
 #### Scenario: Cleanup finishes
 - **WHEN** every owner acknowledges its cleanup

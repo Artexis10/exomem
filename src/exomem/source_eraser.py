@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 
 from . import (
     generated_fragment_store,
+    graph_drain,
     index_sync,
     memory_refs,
     native_copy_custody,
@@ -97,6 +99,13 @@ class _Ledger:
             conn.execute("DELETE FROM source_erasure_progress WHERE source_ref=?", (reference,))
 
 
+def _retry_after_ms(components: dict[str, Any]) -> int:
+    """When a repeat can see progress: the graph drain's next pass, or at once for steps the next call takes."""
+    if "epistemic_graph" in components.get("derived", {}).get("pending", ()):
+        return math.ceil(graph_drain.seconds_until_pass() * 1000)
+    return 0
+
+
 def _status(components: dict[str, Any]) -> str:
     states = {item["state"] for item in components.values()}
     for state in ("pending", "failed", "unknown"):
@@ -125,8 +134,8 @@ class _Eraser:
         # Settled: a repeat of this call cannot change the answer by itself. Pending components still advance.
         settled = status != "pending" and reason not in _READ_FAILURES
         return {"target_source_ref": self.reference, "status": status, "target_retired": status == "complete",
-                "settled": settled, "components": components or {},
-                "failure": None if reason is None else {"code": reason}}
+                "settled": settled, "retry_after_ms": None if settled else _retry_after_ms(components or {}),
+                "components": components or {}, "failure": None if reason is None else {"code": reason}}
 
     def _stale(self) -> OpError:
         return _refuse("SOURCE_ERASURE_STALE", "the Source incarnation no longer has the expected hash",

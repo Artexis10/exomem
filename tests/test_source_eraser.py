@@ -55,7 +55,7 @@ def erase(call, reference, source_hash, operation_id="erase-one", identity=IDENT
 
 
 def drive(call, reference, source_hash, operation_id="erase-one", seconds=30.0):
-    """Retry as a caller does: a pending answer, or a busy writer, means a later call makes progress.
+    """Repeat as the documented caller does: after each answer's `retry_after_ms`, until the answer is settled.
 
     Each call holds the writer boundary, so a caller that repeats at once starves the graph drain it waits for.
     """
@@ -66,10 +66,12 @@ def drive(call, reference, source_hash, operation_id="erase-one", seconds=30.0):
         except OpError as busy:
             if busy.code != "MUTATION_BUSY" or time.monotonic() >= deadline:
                 raise
+            wait_ms = busy.details.get("retry_after_ms") or 500
         else:
-            if result["status"] != "pending" or time.monotonic() >= deadline:
+            if result["settled"] or time.monotonic() >= deadline:
                 return result
-        time.sleep(0.5)
+            wait_ms = result["retry_after_ms"]
+        time.sleep(wait_ms / 1000)
 
 
 def lookup_empty(vault, manager, reference):
@@ -100,6 +102,19 @@ def test_erase_retires_the_page_copies_and_derived_rows_until_complete(vault, at
     assert again["status"] == "complete" and again["target_source_ref"] == reference
     _path, fresh, _hash = capture(vault, call)
     assert fresh != reference
+
+
+def test_an_unsettled_answer_says_when_a_repeat_can_see_the_graph_drain(vault, attempts, erasable):
+    """Callers pace repeats by the answer; one that repeats sooner holds the boundary the drain needs."""
+    _manager, call = attempts
+    _path, reference, source_hash = capture(vault, call)
+
+    first = erase(call, reference, source_hash)
+
+    assert first["settled"] is False and "epistemic_graph" in first["components"]["derived"]["pending"], first
+    assert graph_drain.DEBOUNCE_SECONDS * 1000 <= first["retry_after_ms"] <= graph_drain.IDLE_POLL_SECONDS * 1000
+    final = drive(call, reference, source_hash)
+    assert final["settled"] is True and final["retry_after_ms"] is None, final
 
 
 def test_a_quiet_vault_reaches_complete_and_settled_with_no_other_write(vault, attempts, erasable):
