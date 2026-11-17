@@ -12,7 +12,6 @@ import copy
 import functools
 import hashlib
 import json
-import logging
 import re
 import threading
 import time
@@ -22,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     brief_watermarks,
@@ -52,7 +51,8 @@ from .context_views import INDEX_WARMING, READY, UNAVAILABLE
 from .governance import connector_boundary, egress, principal
 from .vocabulary import registry as vocabulary_registry
 
-log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from .embedding_index import PageScorer
 
 #: The shipped traversal profile whose relation families the member walk follows.
 PROFILE = "brief"
@@ -100,7 +100,7 @@ SOURCES = "sources"
 OPEN_QUESTIONS = "open_questions"
 
 #: The fields of a response that the terminal guard restores from this invocation's compile.
-_PINNED = ("state", "seed", "items", "missing", "related", "changed_since")  # nosemgrep: ep-word-set -- the response schema's own field names.
+_PINNED = ("state", "seed", "items", "missing", "related", "changed_since", "ranked_by")  # nosemgrep: ep-word-set -- the response schema's own field names.
 
 _CACHE: OrderedDict[tuple[Any, ...], tuple[date | None, _Compiled]] = OrderedDict()
 #: A page's external links by the content hash of its text. Reading the links is the dearest step of a compile (a body of
@@ -372,8 +372,6 @@ class _Walk:
     sources: tuple[_Node, ...]
     missing: tuple[dict[str, Any], ...]
     ranked_by: str
-    #: Whether a similarity reading that should have run did not, so the walk holds only for this read.
-    unread: bool = False
 
 
 def _find_seed(
@@ -421,60 +419,34 @@ def _newest_first(nodes: Sequence[_Node]) -> list[_Node]:
     return ordered
 
 
-def _seed_vector(root: Path, path: str) -> Any | None:
-    """The normalised mean of the seed's stored chunk vectors, or None when it has none.
-
-    It reads the seed's rows of the recall sidecar and encodes nothing, so the vector is in the sidecar's own space.
-    """
-    try:
-        import numpy as np
-
-        from . import embeddings
-
-        index = embeddings.peek_embedding_index(root)
-        if index is None:
-            return None
-        chunks, _units = index.stored_text_vectors(path)
-        if not chunks:
-            return None
-        centre = np.mean(np.stack(list(chunks.values())), axis=0)
-        norm = float(np.linalg.norm(centre))
-        return centre / norm if norm > 0.0 and np.all(np.isfinite(centre)) else None
-    except Exception:  # noqa: BLE001 - a seed with no readable vector is ranked by recency, and the response says so
-        log.debug("seed vector unavailable", exc_info=True)
-        return None
-
-
 class _Nearness:
     """How near each candidate is to the seed: the best score of its chunks against the mean of the seed's.
 
-    Only a page's own vectors score it, never a population: a withheld page moves no other page's score or place.
+    Both come from one resident matrix (`scorer`), so nothing is encoded and every score of a walk is read from the
+    same matrix. Only a page's own vectors score it, never a population: a withheld page moves no other page's score
+    or place. Whether nearness ranks the walk is decided from the seed alone, before any candidate is known.
     """
 
-    def __init__(self, root: Path, seed: str) -> None:
-        self.root, self.seed = root, seed
-        self.vector = _seed_vector(root, seed)
+    def __init__(self, scorer: PageScorer | None, seed: str) -> None:
+        self.scorer = scorer
+        self.vector = None
+        rows = None if scorer is None else scorer.rows(seed)
+        if rows is not None:
+            import numpy as np
+
+            centre = rows.mean(axis=0)
+            norm = float(np.linalg.norm(centre))
+            if norm > 0.0 and np.all(np.isfinite(centre)):
+                self.vector = centre / norm
+        self.ranked_by = BY_RECENCY if self.vector is None else BY_SIMILARITY
         self.scores: dict[str, float] = {}
-        #: Some candidates were ordered newest first because no similarity reading served them.
-        self.fell_back = False
-        self.unread = False
 
     def rank(self, nodes: Sequence[_Node]) -> list[_Node]:
-        """`nodes` nearest the seed first, then pages with no score, newest first; all newest first with no reading."""
+        """`nodes` nearest the seed first, then the pages with no vectors, newest first; newest first with no reading."""
         ordered = _newest_first(nodes)
-        if not ordered:
+        if self.vector is None or not ordered:
             return ordered
-        from . import embeddings
-
-        scores = None if self.vector is None else embeddings.resident_page_scores(
-            self.root, [self.seed, *(node.path for node in ordered)], self.vector,
-        )
-        self.unread = self.unread or (self.vector is not None and scores is None)
-        # A matrix that does not vouch for the seed (withheld from recall, or changed since) cannot say what is near it.
-        if scores is None or self.seed not in scores:
-            self.fell_back = True
-            return ordered
-        self.scores.update(scores)
+        self.scores.update(self.scorer.best_scores(self.vector, [node.path for node in ordered]))
         return self.order(ordered)
 
     def order(self, nodes: Sequence[_Node]) -> list[_Node]:
@@ -482,7 +454,7 @@ class _Nearness:
         return sorted(nodes, key=lambda node: -self.scores.get(node.path, float("-inf")))
 
 
-def _walk(root: Path, graph: _Graph, seed: _Node) -> _Walk:
+def _walk(graph: _Graph, seed: _Node, scorer: PageScorer | None) -> _Walk:
     """The members of the seed's brief, over the caller's view, from the seed alone.
 
     Compiled notes within `MAX_HOPS` of the seed through the profile's families, passing only through compiled
@@ -490,7 +462,7 @@ def _walk(root: Path, graph: _Graph, seed: _Node) -> _Walk:
     A candidate is filtered by what the caller sees before anything counts it. Each page's edges are read once for
     each role, and a page's neighbours are checked for visibility only as far as a cap needs.
     """
-    nearness = _Nearness(root, seed.path)
+    nearness = _Nearness(scorer, seed.path)
     compiled = graph.types.selects(seed.page_type, note_types.compiled)
     distance: dict[str, int] = {seed.path: 0}
     notes: list[_Node] = [seed] if compiled else []
@@ -525,8 +497,9 @@ def _walk(root: Path, graph: _Graph, seed: _Node) -> _Walk:
         taken, left, unnamed, complete = graph.admit(candidates, max(0, room))
         unnamed_notes += unnamed
         cut += left
-        # Pages behind a cut page are never examined, so the count then holds at least what was cut.
-        exact = exact and complete and not left
+        # Pages behind a cut page are never examined, so the count then holds at least what was cut; behind the last
+        # hop nothing is a member, so a cut there that inspected every candidate is exact.
+        exact = exact and complete and (not left or hop == MAX_HOPS)
         for node in taken:
             distance[node.path] = hop
             notes.append(node)
@@ -563,17 +536,8 @@ def _walk(root: Path, graph: _Graph, seed: _Node) -> _Walk:
     ranked.sort(key=lambda node: distance[node.path])
     return _Walk(
         seed, tuple((node, distance[node.path]) for node in ranked), tuple(sources), tuple(missing),
-        BY_RECENCY if nearness.fell_back else BY_SIMILARITY, nearness.unread,
+        nearness.ranked_by,
     )
-
-
-def _vector_token(root: Path) -> tuple[int, int, int] | None:
-    """The write token of the resident recall matrix, or None when none is resident; read without waiting."""
-    from . import embeddings
-
-    index = embeddings.peek_embedding_index(root)
-    resident = None if index is None else index.resident_matrix()
-    return None if resident is None else (resident.epoch, resident.generation, resident.instance)
 
 
 def _members(
@@ -584,12 +548,15 @@ def _members(
     Only an owner's walk is kept. A restricted caller's release decision reads the governance policy, the tombstones
     and its authorization live, and no graph token names them, so that walk is made afresh on every read. For the
     owner the walk reads the graph's rows, the recall policy and the resident recall matrix that ranks the second hop,
-    all of which the key names. A walk whose similarity reading did not run is not kept, so the next read ranks it.
+    and the key names all three: the matrix by the token of the scorer that ranked the walk, or None when none did.
     """
+    from . import embeddings
+
+    scorer = embeddings.resident_page_scorer(root)
     token = None if caller.restricted else graph.token()
     key = None if token is None else (
         str(root), caller.binding, seed.path, token, recall_policy.recall_policy_identity(root), registries,
-        _vector_token(root),
+        None if scorer is None else scorer.token,
     )
     if key is not None:
         with _LOCK:
@@ -597,9 +564,9 @@ def _members(
             if held is not None:
                 _WALKS.move_to_end(key)
                 return held
-    walk = _walk(root, graph, seed)
+    walk = _walk(graph, seed, scorer)
     made = (walk, graph.closing([node.path for node, _distance in walk.notes]))
-    if key is not None and not walk.unread:
+    if key is not None:
         with _LOCK:
             _WALKS[key] = made
             _WALKS.move_to_end(key)

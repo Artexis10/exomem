@@ -37,6 +37,7 @@ from exomem import (
     topic_brief,
 )
 from exomem import find as find_module
+from exomem.embedding_index import EmbeddingIndex
 from exomem.governance import egress, principal
 
 NOTES = "Knowledge Base/Notes/Insights"
@@ -323,6 +324,82 @@ def test_a_note_embedded_after_the_last_read_takes_its_place_on_the_next_read(tm
 
     notes = [item["path"] for item in _read(vault, f"{NOTES}/lagoon.md")["items"] if item["kind"] == "note"]
     assert notes[2] == spokes[-1]  # now the nearest second-hop note
+
+
+def test_a_kept_walk_follows_the_matrix_that_ranked_it(tmp_path, monkeypatch) -> None:
+    """The owner's kept walk is keyed by the matrix that ranked it: a lag on one page, then on another, then none."""
+    vault = _vault(tmp_path, monkeypatch)
+    spokes = _survey_world(vault)
+    newest = spokes[-1]
+    _plant_vectors(vault, monkeypatch, {
+        f"{NOTES}/lagoon.md": AXIS, newest: _toward_turn(0.95),
+        **{spoke: _toward_turn(0.9 - 0.1 * n) for n, spoke in enumerate(spokes[:-1])},
+    })
+    current = EmbeddingIndex.require_resident_matrix
+
+    def lagging(*stale: str) -> None:
+        """A matrix that lags the sidecar on these pages' rows, as a service serves one until it catches up."""
+        monkeypatch.setattr(EmbeddingIndex, "require_resident_matrix", lambda self: current(self)._replace(stale_paths=frozenset(stale)))
+
+    def second_hop() -> tuple[str, list[str]]:
+        brief = _read(vault, f"{NOTES}/lagoon.md")
+        return brief["ranked_by"], [item["path"] for item in brief["items"] if item["kind"] == "note"][2:]
+
+    lagging(newest)
+    assert second_hop() == ("similarity", spokes[:5])  # the newest spoke's rows changed since this matrix
+    lagging(spokes[0])
+    assert second_hop() == ("similarity", [newest, *spokes[1:5]])
+
+    def cold(self: EmbeddingIndex) -> None:
+        raise recall_space.CorpusMatrixCold("loading")
+
+    monkeypatch.setattr(EmbeddingIndex, "require_resident_matrix", cold)
+    assert second_hop() == ("recency", spokes[3:][::-1])
+
+
+def test_on_a_profile_with_no_resident_matrix_a_warm_read_reads_no_edge(tmp_path, monkeypatch) -> None:
+    """A profile that keeps no recall matrix ranks by recency on every read, and still keeps the owner's walk."""
+    vault = _vault(tmp_path, monkeypatch)
+    spokes = _survey_world(vault)
+    _plant_vectors(vault, monkeypatch, {f"{NOTES}/lagoon.md": AXIS, **{spoke: _toward_turn(0.5) for spoke in spokes}})
+    monkeypatch.setattr(EmbeddingIndex, "resident_matrix", lambda self: None)
+    monkeypatch.setattr(EmbeddingIndex, "require_resident_matrix", lambda self: None)
+    edge_reads: list[int] = []
+    real = epistemic_graph.GraphView.neighbor_edges
+    monkeypatch.setattr(
+        epistemic_graph.GraphView, "neighbor_edges", lambda *args, **kwargs: edge_reads.append(1) or real(*args, **kwargs)
+    )
+
+    cold = _read(vault, f"{NOTES}/lagoon.md")
+    walked = len(edge_reads)
+    warm = _read(vault, f"{NOTES}/lagoon.md")
+
+    assert walked > 0 and len(edge_reads) == walked  # the warm read read no edge
+    assert cold["ranked_by"] == warm["ranked_by"] == "recency"
+
+
+@pytest.mark.parametrize("vectors", [True, False], ids=["vectors", "no-vectors"])
+def test_a_seed_whose_only_neighbour_is_withheld_reads_as_one_with_none(tmp_path, monkeypatch, vectors) -> None:
+    """Whether nearness ranks a restricted caller's walk is decided without the pages it may not see."""
+
+    def world(name: str, *, with_withheld: bool) -> str:
+        vault = _vault(tmp_path, monkeypatch, name)
+        _note(vault, "hub", "Berths: [[classified]].\n\n## Claim\n- id: hub-claim\n\nThe quay has eight berths.\n")
+        if with_withheld:
+            _note(vault, "classified", "## Claim\n- id: secret-claim\n\nThe quay safe holds the spare key.\n")
+        _withhold(vault, f"{NOTES}/classified.md", ceiling=0)
+        _index(vault)
+        if vectors:
+            planted = {f"{NOTES}/hub.md": AXIS}
+            if with_withheld:
+                planted[f"{NOTES}/classified.md"] = _toward_turn(0.9)
+            _plant_vectors(vault, monkeypatch, planted)
+        _reset_caches()
+        return json.dumps(_read(vault, f"{NOTES}/hub.md", _external()), sort_keys=True)
+
+    served = world("with", with_withheld=True)
+    assert served == world("without", with_withheld=False)
+    assert json.loads(served)["ranked_by"] == ("similarity" if vectors else "recency")
 
 
 def test_with_no_vector_reading_the_second_hop_keeps_the_newest_and_says_so(tmp_path, monkeypatch) -> None:
