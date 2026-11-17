@@ -9242,7 +9242,7 @@ class WikilinkResolver:
         names = self.link_names()
         target = held[0].path
         key = obsidian_links.basename_key(target)
-        group = [*names.index.get(key, ()), *names.machinery.get(key, ())]
+        group = list(dict.fromkeys([*names.index.get(key, ()), *names.machinery.get(key, ())]))
         return obsidian_links.link_form(target, {key: group}).text
 
     # ---- shared add/remove primitives -------------------------------------
