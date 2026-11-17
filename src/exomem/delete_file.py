@@ -30,7 +30,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
+from . import held_fs, media_types, originals, reserved_paths, semantic_contract, source_custody, trash_metadata
 from .fold_leaf import Placement
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import managed_form, managed_join, managed_relative, managed_split
@@ -231,6 +231,8 @@ def _delete_file_local(
             ),
         )
 
+    if (held := source_custody.erase_refusal_at(vault_root, rel_path)) is not None:
+        raise DeleteFileError(*held)
     append_only = in_append_only_tree(rel_path)
     # A fold is the only caller past this refusal: it proves identical bytes remain held elsewhere.
     if append_only and _fold is None:

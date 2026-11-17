@@ -55,7 +55,7 @@ _AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed area names o
     "observe_memory": "observations", "bootstrap": "instructions",
     "inspect_captured_sources": "sources",
     "inspect_capture_erasure_policy": "sources",
-    "reserve_source_capture": "sources", "settle_source_capture": "sources",
+    "reserve_source_capture": "sources", "settle_source_capture": "sources", "erase_captured_source": "sources",
 }
 #: Renderings that sit in another area than their command's.
 _RENDERING_AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed rendering names whose area differs.

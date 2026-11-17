@@ -72,6 +72,8 @@ class _Binding(BaseModel):
     parent_identity: StableIdentity
     destination_parent_identity: StableIdentity | None
     state: Literal["reserved", "initializing", "verified", "installed"] = "reserved"
+    # An installed page moved to its staging name for erasure; its later absence proves removal.
+    retiring: bool = False
     identity: StableIdentity | None = None
     version: FileVersion | None = None
     bound_sha256: str | None = None
@@ -96,7 +98,9 @@ class _Binding(BaseModel):
         if self.state in ("verified", "installed") and (self.version is None or self.version.size != self.expected_size
                                                         or self.bound_sha256 != self.expected_sha256):
             raise ValueError("verified native allocation lacks its complete producer image")
-        if self.state == "installed" and (self.destination_relative is None or self.destination_parent_identity is None):
+        # A removed allocation drops its page name, which a retired Source's title derives.
+        if self.state == "installed" and self.outcome != "removed" and (
+                self.destination_relative is None or self.destination_parent_identity is None):
             raise ValueError("installed native allocation lacks its destination")
         if (self.state != "reserved" and self.outcome == "not_written"
                 or self.outcome == "installed" and self.state != "verified"):
@@ -208,8 +212,13 @@ def _same(first: StableIdentity, second: StableIdentity) -> bool:
 
 
 def _allocation(binding: _Binding) -> dict:
-    # These fields alone change as the closed allocation protocol advances.
-    return binding.model_dump(mode="json", exclude={"state", "identity", "version", "bound_sha256", "outcome"})
+    # These fields alone change as the closed allocation protocol advances; removal also drops the page name.
+    exclude = {"state", "retiring", "identity", "version", "bound_sha256", "outcome"}
+    return binding.model_dump(mode="json", exclude=exclude | ({"destination_relative"} if binding.outcome == "removed" else set()))
+
+
+def _removed(binding: _Binding) -> _Binding:
+    return binding.model_copy(update={"outcome": "removed", "destination_relative": None})
 
 
 class NativeCustody:
@@ -395,7 +404,10 @@ class NativeCustody:
         if not isinstance(reservation, NativeReservation) or reservation._seal is not self._seal:
             raise ValueError("native reservation belongs to another owner")
         value = self._row(conn, reservation.binding_id)
-        if _allocation(value) != _allocation(reservation._binding):
+        held = _allocation(reservation._binding)
+        if value.outcome == "removed":
+            held.pop("destination_relative", None)
+        if _allocation(value) != held:
             raise ValueError("native reservation allocation changed")
         return value
 
@@ -522,7 +534,7 @@ class NativeCustody:
                     or value.state != "reserved" and (outcome == "not_written" or identity != value.identity)
                     or outcome == "installed" and value.state != "verified"):
                 raise ValueError("native acknowledgement does not match its allocation")
-            self._save(conn, value.model_copy(update={"outcome": outcome}))
+            self._save(conn, _removed(value) if outcome == "removed" else value.model_copy(update={"outcome": outcome}))
         self._live_allocations.pop(value.binding_id, None)
 
     def record_retirement(self, reservation: NativeReservation, witness: held_fs.RetirementWitness) -> None:
@@ -531,6 +543,8 @@ class NativeCustody:
             raise ValueError("native retirement requires a held publisher witness")
         with self._connect() as conn:
             value = self._reservation(conn, reservation)
+            if value.outcome == "removed" and value.destination_relative is None:
+                return  # A repeat after the first acknowledgement dropped the page name.
             if (value.state != "installed" or value.outcome not in (None, "removed")
                     or value.destination_relative is None or value.version != witness.before
                     or not _same(witness.root_identity, value.root_identity)
@@ -540,7 +554,81 @@ class NativeCustody:
                     or not _same(witness.observed.identity, value.identity)
                     or witness.observed.identity.link_count != 0 or witness.observed.delete_pending is False):
                 raise ValueError("native retirement differs from its installed allocation")
-            self._save(conn, value.model_copy(update={"outcome": "removed"}))
+            self._save(conn, _removed(value))
+
+    def retire_installed(self, reservation: NativeReservation) -> bool | None:
+        """Remove a retired Source's exact installed version; never move it to trash.
+
+        The page first moves to its own staging name, and the ledger records that move before
+        the unlink. A process that dies after the unlink therefore still proves the removal on
+        retry: only this step removes a retiring staging name. True means removed, None unknown.
+        """
+        self._boundary()
+        try:
+            with self._connect() as conn:
+                value = self._reservation(conn, reservation)
+                if value.outcome == "removed":
+                    return True
+                if (value.state != "installed" or value.outcome is not None or value.identity is None
+                        or value.version is None or value.destination_relative is None
+                        or _parts(value.relative_path)[0] != _parts(value.destination_relative)[0]):
+                    return None
+                staging = _parts(value.relative_path)[1]
+                with self._held(value, destination=True, flush=True) as (filesystem, parent, leaf):
+                    if not value.retiring:
+                        # A process that died after the move left this file at its staging name, and a later
+                        # Source may already hold the freed page name; the staging name is checked first.
+                        moved = filesystem.file(parent, staging, access="mutate")
+                        if not moved.ok:
+                            if not isinstance(moved.error, held_fs.HeldFsError) or moved.error.code != "MISSING":
+                                return None
+                            opened = filesystem.file(parent, leaf, access="mutate")
+                            if not opened.ok:
+                                return None
+                            with opened.require() as file:
+                                if file.version() != value.version:
+                                    return None
+                                filesystem.rename(file, parent, staging).require()
+                                filesystem.flush_directory(parent).require()
+                            moved = filesystem.file(parent, staging, access="mutate")
+                            if not moved.ok:
+                                return None
+                        with moved.require() as file:
+                            if not _same(file.version().identity, value.identity):
+                                return None
+                        value = value.model_copy(update={"retiring": True})
+                        self._save(conn, value)
+                        conn.commit()
+                    opened = filesystem.file(parent, staging, access="mutate")
+                    if not opened.ok:
+                        if isinstance(opened.error, held_fs.HeldFsError) and opened.error.code == "MISSING":
+                            self._save(conn, _removed(value))
+                            return True
+                        return None
+                    with opened.require() as file:
+                        current = file.version().identity
+                        if not _same(current, value.identity) or current.link_count != 1:
+                            return None
+                        filesystem.unlink(file).require()
+                        filesystem.flush_directory(parent).require()
+                        state = file.retirement_state().require()
+                        if state.identity.link_count != 0 or state.delete_pending is False:
+                            return None
+                    self._save(conn, _removed(value))
+            self._live_allocations.pop(value.binding_id, None)
+            return True
+        except (NativeCustodyUnavailable, sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+            return None
+
+    def bound(self, binding_id: str) -> bool | None:
+        """Whether this ledger holds the binding; None when the ledger cannot answer."""
+        self._boundary()
+        try:
+            with self._connect() as conn:
+                return conn.execute("SELECT 1 FROM source_native_bindings WHERE binding_id=?",
+                                    (_id(binding_id),)).fetchone() is not None
+        except (NativeCustodyUnavailable, sqlite3.Error, OSError, ValueError):
+            return None
 
     def _live_version(self, value: _Binding) -> FileVersion | None:
         file = self._live_allocations.get(value.binding_id)
@@ -553,7 +641,8 @@ class NativeCustody:
 
     def _observe(self, value: _Binding, *, destination: bool = False) -> NativeObservation:
         handle = self._handle(value)
-        if value.outcome is not None and not destination:
+        # A removed binding drops its destination name, so its recorded outcome is all there is to observe.
+        if value.outcome is not None and (not destination or value.destination_relative is None):
             return NativeObservation("installed" if value.outcome == "installed" else "closed",
                                      value.binding_id, outcome=value.outcome, reservation=handle)
         with self._held(value, destination=destination) as (filesystem, parent, leaf):
@@ -617,7 +706,7 @@ class NativeCustody:
                                 return NativeObservation("unknown", binding_id, before.identity, before, False)
                             filesystem.unlink(file).require()
                             filesystem.flush_directory(parent).require()
-                    self._save(conn, value.model_copy(update={"outcome": "removed"}))
+                    self._save(conn, _removed(value))
                 self._live_allocations.pop(value.binding_id, None)
                 return self._observe(value.model_copy(update={"outcome": "not_written" if value.state == "reserved" else "removed"}))
         except (NativeCustodyUnavailable, sqlite3.Error, OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):

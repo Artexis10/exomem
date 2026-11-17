@@ -124,6 +124,25 @@ _external_change_seen: dict[Path, tuple[int, float]] = {}
 _covered_generation: dict[str, int] = {}
 
 
+#: Monotonic time the drain's current wait ends without a signal. Scheduling state only, like `_last_debt`.
+_wait_ends = 0.0
+
+
+def seconds_until_pass() -> float:
+    """How long graph debt queued now waits before this process's drain starts a pass over it.
+
+    A debt signal ends the drain's wait at once and starts `DEBOUNCE_SECONDS` of settling, so that is
+    the floor. Without one, the drain wakes when its idle poll or no-progress backoff ends. With no
+    drain in this process, another process's drain finds the debt at its idle poll.
+    """
+    thread = _thread
+    if thread is None or not thread.is_alive():
+        return IDLE_POLL_SECONDS
+    if _DEBT.is_set():
+        return DEBOUNCE_SECONDS
+    return max(DEBOUNCE_SECONDS, _wait_ends - time.monotonic())
+
+
 def note_graph_debt() -> None:
     """Wake the drain: this process just queued epistemic-graph repair.
 
@@ -488,7 +507,7 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
     its drain did: queued receipts are the ordinary drain's, and a cover that
     did not acknowledge is escalated on the next pass, not retried.
     """
-    from . import deferred_index, freshness, graph_sync, index_sync
+    from . import deferred_index, epistemic_graph, freshness, graph_sync, index_sync
 
     key = str(vault_root)
     try:
@@ -515,7 +534,13 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
         log.warning("graph drain: covering drain could not queue its checkpoint", exc_info=True)
         return False
     try:
-        index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT, paths=rels)
+        if rels:
+            index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT, paths=rels)
+        else:
+            # A generation that changed no page queues no receipt; a pass over no page covers it.
+            index = epistemic_graph.EpistemicGraphIndex(vault_root)
+            if index.epoch_admits_incremental_repair():
+                index.drain_paths([])
     except Exception:  # noqa: BLE001 - the ordinary drain retries the queued receipts
         log.warning("graph drain: covering drain failed; its paths stay queued", exc_info=True)
         return True
@@ -688,6 +713,7 @@ def _run(vault_root: Path) -> None:
 
 
 def _run_owned(vault_root: Path) -> None:
+    global _wait_ends
     interval = IDLE_POLL_SECONDS
     # The no-progress backoff (0.0 after progress), the earliest moment the next
     # whole-vault attempt may start, the first debt signal the next whole-vault
@@ -699,9 +725,12 @@ def _run_owned(vault_root: Path) -> None:
     held_since: float | None = None
     stalled_since: float | None = None
     while not _stop.is_set():
+        _wait_ends = time.monotonic() + interval
         signalled = _DEBT.wait(timeout=interval)
         if _stop.is_set():
             break
+        # Awake: the pass starts after the settle, if any, and runs until the loop waits again.
+        _wait_ends = time.monotonic() + (DEBOUNCE_SECONDS if signalled else 0.0)
         _DEBT.clear()
         if _PROGRESS.is_set():
             # Another owner published the graph; the backoff described a graph

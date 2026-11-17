@@ -37,6 +37,16 @@ class SourceErasurePolicy(BaseModel):
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
 
 
+def admission_refusal(root: Path, policy: SourceErasurePolicy, system: str) -> str | None:
+    """Why this cell admits no new erasure for one identity system, or None when it admits one."""
+    from .vault_store import mode
+
+    # Store-mode erasure belongs to a later change, so a store vault never advertises or admits it.
+    if mode.store_mode_active(root):
+        return "store_mode"
+    return None if system in policy.enabled_systems else "disabled"
+
+
 def inspect_policy(root: Path, *, system: str) -> dict:
     """Qualify current host policy without reading a captured record or loading a model."""
     source_capture.require_authority(root)
@@ -45,5 +55,5 @@ def inspect_policy(root: Path, *, system: str) -> dict:
     except OpError as error:
         return {"state": "unknown", "enabled": None, "policy_revision": None,
                 "failure": {"code": error.code}}
-    return {"state": "observed", "enabled": system in policy.enabled_systems,
-            "policy_revision": policy.revision(), "failure": None}
+    enabled = admission_refusal(root, policy, system) is None
+    return {"state": "observed", "enabled": enabled, "policy_revision": policy.revision(), "failure": None}
