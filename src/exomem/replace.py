@@ -31,6 +31,7 @@ from . import (
     indexes,
     lifecycle_statuses,
     memory_refs,
+    obsidian_links,
     relation_review,
     reserved_paths,
     semantic_writes,
@@ -57,15 +58,30 @@ from .vault import (
     append_frontmatter_list_item,
     batch_atomic_write,
     document_newline,
+    find_body_wikilinks,
     kb_root,
     parse_frontmatter,
     plan_log_writes,
     render_frontmatter_document,
     render_wikilink_target,
     rotate_log_if_needed,
+    split_wikilink_target,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _links_to(value: str, destination: str) -> bool:
+    """Whether a wikilink in `value` names the page at `destination`.
+
+    A `root` vault writes a link in its shortest unique form, so the full path need not appear. A link names
+    the page when Obsidian's rule resolves its text to that page among the page alone.
+    """
+    index = obsidian_links.build_index([destination])
+    return any(
+        obsidian_links.resolve_link(split_wikilink_target(match.group(0))[0], index).path == destination
+        for match in find_body_wikilinks(value)
+    )
 
 
 def _read_replace_source(
@@ -579,8 +595,7 @@ def replace(
                 and recovery_receipt.predecessor_path == rel_old_with_ext
                 and token.writer == "note"
                 and token.operation == "replacement"
-                and token.destination.removesuffix(".md")
-                in str(old_parsed.frontmatter.get("superseded_by", ""))
+                and _links_to(str(old_parsed.frontmatter.get("superseded_by", "")), token.destination)
             )
             if exact_backlink:
                 predecessor_hash = recovery_receipt.predecessor_content_hash or predecessor_hash

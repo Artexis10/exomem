@@ -51,6 +51,7 @@ from .vault import (
     read_operation_log,
     resolve_under_vault,
     unique_path,
+    written_link_target,
     yaml_scalar,
 )
 
@@ -357,13 +358,16 @@ def _clean_inline(value: str) -> str:
     return " ".join(value.replace("`", "'").split())
 
 
-def _links_section(planned: Mapping[str, Any]) -> list[str]:
+def _links_section(planned: Mapping[str, Any], root: Path | None = None) -> list[str]:
     """The generated `## Links` section, which sits outside the verbatim fence.
 
     A wikilink in a Source body becomes a graph edge, so each resolved target is
     one plain wikilink to that target's frozen Source page, keeping the fragment
     the original link named. An unresolved target is listed as text: a guessed
     edge would be worse than a missing one.
+
+    With `root`, a `root` vault gets each link in its shortest unique form; a caller without a vault keeps
+    the vault path.
     """
     links = planned.get("links") or {}
     resolved = links.get("resolved") or []
@@ -379,6 +383,8 @@ def _links_section(planned: Mapping[str, Any]) -> list[str]:
         # wikilink (the wikilink grammar's own delimiters); such a fragment is dropped.
         if fragment and not any(ch in fragment for ch in "[]|\r\n"):
             target = f"{target}#{fragment}"
+        if root is not None:
+            target = written_link_target(target, root)
         if target not in seen:
             seen.add(target)
             lines.append(f"- [[{target}]]")
@@ -412,7 +418,12 @@ def _kind_lines(planned: Mapping[str, Any]) -> tuple[str, list[str]]:
 
 
 def render_text_source(
-    planned: Mapping[str, Any], text: str, *, date_iso: str, collection: str | None
+    planned: Mapping[str, Any],
+    text: str,
+    *,
+    date_iso: str,
+    collection: str | None,
+    root: Path | None = None,
 ) -> str:
     """The imported-Source page of a text original.
 
@@ -450,7 +461,7 @@ def render_text_source(
         f"- SHA-256: `{planned['original_sha256']}`",
         f"- Bytes: {planned['original_bytes']}",
         "",
-        *_links_section(planned),
+        *_links_section(planned, root),
         CAPTURE_HEADING,
         "",
     ]
@@ -495,7 +506,7 @@ def render_artifact_source(
     )
 
 
-def note_body(planned: Mapping[str, Any], text: str) -> str:
+def note_body(planned: Mapping[str, Any], text: str, root: Path | None = None) -> str:
     """The own note's body: the original body after its front matter, then the generated links.
 
     The links section is the one a Source gets, with each own-note target replaced by that
@@ -503,7 +514,7 @@ def note_body(planned: Mapping[str, Any], text: str) -> str:
     are kept as read, and the section follows after a blank line.
     """
     body = parse_frontmatter(text)[1]
-    links = _links_section({"links": planned["note"]["links"]})
+    links = _links_section({"links": planned["note"]["links"]}, root)
     if not links:
         return body
     separator = "" if not body else "\n" if body.endswith("\n") else "\n\n"
@@ -528,7 +539,7 @@ def _draft_arguments(
 
     note = planned["note"]
     return {
-        "content": note_body(planned, text),
+        "content": note_body(planned, text, root),
         "note_type": note["note_type"],
         "title": note["title"],
         "slug": note.get("slug"),
@@ -766,7 +777,9 @@ def import_item(
         )
     else:
         assert text is not None
-        content = render_text_source(planned, text, date_iso=date_iso, collection=collection)
+        content = render_text_source(
+            planned, text, date_iso=date_iso, collection=collection, root=root
+        )
     return ImportItem(
         original_path=planned["original_path"],
         target_rel=planned["target_path"],

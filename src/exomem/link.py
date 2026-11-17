@@ -478,7 +478,9 @@ def _normalize_connections(
             c, vault_root, resolver=resolver, strict=False, visible=visible
         )
         if bullet_kind is not None and len(
-            _scan_relation_line(bullet_kind, render_wikilink_target(canonical, vault_root))
+            _scan_relation_line(
+                bullet_kind, render_wikilink_target(canonical, vault_root, resolver=resolver)
+            )
         ) != 1:
             raise LinkError(
                 "INVALID_LINK",
@@ -542,7 +544,10 @@ def _normalize_relations(
             [item["target"]], vault_root=vault_root, resolver=resolver
         )
         warnings.extend(warning for warning in target_warnings if warning not in warnings)
-        pair = (item["kind"].strip(), render_wikilink_target(targets[0], vault_root))
+        pair = (
+            item["kind"].strip(),
+            render_wikilink_target(targets[0], vault_root, resolver=resolver),
+        )
         parsed = _scan_relation_line(*pair)
         if len(parsed) != 1 or not parsed[0].grammar_valid or parsed[0].kind != pair[0]:
             raise LinkError(
@@ -919,7 +924,10 @@ def link(
                 values, vault_root=vault_root, resolver=resolver
             )
             connection_warnings.extend(target_warnings)
-            values = [f"[[{render_wikilink_target(item, vault_root)}]]" for item in targets]
+            values = [
+                f"[[{render_wikilink_target(item, vault_root, resolver=resolver)}]]"
+                for item in targets
+            ]
         facet_values.append((facet_name, values, multi))
     summary_clean, summary_warnings = normalize_body_wikilinks(
         summary, vault_root, resolver=resolver
@@ -939,7 +947,9 @@ def link(
                 f"{field} must not carry a Relations heading; "
                 "pass edges as `relations` or `connections`",
             )
-    connection_targets = [render_wikilink_target(item, vault_root) for item in connections_norm]
+    connection_targets = [
+        render_wikilink_target(item, vault_root, resolver=resolver) for item in connections_norm
+    ]
     source = _render_entity(
         entity_type=entity_type,
         name=display_name,
