@@ -109,6 +109,18 @@ def test_the_whole_vault_walk_keeps_the_unmanaged_folder_and_drops_dot_and_stagi
     assert listed.isdisjoint(OUTSIDE_THE_VAULT_SCOPE)
 
 
+def test_the_combined_walk_flags_each_page_by_the_scope_that_lists_it(scoped_vault: Path) -> None:
+    """The graph reads both scopes in one pass, so its flags must match the two separate walks."""
+    flags = {
+        Path(path).relative_to(scoped_vault).as_posix(): (in_vault, in_kb)
+        for path, in_vault, in_kb in vault.walk_vault_md_with_subtree(scoped_vault, managed_root(scoped_vault))
+    }
+    assert flags["Insights/pump-cause.md"] == (True, True)
+    assert flags["Scratch/x.md"] == (True, False)
+    assert STAGED not in flags or flags[STAGED] == (False, False)
+    assert ".obsidian/x.md" not in flags
+
+
 def test_a_page_is_in_a_scope_when_the_walk_of_that_scope_lists_it(scoped_vault: Path) -> None:
     """A store-mode commit and a changed-file event judge a page from its path, so they must agree with the walks."""
     in_kb = _rels(scoped_vault, find_corpus.walk_md(managed_root(scoped_vault)))

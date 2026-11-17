@@ -7766,7 +7766,9 @@ def walk_vault_md_with_subtree(vault_root: Path, subtree: Path):
     from .find_corpus import _classify_walk_entry
 
     anchor = Path(subtree)
-    subtree_entered = False
+    # In a `root` vault the managed root is the vault root, so the walk of the vault is also the walk of the subtree.
+    subtree_is_vault = anchor == Path(vault_root)
+    subtree_entered = subtree_is_vault
 
     def walk(d: Path, in_vault: bool, in_subtree: bool):
         nonlocal subtree_entered
@@ -7791,7 +7793,7 @@ def walk_vault_md_with_subtree(vault_root: Path, subtree: Path):
             if vault_kind == "md" or subtree_kind == "md":
                 yield child, vault_kind == "md", subtree_kind == "md"
 
-    yield from walk(Path(vault_root), True, False)
+    yield from walk(Path(vault_root), True, subtree_is_vault)
     if not subtree_entered and anchor.is_dir():
         # The vault walk pruned the subtree folder or never reached it.
         yield from walk(anchor, False, True)
