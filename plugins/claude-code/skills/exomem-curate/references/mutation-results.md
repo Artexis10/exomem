@@ -134,8 +134,8 @@ confirmed; never say that it matched. `scope` and
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.
 
-A saved PDF Source carries an `identity` block in its file row, with the `page_hash`
-of the new page. The block says where DOIs appear. It never says that the document
+A saved PDF Source carries an `identity` block in its file row. The block says where
+DOIs appear. It never says that the document
 is the work its title names. `state` is one of:
 
 - `no_claim`: the `url` names no DOI.
@@ -150,10 +150,10 @@ is the work its title names. `state` is one of:
 the work the person asked for. On `conflict` or `not_shown`, the sentence in the reply
 names the finding, and `next_action` is the correction call. Call `save_source` with no
 files, the same `title`, the right `url` and
-`options.correction = {supersedes: <ref>, expected_hash: <page_hash>, reason}`. The
+`options.correction = {supersedes: <ref>, expected_hash: <the page's content hash>, reason}`. The
 correction keeps the stored original, writes one successor Source and leaves the first
-page unchanged. `page_hash` is the hash of the page when it was captured, so read the
-page again if it may have changed since. A search hit for a corrected Source carries
+page unchanged. Take the content hash from `read_page` on the Source's ref just before
+the call, because processing may have rewritten the page. A search hit for a corrected Source carries
 `corrected_by` as `{title, path}`, the page that now stands for it. A successor that the
 caller may not read adds nothing.
 

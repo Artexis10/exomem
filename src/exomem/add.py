@@ -147,8 +147,6 @@ class AddResult:
     same_url: dict[str, object] | None = None
     # True when the duplicate index could not answer, so the capture was stored without a duplicate check.
     duplicate_check_unavailable: bool = False
-    # The hash of the Source page as committed: the guard a later correction of this Source names.
-    page_hash: str | None = None
     # An erasable Source's path names its content, so no call or write log keeps it. Never sent to callers.
     path_withheld: bool = False
 
@@ -1154,17 +1152,9 @@ def add(
         capture_outcome="created" if source_identity is not None else None,
         same_url=same_url,
         duplicate_check_unavailable=duplicate_unavailable,
-        page_hash=_committed_page_hash(source_path),
         path_withheld=custody_started,
     )
 
-
-def _committed_page_hash(page: Path) -> str | None:
-    """The hash of the page as it is on disk, the guard a correction of it names; None when unreadable."""
-    try:
-        return content_hash(page.read_text(encoding="utf-8"))
-    except OSError:
-        return None
 
 
 def stored_why(page_text: str) -> str | None:

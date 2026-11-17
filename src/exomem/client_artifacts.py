@@ -1830,8 +1830,6 @@ def _commit_staged_sources(
                 }
                 if isinstance(payload.get("document_container"), Mapping):
                     outcomes[index]["document_container"] = dict(payload["document_container"])
-                if result.page_hash is not None:
-                    outcomes[index]["page_hash"] = result.page_hash
                 if identity is not None:
                     outcomes[index]["identity"] = identity.reply()
                 source_result_attribution.bind(outcomes[index], (result.ref,))

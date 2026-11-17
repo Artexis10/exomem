@@ -80,7 +80,7 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
     assert "10.5555/bbb" in reply["user_summary"]
     assert "correction" in reply["next_action"]
     assert row["ref"] in reply["next_action"]
-    assert row["page_hash"] in reply["next_action"]
+    assert "read_page" in reply["next_action"]
     predecessor_page, predecessor_original = row["page"], row["stored_path"]
     page_before = (vault / predecessor_page).read_bytes()
     original_before = (vault / predecessor_original).read_bytes()
@@ -88,7 +88,7 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
 
     successor_reply = _save_pdf(
         vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa",
-        correction={"supersedes": row["ref"], "expected_hash": row["page_hash"], "reason": "The URL named a different article."},
+        correction={"supersedes": row["ref"], "expected_hash": mutation_hash(vault / row["page"]), "reason": "The URL named a different article."},
     )
 
     successor = successor_reply["files"][0]
@@ -112,8 +112,9 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
 # --- the correction route: guards and what it leaves behind ----------------------------------------
 
 
-def _correction(row: dict, **overrides: object) -> dict:
-    return {"supersedes": row["ref"], "expected_hash": row["page_hash"], "reason": "The url named a different article.", **overrides}
+def _correction(vault: Path, row: dict, **overrides: object) -> dict:
+    # The receipt names no page hash, so the guard comes from the page, as an agent reads it with read_page.
+    return {"supersedes": row["ref"], "expected_hash": mutation_hash(vault / row["page"]), "reason": "The url named a different article.", **overrides}
 
 
 def _sources(vault: Path) -> set[Path]:
@@ -140,7 +141,7 @@ def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_sou
     # What `next_action` asks for: no files, the same title, the right url and the correction; tags set anew.
     successor = _save_pdf(
         vault, source_schema, upload=False, source_kind=None, url="https://doi.org/10.5555/aaa", tags=["lighthouses"],
-        correction=_correction(row),
+        correction=_correction(vault, row),
     )["files"][0]
 
     kept = _frontmatter(vault, successor["page"])
@@ -158,7 +159,7 @@ def test_a_metadata_only_correction_scans_the_canonical_sources_once(vault, sour
     scan = source_capture.canonical_pages
     monkeypatch.setattr(source_capture, "canonical_pages", lambda *args, **kwargs: scans.append(args) or scan(*args, **kwargs))
 
-    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))
+    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))
 
     assert successor["files"][0]["outcome"] == "stored"
     assert len(scans) == 1
@@ -169,7 +170,7 @@ def test_a_changed_original_refuses_the_correction_and_writes_nothing(vault, sou
     before = _sources(vault)
 
     with pytest.raises(ValueError, match="SOURCE_ORIGINAL_CHANGED"):
-        _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))
+        _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))
 
     assert _sources(vault) == before
     assert not list(source_corrections.receipt_root(vault).glob("*.json"))
@@ -179,30 +180,30 @@ def test_a_stale_page_hash_refuses_the_metadata_only_correction(vault, source_sc
     before = _sources(vault)
 
     with pytest.raises(ValueError, match="SOURCE_CORRECTION_STALE"):
-        _save_pdf(vault, source_schema, upload=False, correction=_correction(saved, expected_hash="0" * 64))
+        _save_pdf(vault, source_schema, upload=False, correction=_correction(vault, saved, expected_hash="0" * 64))
 
     assert _sources(vault) == before
     assert not list(source_corrections.receipt_root(vault).glob("*.json"))
 
 
 def test_a_second_correction_of_the_same_predecessor_is_refused(vault, source_schema, saved) -> None:
-    _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))
+    _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))
     before = _sources(vault)
 
     with pytest.raises(ValueError, match="SOURCE_ALREADY_CORRECTED"):
-        _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/ccc", correction=_correction(saved))
+        _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/ccc", correction=_correction(vault, saved))
 
     assert _sources(vault) == before
     assert len(list(source_corrections.receipt_root(vault).glob("*.json"))) == 1
 
 
 def test_an_undo_is_a_further_correction_and_history_only_grows(vault, source_schema, saved) -> None:
-    first = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))["files"][0]
+    first = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))["files"][0]
     kept = [vault / name for name in (saved["page"], saved["stored_path"], first["page"], first["stored_path"])]
     before = [path.read_bytes() for path in kept]
     count = len(_sources(vault))
 
-    undone = _save_pdf(vault, source_schema, upload=False, url=CLAIM, correction=_correction(first))["files"][0]
+    undone = _save_pdf(vault, source_schema, upload=False, url=CLAIM, correction=_correction(vault, first))["files"][0]
 
     assert undone["hash"] == saved["hash"]
     assert [path.read_bytes() for path in kept] == before
@@ -213,9 +214,9 @@ def test_an_undo_is_a_further_correction_and_history_only_grows(vault, source_sc
 def test_a_correction_carries_the_predecessors_ingested_into(vault, source_schema, saved) -> None:
     page = vault / saved["page"]
     page.write_text(page.read_text(encoding="utf-8").replace("ingested_into: []", 'ingested_into: ["[[Notes/Insights/compiled-claim]]"]'), encoding="utf-8")
-    row = dict(saved, page_hash=mutation_hash(page))
+    row = saved
 
-    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(row))["files"][0]
+    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, row))["files"][0]
 
     assert _frontmatter(vault, successor["page"])["ingested_into"] == ["[[Notes/Insights/compiled-claim]]"]
 
@@ -405,7 +406,7 @@ def test_the_audit_names_an_uncorrected_conflict_and_stops_after_the_correction(
     assert "10.5555/aaa" in finding.detail and "10.5555/bbb" in finding.detail
     assert saved["ref"] in finding.proposed_fix
 
-    _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))
+    _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))
 
     assert _findings(vault) == []
 
@@ -423,7 +424,7 @@ def test_the_audit_reports_neither_printed_nor_not_shown(vault, source_schema, t
 
 
 def test_a_withheld_successor_adds_no_corrected_by_to_the_predecessor_hit(vault, source_schema, saved, monkeypatch) -> None:
-    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(saved))["files"][0]
+    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))["files"][0]
     monkeypatch.setattr(source_corrections, "_authorizer", lambda _root: lambda path: path != successor["page"])
 
     assert source_corrections.corrected_by(vault, {saved["page"]: saved["ref"]}) == {}
@@ -437,7 +438,7 @@ def test_a_corrected_source_never_counts_as_unprocessed_while_a_live_note_cites_
     note.note(vault, content="## Claim\n\nLanterns exist.\n", note_type="insight", title="Lantern claim", status="active",
               sources=[saved["page"].removesuffix(".md")], relation_disposition="reviewed_none", relation_review_reason="A standalone claim for the test.")
     successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(
-        saved, expected_hash=mutation_hash(vault / saved["page"])))["files"][0]
+        vault, saved, expected_hash=mutation_hash(vault / saved["page"])))["files"][0]
 
     flagged = {item.path for item in audit.audit(vault, categories=["unprocessed_source"]).findings}
 

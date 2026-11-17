@@ -936,12 +936,6 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
-            if "page_hash" in item:
-                # The guard a correction of this Source's page names.
-                if sha256(item["page_hash"]):
-                    row["page_hash"] = item["page_hash"]
-                else:
-                    unverified.append("page_hash")
             if "identity" in item:
                 if (identity := document_identity.reply_block(item["identity"])) is None:
                     unverified.append("identity")
@@ -2337,11 +2331,13 @@ def _identity_findings(artifact_receipt: Mapping[str, Any]) -> list[tuple[Mappin
 
 def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
     """The metadata-only correction call that fixes a Source whose url does not match its document."""
-    ref, page_hash = row.get("ref"), row.get("page_hash")
-    if not ref or not page_hash:
+    # No page hash rides the receipt: the stored page's bytes depend on where its original is kept, which
+    # a restricted caller must not learn, and extraction rewrites the page; read_page gives the current hash.
+    ref = row.get("ref")
+    if not ref:
         return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."
-    more = f" The other {flagged - 1} flagged files carry their own ref and page_hash." if flagged > 1 else ""
-    return document_identity.correction_call(str(ref), str(page_hash)) + more
+    more = f" The other {flagged - 1} flagged files carry their own ref." if flagged > 1 else ""
+    return document_identity.correction_call(str(ref), None) + more
 
 
 #: The records dispositions that leave a canonical Record to write: filing, a recurrence, or a
