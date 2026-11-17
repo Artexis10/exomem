@@ -26,6 +26,7 @@ import yaml
 from . import access as access_module
 from . import overview as overview_module
 from .kbdir import is_managed_root_name, managed_join, managed_root
+from .vault_store import cli_fence
 
 # Classification of a top-level sibling folder.
 CLASS_READONLY = "readonly"
@@ -316,6 +317,7 @@ def personalize_main(argv: list[str]) -> int:
     vault = args.vault or _vault_default()
     if not vault:
         parser.error("set --vault or $EXOMEM_VAULT_PATH")
+    cli_fence.require("personalize", Path(vault).expanduser())
 
     if args.json:
         import json

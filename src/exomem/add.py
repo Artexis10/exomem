@@ -17,10 +17,10 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import hashlib
+import io
 import logging
 import os
 import stat
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -38,6 +38,7 @@ from . import (
     schema,
     source_capture,
     source_corrections,
+    source_result_attribution,
     source_taxonomy,
     tag_variants,
     temporal,
@@ -59,6 +60,7 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
+    filename_adjusted_warning,
     kb_root,
     parse_frontmatter,
     read_guarded_text,
@@ -170,7 +172,11 @@ class AddResult:
             out["same_url"] = self.same_url
         if self.duplicate_check_unavailable:
             out["duplicate_check_unavailable"] = True
-        return out
+        # These are this producer's result fields; historical outcome facts stay independently readable.
+        paths = tuple((key,) for key in out if key not in (
+            "capture_outcome", "duplicate_check_unavailable", "same_url",
+        ))
+        return source_result_attribution.bind(out, (self.ref,), paths=paths)
 
 
 @dataclass
@@ -417,7 +423,7 @@ def prepare_source_metadata(
         raise AddError(code=err.code, missing=list(err.missing), reason=err.reason)
     try:
         filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root
+            title, slug, vault_root=vault_root, dated=True
         )
     except InvalidSlugError as e:
         raise AddError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
@@ -448,6 +454,7 @@ def add(
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    passages: list[source_capture.DeclaredPassage] | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
     reuse_payload: bool = False,
@@ -488,6 +495,9 @@ def add(
     """
     from .governance import raw_protection as raw_guard
 
+    if passages is not None:
+        passages = source_capture.validate_passages(passages)
+        content = "\n\n".join(passage["text"] for passage in passages)
     if correction is not None and (source_identity is not None or adoption_seed is not None or supersede):
         raise ValueError("INVALID_SOURCE_CORRECTION: correction cannot coexist with source_identity, adoption, or episode revision")
     correction_plan = source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
@@ -503,12 +513,16 @@ def add(
             capture_input_digest = source_capture.capture_digest(
                 vault_root, content=content, title=title, source_type=source_type or "", url=url,
                 tags=tags, why_captured=why_captured, domain=domain, projects=projects,
-                slug=slug, raw_protection=raw_protection,
+                slug=slug, raw_protection=raw_protection, passages=passages,
             )
     if raw_protection and artifact is None:
-        with tempfile.TemporaryDirectory(prefix="exomem-raw-source-") as staging:
-            original = Path(staging) / "source.txt"
-            original.write_bytes(content.encode("utf-8"))
+        def prepare_raw(value: dict) -> None:
+            assert _prepare is not None
+            normalized = {**value["normalized_native_args"], "content": content}
+            _prepare({**value, "normalized_native_args": normalized})
+
+        # The artifact API already accepts a seekable stream; no unowned pre-allocation disk copy is needed.
+        with io.BytesIO(content.encode("utf-8")) as original:
             return add(
                 vault_root, source_schema, content="", title=title, source_type=source_type,
                 slug=slug, url=url, tags=tags, why_captured=why_captured, domain=domain,
@@ -517,8 +531,12 @@ def add(
                 supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
                 raw_protection=True,
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
+                passages=passages,
                 expected_sha256=expected_sha256,
                 correction=correction,
+                _allocation=_allocation,
+                _prepare=prepare_raw if _prepare is not None else None,
+                _validate_inputs=_validate_inputs,
             )
     # An artifact's identity is read before validation, because the page body
     # is synthesized from it when the caller supplied no text — and
@@ -594,11 +612,16 @@ def add(
             source_capture.require_authority(vault_root)
             if original_digest != capture_input_digest:
                 raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
+            from . import capture_attempts, source_custody
+
+            source_custody.require_publishable(vault_root, reference)
+            if source_custody.available():
+                capture_attempts.record_observed(vault_root, reference)
             return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
     # Identity decides an identity-bearing capture alone; an artifact, a correction, an adoption, an
     # episode revision and a protected capture each have a lane of their own.
     checks_duplicates = (
-        reuse_payload and artifact is None and source_identity is None and correction is None
+        reuse_payload and passages is None and artifact is None and source_identity is None and correction is None
         and adoption_seed is None and not supersede and extra_frontmatter is None
         and not raw_protection and _prepare is None and _allocation is None
     )
@@ -653,9 +676,8 @@ def add(
         project_plan = replace(project_plan, writes=(), introductions=())
 
     supersede_targets = _supersede_targets(vault_root, folder_path, supersede)
-    stem = f"{date_iso}-{filename_slug}"
-    if raw_protection:
-        stem = raw_guard.PREFIX + stem
+    name_prefix = (raw_guard.PREFIX if raw_protection else "") + f"{date_iso}-"
+    stem = name_prefix + filename_slug
     # No directory is created here: the batch creates the folder with the page
     # and removes it again if the commit is refused.
     if artifact is None:
@@ -739,6 +761,7 @@ def add(
         adoption_receipt=adoption_receipt,
         source_identity=source_identity,
         capture_input_digest=capture_input_digest,
+        passages=passages,
         extra_lines=(*(episode_lines or ()), *(
             (f"supersedes: {yaml_scalar(correction_plan.old_ref)}",) if correction_plan is not None else ()
         )),
@@ -752,72 +775,15 @@ def add(
             digest=artifact_digest,
         )
 
-    # Plan with post-creation counts: the folder may not exist until the batch
-    # creates it, so include the new file in the in-memory counts.
-    rel_source_no_ext = (
-        source_path.relative_to(vault_root).with_suffix("").as_posix()
-    )
-
-    # Pre-compute counts and bump the relevant folder by 1 for the new file.
+    rel_source_no_ext = source_path.relative_to(vault_root).with_suffix("").as_posix()
     count_errors: list[OSError] = []
     with call_spans.span("source.counts"):
-        pre_counts = indexes._count_sources(
-            kb_root(vault_root) / "Sources", on_error=count_errors.append
-        )
+        pre_counts = indexes._count_sources(kb_root(vault_root) / "Sources", on_error=count_errors.append)
     post_counts = dict(pre_counts)
     if in_sources:
         post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
-
-    activity_summary = _activity_summary(
-        rel_source_no_ext=rel_source_no_ext,
-        title=title,
-        source_type=kind.key,
-        tags=tags_clean,
-    )
-    log_entry_body = _log_entry_body(
-        title=title,
-        source_type=kind.key,
-        url=url,
-        tags=tags_clean,
-        why_captured=why_captured,
-    )
-
-    with call_spans.span("source.index_planning"):
-        update = indexes.compute_updates(
-            vault_root,
-            source_type=folder_name.lower(),
-            folder_title=folder_name,
-            folder_description=taxonomy.category_description(folder_name),
-            rel_source_path=(
-                f"{managed_join('')}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
-                if in_sources else rel_source_no_ext
-            ),
-            date_iso=date_iso,
-            stamp_iso=stamp_iso,
-            activity_summary=activity_summary,
-            log_entry_body=log_entry_body,
-            source_counts=post_counts,
-        )
-
-        # Refresh the Notes/Entities counts in the top index alongside the
-        # Sources counts that compute_updates() already handled. `add` doesn't
-        # change Notes/Entities counts, so no override needed.
-        sub_writes, top_with_counts = indexes.compute_subindex_writes(
-            vault_root,
-            top_index_text=update.top_index_content,
-            pending_paths=[rel_source_no_ext],
-            include_sources_index=False,
-        )
-        top_index_final = (
-            top_with_counts if top_with_counts is not None
-            else update.top_index_content
-        )
-    derived = _derived_index_writes(vault_root, update, top_index_content=top_index_final)
-    derived.extend(("index", write) for write in sub_writes)
-    writes = [
-        PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
-        *(write for _role, write in derived),
-    ]
+    derived: list[tuple[str, PlannedWrite]] = []
+    writes = [PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH)]
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
     writes.extend(supersede_writes)
@@ -833,7 +799,16 @@ def add(
             new_path=source_path.relative_to(vault_root).as_posix(), timestamp=stamp_iso,
         ))
 
-    warnings: list[str] = list(slug_warnings) + tag_warnings + identity_warnings
+    adjusted = filename_adjusted_warning(
+        title,
+        slug,
+        planned=stem,
+        final=source_path.stem,
+        vault_root=vault_root,
+        dated=True,
+        date_prefix=name_prefix,
+    )
+    warnings: list[str] = list(slug_warnings) + ([adjusted] if adjusted else []) + tag_warnings + identity_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
     # "registered 'field-notebook'" reports what the write did, so routing it
     # through the suppression channel would let a dismissal hide a fact.
@@ -882,11 +857,71 @@ def add(
             writes.extend(container_plan.writes)
             originals.extend(write for write in container_plan.writes if isinstance(write.content, PreparedBinaryContent))
             core_paths.update(write.path for write in container_plan.writes)
+        from . import source_custody, source_payload_custody
+
+        source_reference = memory_refs.memory_ref(exomem_id)
+        custody_started = source_custody.begin_capture(
+            vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
+            source_hash=content_hash(writes[0].content), identity=source_identity,
+        )
+        # An enrolled Source stays off the shared index and log pages; the captured-Source inventory lists it.
+        if not raw_protection and not custody_started:
+            activity_summary = _activity_summary(
+                rel_source_no_ext=rel_source_no_ext,
+                title=title,
+                source_type=kind.key,
+                tags=tags_clean,
+            )
+            log_entry_body = _log_entry_body(
+                title=title,
+                source_type=kind.key,
+                url=url,
+                tags=tags_clean,
+                why_captured=why_captured,
+            )
+
+            with call_spans.span("source.index_planning"):
+                update = indexes.compute_updates(
+                    vault_root,
+                    source_type=folder_name.lower(),
+                    folder_title=folder_name,
+                    folder_description=taxonomy.category_description(folder_name),
+                    rel_source_path=(
+                        f"{managed_join('')}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
+                        if in_sources else rel_source_no_ext
+                    ),
+                    date_iso=date_iso,
+                    stamp_iso=stamp_iso,
+                    activity_summary=activity_summary,
+                    log_entry_body=log_entry_body,
+                    source_counts=post_counts,
+                )
+
+                # Refresh the Notes/Entities counts in the top index alongside the
+                # Sources counts that compute_updates() already handled. `add` doesn't
+                # change Notes/Entities counts, so no override needed.
+                sub_writes, top_with_counts = indexes.compute_subindex_writes(
+                    vault_root,
+                    top_index_text=update.top_index_content,
+                    pending_paths=[rel_source_no_ext],
+                    include_sources_index=False,
+                )
+                top_index_final = (
+                    top_with_counts if top_with_counts is not None
+                    else update.top_index_content
+                )
+            derived = _derived_index_writes(vault_root, update, top_index_content=top_index_final)
+            derived.extend(("index", write) for write in sub_writes)
+            writes[1:1] = [write for _role, write in derived]
         # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
         bound_outputs = vocabulary_auxiliaries.seal(
             vault_root, primary=writes[0],
             derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
         )
+        payload_custody = container_stack.enter_context(source_payload_custody.capture(
+            vault_root, reference=source_reference, primary=writes[0], writes=writes,
+            auxiliaries=bound_outputs, enabled=custody_started,
+        ))
         def validate_bindings() -> None:
             if _validate_inputs is not None:
                 _validate_inputs()
@@ -895,6 +930,7 @@ def add(
                 source_capture.require_authority(vault_root)
             if correction_plan is not None:
                 correction_plan.require_authority(vault_root)
+            source_custody.require_publishable(vault_root, source_reference)
 
         def prepare_final(planned: list[PlannedWrite]) -> None:
             _prepare({"allocation": allocation, "ref": memory_refs.memory_ref(exomem_id),
@@ -919,12 +955,14 @@ def add(
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
                 _prepare=prepare_final if _prepare is not None else None,
+                **({"_payload_custody": payload_custody} if payload_custody is not None else {}),
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
                                _vocabulary_auxiliaries=bound_outputs,
                                _validate_prepared_bindings=validate_bindings,
-                               _prepare=prepare_final if _prepare is not None else None)
+                               _prepare=prepare_final if _prepare is not None else None,
+                               **({"_payload_custody": payload_custody} if payload_custody is not None else {}))
     except _NativePrepared:
         raise
     except source_capture.SourceCaptureError:
@@ -958,6 +996,9 @@ def add(
         deferred_fanout(
             vault_root, committed, created_paths=created_paths, publication_intents=publication_intents
         )
+
+    if custody_started:
+        source_custody.finish_capture(vault_root, source_reference, path=source_path.relative_to(vault_root).as_posix())
 
     if checks_duplicates or artifact is not None:
         # The next acquisition of the mutation boundary finds this payload, whatever other indexes have caught up.
@@ -1068,16 +1109,21 @@ def _same_url_advisory(found: duplicates.SameUrl | None) -> dict[str, object] | 
     """The `same_url` advisory for earlier Sources that share a capture's URL: up to five of them and the total."""
     if found is None:
         return None
-    return {
+    if found.count > len(found.sources):
+        source_result_attribution.mark_unknown()
+    out = {
         "count": found.count,
         "sources": [
-            {
+            source_result_attribution.bind({
                 "ref": source.ref, "path": source.path, "title": source.payload.frontmatter.get("title"),
                 "captured": str(source.payload.frontmatter.get("captured")),
-            }
+            }, (source.ref,))
             for source in found.sources
         ],
     }
+    return source_result_attribution.bind(
+        out, tuple(source.ref for source in found.sources), paths=(("count",),), action="count",
+    )
 
 
 _SUGGESTION_KIND = "source_classification_debt"
@@ -1545,6 +1591,7 @@ def _render_source(
     adoption_receipt: Mapping[str, object] | None = None,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    passages: list[source_capture.DeclaredPassage] | None = None,
     extra_lines: Sequence[str] = (),
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
@@ -1573,6 +1620,8 @@ def _render_source(
 
         lines.append("source_identity: " + json.dumps(source_identity))
         lines.append(f"capture_input_digest: {yaml_scalar(capture_input_digest)}")
+    if passages is not None:
+        lines.append(f"declared_passages: {len(passages)}")
     lines.extend(extra_lines)
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
@@ -1613,6 +1662,11 @@ def _render_source(
         # Single-line blockquote at top, per page-types.md shape.
         for paragraph in why_captured.strip().splitlines():
             lines.append(f"> {paragraph}")
+        lines.append("")
+    if passages is not None:
+        from .passage_evidence import render_key_block
+
+        lines.append(render_key_block([passage["key"] for passage in passages]).rstrip("\n"))
         lines.append("")
     lines.append(CAPTURE_HEADING)
     lines.append("")

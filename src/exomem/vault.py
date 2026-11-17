@@ -30,7 +30,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -108,19 +108,30 @@ _RESERVED_DEVICE_NAMES = frozenset(
     | {f"com{digit}" for digit in range(1, 10)}
     | {f"lpt{digit}" for digit in range(1, 10)}
 )
-#: The two styles a vault may name derived files in. `slug` is the historical
-#: behaviour and stays the default: the filename is the note's identity here
-#: (there is no permalink field), so changing the default would change the
-#: address of every note written after an upgrade in vaults nobody asked.
+#: The two styles a vault may name derived files in. `title` is the default, so a
+#: new page carries the name its author wrote; `slug` is the opt-out. The style
+#: governs new names only: no file is renamed, and a link to an existing one keeps
+#: resolving, so changing the default changes nothing already written.
 FILENAME_STYLES = ("slug", "title")
-DEFAULT_FILENAME_STYLE = "slug"
+DEFAULT_FILENAME_STYLE = "title"
 _FILENAME_STYLE_ENV = "EXOMEM_FILENAME_STYLE"
+#: Where the filename style in force came from. Closed: `filename_style_source` returns one of these.
+FILENAME_STYLE_FROM_ENVIRONMENT = "environment"
+FILENAME_STYLE_FROM_PROJECT_KEYS = "project-keys.yaml"
+FILENAME_STYLE_FROM_DEFAULT = "default"
 _EXPLICIT_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
 
 class InvalidSlugError(ValueError):
     """An explicit filename slug violated the portable ASCII contract."""
+
+
+class UnparseableFilenameStyleError(InvalidSlugError):
+    """`project-keys.yaml` is not parseable, so the style the vault chose is unknown.
+
+    A write does not refuse for it (`derived_filename_style`); doctor fails.
+    """
 
 
 # Legacy hardcoded curated-tree list — now EMPTY by default. Curated /
@@ -162,6 +173,11 @@ _EXCLUDED_FIELD_REMEDIES: Mapping[str, str] = {
 }
 EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(_EXCLUDED_FIELD_REMEDIES)
 EXCLUDED_FIELD_CODE = "EXCLUDED_FIELD"
+
+#: The frontmatter key that names a page's note type, and the key that every governed write
+#: stamps with its instant. The page schema fixes both; they are protocol keys, not vocabulary.
+TYPE_FIELD = "type"
+UPDATED_FIELD = "updated"
 
 # The broader `auto_*` exclusion documented in
 # `_scaffold/_Schema/references/frontmatter.md` is deliberately deferred: it is
@@ -690,8 +706,8 @@ def fit_filename(
     return date_prefix + shown + tail, shown != title
 
 
-def resolve_filename_style(vault_root: Path | None = None) -> str:
-    """The filename style in force, by documented precedence.
+def filename_style_source(vault_root: Path | None = None) -> tuple[str, str]:
+    """The filename style in force and where it came from, by documented precedence.
 
     Environment first so a run can be pinned without editing the vault, then the
     vault's own key, then the default. An unrecognised value is refused rather
@@ -699,21 +715,26 @@ def resolve_filename_style(vault_root: Path | None = None) -> str:
     means "carry on" is how a user concludes the setting does not work.
     """
     configured = os.environ.get(_FILENAME_STYLE_ENV)
-    source = "environment"
+    source = FILENAME_STYLE_FROM_ENVIRONMENT
     if configured is None and vault_root is not None:
         from . import project_keys
 
         configured = project_keys.filename_style(vault_root)
-        source = "project-keys.yaml"
+        source = FILENAME_STYLE_FROM_PROJECT_KEYS
     if configured is None:
-        return DEFAULT_FILENAME_STYLE
+        return DEFAULT_FILENAME_STYLE, FILENAME_STYLE_FROM_DEFAULT
     normalized = str(configured).strip().lower()
     if normalized not in FILENAME_STYLES:
         raise InvalidSlugError(
             f"filename style {configured!r} from {source} is not one of "
             f"{', '.join(FILENAME_STYLES)}"
         )
-    return normalized
+    return normalized, source
+
+
+def resolve_filename_style(vault_root: Path | None = None) -> str:
+    """The filename style in force; `filename_style_source` also says where it came from."""
+    return filename_style_source(vault_root)[0]
 
 
 def slugify_title(title: str, max_length: int = SLUG_MAX_LENGTH) -> str:
@@ -740,8 +761,92 @@ def slugify_with_truncation_check(
     return slug, None
 
 
+def derived_filename_style(vault_root: Path | None, *, dated: bool = False) -> tuple[str, str | None]:
+    """The style that derives a new page's name, and a warning when the vault's own choice was unreadable.
+
+    The vault's style, except that a dated Source keeps `slug` by default. A `project-keys.yaml`
+    that cannot be parsed does not stop the write: capture matters more than a name in the vault's
+    style, so the write takes the default style and carries a warning that names the parse error.
+    A file that parses but holds no valid style still refuses, as `filename_style_source` does.
+    """
+    warning = None
+    try:
+        style, source = filename_style_source(vault_root)
+    except UnparseableFilenameStyleError as error:
+        style, source = DEFAULT_FILENAME_STYLE, FILENAME_STYLE_FROM_DEFAULT
+        warning = (
+            f"FILENAME_STYLE_UNPARSEABLE: {error}; this page was named in the default style. "
+            "Fix the file, then run doctor."
+        )
+    return ("slug" if dated and source == FILENAME_STYLE_FROM_DEFAULT else style), warning
+
+
+def derives_title_name(slug: str | None, vault_root: Path | None = None, *, dated: bool = False) -> bool:
+    """Whether a page without a caller-chosen `slug` is named by its title in this vault."""
+    return slug is None and derived_filename_style(vault_root, dated=dated)[0] == "title"
+
+
+def filename_adjusted_warning(
+    title: str,
+    slug: str | None,
+    *,
+    planned: str,
+    final: str,
+    vault_root: Path | None = None,
+    dated: bool = False,
+    date_prefix: str = "",
+) -> str | None:
+    """The one warning for a title-derived file name that is not its title, or None.
+
+    It is built where the name is final, after `unique_path` has added a number, so it names
+    the stem that the page is linked by. `planned` is the stem that `resolve_filename_slug`
+    gave, date prefix included, and `final` is the stem that was written. A caller-chosen
+    `slug` and a slug-style vault are not title names and carry their own slug warnings.
+    """
+    if not derives_title_name(slug, vault_root, dated=dated):
+        return None
+    given = unicodedata.normalize("NFC", title).strip()
+    if final == date_prefix + given:
+        return None
+    name = corrected_title_name(title).name
+    # Two caps can cut a name, and each says so itself: `fit_filename` at the byte cap, and the
+    # sanitiser at its character cap, which it applies unless it is given none.
+    fitted = fit_filename(name, date_prefix=date_prefix) if name else None
+    cut = (fitted is not None and fitted[1]) or (
+        sanitize_title_filename(title) != sanitize_title_filename(title, max_length=0)
+    )
+    reasons = []
+    if not name:
+        reasons.append("no part of the title can name a file, so the name comes from its slug")
+    elif name != given:
+        removed = given[len(name):] if given.startswith(name) else None
+        # A dot or space at the end is the one removal that the rule names apart from the unsafe characters.
+        if cut and removed is not None:
+            pass  # what follows the name is what the cut dropped, and the cut reason below says so
+        elif removed is not None and not removed.strip(". "):
+            reasons.append("a trailing dot or space was removed")
+        else:
+            reasons.append("characters that a file name or a link cannot hold were changed")
+    numbered = final != planned
+    # `unique_path` shortens the stem when its number would pass the byte cap.
+    shortened_for_number = numbered and not final.startswith(f"{planned}-")
+    if cut or shortened_for_number:
+        reasons.append("the name was shortened to fit the length limit")
+    if numbered:
+        reasons.append("a number was added because another page already holds that name or title")
+    return (
+        f"FILENAME_ADJUSTED: the file name is {final!r} ({'; '.join(reasons)}); "
+        "the title is stored as given. Link to this note by that name."
+    )
+
+
 def resolve_filename_slug(
-    title: str, slug: str | None = None, *, vault_root: Path | None = None
+    title: str,
+    slug: str | None = None,
+    *,
+    vault_root: Path | None = None,
+    dated: bool = False,
+    date_prefix: str = "",
 ) -> tuple[str, list[str]]:
     """Resolve a new filename component without conflating it with display title.
 
@@ -752,8 +857,13 @@ def resolve_filename_slug(
     `vault_root` selects the vault's filename style for the DERIVED branch only.
     An explicit `slug` keeps its contract under every style, because it is how a
     caller pins a name it already intends to link to. Omitting `vault_root`
-    resolves the style from the environment alone, which keeps every existing
-    caller on today's behaviour.
+    resolves the style from the environment alone.
+
+    `dated` marks a Source's name. A vault that configured no style keeps the slug
+    form there, so the default change renames no Source; a configured style applies
+    as it always did. A note whose name starts with a date follows the style like any
+    other note: its caller passes the text it puts before the name as `date_prefix`,
+    so the byte cap counts it. The name returned never includes the prefix.
     """
     if slug is not None:
         if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
@@ -764,26 +874,25 @@ def resolve_filename_slug(
             raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
-    if resolve_filename_style(vault_root) == "title":
-        readable = sanitize_title_filename(title)
-        if readable:
+    style, style_warning = derived_filename_style(vault_root, dated=dated)
+    style_warnings = [style_warning] if style_warning else []
+    if style == "title":
+        corrected = corrected_title_name(title)
+        fitted = fit_filename(corrected.name, date_prefix=date_prefix) if corrected.name else None
+        if fitted is not None:
             # No transliteration warning here: nothing was transliterated. That
             # warning exists because the slug path is lossy for non-ASCII text,
-            # and this path is what a vault sets to stop paying that cost.
-            warnings = []
-            if readable != sanitize_title_filename(title, max_length=0):
-                warnings.append(
-                    f"SLUG_TRUNCATED: filename truncated to {readable!r}; link to "
-                    "this note using that name or its frontmatter title -- "
-                    "re-deriving a name from the full title will not resolve."
-                )
-            return readable, warnings
-        # A title that is entirely reserved characters has no readable form, so
-        # fall through to the slug path rather than failing the write. One note
-        # named the old way beats a refused write.
+            # and this path is what a vault sets to stop paying that cost. A name
+            # that differs from its title is reported by `filename_adjusted_warning`,
+            # once the final name is known.
+            return fitted[0].removeprefix(date_prefix), style_warnings
+        # A title with no usable name (all reserved characters, or no bytes left
+        # under the cap) has no readable form, so fall through to the slug path
+        # rather than failing the write. One note named the old way beats a
+        # refused write.
 
     resolved, truncation_warning = slugify_with_truncation_check(title)
-    warnings = [truncation_warning] if truncation_warning else []
+    warnings = [*style_warnings, *([truncation_warning] if truncation_warning else [])]
     if any(ord(char) > 127 for char in title):
         warnings.append(
             "automatic filename slug used lossy, language-blind ASCII "
@@ -860,7 +969,14 @@ def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
     return title_key(title) if title else None
 
 
-def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
+def unique_path(
+    directory: Path,
+    stem: str,
+    suffix: str = ".md",
+    *,
+    vault_root: Path | None = None,
+    title_held: Callable[[str], bool] | None = None,
+) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
     Collision is tested case-INSENSITIVELY on every platform, not with
@@ -874,41 +990,75 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
 
     Listing the directory costs one syscall on a write path, against a data-loss
     class that only appears after a sync to another machine.
+
+    With `vault_root`, a name that a live page's lineage still claims is taken too, so a new
+    page never takes the links of a page that moved away (`prior_claims`).
+
+    A number added to a long name shortens the name, so the file keeps the byte cap.
+
+    `title_held` says whether a stem is another live page's title. A page named by that stem
+    would take over every bare link to the title, because a stem match beats a title match, so
+    such a stem counts as taken even when no file has the name.
     """
+    reserved: frozenset[str] = frozenset()
     if vault_root is not None:
+        from . import prior_claims
         from .governance import connector_boundary
 
         connector_boundary.require_create(
             vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix()
         )
+        reserved = prior_claims.reserved_names(
+            vault_root, directory.relative_to(vault_root).as_posix()
+        )
         stored = _stored_folder_keys(vault_root, directory, f"{stem}{suffix}")
         if stored is not None:
-            return directory / _first_free_name(stem, suffix, stored)
+            held = stored | reserved
+            return directory / _first_free_name(
+                stem, suffix, lambda name: vault_name_key(name) in held, title_held
+            )
     try:
-        taken = {vault_name_key(entry.name) for entry in directory.iterdir()}
+        taken = {vault_name_key(entry.name) for entry in directory.iterdir()} | reserved
     except OSError:
         # Unlistable, most often because it does not exist yet. `exists()` is
         # the weaker test -- case-sensitive on Linux -- but it is the only one
         # available without a listing, and it must still be applied rather than
         # assumed to pass, or an unlistable-but-populated directory would hand
         # back a path that already holds another note.
-        candidate = directory / f"{stem}{suffix}"
-        i = 2
-        while candidate.exists():
-            candidate = directory / f"{stem}-{i}{suffix}"
-            i += 1
-        return candidate
-    return directory / _first_free_name(stem, suffix, taken)
+        return directory / _first_free_name(
+            stem,
+            suffix,
+            lambda name: (directory / name).exists() or vault_name_key(name) in reserved,
+            title_held,
+        )
+    return directory / _first_free_name(
+        stem, suffix, lambda name: vault_name_key(name) in taken, title_held
+    )
 
 
-def _first_free_name(stem: str, suffix: str, taken: set[str]) -> str:
-    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... with no name key in ``taken``."""
-    candidate = f"{stem}{suffix}"
-    i = 2
-    while vault_name_key(candidate) in taken:
-        candidate = f"{stem}-{i}{suffix}"
-        i += 1
-    return candidate
+def numbered_stem(stem: str, number: int, suffix: str = ".md") -> str:
+    """``stem-<number>``, with the stem cut so that the name with its extension keeps the byte cap.
+
+    This is the one place a collision number is added. `fit_filename` does the cut: its
+    `extension` counts the number and the real extension, at a code point.
+    """
+    tail = f"-{number}"
+    fitted = fit_filename(stem, extension=tail + suffix)
+    return f"{fitted[0] if fitted else stem}{tail}"
+
+
+def _first_free_name(
+    stem: str,
+    suffix: str,
+    name_taken: Callable[[str], bool],
+    title_held: Callable[[str], bool] | None = None,
+) -> str:
+    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... that no file and no other page's title holds."""
+    candidate, number = stem, 2
+    while name_taken(f"{candidate}{suffix}") or (title_held is not None and title_held(candidate)):
+        candidate = numbered_stem(stem, number, suffix)
+        number += 1
+    return f"{candidate}{suffix}"
 
 
 def _stored_folder_keys(vault_root: Path, directory: Path, name: str) -> set[str] | None:
@@ -1846,6 +1996,7 @@ class _BatchArtifactGuard:
     guard: PathGuard
     #: A generation guard carries no digest; rollback still compares the planned one.
     planned_hash: str | None = None
+    native_version: held_fs.FileVersion | None = None
 
     @property
     def path(self) -> Path:
@@ -1873,10 +2024,15 @@ class _BatchArtifactGuard:
         expected_content_hash: str | None = None,
         expected_identity: PathIdentity | None = None,
         expected_generation: tuple[int, int, int] | None = None,
+        expected_native_version: held_fs.FileVersion | None = None,
     ) -> _BatchArtifactGuard:
         absolute = Path(os.path.abspath(path))
         root = absolute.parent
-        if expected_generation is not None:
+        if expected_native_version is not None:
+            if expected_content_hash is None:
+                raise PathGuardError("PATH_GUARD_INVALID", "a native version guard keeps the planned hash")
+            guard = PathGuard.capture(root, absolute.name, leaf_policy="stable")
+        elif expected_generation is not None:
             if expected_content_hash is None:
                 raise PathGuardError("PATH_GUARD_INVALID", "a generation guard keeps the planned hash")
             # The caller proved the bytes when it copied them in and read this generation
@@ -1909,13 +2065,28 @@ class _BatchArtifactGuard:
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
         # `PathGuard.capture` has just rechecked the guard it returned.
-        return cls(
+        captured = cls(
             root,
             guard,
-            planned_hash=expected_content_hash if expected_generation is not None else None,
+            planned_hash=expected_content_hash if expected_generation is not None or expected_native_version is not None else None,
+            native_version=expected_native_version,
         )
+        if expected_native_version is not None:
+            captured.recheck()
+        return captured
 
     def recheck(self) -> None:
+        if self.native_version is not None:
+            self.guard.recheck(self.root)
+            try:
+                with held_fs.acquire(self.root).require() as filesystem, filesystem.parent(".").require() as parent:
+                    with filesystem.file(parent, self.guard.target).require() as file:
+                        if file.version() != self.native_version:
+                            raise PathGuardError("PATH_GUARD_CHANGED", "native batch artifact version changed")
+                self.guard.recheck(self.root)
+            except (OSError, held_fs.HeldFsError) as error:
+                raise PathGuardError("PATH_GUARD_CHANGED", "native batch artifact is unavailable") from error
+            return
         try:
             self.guard.recheck(self.root)
             return
@@ -2075,6 +2246,8 @@ class _BatchReplaceContext:
     published_metadata: _BatchSnapshot | None = None
     inverse_recheck: Callable[[], None] | None = None
     expected_content_hash: str | None = None
+    custody: _ArtifactCustody | None = None
+    custody_factory: Callable[[], _ArtifactCustody | None] | None = None
 
 
 _BATCH_REPLACE_CONTEXT: ContextVar[_BatchReplaceContext | None] = ContextVar(
@@ -2090,19 +2263,42 @@ def _batch_replace_context(
     *,
     inverse_recheck: Callable[[], None] | None = None,
     expected_content_hash: str | None = None,
+    custody: _ArtifactCustody | None = None,
+    custody_factory: Callable[[], _ArtifactCustody | None] | None = None,
 ) -> Iterator[None]:
     """Carry held-publication inputs without widening the legacy test seam."""
 
     token = _BATCH_REPLACE_CONTEXT.set(
         _BatchReplaceContext(
             vault_root, expected_destination, published_metadata,
-            inverse_recheck, expected_content_hash,
+            inverse_recheck, expected_content_hash, custody, custody_factory,
         )
     )
     try:
         yield
     finally:
         _BATCH_REPLACE_CONTEXT.reset(token)
+
+
+@dataclass(frozen=True)
+class _ArtifactCustody:
+    """Trusted producer hooks for one exclusive native allocation and verified copy."""
+
+    temporary: held_fs.TemporaryCustody
+    verified: Callable[[held_fs.HeldFile, str], None]
+    before_install: Callable[[], None] | None = None
+    installed: Callable[[held_fs.InstallationWitness], None] | None = None
+    retired: Callable[[held_fs.RetirementWitness], None] | None = None
+
+
+@dataclass(frozen=True)
+class _BatchPayloadCustody:
+    """One trusted payload owner binds native stages, publication copies and inverse removal."""
+
+    stage: Callable[[PlannedWrite, _BatchWorkspace, bool], _ArtifactCustody | None]
+    publication: Callable[[PlannedWrite, _WorkspaceArtifact, bool], _ArtifactCustody | None]
+    removed: Callable[[PlannedWrite, PathIdentity], None]
+    finished: Callable[[], None] | None = None
 
 
 @dataclass(slots=True)
@@ -2121,6 +2317,9 @@ class _WorkspaceArtifact:
     #: The same triple for the destination this stage was copied to, read from the handle
     #: that proved the published identity; `None` when the copy cannot vouch for it.
     installed_generation: tuple[int, int, int] | None = None
+    installation_witness: held_fs.InstallationWitness | None = None
+    requires_installation_witness: bool = False
+    custody: _ArtifactCustody | None = None
 
     @property
     def path(self) -> Path:
@@ -2192,6 +2391,16 @@ class _WorkspaceArtifact:
         self.content_hash = _descriptor_hash(self.descriptor, self.identity)
         self.content_bound = True
         self.recheck()
+
+    def acknowledge_removed(self) -> None:
+        if self.custody is None:
+            return
+        assert self.held_file is not None
+        try:
+            self.custody.temporary.release(self.name, self.held_file.identity, "removed")
+        except held_fs.CustodyAcknowledgementPending:
+            # Native absence is known; failed owner acknowledgement retains its durable reservation.
+            pass
 
     def close(self) -> None:
         if not self.closed:
@@ -2683,8 +2892,14 @@ class _BatchWorkspace:
             if iterator is not None:
                 iterator.close()
 
-    def create_artifact(self, name: str, content: bytes) -> _WorkspaceArtifact:
+    def create_artifact(
+        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None,
+    ) -> _WorkspaceArtifact:
         self.recheck()
+        if custody is not None:
+            if self.held_filesystem is None or self.held_directory is None:
+                raise PathGuardError("PATH_GUARD_UNSAFE", "payload custody requires a held allocation")
+            custody.temporary.reserve(name)
         held_file: held_fs.HeldFile | None = None
         if self.held_filesystem is not None and self.held_directory is not None:
             opened = self.held_filesystem.file(
@@ -2728,13 +2943,19 @@ class _BatchWorkspace:
                 identity,
                 digest,
                 held_file=held_file,
+                custody=custody,
             )
             self.artifacts[name] = artifact
+            if custody is not None:
+                assert held_file is not None
+                custody.temporary.bind(name, held_file)
             _write_all(descriptor, content)
             if _descriptor_hash(descriptor, identity) != digest:
                 raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
             artifact.content_bound = True
             artifact.recheck()
+            if custody is not None:
+                custody.verified(held_file, digest)
             self.recheck()
             return artifact
         except Exception:
@@ -2752,6 +2973,7 @@ class _BatchWorkspace:
         *,
         expected_size: int,
         expected_hash: str,
+        custody: _ArtifactCustody | None = None,
     ) -> _WorkspaceArtifact:
         """Copy a reviewed seekable stream into one held private stage."""
 
@@ -2774,6 +2996,10 @@ class _BatchWorkspace:
             ) from error
 
         self.recheck()
+        if custody is not None:
+            if self.held_filesystem is None or self.held_directory is None:
+                raise PathGuardError("PATH_GUARD_UNSAFE", "payload custody requires a held allocation")
+            custody.temporary.reserve(name)
         held_file: held_fs.HeldFile | None = None
         if self.held_filesystem is not None and self.held_directory is not None:
             opened = self.held_filesystem.file(
@@ -2820,8 +3046,12 @@ class _BatchWorkspace:
                 identity,
                 expected_hash,
                 held_file=held_file,
+                custody=custody,
             )
             self.artifacts[name] = artifact
+            if custody is not None:
+                assert held_file is not None
+                custody.temporary.bind(name, held_file)
             digest = hashlib.sha256()
             written = 0
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -2849,6 +3079,8 @@ class _BatchWorkspace:
             artifact.recheck(verify_content=False)
             artifact.generation = artifact.current_generation(os.fstat(descriptor))
             artifact.content_bound = True
+            if custody is not None:
+                custody.verified(held_file, expected_hash)
             self.recheck()
             return artifact
         except Exception:
@@ -2878,8 +3110,10 @@ class _BatchWorkspace:
         vault_root: Path | None = None,
         expected_destination: PathIdentity | None = None,
         published_metadata: _BatchSnapshot | None = None,
+        custody: _ArtifactCustody | None = None,
     ) -> PathIdentity:
         context = _BATCH_REPLACE_CONTEXT.get()
+        custody_factory = context.custody_factory if context is not None else None
         inverse_recheck = context.inverse_recheck if context is not None else None
         expected_content_hash = context.expected_content_hash if context is not None else None
         if context is not None:
@@ -2889,6 +3123,9 @@ class _BatchWorkspace:
                 expected_destination = context.expected_destination
             if published_metadata is None:
                 published_metadata = context.published_metadata
+            if custody is None:
+                custody = context.custody
+        artifact.requires_installation_witness = custody is not None or custody_factory is not None
         if inverse_recheck is not None:
             inverse_recheck()
         self.recheck()
@@ -2919,7 +3156,7 @@ class _BatchWorkspace:
             with acquired.require() as filesystem:
                 parent_relative = relative.parent.as_posix()
                 parent_result = filesystem.parent(
-                    parent_relative if parent_relative != "." else "."
+                    parent_relative if parent_relative != "." else ".",
                 )
                 if not parent_result.ok:
                     raise PathGuardError(
@@ -2984,6 +3221,8 @@ class _BatchWorkspace:
 
                     def publish_once() -> None:
                         nonlocal published, temporary_witness
+                        attempt_custody = custody_factory() if custody_factory is not None else custody
+                        artifact.requires_installation_witness = attempt_custody is not None
                         temporary_witness = None
                         if inverse_recheck is not None:
                             inverse_recheck()
@@ -2992,11 +3231,27 @@ class _BatchWorkspace:
                             nonlocal temporary_witness
                             if published_metadata is not None:
                                 _apply_held_snapshot_metadata(file, published_metadata)
+                            if attempt_custody is not None:
+                                attempt_custody.verified(file, artifact.content_hash)
                             if witnessed:
                                 # Link and rename keep size and mtime, so the installed file
                                 # must still show what the verified copy left in the temporary.
                                 temporary = file.version()
                                 temporary_witness = (temporary.size, temporary.mtime_ns)
+
+                        def before_install() -> None:
+                            if attempt_custody is not None and attempt_custody.before_install is not None:
+                                attempt_custody.before_install()
+                            recheck_publish_precondition()
+
+                        def after_install(witness: held_fs.InstallationWitness) -> None:
+                            # Save the native fact before an owner acknowledgement can fail.
+                            artifact.installation_witness = witness
+                            after = witness.after
+                            if STAT_GENERATION_TRUSTED:
+                                artifact.installed_generation = (after.size, after.mtime_ns, after.change_time_ns)
+                            if attempt_custody is not None and attempt_custody.installed is not None:
+                                attempt_custody.installed(witness)
 
                         _before_batch_destination_published(
                             final, restoring=published_metadata is not None
@@ -3011,6 +3266,10 @@ class _BatchWorkspace:
                             expected_identity=expected_stable,
                             expected_sha256=expected_content_hash,
                             prepare=prepare_published,
+                            custody=attempt_custody.temporary if attempt_custody is not None else None,
+                            before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
+                            after_install=after_install if attempt_custody is not None else None,
+                            after_retire=attempt_custody.retired if attempt_custody is not None else None,
                         )
                         if (
                             not published.ok
@@ -3063,6 +3322,11 @@ class _BatchWorkspace:
                             raise PathGuardError(
                                 "PATH_GUARD_CHANGED", "batch destination changed"
                             )
+                        if custody is not None and (
+                            artifact.installation_witness is None
+                            or installed.version() != artifact.installation_witness.after
+                        ):
+                            raise PathGuardError("PATH_GUARD_CHANGED", "batch installation witness changed")
                         if witnessed:
                             # The batch binds a binary by this generation instead of hashing it,
                             # so vouch for it only when the copy shows no change since the
@@ -3143,7 +3407,15 @@ class _BatchWorkspace:
                         expected_destination, installed_identity
                     ):
                         return None
-                    if _descriptor_hash(descriptor, installed_identity) != artifact.content_hash:
+                    if artifact.requires_installation_witness:
+                        witness = artifact.installation_witness
+                        if (witness is None or not witness.authentic()
+                                or witness.leaf != absolute_final.name
+                                or not held_fs._same_file_identity(witness.root_identity, self.held_filesystem.root_identity)
+                                or not held_fs._same_file_identity(witness.parent_identity, self.held_parent.identity)
+                                or installed.version() != witness.after):
+                            return None
+                    elif _descriptor_hash(descriptor, installed_identity) != artifact.content_hash:
                         return None
                 self.recheck()
                 artifact.recheck()
@@ -3280,7 +3552,8 @@ class _BatchWorkspace:
             artifact.recheck()
             if self.held_filesystem is not None and self.held_directory is not None:
                 expected = artifact.identity
-                artifact.close()
+                if artifact.custody is None:
+                    artifact.close()
                 mutable = self.held_filesystem.file(
                     self.held_directory,
                     artifact.name,
@@ -3295,11 +3568,16 @@ class _BatchWorkspace:
                         or not _same_identity(expected, os.fstat(descriptor))
                     ):
                         return False
+                    if artifact.custody is not None and current.identity != artifact.held_file.identity:
+                        # A new alias keeps payload bytes alive; one removed name cannot retire that copy.
+                        return False
                     removed = self.held_filesystem.unlink(current)
                     if not removed.ok:
                         return False
+                artifact.close()
                 self.artifacts.pop(artifact.name)
                 self.recheck()
+                artifact.acknowledge_removed()
                 return True
             if os.name == "nt":  # Windows cannot unlink an open CRT file
                 artifact.close()
@@ -3312,6 +3590,7 @@ class _BatchWorkspace:
             artifact.close()
             self.artifacts.pop(artifact.name)
             self.recheck()
+            artifact.acknowledge_removed()
             return True
         except (OSError, PathGuardError):
             return False
@@ -3466,6 +3745,9 @@ def _restore_bound_source_timestamps(
     before = os.fstat(descriptor)
     if not _same_identity(source.identity, before):
         raise PathGuardError("PATH_GUARD_CHANGED", "batch source changed")
+    if (before.st_atime_ns, before.st_mtime_ns) == (atime_ns, mtime_ns):
+        # Even an unchanged utime moves the native version and invalidates retained installation evidence.
+        return
     if os.utime in getattr(os, "supports_fd", set()):
         os.utime(descriptor, ns=(atime_ns, mtime_ns))
     elif os.utime in getattr(os, "supports_follow_symlinks", set()):
@@ -3631,7 +3913,10 @@ def _reset_restored_timestamps(
             or not _same_identity(expected_identity, info)
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "restored batch artifact changed")
-        if os.utime in getattr(os, "supports_fd", set()):
+        if (info.st_atime_ns, info.st_mtime_ns) == (snapshot.atime_ns, snapshot.mtime_ns):
+            # Preserve exact native versions when snapshot timestamps already match.
+            pass
+        elif os.utime in getattr(os, "supports_fd", set()):
             os.utime(descriptor, ns=(snapshot.atime_ns, snapshot.mtime_ns))
         elif os.name == "nt":
             _set_windows_path_timestamps(
@@ -5684,6 +5969,7 @@ def batch_atomic_write(
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
+    _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -5708,6 +5994,9 @@ def batch_atomic_write(
 
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
+            if _payload_custody is not None:
+                # A file-owner contract cannot silently lose its custody in another persistence owner.
+                raise ValueError("file payload custody requires its native writer")
             return store_batch.commit_batch(
                 writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
                 completion_guards=completion_guards, index_reports=index_reports,
@@ -5716,12 +6005,20 @@ def batch_atomic_write(
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
             )
-    with _BATCH_COMMIT_LOCK:
+    with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
                 "defer_graph_completion requires vault_root and post_commit_fanout=False"
             )
         caller_writes = list(writes)
+        _require_distinct_destinations(caller_writes)
+        from . import generated_fragment_store, source_native_custody
+
+        if vault_root is not None and _payload_custody is not None:
+            # Native allocation facts share one connection; it outlives the unit's closing change.
+            custody_stack.enter_context(source_native_custody.session())
+            # Pre-byte catalogue work commits as one phase; acknowledgements share one closing change.
+            custody_stack.enter_context(generated_fragment_store.unit(vault_root))
         if _prepare is not None:
             from . import vocabulary_gate
 
@@ -5734,6 +6031,7 @@ def batch_atomic_write(
                     defer_graph_completion=defer_graph_completion,
                     _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                     _validate_prepared_bindings=_validate_prepared_bindings, _prepare=_prepare,
+                    _payload_custody=_payload_custody,
                 )
         from . import curation_witness
 
@@ -5765,6 +6063,7 @@ def batch_atomic_write(
                 publication_intents_out=publication_intents_out,
                 _validate_prepared_bindings=_validate_prepared_bindings,
                 _before_first_install=curation_witness.publication_hook(curation_witness_state),
+                _payload_custody=_payload_custody,
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -5827,6 +6126,7 @@ def _batch_atomic_write_locked(
     _before_first_install: Callable[[], None] | None = None,
     _graph_epoch: bool = True,
     _before_commit_point: Callable[[], None] | None = None,
+    _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -6084,9 +6384,11 @@ def _batch_atomic_write_locked(
                     leaf_policy="stable" if os.path.lexists(write.path) else "absent",
                 )
             rollback_ancestry.append((ancestry_root, ancestry_guard))
+            custody = _payload_custody.stage(write, workspace, False) if _payload_custody is not None else None
+            custody_options = {"custody": custody} if custody is not None else {}
             if isinstance(write.content, str):
                 artifact = workspace.create_artifact(
-                    f"stage-{index}.tmp", write.content.encode("utf-8")
+                    f"stage-{index}.tmp", write.content.encode("utf-8"), **custody_options,
                 )
             elif isinstance(write.content, PreparedBinaryContent):
                 if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
@@ -6099,6 +6401,7 @@ def _batch_atomic_write_locked(
                     write.content.stream,
                     expected_size=write.content.size,
                     expected_hash=write.content.sha256,
+                    **custody_options,
                 )
             else:  # pragma: no cover - the public union is closed
                 raise PathGuardError(
@@ -6380,6 +6683,7 @@ def _batch_atomic_write_locked(
             with _batch_replace_context(
                 Path(vault_root) if vault_root is not None else None,
                 expected_destination,
+                custody_factory=functools.partial(_payload_custody.publication, writes[index], artifact, False) if _payload_custody is not None else None,
             ):
                 try:
                     installed_identity = workspace.replace_artifact(artifact, final)
@@ -6397,6 +6701,7 @@ def _batch_atomic_write_locked(
                             final,
                             expected_content_hash=artifact.content_hash,
                             expected_identity=installed_identity,
+                            expected_native_version=artifact.installation_witness.after if artifact.installation_witness is not None else None,
                         )
                     raise
             if publication_intents_enabled:
@@ -6407,6 +6712,7 @@ def _batch_atomic_write_locked(
                 expected_content_hash=artifact.content_hash,
                 expected_identity=installed_identity,
                 expected_generation=artifact.installed_generation,
+                expected_native_version=artifact.installation_witness.after if artifact.installation_witness is not None else None,
             )
             _after_batch_destination_published(final)
             workspace.recheck()
@@ -6487,9 +6793,13 @@ def _batch_atomic_write_locked(
                 recheck_inverse()
                 if snapshot is None:
                     workspace.unlink_installed(final, final_guard, inverse_recheck=recheck_inverse)
+                    if _payload_custody is not None:
+                        _payload_custody.removed(writes[replaced_index], final_guard.identity)
                 else:
+                    custody = _payload_custody.stage(writes[replaced_index], workspace, True) if _payload_custody is not None else None
                     restore = workspace.create_artifact(
-                        f"restore-{replaced_index}.tmp", snapshot.content
+                        f"restore-{replaced_index}.tmp", snapshot.content,
+                        **({"custody": custody} if custody is not None else {}),
                     )
                     _apply_snapshot_metadata(restore, snapshot)
                     restore.recheck(verify_content=False)
@@ -6500,14 +6810,19 @@ def _batch_atomic_write_locked(
                         snapshot,
                         inverse_recheck=recheck_inverse,
                         expected_content_hash=final_guard.content_hash,
+                        custody_factory=functools.partial(_payload_custody.publication, writes[replaced_index], restore, True) if _payload_custody is not None else None,
                     ):
                         restored_identity = workspace.replace_artifact(restore, final)
                     _BatchArtifactGuard.capture(
                         final,
                         expected_content_hash=snapshot.content_hash,
                         expected_identity=restored_identity,
+                        expected_generation=restore.installed_generation,
+                        expected_native_version=restore.installation_witness.after if restore.installation_witness is not None else None,
                     )
-                    _reset_restored_timestamps(final, restored_identity, snapshot)
+                    if not restore.requires_installation_witness:
+                        # Held custody applied metadata before its witness; another utime would invalidate that version.
+                        _reset_restored_timestamps(final, restored_identity, snapshot)
                     workspace.recheck()
                 final_guards.pop(final, None)
                 restored_paths.add(final)
@@ -6568,6 +6883,12 @@ def _batch_atomic_write_locked(
     finally:
         if additive_guard is not None:
             additive_guard.abort()
+        if _payload_custody is not None and _payload_custody.finished is not None:
+            try:
+                _payload_custody.finished()
+            except held_fs.CustodyAcknowledgementPending:
+                # Native rollback and cleanup finished; the owner retains its unresolved canonical reservations.
+                pass
 
     if vault_root is not None:
         # Before the write acknowledges, so the free-text census names every
@@ -8633,12 +8954,89 @@ def _store_inbound_mode(vault_root: Path) -> bool:
     return store_mode.store_mode_for_reads(Path(vault_root))
 
 
+def served_page_bytes(vault_root: Path, rel: str) -> bytes | None:
+    """A page's bytes where the vault serves it: the store's page, else the file; None if absent."""
+    from .vault_store import read as store_read
+
+    def served() -> tuple[bytes | None]:
+        try:
+            return (store_read.owned_bytes(vault_root, rel),)
+        except FileNotFoundError:
+            return (None,)
+
+    # A one-tuple tells a page the store serves but lacks from a path that the disk decides.
+    stored = store_read.from_store(vault_root, rel, served)
+    if stored is not None:
+        return stored[0]
+    try:
+        return (Path(vault_root) / rel).read_bytes()
+    except OSError:
+        return None
+
+
+def lineage_link_targets(vault_root: Path, target_rel_path: str) -> tuple[str, ...]:
+    """The prior paths that links may still name the target by, read from its own bytes.
+
+    These are the target's lineage entries and the relayout rows that claim for it, without
+    a path where a page with an `exomem_id` now stands: that page owns its path's links. The
+    read costs the target's bytes and the relayout record, never a scan or the derived index,
+    so a stale index cannot hide a link from a delete check.
+    """
+    from . import memory_refs, page_lineage, relayout_record
+
+    root = Path(vault_root)
+    rel = target_rel_path if target_rel_path.lower().endswith(".md") else target_rel_path + ".md"
+    raw = served_page_bytes(root, rel)
+    if raw is None:
+        return ()
+    front, has_block = page_lineage.read_front_of_bytes(raw)
+    if not has_block:
+        front = {}
+    claimed = page_lineage.iter_claims(
+        rel, front, memory_refs.normalize_id(front.get(memory_refs.ID_FIELD)),
+        relayout_record.load(root),
+    )
+    kept: list[str] = []
+    for prior in claimed:
+        held = served_page_bytes(root, prior)
+        if held is not None:
+            holder, _held_body, held_block = parse_frontmatter(
+                held.decode("utf-8", errors="replace")
+            )
+            if held_block is not None and memory_refs.normalize_id(
+                holder.get(memory_refs.ID_FIELD)
+            ) is not None:
+                continue
+        kept.append(prior)
+    return tuple(kept)
+
+
+def _merge_inbound(found: Iterable[list[InboundLink]]) -> list[InboundLink]:
+    """The links of several lookups, in lookup order, each link once.
+
+    Two lookups may list one link, while one lookup lists two links on one line as two rows, so a
+    row counts once for each time a single lookup lists it.
+    """
+    emitted: dict[tuple[str, int, str], int] = {}
+    merged: list[InboundLink] = []
+    for links in found:
+        listed: dict[tuple[str, int, str], int] = {}
+        for link in links:
+            key = (link.path, link.line_number, link.raw_target)
+            listed[key] = listed.get(key, 0) + 1
+            if listed[key] > emitted.get(key, 0):
+                emitted[key] = listed[key]
+                merged.append(link)
+    return merged
+
+
 def find_inbound_wikilinks(
     vault_root: Path,
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
     target_has_no_file: bool = False,
+    lineage: bool = True,
 ) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
@@ -8667,30 +9065,57 @@ def find_inbound_wikilinks(
 
     A store-mode vault answers from its inbound rows at the request's snapshot. There every stored
     page counts toward its basename whether or not it has a file, so `target_has_no_file` is moot.
+
+    With `lineage`, links to the target's prior paths count too (`lineage_link_targets`), because
+    they resolve to it. A move or reclassification that plans rewrites of links to the old path
+    passes `lineage=False`: the page keeps its lineage, so its prior paths keep resolving.
     """
-    stored = _store_inbound(vault_root, (target_rel_path,), visible)
+    priors = lineage_link_targets(vault_root, target_rel_path) if lineage else ()
+    stored = _store_inbound(vault_root, (target_rel_path, *priors), visible)
     if stored is not None:
-        return stored[target_rel_path]
+        if not priors:
+            return stored[target_rel_path]
+        return _merge_inbound(stored[target] for target in (target_rel_path, *priors))
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
-    return _select_inbound_wikilinks(
+        prior_snapshots = [(prior, _snapshot_inbound(data, prior)) for prior in priors]
+    selected = _select_inbound_wikilinks(
         snapshot, target_rel_path, visible, target_has_no_file=target_has_no_file
     )
+    if not prior_snapshots:
+        return selected
+    return _merge_inbound([
+        selected,
+        *(
+            _select_inbound_wikilinks(
+                prior_snapshot,
+                prior,
+                visible,
+                target_has_no_file=prior not in prior_snapshot.sources,
+            )
+            for prior, prior_snapshot in prior_snapshots
+        ),
+    ])
 
 
 def find_inbound_wikilinks_many(
-    vault_root: Path, targets: Iterable[str], *, held: bool = False
+    vault_root: Path,
+    targets: Iterable[str],
+    *,
+    held: bool = False,
+    visible: Callable[[str], bool] | None = None,
 ) -> dict[str, list[InboundLink]]:
-    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them.
+    """`find_inbound_wikilinks` without lineage for several targets over one index read.
 
     `held` says that the vault holds every target, as a store holds a page that may have no file
     yet: a target that the index did not read counts toward its basename, as `target_has_no_file`
     does for one target, and the index answers which ones those are without a look at the disk.
-    A store-mode vault answers from its inbound rows, where `held` is moot.
+    A store-mode vault answers from its inbound rows, where `held` is moot. `visible` is a
+    reader's view, as for `find_inbound_wikilinks`; `None` is the owner's.
     """
     targets = list(targets)
-    stored = _store_inbound(vault_root, targets, None)
+    stored = _store_inbound(vault_root, targets, visible)
     if stored is not None:
         return stored
     data = _inbound_index(vault_root)
@@ -8700,7 +9125,7 @@ def find_inbound_wikilinks_many(
         target: _select_inbound_wikilinks(
             snapshot,
             target,
-            None,
+            visible,
             target_has_no_file=held and target not in snapshot.sources,
         )
         for target, snapshot in snapshots.items()
@@ -8997,6 +9422,11 @@ class WikilinkResolver:
     #: The token of the resident publication whose maps these are, so a reader may keep what it
     #: derives from them beside that token. Every patch drops it; only the publisher sets it.
     publication: object | None = None
+    #: The prior-path claims read for these maps (`prior_claims`); every patch drops them.
+    _prior_claims: Any = None
+    #: Claims a derivation binds for the state it derives, such as a store commit's own
+    #: transaction; resolution reads them instead of the index, and a patch keeps them.
+    bound_claims: Any = None
 
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
@@ -9099,7 +9529,24 @@ class WikilinkResolver:
             candidates_by_key=self.candidates_by_key,
         )
         copy.publication = self.publication
+        copy._prior_claims = self._prior_claims
+        copy.bound_claims = self.bound_claims
         return copy
+
+    def prior_claims(self) -> Any:
+        """The prior-path claims kept beside these maps, read on first need.
+
+        A link that resolves by its exact path asks whether a page claims that path, so these
+        answer without a read per link. A patch drops them, because a page that moved, appeared
+        or vanished changes the claims; a claimed path is checked again against the current index.
+        """
+        from . import prior_claims
+
+        if self.bound_claims is not None:
+            return self.bound_claims
+        if self._prior_claims is None:
+            self._prior_claims = prior_claims.current(self.vault_root)
+        return self._prior_claims
 
     def title_key_for_path(self, rel_path: str) -> str | None:
         """Return the normalized resolver title contributed by one path.
@@ -9132,6 +9579,7 @@ class WikilinkResolver:
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
         self.publication = None
+        self._prior_claims = None
         self.candidates_by_key[no_ext] = tuple(
             sorted(
                 (
@@ -9154,6 +9602,7 @@ class WikilinkResolver:
         if not any(candidate.path == rel_path for candidate in previous):
             return
         self.publication = None
+        self._prior_claims = None
         remaining = tuple(candidate for candidate in previous if candidate.path != rel_path)
         if remaining:
             self.candidates_by_key[no_ext] = remaining
@@ -9381,7 +9830,9 @@ def normalize_wikilink(
     pages it admits; `None` matches over every page.
 
     `targeted_namespace_contains` answers exact resolver keys for explicit
-    paths. Bare names use `resolver` or lazily call `resolver_factory`.
+    paths. Bare names use `resolver` or lazily call `resolver_factory`. With it,
+    the caller authorizes the file an explicit path names, and `visible` filters
+    only the pages that claim the path through their lineage.
 
     `retired` answers the item path that a converted collection retired for
     an unresolved path, or None; `None` checks each link on its own. A caller
@@ -9400,6 +9851,175 @@ def normalize_wikilink(
 def wikilink_page_key(page: str) -> str:
     """A link's page part as resolution keys it: no `.md`, no edge blanks or slashes."""
     return page.removesuffix(".md").strip().strip("/")
+
+
+def _current_claims(resolver: Any, vault_root: Path) -> Any:
+    """The prior-path claims a derivation binds on `resolver`, else the index's current ones."""
+    bound = getattr(resolver, "bound_claims", None)
+    if bound is not None:
+        return bound
+    from . import prior_claims
+
+    return prior_claims.current(vault_root)
+
+
+def _kept_claims(resolver: Any, vault_root: Path) -> Any:
+    """The claims kept beside the resolver's maps; a read-only corpus view keeps none."""
+    keeper = getattr(resolver, "prior_claims", None)
+    return keeper() if keeper is not None else _current_claims(resolver, vault_root)
+
+
+def _live_claimants(
+    paths: Iterable[str],
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The live pages among `paths` that the caller may see, counted after that filter."""
+    wanted = set(paths)
+    if not wanted:
+        return []
+    if targeted:
+        # Namespace membership proves liveness. Each path is an exact page path from the
+        # lineage index, so `visible` can judge it before the count.
+        return [
+            WikilinkCandidate(path, None)
+            for path in sorted(wanted)
+            if contains(_wikilink_path_key(path)) and (visible is None or visible(path))
+        ]
+    return [
+        candidate
+        for candidate in wikilink_candidates(
+            resolver.candidates_by_key,
+            {_wikilink_path_key(path) for path in wanted},
+            visible=visible,
+        )
+        if candidate.path in wanted
+    ]
+
+
+def _squatter_claimants(
+    key: str,
+    vault_root: Path,
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The lineage claimants that keep `key` from a file without an `exomem_id` sitting there."""
+    claims = _current_claims(resolver, vault_root)
+    claimants = claims.claimants(key)
+    if not claimants:
+        return []
+    held = (
+        # The caller's namespace holds `key`; a file the caller may not see holds no name.
+        [path for path in (key + ".md",) if visible is None or visible(path)]
+        if targeted
+        else [
+            match.path
+            for match in wikilink_candidates(resolver.candidates_by_key, (key,), visible=visible)
+        ]
+    )
+    if any(claims.has_identity(path) for path in held):
+        return []  # a page with an identity at its own path is a live name
+    return _live_claimants(
+        (path for path in claimants if path not in held),
+        resolver, contains, targeted=targeted, visible=visible,
+    )
+
+
+def _prior_path_claimants(
+    cleaned: str,
+    vault_root: Path,
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The visible live pages that left the path `cleaned`, as written or under Knowledge Base."""
+    claims = _current_claims(resolver, vault_root)
+    for key in (cleaned, managed_join(cleaned)):
+        claimed = _live_claimants(
+            claims.claimants(key), resolver, contains, targeted=targeted, visible=visible
+        )
+        if claimed:
+            return claimed
+    return []
+
+
+def prior_path_pages(
+    vault_root: Path,
+    value: str,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> list[str]:
+    """The live pages whose lineage names the path `value`, as a link to that path resolves it.
+
+    A page that `visible` hides counts for nothing, so a hidden page reads as no page.
+    """
+    cleaned = wikilink_page_key(split_wikilink_target(value)[0])
+    if "/" not in cleaned:
+        return []
+    return [
+        candidate.path
+        for candidate in _prior_path_claimants(
+            cleaned, vault_root, resolver, resolver.full_paths.__contains__,
+            targeted=False, visible=visible,
+        )
+    ]
+
+
+def prior_stem_pages(
+    vault_root: Path,
+    value: str,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> list[str]:
+    """The live pages whose lineage names the bare stem `value`, as a link to that stem resolves it.
+
+    A live page under that stem or title wins, so the answer is then empty. A page that `visible`
+    hides counts for nothing.
+    """
+    cleaned = wikilink_page_key(split_wikilink_target(value)[0])
+    if not cleaned or "/" in cleaned:
+        return []
+    matches, kind = _bare_name_matches(cleaned, vault_root, resolver, visible=visible)
+    return [candidate.path for candidate in matches] if kind == "prior stem" else []
+
+
+def _bare_name_matches(
+    cleaned: str,
+    vault_root: Path,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> tuple[list[WikilinkCandidate], str]:
+    """The pages the bare name `cleaned` names at the first step that finds any, and that step.
+
+    The steps run in order: the stem, the title, then a prior stem, so a prior stem never wins
+    over a live name. A page that `visible` hides counts for nothing.
+    """
+    stem_matches = wikilink_candidates(
+        resolver.candidates_by_key, resolver.stems.get(cleaned, ()), visible=visible
+    )
+    if stem_matches:
+        return stem_matches, "stem"
+    key = title_key(cleaned)
+    title_matches = wikilink_candidates(
+        resolver.candidates_by_key, resolver.titles.get(key, ()), title_key=key, visible=visible
+    )
+    if title_matches:
+        return title_matches, "title"
+    return _live_claimants(
+        _current_claims(resolver, vault_root).stem_claimants(cleaned),
+        resolver, resolver.full_paths.__contains__, targeted=False, visible=visible,
+    ), "prior stem"
 
 
 def _normalize_wikilink(
@@ -9430,8 +10050,10 @@ def _normalize_wikilink(
 
     # Explicit paths need namespace membership only; bare names need the full
     # stem/title index and retain its ambiguity rules.
-    # Boolean membership cannot prove which physical owner passes visibility.
-    targeted = targeted_namespace_contains is not None and "/" in cleaned and visible is None
+    # Boolean membership cannot prove which physical owner of a path passes `visible`, so a
+    # targeted caller authorizes the link's final target itself. The lineage claimants that
+    # a path resolves through are exact index paths, which `visible` filters before counting.
+    targeted = targeted_namespace_contains is not None and "/" in cleaned
     if not targeted and resolver is None:
         resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
     contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
@@ -9460,22 +10082,27 @@ def _normalize_wikilink(
     # Full paths take precedence over Knowledge-Base-relative paths.
     for key in (cleaned, managed_join(cleaned)):
         if contains(key):
+            # The resolver's kept claims answer the common case, a path that no page left,
+            # with one lookup; only a path that they list is checked against the index.
+            if _kept_claims(resolver, vault_root).claimants(key):
+                claimed = _squatter_claimants(
+                    key, vault_root, resolver, contains, targeted=targeted, visible=visible
+                )
+                if claimed:
+                    return _selected(claimed, "prior path")
             if targeted:
                 return key + anchor, None, None
             matches = _matches((key,))
             if matches:
                 return _selected(matches, "path")
 
-    # 3. Bare name (no `/`): stem match first, then frontmatter title.
-    if "/" not in cleaned:
-        stem_matches = _matches(resolver.stems.get(cleaned, ()))
-        if stem_matches:
-            return _selected(stem_matches, "stem")
-        title_matches = _matches(
-            resolver.titles.get(title_key(cleaned), ()), title_key=title_key(cleaned)
+    # A path that a moved page left names that page while exactly one visible live page claims it.
+    if "/" in cleaned:
+        claimed = _prior_path_claimants(
+            cleaned, vault_root, resolver, contains, targeted=targeted, visible=visible
         )
-        if title_matches:
-            return _selected(title_matches, "title")
+        if claimed:
+            return _selected(claimed, "prior path")
 
     # A path that a converted collection retired names its stored row. A strict
     # caller needs a file, which that path no longer has.
@@ -9488,6 +10115,13 @@ def _normalize_wikilink(
             found = retired(cleaned)
         if found is not None:
             return _wikilink_path_key(found) + anchor, None, None
+
+    # 3. Bare name (no `/`): stem match first, then frontmatter title, then a prior stem,
+    # which never wins over a live name.
+    if "/" not in cleaned:
+        bare_matches, kind = _bare_name_matches(cleaned, vault_root, resolver, visible=visible)
+        if bare_matches:
+            return _selected(bare_matches, kind)
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result

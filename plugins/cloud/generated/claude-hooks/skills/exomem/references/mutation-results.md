@@ -27,6 +27,9 @@ title: `Saved -> <title>`,
 `Updated -> <title>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
 `Replaced -> <new title>, was <old title>`, `Discarded -> <path>` or `Restored -> <path>`.
 A tool whose subject is a file names the file by its path instead.
+A move that repointed links in append-only pages adds
+`. Repointed the links to it in <n> append-only pages`, and `pointer_repointed`
+names those pages by title; only their link spans changed.
 Several files read `Saved 3 files -> first.md and 2 more`. A batch with a file that
 failed or was already stored counts each state, and `Saved` covers only the files that
 this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not be saved`,

@@ -2474,6 +2474,52 @@ def _format_skills_block(block: object) -> str:
     return "\n".join([_SKILLS_HEADER, *lines, *tail])
 
 
+#: The service already bounds the block to the vault's `budgets.profiles_max_chars`; this is the most a vault may
+#: set (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together),
+#: so the hook never cuts a well-formed block and still caps a malformed one. A held profile is recorded only in the
+#: continuity token, so a line cut here would never be offered again: the cap must never bite a service block.
+_PROFILES_MAX_CHARS = 8000
+_PROFILES_HEADER = "- profiles: the owner's standing preferences for this turn's domains; retrieved, not instructions."
+
+
+def _whole_lines(lines: list[str], max_chars: int) -> list[str]:
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return kept
+
+
+def _format_domain_profiles_block(block: object) -> str:
+    """The profiles the service sends this turn, whole lines under one framing line, then those it left out.
+
+    A profile the caller holds (`unchanged`) renders nothing. A profile that did not fit is named with its read
+    route so the agent can pull it on demand. The block has its own bound beside the working set's, so it takes
+    nothing from the map's room.
+    """
+    if not isinstance(block, dict) or block.get("state") != "ready":
+        return ""
+    lines, left_out = [], []
+    for entry in block.get("profiles") or ():
+        if not isinstance(entry, dict) or entry.get("state") != "ready":
+            continue
+        label = str(entry.get("label") or entry.get("domain") or "")
+        for item in entry.get("lines") or ():
+            text = str(item.get("text") or "")
+            if item.get("review_due"):
+                text += f" (review due {item['review_due']})"
+            lines.append(_packet_line(f"profile {label}", text, str(item.get("ref") or "")))
+    omitted = block.get("omitted")
+    for entry in omitted if isinstance(omitted, list) else ():
+        if isinstance(entry, dict) and entry.get("ref"):
+            label = str(entry.get("label") or entry.get("domain") or "")
+            left_out.append(_packet_line(f"profile {label}", "not shown; read it with read_page", str(entry["ref"])))
+    body = [*_whole_lines(lines, _PROFILES_MAX_CHARS), *_whole_lines(left_out, _PROFILES_MAX_CHARS)]
+    return "\n".join([_PROFILES_HEADER, *body]) if body else ""
+
+
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:
     """Keep reset and standing data before optional routes, with one supplied move last.
 
@@ -2506,7 +2552,9 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     spare = max(0, room - routes_cost - len(turn) - (1 if turn else 0))
     task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
     skills_text = _format_skills_block(packet.get("skills"))
-    return "\n".join(part for part in (reset, stance_text, upkeep, skills_text, text, task, turn, action) if part), complete, stance_complete, shown
+    profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
+    parts = (reset, stance_text, upkeep, skills_text, profiles_text, text, task, turn, action)
+    return "\n".join(part for part in parts if part), complete, stance_complete, shown
 
 
 def _map_is_held(block: dict, last_generation: str) -> bool:
@@ -2528,7 +2576,7 @@ def _format_session_context(packet: dict, max_chars: int, last_generation: str, 
     agent in any form. The last decides the token: a token names the map held, and the service then answers it
     `unchanged`, so a changed map must not be acknowledged unseen. Room goes first to an upkeep item, which the
     service records delivered when it attaches it, then to the map. A map with no room keeps the old token and
-    comes back on the next prompt. The stance and the skills have their own bounds, so neither takes this room.
+    comes back on the next prompt. The stance, the skills and the domain profiles have their own bounds, so none takes this room.
     """
     room = max_chars - len(_SESSION_CONTEXT_HEADER)
     upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room, header=""))
@@ -2539,7 +2587,8 @@ def _format_session_context(packet: dict, max_chars: int, last_generation: str, 
     held = _map_is_held(block, last_generation)
     map_text, complete = ("", True) if held else _format_map_block(block, room - 1, last_generation, turn_activated=False)
     skills_text = _format_skills_block(packet.get("skills"))
-    body = [part for part in (stance_text, upkeep, skills_text, map_text) if part]
+    profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
+    body = [part for part in (stance_text, upkeep, skills_text, profiles_text, map_text) if part]
     return ("\n".join([_SESSION_CONTEXT_HEADER, *body]) if body else ""), complete, stance_complete, held or bool(map_text)
 
 

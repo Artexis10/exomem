@@ -4071,6 +4071,26 @@ def search_substring_result(
     )
 
 
+def search_substrings_result(
+    vault_root: Path, queries: Sequence[str], *, scope: str = "kb"
+) -> CatalogQueryResult[dict[str, list[str]]]:
+    """`search_substring_result` for several queries under one readiness proof and snapshot.
+
+    Each proof walks the vault, so a caller with many queries pays for one walk, not one each.
+    """
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    tokens = {query: query.split() for query in queries}
+    empty = {query: [] for query, words in tokens.items() if not words}
+    asked = {query: words for query, words in tokens.items() if words}
+    if not asked:
+        return CatalogQueryResult(empty, CatalogReadiness("available", True, backend()))
+    answer = get_store(vault_root).search_substrings_result(asked, scope)
+    if answer.value is None:
+        return answer
+    return CatalogQueryResult({**empty, **answer.value}, answer.readiness)
+
+
 def search_keyword_groups_result(
     vault_root: Path, query_norm: str, *, scope: str, freshness: tuple | None,
     limit: int, allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
@@ -5230,6 +5250,20 @@ def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     LexicalStore._create_catalog_tables(conn)
     LexicalStore._create_catalog_indexes(conn)
     LexicalStore._ensure_fts_schema(conn)
+
+
+def stamp_catalogue_schema(conn: sqlite3.Connection) -> None:
+    """Record on ``conn`` that every page row was derived under this build's schema (caller owns the txn).
+
+    The counterpart of ``create_catalogue_schema``, which stamps nothing: store mode's owner pass
+    calls it once its rows cover every page, because ``_schema_is_current`` reads the stamp on the
+    store's connection and a store that migration copied from an older sidecar still carries that one.
+    """
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(SCHEMA_VERSION),),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -13184,6 +13218,18 @@ class LexicalStore:
             scope,
             freshness,
             lambda conn: self._substring_query(conn, tokens, scope, k, allowed_paths),
+            "lexical sidecar substring query failed (%s)",
+        )
+
+    def search_substrings_result(
+        self, tokens: Mapping[str, list[str]], scope: str
+    ) -> CatalogQueryResult[dict[str, list[str]]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            None,
+            lambda conn: {
+                query: self._substring_query(conn, words, scope) for query, words in tokens.items()
+            },
             "lexical sidecar substring query failed (%s)",
         )
 

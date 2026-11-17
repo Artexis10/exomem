@@ -1974,9 +1974,13 @@ def prepare_recovery_epoch(
 
 
 def prepare_rename_epoch(
-    vault_root: Path, renames: Iterable[tuple[str, str]]
+    vault_root: Path, renames: Iterable[tuple[str, str]], *, adopted: bool = False
 ) -> GraphDeletionEpoch | None:
-    """Fence actual file renames before any source leaves its current location."""
+    """Fence actual file renames before any source leaves its current location.
+
+    `adopted` says the renames already ran (curation adopts an interrupted move), so each new
+    page is read from its new path.
+    """
     from . import recall_policy, reserved_paths
     from .vault import in_excluded_scan_dir
 
@@ -1991,7 +1995,9 @@ def prepare_rename_epoch(
         )
         new_input = new_rel.lower().endswith(".md") and not in_excluded_scan_dir(new_rel)
         if new_input:
-            content = reserved_paths.read_generic_bytes(root, old_rel, physical=True).data
+            content = reserved_paths.read_generic_bytes(
+                root, new_rel if adopted else old_rel, physical=True
+            ).data
             new_input = recall_policy.admits_markdown_content(root, new_rel, content)
         if old_input:
             paths.append((old_rel, None))

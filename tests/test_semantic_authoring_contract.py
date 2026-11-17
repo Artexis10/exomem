@@ -41,6 +41,7 @@ COMPILED_DESTINATIONS = {
     "pattern": "Notes/Patterns",
     "procedure": "Notes/Procedures",
     "production-log": "Notes/Productions",
+    "profile": "Notes/Profiles",
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (

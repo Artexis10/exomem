@@ -204,6 +204,35 @@ class FileHandle(Wire):
 _UNLINKED = Field(default=None, description="Why your review found no useful link; never added to note text.")
 _PREVIEW = Field(default=None)
 _DETAIL = Field(default=None)
+_REVIEW = Field(default=None, description="This call's preview `review_token`; a profile page's write needs it.")
+_DRAFT_FIELDS = ("draft_id", "draft_hash", "draft_token")
+
+
+def _edit_review(wire: Mapping[str, Any]) -> dict[str, Any]:
+    """The leaf `transition_token` of an edit's `review`: an edit preview's `review_token` is that token."""
+    review = wire.get("review")
+    return {} if review is None else {"transition_token": review}
+
+
+def _creation_review(wire: Mapping[str, Any]) -> dict[str, Any]:
+    """The leaf draft fields that a creation's `review` packs, each None when the call has none.
+
+    A reviewed-none decision on the draft binds the draft's own hash, as a leaf caller copies it.
+    """
+    from .semantic_writes import creation_review_fields
+
+    review = wire.get("review")
+    if review is None:
+        return dict.fromkeys(_DRAFT_FIELDS)
+    fields = creation_review_fields(review)
+    if fields is None:
+        raise Refusal(
+            "INVALID_ARGUMENT",
+            "review is not a creation preview's `review_token`. "
+            "Preview this exact call and send its `review_token` unchanged.",
+        )
+    draft = dict(zip(_DRAFT_FIELDS, fields, strict=True))
+    return {**draft, **({"relation_review_hash": draft["draft_hash"]} if wire.get("unlinked_reason") is not None else {})}
 
 
 # --- Reads ----------------------------------------------------------------------------------
@@ -227,6 +256,13 @@ class SearchMemory(Wire):
 
 
 def _search(wire: dict[str, Any], ctx: Context) -> Translated:
+    if (wire.get("options") or {}).get("result_level") == "passage":
+        from . import passage_evidence
+
+        try:
+            passage_evidence.validate_ranking_options(wire.get("options") or {})
+        except ValueError as error:
+            raise Refusal("INVALID_PASSAGE_OPTION", str(error).partition(": ")[2]) from None
     leaf = {
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
@@ -237,7 +273,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class ReadPage(Wire):
     page: Page
-    part: Literal["text", "history", "units"] | None = Field(default=None, description="text (default), history, or units: observations with their ids.")
+    part: Literal["text", "history", "units", "brief"] | None = Field(default=None, description="text (default), history, units: observations with ids, or brief: a topic's brief.")
     more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(
         default=None, description="Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
@@ -250,6 +286,7 @@ def _read_page_leaf(wire: Mapping[str, Any]) -> dict[str, Any]:
         "path": wire.get("page"), "continuation": wire.get("more"),
         "include_history": True if wire.get("part") == "history" else None,
         "units": True if wire.get("part") == "units" else None,
+        "brief": True if wire.get("part") == "brief" else None,
     }
 
 
@@ -261,6 +298,8 @@ def _spell_read(arguments: Mapping[str, Any]) -> dict[str, Any]:
         wire["part"] = "history"
     elif arguments.get("units"):
         wire["part"] = "units"
+    elif arguments.get("brief"):
+        wire["part"] = "brief"
     rest = {key: value for key, value in arguments.items() if key not in handled and value is not None}
     return {**wire, **({"options": rest} if rest else {})}
 
@@ -312,13 +351,14 @@ class CreateNote(Wire):
     unlinked_reason: str | None = _UNLINKED
     vocabulary_decision: VocabularyDecision | None = None
     suggest_links: bool | None = Field(default=None, description="Also return pages to link.")
+    review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
 
-#: Leaf fields a public note never sets: the server names the page from the title and holds no draft
-#: between calls. Listing them keeps `fields` from sending one.
-_NO_DRAFT_OR_SLUG = dict.fromkeys(("draft_id", "draft_hash", "draft_token", "slug"))
+#: Leaf fields a public note never sets: the server names the page from the title. Listing it keeps
+#: `fields` from sending one. The server holds no draft between calls, so a draft comes only from `review`.
+_NO_SLUG = {"slug": None}
 
 
 def _create_note(wire: dict[str, Any], ctx: Context) -> Translated:
@@ -326,7 +366,8 @@ def _create_note(wire: dict[str, Any], ctx: Context) -> Translated:
         "title": wire["title"], "content": wire["content"], "note_type": wire.get("type"),
         "project": wire.get("project"), "projects": wire.get("projects"), "sources": wire.get("sources"),
         "tags": wire.get("tags"), "suggestions": wire.get("suggest_links"), "validate_only": wire.get("preview"),
-        "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire), **_NO_DRAFT_OR_SLUG,
+        "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire), **_NO_SLUG,
+        **_creation_review(wire),
     }
     return "remember", _leaf_call(wire, "fields", ctx, "remember", "create_note", leaf)
 
@@ -345,6 +386,7 @@ class AddObservation(Wire):
     until: str | None = Field(default=None, description="ISO date this stops holding.")
     check_by: str | None = Field(default=None, description="ISO date to revisit.")
     unlinked_reason: str | None = _UNLINKED
+    review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
@@ -358,7 +400,7 @@ def _add_observation(wire: dict[str, Any], ctx: Context) -> Translated:
         "relations": _links([link for link in links]) if links else None,
         "kind": wire.get("kind"), "verdict": wire.get("verdict"), "id": wire.get("anchor"),
         "as_of": wire.get("as_of"), "until": wire.get("until"), "check_by": wire.get("check_by"),
-        "response_detail": wire.get("detail"), **_unlinked(wire),
+        "response_detail": wire.get("detail"), **_unlinked(wire), **_edit_review(wire),
     })
     return "observe_memory", leaf
 
@@ -394,7 +436,7 @@ _EDIT_ACTION_FIELDS: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {  # no
     "edit_observation": (frozenset({"observation", "category", "text", "tags", "context", "links"}), ("observation",)),
     "remove_observation": (frozenset({"observation"}), ("observation",)),
 }
-_EDIT_SHARED = frozenset({"note", "why", "action", "unlinked_reason", "preview", "detail"})
+_EDIT_SHARED = frozenset({"note", "why", "action", "unlinked_reason", "review", "preview", "detail"})
 
 
 class EditNote(Wire):
@@ -420,6 +462,7 @@ class EditNote(Wire):
     context: str | None = Field(default=None, description="edit_observation.")
     links: list[Link] | None = Field(default=None, description="edit_observation: the full list.")
     unlinked_reason: str | None = _UNLINKED
+    review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
@@ -449,7 +492,7 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
                 "category": wire.get("category"), "content": wire.get("text"), "tags": wire.get("tags"),
                 "context": wire.get("context"), "relations": _links(wire.get("links")),
             }),
-            **_given(_unlinked(wire)), **guard, **detail,
+            **_given(_unlinked(wire)), **_edit_review(wire), **guard, **detail,
         }
         return "observe_memory", leaf
     operation: dict[str, Any]
@@ -485,6 +528,7 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
                      **_given({"overwrite": wire.get("overwrite")})}
     operation.update(guard)
     operation.update(_given(_unlinked(wire)))
+    operation.update(_edit_review(wire))
     if wire.get("preview"):
         operation["validate_only"] = True
     return "edit_memory", {"path": wire["note"], "why": wire["why"], "operation": operation, **detail}
@@ -564,7 +608,7 @@ def _supersede_note(wire: dict[str, Any], ctx: Context) -> Translated:
         "reason": wire["why"], "note_type": wire.get("type"), "project": wire.get("project"),
         "projects": wire.get("projects"), "sources": wire.get("sources"), "tags": wire.get("tags"),
         "validate_only": wire.get("preview"), "response_detail": wire.get("detail"),
-        **_unlinked(wire), **_vocabulary(wire), **_NO_DRAFT_OR_SLUG,
+        **_unlinked(wire), **_vocabulary(wire), **_NO_SLUG, **dict.fromkeys(_DRAFT_FIELDS),
     }
     return "replace_memory", _leaf_call(wire, "fields", ctx, "replace_memory", "supersede_note", leaf)
 

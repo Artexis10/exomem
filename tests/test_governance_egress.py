@@ -3153,7 +3153,7 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "list": "structure",
         "create": "validation",
         "append": "validation",
-        "move": "mutation",
+        "move": "validation",
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
@@ -3171,6 +3171,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
     assert not commands.invocation_is_read_only(
         manage, {"operation": "create", "validate_only": False}
     )
+    assert commands.invocation_is_read_only(manage, {"operation": "move", "validate_only": True})
+    assert not commands.invocation_is_read_only(manage, {"operation": "move"})
 
     assert registry[("schema_memory", "operation")] == {
         "infer": "save-conditional",

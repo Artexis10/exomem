@@ -40,6 +40,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
         homes,
         lifecycle_statuses,
         note_types,
+        page_fields,
         planning_values,
         relation_registry,
         semantic_language_registry,
@@ -62,6 +63,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
             homes.SPEC,
             topic_carriers.SPEC,
             sync_providers.SPEC,
+            page_fields.SPEC,
         )
     }
 

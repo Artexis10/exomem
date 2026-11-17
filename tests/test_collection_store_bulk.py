@@ -1,13 +1,16 @@
 """Store-only bulk guarantees not supplied by the file bulk workflow tests."""
 
 import json
+from contextlib import closing
 
 import pytest
 from test_collection_store_writer import CID, create, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 from test_records_bulk_upsert import EVIDENCE, _evidence
+from test_source_original_hydration import enrolled_original as enrolled_original
+from test_source_original_hydration import selected_store as selected_store
 
-from exomem import records, writer_lease
+from exomem import media_jobs, media_store, provenance, records, source_custody, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.collection_store.preview import preview_store
@@ -47,6 +50,46 @@ def test_500_rows_share_one_transition_and_transaction_without_file_depth(store,
         bulk(store, [{"item": {"title": "Too many"}}] * 501)
     assert error.value.code == "BULK_UPSERT_TOO_MANY_ROWS"
     assert error.value.details["maximum"] == 500
+
+
+def test_bulk_original_acquisition_failure_does_not_claim_the_later_valid_natural_key(
+        vault, tmp_path, enrolled_original, monkeypatch):
+    """A failed input download rejects its row without admitting that Source or hiding a later valid row."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    with connection.open_writer(tmp_path / "bulk.sqlite", lease_check=lambda: True) as handle:
+        store = CollectionWriter(vault, handle)
+        manager, reference, original, expected = enrolled_original
+        create(store)
+        _evidence(store.root)
+        import hashlib
+
+        body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+            "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+            "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+        downloaded = []
+
+        def interrupted(_backend, _reference, _identity, sink):
+            downloaded.append(True)
+            sink.write(b"partial plaintext")
+            raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "original transport interrupted")
+
+        monkeypatch.setattr(media_store, "_decrypt_into", interrupted)
+        result = bulk(store, [
+            {"item": {"title": "Repeated identity"}, "body": body},
+            {"item": {"title": "Repeated identity"}, "body": "Independent observation."},
+            {"item": {"title": "Invalid count", "count": "invalid"}, "body": body},
+        ], on_reject="skip")
+        assert downloaded == [True]
+        assert result["committed"] is True and result["counts"]["inserted"] == 1
+        assert [row["outcome"] for row in result["rows"]] == ["rejected", "inserted", "rejected"]
+        assert result["rows"][0]["code"] == "ORIGIN_INPUT_UNAVAILABLE"
+        assert not original.exists()
+        with manager.mutation_guard(store.root):
+            manifest, _ = source_custody.read_manifest(store.root, reference)
+            assert "collection_records" not in manifest.dependency_epochs
+        with closing(media_jobs.MediaJobStore(store.root)._connect()) as conn:
+            assert conn.execute("SELECT count(*) FROM media_access").fetchone()[0] == 0
 
 
 def test_public_bulk_refuses_authored_view_stamp_without_changing_canonical_data(store):

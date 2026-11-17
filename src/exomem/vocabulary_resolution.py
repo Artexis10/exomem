@@ -203,6 +203,53 @@ def resolve_topics(taxonomy: source_taxonomy.SourceTaxonomy, values: Iterable[ob
     return TopicResolution(tuple(resolved), tuple(unresolved))
 
 
+# What a profile page's declared topics make it: the closed set of scopes the profile serving reads.
+SCOPE_GLOBAL = "global"
+SCOPE_DOMAIN = "domain"
+SCOPE_UNRESOLVED = "unresolved"
+SCOPE_MULTIPLE = "multiple"
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileScope:
+    """The one scope a profile page's `topics` give it.
+
+    `domain` carries the canonical key for a `domain` scope; `topics` holds the declared values for the others.
+    """
+
+    kind: str
+    domain: str | None = None
+    topics: tuple[str, ...] = ()
+
+
+def declared_topics(value: object) -> tuple[str, ...]:
+    """The distinct, stripped scalar values of a page's `topics` field, in declaration order.
+
+    The field may be one string or a list. A nested or non-scalar value is not a topic and is dropped.
+    """
+    values = (value,) if isinstance(value, str) else value if isinstance(value, (list, tuple)) else ()
+    return tuple(dict.fromkeys(
+        text for item in values if isinstance(item, (str, int, float)) and not isinstance(item, bool) and (text := str(item).strip())
+    ))
+
+
+def profile_scope(taxonomy: source_taxonomy.SourceTaxonomy, topics: object) -> ProfileScope:
+    """A profile page's scope from its `topics`: none is global, one is that domain, anything else supplies nothing.
+
+    Two spellings of one registered domain (a key and its alias) name one domain. A page that names two domains
+    is `multiple`; a single value the registry does not resolve is `unresolved`, never the global profile.
+    """
+    declared = declared_topics(topics)
+    if not declared:
+        return ProfileScope(SCOPE_GLOBAL)
+    found = resolve_topics(taxonomy, declared)
+    if len(found.resolved) + len(found.unresolved) > 1:
+        return ProfileScope(SCOPE_MULTIPLE, topics=declared)
+    if found.unresolved:
+        return ProfileScope(SCOPE_UNRESOLVED, topics=declared)
+    return ProfileScope(SCOPE_DOMAIN, found.resolved[0], declared)
+
+
 def plan_topic_registrations(
     vault_root: Path,
     values: str | list[str],

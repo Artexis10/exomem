@@ -173,7 +173,8 @@ def _revision(text: str | None, version: str) -> dict[str, Any]:
         entry = json.loads(text) if text is not None else None
     except json.JSONDecodeError:
         entry = None
-    if not isinstance(entry, dict) or entry.get("version") != ENTRY_VERSION:
+    # Version two adds exact dependency bindings without changing the released history payload.
+    if not isinstance(entry, dict) or entry.get("version") not in (ENTRY_VERSION, 2):
         # Kept but unreadable: say so rather than drop it from the count.
         return {"version": version, "status": "unreadable"}
     return {

@@ -99,6 +99,7 @@ def _bootstrap(monkeypatch, level: str, surface: str | None, *, populated: bool 
             tier2_enabled=True,
             product_commands=tuple(
                 command.public_name for command in commands.product_commands_for("mcp", cloud=True)
+                if command.agent_listed
             ),
         )
         with capabilities.active_surface(descriptor):
