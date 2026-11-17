@@ -8985,34 +8985,70 @@ def _keyed_title(title: object) -> tuple[str | None, str | None]:
     return title_key(str(title)), str(title).strip()
 
 
-def _machinery_markdown(vault_root: Path) -> list[str]:
-    """The Markdown files that Obsidian shows below a machinery folder of the managed root: the folders that
-    the resolver's corpus skips, which a writer still counts when it picks a short link.
+#: The folders that Obsidian shows and the resolver's corpus skips: a name of `CORPUS_EXCLUDED_DIR_NAMES` with
+#: no leading dot, because Obsidian hides a dot-named folder.
+_MACHINERY_FOLDER_NAMES = tuple(
+    sorted(name for name in CORPUS_EXCLUDED_DIR_NAMES if not name.startswith("."))
+)
+#: The basename index of the machinery folders' loose Markdown files, by vault root. A walk of a trash or archive
+#: folder grows with use, so a writer reads it once and keeps it. Managed-page patches never change it, because a
+#: patch adds or drops a page of the corpus, which skips these folders. It is dropped when a resolver is built from
+#: disk, when an Exomem writer places or removes a file below such a folder (`machinery_changed`, called by
+#: the lifecycle move and the generic file writer in `reserved_paths` and by `find.on_resolver_files_changed`), and
+#: on an event gap. An edit made outside Exomem below such a folder is seen at the next such drop only: the
+#: file watcher passes the resolver no event for these folders. The cost of the delay is a short link that Obsidian
+#: may resolve to the trashed file, while Exomem resolves the same link to the managed page.
+_MACHINERY_ON_DISK: dict[Path, dict[str, list[str]]] = {}
 
-    A machinery folder is a name of `CORPUS_EXCLUDED_DIR_NAMES` with no leading dot, because Obsidian hides a
-    dot-named folder. A store-mode vault also reads its stored pages from the store's path index, in case the
-    projection onto disk lags; `build_index` counts a path in both lists once. A machinery folder below a
-    content folder is not read: finding it would take a walk of every folder.
+
+def machinery_changed(vault_root: Path, rels: Iterable[str] | None = None) -> None:
+    """Drop the kept listing of the machinery folders of `vault_root`.
+
+    With `rels`, the vault-relative paths a writer placed or removed, the listing is dropped only when any of them
+    lies below a machinery folder of the managed root; without `rels` it is dropped unconditionally.
     """
+    root = Path(vault_root)
+    if rels is not None and not any(_below_machinery(rel) for rel in rels):
+        return
+    _MACHINERY_ON_DISK.pop(root, None)
+
+
+def _below_machinery(rel: str) -> bool:
+    below = managed_split_parts(str(rel).replace("\\", "/").split("/"))
+    return bool(below) and below[0] in _MACHINERY_FOLDER_NAMES
+
+
+def _machinery_stored(vault_root: Path) -> list[str]:
+    """The Markdown pages that a store-mode vault holds below a machinery folder, from the store's path index."""
     from . import find_corpus
 
+    if not find_corpus.store_serves(vault_root):
+        return []
+    from .vault_store import read
+
+    key = managed_root_key()
+    with read.snapshot(vault_root) as view:
+        return [
+            meta.path
+            for name in _MACHINERY_FOLDER_NAMES
+            for meta in view.pages(f"{key}/{name}/" if key else f"{name}/")
+            if meta.path.lower().endswith(obsidian_links.MARKDOWN_SUFFIX)
+        ]
+
+
+def _machinery_markdown(vault_root: Path) -> list[str]:
+    """The Markdown files on disk below a machinery folder of the managed root, which Obsidian shows.
+
+    A machinery folder below a content folder is not read: finding it would take a walk of every folder.
+    """
     root = Path(vault_root)
     base = managed_root(root)
-    names = sorted(name for name in CORPUS_EXCLUDED_DIR_NAMES if not name.startswith("."))
     found: list[str] = []
-    stored = find_corpus.store_serves(root)
-    if stored:
-        from .vault_store import read
-
-        key = managed_root_key()
-        with read.snapshot(root) as view:
-            for name in names:
-                found.extend(
-                    meta.path
-                    for meta in view.pages(f"{key}/{name}/" if key else f"{name}/")
-                    if meta.path.lower().endswith(obsidian_links.MARKDOWN_SUFFIX)
-                )
-    pending = [base / name for name in names if (base / name).is_dir() and not (base / name).is_symlink()]
+    pending = [
+        base / name
+        for name in _MACHINERY_FOLDER_NAMES
+        if (base / name).is_dir() and not (base / name).is_symlink()
+    ]
     while pending:
         folder = pending.pop()
         try:
@@ -9034,6 +9070,23 @@ def _machinery_markdown(vault_root: Path) -> list[str]:
     return found
 
 
+def _machinery_index(vault_root: Path) -> Mapping[str, list[str]]:
+    """The basename index of every Markdown file below a machinery folder: the kept listing of the disk, and in a
+    store-mode vault the stored pages too, read from the store's path index each time because a store commit
+    changes them with no writer hook. Obsidian lists a stored page's file as well, so the two lists are joined."""
+    root = Path(vault_root)
+    on_disk = _MACHINERY_ON_DISK.get(root)
+    if on_disk is None:
+        on_disk = _MACHINERY_ON_DISK[root] = obsidian_links.build_index(_machinery_markdown(root))
+    stored = _machinery_stored(root)
+    if not stored:
+        return on_disk
+    merged = {key: list(paths) for key, paths in on_disk.items()}
+    for key, paths in obsidian_links.build_index(stored).items():
+        merged[key] = list(dict.fromkeys([*merged.get(key, ()), *paths]))
+    return merged
+
+
 class _LinkNames:
     """Obsidian's link index of a single resolver state: the pages it holds, the rule over them, and the machinery files.
 
@@ -9044,7 +9097,7 @@ class _LinkNames:
 
     def __init__(self, vault_root: Path, paths: Iterable[str]) -> None:
         self._vault_root = vault_root
-        self._machinery: dict[str, list[str]] | None = None
+        self._machinery: Mapping[str, list[str]] | None = None
         self.index = obsidian_links.build_index(paths)
         self.rule = obsidian_links.IndexResolver(self.index)
 
@@ -9053,8 +9106,30 @@ class _LinkNames:
         """The basename index of the machinery folders' Markdown files, outside the resolver's corpus."""
         found = self._machinery
         if found is None:
-            found = self._machinery = obsidian_links.build_index(_machinery_markdown(self._vault_root))
+            found = self._machinery = _machinery_index(self._vault_root)
         return found
+
+
+def obsidian_candidate(
+    rule: obsidian_links.IndexResolver,
+    candidates_by_key: Mapping[str, tuple[WikilinkCandidate, ...]],
+    page: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+) -> WikilinkCandidate | None:
+    """The single page that Obsidian's rule over `rule`'s index names for the page part of a link, or None.
+
+    The rule is closed, because Obsidian's behaviour fixes it (`obsidian_links`). A text that two files satisfy
+    names none. `visible` limits the files to those a writer may see, as the earlier steps of the resolver do.
+    The resolver and the semantic contract's snapshot call this, so a writer and a guard agree on what resolves.
+    """
+    paths = [path for path in rule.resolve(page).paths if visible is None or visible(path)]
+    if len(paths) != 1:
+        return None
+    for candidate in candidates_by_key.get(_wikilink_path_key(paths[0]), ()):
+        if candidate.path == paths[0]:
+            return candidate
+    return None
 
 
 class WikilinkResolver:
@@ -9080,7 +9155,8 @@ class WikilinkResolver:
     #: derives from them beside that token. Every patch drops it; only the publisher sets it.
     publication: object | None = None
     #: Obsidian's link index of the pages this resolver holds. Built on the first step-6 lookup or short-form
-    #: request, and dropped by every patch, so a copy made by `from_maps` starts with none.
+    #: request, and dropped by every patch, so a copy made by `from_maps` starts with none. The machinery
+    #: folders' files are kept apart (`_MACHINERY_ON_DISK`), so a patch does not drop them.
     _link_names: _LinkNames | None = None
 
     def __init__(self, vault_root: Path):
@@ -9118,6 +9194,7 @@ class WikilinkResolver:
         from .vault_store import ownership, read
 
         root = self.vault_root
+        machinery_changed(root)
         # A store-mode vault's corpus holds the store's pages and the files that it does not own.
         corpus = find_corpus.corpus_paths(
             root, "vault", lambda **walk: walk_vault_md(root, **walk)
@@ -9217,18 +9294,11 @@ class WikilinkResolver:
     ) -> WikilinkCandidate | None:
         """The single page that Obsidian's rule names for the page part of a link, or None.
 
-        Step 6 of the resolver's order, which only a link that no earlier step resolved reaches. The rule
-        is closed, because Obsidian's behaviour fixes it (`obsidian_links`). A text that two files satisfy
-        stays unresolved. `visible` limits the files to those a writer may see, as the earlier steps do.
+        Step 6 of the resolver's order, which only a link that no earlier step resolved reaches.
         """
-        match = self.link_names().rule.resolve(page)
-        paths = [path for path in match.paths if visible is None or visible(path)]
-        if len(paths) != 1:
-            return None
-        for candidate in self.candidates_by_key.get(_wikilink_path_key(paths[0]), ()):
-            if candidate.path == paths[0]:
-                return candidate
-        return None
+        return obsidian_candidate(
+            self.link_names().rule, self.candidates_by_key, page, visible=visible
+        )
 
     def short_link(self, page: str) -> str | None:
         """The shortest link text that names the page at `page` (no `.md`) alone, for a writer in a `root` vault.

@@ -16,10 +16,12 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, vault  # noqa: F401
 from test_vault_store_read_write import put, stored, writer  # noqa: F401
 
-from exomem import commands, obsidian_links
+from exomem import commands, freshness, obsidian_links, reserved_paths
+from exomem import find as find_module
 from exomem import schema as schema_module
 from exomem import vault as vault_module
 from exomem.governance.principal import library_scope
+from exomem.vault import walk_vault_md
 from exomem.vault_store import write
 from tests.conftest import FIXTURE_VAULT, bind_root_vault, initialize_vault_state_offline
 
@@ -160,8 +162,45 @@ def test_a_store_mode_vault_counts_the_machinery_files_it_stores_and_the_ones_it
     write.commit(writer, put("Knowledge Base/_trash/Gamma.md", b"# Gamma\n"))
     _write_markdown(stored, "Knowledge Base/_archive/2026/Delta.md")
 
-    found = set(vault_module._machinery_markdown(stored))
+    found = {path for paths in vault_module._machinery_index(stored).values() for path in paths}
 
     assert {"Knowledge Base/_trash/Gamma.md", "Knowledge Base/_archive/2026/Delta.md"} <= found
     assert ALPHA not in found
     assert all(path.lower().endswith(".md") for path in found)
+
+
+def test_a_writer_that_files_a_homonym_in_the_trash_changes_the_next_link_and_no_other_write_walks_again(
+    root_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The listing of the machinery folders is read once, kept across writes, and dropped when a writer files into one."""
+    walks: list[Path] = []
+    walk = vault_module._machinery_markdown
+    monkeypatch.setattr(
+        vault_module, "_machinery_markdown", lambda root: (walks.append(root), walk(root))[1]
+    )
+    page = _remember(root_vault, "Valve inventory", "insight")
+    stem = Path(page).stem
+    # The server's route: writers fork the shared resolver, which each write patches instead of rebuilding.
+    freshness.seed(
+        root_vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in walk_vault_md(root_vault)),
+    )
+    find_module._get_query_resolver(root_vault)
+
+    def linked_from(title: str) -> str:
+        created = _remember(root_vault, title, "insight", f"{UNIT}\n[[{page.removesuffix('.md')}]]\n")
+        return _link_texts((root_vault / created).read_text(encoding="utf-8"))[0]
+
+    assert linked_from("First summary") == stem
+    assert linked_from("Second summary") == stem
+    reads_while_kept = len(walks)
+
+    reserved_paths.publish_generic_bytes(
+        root_vault, f"_trash/2026-01-01/{stem}.md", b"# Older copy\n", expected_identity=None
+    )
+
+    assert linked_from("Third summary") == f"{Path(page).parent.name}/{stem}"
+    assert reads_while_kept == 1
+    assert len(walks) == 2
+

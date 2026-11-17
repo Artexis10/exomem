@@ -8805,10 +8805,14 @@ def on_resolver_files_changed(
     event-index kill switch is set (reverts to pure digest-keyed
     rebuild-on-change, matching freshness/inbound rollback).
     """
-    if not freshness.event_indexes_enabled():
-        return
     changed_list = list(changed_rels)
     deleted_list = list(deleted_rels)
+    from . import vault as vault_module
+
+    # A writer's own batch may place a file below a machinery folder, whatever the kill switch says.
+    vault_module.machinery_changed(vault_root, [*changed_list, *deleted_list])
+    if not freshness.event_indexes_enabled():
+        return
     if not (changed_list or deleted_list):
         return
     root = Path(vault_root)
@@ -8823,8 +8827,6 @@ def on_resolver_files_changed(
 
     if projected_cached is None:
         return
-    from . import vault as vault_module
-
     cached_identity, projected, _publication = projected_cached
     checkpoint = _RECALL_RESOLVER_CHECKPOINTS.get(root)
 
@@ -9106,8 +9108,10 @@ def evict_resolver_caches(vault_root: Path) -> int:
     """Withdraw both resolver projections for one vault after an event gap."""
     root = Path(vault_root)
     from . import graph_read_publication
+    from . import vault as vault_module
 
     graph_read_publication.forget(root)
+    vault_module.machinery_changed(root)
     with _RESOLVER_LOCK:
         removed = int(root in _RESOLVER_CACHE) + int(root in _RECALL_RESOLVER_CACHE)
         _evict_resolver(root)

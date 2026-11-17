@@ -1938,6 +1938,13 @@ def _note_census(
     artifact_census.note_touched(vault_root, removed)
 
 
+def _note_machinery(vault_root: Path, rels: Iterable[str]) -> None:
+    """Tell the link writers' machinery listing about files this writer placed or removed, before it returns."""
+    from . import vault
+
+    vault.machinery_changed(vault_root, rels)
+
+
 def _refuse_stored_pages(
     vault_root: Path, operation: str, *values: object, folder: bool = False
 ) -> None:
@@ -2063,7 +2070,9 @@ def publish_generic_bytes(
                 identity = published.require()
                 _refuse_private_identity(identity, current)
                 _require_current_generic_directory(filesystem, parent)
-                _note_census(vault_root, [leaf if parent_path == "." else f"{parent_path}/{leaf}"])
+                published_rel = leaf if parent_path == "." else f"{parent_path}/{leaf}"
+                _note_census(vault_root, [published_rel])
+                _note_machinery(vault_root, [published_rel])
                 return identity
 
 
@@ -2232,6 +2241,7 @@ def move_generic_path(
             rollback=rollback,
         )
     _note_census(vault_root, arrived, removed=[os.fspath(source)])
+    _note_machinery(vault_root, [*arrived, os.fspath(source)])
 
 
 def _move_generic_path_held(
