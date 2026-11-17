@@ -159,12 +159,15 @@ A collection may also name how to capture into it:
 
 ```yaml
 capture:
-  method: "[[Incident capture method]]"
+  method: "exomem://memory/<uuid of the page>"
 ```
 
-`method` is one vault page (any kind: a procedure, a pattern, a skill) written
-as a quoted wiki link or an `exomem://memory/<uuid>` ref. Routing never depends
-on it. When a write routes to the collection, its `records_routing` carries
+`method` is one vault page (any kind: a procedure, a pattern, a skill). Prefer
+its `exomem://memory/<uuid>` ref: it survives a rename or a move and needs no
+link resolver. A quoted wiki link such as `"[[Incident capture method]]"` also
+works, but a title is resolved through the vault's link resolver, so a turn may
+not serve it until that resolver is warm; a write resolves it as it runs.
+Routing never depends on it. When a write routes to the collection, its `records_routing` carries
 `method` (a `title` and a `read_ref`) and, where the advisory asks you to act,
 tells you to follow it; when a turn routes to the collection, the page is
 served as a method to read. A method the caller cannot read, or that names no

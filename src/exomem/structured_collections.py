@@ -385,8 +385,10 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "keys": list(_CAPTURE_KEYS),
             "purpose": (
                 "the one vault page that holds how to capture into this collection; a write or a turn "
-                "that routes here names it so the agent reads and follows it. Quote a wiki link: "
-                "method: \"[[Page title]]\", or give an exomem:// ref. Routing never depends on it"
+                "that routes here names it so the agent reads and follows it. Prefer an exomem:// ref: it "
+                "survives a rename or a move and needs no link resolver. A quoted wiki link, method: "
+                "\"[[Page title]]\", may not be served on a turn until the link resolver is warm. "
+                "Routing never depends on it"
             ),
         },
         "item_representation": {

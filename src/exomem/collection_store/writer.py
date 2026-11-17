@@ -781,6 +781,7 @@ class CollectionWriter:
         if declared.kind == "intended" and facade_profile != "records":
             payload["contract"].pop("plans")
             payload["contract"].pop("claims", None)
+            # The closed planning contract refuses an extra key (PLAN_RESPONSE_TOO_LARGE); this hides a declared capture block.
             payload["contract"].pop("capture", None)
             return planning._project_inspection(payload, manifest), selection
         observations = due_state.collection_observation_coverage(
