@@ -31,15 +31,24 @@ CREATED = "Knowledge Base/Notes/Graph State.md"
 
 
 def leave_file_modes_graph_debt(root):
-    """The epoch a pre-migration write left: an unacknowledged checkpoint and its queued repair."""
-    checkpoint = graph_sync.GraphSyncCheckpoint.create(
-        generation=1,
-        mutation_id="a1b2c3d4e5f6a7b8c9d0e1f2",
-        paths=((ALPHA, "0" * 64),),
-        created_paths=(ALPHA,),
+    """The epoch a pre-migration write left: an unacknowledged checkpoint and its queued repair.
+
+    It issues the generation above the floor and the acknowledgement that the file-mode phase left.
+    """
+    _state, acknowledged = graph_sync.acknowledgement_state(root)
+    floor = graph_sync.read_floor(root)
+    generation = 1 + max(floor.generation if floor else 0, acknowledged.generation if acknowledged else 0)
+    graph_sync._write_floor(root, graph_sync.GraphSyncGenerationFloor.create(generation))
+    graph_sync._write_checkpoint(
+        root,
+        graph_sync.GraphSyncCheckpoint.create(
+            generation=generation,
+            mutation_id="a1b2c3d4e5f6a7b8c9d0e1f2",
+            paths=((ALPHA, "0" * 64),),
+            created_paths=(ALPHA,),
+        ),
     )
-    graph_sync._write_checkpoint(root, checkpoint)
-    deferred_index.add_graph(root, [ALPHA], generation=1)
+    deferred_index.add_graph(root, [ALPHA], generation=generation)
     assert graph_sync.status(root)["state"] == "recovery_required"
 
 
