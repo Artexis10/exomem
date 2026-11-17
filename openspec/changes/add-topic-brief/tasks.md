@@ -15,6 +15,11 @@
 - [x] 2.6 Add the watermark sidecar and `changed_since` (D5).
 - [x] 2.7 Record brief-read latency and errors in metric series of their own. Teach the call in the scaffold operations reference.
 - [x] 2.8 Keep an owner's member walk under the graph snapshot's token (D4). A warm owner read of an unchanged graph reads no edge.
+- [x] 2.9 Keep at most five second-hop notes, nearest the seed first, and report `ranked_by` (D2). Key the owner's walk memo on the token of the scorer that ranked it. Tests: the second hop keeps the nearest notes and counts the rest; with no vector reading it keeps the newest and says so; a note embedded after a read takes its place on the next read; a kept walk follows the matrix that ranked it through a lag on one page, a lag on another and a cold matrix; a profile with no resident matrix still reads no edge on a warm read; a restricted caller's brief of a seed whose only neighbour is withheld is the brief of a store without that page, with and without vectors.
+  - Latency, 2026-11-17: the 3.2 store rebuilt (20,402 pages, 180,404 nodes, 423,133 edges, file mode) with one planted recall vector per page and the matrix resident, so the nearness reading runs (`ranked_by: "similarity"` in every shape). The code before this task and after it ran back to back on the same store, at a load average of 2.5 to 3.8, with the 3.2 shapes and callers.
+  - Owner: warm p95 46 to 55 ms before, 40 to 59 ms after (budget 250 ms); cold p95 275 to 803 ms before, 291 to 634 ms after (budget 1,000 ms).
+  - Restricted caller: cold p95 755 to 1,233 ms before, 640 to 928 ms after; warm p95 941 to 1,297 ms before, 527 to 1,070 ms after (budget 1,000 ms for both). The one shape still above it is the hub with 1,495 of 1,500 spokes withheld, warm 1,070 ms (n=7). One-by-one release decisions per read: 313 to 1,771 before, 169 to 1,619 after, because fewer second-hop pages are inspected.
+  - Logs: `probe-before2.log` and `probe-after2.log`, kept outside this repository. An earlier pair ran at unequal load and is not used.
 
 ## 3. Proof
 

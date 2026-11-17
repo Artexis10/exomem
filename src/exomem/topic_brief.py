@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     brief_watermarks,
@@ -51,6 +51,9 @@ from .context_views import INDEX_WARMING, READY, UNAVAILABLE
 from .governance import connector_boundary, egress, principal
 from .vocabulary import registry as vocabulary_registry
 
+if TYPE_CHECKING:
+    from .embedding_index import PageScorer
+
 #: The shipped traversal profile whose relation families the member walk follows.
 PROFILE = "brief"
 #: The brief's own metric series. A brief read is also a `read_page` call that `exomem_tool_*` already counts, so a series
@@ -61,6 +64,9 @@ DURATION = "exomem_brief_read_duration_ms"
 
 #: Resource bounds of the brief contract (spec: "Brief members are bounded"), not vault vocabulary.
 MAX_HOPS = 2
+#: Second-hop notes a walk keeps, nearest the seed first. The second hop is what the seed's own links link to, and a broad
+#: note that many pages cite fills it with other subjects' notes, so only the nearest few join (design D2).
+SECOND_HOP_CAP = 5
 NOTE_CAP = 40
 SOURCE_CAP = 40
 RELATED_CAP = 10
@@ -84,13 +90,17 @@ COUNT_BOUND = 40
 _CHUNK = 400
 CACHE_SIZE = 128
 
+#: The `ranked_by` values of the response schema: what ordered the candidates that the caps chose among.
+BY_SIMILARITY = "similarity"
+BY_RECENCY = "recency"
+
 # The response schema of the brief fixes these section names (spec: "A brief has conclusions, sources and open questions").
 CONCLUSIONS = "conclusions"
 SOURCES = "sources"
 OPEN_QUESTIONS = "open_questions"
 
 #: The fields of a response that the terminal guard restores from this invocation's compile.
-_PINNED = ("state", "seed", "items", "missing", "related", "changed_since")  # nosemgrep: ep-word-set -- the response schema's own field names.
+_PINNED = ("state", "seed", "items", "missing", "related", "changed_since", "ranked_by")  # nosemgrep: ep-word-set -- the response schema's own field names.
 
 _CACHE: OrderedDict[tuple[Any, ...], tuple[date | None, _Compiled]] = OrderedDict()
 #: A page's external links by the content hash of its text. Reading the links is the dearest step of a compile (a body of
@@ -361,6 +371,7 @@ class _Walk:
     notes: tuple[tuple[_Node, int], ...]
     sources: tuple[_Node, ...]
     missing: tuple[dict[str, Any], ...]
+    ranked_by: str
 
 
 def _find_seed(
@@ -408,13 +419,50 @@ def _newest_first(nodes: Sequence[_Node]) -> list[_Node]:
     return ordered
 
 
-def _walk(graph: _Graph, seed: _Node) -> _Walk:
+class _Nearness:
+    """How near each candidate is to the seed: the best score of its chunks against the mean of the seed's.
+
+    Both come from one resident matrix (`scorer`), so nothing is encoded and every score of a walk is read from the
+    same matrix. Only a page's own vectors score it, never a population: a withheld page moves no other page's score
+    or place. Whether nearness ranks the walk is decided from the seed alone, before any candidate is known.
+    """
+
+    def __init__(self, scorer: PageScorer | None, seed: str) -> None:
+        self.scorer = scorer
+        self.vector = None
+        rows = None if scorer is None else scorer.rows(seed)
+        if rows is not None:
+            import numpy as np
+
+            centre = rows.mean(axis=0)
+            norm = float(np.linalg.norm(centre))
+            if norm > 0.0 and np.all(np.isfinite(centre)):
+                self.vector = centre / norm
+        self.ranked_by = BY_RECENCY if self.vector is None else BY_SIMILARITY
+        self.scores: dict[str, float] = {}
+
+    def rank(self, nodes: Sequence[_Node]) -> list[_Node]:
+        """`nodes` nearest the seed first, then the pages with no vectors, newest first; newest first with no reading."""
+        ordered = _newest_first(nodes)
+        if self.vector is None or not ordered:
+            return ordered
+        self.scores.update(self.scorer.best_scores(self.vector, [node.path for node in ordered]))
+        return self.order(ordered)
+
+    def order(self, nodes: Sequence[_Node]) -> list[_Node]:
+        """`nodes` by the scores already read: nearest first, then the unscored in their given order."""
+        return sorted(nodes, key=lambda node: -self.scores.get(node.path, float("-inf")))
+
+
+def _walk(graph: _Graph, seed: _Node, scorer: PageScorer | None) -> _Walk:
     """The members of the seed's brief, over the caller's view, from the seed alone.
 
     Compiled notes within `MAX_HOPS` of the seed through the profile's families, passing only through compiled
-    notes; the Sources they attach. A candidate is filtered by what the caller sees before anything counts it.
-    Each page's edges are read once for each role, and a page's neighbours are checked for visibility only as far as a cap needs.
+    notes, with at most `SECOND_HOP_CAP` past the seed's own links, nearest the seed first; the Sources they attach.
+    A candidate is filtered by what the caller sees before anything counts it. Each page's edges are read once for
+    each role, and a page's neighbours are checked for visibility only as far as a cap needs.
     """
+    nearness = _Nearness(scorer, seed.path)
     compiled = graph.types.selects(seed.page_type, note_types.compiled)
     distance: dict[str, int] = {seed.path: 0}
     notes: list[_Node] = [seed] if compiled else []
@@ -439,15 +487,19 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
         touches = expand(frontier)
         exact = exact and COMPILED_NOTE not in row_cut
         found = graph.nodes([path for path in touches if path not in distance])
-        candidates = _newest_first([
+        candidates = nearness.rank([
             node for node in found.values() if graph.types.selects(node.page_type, note_types.compiled)
         ])
+        room = NOTE_CAP - len(notes)
+        if hop > 1:
+            room = min(room, SECOND_HOP_CAP)
         # A page with no stable id has no ref to serve its items under: counted, never silently left out.
-        taken, left, unnamed, complete = graph.admit(candidates, max(0, NOTE_CAP - len(notes)))
+        taken, left, unnamed, complete = graph.admit(candidates, max(0, room))
         unnamed_notes += unnamed
         cut += left
-        # Pages behind a cut page are never examined, so the count then holds at least what was cut.
-        exact = exact and complete and not left
+        # Pages behind a cut page are never examined, so the count then holds at least what was cut; behind the last
+        # hop nothing is a member, so a cut there that inspected every candidate is exact.
+        exact = exact and complete and (not left or hop == MAX_HOPS)
         for node in taken:
             distance[node.path] = hop
             notes.append(node)
@@ -480,9 +532,12 @@ def _walk(graph: _Graph, seed: _Node) -> _Walk:
     for role, count in ((COMPILED_NOTE, unnamed_notes), (SOURCE, unnamed_sources)):
         if count:
             missing.append({"role": role, "reason": "unreferenced", "count": count})
-    ranked = _newest_first(notes)
+    ranked = nearness.order(_newest_first(notes))
     ranked.sort(key=lambda node: distance[node.path])
-    return _Walk(seed, tuple((node, distance[node.path]) for node in ranked), tuple(sources), tuple(missing))
+    return _Walk(
+        seed, tuple((node, distance[node.path]) for node in ranked), tuple(sources), tuple(missing),
+        nearness.ranked_by,
+    )
 
 
 def _members(
@@ -492,11 +547,16 @@ def _members(
 
     Only an owner's walk is kept. A restricted caller's release decision reads the governance policy, the tombstones
     and its authorization live, and no graph token names them, so that walk is made afresh on every read. For the
-    owner the walk reads the graph's rows and the recall policy, both of which the key names.
+    owner the walk reads the graph's rows, the recall policy and the resident recall matrix that ranks the second hop,
+    and the key names all three: the matrix by the token of the scorer that ranked the walk, or None when none did.
     """
+    from . import embeddings
+
+    scorer = embeddings.resident_page_scorer(root)
     token = None if caller.restricted else graph.token()
     key = None if token is None else (
         str(root), caller.binding, seed.path, token, recall_policy.recall_policy_identity(root), registries,
+        None if scorer is None else scorer.token,
     )
     if key is not None:
         with _LOCK:
@@ -504,7 +564,7 @@ def _members(
             if held is not None:
                 _WALKS.move_to_end(key)
                 return held
-    walk = _walk(graph, seed)
+    walk = _walk(graph, seed, scorer)
     made = (walk, graph.closing([node.path for node, _distance in walk.notes]))
     if key is not None:
         with _LOCK:
@@ -746,7 +806,10 @@ def _compiled(
     sources = [(node.id, node.content_hash, node.lifecycle, node.path) for node in walk.sources]
     key = (
         str(root), caller.binding,
-        _digest([walk.seed.path, members, sources, list(closing), registries, [PROFILE, MAX_HOPS, NOTE_CAP, SOURCE_CAP]]),
+        _digest([
+            walk.seed.path, members, sources, list(closing), registries,
+            [PROFILE, MAX_HOPS, SECOND_HOP_CAP, NOTE_CAP, SOURCE_CAP],
+        ]),
     )
     with _LOCK:
         held = _CACHE.get(key)
@@ -973,6 +1036,7 @@ def _serve(root: Path, subject: str, continuation: str | None, purpose: str | No
         "seed": {"ref": seed.ref, "path": seed.path, "title": _unlinked(seed.title)},
         # A copy: the walk is shared across reads, and a response is the caller's to change.
         "missing": [dict(entry) for entry in walk.missing],
+        "ranked_by": walk.ranked_by,
     }
     generation = _digest([list(compiled.items), shown])
     offset = 0

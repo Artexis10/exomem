@@ -267,6 +267,37 @@ class _EmbCache(NamedTuple):
     passage_admitted: bool = False
 
 
+class PageScorer:
+    """Pages scored against one resident matrix: the rows it vouches for a page, and each page's best chunk score.
+
+    A page withheld by the store or changed since the matrix (a lagging view's `stale_paths`) has no rows here.
+    `token` names everything a score read from this scorer depends on, so a result kept under it stays correct.
+    `metadata` is sorted by file_path, so each page's rows are one block that bisection finds.
+    """
+
+    def __init__(self, resident: _EmbCache, withheld: frozenset[str]) -> None:
+        self._resident = resident
+        self._skip = withheld | (resident.stale_paths or frozenset())
+        self.token = (resident.epoch, resident.generation, resident.instance, resident.stale_paths, withheld)
+
+    def rows(self, path: str) -> np.ndarray | None:
+        if path in self._skip:
+            return None
+        metadata = self._resident.metadata
+        low = bisect_left(metadata, path, key=itemgetter(0))
+        high = bisect_right(metadata, path, key=itemgetter(0))
+        return self._resident.matrix[low:high] if low < high else None
+
+    def best_scores(self, query_vec: np.ndarray, paths: Iterable[str]) -> dict[str, float]:
+        query = np.asarray(query_vec, dtype=np.float32).reshape(-1)
+        best: dict[str, float] = {}
+        for path in set(paths):
+            block = self.rows(path)
+            if block is not None:
+                best[path] = float((block @ query).max())
+        return best
+
+
 class ChunkProof(NamedTuple):
     """The actual vector snapshot that supplied a selected chunk's score."""
 
@@ -2798,21 +2829,22 @@ class EmbeddingIndex:
         `metadata` is sorted by file_path, so each path's rows are one block that bisection finds
         (`_without_paths` relies on the same order); no row pass and no memo is needed.
         """
+        scorer = self.page_scorer()
+        return None if scorer is None else scorer.best_scores(query_vec, paths)
+
+    def page_scorer(self) -> PageScorer | None:
+        """A scorer bound to the matrix that serves now, or None when no resident matrix serves this profile.
+
+        It reads what `best_scores_for_paths` reads, once: a cold matrix starts the one background load and raises
+        `recall_space.CorpusMatrixCold`, and the disk-scoring profile answers None.
+        """
         withheld = self._withheld()
         if withheld.everything:
             return None
         resident = self.require_resident_matrix()
         if resident is None:
             return None
-        metadata, matrix = resident.metadata, resident.matrix
-        query = np.asarray(query_vec, dtype=np.float32).reshape(-1)
-        best: dict[str, float] = {}
-        for path in set(paths) - withheld.paths - (resident.stale_paths or frozenset()):
-            low = bisect_left(metadata, path, key=itemgetter(0))
-            high = bisect_right(metadata, path, key=itemgetter(0))
-            if low < high:
-                best[path] = float((matrix[low:high] @ query).max())
-        return best
+        return PageScorer(resident, frozenset(withheld.paths))
 
 
     def select_passage_chunks(
