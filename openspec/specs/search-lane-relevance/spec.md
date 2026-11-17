@@ -1,7 +1,7 @@
 # search-lane-relevance Specification
 
 ## Purpose
-Keep each search lane from contributing results that only match by chance. An image or video keyframe joins the CLIP lane only when its similarity clears a chance level measured from the whole index, the lane trace reports what that band withheld, and a question's leading word does not choose the ranking intent.
+Keep the CLIP lane from contributing images that match a question only by chance, and keep a question's leading word from choosing its ranking intent. An image or video keyframe joins the CLIP lane only when its similarity clears a chance level measured from the whole index, and the lane trace reports what that band withheld.
 
 ## Requirements
 
