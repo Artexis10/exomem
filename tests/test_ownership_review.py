@@ -1240,7 +1240,8 @@ def test_a_restricted_caller_is_not_told_how_many_pages_were_never_asked(
     """The count covers every eligible page, withheld ones included, so only a caller with
     whole-vault authority receives it."""
     monkeypatch.setenv(ownership_rotation.ENV_ROTATION_DAILY, "1")
-    _put(vault, "Knowledge Base/Notes/Insights/withheld-fare-rules.md", _text(page_type="insight", number=9))
+    withheld = "Knowledge Base/Notes/Insights/withheld-fare-rules.md"
+    _put(vault, withheld, _text(page_type="insight", number=9))
     _generate(vault, "travel", 3, first=1300)
     due_state.reconcile(vault, today=TODAY)
     tomorrow = TODAY + dt.timedelta(days=1)
