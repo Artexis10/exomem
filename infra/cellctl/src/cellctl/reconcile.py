@@ -566,6 +566,9 @@ class ClusterConfig:
     # here only after it is on in each existing cell through the selection above, so the
     # default changes no existing cell's render. An empty default renders as before.
     media_engine_fleet_default: tuple[str, ...] = ()
+    # erase-captured-source: identity system -> the cells whose owner enabled erasure for it.
+    # A selection with no fleet default, because each cell's enablement is its owner's decision.
+    source_erasure_cell_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     # add-cloud-media-store D4-D6: the media edge's settings; None leaves every cell as before.
     media_edge: MediaEdgeConfig | None = None
     # Whether the schema has the media key columns. run_loop observes it on each connect; it is
@@ -643,6 +646,16 @@ class ClusterConfig:
             or len(set(default)) != len(default)
         ):
             raise ValueError("a media engine fleet default is a list of unique lower-case engine names")
+        for system, cell_ids in self.source_erasure_cell_ids.items():
+            if (
+                not isinstance(system, str)
+                or not system
+                or not isinstance(cell_ids, tuple)
+                or len(cell_ids) > 1024
+                or any(not isinstance(cell_id, str) or not db.CELL_ID_RE.fullmatch(cell_id) for cell_id in cell_ids)
+                or len(set(cell_ids)) != len(cell_ids)
+            ):
+                raise ValueError("a Source erasure selection maps identity systems to unique base32 cell IDs")
 
     @property
     def reads_media_keys(self) -> bool:
@@ -682,6 +695,11 @@ class ClusterConfig:
         """
         own = {engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids}
         return ",".join(sorted(own | set(self.media_engine_fleet_default)))
+
+    def source_erasure_policy_for_cell(self, cell_id: str) -> str:
+        """The cell's Source erasure policy as the runtime reads it; "" keeps erasure off."""
+        systems = sorted(system for system, ids in self.source_erasure_cell_ids.items() if cell_id in ids)
+        return json.dumps({"enabled_systems": systems}, separators=(",", ":")) if systems else ""
 
 
 class ClusterGateway:
@@ -1017,6 +1035,10 @@ def _compute_render_digest(
         # Only a cell whose engine set changes sees its digest move: a canary restarts
         # one cell, and a default that names what a cell already runs restarts none.
         material["media_engines"] = engines
+    erasure = cluster_config.source_erasure_policy_for_cell(row.cell_id)
+    if erasure:
+        # Enabling erasure restarts only that cell; every other cell keeps its digest.
+        material["source_erasure_policy"] = erasure
     edge = cluster_config.media_edge
     media_mode = _media_mode(cluster_config, row)
     if edge is not None and media_credential_version is not None:
@@ -3531,6 +3553,7 @@ async def _reconcile_row(
             object_store_bucket=cluster_config.cell_data_staging_bucket,
             grant_public_key=cluster_config.grant_public_key,
             media_engines=cluster_config.media_engines_for_cell(row.cell_id),
+            source_erasure_policy=cluster_config.source_erasure_policy_for_cell(row.cell_id),
             b2_key_id=key_id,
             b2_key_secret=key_secret,
             **secret_material,

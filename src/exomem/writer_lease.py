@@ -220,6 +220,8 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 )
 # True only inside ``progress_check``: a check that need not ask the coordinator itself.
 _PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
+# True only while `invoke_command` runs a command its declared access classifies as a read.
+_INVOCATION_READS: ContextVar[bool] = ContextVar("exomem_invocation_reads", default=False)
 
 
 @contextmanager
@@ -6006,7 +6008,9 @@ class LeaseManager:
         capture_attempt_operation = capture_attempt_control or (
             command.name == "capture_source" and kwargs.get("capture_reservation") is not None
         )
-        bypass_generic_replay = authorization_issuance or capture_attempt_operation
+        # Erasure binds each operation_id to one target and reports fresh progress on every retry.
+        bypass_generic_replay = (authorization_issuance or capture_attempt_operation
+                                 or command.name == "erase_captured_source")
         capture_attempt_wire = None
         if capture_attempt_operation:
             from . import capture_attempts
@@ -6938,14 +6942,16 @@ class LeaseManager:
         # it (`reconcile.reconcile`). Its long read-only and self-locked phases run with no
         # hold, so other writers commit between phases. The graph join after it holds none.
         narrow_reconcile = runs_reconcile and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
-        # A curation proposal prepares read-only, then seals; `seal_proposal` takes
-        # the mutation boundary itself and re-checks every binding under it, so
-        # preparation can run without the lock. Apply, resume and compensation
-        # write step by step and keep the wide boundary.
+        # A curation proposal, forward or compensating, prepares read-only, then
+        # seals; the seal (`seal_proposal`, `propose_compensation`) takes the
+        # mutation boundary itself and re-checks every binding under it, so
+        # preparation can run without the lock. Apply, resume and applying a
+        # compensation write step by step and keep the wide boundary. The two
+        # actions are members of the closed curation action enum.
         narrow_curation_proposal = (
             command.name == "maintain_memory"
             and kwargs.get("mode") == "curation"
-            and kwargs.get("curation_action") == "propose"
+            and kwargs.get("curation_action") in ("propose", "propose-compensation")
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # Only record owns a short guard around fresh admission, revision
@@ -8513,6 +8519,15 @@ def record_caller_refusal(
         pass
 
 
+def invocation_reads() -> bool:
+    """Whether the dispatched command now running is declared read-only (`Command.read_only`).
+
+    False inside a write and outside a dispatched command (a CLI helper, the watcher, a direct
+    call), so a step that only a read may take stays off wherever the access is not known.
+    """
+    return _INVOCATION_READS.get()
+
+
 def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
@@ -9045,6 +9060,16 @@ def invoke_command(
         dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
+        # Only a command declared read-only reads by a page's prior path. A write-capable command
+        # keeps its target literal in every mode, so a preview (validate_only, dry_run) names the
+        # page its commit acts on, and a write outside the writer stays a write.
+        reads = _INVOCATION_READS.set(command.read_only)
+        try:
+            return _invoke_leaf()
+        finally:
+            _INVOCATION_READS.reset(reads)
+
+    def _invoke_leaf() -> Any:
         with _owner_authority_scope(command.name):
             # This fixed capture field gates cached terminals and key mismatch, too.
             if command.name == "capture_source" and kwargs.get("source_identity") is not None:

@@ -54,6 +54,12 @@ Checks (all read-only; no writes ever):
   agent, not as a claim that the page is overloaded, and kept out of the default
   attention union because its steps are the system's choice. One item per page;
   a dismissal holds until the page reaches its next step.
+- `ownership_review`: a compiled page with one project key that was asked whether
+  it belongs in its current home, because it was created or retitled in a project
+  or because the daily rotation reached it. Reported at `info` as a question for
+  the connected agent, never as a claim that the page is misfiled, and listed
+  with the other backlog items after dated obligations. One item per page; a dismissal holds until the page's project key,
+  home folder or title changes.
 - `supersession_integrity`: a `supersedes`/`superseded_by` pointer that does not
   resolve, and a supersession component with more than one current head. Both
   are `warn` DEFECTS in authored state with no threshold anywhere, which is why
@@ -187,6 +193,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "unreflected_outcomes",
     "unreflected_observations",
     "note_cohesion",
+    "ownership_review",
     "entity_recurrence",
     "collection_candidate",
     "artifact_role_promotion",
@@ -772,6 +779,9 @@ def audit(
     with stage('note_cohesion') as run:
         if run:
             findings.extend(_check_note_cohesion(vault_root, pages))
+    with stage('ownership_review') as run:
+        if run:
+            findings.extend(_check_ownership_review(vault_root, pages))
     with stage('entity_recurrence') as run:
         if run:
             findings.extend(
@@ -2836,6 +2846,23 @@ def _check_wikilinks(
         if isinstance(title, str) and title.strip():
             titles_to_paths.setdefault(vault_module.title_key(title), []).append(no_ext)
 
+    from .governance import egress
+
+    # A path that a moved page left resolves to that page, as the resolver's own step decides,
+    # among the pages the caller may see.
+    visible = (
+        egress.restricted_release_filter(vault_root)
+        if egress.caller_restricted(vault_root)
+        else None
+    )
+    resolver: vault_module.WikilinkResolver | None = None
+
+    def prior_claimants(target: str) -> list[str]:
+        nonlocal resolver
+        if resolver is None:
+            resolver = find_module.shared_resolver(vault_root)
+        return vault_module.prior_path_pages(vault_root, target, resolver, visible=visible)
+
     for page in pages:
         # Skip wikilinks inside fenced code blocks and inline code spans —
         # `[[:space:]]` and similar regex/bash snippets aren't real links.
@@ -2858,6 +2885,9 @@ def _check_wikilinks(
             if target_for_resolve.lstrip("/") in full_paths:
                 continue
             if "/" in target_for_resolve and retired_link_target(vault_root, target_for_resolve):
+                continue
+            moved_claimants = prior_claimants(target_for_resolve) if "/" in target_for_resolve else []
+            if len(moved_claimants) == 1:
                 continue
             # Bare-name lookup: Obsidian resolves [[name]] by filename anywhere
             # in the vault. Only attempt if no path separator.
@@ -2897,6 +2927,7 @@ def _check_wikilinks(
                 or ambiguous_stem
                 or ambiguous_title
                 or non_markdown_collision
+                or moved_claimants
             )
             category = "broken_wikilink" if broken else "forward_reference"
             if category not in selected:
@@ -3780,6 +3811,68 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
             detail=item["reason"],
             proposed_fix="Run `maintain_memory` with mode `reconcile`.",
             meta=item,
+            )
+        )
+    findings.extend(_prior_path_findings(vault_root))
+    return findings
+
+
+def _prior_path_findings(vault_root: Path) -> list[AuditFinding]:
+    """The prior-path findings (`prior_claims.issues`) that the caller may see.
+
+    A restricted caller sees a finding only when it may see every path the finding names, so a
+    finding never reveals a withheld claimant. Only the owner sees an identified page at a
+    claimed path: that finding pairs two pages' histories, which no partial view can judge.
+    """
+    from . import prior_claims
+    from .governance import egress
+
+    # A bound store gives the owner a release filter too, so the filter's presence does not
+    # say whether the caller is restricted.
+    visible = (
+        egress.restricted_release_filter(vault_root)
+        if egress.caller_restricted(vault_root)
+        else None
+    )
+    findings: list[AuditFinding] = []
+    for item in prior_claims.issues(vault_root):
+        request_budget.checkpoint()
+        paths = [str(path) for path in item["paths"]]  # type: ignore[union-attr]
+        if visible is not None and (
+            item["kind"] == "reserved_path_identified"
+            or not all(visible(path) for path in (str(item["path"]), *paths))
+        ):
+            continue
+        if item["kind"] == "prior_path_conflict":
+            detail = (
+                f"prior_path_conflict: {item['path']} is claimed by {', '.join(paths)}; "
+                "links to it stay unresolved"
+            )
+            fix = "Repoint the links to the page they mean, then move or correct the other claimant."
+        elif item["kind"] == "reserved_path_identified":
+            detail = (
+                f"reserved_path_identified: {item['path']} holds its own exomem_id and sits where "
+                f"{', '.join(paths)} moved from; links written before that move now resolve to it"
+            )
+            fix = (
+                "Repoint the old links that mean the moved page, or move the page at the reserved "
+                "path to its own name."
+            )
+        else:
+            detail = (
+                f"reserved_path_occupied: {item['path']} has no exomem_id and sits where "
+                f"{', '.join(paths)} moved from; links to it resolve to the moved page"
+            )
+            fix = "Move or remove the file at the reserved path, or give it its own name."
+        findings.append(
+            AuditFinding(
+                category="reference_identity",
+                severity="warn",
+                path=str(item["path"]),
+                detail=detail,
+                proposed_fix=fix,
+                paths=paths,
+                meta={"kind": item["kind"], "path": item["path"], "claimants": paths},
             )
         )
     return findings
@@ -6432,6 +6525,54 @@ def _check_note_cohesion(
         )
         if found is not None:
             findings.append(found)
+    return findings
+
+
+# ---------------- check: ownership_review ----------------
+
+
+@call_spans.timed("audit.ownership_review")
+def _check_ownership_review(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface the question for each eligible page that was asked about.
+
+    The rule, the question and the identity live in `ownership_review`, which the write
+    path calls as well; the asked ledger lives in `ownership_rotation`, keyed by the page's
+    identity so a moved page is still asked. A page the ledger does not hold has no item,
+    so this check reads the ledger once and judges only the asked pages. It claims nothing
+    about a page: whether the page belongs where it is is the connected agent's judgement.
+    """
+    from . import ownership_review, ownership_rotation
+
+    asked = ownership_rotation.asked(vault_root)
+    if not asked:
+        return []
+    type_basis = note_types.Basis(vault_root)
+    status_basis = lifecycle_statuses.Basis(vault_root)
+    keep = ownership_review.keep_call()
+    findings: list[AuditFinding] = []
+    for page in pages:
+        request_budget.checkpoint()
+        asked_on = asked.get(ownership_rotation.page_key(page.rel_path, page.frontmatter))
+        if asked_on is None:
+            continue
+        subject = ownership_review.subject_of(
+            vault_root,
+            page.rel_path,
+            page_type=page.page_type,
+            frontmatter=page.frontmatter,
+            title=page.title,
+            type_basis=type_basis,
+            status_basis=status_basis,
+        )
+        if subject is not None:
+            findings.append(
+                ownership_review.finding(
+                    page.rel_path, subject=subject, asked_on=asked_on, keep=keep
+                )
+            )
     return findings
 
 

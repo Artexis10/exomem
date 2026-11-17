@@ -1932,6 +1932,8 @@ class DetachedCatalog:
     cancelled: threading.Event = field(default_factory=threading.Event)
     finished: threading.Event = field(default_factory=threading.Event)
     builder: threading.Thread | None = None
+    #: The Source retirement generation before the walk; a cutoff since then voids the rows it parsed.
+    retired_through: int | None = None
 
 
 class _DetachedBuildCancelled(Exception):
@@ -4071,6 +4073,26 @@ def search_substring_result(
     )
 
 
+def search_substrings_result(
+    vault_root: Path, queries: Sequence[str], *, scope: str = "kb"
+) -> CatalogQueryResult[dict[str, list[str]]]:
+    """`search_substring_result` for several queries under one readiness proof and snapshot.
+
+    Each proof walks the vault, so a caller with many queries pays for one walk, not one each.
+    """
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    tokens = {query: query.split() for query in queries}
+    empty = {query: [] for query, words in tokens.items() if not words}
+    asked = {query: words for query, words in tokens.items() if words}
+    if not asked:
+        return CatalogQueryResult(empty, CatalogReadiness("available", True, backend()))
+    answer = get_store(vault_root).search_substrings_result(asked, scope)
+    if answer.value is None:
+        return answer
+    return CatalogQueryResult({**empty, **answer.value}, answer.readiness)
+
+
 def search_keyword_groups_result(
     vault_root: Path, query_norm: str, *, scope: str, freshness: tuple | None,
     limit: int, allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
@@ -4764,11 +4786,11 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
     if not removed_rel_paths or not lexical_path(vault_root).exists():
         return True
     try:
-        get_store(vault_root).delete_rel_paths(removed_rel_paths)
+        # A deferred delete schedules its repair but leaves the rows in place until then.
+        return get_store(vault_root).delete_rel_paths(removed_rel_paths) is not False
     except Exception as e:  # noqa: BLE001
         log.warning("lexical sidecar delete skipped (%s)", e)
         return False
-    return True
 
 
 # ---------------------------------------------------- exact receipt custody
@@ -6919,6 +6941,13 @@ class LexicalStore:
         ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def _meta_retired_through(self, conn: sqlite3.Connection) -> int | None:
+        """The Source retirement generation a detached build read before its walk, if it stamped one."""
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'source_retired_through'"
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
     def _catalog_release_current(self, conn: sqlite3.Connection) -> bool:
         """Whether the running release built the rows behind `conn` (see `_stamp_whole_build`)."""
         row = conn.execute("SELECT value FROM meta WHERE key = 'catalog_release'").fetchone()
@@ -8090,6 +8119,8 @@ class LexicalStore:
                         self._delete_rowid(conn, row[0])
                     else:
                         self._delete_semantic_units(conn, rel)
+                    # The delete triggers stamped a fresh revision for rows that no longer exist (see delete_page_rows).
+                    conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
                 for rel in suppressed:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
@@ -8968,6 +8999,7 @@ class LexicalStore:
         *,
         cancel: threading.Event | None = None,
         reuse_identity: str | None = None,
+        retired_through: int | None = None,
     ) -> bool:
         """Write one walked corpus and its target checkpoints into a temp catalogue.
 
@@ -8978,6 +9010,8 @@ class LexicalStore:
         replace the live one. A set ``cancel`` stops the build between pages
         with `_DetachedBuildCancelled`. A ``reuse_identity`` lets the temp start
         from the live catalogue built under that identity (`_seed_from_live`).
+        A ``retired_through`` stamps the Source retirement generation read
+        before the walk, for a process that adopts the file later.
         """
         started = time.monotonic()
         counts: tuple[int, int, int, int] | None = None
@@ -9020,6 +9054,12 @@ class LexicalStore:
                         )
                     self._write_checkpoint(conn, scope, checkpoint)
                 self._write_catalog_identity(conn)
+                if retired_through is not None:
+                    conn.execute(
+                        "INSERT INTO meta(key, value) VALUES('source_retired_through', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (str(retired_through),),
+                    )
             # Fold the WAL back into the main file so the published sidecar is a
             # single self-contained file. Publication is FORBIDDEN unless this
             # provably succeeds — otherwise a plain `os.replace` of just the main
@@ -9480,6 +9520,9 @@ class LexicalStore:
             _DETACHED[temp_path] = detached
         built = False
         try:
+            from . import source_custody
+
+            detached.retired_through = source_custody.retirement_generation(self.vault_root)
             identity = catalog_semantic_identity(self.vault_root)
             policy = recall_policy.recall_policy_identity(self.vault_root)
             members, signatures = self._walk_entries(cancel=detached.cancelled)
@@ -9496,7 +9539,8 @@ class LexicalStore:
                 )
                 scope_targets[scope] = ("walk", None, checkpoint, triple)
             if not self._materialize_catalog(
-                temp_path, members, signatures, scope_targets, cancel=detached.cancelled
+                temp_path, members, signatures, scope_targets, cancel=detached.cancelled,
+                retired_through=detached.retired_through,
             ):
                 return None
             if (
@@ -9556,7 +9600,12 @@ class LexicalStore:
                 else max(0.0, min(_PUBLICATION_TIMEOUT_ADOPT, timeout))
             )
             with self._publication_lock(timeout=wait):
-                if self._detached_catalog_current(detached.path):
+                from . import source_custody
+
+                if source_custody.retired_since(self.vault_root, detached.retired_through):
+                    # Its rows may hold a Source erased after the walk; the ordinary rebuild serves instead.
+                    log.info("lexical detached catalogue predates a Source retirement; not adopted")
+                elif self._detached_catalog_current(detached.path):
                     published = self._replace_live_catalog(detached.path)
                 else:
                     log.info("lexical detached catalogue is no longer current; not adopted")
@@ -13198,6 +13247,18 @@ class LexicalStore:
             scope,
             freshness,
             lambda conn: self._substring_query(conn, tokens, scope, k, allowed_paths),
+            "lexical sidecar substring query failed (%s)",
+        )
+
+    def search_substrings_result(
+        self, tokens: Mapping[str, list[str]], scope: str
+    ) -> CatalogQueryResult[dict[str, list[str]]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            None,
+            lambda conn: {
+                query: self._substring_query(conn, words, scope) for query, words in tokens.items()
+            },
             "lexical sidecar substring query failed (%s)",
         )
 

@@ -233,6 +233,8 @@ _OPERATIONAL_KEYS = frozenset(
         "graph_sync_checkpoint",
         "graph_sync_remediation",
         "vocabulary_sync",
+        # The paths of the append-only pages a move repointed; the reply names them by title.
+        "pointer_repointed_paths",
     }
 )
 
@@ -259,6 +261,8 @@ _MAX_WARNING_CHARS = 300
 _MAX_RELATION_ADVISORY_LABELS = 8
 _MAX_RELATION_ADVISORY_EXAMPLES = 5
 _MAX_RELATION_ADVISORY_LABEL_CHARS = 128
+#: How many repointed append-only pages compact names; the summary's count covers the rest.
+_MAX_REPOINTED_PAGES = 8
 
 
 def _operation_id(result: Any) -> str | None:
@@ -1108,6 +1112,9 @@ _MAX_UNCLASSIFIED_FOLDERS = 4
 #: advisory, so `tests/test_note_cohesion.py` writes it on every tool shape against
 #: this bound. It only stops a malformed payload from widening the wire.
 _MAX_COHESION_QUESTION_CHARS = 800
+#: The same bound for the ownership question: 400 tokens at four characters a token, the
+#: proxy the spec's token limit is checked against. A longer question drops the advisory.
+_MAX_OWNERSHIP_QUESTION_CHARS = 1600
 
 
 def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
@@ -1141,13 +1148,34 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
 
 def _structure_suggestion_kind_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
     from .note_cohesion import KIND as note_cohesion_kind
+    from .ownership_review import KIND as ownership_kind
 
     kind = value.get("kind")
     if kind == _SOURCE_CLASSIFICATION_KIND:
         return _source_classification_projection(value)
     if kind == note_cohesion_kind:
         return _note_cohesion_projection(value)
+    if kind == ownership_kind:
+        return _ownership_projection(value)
     return None
+
+
+def _review_identity(value: Mapping[str, Any]) -> tuple[str, str] | None:
+    """The validated `(ref, fingerprint)` of the review item a suggestion names, or None."""
+    from . import review_state
+
+    try:
+        ref = review_state.review_ref(review_state.parse_review_ref(str(value.get("ref") or "")))
+    except ValueError:
+        return None
+    fingerprint = value.get("fingerprint")
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 24
+        or any(char not in "0123456789abcdef" for char in fingerprint)
+    ):
+        return None
+    return ref, fingerprint
 
 
 def _source_classification_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1174,7 +1202,6 @@ def _source_classification_projection(value: Mapping[str, Any]) -> dict[str, Any
 
 def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
     """The question a compiled write asks: three counts, the item's identity, the text."""
-    from . import review_state
     from .note_cohesion import BASE_STEP_UNITS, KIND
 
     units = value.get("units")
@@ -1184,17 +1211,10 @@ def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None
         return None
     if not (step >= BASE_STEP_UNITS and units >= step and following > step):
         return None
-    try:
-        ref = review_state.review_ref(review_state.parse_review_ref(str(value.get("ref") or "")))
-    except ValueError:
+    identity = _review_identity(value)
+    if identity is None:
         return None
-    fingerprint = value.get("fingerprint")
-    if (
-        not isinstance(fingerprint, str)
-        or len(fingerprint) != 24
-        or any(char not in "0123456789abcdef" for char in fingerprint)
-    ):
-        return None
+    ref, fingerprint = identity
     question = value.get("question")
     if not isinstance(question, str) or not 0 < len(question) <= _MAX_COHESION_QUESTION_CHARS:
         return None
@@ -1205,6 +1225,27 @@ def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None
         "units": units,
         "step_units": step,
         "next_step_units": following,
+        "ref": ref,
+        "fingerprint": fingerprint,
+        "id": item_id({"ref": ref, "fingerprint": fingerprint}),
+        "question": question,
+    }
+
+
+def _ownership_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The question a written page asks about its home: the item's identity and the text."""
+    from .ownership_review import KIND
+    from .review_ids import item_id
+
+    identity = _review_identity(value)
+    if identity is None:
+        return None
+    ref, fingerprint = identity
+    question = value.get("question")
+    if not isinstance(question, str) or not 0 < len(question) <= _MAX_OWNERSHIP_QUESTION_CHARS:
+        return None
+    return {
+        "kind": KIND,
         "ref": ref,
         "fingerprint": fingerprint,
         "id": item_id({"ref": ref, "fingerprint": fingerprint}),
@@ -2374,6 +2415,19 @@ def _user_summary(
     return _lead(head, names)
 
 
+def _pointer_repointed(leaf: Any) -> list[Mapping[str, Any]]:
+    """The append-only pages whose links a move or reclassification repointed, title first."""
+    pages = leaf.get("pointer_repointed") if isinstance(leaf, Mapping) else None
+    if not isinstance(pages, list):
+        return []
+    return [
+        page for page in pages
+        if isinstance(page, Mapping)
+        and isinstance(page.get("title"), str)
+        and isinstance(page.get("path"), str)
+    ]
+
+
 def _stated_outcome(leaf: Any) -> str | None:
     """The sentence an approval leaf states itself.
 
@@ -2469,6 +2523,18 @@ def project_terminal(
         compact["user_summary"] += f". {flagged[0][1]}"
         if len(flagged) > 1:
             compact["user_summary"] += f" (and {len(flagged) - 1} more files have a finding)"
+    repointed = _pointer_repointed(leaf)
+    if repointed:
+        # An append-only page changed only in its links; the person hears it, the agent sees which.
+        if "user_summary" in compact:
+            pages = "page" if len(repointed) == 1 else "pages"
+            compact["user_summary"] += (
+                f". Repointed the links to it in {len(repointed)} append-only {pages}"
+            )
+        compact["pointer_repointed"] = [
+            page["title"] for page in repointed[:_MAX_REPOINTED_PAGES]
+        ]
+        compact["pointer_repointed_paths"] = [page["path"] for page in repointed]
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]

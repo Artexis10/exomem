@@ -109,7 +109,10 @@ def publication_hook(state: PendingWitness | None) -> Callable[[], None] | None:
 
 @contextmanager
 def suspended() -> Iterator[None]:
-    """Keep an owner's auxiliary batch from consuming its caller's pending witness."""
+    """Keep an owner's auxiliary batch from consuming its caller's pending witness.
+
+    A move's intent record is such a batch: inside the seam it would be offered the witness.
+    """
     token = _ACTIVE.set(None)
     try:
         yield

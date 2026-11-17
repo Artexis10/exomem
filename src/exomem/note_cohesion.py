@@ -118,6 +118,27 @@ def is_candidate(
     )
 
 
+def is_askable(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    frontmatter: Mapping[Any, Any],
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> bool:
+    """Whether the page's owner could act on a question about it: recall-eligible, live, writable.
+
+    Shared with `ownership_review`, so both review families ask about the same pages. A
+    superseded, archived, dropped or draft page is never asked, and neither is one in a
+    tree that its owner cannot edit.
+    """
+    if not recall_policy.is_recall_candidate(vault_root, rel_path):
+        return False
+    status = (status_basis or lifecycle_statuses.Basis(vault_root)).classify(
+        frontmatter.get("status"), path=rel_path, frontmatter=frontmatter
+    )
+    return status.live and access.access_tier(vault_root, rel_path) == access.TIER_READ_WRITE
+
+
 def finding(
     vault_root: Path,
     rel_path: str,
@@ -136,16 +157,7 @@ def finding(
         rel_path, page_type=page_type, frontmatter=frontmatter, type_basis=type_basis
     ):
         return None
-    if not recall_policy.is_recall_candidate(vault_root, rel_path):
-        return None
-    # Only a live page in a writable tree can be split or kept whole by its owner; a
-    # superseded, archived, dropped or draft page is never asked.
-    status = (status_basis or lifecycle_statuses.Basis(vault_root)).classify(
-        frontmatter.get("status"), path=rel_path, frontmatter=frontmatter
-    )
-    if not status.live:
-        return None
-    if access.access_tier(vault_root, rel_path) != access.TIER_READ_WRITE:
+    if not is_askable(vault_root, rel_path, frontmatter=frontmatter, status_basis=status_basis):
         return None
     step, next_step = reached
     authored = temporal.parse(frontmatter.get("updated") or frontmatter.get("created"))

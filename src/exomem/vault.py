@@ -174,6 +174,11 @@ _EXCLUDED_FIELD_REMEDIES: Mapping[str, str] = {
 EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(_EXCLUDED_FIELD_REMEDIES)
 EXCLUDED_FIELD_CODE = "EXCLUDED_FIELD"
 
+#: The frontmatter key that names a page's note type, and the key that every governed write
+#: stamps with its instant. The page schema fixes both; they are protocol keys, not vocabulary.
+TYPE_FIELD = "type"
+UPDATED_FIELD = "updated"
+
 # The broader `auto_*` exclusion documented in
 # `_scaffold/_Schema/references/frontmatter.md` is deliberately deferred: it is
 # a prefix rule with a different compatibility surface from this exact-name set.
@@ -986,25 +991,34 @@ def unique_path(
     Listing the directory costs one syscall on a write path, against a data-loss
     class that only appears after a sync to another machine.
 
+    With `vault_root`, a name that a live page's lineage still claims is taken too, so a new
+    page never takes the links of a page that moved away (`prior_claims`).
+
     A number added to a long name shortens the name, so the file keeps the byte cap.
 
     `title_held` says whether a stem is another live page's title. A page named by that stem
     would take over every bare link to the title, because a stem match beats a title match, so
     such a stem counts as taken even when no file has the name.
     """
+    reserved: frozenset[str] = frozenset()
     if vault_root is not None:
+        from . import prior_claims
         from .governance import connector_boundary
 
         connector_boundary.require_create(
             vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix()
         )
+        reserved = prior_claims.reserved_names(
+            vault_root, directory.relative_to(vault_root).as_posix()
+        )
         stored = _stored_folder_keys(vault_root, directory, f"{stem}{suffix}")
         if stored is not None:
+            held = stored | reserved
             return directory / _first_free_name(
-                stem, suffix, lambda name: vault_name_key(name) in stored, title_held
+                stem, suffix, lambda name: vault_name_key(name) in held, title_held
             )
     try:
-        taken = {vault_name_key(entry.name) for entry in directory.iterdir()}
+        taken = {vault_name_key(entry.name) for entry in directory.iterdir()} | reserved
     except OSError:
         # Unlistable, most often because it does not exist yet. `exists()` is
         # the weaker test -- case-sensitive on Linux -- but it is the only one
@@ -1012,7 +1026,10 @@ def unique_path(
         # assumed to pass, or an unlistable-but-populated directory would hand
         # back a path that already holds another note.
         return directory / _first_free_name(
-            stem, suffix, lambda name: (directory / name).exists(), title_held
+            stem,
+            suffix,
+            lambda name: (directory / name).exists() or vault_name_key(name) in reserved,
+            title_held,
         )
     return directory / _first_free_name(
         stem, suffix, lambda name: vault_name_key(name) in taken, title_held
@@ -8937,12 +8954,89 @@ def _store_inbound_mode(vault_root: Path) -> bool:
     return store_mode.store_mode_for_reads(Path(vault_root))
 
 
+def served_page_bytes(vault_root: Path, rel: str) -> bytes | None:
+    """A page's bytes where the vault serves it: the store's page, else the file; None if absent."""
+    from .vault_store import read as store_read
+
+    def served() -> tuple[bytes | None]:
+        try:
+            return (store_read.owned_bytes(vault_root, rel),)
+        except FileNotFoundError:
+            return (None,)
+
+    # A one-tuple tells a page the store serves but lacks from a path that the disk decides.
+    stored = store_read.from_store(vault_root, rel, served)
+    if stored is not None:
+        return stored[0]
+    try:
+        return (Path(vault_root) / rel).read_bytes()
+    except OSError:
+        return None
+
+
+def lineage_link_targets(vault_root: Path, target_rel_path: str) -> tuple[str, ...]:
+    """The prior paths that links may still name the target by, read from its own bytes.
+
+    These are the target's lineage entries and the relayout rows that claim for it, without
+    a path where a page with an `exomem_id` now stands: that page owns its path's links. The
+    read costs the target's bytes and the relayout record, never a scan or the derived index,
+    so a stale index cannot hide a link from a delete check.
+    """
+    from . import memory_refs, page_lineage, relayout_record
+
+    root = Path(vault_root)
+    rel = target_rel_path if target_rel_path.lower().endswith(".md") else target_rel_path + ".md"
+    raw = served_page_bytes(root, rel)
+    if raw is None:
+        return ()
+    front, has_block = page_lineage.read_front_of_bytes(raw)
+    if not has_block:
+        front = {}
+    claimed = page_lineage.iter_claims(
+        rel, front, memory_refs.normalize_id(front.get(memory_refs.ID_FIELD)),
+        relayout_record.load(root),
+    )
+    kept: list[str] = []
+    for prior in claimed:
+        held = served_page_bytes(root, prior)
+        if held is not None:
+            holder, _held_body, held_block = parse_frontmatter(
+                held.decode("utf-8", errors="replace")
+            )
+            if held_block is not None and memory_refs.normalize_id(
+                holder.get(memory_refs.ID_FIELD)
+            ) is not None:
+                continue
+        kept.append(prior)
+    return tuple(kept)
+
+
+def _merge_inbound(found: Iterable[list[InboundLink]]) -> list[InboundLink]:
+    """The links of several lookups, in lookup order, each link once.
+
+    Two lookups may list one link, while one lookup lists two links on one line as two rows, so a
+    row counts once for each time a single lookup lists it.
+    """
+    emitted: dict[tuple[str, int, str], int] = {}
+    merged: list[InboundLink] = []
+    for links in found:
+        listed: dict[tuple[str, int, str], int] = {}
+        for link in links:
+            key = (link.path, link.line_number, link.raw_target)
+            listed[key] = listed.get(key, 0) + 1
+            if listed[key] > emitted.get(key, 0):
+                emitted[key] = listed[key]
+                merged.append(link)
+    return merged
+
+
 def find_inbound_wikilinks(
     vault_root: Path,
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
     target_has_no_file: bool = False,
+    lineage: bool = True,
 ) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
@@ -8971,30 +9065,57 @@ def find_inbound_wikilinks(
 
     A store-mode vault answers from its inbound rows at the request's snapshot. There every stored
     page counts toward its basename whether or not it has a file, so `target_has_no_file` is moot.
+
+    With `lineage`, links to the target's prior paths count too (`lineage_link_targets`), because
+    they resolve to it. A move or reclassification that plans rewrites of links to the old path
+    passes `lineage=False`: the page keeps its lineage, so its prior paths keep resolving.
     """
-    stored = _store_inbound(vault_root, (target_rel_path,), visible)
+    priors = lineage_link_targets(vault_root, target_rel_path) if lineage else ()
+    stored = _store_inbound(vault_root, (target_rel_path, *priors), visible)
     if stored is not None:
-        return stored[target_rel_path]
+        if not priors:
+            return stored[target_rel_path]
+        return _merge_inbound(stored[target] for target in (target_rel_path, *priors))
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
-    return _select_inbound_wikilinks(
+        prior_snapshots = [(prior, _snapshot_inbound(data, prior)) for prior in priors]
+    selected = _select_inbound_wikilinks(
         snapshot, target_rel_path, visible, target_has_no_file=target_has_no_file
     )
+    if not prior_snapshots:
+        return selected
+    return _merge_inbound([
+        selected,
+        *(
+            _select_inbound_wikilinks(
+                prior_snapshot,
+                prior,
+                visible,
+                target_has_no_file=prior not in prior_snapshot.sources,
+            )
+            for prior, prior_snapshot in prior_snapshots
+        ),
+    ])
 
 
 def find_inbound_wikilinks_many(
-    vault_root: Path, targets: Iterable[str], *, held: bool = False
+    vault_root: Path,
+    targets: Iterable[str],
+    *,
+    held: bool = False,
+    visible: Callable[[str], bool] | None = None,
 ) -> dict[str, list[InboundLink]]:
-    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them.
+    """`find_inbound_wikilinks` without lineage for several targets over one index read.
 
     `held` says that the vault holds every target, as a store holds a page that may have no file
     yet: a target that the index did not read counts toward its basename, as `target_has_no_file`
     does for one target, and the index answers which ones those are without a look at the disk.
-    A store-mode vault answers from its inbound rows, where `held` is moot.
+    A store-mode vault answers from its inbound rows, where `held` is moot. `visible` is a
+    reader's view, as for `find_inbound_wikilinks`; `None` is the owner's.
     """
     targets = list(targets)
-    stored = _store_inbound(vault_root, targets, None)
+    stored = _store_inbound(vault_root, targets, visible)
     if stored is not None:
         return stored
     data = _inbound_index(vault_root)
@@ -9004,7 +9125,7 @@ def find_inbound_wikilinks_many(
         target: _select_inbound_wikilinks(
             snapshot,
             target,
-            None,
+            visible,
             target_has_no_file=held and target not in snapshot.sources,
         )
         for target, snapshot in snapshots.items()
@@ -9301,6 +9422,11 @@ class WikilinkResolver:
     #: The token of the resident publication whose maps these are, so a reader may keep what it
     #: derives from them beside that token. Every patch drops it; only the publisher sets it.
     publication: object | None = None
+    #: The prior-path claims read for these maps (`prior_claims`); every patch drops them.
+    _prior_claims: Any = None
+    #: Claims a derivation binds for the state it derives, such as a store commit's own
+    #: transaction; resolution reads them instead of the index, and a patch keeps them.
+    bound_claims: Any = None
 
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
@@ -9403,7 +9529,24 @@ class WikilinkResolver:
             candidates_by_key=self.candidates_by_key,
         )
         copy.publication = self.publication
+        copy._prior_claims = self._prior_claims
+        copy.bound_claims = self.bound_claims
         return copy
+
+    def prior_claims(self) -> Any:
+        """The prior-path claims kept beside these maps, read on first need.
+
+        A link that resolves by its exact path asks whether a page claims that path, so these
+        answer without a read per link. A patch drops them, because a page that moved, appeared
+        or vanished changes the claims; a claimed path is checked again against the current index.
+        """
+        from . import prior_claims
+
+        if self.bound_claims is not None:
+            return self.bound_claims
+        if self._prior_claims is None:
+            self._prior_claims = prior_claims.current(self.vault_root)
+        return self._prior_claims
 
     def title_key_for_path(self, rel_path: str) -> str | None:
         """Return the normalized resolver title contributed by one path.
@@ -9436,6 +9579,7 @@ class WikilinkResolver:
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
         self.publication = None
+        self._prior_claims = None
         self.candidates_by_key[no_ext] = tuple(
             sorted(
                 (
@@ -9458,6 +9602,7 @@ class WikilinkResolver:
         if not any(candidate.path == rel_path for candidate in previous):
             return
         self.publication = None
+        self._prior_claims = None
         remaining = tuple(candidate for candidate in previous if candidate.path != rel_path)
         if remaining:
             self.candidates_by_key[no_ext] = remaining
@@ -9685,7 +9830,9 @@ def normalize_wikilink(
     pages it admits; `None` matches over every page.
 
     `targeted_namespace_contains` answers exact resolver keys for explicit
-    paths. Bare names use `resolver` or lazily call `resolver_factory`.
+    paths. Bare names use `resolver` or lazily call `resolver_factory`. With it,
+    the caller authorizes the file an explicit path names, and `visible` filters
+    only the pages that claim the path through their lineage.
 
     `retired` answers the item path that a converted collection retired for
     an unresolved path, or None; `None` checks each link on its own. A caller
@@ -9704,6 +9851,175 @@ def normalize_wikilink(
 def wikilink_page_key(page: str) -> str:
     """A link's page part as resolution keys it: no `.md`, no edge blanks or slashes."""
     return page.removesuffix(".md").strip().strip("/")
+
+
+def _current_claims(resolver: Any, vault_root: Path) -> Any:
+    """The prior-path claims a derivation binds on `resolver`, else the index's current ones."""
+    bound = getattr(resolver, "bound_claims", None)
+    if bound is not None:
+        return bound
+    from . import prior_claims
+
+    return prior_claims.current(vault_root)
+
+
+def _kept_claims(resolver: Any, vault_root: Path) -> Any:
+    """The claims kept beside the resolver's maps; a read-only corpus view keeps none."""
+    keeper = getattr(resolver, "prior_claims", None)
+    return keeper() if keeper is not None else _current_claims(resolver, vault_root)
+
+
+def _live_claimants(
+    paths: Iterable[str],
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The live pages among `paths` that the caller may see, counted after that filter."""
+    wanted = set(paths)
+    if not wanted:
+        return []
+    if targeted:
+        # Namespace membership proves liveness. Each path is an exact page path from the
+        # lineage index, so `visible` can judge it before the count.
+        return [
+            WikilinkCandidate(path, None)
+            for path in sorted(wanted)
+            if contains(_wikilink_path_key(path)) and (visible is None or visible(path))
+        ]
+    return [
+        candidate
+        for candidate in wikilink_candidates(
+            resolver.candidates_by_key,
+            {_wikilink_path_key(path) for path in wanted},
+            visible=visible,
+        )
+        if candidate.path in wanted
+    ]
+
+
+def _squatter_claimants(
+    key: str,
+    vault_root: Path,
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The lineage claimants that keep `key` from a file without an `exomem_id` sitting there."""
+    claims = _current_claims(resolver, vault_root)
+    claimants = claims.claimants(key)
+    if not claimants:
+        return []
+    held = (
+        # The caller's namespace holds `key`; a file the caller may not see holds no name.
+        [path for path in (key + ".md",) if visible is None or visible(path)]
+        if targeted
+        else [
+            match.path
+            for match in wikilink_candidates(resolver.candidates_by_key, (key,), visible=visible)
+        ]
+    )
+    if any(claims.has_identity(path) for path in held):
+        return []  # a page with an identity at its own path is a live name
+    return _live_claimants(
+        (path for path in claimants if path not in held),
+        resolver, contains, targeted=targeted, visible=visible,
+    )
+
+
+def _prior_path_claimants(
+    cleaned: str,
+    vault_root: Path,
+    resolver: Any,
+    contains: Callable[[str], bool],
+    *,
+    targeted: bool,
+    visible: Callable[[str], bool] | None,
+) -> list[WikilinkCandidate]:
+    """The visible live pages that left the path `cleaned`, as written or under Knowledge Base."""
+    claims = _current_claims(resolver, vault_root)
+    for key in (cleaned, managed_join(cleaned)):
+        claimed = _live_claimants(
+            claims.claimants(key), resolver, contains, targeted=targeted, visible=visible
+        )
+        if claimed:
+            return claimed
+    return []
+
+
+def prior_path_pages(
+    vault_root: Path,
+    value: str,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> list[str]:
+    """The live pages whose lineage names the path `value`, as a link to that path resolves it.
+
+    A page that `visible` hides counts for nothing, so a hidden page reads as no page.
+    """
+    cleaned = wikilink_page_key(split_wikilink_target(value)[0])
+    if "/" not in cleaned:
+        return []
+    return [
+        candidate.path
+        for candidate in _prior_path_claimants(
+            cleaned, vault_root, resolver, resolver.full_paths.__contains__,
+            targeted=False, visible=visible,
+        )
+    ]
+
+
+def prior_stem_pages(
+    vault_root: Path,
+    value: str,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> list[str]:
+    """The live pages whose lineage names the bare stem `value`, as a link to that stem resolves it.
+
+    A live page under that stem or title wins, so the answer is then empty. A page that `visible`
+    hides counts for nothing.
+    """
+    cleaned = wikilink_page_key(split_wikilink_target(value)[0])
+    if not cleaned or "/" in cleaned:
+        return []
+    matches, kind = _bare_name_matches(cleaned, vault_root, resolver, visible=visible)
+    return [candidate.path for candidate in matches] if kind == "prior stem" else []
+
+
+def _bare_name_matches(
+    cleaned: str,
+    vault_root: Path,
+    resolver: WikilinkResolver,
+    *,
+    visible: Callable[[str], bool] | None,
+) -> tuple[list[WikilinkCandidate], str]:
+    """The pages the bare name `cleaned` names at the first step that finds any, and that step.
+
+    The steps run in order: the stem, the title, then a prior stem, so a prior stem never wins
+    over a live name. A page that `visible` hides counts for nothing.
+    """
+    stem_matches = wikilink_candidates(
+        resolver.candidates_by_key, resolver.stems.get(cleaned, ()), visible=visible
+    )
+    if stem_matches:
+        return stem_matches, "stem"
+    key = title_key(cleaned)
+    title_matches = wikilink_candidates(
+        resolver.candidates_by_key, resolver.titles.get(key, ()), title_key=key, visible=visible
+    )
+    if title_matches:
+        return title_matches, "title"
+    return _live_claimants(
+        _current_claims(resolver, vault_root).stem_claimants(cleaned),
+        resolver, resolver.full_paths.__contains__, targeted=False, visible=visible,
+    ), "prior stem"
 
 
 def _normalize_wikilink(
@@ -9734,8 +10050,10 @@ def _normalize_wikilink(
 
     # Explicit paths need namespace membership only; bare names need the full
     # stem/title index and retain its ambiguity rules.
-    # Boolean membership cannot prove which physical owner passes visibility.
-    targeted = targeted_namespace_contains is not None and "/" in cleaned and visible is None
+    # Boolean membership cannot prove which physical owner of a path passes `visible`, so a
+    # targeted caller authorizes the link's final target itself. The lineage claimants that
+    # a path resolves through are exact index paths, which `visible` filters before counting.
+    targeted = targeted_namespace_contains is not None and "/" in cleaned
     if not targeted and resolver is None:
         resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
     contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
@@ -9764,22 +10082,27 @@ def _normalize_wikilink(
     # Full paths take precedence over Knowledge-Base-relative paths.
     for key in (cleaned, managed_join(cleaned)):
         if contains(key):
+            # The resolver's kept claims answer the common case, a path that no page left,
+            # with one lookup; only a path that they list is checked against the index.
+            if _kept_claims(resolver, vault_root).claimants(key):
+                claimed = _squatter_claimants(
+                    key, vault_root, resolver, contains, targeted=targeted, visible=visible
+                )
+                if claimed:
+                    return _selected(claimed, "prior path")
             if targeted:
                 return key + anchor, None, None
             matches = _matches((key,))
             if matches:
                 return _selected(matches, "path")
 
-    # 3. Bare name (no `/`): stem match first, then frontmatter title.
-    if "/" not in cleaned:
-        stem_matches = _matches(resolver.stems.get(cleaned, ()))
-        if stem_matches:
-            return _selected(stem_matches, "stem")
-        title_matches = _matches(
-            resolver.titles.get(title_key(cleaned), ()), title_key=title_key(cleaned)
+    # A path that a moved page left names that page while exactly one visible live page claims it.
+    if "/" in cleaned:
+        claimed = _prior_path_claimants(
+            cleaned, vault_root, resolver, contains, targeted=targeted, visible=visible
         )
-        if title_matches:
-            return _selected(title_matches, "title")
+        if claimed:
+            return _selected(claimed, "prior path")
 
     # A path that a converted collection retired names its stored row. A strict
     # caller needs a file, which that path no longer has.
@@ -9792,6 +10115,13 @@ def _normalize_wikilink(
             found = retired(cleaned)
         if found is not None:
             return _wikilink_path_key(found) + anchor, None, None
+
+    # 3. Bare name (no `/`): stem match first, then frontmatter title, then a prior stem,
+    # which never wins over a live name.
+    if "/" not in cleaned:
+        bare_matches, kind = _bare_name_matches(cleaned, vault_root, resolver, visible=visible)
+        if bare_matches:
+            return _selected(bare_matches, kind)
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result

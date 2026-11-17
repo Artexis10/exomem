@@ -6,7 +6,7 @@ Reclassification (`reclassify_source.py`) moves a Source through `move_file(upda
 
 **Goals:** move the legacy `Sources/Other` files without changing any append-only byte; make every move reversible; show every referrer outcome before a move.
 
-**Non-Goals:** rewriting append-only pages; redirecting writes; inferring a classification that was never recorded.
+**Non-Goals:** rewriting append-only content; redirecting writes; inferring a classification that was never recorded.
 
 ## Decisions
 
@@ -16,7 +16,7 @@ Reclassification (`reclassify_source.py`) moves a Source through `move_file(upda
 
 ### 2. Canonical frontmatter holds a reversible history
 
-`reclassified_from` becomes a list of entries, oldest first. Each entry records the prior path, kind and domain. A legacy scalar reads as one entry whose classification is unknown. The field name and entry keys are closed protocol tokens.
+`moved_from` holds the history: a list of entries, oldest first. Each entry records the prior path, kind and domain. Phase 1 shipped the list as `reclassified_from`. That spelling stays readable as entries older than every `moved_from` entry, and no writer renames the key. A legacy scalar reads as one entry whose classification is unknown. The field names and entry keys are closed protocol tokens. `add-curation-relocation-protocol` makes every move append to the same list.
 
 Reclassification writes this field, the classification fields and the companion pointers (`evidence_file`, `data_file`, `raw_protection.artifact_path`) by patching the source spans that the existing YAML loader reports. That replaces `_set_scalar`, `_drop_scalar`, which are regexes over a parsed language (C6), and the whole-frontmatter reserialization in `_repoint_artifact`. The transform proves body-byte equality before the transaction commits.
 
@@ -28,9 +28,11 @@ A revert mode restores the latest entry's path, kind and domain through the same
 
 The preview lists the destination, the mutable referrers it would rewrite, and the append-only referrers it leaves unchanged, grouped by link form. It also lists each refusal with its cause. A restricted mover sees only referrers it can see. A refusal names no withheld page, so the answer matches a vault without withheld pages.
 
-### 5. Phase 2 is conditional
+### 5. Phase 2 is delivered by `add-curation-relocation-protocol`
 
-The live drain preview counts the Sources whose append-only referrers name them by path. If that count is zero, the drain completes in Phase 1 and Phase 2 is withdrawn. If it is not zero, Phase 2 adds history-aware resolution under these constraints:
+`add-curation-relocation-protocol` delivers history-aware resolution for every page with lineage, under its own requirements. It keeps every write target literal, reserves each claimed prior path, and resolves graph, audit and inbound owners through the same resolver. It widens the claims below from Sources to every page with lineage. Its history store is a derived `prior_paths` table beside `identities`, refilled from page bytes. After it ships, reclassification repoints a path link in an append-only page through the governed pointer write, like any move. Its revert restores that page from the pointer-write record. Lineage stays the safety net for every reference that the move does not write.
+
+The constraints first written for this phase follow. The delivered design supersedes them where it differs.
 
 - Only read-only commands resolve through history, through a dedicated read-only resolver. `resolve_visible_identifier`, `prepare_page_read` and every write path stay literal.
 - A claim is admitted only from a page under `Sources/` or `Evidence/` and only for a Markdown path under `Sources/`.
@@ -39,11 +41,11 @@ The live drain preview counts the Sources whose append-only referrers name them 
 - Completeness is proved only when `delta_since` is complete and no changed, deleted or pending path lies under a claimant tree. A restart does not make every Sources read warm.
 - The history store is chosen then, between extending `.refs.sqlite` and adding history to the shared broad `WikilinkResolver`, which is already tied to the vault checkpoint.
 
-Phase 2 requires its own design update and review before implementation.
+The delivered design had its own review in `add-curation-relocation-protocol`.
 
 ## Controls and costs
 
-- The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.
+- The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. After Decision 5 a path link is repointed through the governed pointer write, so the guard holds a file back only when the source carries no `exomem_id`. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.
 - Revert refusal for an unknown classification prevents inventing a classification. When it fires, the owner reclassifies explicitly. The owner pays one step.
 
 ## Migration Plan
@@ -51,4 +53,4 @@ Phase 2 requires its own design update and review before implementation.
 1. Ship Phase 1. No page changes until a reclassification runs.
 2. After release and installation on the personal service, preview the whole drain.
 3. Apply the moves that the preview clears in reviewed batches through governed reclassification, and check references after each batch.
-4. Roll back a file with revert. Decide Phase 2 from the count of files that the preview held back.
+4. Roll back a file with revert. Move the files that the preview held back after `add-curation-relocation-protocol` ships.

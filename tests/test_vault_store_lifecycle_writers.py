@@ -59,6 +59,8 @@ from exomem.vault_store import (
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
 
 MOVED = "Knowledge Base/Notes/Gamma Moved.md"
+#: Gamma's bytes after a move: its lineage entry naming the path it left is the only change.
+MOVED_TEXT = GAMMA_TEXT.replace("type: note\n", f"type: note\nmoved_from:\n- path: {GAMMA}\n")
 EPSILON = "Knowledge Base/Notes/Epsilon.md"
 EPSILON_TEXT = "---\ntitle: Epsilon\ntype: note\n---\n# Epsilon\n\nThe ledger is in [[Gamma]].\n"
 
@@ -108,7 +110,7 @@ def test_a_move_carries_the_rows_and_rewrites_a_stored_linker_without_writing_ma
     result = move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
 
     assert result.files_touched == [DELTA]
-    assert read.owned_bytes(served, MOVED) == GAMMA_TEXT.encode()
+    assert read.owned_bytes(served, MOVED) == MOVED_TEXT.encode()
     assert not read.page_exists(served, GAMMA)
     assert b"[[Gamma Moved]]" in read.owned_bytes(served, DELTA)
     assert store_rows(served, "SELECT 1 FROM pages WHERE path = ?", GAMMA) == []
@@ -340,11 +342,10 @@ def test_a_validated_move_names_the_hashes_that_its_commit_then_writes(served):
     move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
     after = {entry["path"]: entry.get("content_hash") for entry in validation.after}
     assert after[DELTA] == hashlib.sha256(read.owned_bytes(served, DELTA)).hexdigest()
+    assert after[MOVED] == hashlib.sha256(read.owned_bytes(served, MOVED)).hexdigest()
     renamed = {entry["path"]: entry for entry in validation.rename_after}
-    assert (
-        renamed[MOVED]["content_hash"]
-        == hashlib.sha256(read.owned_bytes(served, MOVED)).hexdigest()
-    )
+    # Right after the rename the page still holds its source bytes; its lineage entry follows.
+    assert renamed[MOVED]["content_hash"] == hashlib.sha256(GAMMA_TEXT.encode()).hexdigest()
     assert renamed[GAMMA] == {"path": GAMMA, "absent": True}
 
 
@@ -359,7 +360,7 @@ def test_a_governed_page_moves_through_the_store_with_no_tombstone_or_receipt(se
     assert revision(served) == start
     move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
 
-    assert read.owned_bytes(served, MOVED) == GAMMA_TEXT.encode()
+    assert read.owned_bytes(served, MOVED) == MOVED_TEXT.encode()
     assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
     assert not list((served / "Knowledge Base/_Governance").rglob("*.json"))
     assert receipts.event_records(served) == []

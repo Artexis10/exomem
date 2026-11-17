@@ -225,7 +225,9 @@ def test_actual_move_fences_both_endpoints_and_names_the_bytes_the_rename_instal
     else:
         assert dict(epochs[0].paths) == {old_rel: None, new_rel: vault.content_hash(source)}
     assert not old.exists()
-    expected = source if outside_kb else source.replace("Original", "Changed")
+    expected = source if outside_kb else source.replace("Original", "Changed").replace(
+        "---\n\n", f"moved_from:\n- path: {old_rel}\n---\n\n", 1
+    )
     assert (tmp_path / new_rel).read_text(encoding="utf-8") == expected
 
 
@@ -292,13 +294,14 @@ def test_uncertain_child_outcome_keeps_the_move_and_full_repair(tmp_path, monkey
             content_transform=lambda text: text.replace("Original", "Changed"),
         )
 
+    moved = source.replace("Original", "Changed").replace(
+        "---\n\n", f"moved_from:\n- path: {old_rel}\n---\n\n", 1
+    )
     assert not old.exists()
-    assert (tmp_path / new_rel).read_text(encoding="utf-8") == source.replace("Original", "Changed")
+    assert (tmp_path / new_rel).read_text(encoding="utf-8") == moved
     checkpoint = graph_sync.read_checkpoint(tmp_path)
     assert checkpoint is not None
-    assert dict(checkpoint.paths)[new_rel] == vault.content_hash(
-        source.replace("Original", "Changed")
-    )
+    assert dict(checkpoint.paths)[new_rel] == vault.content_hash(moved)
     assert deferred_index.graph_full_rebuild_pending(tmp_path) >= checkpoint.generation
 
 

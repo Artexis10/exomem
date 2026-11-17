@@ -1418,6 +1418,19 @@ def test_media_engine_fleet_default_is_validated_and_delivered_to_cellctl() -> N
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_source_erasure_selection_is_validated_and_delivered_to_cellctl() -> None:
+    selection = {"records": ["aaaaaaaaaaaaaaaa"]}
+    deployment = _find(_helm_template("--set-json", "cellctl.sourceErasureCellIds=" + json.dumps(selection)),
+                       "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value")
+           for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["CELLCTL_SOURCE_ERASURE_CELL_IDS"]) == selection
+    for bad in ({"records": ["not-a-cell"]}, ["aaaaaaaaaaaaaaaa"]):
+        result = _helm_render("--set-json", "cellctl.sourceErasureCellIds=" + json.dumps(bad))
+        assert result.returncode != 0 and "sourceErasureCellIds" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_a_misspelt_engine_name_is_refused_in_the_per_cell_selection() -> None:
     selection = {"documnets": ["aaaaaaaaaaaaaaaa"]}
     result = _helm_render("--set-json", "cellctl.mediaEngineCellIds=" + json.dumps(selection))

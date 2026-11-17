@@ -176,6 +176,13 @@ def create_file(
     existing_text: str | None = None
     existing_guard: vault_module.PathGuard | None = None
     existing_file = abs_path.exists()
+    if not existing_file:
+        from . import prior_claims
+
+        try:
+            prior_claims.require_unreserved(vault_root, rel_path, newest=not validate_only)
+        except prior_claims.ReservedPathError as error:
+            raise CreateFileError(code=error.code, reason=error.reason) from None
     if existing_file:
         # A file the writer may not see is never overwritten: it is refused
         # exactly as an occupied path is without `overwrite`, before any read.

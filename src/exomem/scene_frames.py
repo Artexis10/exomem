@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
-from . import embeddings, index_sync, semantic_contract
+from . import embeddings, index_sync, prior_claims, semantic_contract
 from .governance import projected_retrieval
 from .preserve import _render_sidecar
 from .vault import (
@@ -454,6 +454,9 @@ def write_scene_frames(
         sidecar = jpg.with_name(name + ".md")
         artifact_rel = jpg.relative_to(root).as_posix()
         try:
+            # A frame pair that moved away still claims these names, so its old links never
+            # reach a re-extracted frame; that one frame is skipped.
+            prior_claims.require_unreserved(root, sidecar.relative_to(root).as_posix())
             md = _render_sidecar(
                 artifact_name=name,
                 scope=scope,

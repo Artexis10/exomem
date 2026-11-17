@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from exomem import catalogue_prewarm as prewarm
-from exomem import freshness, lexstore, privacy_log, reserved_paths
+from exomem import freshness, lexstore, privacy_log, reserved_paths, source_custody
 from exomem.log_events import JsonLinesFormatter
 
 
@@ -171,6 +171,16 @@ def test_invalid_stage_is_observational_then_discarded_for_cold_fallback(vault, 
     assert not prewarm._staged_copies(store)
     lexstore.ensure_fresh(vault)
     assert store.path.exists()
+
+
+def test_a_copy_staged_before_a_source_erasure_cutoff_is_rebuilt_by_the_next_build(vault):
+    """Kept as already staged, a copy that boot refuses would leave every later boot on the cold path."""
+    _stage(vault)
+    # The persistent cutoff an erasing cell writes; its own tests drive a real erase.
+    source_custody._generation_path(vault).write_text("1\n", encoding="ascii")
+
+    assert prewarm.build(vault) == "staged"
+    assert prewarm.adopt_at_boot(vault)
 
 
 def test_adopted_copy_uses_restart_heal_for_edits_additions_and_deletions(vault, monkeypatch):

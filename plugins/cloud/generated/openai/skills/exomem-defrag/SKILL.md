@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: 6014d4b3a1cf783979da9011166a5c97265228c81e27093c39145ddc057de35b
+  skill_contract: 0449beceb4bf65dffc17754e5b417ccd0da5eca0520b24779b1c80ad2bec2eb7
   version: "0.1.0"
 ---
 
@@ -24,8 +24,9 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Content outside the managed Knowledge Base is
+read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
@@ -95,7 +96,7 @@ Only mutate when the correct action is clear. Use supersession for meaningful ch
 ## Mistakes to avoid
 Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.
 
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

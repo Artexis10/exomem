@@ -171,6 +171,11 @@ cellctl:
   # for it: the default then changes no existing cell's render and restarts no pod.
   # Empty keeps every engine off in a cell that mediaEngineCellIds does not name.
   mediaEngineFleetDefault: []
+  # Identity system -> the cells whose owner enabled captured-Source erasure for it
+  # (erase-captured-source), e.g. {"<identity system>": ["<cell id>"]}. Add a cell
+  # only when its owner enables erasure. A change restarts only the cells it names.
+  # There is no fleet default: every cell not named here keeps erasure off.
+  sourceErasureCellIds: {}
   # Qualified values are operator supplied only after shared-worker acceptance.
   sharedWorker:
     mode: "off"

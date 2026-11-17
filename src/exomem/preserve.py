@@ -348,6 +348,21 @@ def _sidecar_path(artifact: Path, *, protected: bool) -> Path:
     return artifact.with_name(f"{artifact.name}.md")
 
 
+def _refuse_reserved_capture(vault_root: Path, paths: tuple[Path, ...]) -> None:
+    """Refuse a capture whose artifact or page would take a path a moved page still claims.
+
+    A moved artifact leaves with its page, so both of its old names stay reserved (`prior_claims`).
+    """
+    from . import prior_claims
+
+    for path in dict.fromkeys(paths):
+        try:
+            prior_claims.require_unreserved(vault_root, path.relative_to(vault_root).as_posix())
+        except prior_claims.ReservedPathError as error:
+            code = "ARTIFACT_EXISTS" if error.code == "FILE_EXISTS" else error.code
+            _raise(code, ["filename"], f"{error.reason}; pick a new filename")
+
+
 def _sidecar_paths(artifact: Path, *, protected: bool, source: bool = False) -> tuple[Path, ...]:
     canonical = _sidecar_path(artifact, protected=protected)
     if source and not protected:
@@ -701,6 +716,7 @@ def preserve(
         # only `.md` is indexed. A preserved transcript used to land exactly
         # that way, which is why citing it reported the source as missing.
         sidecar_path = _sidecar_path(folder / filename_safe, protected=raw_protection)
+        _refuse_reserved_capture(vault_root, (artifact_path, sidecar_path))
         if sidecar_path.exists():
             return _raise(
                 "COMPANION_EXISTS",
@@ -1411,6 +1427,17 @@ def _render_sidecar(
     return "\n".join(lines)
 
 
+def _require_unclaimed_page(vault_root: Path, page: Path) -> None:
+    """Raise `prior_claims.ReservedPathError` when a moved page still claims `page`.
+
+    A binary at such a path arrived after its namesake pair moved. A page for it there would
+    capture the moved page's old links, so the binary stays unpaged until it is renamed.
+    """
+    from . import prior_claims
+
+    prior_claims.require_unreserved(vault_root, page.relative_to(vault_root).as_posix())
+
+
 def ensure_media_sidecar(
     vault_root: Path, binary_path: Path, *, today: dt.date | None = None
 ) -> tuple[Path, bool]:
@@ -1436,6 +1463,7 @@ def ensure_media_sidecar(
     connector_boundary.require_create(vault_root, sidecar.relative_to(vault_root).as_posix(), replace_existing=True)
     if sidecar.exists():
         return sidecar, False
+    _require_unclaimed_page(vault_root, sidecar)
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
     tree, scope, category = artifact_location(rel)
     md = _render_sidecar(
@@ -1493,6 +1521,7 @@ def ensure_artifact_page(
     connector_boundary.require_create(vault_root, page.relative_to(vault_root).as_posix(), replace_existing=True)
     if page.exists():
         return page, False
+    _require_unclaimed_page(vault_root, page)
 
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
     tree, scope, category = artifact_location(rel)

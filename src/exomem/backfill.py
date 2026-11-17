@@ -30,6 +30,7 @@ from . import (
     extract,
     index_sync,
     preserve,
+    prior_claims,
     recall_policy,
     rename_journal,
     scene_frames,
@@ -387,7 +388,12 @@ def backfill_media(
             if not _is_automatic_media_candidate(vault_root, f):
                 _purge_suppressed_clip(clip_store, vault_root, f)
                 continue
-            sidecar, created = preserve.ensure_media_sidecar(vault_root, f)
+            try:
+                sidecar, created = preserve.ensure_media_sidecar(vault_root, f)
+            except prior_claims.ReservedPathError as error:
+                log_fn(f"  [{i}/{len(files)}] {rel} -> no sidecar: {error.reason}")
+                stats.skipped += 1
+                continue
             stats.sidecars_created += int(created)
         if need_ocr or need_rediarize or need_retime:
             if not _is_automatic_media_candidate(vault_root, f):

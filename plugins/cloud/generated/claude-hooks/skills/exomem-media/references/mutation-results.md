@@ -27,6 +27,9 @@ title: `Saved -> <title>`,
 `Updated -> <title>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
 `Replaced -> <new title>, was <old title>`, `Discarded -> <path>` or `Restored -> <path>`.
 A tool whose subject is a file names the file by its path instead.
+A move that repointed links in append-only pages adds
+`. Repointed the links to it in <n> append-only pages`, and `pointer_repointed`
+names those pages by title; only their link spans changed.
 Several files read `Saved 3 files -> first.md and 2 more`. A batch with a file that
 failed or was already stored counts each state, and `Saved` covers only the files that
 this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not be saved`,
@@ -67,6 +70,10 @@ more than one independent question? The runtime counts size and claims nothing
 about the page. The field reports nothing about any other page, and it never
 affects `status`, `mutated`, or replay. Nothing is reorganised by the runtime;
 answering is the agent's decision with the user (see `writing.md`).
+Its `kind` is `ownership` while the written page is asked whether it belongs in its
+project and nobody has answered. It holds the review item's `ref`, `fingerprint` and
+`id`, and one `question` that carries the ownership test and the call that keeps the
+page where it is. A response carries one such advisory, and the ownership one leads.
 Use `detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed

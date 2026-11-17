@@ -63,6 +63,11 @@ STATE_FILENAME = ".review-state.json"
 #: pathological store, not an expectation — a live store compacts past 1 MiB
 #: and sits orders of magnitude below it.
 _STATE_READ_LIMIT = 64 * 1024 * 1024
+
+#: Parsed stores for read-only advisory readers, by file path. One process can serve several
+#: vaults, so the memo is capped like the due-state memos; a replaced file changes its token.
+_SHARED_CAP = 8
+_SHARED: dict[str, tuple[tuple[int, int, int], dict[str, Any]]] = {}
 #: How much further the RECOVERY path may read.
 #:
 #: Failing closed on an over-limit store is only safe if there is a way back,
@@ -583,6 +588,31 @@ class ReviewStateStore:
             publish_holder_metadata=False,
         ), _LOCK:
             yield
+
+    def load_shared(self) -> dict[str, Any]:
+        """The store for a caller that only reads it: parsed once per file version.
+
+        A store of tens of thousands of decisions takes tens of milliseconds to parse, and the
+        write path reads it for several advisories. The returned object is shared: a caller
+        that changes the store uses `load`, never this. Every writer replaces the file, so
+        inode, mtime and size together name its version. Raises like `load`.
+        """
+        try:
+            info = self.path.stat()
+        except OSError:
+            return self.load()
+        token = (info.st_ino, info.st_mtime_ns, info.st_size)
+        key = str(self.path)
+        with _LOCK:
+            held = _SHARED.get(key)
+        if held is not None and held[0] == token:
+            return held[1]
+        payload = self.load()
+        with _LOCK:
+            if key not in _SHARED and len(_SHARED) >= _SHARED_CAP:
+                _SHARED.pop(next(iter(_SHARED)))
+            _SHARED[key] = (token, payload)
+        return payload
 
     def load(self, *, read_limit: int | None = None) -> dict[str, Any]:
         """The store, or an empty one when the file is absent.
