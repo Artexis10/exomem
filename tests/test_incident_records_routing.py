@@ -872,21 +872,22 @@ def _remember_failure(
     body: str,
     slug: str,
     *,
-    project: str = "widget-app",
+    project: str | None = "widget-app",
     title: str = "Widget panel froze on load",
     tags: list[str] | None = None,
     unit_tag: str | None = None,
+    note_type: str = "failure",
 ) -> dict:
     from exomem import commands
 
     arguments = {
-        "content": f"## Observations\n\n- [failure] {body} #{unit_tag or project} ^{slug}\n",
+        "content": f"## Observations\n\n- [{note_type}] {body} #{unit_tag or project} ^{slug}\n",
         "title": title,
         "slug": slug,
-        "note_type": "failure",
-        "projects": [project],
+        "note_type": note_type,
         "tags": tags if tags is not None else [project, "failure"],
         "sources": [evidence],
+        **({"projects": [project]} if project else {}),
     }
     validation = commands.op_remember(vault, validate_only=True, **arguments)
     return commands.op_remember(
@@ -1009,6 +1010,64 @@ def test_a_singular_project_on_a_failure_note_still_routes_and_is_reported(
     assert any("`project` was applied as projects" in warning for warning in written["warnings"])
     routing = _terminal_routing(written["creation"]["records_routing"])
     assert routing is not None and routing["disposition"] == "file"
+
+
+def test_a_partly_declared_collection_wins_the_write_over_a_wider_undeclared_one(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure note names no project, so the declaration is only partly held."""
+    from exomem import commands
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal")
+    commands.op_record_memory(
+        vault,
+        action="create",
+        manifest_path=LEDGER,
+        manifest_text=_incident_manifest(claims="claims:\n  tags: [panel, stall, render, queue]\n")
+        .replace("21111111-1111-4111-8111-111111111111", "31111111-1111-4111-8111-111111111111")
+        .replace("Widget incidents", "Panel ledger"),
+        why="track panel stalls",
+    )
+    due_state.reconcile(vault)
+
+    written = _remember_failure(
+        vault, evidence, "The panel stalled while rendering", "panel-stall-render",
+        project=None, title="Panel stall render", tags=["dogfood", "regressions"],
+        unit_tag="dogfood",
+    )
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None
+    assert routing["collection"] == INCIDENTS
+    assert routing["strength"] == "moderate" and "disposition" not in routing
+
+
+def test_a_declared_route_files_whatever_type_it_declares(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The collection's declaration, not the page's type word, decides that it is acted on."""
+    from exomem import commands
+
+    declares_insights = _INCIDENT_CLAIMS + "  match:\n    type: [insight]\n    project: [widget-app]\n"
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=declares_insights)
+
+    written = _remember_failure(
+        vault, evidence, "Batching panel renders removes the stall", "batch-panel-renders",
+        title="Batch panel renders", note_type="insight",
+    )
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["strength"] == "strong"
+    assert routing["disposition"] == "file"
+    assert "recurring incident" not in routing["instruction"]
+    # The unreflected-observation entry that an edit consults exists for a declared route too.
+    edited = _edit_note(
+        vault, _created(written)[0], "removes the stall", "removes the stall on first load"
+    )
+    reoffered = _raw_routing(edited)
+    assert reoffered is not None and reoffered["disposition"] == "file"
+    appended = commands.op_record_memory(vault, **routing["record_memory"])
+    assert appended["operation"] == "append"
 
 
 def test_a_routed_failure_note_stays_coverage_visible_under_a_partial_census(
