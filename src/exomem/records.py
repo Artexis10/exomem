@@ -1164,11 +1164,21 @@ def resolve_preserved_source(
     """
     if type(reference) is not str or not reference or len(reference.encode("utf-8")) > 1024:
         return None
+    lanes = tuple(managed_join(f"{lane}/") for lane in _BULK_SOURCE_LANES)
     try:
-        path, relative = vault.resolve_under_vault(
-            root, reference, must_exist=True, must_be_file=True
-        )
-        lanes = tuple(managed_join(f"{lane}/") for lane in _BULK_SOURCE_LANES)
+        try:
+            path, relative = vault.resolve_under_vault(
+                root, reference, must_exist=True, must_be_file=True
+            )
+        except vault.VaultPathError:
+            from . import originals
+
+            # A shared archive keeps a preserved original's bytes in its pool, so its filing has no file at its
+            # path. The read gate decides: a deleted filing resolves to nothing, like an absent one.
+            path, relative = vault.resolve_under_vault(root, reference)
+            if (os.path.lexists(path) or not relative.startswith(lanes)
+                    or originals.digest_addressed(root, relative) is None):
+                return None
         if relative == reference and relative.startswith(lanes) and released(relative, path):
             return path, relative
     except (vault.VaultPathError, vault.PathGuardError, OSError, ValueError, UnicodeDecodeError):
