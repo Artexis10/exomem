@@ -8990,9 +8990,9 @@ def _machinery_markdown(vault_root: Path) -> list[str]:
     the resolver's corpus skips, which a writer still counts when it picks a short link.
 
     A machinery folder is a name of `CORPUS_EXCLUDED_DIR_NAMES` with no leading dot, because Obsidian hides a
-    dot-named folder. A store-mode vault reads its stored pages from the store's path index and takes only the
-    files the store does not own from the disk. A machinery folder below a content folder is not read: finding
-    it would take a walk of every folder.
+    dot-named folder. A store-mode vault also reads its stored pages from the store's path index, in case the
+    projection onto disk lags; `build_index` counts a path in both lists once. A machinery folder below a
+    content folder is not read: finding it would take a walk of every folder.
     """
     from . import find_corpus
 
@@ -9002,13 +9002,15 @@ def _machinery_markdown(vault_root: Path) -> list[str]:
     found: list[str] = []
     stored = find_corpus.store_serves(root)
     if stored:
-        from .vault_store import ownership, read
+        from .vault_store import read
 
         key = managed_root_key()
         with read.snapshot(root) as view:
             for name in names:
                 found.extend(
-                    meta.path for meta in view.pages(f"{key}/{name}/" if key else f"{name}/")
+                    meta.path
+                    for meta in view.pages(f"{key}/{name}/" if key else f"{name}/")
+                    if meta.path.lower().endswith(obsidian_links.MARKDOWN_SUFFIX)
                 )
     pending = [base / name for name in names if (base / name).is_dir() and not (base / name).is_symlink()]
     while pending:
@@ -9024,10 +9026,11 @@ def _machinery_markdown(vault_root: Path) -> list[str]:
                 continue
             if entry.is_dir(follow_symlinks=False):
                 pending.append(Path(entry.path))
-            elif entry.name.lower().endswith(".md") and ".sync-conflict-" not in entry.name:
-                rel = relative_posix(Path(entry.path), root)
-                if not stored or ownership.classify(rel) is not ownership.Ownership.PAGE:
-                    found.append(rel)
+            elif (
+                entry.name.lower().endswith(obsidian_links.MARKDOWN_SUFFIX)
+                and ".sync-conflict-" not in entry.name
+            ):
+                found.append(relative_posix(Path(entry.path), root))
     return found
 
 

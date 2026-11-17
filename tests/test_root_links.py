@@ -12,10 +12,15 @@ import shutil
 from pathlib import Path
 
 import pytest
+from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_vault_store_migration import ALPHA, vault  # noqa: F401
+from test_vault_store_read_write import put, stored, writer  # noqa: F401
 
-from exomem import commands, obsidian_links, vault
+from exomem import commands, obsidian_links
 from exomem import schema as schema_module
+from exomem import vault as vault_module
 from exomem.governance.principal import library_scope
+from exomem.vault_store import write
 from tests.conftest import FIXTURE_VAULT, bind_root_vault, initialize_vault_state_offline
 
 KB = "Knowledge Base"
@@ -48,7 +53,7 @@ def _obsidian_sees(vault_root: Path) -> dict[str, list[str]]:
 
 def _link_texts(text: str) -> list[str]:
     """The page part of every wikilink in `text` that names a page, in order; a folder link names none."""
-    pages = (vault.split_wikilink_target(match.group(0))[0] for match in vault.find_body_wikilinks(text))
+    pages = (vault_module.split_wikilink_target(match.group(0))[0] for match in vault_module.find_body_wikilinks(text))
     return [page for page in pages if not page.endswith("/")]
 
 
@@ -146,3 +151,17 @@ def test_a_link_to_an_entity_resolves_after_the_entity_is_written(root_vault: Pa
     organization = next(path for path in (root_vault / "Entities").rglob("Pump Works.md"))
     landed = _resolved(root_vault, organization.relative_to(root_vault).as_posix())
     assert set(landed) == {person["path"], note}
+
+
+def test_a_store_mode_vault_counts_the_machinery_files_it_stores_and_the_ones_it_does_not(
+    stored, writer  # noqa: F811
+) -> None:
+    """A machinery folder holds stored pages and loose files; the group counts both and no content page."""
+    write.commit(writer, put("Knowledge Base/_trash/Gamma.md", b"# Gamma\n"))
+    _write_markdown(stored, "Knowledge Base/_archive/2026/Delta.md")
+
+    found = set(vault_module._machinery_markdown(stored))
+
+    assert {"Knowledge Base/_trash/Gamma.md", "Knowledge Base/_archive/2026/Delta.md"} <= found
+    assert ALPHA not in found
+    assert all(path.lower().endswith(".md") for path in found)
