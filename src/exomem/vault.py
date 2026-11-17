@@ -45,6 +45,7 @@ from . import (
     call_spans,
     freshness,
     held_fs,
+    obsidian_links,
     privacy_log,
     request_budget,
     reserved_paths,
@@ -9004,6 +9005,9 @@ class WikilinkResolver:
     #: The token of the resident publication whose maps these are, so a reader may keep what it
     #: derives from them beside that token. Every patch drops it; only the publisher sets it.
     publication: object | None = None
+    #: Obsidian's link index of the pages this resolver holds, with the resolver that reads it. Built on the first
+    #: step-6 lookup or short-form request, and dropped by every patch, so a copy made by `from_maps` starts with none.
+    _link_names: tuple[obsidian_links.Index, obsidian_links.IndexResolver] | None = None
 
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
@@ -9120,6 +9124,38 @@ class WikilinkResolver:
                 return candidate.title_key
         return None
 
+    def link_names(self) -> tuple[obsidian_links.Index, obsidian_links.IndexResolver]:
+        """The basename index of the pages this resolver holds, and Obsidian's rule over it.
+
+        The resolver's corpus skips the machinery folders, so those files are not in the index and a link into
+        them stays unresolved. The index is built once per resolver state: every patch drops it.
+        """
+        names = self._link_names
+        if names is None:
+            index = obsidian_links.build_index(
+                candidate.path for group in self.candidates_by_key.values() for candidate in group
+            )
+            names = self._link_names = (index, obsidian_links.IndexResolver(index))
+        return names
+
+    def obsidian_match(
+        self, page: str, *, visible: Callable[[str], bool] | None = None
+    ) -> WikilinkCandidate | None:
+        """The single page that Obsidian's rule names for the page part of a link, or None.
+
+        Step 6 of the resolver's order, which only a link that no earlier step resolved reaches. The rule
+        is closed, because Obsidian's behaviour fixes it (`obsidian_links`). A text that two files satisfy
+        stays unresolved. `visible` limits the files to those a writer may see, as the earlier steps do.
+        """
+        match = self.link_names()[1].resolve(page)
+        paths = [path for path in match.paths if visible is None or visible(path)]
+        if len(paths) != 1:
+            return None
+        for candidate in self.candidates_by_key.get(_wikilink_path_key(paths[0]), ()):
+            if candidate.path == paths[0]:
+                return candidate
+        return None
+
     # ---- shared add/remove primitives -------------------------------------
     # The full build AND the incremental patch both go through these, so a
     # patched resolver's maps are byte-identical to a fresh rebuild's for the
@@ -9139,6 +9175,7 @@ class WikilinkResolver:
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
         self.publication = None
+        self._link_names = None
         self.candidates_by_key[no_ext] = tuple(
             sorted(
                 (
@@ -9161,6 +9198,7 @@ class WikilinkResolver:
         if not any(candidate.path == rel_path for candidate in previous):
             return
         self.publication = None
+        self._link_names = None
         remaining = tuple(candidate for candidate in previous if candidate.path != rel_path)
         if remaining:
             self.candidates_by_key[no_ext] = remaining
@@ -9495,6 +9533,14 @@ def _normalize_wikilink(
             found = retired(cleaned)
         if found is not None:
             return _wikilink_path_key(found) + anchor, None, None
+
+    # 6. Obsidian's rule over the link index: the case-insensitive basename or the trailing path, when a
+    # single file satisfies it. It runs last, so only a link that resolves nowhere else changes. A targeted
+    # caller asked for no resolver, and its explicit path stays a namespace question.
+    if resolver is not None:
+        found_candidate = resolver.obsidian_match(cleaned, visible=visible)
+        if found_candidate is not None:
+            return _selected([found_candidate], "obsidian rule")
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result
