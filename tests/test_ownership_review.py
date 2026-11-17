@@ -37,7 +37,8 @@ from exomem.governance.principal import request_scope
 from exomem.vault import parse_frontmatter
 from tests.page_opens import pages_opened
 from tests.test_consolidated_tools import _build, _call, _tool
-from tests.test_episode_memory_command import _audience, _withhold_notes_from
+from tests.test_derived_identifier_egress import _govern, _reset
+from tests.test_episode_memory_command import _audience
 
 TODAY = dt.date(2026, 8, 16)
 FOLDER = "Knowledge Base/Notes/Research/Travel"
@@ -585,7 +586,9 @@ def test_a_restricted_caller_cannot_tell_a_withheld_page_id_from_no_id(vault: Pa
     _ask(vault, withheld)
     due_state.reconcile(vault, today=TODAY)
     asked = _suggestion(_grow(vault, withheld, 2))
-    _withhold_notes_from(vault, "client-a")
+    # The scope must match the page that exists: a withheld scope that names no page withholds nothing.
+    _govern(vault, "client-a", scope="Notes/Insights/withheld-*.md")
+    _reset()
 
     with request_scope(_audience("client-a")):
         with pytest.raises(OpError) as withheld_id:
