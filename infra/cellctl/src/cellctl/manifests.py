@@ -387,6 +387,8 @@ class CellManifestSpec:
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
+    # erase-captured-source: the cell's Source erasure policy JSON, or "" to keep erasure off.
+    source_erasure_policy: str = ""
     # add-cloud-media-store D4-D6: a cell the media edge serves. The URL selects the
     # cell; the rest is its standard-mode key bundle and edge credential, all or none.
     media_edge_url: str = ""
@@ -831,6 +833,8 @@ def _container_security_context() -> dict:
 # The per-cell media engine switch (cloud-multimodal-processing D7). It is the
 # variable the runtime's media_engines module reads.
 MEDIA_ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
+# The per-cell Source erasure policy, the variable the runtime's source_erasure module reads.
+SOURCE_ERASURE_POLICY_ENV = "EXOMEM_SOURCE_ERASURE_POLICY"
 
 
 # NEW-2: model_env is operator-only chart configuration, so this stays a
@@ -853,6 +857,8 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         "EXOMEM_KB_DIRNAME",
         # Rendered per cell from the media engine selection, never chart-wide.
         MEDIA_ENGINES_ENV,
+        # Rendered per cell from the erasure selection: a chart-wide value would enable every owner's cell.
+        SOURCE_ERASURE_POLICY_ENV,
         # Names the cell's media store and holds its key paths; cellctl renders it per cell.
         MEDIA_STORE_CONFIG_ENV,
         # `inline` would run media extraction inside the serving process, which a
@@ -1010,6 +1016,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": key, "value": value})
     if spec.media_engines:
         env.append({"name": MEDIA_ENGINES_ENV, "value": spec.media_engines})
+    if spec.source_erasure_policy:
+        env.append({"name": SOURCE_ERASURE_POLICY_ENV, "value": spec.source_erasure_policy})
     return env
 
 
