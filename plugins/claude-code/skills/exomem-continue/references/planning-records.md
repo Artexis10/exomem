@@ -147,8 +147,32 @@ title and tags only, compared in a folded form, so `failure`/`failures` and
 `regression`/`regressions` meet, and function words such as "not" or "after"
 never count as shared vocabulary.
 
-A strong route of a failure-shaped note carries a `disposition`, set by the
-user's prominence: `file` (perform the ready `add_record` call without
+A declaration also decides when only part of it holds. When no collection's
+whole `match` holds, a collection the page does not contradict is still
+preferred by how many of its declared predicates the page holds (a page silent
+about `project` can hold `type`), and shared words only rank the collections
+that tie on that count. A partly held declaration never makes a route `strong`
+by itself, and the collection still needs the shared words that any word route
+needs.
+
+A collection may also name how to capture into it:
+
+```yaml
+capture:
+  method: "[[Incident capture method]]"
+```
+
+`method` is one vault page (any kind: a procedure, a pattern, a skill) written
+as a quoted wiki link or an `exomem://memory/<uuid>` ref. Routing never depends
+on it. When a write routes to the collection, its `records_routing` carries
+`method` (a `title` and a `read_ref`) and, where the advisory asks you to act,
+tells you to follow it; when a turn routes to the collection, the page is
+served as a method to read. A method the caller cannot read, or that names no
+page, is left out, and `inspect_memory(operation="records.inspect")` reports one
+`CAPTURE_METHOD_UNAVAILABLE` finding for it.
+
+A strong route that a declared `match` produced carries a `disposition`,
+whatever the note's type, set by the user's prominence: `file` (perform the ready `add_record` call without
 asking), `append_occurrence` (perform the ready update payload, which adds the
 note to the existing item it recurs), `ask` (put the one precomposed question
 once and act only on yes), or `hold` (leave it for review). Editing a note that
