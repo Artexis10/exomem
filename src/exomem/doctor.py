@@ -887,6 +887,9 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
         )
     if vault_root is None:
         return _check("dep.fts5-lexical", "pass", "FTS5 + trigram are available.")
+    stored = _check_store_lexical(vault_root)
+    if stored is not None:
+        return stored
     side = lexstore.lexical_path(vault_root)
     if not side.exists():
         return _check(
@@ -909,6 +912,47 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
         "dep.fts5-lexical",
         "pass",
         f"FTS5 lexical sidecar healthy ({n} pages indexed).",
+    )
+
+
+def _check_store_lexical(vault_root: Path) -> DoctorCheck | None:
+    """`dep.fts5-lexical` for a store-mode vault, from the store's own rows; None for a file-mode vault.
+
+    A store-mode vault never reads the file-mode sidecar, which migration left frozen at the page count
+    of the day it was migrated.
+    """
+    from .collection_store.connection import CollectionStoreError
+    from .vault_store import mode, read
+
+    if not mode.store_mode_for_reads(vault_root):
+        return None
+    try:
+        with read.request_snapshot(vault_root):
+            state = read.readiness(vault_root)
+            with read.snapshot(vault_root) as view:
+                pages = view.connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    except (CollectionStoreError, OSError, sqlite3.Error) as error:
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            f"The store's lexical rows could not be read ({getattr(error, 'code', type(error).__name__)}).",
+            "Fix the store failure that the vault store checks in this report name.",
+        )
+    details = {"vault_store_revision": state.revision, "registry": state.registry}
+    notice = read.registry_notice(state)
+    if notice is not None:
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            f"The store holds {pages} lexical page row(s), and some may lag. {notice['notice']}",
+            "Keep the service running: the pass finishes there, and this check turns to pass.",
+            details=details,
+        )
+    return _check(
+        "dep.fts5-lexical",
+        "pass",
+        f"The store's lexical rows are healthy ({pages} pages indexed, at store revision {state.revision}).",
+        details=details,
     )
 
 
@@ -937,7 +981,18 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
     from . import index_sync, lexstore
+    from .vault_store import mode as store_mode
 
+    if store_mode.store_mode_for_reads(vault_root):
+        # Migration leaves file mode's queue in place, and a store commit drains nothing from it: the
+        # vectors follow the store's audit trail. A warning here would name `exomem index`, which a
+        # store-mode vault refuses.
+        return _check(
+            "deferred_index_backlog",
+            "pass",
+            "This vault is in store mode, which keeps no file-mode index backlog: its vectors follow the store.",
+            details=details,
+        )
     sidecar = lexstore.lexical_path(vault_root)
     if sidecar.exists():
         try:
@@ -1173,11 +1228,22 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
 
     store_graph = graph_state.read(vault_root)
     if store_graph is not None:
-        details = {
-            "state": "current" if store_graph.current else "unavailable",
-            "vault_store_revision": store_graph.revision,
-        }
+        details = {"state": store_graph.state, "vault_store_revision": store_graph.revision}
         if store_graph.current:
+            from .vault_store import read as store_read
+
+            notice = store_read.request_registry_notice(vault_root)
+            if notice is not None:
+                # The registry pass re-derives the pages in path order: the graph serves, and some rows may lag.
+                details = {**details, "state": notice["lag"]["registry"], "registry": notice["lag"]}
+                return _check(
+                    "graph_sync.state",
+                    "warn",
+                    f"The graph is served from the store at store revision {store_graph.revision}, and its "
+                    f"registry state is {notice['lag']['registry']}. {notice['notice']}",
+                    "Keep the service running: the pass finishes there, and this check turns to pass.",
+                    details=details,
+                )
             return _check(
                 "graph_sync.state",
                 "pass",
@@ -1185,7 +1251,7 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
                 details=details,
             )
         details["reason"] = store_graph.reason
-        if store_graph.reason == "graph_disabled":
+        if store_graph.reason == graph_state.GRAPH_DISABLED:
             return _check(
                 "graph_sync.state",
                 "warn",
@@ -1688,6 +1754,7 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
     that backlog will not shrink on its own.
     """
     from . import epistemic_graph, freshness, semantic_contract
+    from .vault_store import mode as store_mode
 
     corpus_cache = semantic_contract.corpus_context_cache_enabled()
     event_indexes = freshness.event_indexes_enabled()
@@ -1698,7 +1765,8 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
         "graph_scheduling_enabled": graph_scheduling,
     }
 
-    if not event_indexes and vault_root is not None:
+    # A store-mode vault drains no file-mode queue, so the queue says nothing about its write path.
+    if not event_indexes and vault_root is not None and not store_mode.store_mode_for_reads(vault_root):
         from . import index_sync
 
         status = index_sync.deferred_work_status(vault_root)

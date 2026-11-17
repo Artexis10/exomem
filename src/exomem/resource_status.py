@@ -104,7 +104,15 @@ def _cache_residency() -> dict[str, Any]:
 
 def _deferred_work(vault_root: Path | None) -> dict[str, Any]:
     from . import index_sync
+    from .vault_store import mode as store_mode
 
+    if vault_root is not None and store_mode.store_mode_for_reads(vault_root):
+        # Migration leaves file mode's queues where they were and nothing in store mode drains them: the
+        # vectors follow the store's audit trail. Their counts would report work that never runs.
+        return {
+            "state": "not_applicable",
+            "reason": "This vault is in store mode, which keeps no file-mode index queue: its vectors follow the store.",
+        }
     return index_sync.deferred_work_status(vault_root)
 
 
