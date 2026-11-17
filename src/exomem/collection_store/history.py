@@ -589,8 +589,12 @@ def release_inputs(root):
     The store thread keys its history repair on this, so a changed policy, access file, blocked flag
     or tombstone marks the pages pending without a census render. It reads no history.
     """
+    from .. import layout
+
     found = _file_inputs(root)
-    return hashlib.sha256(json.dumps([found.policy.fingerprint, *found.key]).encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps([found.policy.fingerprint, *found.key]).encode()).hexdigest()
+    # A `root` vault reads a governance path selector through its registered areas, which no policy file holds.
+    return layout.fold_selector_identity(digest)
 
 
 class PageContext:

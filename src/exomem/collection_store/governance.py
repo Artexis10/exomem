@@ -1218,7 +1218,11 @@ class OperationAuthorization:
         return decision
 
     def _release_dependency(self):
-        return (self.policy.fingerprint, self.who.audience_id, self.who.resolved, self.purpose,
+        from .. import layout  # a local name here is a collection layout in most of this module
+
+        # A `root` vault reads a governance path selector through its registered areas, which no policy file holds.
+        policy_identity = layout.fold_selector_identity(self.policy.fingerprint)
+        return (policy_identity, self.who.audience_id, self.who.resolved, self.purpose,
                 self.access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)), self.mutation,
                 connector_boundary.cache_identity(self.root, self.who, self.policy))
 

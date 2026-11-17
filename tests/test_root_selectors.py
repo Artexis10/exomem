@@ -8,13 +8,15 @@ reader must read the authored value through the served layout. A reader that doe
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 
 import pytest
 
-from exomem import access, commands, layout, topic_carriers
+from exomem import access, commands, layout, recall_policy, topic_carriers
 from exomem import find as find_module
+from exomem.collection_store import history
 from exomem.governance import egress, membership, policy
 from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
 from exomem.vocabulary import instances, registry_specs
@@ -162,18 +164,12 @@ def test_a_selector_names_the_same_pages_in_every_spelling(root_vault: Path) -> 
     assert members[0][RESTRICTED] == {SCOPE_ID} and members[0][OPEN] == frozenset()
 
 
-def test_a_registry_change_moves_a_selector_that_named_the_new_area(root_vault: Path) -> None:
-    """The areas are cached, so a type that a save adds afterwards must read its area into the selector at once."""
-    _write(root_vault, "Playbooks/restart.md", _page("Restart order"))
-    _withhold(root_vault, paths='["Notes/Playbooks/**"]')
-    with request_scope(EXTERNAL):
-        before = {item["id"] for item in commands.op_search(root_vault, query=TOKEN, limit=50)["results"]}
-    assert "Playbooks/restart.md" in before  # no registered area: the selector keeps its written form and selects nothing
-
+def _add_the_playbooks_area(vault: Path) -> None:
+    """The owner's registry save that gives `Playbooks` its own note type, which makes it a registered area."""
     with library_scope():
-        inspected = commands.op_schema_memory(root_vault, subject="note-types", operation="inspect")
+        inspected = commands.op_schema_memory(vault, subject="note-types", operation="inspect")
         commands.op_schema_memory(
-            root_vault,
+            vault,
             subject="note-types",
             operation="save",
             proposal={"upsert": {"playbook": {
@@ -183,11 +179,84 @@ def test_a_registry_change_moves_a_selector_that_named_the_new_area(root_vault: 
             expected_hash=inspected["content_hash"],
             why="the owner keeps playbooks in their own area",
         )
-    find_module.clear_cache()
-    with request_scope(EXTERNAL):
-        after = {item["id"] for item in commands.op_search(root_vault, query=TOKEN, limit=50)["results"]}
 
-    assert "Playbooks/restart.md" not in after
+
+def _what_stored_state_follows(vault: Path) -> dict[str, str | None]:
+    """Every identity that an index, a recall checkpoint or a history release is kept against."""
+    return {
+        "access": access.policy_fingerprint(vault),
+        "recall": recall_policy.recall_policy_identity(vault)[1],
+        "publication": access.publication_policy_snapshot(vault).fingerprint,
+        "history": history.release_inputs(vault),
+    }
+
+
+def test_a_registry_save_that_adds_an_area_withholds_its_page_from_a_restricted_caller_at_once(
+    root_vault: Path,
+) -> None:
+    """A `Notes/<Area>/` selector reads as the area's folder only for a registered area, so a save moves its members."""
+    _write(root_vault, "Playbooks/restart.md", _page("Restart order"))
+    _withhold(root_vault, paths=f'["{KB}/Notes/Playbooks/**"]')
+
+    def seen() -> dict[str, object]:
+        with request_scope(EXTERNAL):
+            searched = "Playbooks/restart.md" in {
+                item["id"] for item in commands.op_search(root_vault, query=TOKEN, limit=50)["results"]
+            }
+            found = "Playbooks/restart.md" in {
+                hit["path"] for hit in commands.op_find(root_vault, query=TOKEN, limit=10)
+            }
+            try:
+                commands.op_get(root_vault, path="Playbooks/restart.md")
+            except ValueError as refused:
+                read = str(refused).split(":")[0]
+            else:
+                read = "RELEASED"
+        return {"search": searched, "find": found, "get": read}
+
+    # No registered area: the selector keeps its written form and selects nothing, so the page is released.
+    assert seen() == {"search": True, "find": True, "get": "RELEASED"}
+
+    _add_the_playbooks_area(root_vault)
+
+    assert seen() == {"search": False, "find": False, "get": "NOT_FOUND"}
+
+
+def test_a_registry_save_that_adds_an_area_moves_every_identity_that_stored_state_follows(root_vault: Path) -> None:
+    """Stored recall checkpoints and history releases follow these identities, and no page or policy byte changed."""
+    _write(root_vault, "Playbooks/restart.md", _page("Restart order"))
+    _write(root_vault, "_access.yaml", "excluded:\n  - Notes/Playbooks\n")
+    _withhold(root_vault, paths=f'["{KB}/Notes/Playbooks/**"]')
+    before = _what_stored_state_follows(root_vault)
+    assert access.access_tier(root_vault, "Playbooks/restart.md") != access.TIER_EXCLUDED
+
+    _add_the_playbooks_area(root_vault)
+    after = _what_stored_state_follows(root_vault)
+
+    assert access.access_tier(root_vault, "Playbooks/restart.md") == access.TIER_EXCLUDED
+    assert all(before[name] != after[name] for name in before), (before, after)
+    # A recall checkpoint is published only while these two agree.
+    assert before["access"] == before["recall"] == before["publication"]
+    assert after["access"] == after["recall"] == after["publication"]
+
+
+def test_a_registry_save_that_adds_an_area_leaves_the_identities_of_a_nested_vault_as_they_were(
+    tmp_path: Path,
+) -> None:
+    """The area set belongs to `root`: a nested vault keeps its fingerprints, so none of its stored state rebuilds."""
+    vault = tmp_path / "nested"
+    shutil.copytree(FIXTURE_VAULT, vault)
+    initialize_vault_state_offline(vault, source="nested identity fixture")
+    raw = b"excluded:\n  - Notes/Playbooks\n"
+    (vault / KB / "_access.yaml").write_bytes(raw)
+    _withhold(vault / KB, paths=f'["{KB}/Notes/Playbooks/**"]')
+    before = _what_stored_state_follows(vault)
+
+    _add_the_playbooks_area(vault)
+    after = _what_stored_state_follows(vault)
+
+    assert before == after
+    assert before["access"] == hashlib.sha256(raw).hexdigest()
 
 
 def test_a_nested_vault_still_reads_the_selector_as_written(tmp_path: Path) -> None:

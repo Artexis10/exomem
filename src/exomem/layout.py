@@ -22,6 +22,7 @@ plan and `layout_report`, which feeds status and doctor, call `inspect` and neve
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import threading
@@ -557,6 +558,30 @@ def read_selectors(values: tuple[str, ...]) -> tuple[str, ...]:
 def read_selector(value: str) -> str:
     """One authored path selector value, read in the layout that this process serves."""
     return read_selectors((value,))[0]
+
+
+@lru_cache(maxsize=256)
+def _bound_to(fingerprint: str, areas: Areas) -> str:
+    names = "\0".join(sorted(areas.names))
+    return hashlib.sha256(f"{fingerprint}\0{names}".encode()).hexdigest()
+
+
+def fold_selector_identity(fingerprint: str) -> str:
+    """`fingerprint` of a live file that holds authored selectors, bound to the areas that read them.
+
+    In `root` a `Notes/<Area>/` selector selects the area's folder only while `<Area>` is registered,
+    so the same file bytes name other pages once a registry save adds an area. Every index, cache and
+    recall checkpoint that follows such a fingerprint must therefore follow the area set too. In
+    `nested` a selector is read as written, so the fingerprint comes back as it is and no stored
+    state of a `nested` vault is invalidated.
+
+    Fold a fingerprint that is a pure function of live files (`_access.yaml`) and is rebuilt when it
+    moves. Do not fold the governance `Policy.fingerprint`: a stored policy generation is verified by
+    recompiling its stored document bytes, so a fingerprint that carried the area set would stop
+    matching its own generation at the first registry save.
+    """
+    areas = selector_areas()
+    return fingerprint if areas is None else _bound_to(fingerprint, areas)
 
 
 # --------------------------------------------------------------------------- #

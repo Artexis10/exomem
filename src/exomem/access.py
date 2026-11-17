@@ -109,7 +109,9 @@ def policy_fingerprint(vault_root: Path) -> str:
 
     This is intentionally content-based rather than mtime-based: access policy
     changes are security boundaries and must invalidate find's hot result cache
-    even after a same-size or timestamp-preserving replacement.
+    even after a same-size or timestamp-preserving replacement. In a `root` vault
+    the identity also follows the registered areas that read the tiers' paths, so a
+    registry save that adds an area moves it while the bytes stay as they were.
 
     A transient stat/read failure deliberately reports the LAST GOOD identity.
     Moving it would flip ``recall_policy.recall_policy_identity``, which makes
@@ -145,7 +147,8 @@ def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot |
         )
     except (OSError, ValueError):
         return None
-    return PublicationPolicySnapshot(hashlib.sha256(raw).hexdigest())
+    # The same identity as `policy_fingerprint`: a recall checkpoint is published only while the two agree.
+    return PublicationPolicySnapshot(_bound_to_areas(hashlib.sha256(raw).hexdigest()))
 
 
 def _policy_signature(path: Path) -> _PolicySignature:
@@ -157,6 +160,14 @@ def _policy_signature(path: Path) -> _PolicySignature:
         stat.st_dev,
         stat.st_ino,
     )
+
+
+def _bound_to_areas(fingerprint: str) -> str:
+    """The identity of exact policy bytes, bound to the areas that read its tiers in a `root` vault."""
+    # layout imports modules that import access, so it waits for the first call.
+    from . import layout
+
+    return layout.fold_selector_identity(fingerprint)
 
 
 def _empty_policy() -> dict[str, list[str]]:
@@ -175,7 +186,7 @@ def _degraded_state(key: str) -> tuple[str, dict[str, list[str]], bool]:
     """
     cached = _CACHE.get(key)
     if cached is not None:
-        return cached[1], cached[2], False
+        return _bound_to_areas(cached[1]), cached[2], False
     return UNAVAILABLE_POLICY_FINGERPRINT, _empty_policy(), True
 
 
@@ -218,7 +229,7 @@ def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
         return _degraded_state(key)
     cached = _CACHE.get(key)
     if cached is not None and cached[0] == signature:
-        return cached[1], cached[2], False
+        return _bound_to_areas(cached[1]), cached[2], False
     try:
         raw = path.read_bytes()
     except OSError as error:
@@ -238,14 +249,14 @@ def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
     fingerprint = hashlib.sha256(raw).hexdigest()
     if cached is not None and cached[1] == fingerprint:
         _CACHE[key] = (signature, fingerprint, cached[2])
-        return fingerprint, cached[2], False
+        return _bound_to_areas(fingerprint), cached[2], False
     try:
         cfg = parse_config(raw)
     except (UnicodeError, yaml.YAMLError) as error:
         log.warning("could not parse %s (%s); treating as no access policy", path.name, error)
         cfg = _empty_policy()
     _CACHE[key] = (signature, fingerprint, cfg)
-    return fingerprint, cfg, False
+    return _bound_to_areas(fingerprint), cfg, False
 
 
 def _kb_relative(rel_path: str) -> str:
