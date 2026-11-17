@@ -1883,7 +1883,7 @@ def capture_source_correction(
     applies: the historical page hash, one successor per predecessor, canonical identity, authority and egress.
     """
     from . import add as add_module
-    from . import reserved_paths, source_capture, source_corrections
+    from . import media_store, reserved_paths, source_capture, source_corrections
     from .governance import raw_protection as raw_guard
 
     plan = source_corrections.prepare_correction(vault_root, correction)
@@ -1919,13 +1919,15 @@ def capture_source_correction(
     staged_path = Path(name)
     digest = hashlib.sha256()
     try:
-        with os.fdopen(descriptor, "wb") as copy, reserved_paths.open_generic_binary(vault_root, stored) as original:
+        # The storage-aware reader: in shared original storage no file holds the logical path, and the
+        # bytes come from the pool object its filing binds. The SHA-256 check below still decides reuse.
+        with os.fdopen(descriptor, "wb") as copy, media_store.open_original(vault_root, stored) as original:
             size = 0
             while chunk := original.stream.read(1 << 20):
                 digest.update(chunk)
                 copy.write(chunk)
                 size += len(chunk)
-    except (OSError, reserved_paths.ReservedPathLeafError):
+    except (OSError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError):
         staged_path.unlink(missing_ok=True)
         raise ValueError(
             "SOURCE_ORIGINAL_CHANGED: the stored original of this Source cannot be read; "

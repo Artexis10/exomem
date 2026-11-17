@@ -2331,8 +2331,8 @@ def _identity_findings(artifact_receipt: Mapping[str, Any]) -> list[tuple[Mappin
 
 def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
     """The metadata-only correction call that fixes a Source whose url does not match its document."""
-    # No page hash rides the receipt: the stored page's bytes depend on where its original is kept, which
-    # a restricted caller must not learn, and extraction rewrites the page; read_page gives the current hash.
+    # No page hash rides the receipt: processing rewrites the page after capture, so the guard a correction
+    # names comes from read_page, which gives the current hash.
     ref = row.get("ref")
     if not ref:
         return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."

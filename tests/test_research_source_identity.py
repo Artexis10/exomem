@@ -63,6 +63,25 @@ def _frontmatter(vault: Path, rel_path: str) -> dict:
     return yaml.safe_load(text.split("\n---\n", 1)[0].removeprefix("---\n"))
 
 
+def test_a_source_in_shared_original_storage_is_corrected_without_re_upload(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:
+    # A new archive keeps originals in the content-addressed pool, where no file holds the logical path.
+    from conftest import initialize_vault_state_offline
+
+    from exomem import artifact_lifecycle, original_pool
+
+    initialize_vault_state_offline(vault, source="shared storage correction")
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    first = _save_pdf(vault, source_schema, url=CLAIM)["files"][0]
+
+    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, first))["files"][0]
+
+    assert successor["outcome"] == "stored"
+    assert successor["hash"] == first["hash"]
+    assert successor["identity"]["state"] == "printed"
+
+
 @pytest.mark.usefixtures("owner_scope")
 def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reupload(
     vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
