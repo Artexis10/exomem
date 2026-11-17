@@ -148,6 +148,29 @@ Answer once and carry on with the task. Do not recite the field names to the use
 and do not split a coherent note to make the question go away. A page that drops
 below the first step is not asked either.
 
+**When a write asks whether the page belongs in its project.** A write may return
+`structure_suggestion` of kind `ownership`. It means the written page is being asked
+whether it belongs in its current project and home folder: the page was created in a
+project, its project key or title just changed, or the daily rotation reached it. It does
+not say the page is misfiled: the runtime decides when to ask and you judge meaning.
+The question carries the ownership test, and the served `routes` in the bootstrap carry
+the same wording. Apply it to the page in hand, answer before you reply to the user, and
+do not change the page when you answer.
+
+- **It serves the project's goal.** Dismiss the item with
+  `decide_review_item(review_item=<id>, decision='dismiss', why='intentional: <the project goal this page serves>')`. The item stays quiet while the
+  page keeps its project key, folder and title, however much the page grows.
+- **It has its own goal, schedule or course of events.** Tell the user. On their yes,
+  propose the move or split through the curation lane. Register a new project through
+  the project-key route first, link the related projects' notes with a typed relation,
+  and get the user's exact confirmation of the previewed plan.
+- **You cannot tell.** If the user already decided this page's home and nothing since
+  bears on ownership, the earlier decision stands: dismiss with a reason that starts
+  `deferred:`, or make no call.
+
+Answer once and carry on with the task. Do not recite the field names to the user.
+A page that is asked and also at a size step carries the ownership question first.
+
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
 *timing*, not *volume* — it never means keep less. Minimality is a property of
 *expression* — distillation, signal-density, no redundancy — never of *coverage*.

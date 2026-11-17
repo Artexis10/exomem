@@ -51,6 +51,8 @@ _REVIEW_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$", re.
 _DUE_TEMP_RE = re.compile(
     r"^\.\.due-state(?:-emission|-candidates)?\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
 )
+#: The atomic-replace temp name of the rotation file: a closed file-name format.
+_OWNERSHIP_TEMP_RE = re.compile(r"^\.\.ownership-rotation\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
@@ -653,6 +655,14 @@ _REGISTRY = (
         ),
         patterns=(_DUE_TEMP_RE,),
         migrates_from_vault=True,
+    ),
+    # Born in the external state root, so it has nothing to migrate from the vault.
+    InternalStateDescriptor(
+        "ownership-review",
+        "ownership_rotation",
+        StatePlacement.EXTERNAL_STATE,
+        exact=(".ownership-asked.jsonl", ".ownership-rotation.json"),
+        patterns=(_OWNERSHIP_TEMP_RE,),
     ),
     InternalStateDescriptor(
         "lexical-rebuild",

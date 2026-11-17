@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence.
 metadata:
-  skill_contract: c46c24d063dd7a37149f66b03a3407425f5aa207e5f9ad9ba14ef50ff40264a4
+  skill_contract: efaf5422341341abd23e7a053090bb73e6bd5952131000a59a72497f78b03c0f
   version: "0.2.0"
 ---
 
@@ -115,7 +115,7 @@ Preserve history. Prefer supersession when meaning changes. Keep links useful, n
 ## Mistakes to avoid
 Do not rewrite the content of raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, silently continue a partial or blocked run, or turn one confirmation into standing approval.
 
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

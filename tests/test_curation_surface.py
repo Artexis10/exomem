@@ -163,7 +163,7 @@ def test_shared_leaf_routes_every_curation_action(vault: Path, monkeypatch) -> N
             if args:
                 kwargs["plan"] = args[0]
             calls.append((name, kwargs))
-            return {"action": name, "mutated": name not in curation.READ_ONLY_ACTIONS}
+            return {"action": name, "mutated": name not in curation.READ_ONLY_ACTIONS, "actions": []}
 
         return invoke
 

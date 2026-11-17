@@ -234,9 +234,9 @@ def test_an_off_family_is_reachable_only_through_the_all_states_view(vault: Path
     assert items[0]["disposition"] == "off"
 
 
-def test_exclusion_happens_before_fusion(vault: Path) -> None:
-    """An item flagged only by a quiet family disappears; a doubly-flagged one keeps
-    its other reasons rather than vanishing with them."""
+def test_a_quiet_family_removes_only_its_own_rows(vault: Path) -> None:
+    """A page flagged only by a quiet family disappears; a page that another family also
+    flags keeps that family's row."""
     overdue_prediction(vault, "nag-solo")
     # A page with a due prediction AND no outbound relations earns relation_debt too.
     from _nag_governance_helpers import write
@@ -251,15 +251,14 @@ def test_exclusion_happens_before_fusion(vault: Path) -> None:
 
     before = commands.op_attention(vault, limit=0)["items"]
     both = [i for i in before if "nag-both" in i["path"]]
-    assert both and len(both[0]["categories"]) > 1, before
+    assert sorted(i["categories"] for i in both) == [["prediction_window"], ["relation_debt"]]
 
     commands.op_triage_memory(vault, ref=FAMILY_REF, action="quiet", why=WHY)
 
     after = commands.op_attention(vault, limit=0)["items"]
     assert not [i for i in after if "nag-solo" in i["path"]]
     surviving = [i for i in after if "nag-both" in i["path"]]
-    assert surviving, after
-    assert FAMILY not in surviving[0]["categories"]
+    assert [i["categories"] for i in surviving] == [["relation_debt"]]
 
 
 @pytest.mark.usefixtures("obligations_only")
@@ -442,29 +441,23 @@ def test_dispositions_and_item_decisions_compose(vault: Path) -> None:
     assert states["nag-two.md"] == "open"
 
 
-def test_a_multi_flagged_item_resurfaces_when_a_family_returns(vault: Path) -> None:
-    """The compose rule the singly-flagged case does not exercise.
+def test_a_returning_family_reopens_only_its_own_row(vault: Path) -> None:
+    """A decision on one signal never leaks onto another signal of the same page.
 
-    The user dismissed a signal composed of `relation_debt` alone, because
-    `prediction_window` was quiet and its reason had been dropped before fusion.
-    When the family returns the item's composed reasons become both — a signal
-    the user has never seen and never decided about — so it is open. Recording
-    the restored composition against the earlier decision would leak a dismissal
-    across a signal the user never saw, which is the exact hazard the
-    fused/component split exists to prevent.
-
-    The decision is not lost: the record still stands under the fingerprint it
-    was taken against, and so do the component records the fan-out wrote.
+    The user dismissed the page's `relation_debt` while `prediction_window` was quiet.
+    When the family returns, its prediction is a signal the user has never seen and never
+    decided about, so that row is open. The relation-debt row is a separate row with its
+    own fingerprint, so its dismissal still holds, and the record still stands.
     """
     doubly_flagged(vault)
     scratch_page(vault)
 
     commands.op_triage_memory(vault, ref=FAMILY_REF, action="quiet", why=WHY)
-    quieted = [
+    [quieted] = [
         item
         for item in commands.op_attention(vault, limit=0, state="all")["items"]
         if "nag-double" in item["path"]
-    ][0]
+    ]
     assert quieted["categories"] == ["relation_debt"], quieted["categories"]
     commands.op_triage_memory(
         vault, ref=quieted["ref"], action="dismiss", why="handled: dealt with elsewhere"
@@ -473,14 +466,15 @@ def test_a_multi_flagged_item_resurfaces_when_a_family_returns(vault: Path) -> N
 
     commands.op_triage_memory(vault, ref=FAMILY_REF, action="normal")
 
-    restored = [
-        item
+    rows = {
+        tuple(item["categories"]): item
         for item in commands.op_attention(vault, limit=0, state="all")["items"]
         if "nag-double" in item["path"]
-    ][0]
-    assert restored["categories"] == ["prediction_window", "relation_debt"]
-    assert restored["fingerprint"] != dismissed_fingerprint
-    assert restored["state"] == "open"
+    }
+    assert set(rows) == {("prediction_window",), ("relation_debt",)}
+    assert rows[("prediction_window",)]["state"] == "open"
+    assert rows[("relation_debt",)]["state"] == "dismissed"
+    assert rows[("relation_debt",)]["fingerprint"] == dismissed_fingerprint
 
     records = review_state.ReviewStateStore(vault).load()["records"]
     key = f"{quieted['item_id']}:{dismissed_fingerprint}"

@@ -256,6 +256,7 @@ _PATTERN_SAMPLES = (
     ".embeddings.0123456789abcdef.sqlite-wal",
     "..review-state.json.abc123_4.tmp",
     "..due-state-candidates.json.abc123_4.tmp",
+    "..ownership-rotation.json.abc123_4.tmp",
     f".lexical.sqlite.rebuild-{_HEX32}.tmp-shm",
     ".lexical-staged-0123456789abcdef.sqlite-wal",
     f".lexical.sqlite-shm.quarantine-{_HEX32}",
@@ -341,6 +342,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         lexstore,
         media_jobs,
         memory_refs,
+        ownership_rotation,
         procedure_approval,
         review_state,
         served_context,
@@ -392,6 +394,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-staged-lock",
         "maintenance-jobs-store",
         "media-jobs-store",
+        "ownership-review",
         "procedure-approval-key",
         "procedure-approvals",
         "references-store",
@@ -474,6 +477,14 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
                 f".{due_state.EMISSION_FILENAME}.abc123_4.tmp"
             ),
             "due-state",
+        ),
+        (ownership_rotation.asked_path(root), "ownership-review"),
+        (ownership_rotation.rotation_path(root), "ownership-review"),
+        (
+            ownership_rotation.rotation_path(root).with_name(
+                f".{ownership_rotation.ROTATION_FILENAME}.abc123_4.tmp"
+            ),
+            "ownership-review",
         ),
         (
             lexical_live.with_name(f"{lexical_live.name}.rebuild-{token32}.tmp"),

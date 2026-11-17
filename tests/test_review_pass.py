@@ -205,8 +205,8 @@ def test_a_held_listing_equals_a_listing_computed_in_the_request(
     vault: Path, warm_managed_cell, caller: RequestPrincipal
 ) -> None:
     _unlinked_notes(vault, 3)
-    # Two predictions on one page: two items on one path, and each fused with the page's
-    # relation debt.
+    # Two predictions on one page: two partitioned items on one path, and the page's relation
+    # debt is a third, which the predictions do not absorb.
     _note(vault, "forecast", "## Prediction\n\n- id: p1\n- check_by: 2026-01-01\n\nThe queue drains.\n\n"
           "## Prediction\n\n- id: p2\n- check_by: 2026-02-01\n\nThe cache warms.\n")
     # An old page with two inbound links, one from a page the client may not see. For the
@@ -233,7 +233,7 @@ def test_a_held_listing_equals_a_listing_computed_in_the_request(
     assert _from_held(held) is (caller is OWNER)
     assert not _from_held(fresh)
     assert listing(held) == listing(fresh)
-    assert _paths(fresh).count(f"{NOTES}/forecast.md") == 2
+    assert _paths(fresh).count(f"{NOTES}/forecast.md") == 3
     assert _item(fresh, f"{NOTES}/fact-1.md")["item_id"] == dismissed["item_id"]
     assert _item(fresh, f"{NOTES}/fact-1.md")["state"] == "dismissed"
     assert ("stale_review" in _item(fresh, old)["categories"]) is (caller is CLIENT)

@@ -70,6 +70,10 @@ more than one independent question? The runtime counts size and claims nothing
 about the page. The field reports nothing about any other page, and it never
 affects `status`, `mutated`, or replay. Nothing is reorganised by the runtime;
 answering is the agent's decision with the user (see `writing.md`).
+Its `kind` is `ownership` while the written page is asked whether it belongs in its
+project and nobody has answered. It holds the review item's `ref`, `fingerprint` and
+`id`, and one `question` that carries the ownership test and the call that keeps the
+page where it is. A response carries one such advisory, and the ownership one leads.
 Use `detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed

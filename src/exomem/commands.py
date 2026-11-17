@@ -1936,12 +1936,16 @@ def op_bootstrap(
                 "remember_suggestions": f"non-binding related pages: {suggest_links}, {detail_full}",
                 "write_feedback": f"create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with {detail_full}",
                 "structure_suggestion": (
-                    "A committed response may carry one advisory. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
+                    "A committed response may carry one advisory. ownership: the written page is asked whether it belongs in its project; the item's ref and fingerprint, one question. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
-                    else "advisory in the default committed response. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
+                    else "advisory in the default committed response. kind='ownership': the written page is asked whether it belongs in its current project and home folder while its review item is open; it carries the item's ref and fingerprint and one question, and the runtime never says the page is misfiled. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
                 "structure_suggestion_handling": (
-                    "note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
+                    "ownership: answer its question about the page in hand and never change the page to answer it. Serves the project's goal: "
+                    + call_text("triage_memory", {"item_id": "<id>", "action": "dismiss", "why": "intentional: <the project goal>"})
+                    + ". Unsure: dismiss with a `deferred:` reason or make no call. Elsewhere or several: tell the user, and on their yes propose it with "
+                    + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
+                    + ". note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
                     + call_text("triage_memory", {"item_id": "<id>", "action": "dismiss", "why": "intentional: <the one question>"})
                     + "; it stays quiet until the next size step. Several: propose a split with "
                     + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
@@ -11535,6 +11539,17 @@ def _validate_vocabulary_binding(
         )
 
 
+def _with_ownership_question(vault_root: Path, previewed: dict[str, Any]) -> dict[str, Any]:
+    """A curation preview beside the one ownership question of its placing steps.
+
+    Added to the reply only: the sealed plan and its fingerprint stay as they were.
+    """
+    from . import ownership_review
+
+    asked = ownership_review.preview_question(vault_root, previewed["actions"])
+    return {**previewed, "ownership_question": asked} if asked else previewed
+
+
 def _bind_connect_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
     """Bind accept-by-id before admission, including the source page's exact version."""
     item_id = arguments.get("item_id")
@@ -12329,7 +12344,7 @@ def op_maintain_memory(
         plan: Closed agent-authored plan for curation propose.
         refs: Memory refs for curation work-item.
         paths: Vault paths for curation work-item.
-        review_ref: Recurring-identity review ref for a work-item.
+        review_ref: Review ref for a work-item: a recurring-identity candidate, or an item on one page.
         hydration_recheck: Continuation ordinal 1-8; the eighth is closure-only.
         expected_plan_fingerprint: Reviewed plan fingerprint for approval.
         vocabulary_ref: Vocabulary decision for curation apply or resume.
@@ -12447,7 +12462,8 @@ def op_maintain_memory(
                 return curation_module.propose(vault_root, plan)
             if curation_action == "preview":
                 assert run_id is not None
-                return curation_module.preview(vault_root, run_id=run_id)
+                previewed = curation_module.preview(vault_root, run_id=run_id)
+                return _with_ownership_question(vault_root, previewed)
             if curation_action == "status":
                 assert run_id is not None
                 return curation_module.status(vault_root, run_id=run_id)
