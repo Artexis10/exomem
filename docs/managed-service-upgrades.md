@@ -375,11 +375,12 @@ in it has `success` false. A write passes when its `structuredContent` names the
 saved episode (an `episode` starting `ep-`) and holds no `error`. A refused call
 still returns a normal `result`, so the absence of an error is not proof that a
 call succeeded. A search refused while an index rebuilds is one example. A line
-that is not JSON fails. The check command prints the failed reads, then the
-failed writes; expect both to be 0:
+that is not JSON fails. The check command prints one count line for reads and
+one for writes; expect `0 failed of N`, where N is the number of probe pairs.
+No output means the check did not run, for example because `jq` is missing:
 
 ```sh
-awk '$2 == "read"' /tmp/xr/calls.log | jq -R 'sub("^[^{]*"; "") | try (fromjson | .result | .isError == false and ([.. | objects | select(.success == false)] | length == 0)) catch false' | grep -c false; awk '$2 == "write"' /tmp/xr/calls.log | jq -R 'sub("^[^{]*"; "") | try (fromjson | .result.structuredContent | (.episode // "" | startswith("ep-")) and .error == null) catch false' | grep -c false
+awk '$2 == "read"' /tmp/xr/calls.log | jq -Rnr '[inputs | sub("^[^{]*"; "") | try (fromjson | .result | .isError == false and ([.. | objects | select(.success == false)] | length == 0)) catch false] | "reads: \(map(select(not)) | length) failed of \(length)"'; awk '$2 == "write"' /tmp/xr/calls.log | jq -Rnr '[inputs | sub("^[^{]*"; "") | try (fromjson | .result.structuredContent | (.episode // "" | startswith("ep-")) and .error == null) catch false] | "writes: \(map(select(not)) | length) failed of \(length)"'
 ```
 
 The worker also inherits the user manager's environment. Run `systemctl --user
