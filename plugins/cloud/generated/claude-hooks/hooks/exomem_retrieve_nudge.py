@@ -32,7 +32,8 @@ instructions. Current state first, then units, then pointers, each carrying the
 provenance ref that produced it, whole items only under
 `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 4,000) with trailing items dropped
 rather than one cut in half. The stance and skills blocks have their own bounds
-beside that ceiling, and each renders whole once a session. An `ambiguous` abstention is the one abstention it
+beside that ceiling, and each renders whole once a session. The recorded positions
+block has its own bound too, and renders on each turn that carries it. An `ambiguous` abstention is the one abstention it
 renders — the competing anchors plus the instruction to call again with
 `anchor` — because otherwise the agent would never see the senses it is the only
 one able to choose between; every other abstention leaves exactly the ordinary
@@ -2520,6 +2521,56 @@ def _format_domain_profiles_block(block: object) -> str:
     return "\n".join([_PROFILES_HEADER, *body]) if body else ""
 
 
+#: The service already bounds the block to the vault's `budgets.positions_max_chars`; this is the most a vault may
+#: set (`activation_conventions.BUDGET_BOUNDS`, pinned by a test as `_SKILLS_MAX_CHARS` is), so the hook never cuts a
+#: well-formed block and still caps a malformed one. The framing line and the overflow line ride beside it.
+_POSITIONS_MAX_CHARS = 8000
+
+
+def _position_line(item: dict) -> str:
+    """One recorded position, written exactly as the service's `positions.item_line` counts it, collapsed."""
+    # nosemgrep: ep-word-set -- the positions block's closed wire fields
+    date, title, text, ref = (" ".join(str(item.get(key) or "").split()) for key in ("date", "title", "text", "ref"))
+    dated = f"{date}, " if date else ""
+    return f"- position ({dated}{title}): {text} [{ref}]"
+
+
+def _format_positions_block(block: object) -> str:
+    """The person's recorded positions under the service's framing line, whole lines; nothing when none is served.
+
+    The block has its own bound beside the working set's, so it takes nothing from the map's or the turn's room.
+    The references the service could not fit render after the lines, as many as one more bound's worth allows.
+    """
+    # nosemgrep: ep-word-set -- the positions block's closed states that carry items or references
+    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial"):
+        return ""
+    lines, used = [], 0
+    for item in block.get("items") or ():
+        if not isinstance(item, dict) or not item.get("text"):
+            continue
+        line = _position_line(item)
+        if used + len(line) + 1 > _POSITIONS_MAX_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    refs = [" ".join(str(ref).split()) for ref in block.get("overflow_refs") or () if isinstance(ref, str) and ref.strip()]
+    shown, room = [], _POSITIONS_MAX_CHARS
+    for ref in refs:
+        if room - len(ref) - 4 < 0:
+            break
+        shown.append(f"[{ref}]")
+        room -= len(ref) + 4
+    if not lines and not shown:
+        return ""
+    unseen = len(refs) - len(shown)
+    tail = []
+    if shown:
+        more = f" (+{unseen} more)" if unseen else ""
+        tail = [f"- positions not shown, read by ref: {', '.join(shown)}{more}"]
+    about = " ".join(str(block.get("about") or "").split())
+    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail])
+
+
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:
     """Keep reset and standing data before optional routes, with one supplied move last.
 
@@ -2553,7 +2604,8 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
     skills_text = _format_skills_block(packet.get("skills"))
     profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
-    parts = (reset, stance_text, upkeep, skills_text, profiles_text, text, task, turn, action)
+    positions_text = _format_positions_block(packet.get("positions"))
+    parts = (reset, stance_text, upkeep, skills_text, profiles_text, text, task, positions_text, turn, action)
     return "\n".join(part for part in parts if part), complete, stance_complete, shown
 
 

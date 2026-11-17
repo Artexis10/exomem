@@ -417,8 +417,13 @@ def compile_context(
     timings: find_types.FindTimings | None = None,
     index_token: tuple[int, int, int] | None = None,
     prepare_slice: Callable[[], tuple[frozenset[str], int]] | None = None,
+    reach: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Revalidate before selection, then allocate complete source-bound read routes."""
+    """Revalidate before selection, then allocate complete source-bound read routes.
+
+    `reach`, when given, receives the pages this response serves for the turn, `{path: title}`: each lead that
+    this block or the turn slice routes, and each link target that the block lists.
+    """
     from . import working_set_runtime
 
     if not working_set_runtime.activation_released_corpus_tasks() and not full_source_access(root, caller):
@@ -538,8 +543,9 @@ def compile_context(
                     # The read handle is the stable ref, never the path: a rename must not put words into the line.
                     method["read_ref"] = sources[path].ref
         # The links come last: a lead served without them still answers the turn, a lead never read does not.
+        target_paths: dict[str, str] = {}
         for reason in working_set.attach_task_links(
-            root, candidates, link_targets=link_targets, caller=caller, timings=timings,
+            root, candidates, link_targets=link_targets, caller=caller, timings=timings, target_paths=target_paths,
         ):
             _add_missing(block, reason)
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
@@ -583,6 +589,8 @@ def compile_context(
                     # A named lead without one listed link would only repeat the turn slice's route.
                     block["candidates"].remove(item)
                     _add_missing(block, "budget")
+        if reach is not None:
+            _record_reach(reach, candidates, block["candidates"], covered, target_paths)
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")
         _remember_sources(root, caller, sources)
@@ -590,6 +598,22 @@ def compile_context(
     except Exception:  # noqa: BLE001 - optional discovery cannot discard a usable map
         log.warning("task context unavailable", exc_info=True)
         return empty("unavailable", reset=bool(held))
+
+
+def _record_reach(
+    reach: dict[str, str], candidates: Sequence[Mapping[str, Any]], served: Sequence[Mapping[str, Any]],
+    covered: frozenset[str], target_paths: Mapping[str, str],
+) -> None:
+    """The served leads and the link targets they list, each with the title this caller is shown."""
+    listed = {id(item) for item in served}
+    for item in candidates:
+        if id(item) not in listed and item["ref"] not in covered and item["source_ref"] not in covered:
+            continue
+        reach.setdefault(item["source_ref"], str(item.get("title") or item["source_ref"]))
+        for link in item.get("links") or ():
+            path = target_paths.get(link["target_ref"])
+            if path:
+                reach.setdefault(path, str(link.get("title") or path))
 
 
 def pin(root: Path, caller: Any, block: Mapping[str, Any], *, limit: int) -> dict[str, Any]:

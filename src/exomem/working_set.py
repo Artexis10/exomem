@@ -1681,9 +1681,11 @@ def task_candidates(
 
 def attach_task_links(
     vault_root: Path, candidates: Sequence[dict[str, Any]], *, link_targets: Mapping[str, Any], caller: Any,
-    timings: Any = None,
+    timings: Any = None, target_paths: dict[str, str] | None = None,
 ) -> list[str]:
     """List each served lead's outbound links on it, and return the task-context missing reasons of a skipped lookup.
+
+    `target_paths`, when given, receives each listed link's `target_ref` mapped to its page path.
 
     Links are read only for the leads that projection kept, and only with the time that projection left: a lead
     without its links still serves the turn, but a link lookup that ran first could spend the deadline that
@@ -1697,7 +1699,9 @@ def attach_task_links(
         return ["budget"]
     try:
         with find_types.timing_span(timings, "working_set.task_context_links"):
-            links = _task_links(vault_root, candidates, by_path=link_targets, visible=caller.visible)
+            links = _task_links(
+                vault_root, candidates, by_path=link_targets, visible=caller.visible, paths=target_paths,
+            )
     except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
         log.debug("task-context links unavailable", exc_info=True)
         links = None
@@ -1714,7 +1718,7 @@ def attach_task_links(
 
 def _task_links(
     vault_root: Path, candidates: Sequence[Mapping[str, Any]], *, by_path: Mapping[str, Any],
-    visible: Callable[[str], bool] | None,
+    visible: Callable[[str], bool] | None, paths: dict[str, str] | None = None,
 ) -> dict[str, tuple[list[dict[str, str]], int]] | None:
     """Each candidate page's outbound links, typed relations first: `{page: (listed links, omitted count)}`.
 
@@ -1744,6 +1748,8 @@ def _task_links(
     result: dict[str, tuple[list[dict[str, str]], int]] = {}
     for seed, targets in ranked.items():
         ordered = sorted(targets.items(), key=lambda pair: pair[1][:2])
+        if paths is not None:
+            paths.update((by_path[target].ref or target, target) for target, _rank in ordered[:TASK_LINKS_PER_CANDIDATE])
         result[seed] = ([
             {"relation": relation, "target_ref": by_path[target].ref or target, "title": by_path[target].title}
             for target, (_tier, _position, relation) in ordered[:TASK_LINKS_PER_CANDIDATE]

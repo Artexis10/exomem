@@ -4059,6 +4059,10 @@ def guard_working_set(
                 from .. import domain_profiles
 
                 guarded["domain_profiles"] = domain_profiles.guard_block(vault_root, caller, guarded["domain_profiles"])
+            if "positions" in guarded:
+                from .. import positions
+
+                guarded["positions"] = positions.guard_block(vault_root, caller, guarded["positions"])
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("next_action"),
             )

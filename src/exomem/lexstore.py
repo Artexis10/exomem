@@ -1355,13 +1355,17 @@ class SemanticUnitLexicalHit:
     fingerprint: str | None
     source_order: int
     lexical_score: float | None
+    #: The unit's own rich `as_of` date, when its interpretation carries one.
+    as_of: str | None = None
+    #: The parent page's stored `updated` date (`0000-00-00` when the page has none).
+    parent_updated: str = ""
 
 
 #: Stored occurrence columns a served unit hit reads, in `_unit_hit` order.
 _OCCURRENCE_COLUMNS = (
     "u.unit_ref, u.parent_path, u.parent_ref, u.parent_generation, u.parent_source_hash, "
     "u.parser_version, u.form, u.category_raw, u.category_key, u.content, u.tags_json, "
-    "u.context, u.unit_source_hash, u.anchor, u.line, u.end_line, u.source_order"
+    "u.context, u.unit_source_hash, u.anchor, u.line, u.end_line, u.source_order, u.updated"
 )
 #: Occurrence rows interpreted per batch. Batches are transport: a row the
 #: selected interpretation rejects never counts toward a result or a cap.
@@ -1393,6 +1397,8 @@ def _unit_hit(row: tuple, unit: Any, score: float | None) -> SemanticUnitLexical
         fingerprint=unit.fingerprint,
         source_order=int(row[16]),
         lexical_score=float(score) if score is not None else None,
+        as_of=getattr(unit, "as_of", None),
+        parent_updated=str(row[17] or ""),
     )
 
 
@@ -4626,7 +4632,7 @@ def _eligibility_metadata_query(
                 (json.dumps(sorted(result), ensure_ascii=False),),
             )
             for row, served in view.served(unit_rows):
-                path, verdict, check_by = row[1], row[17], row[18]
+                path, verdict, check_by = row[1], row[18], row[19]
                 unit = dict(
                     category=served.category,
                     category_key=row[8],
@@ -12898,7 +12904,7 @@ class LexicalStore:
                 if len(hits) >= k:
                     break
                 if wanted(row, unit):
-                    hits.append(_unit_hit(row, unit, row[17]))
+                    hits.append(_unit_hit(row, unit, row[18]))
         view.require_complete()
         return hits
 
