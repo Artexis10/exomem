@@ -146,8 +146,10 @@ which Sources they cite and what stays open. Pass a page of the subject, or free
 `page`. A page fixes the subject. Free text resolves to the best compiled-note hit and lists
 other hits as `related`; read one of them to switch subject.
 
-The brief walks up to two hops from the subject page, in both directions, through compiled
-notes only. It serves three sections: `conclusions`, `sources` and `open_questions`. Each
+The brief takes every compiled note one link from the subject page, in either direction, and
+at most five compiled notes one link further, those nearest the subject page first.
+`ranked_by` says whether nearness or recency chose them. It serves three sections:
+`conclusions`, `sources` and `open_questions`. Each
 item carries its `ref`, `path` and `updated`. A cut shows in `missing` with a count and the
 reason `cap`; it is never silent. A superseded or closed unit is left out and counted on its
 note under `omitted`.

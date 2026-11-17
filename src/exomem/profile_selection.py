@@ -85,26 +85,22 @@ def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str,
         return None
     import numpy as np
 
-    from . import embeddings, readiness, recall_space
+    from . import embeddings
 
+    scorer = embeddings.resident_page_scorer(root)
+    if scorer is None:
+        return None
     try:
         index = embeddings.peek_embedding_index(root)
         fingerprint = embeddings.activation_fingerprint()
-        if index is None or fingerprint is None or readiness.should_defer("embeddings"):
-            return None
-        managed = readiness.runtime_managed()
-        # A one-shot process never loads the matrix, so a cold one is expected there; a service warms it.
-        if not managed and index.resident_matrix() is None:
-            return None
-        identity = index.identity
-        if identity is None or identity.fingerprint != fingerprint:
+        # The turn vector is the activation encoder's: a sidecar that another encoder wrote holds another space.
+        identity = None if index is None else index.identity
+        if fingerprint is None or identity is None or identity.fingerprint != fingerprint:
             return None
         query = np.asarray(turn_vector, dtype=np.float32).reshape(-1)
         if not np.all(np.isfinite(query)) or float(np.linalg.norm(query)) == 0.0:
             return None
-        return index.best_scores_for_paths(query, pages)
-    except recall_space.CorpusMatrixCold:
-        return None
+        return scorer.best_scores(query, pages)
     except Exception:  # noqa: BLE001 - a failed vector reading leaves the lexical one standing, and the evidence says so
         log.debug("profile vector reading unavailable", exc_info=True)
         return None
