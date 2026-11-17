@@ -2,7 +2,7 @@
 name: exomem-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
 metadata:
-  skill_contract: 9aad891a2c73691f1e378642940cad09340c37f0f6d84714a37acf4a44caf98b
+  skill_contract: 749f9d61e9efa3934dcacf1278c6c15c2a696b9dca099a73db3e18d751c56a50
   version: "0.1.0"
 ---
 
