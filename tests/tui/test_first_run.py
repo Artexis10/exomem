@@ -69,8 +69,8 @@ async def test_the_preview_precedes_the_write(make_app, tmp_path):
         await pilot.pause()
         preview = _text(app, "#preview")
         assert "Will create" in preview
-        assert "Knowledge Base/" in preview
-        assert "Sources/" in preview and "Notes/" in preview
+        assert "Exomem/" in preview
+        assert "Sources/" in preview and "Research/" in preview
         assert "owns nothing outside it" in preview
         assert not backend.calls or all(call[0] != "init_vault" for call in backend.calls), (
             "the preview must render before anything is written"
@@ -100,7 +100,7 @@ async def test_create_on_an_existing_vault_connects_instead_of_failing(make_app,
             "an existing vault must be connected, never re-initialized"
         )
         assert "connected" in _text(app, "#ledger")
-        assert "already held a Knowledge Base" in _text(app, "#ledger")
+        assert "already held an Exomem vault" in _text(app, "#ledger")
 
 
 async def test_a_write_failure_offers_recoveries_and_changes_nothing(make_app, tmp_path):
