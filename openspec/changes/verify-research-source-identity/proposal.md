@@ -20,7 +20,7 @@ A corrected Source is also invisible in search. Its hit keeps the wrong title, w
 - **Corrected Sources in search.** A search hit for a corrected Source carries `corrected_by`, naming the current successor the caller may read.
 - **Missed conflicts surface later.** A new audit family, `source_identity_conflict`, reports an uncorrected Source whose recorded check is `conflict`.
 - **Guidance.** The served contract and the scaffold tell agents five things:
-  - Keep user-supplied files and the documents an answer relies on.
+  - Custody of a Source verifies none of its claims.
   - Take bibliographic identity from the document.
   - Label the document form.
   - Decide compilation.
@@ -37,7 +37,7 @@ None.
 - `attachment-source-ingestion`: a captured document reports its own identity evidence.
 - `durable-source-capture`: a metadata-only correction reuses the stored original; search marks a corrected Source.
 - `command-surface`: Source document form, and the `source_identity_conflict` audit family.
-- `agent-bootstrap-contract`: research-source custody, identity, form and compilation guidance.
+- `agent-bootstrap-contract`: research-source identity, form and compilation guidance.
 
 ## Impact
 

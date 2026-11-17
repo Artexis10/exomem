@@ -1,17 +1,17 @@
 ## ADDED Requirements
 
-### Requirement: The contract teaches research-source custody and identity
+### Requirement: The contract teaches research-source identity
 
 The served capture guidance and the shipped skill scaffold SHALL tell agents:
 
-- to keep user-supplied files, and the external documents that an answer relies on, as Sources without waiting to be asked;
+- that a Source's custody verifies none of its claims;
 - to take a document's title, authors, year, venue and DOI from the document itself, never from a search result or memory;
 - to state the document form, and to save an abstract or citation record when the full text is unavailable;
 - to decide whether the Source warrants compilation into an existing or new note, and otherwise to report it as kept for custody only;
 - to correct a wrong Source with a metadata-only correction.
 
 The guidance SHALL ship only when a real-model comparison shows that the arm with it outperforms the same code without it on the incident cases.
-The per-turn capture policy SHALL carry only the custody and identity rule; the document-form, compilation and correction details SHALL live in the skill scaffold.
+The per-turn capture policy SHALL carry only the identity rule; the document-form, compilation and correction details SHALL live in the skill scaffold.
 
 #### Scenario: An agent receives a misleading repository match
 

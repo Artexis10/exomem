@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 214654b7aca782fc7c4c4dc73e6078fe27452f35ae550144ce3c47a66ac7451e
+  skill_contract: 6014d4b3a1cf783979da9011166a5c97265228c81e27093c39145ddc057de35b
   version: "0.1.0"
 ---
 
@@ -73,7 +73,7 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
 2. Preserve raw material with `save_source`: `content` for authored text, `files` for original attachments. Original bytes remain intact.
-   Keep a file the user hands over as a Source without waiting to be asked, even when nothing in it is a durable conclusion: the durability bar applies to notes, not to originals. Keeping it verifies none of its claims.
+   A Source's custody verifies none of its claims.
    Never retype an original file. If its handle is unavailable, follow the Source upload route that the exposed tools serve.
    Use `save_evidence` or `save_evidence` for proof-bearing material.
    Pass `source_kind` and `domain` on a `save_source` call — both are open

@@ -70,7 +70,7 @@ The audit's Source pass already reads each Source's frontmatter. A Source whose 
 
 ### Guidance earns its place
 
-The added contract and scaffold text is ablated as one group in the real-model incident cases: the changed code with the guidance against the same code without it. Guidance that does not beat that arm is removed before release. The per-turn capture policy is at its byte ceiling, so it carries only the custody and identity rule, and its pinned budgets rise by that line's size.
+The added contract and scaffold text is ablated as one group in the real-model incident cases: the changed code with the guidance against the same code without it. Guidance that does not beat that arm is removed before release. The per-turn capture policy is at its byte ceiling, so it carries only the identity rule, and its pinned budgets rise by that line's size. The rounds removed a per-turn custody line: agents that received it still declined to keep a file the user handed over as a one-off or inconclusive check, at the same rate as without it. Keeping user-supplied files without a prompt is therefore not delivered by this change; it needs its own design.
 
 ## Risks / Trade-offs
 

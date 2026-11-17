@@ -24,7 +24,7 @@
 ## 5. Guidance
 
 - [x] 5.1 Add the research-source lines to the served capture guidance and the scaffold.
-- [ ] 5.2 Remove the guidance if the changed code with it does not beat the same code without it in the real-model comparison.
+- [x] 5.2 Remove the guidance if the changed code with it does not beat the same code without it in the real-model comparison. The custody wording did not (no-nudge and screenshot cases, rounds 2 to 4) and is removed; the identity guidance did (misleading-DOI case) and stays.
 
 ## 6. Proof
 
