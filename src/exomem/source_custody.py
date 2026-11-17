@@ -373,6 +373,12 @@ def retirement_generation(root: Path) -> int | None:
     return value
 
 
+def retired_since(root: Path, generation: int | None) -> bool:
+    """Whether a cutoff may have landed since ``generation`` was read: True when either read failed."""
+    current = retirement_generation(root)
+    return current is None or generation is None or current != generation
+
+
 def advance_retirement_generation(root: Path) -> bool:
     """Void every reusable cache entry read before now, in any process; False when vault state refused it."""
     import os

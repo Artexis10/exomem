@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from . import freshness, lexstore, reserved_paths, state_paths
+from . import freshness, lexstore, reserved_paths, source_custody, state_paths
 from .log_events import log_event
 from .state_migration import vault_store_recorded
 from .vault import VaultLockError, _InterprocessFileLock
@@ -67,6 +67,10 @@ def _catalog_valid(
                     return (
                         store._schema_is_current(conn)
                         and store._meta_catalog_identity(conn) == identity
+                        # Its rows may hold a Source erased after the walk; a cold build serves instead.
+                        and not source_custody.retired_since(
+                            store.vault_root, store._meta_retired_through(conn)
+                        )
                         and all(
                             lexstore.checkpoint_state(store._meta_checkpoint(conn, scope)) is not None
                             for scope in freshness.SCOPES

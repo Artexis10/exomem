@@ -260,6 +260,29 @@ def test_a_catalogue_built_before_the_erase_is_not_adopted_after_it(vault, attem
         assert conn.execute("SELECT count(*) FROM pages WHERE path = ?", (path,)).fetchone()[0] == 0
 
 
+def test_a_catalogue_staged_before_the_erase_is_not_adopted_at_boot(vault, attempts, erasable):
+    """A new release stages its catalogue while the old cell serves; adopting it after the cutoff would serve the Source again."""
+    import sqlite3
+
+    from exomem import catalogue_prewarm, lexstore
+
+    _manager, call = attempts
+    assert lexstore.get_store(vault).rebuild_atomic()  # A live cell keeps its lexical index built.
+    path, reference, source_hash = capture(vault, call)
+    with sqlite3.connect(lexstore.lexical_path(vault)) as conn:
+        # The old release's live catalogue, which the new release cannot use, so it stages its own.
+        conn.execute("UPDATE meta SET value = 'older-release' WHERE key = 'catalog_identity'")
+    conn.close()
+    assert catalogue_prewarm.build(vault) == "staged"
+
+    assert drive(call, reference, source_hash)["status"] == "complete"
+
+    assert catalogue_prewarm.adopt_at_boot(vault) is False
+    with sqlite3.connect(lexstore.lexical_path(vault)) as conn:
+        assert conn.execute("SELECT count(*) FROM pages WHERE path = ?", (path,)).fetchone()[0] == 0
+    conn.close()
+
+
 def test_disabled_policy_refuses_before_any_lookup(vault, attempts, monkeypatch):
     _manager, call = attempts
     monkeypatch.delenv("EXOMEM_SOURCE_ERASURE_POLICY", raising=False)
