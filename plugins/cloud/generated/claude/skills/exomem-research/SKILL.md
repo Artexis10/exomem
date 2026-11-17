@@ -2,7 +2,7 @@
 name: exomem-research
 description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 metadata:
-  skill_contract: 83814804dbd620b9af799275eff56b0a0a5ad1eb242940e1921c17dfdcd6b6e1
+  skill_contract: 6014d4b3a1cf783979da9011166a5c97265228c81e27093c39145ddc057de35b
   version: "0.1.0"
 ---
 
@@ -73,6 +73,8 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 ## Workflow
 1. Search Exomem first with `search_memory` for prior conclusions and related sources.
 2. Gather external sources only as needed; preserve important raw sources with `save_source`, passing `files` when the client can hand over an attachment. `save_evidence`, `save_evidence`, and the `upload_files` fallback are for proof-bearing artifacts, not for raw material.
+   Take a document's title, authors, year, venue and DOI from the document itself, never from a search hit, a repository match or memory. Compare what you saved with the reply's `identity` block, which shows the document's opening and the DOIs it carries. A document that cites the work is not the work. When they differ, correct the Source with `options.correction` and no `files`.
+   Set `document_form`. When the full text is unavailable, save the publisher's abstract or citation record and label it so; never present it as the full text.
 3. Attribute findings to sources and distinguish evidence from interpretation.
 4. Draft the result as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
 5. Reuse meaningful connections from the research context; use `inspect_memory(operation="connections.suggest_links")` when candidates are still missing and review related prior notes. Then write with `create_note`, including the sources and accepted connections in the first write.
