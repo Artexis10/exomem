@@ -180,7 +180,8 @@ def plan_question(vault_root: Path, steps: list[Mapping[str, Any]]) -> dict[str,
         if kind == "create-note":
             note_type = args.get("note_type")
             project = project_key(args)
-            if project is not None and (note_type is None or basis.selects(note_type, note_types.compiled)):
+            compiled = note_type is None or basis.selects(note_type, note_types.compiled)
+            if project is not None and compiled:
                 placed.append((str(step["step_id"]), project))
         elif kind == "move":
             try:
@@ -196,7 +197,8 @@ def plan_question(vault_root: Path, steps: list[Mapping[str, Any]]) -> dict[str,
             ):
                 continue
             fields = args.get("fields") or {}
-            assigned = project_key(fields if {"project", "projects"} & fields.keys() else frontmatter)
+            reassigns = bool({"project", "projects"} & fields.keys())
+            assigned = project_key(fields if reassigns else frontmatter)
             if assigned is not None:
                 placed.append((str(step["step_id"]), assigned))
     if not placed:

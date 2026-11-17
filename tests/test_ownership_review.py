@@ -586,7 +586,7 @@ def test_a_restricted_caller_cannot_tell_a_withheld_page_id_from_no_id(vault: Pa
     _ask(vault, withheld)
     due_state.reconcile(vault, today=TODAY)
     asked = _suggestion(_grow(vault, withheld, 2))
-    # The scope must match the page that exists: a withheld scope that names no page withholds nothing.
+    # The scope must match an existing page: a scope that names no page withholds nothing.
     _govern(vault, "client-a", scope="Notes/Insights/withheld-*.md")
     _reset()
 
