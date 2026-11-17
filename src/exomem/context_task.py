@@ -443,7 +443,7 @@ def _method_items(source: SourceProjection, source_ref: str, *, whole: bool = Fa
 
 def _declared_methods(
     root: Path, caller: Any, leads: Sequence[Mapping[str, Any]], sources: dict, methods_by_source: dict[str, list[dict[str, Any]]],
-) -> tuple[dict[str, str], bool]:
+) -> tuple[dict[str, str], bool, bool]:
     """The page each collection-manifest lead declares as its capture method, projected as a method.
 
     A lead's declaration is read from its own released frontmatter, so it names a page only to a caller who
@@ -452,13 +452,21 @@ def _declared_methods(
     reference resolves only through the broad resolver that is already resident, since building it reads the
     whole vault; a cold one costs this turn the method and schedules the build. A path or a ref costs one
     lookup. Each declaring lead costs at most one source projection. The method is advisory, so a failure
-    on it costs the method and never the task context. Returns the method page by lead, and whether the
-    deadline cut the projection short.
+    on it costs the method and never the task context. Returns the method page by lead, whether the
+    deadline cut the projection short, and whether a cold resolver left a reference unresolved.
     """
-    from . import capture_method, find, structured_collections
+    from . import capture_method, find, structured_collections, vault
+
+    cold = False
 
     def resident_resolver():
-        return find.borrow_query_resolver(root, caller.visible, schedule_rebuild=True)
+        nonlocal cold
+        # A process with no watcher owner would schedule a build that nothing keeps current, as `working_set` decides.
+        resolver = find.borrow_query_resolver(
+            root, caller.visible, schedule_rebuild=vault.inbound_recovery_available(root),
+        )
+        cold = cold or resolver is None
+        return resolver
 
     declared: dict[str, str] = {}
     for lead in leads:
@@ -479,15 +487,16 @@ def _declared_methods(
                 continue
             method = project_source(root, path, caller, cache=sources)
         except TaskDeadline:
-            return declared, True
-        except Exception:  # noqa: BLE001 -- the declared method is advisory: a transient failure on it costs the method, not the turn
+            return declared, True, cold
+        except Exception:  # noqa: BLE001 - the method is advisory: a failure on it costs the method, never the turn
+            # Not reported: for a path-form reference, an error would reveal that a withheld page exists.
             continue
         if method is None:
             continue
         declared[lead["source_ref"]] = path
         if method.methods is not None and path not in methods_by_source and (items := _method_items(method, path, whole=True)):
             methods_by_source[path] = items
-    return declared, False
+    return declared, False, cold
 
 
 def compile_context(
@@ -576,9 +585,12 @@ def compile_context(
                 _add_missing(block, "lane_failed")
             if items := _method_items(source, candidate["source_ref"]):
                 methods_by_source.setdefault(candidate["source_ref"], []).extend(items)
-        declared_by_lead, cut_short = _declared_methods(root, caller, candidates, sources, methods_by_source)
+        declared_by_lead, cut_short, resolver_cold = _declared_methods(root, caller, candidates, sources, methods_by_source)
         if cut_short:
             _add_missing(block, "budget")
+        if resolver_cold:
+            # The miss comes before any page is looked up, so it says nothing of a page the caller may not read.
+            _add_missing(block, "lane_failed")
         from . import context_fit
 
         with find_types.timing_span(timings, "working_set.context_fit"):

@@ -15,7 +15,7 @@ from test_governance_egress import _external, write_rule
 from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
-from exomem import call_spans, commands, context_catalogue, find, freshness, lexstore, working_set_runtime
+from exomem import call_spans, commands, context_catalogue, find, freshness, lexstore, page_names, working_set_runtime
 from exomem.governance import principal
 from exomem.vault import WikilinkResolver
 from exomem.writer_lease import invoke_command
@@ -1155,13 +1155,40 @@ def test_a_withheld_capture_method_page_is_served_to_no_one_who_may_not_read_it(
     assert "stocktake" not in str(withheld).lower()
 
 
-def test_a_title_declared_method_builds_no_resolver_on_a_cold_turn_and_is_served_once_it_is_resident(
+def test_a_cold_resolver_reports_the_method_it_could_not_resolve_as_a_partial_result(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The broad resolver is a vault-sized build: a turn borrows it, and a cold cache costs that turn the method."""
+    """A turn that borrows a cold resolver says so, as it says any other lane it could not run."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _declare_capture_method(vault, "[[Stocktake recording method]]")
     _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    find.evict_resolver_caches(vault)
+
+    cold = _activate(vault, turn=DEPOT_TURN, max_chars=8000)
+
+    assert cold["task_context"]["state"] == "partial"
+    assert cold["task_context"]["missing"] == [{"role": "task_context", "reason": "lane_failed"}]
+    _resident_resolver(vault)
+    resident = _activate(vault, turn=DEPOT_TURN, max_chars=8000, client="fixture-b")
+    assert resident["task_context"]["state"] == "ready"
+    assert resident["task_context"]["missing"] == []
+
+
+@pytest.mark.parametrize("form", ["title", "page-id"])
+def test_a_declared_method_builds_no_resolver_on_a_cold_turn_and_is_served_once_it_is_resident(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, form: str
+) -> None:
+    """The broad resolver is a vault-sized build: a turn borrows it, and a cold cache costs that turn the method.
+
+    A short page id reaches the resolver on its own step (a page that holds no id is found by its path hash),
+    so it is a second route to the same build.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
+    reference = "Stocktake recording method" if form == "title" else page_names.read_identity(vault, STOCKTAKE_METHOD).id
+    _declare_capture_method(vault, f"[[{reference}]]")
     _built(vault).close()
     lexstore.ensure_fresh(vault)
     find.evict_resolver_caches(vault)
