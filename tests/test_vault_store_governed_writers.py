@@ -9,7 +9,9 @@ where it was.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
+import io
 import json
 import time
 from pathlib import Path
@@ -25,9 +27,11 @@ from test_vault_store_migration import BETA, vault  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows
 
 from exomem import (
+    adopt,
     delete_directory,
     delete_file,
     embeddings,
+    preserve,
     recover_from_trash,
     reserved_paths,
 )
@@ -580,3 +584,30 @@ def test_a_folder_trash_on_a_governed_vault_reads_the_store_alike_for_any_size(s
     assert reads_for_one_trash("Knowledge Base/Projects/Few", 2) == reads_for_one_trash(
         "Knowledge Base/Projects/Many", 30
     )
+
+
+def test_a_preserve_logs_into_a_stored_log_that_no_file_projects_yet(served):
+    """A preserve that reads the disk for the log tells the person that the log is missing and
+    writes no entry, though the store holds it."""
+    (served / LOG).unlink()
+    assert read.owned_bytes(served, LOG) is not None
+
+    result = preserve.preserve_stream(
+        served, scope="Examples", category="Documents", filename="tide.txt",
+        stream=io.BytesIO(b"A neutral tide reading."), content_type="text/plain",
+    )
+
+    assert not [warning for warning in result.warnings if "log.md" in warning]
+    assert b"Mobile preserve via exomem" in read.owned_bytes(served, LOG)
+
+
+def test_a_saved_adoption_manifest_logs_into_a_stored_log_that_no_file_projects_yet(served):
+    """A manifest save that reads the disk for the log tells the person that the log is missing and
+    writes no entry, though the store holds it."""
+    (served / LOG).unlink()
+    assert read.owned_bytes(served, LOG) is not None
+
+    report = adopt.adopt(served, mode="save-manifest", today=dt.date(2026, 7, 7))
+
+    assert not [warning for warning in report["manifest"]["warnings"] if "log.md" in warning]
+    assert b"Saved existing-vault adoption manifest" in read.owned_bytes(served, LOG)
