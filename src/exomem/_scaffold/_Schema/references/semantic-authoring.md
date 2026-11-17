@@ -46,7 +46,7 @@ Rich example:
 ## Decision
 - id: commit-to-morning-training
 - tags: health
-- relations: supports: [[Knowledge Base/Notes/Health/Morning training]]
+- relations: supports: [[Notes/Health/Morning training]]
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```

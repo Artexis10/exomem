@@ -25,7 +25,7 @@ Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence content is immutable; their pointers change only through governed
-moves and pointer corrections. Content outside the managed Knowledge Base is
+moves and pointer corrections. Content outside the managed root is
 read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
@@ -163,7 +163,7 @@ Rich example:
 ## Decision
 - id: commit-to-morning-training
 - tags: health
-- relations: supports: [[Knowledge Base/Notes/Health/Morning training]]
+- relations: supports: [[Notes/Health/Morning training]]
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```

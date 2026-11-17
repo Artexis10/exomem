@@ -35,7 +35,7 @@ and index updates are determined by the operation, not the caller.
 | **get** | Read a full file by path; `frontmatter_only=true` returns just the frontmatter. Returns `content_hash` + `mtime` for the two-writer drift guard (a replace-body edit takes the page `id` instead). Read-only | — |
 | **audit** | Lint pass: orphans, broken links, supersession integrity, aged unprocessed sources | proposals only |
 | **overview** | Bounded structure report of the vault or a subtree — folder tree, counts, frontmatter coverage, junk candidates. Works outside the KB and pre-init (read-only) | — |
-| **adopt** | Safe first-run adoption workflow for an existing vault: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals | `Knowledge Base/_Adoption/` or `Sources/Imported/` only in explicit write modes |
+| **adopt** | Safe first-run adoption workflow for an existing vault: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals | `_Adoption/` or `Sources/Imported/` only in explicit write modes |
 | **inspect_memory** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
 | **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Remote tools preview with `dry_run=true`, then start the repair as a maintenance job with the `plan_id` and a `why`; the CLI is `exomem maintain --reconcile` | drifted indexes + embedding sidecar |
@@ -158,8 +158,8 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     personal server, offer the browser upload form. Custody is proven only by a returned
     `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
 - **Media processing is automatic and actionable — `inspect_memory` and `manage_memory`.** Supported
-  audio and video preserved through Exomem or copied directly into the governed
-  Knowledge Base are reconciled into durable timestamped transcription work.
+  audio and video preserved through Exomem or copied directly into the
+  managed root are reconciled into durable timestamped transcription work.
   Call `manage_memory(operation="media.process", arguments={'path': ...})` for immediate targeted
   reconciliation, `operation="status"` for bounded per-artifact state and next
   actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
@@ -219,16 +219,16 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   are listed in `not_shown`. Exomem Cloud keeps 768 px and reports it in
   `max_side_effective`. Soft-fails with a clear code when the server lacks the media extra.
 - **Read-only / excluded subtrees are write-protected.** Mark a subtree `readonly:`
-  or `excluded:` in `Knowledge Base/_access.yaml` (see `write-scope.md` §
+  or `excluded:` in `_access.yaml` (see `write-scope.md` §
   Per-subtree access overrides): `readonly` stays searchable but refuses **every**
   write (Tier 1 and Tier 2) — hard, no override; `excluded` is additionally hidden
   from `find`/embeddings. This is the in-KB counterpart to the by-location rule that
-  everything outside `Knowledge Base/` is read-only.
-- **Every write logs to `Knowledge Base/log.md`** with the operation, path, and a
+  everything outside the managed root is read-only.
+- **Every write logs to `log.md`** with the operation, path, and a
   one-line rationale. Where appropriate, ops require a `why:` (e.g. `edit`'s
   frontmatter-patch mode).
 - **Deletes are never permanent at the MCP layer.** `delete` moves targets to
-  `Knowledge Base/_trash/YYYY-MM-DD/…` with a `.meta.json` sidecar; recovery is
+  `_trash/YYYY-MM-DD/…` with a `.meta.json` sidecar; recovery is
   `recover_from_trash`. Permanent removal happens manually. The `_trash/` subtree
   is excluded from `find` and `audit`.
 - **Supersession over deletion** for compiled material — prefer `replace`.

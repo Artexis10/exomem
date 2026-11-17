@@ -1,12 +1,12 @@
-# Knowledge Base — Index
+# Index
 
-Compiled, structured layer of your markdown vault (Obsidian optional). Governed by [[Knowledge Base/_Schema/SKILL]].
+Compiled, structured layer of your markdown vault (Obsidian optional). Governed by [[_Schema/SKILL]].
 
 ## Sections
 
-- [[Knowledge Base/Sources/index|Sources]] — raw, immutable inputs
-- [[Knowledge Base/Notes/index|Notes]] — compiled material
-- [[Knowledge Base/Entities/index|Entities]] — typed nodes
+- [[Sources/index|Sources]] — raw, immutable inputs
+- [[Notes/index|Notes]] — compiled material
+- [[Entities/index|Entities]] — typed nodes
 
 ## Recent activity
 

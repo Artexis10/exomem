@@ -1,6 +1,6 @@
 # Importing a folder or archive
 
-Use this when the person wants existing files in the Knowledge Base: a folder, a ZIP or a notes export. Adoption never changes an original, and the person keeps their own copy in every route. A file whose bytes the vault already holds is not stored again: the existing Source records the new path, and a re-run writes nothing (`mapped`, [operations](operations.md#collection-adoption)). Fields of each operation are in [operations](operations.md#collection-adoption).
+Use this when the person wants existing files in the managed root: a folder, a ZIP or a notes export. Adoption never changes an original, and the person keeps their own copy in every route. A file whose bytes the vault already holds is not stored again: the existing Source records the new path, and a re-run writes nothing (`mapped`, [operations](operations.md#collection-adoption)). Fields of each operation are in [operations](operations.md#collection-adoption).
 
 ## Cloud prerequisites
 
@@ -44,7 +44,7 @@ If another import is open, inspect its progress through MCP and agree whether to
    - Cloud: `transfer_memory(action="import_discard", import_id=<id>, confirm=true)` deletes the staged folder for good.
    - Local: no Exomem command discards a stage. The person deletes `_Imports/<id>` by hand.
    - A discard keeps a residual record of each member that adoption did not file or `finish` did not verify. Status lists those members as "discarded, not filed", with the reason as the `code`.
-   - On Cloud, if a discard does not finish, `observe_transfer` shows the import stuck in `cleanup_pending`, and its `error_code` may name the refusal. Read `inspect_memory` status for that window. `renames_pending` lists Knowledge Base paths: run `apply`, or move each file and keep the source. The cell retries the discard on its own, so another `import_discard` changes nothing. Keep the source until the window reads `discarded`.
+   - On Cloud, if a discard does not finish, `observe_transfer` shows the import stuck in `cleanup_pending`, and its `error_code` may name the refusal. Read `inspect_memory` status for that window. `renames_pending` lists managed-root paths: run `apply`, or move each file and keep the source. The cell retries the discard on its own, so another `import_discard` changes nothing. Keep the source until the window reads `discarded`.
    - A window in state `unreadable` has a record that cannot be read. No tool you hold discards it, and the person cannot either. Keep the source, tell the person, and leave the stage. Only the operator of Exomem Cloud can discard it, with `--walk-stage`.
 8. Acknowledge residual paths only when the person confirms they no longer need to keep them: `manage_memory(operation="imports.acknowledge", arguments={"import_id": <id>, "paths": [...]})`. This is the person's decision. Acknowledged paths stop counting toward `keep_source`. No tool undoes it; the operator can restore the entries by editing the record. A call without paths is refused.
 
@@ -91,7 +91,7 @@ Some older runs lack enough evidence, especially failed-only retries or partiall
 Recovery confirms filing and custody; `finish` must still report recall coverage and any pending extraction or visibility.
 
 ## What adoption leaves staged
-- Each file that is filed as an artifact loses its staged copy once its Knowledge Base copy matches (`consumed` in the reply). `consume=false` on `start` keeps every staged copy.
+- Each file that is filed as an artifact loses its staged copy once its managed-root copy matches (`consumed` in the reply). `consume=false` on `start` keeps every staged copy.
 - A text file loses its staged copy at `finish`, once its Source page holds the exact text.
 - A text file keeps its copy while its note is owed. `apply` is refused after `finish`, so the copy stays staged and the residual lists the file as `pending`.
 - A text file also keeps its copy when `finish` finds a difference, and the residual lists it as unfiled. `source_differs` means the Source page no longer holds the exact text, so the staged copy is the only exact one. `copy_changed` means the Source page holds the text, but `finish` could not safely remove the staged copy: it changed after the plan, the stage manifest does not list it, or the removal failed. Review it with the person; do not discard it unreviewed.

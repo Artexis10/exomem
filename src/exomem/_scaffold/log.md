@@ -1,4 +1,4 @@
-# Knowledge Base — Activity Log
+# Activity Log
 
 Append-only chronological record of every confirmed write. Most recent first.
 

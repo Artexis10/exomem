@@ -13,7 +13,7 @@
 # the vocabulary changes by a shipped revision or by your own override, and a
 # proposal from anywhere else belongs in a review queue.
 #
-# YOUR OVERRIDE: copy this file to `<vault>/<Knowledge Base>/_Schema/
+# YOUR OVERRIDE: copy this file to `<vault>/<managed root>/_Schema/
 # context-roles.yaml` and edit it there. An override may add a role, add
 # categories or cues to a shipped one, or narrow which anchor kinds a role
 # defaults for. It may not remove or rename a shipped role — a packet that

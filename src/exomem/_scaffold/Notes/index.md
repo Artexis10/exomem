@@ -1,13 +1,13 @@
 # Notes — Index
 
-LLM-compiled, structured material. Governed by [[Knowledge Base/_Schema/SKILL]].
+LLM-compiled, structured material. Governed by [[_Schema/SKILL]].
 
-See [[Knowledge Base/_Schema/references/page-types|page-types]] for shape and [[Knowledge Base/_Schema/references/operations|operations § note]] for procedure.
+See [[_Schema/references/page-types|page-types]] for shape and [[_Schema/references/operations|operations § note]] for procedure.
 
 ## By type
 
 ### Research — project-or-domain-scoped synthesis (0)
-- [[Knowledge Base/Notes/Research/Personal/|Personal]] (0) — cross-cutting, not tied to a specific project
+- [[Notes/Research/Personal/|Personal]] (0) — cross-cutting, not tied to a specific project
 
 ### Insights — distilled cross-cutting lessons (0)
 

@@ -1,7 +1,7 @@
 # _Governance
 
 This folder is where you author reviewed disclosure-policy source for your
-Knowledge Base — separate from the compiled, structured material it governs.
+vault — separate from the compiled, structured material it governs.
 It is never indexed as content: it never shows up in search results, and
 nothing you write here is treated as a note, a source, or evidence.
 
@@ -29,7 +29,7 @@ commit activates one immutable policy/projector/catalog tuple; a direct edit doe
 not silently replace the active tuple.
 
 This tree and Exomem's internal governance state, including
-`Knowledge Base/.governance.sqlite` and its transactional siblings, are reserved.
+`.governance.sqlite` and its transactional siblings, are reserved.
 Generic file, dataset, media, transfer, and download commands intentionally hide
 or refuse them. A `RESERVED_PATH` response means to use the governance tools, not to
 retry through an alias, link, alternate spelling, or direct file operation.
