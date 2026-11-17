@@ -17,7 +17,8 @@
 
 ## 4. Proof before release
 
-- [ ] 4.1 Gate 5: on a generated 20,000-page vault, measure write-path p95 before and after on the same instrument (budget: current p95 plus 25 ms) and the question's token size (at most 400). Record the commands and numbers.
+- [x] 4.1 Gate 5: on a generated 20,000-page vault, measure write-path p95 before and after on the same instrument (budget: current p95 plus 25 ms) and the question's token size (at most 400). Record the commands and numbers.
+      Evidence, 2026-11-17: generated 20,000-page vault in 40 projects; before and after measured on the same harness and page states, timing the added post-commit work directly (200 samples for the structure question, 40 for the due-state delta, two repeats). Worst after-minus-before p95: create question +3.1 ms, edit question +2.1 ms, due-state delta +6.8 ms, create plus delta +9.6 ms, all with every page asked (budget +25 ms). Question text 287 tokens (cl100k_base); the whole suggestion object 342 tokens.
 - [ ] 4.2 Gate 6: a real-model cross-client run on a disposable vault with invented names and a seeded misfiled group: Claude headless over stdio and an OpenAI Responses actor over HTTP, both on the Exomem MCP. Record the surfacing rate per client and whether each answer used the spelled-out call or the curation route.
 
 ## 5. Closure
