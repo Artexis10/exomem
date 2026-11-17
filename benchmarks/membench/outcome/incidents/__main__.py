@@ -39,6 +39,8 @@ which the arm needs to serve a routed collection's declared method to it. Both a
 ``recall_context`` answers without an ``index_warming`` abstention (``warmup.py``); the unit records
 ``warm_seconds``, and a server that does not warm in time makes the unit unknown. An arm whose manifest does
 not parse ``capture`` is seeded without the declaration and the unit records ``capture_supported: false``.
+A case that seeds collections then has the arm build its indexes (the unit records ``index_build_seconds``),
+as a long-lived vault has them built.
 
 An arm is a checkout: its ``src`` runs the MCP server, its ``plugins/claude-code`` supplies the skill
 and hooks, and its own docs and code supply the guidance text, in native MCP activation mode. Every
@@ -536,6 +538,8 @@ def seed_unit(case: dict, arm: Path, root: Path) -> tuple[dict | None, dict, Pat
         )
         # One property of the arm, read once by its own code: whether its manifest carries `capture`.
         record["capture_supported"] = record["collections"][0]["capture_supported"]
+        # A real vault has its indexes built; the arm's own classes build them, the same way for every arm.
+        record["index_build_seconds"] = run_arm_side(arm, root, "build_indexes", str(vault))["seconds"]
     if reads_sources(case):
         before = run_arm_side(arm, root, "sources", str(vault))
         record["sources_before"] = [row["path"] for row in before["sources"]]

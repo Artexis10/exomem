@@ -243,6 +243,25 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
     return written
 
 
+def build_indexes(vault: Path) -> dict:
+    """Build the on-disk indexes that a long-lived vault already has, through the arm's own classes.
+
+    The link graph, the working-set index, the context catalogue and the lexical store. The service builds
+    them as its watcher sees pages change; a vault seeded a moment ago has none, and a turn on it would
+    read ``partial`` for as long as the server runs, because the graph lane has nothing to read.
+    """
+    import time
+
+    from exomem import context_catalogue, epistemic_graph, lexstore, working_set_index
+
+    started = time.perf_counter()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    context_catalogue.ContextCatalogue(vault).rebuild()
+    lexstore.ensure_fresh(vault)
+    return {"seconds": round(time.perf_counter() - started, 2)}
+
+
 def prominence(level: str) -> dict:
     """Set the capture prominence through the arm's own preference path, and read back what it resolves.
 
@@ -388,6 +407,8 @@ if __name__ == "__main__":
         result = seed_sources(Path(args[0]), Path(args[1]), json.load(sys.stdin))
     elif command == "seed_collections":
         result = seed_collections(Path(args[0]), json.load(sys.stdin))
+    elif command == "build_indexes":
+        result = build_indexes(Path(args[0]))
     elif command == "prominence":
         result = prominence(args[0])
     elif command == "records":

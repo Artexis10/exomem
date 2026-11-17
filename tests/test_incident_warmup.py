@@ -133,5 +133,7 @@ def test_the_loopback_server_serves_a_declared_method_only_to_a_sign_in_that_act
     incidents.seed_unit(case, REPO_ROOT, tmp_path)
     assert case["remote_owner"] is True
     state, items = served_methods(tmp_path, remote_owner=True, turn=case["prompt"])
-    assert state != "unavailable" and len(items) == 1
+    # `ready`, not `partial`: a long-lived vault has its indexes built, so the turn is not graded on a
+    # link graph that a fresh seed never built.
+    assert state == "ready" and len(items) == 1
     assert served_methods(tmp_path, remote_owner=False, turn=case["prompt"]) == ("unavailable", [])
