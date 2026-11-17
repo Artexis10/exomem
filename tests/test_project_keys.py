@@ -95,7 +95,7 @@ def test_note_auto_registers_unknown_project_key(vault: Path) -> None:
         today=TODAY,
     )
     # Note landed under the new folder.
-    assert result.path == "Knowledge Base/Notes/Research/Vehicles/vehicle-test-note.md"
+    assert result.path == "Knowledge Base/Notes/Research/Vehicles/Vehicle test note.md"
     assert (vault / result.path).exists()
     # Warning surfaced the registration.
     assert any(

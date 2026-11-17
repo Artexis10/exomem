@@ -967,7 +967,7 @@ def test_public_remember_leaf_prepares_and_hands_off_once(
     prepares = _assert_one_handoff_per_batch(fake)
     named = [k for k in prepares if k["advisory_target_rel_path"] is not None]
     assert len(named) == 1
-    assert named[0]["advisory_target_rel_path"].endswith("fast-ack-creation.md")
+    assert named[0]["advisory_target_rel_path"].endswith("Fast ack creation.md")
 
 
 def test_public_edit_leaf_prepares_and_hands_off_once(
