@@ -559,7 +559,7 @@ def _closing_lines(result: dict) -> list[str]:
         refused = result["refused_by_vault"]
         note = [f"{files_phrase(refused)} left out because the vault refused {'it' if refused == 1 else 'them'}: "
                 "the manifest gives each a code."] if refused else []
-        consume = ("Adoption removes each staged file once its copy in the Knowledge Base matches."
+        consume = ("Adoption removes each staged file once its copy in the managed root matches."
                    if result["stage_recorded"] else
                    "The vault's state folder is not set up yet, so adoption keeps every staged copy.")
         return [*lines, consume, *note, f"Manifest: {result['manifest']}", f"Next: run {start}, and repeat it with its continuation until filing is done.{hidden}"]

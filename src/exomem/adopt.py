@@ -33,7 +33,7 @@ from . import (
 )
 from . import compile_proposal as compile_proposal_module
 from . import overview as overview_module
-from .kbdir import managed_join, managed_relative, managed_root, managed_split
+from .kbdir import managed_join, managed_relative, managed_root, managed_root_label, managed_split
 from .source_coverage import CAPTURE_HEADING, fence_for, fenced_capture
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -162,7 +162,7 @@ def _safe_next_actions(kb_present: bool, carrier_review: dict | None = None) -> 
                 "action": "initialize-kb",
                 "status": "available",
                 "description": (
-                    f"Run setup/init to create {managed_join('')} beside existing files "
+                    f"Run setup/init to create {managed_root_label()} beside existing files "
                     "before saving manifests or compiled knowledge."
                 ),
             }
@@ -179,7 +179,7 @@ def _governance(scan: dict) -> dict:
         "kb_present": present,
         "governed_path": kb.get("path") if present else None,
         "read_only_input": (
-            "All existing files outside the governed Knowledge Base are searchable "
+            "All existing files outside the managed root are searchable "
             "read-only input. Exomem does not rewrite, move, delete, or add "
             "frontmatter to them by default."
         ),
@@ -190,7 +190,7 @@ def _require_kb(root: Path) -> None:
     if not managed_root(root).is_dir():
         raise AdoptError(
             "KB_NOT_INITIALIZED",
-            f"{managed_join('')} is required for this adopt mode; run setup/init first",
+            f"{managed_root_label(sentence_start=True)} is required for this adopt mode; run setup/init first",
         )
 
 
@@ -210,7 +210,7 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
     if managed_split(raw) is None:
         raise AdoptError(
             "INVALID_MANIFEST_PATH",
-            f"manifest_path must be under {managed_join('')}",
+            f"manifest_path must be under {managed_root_label()}",
         )
     if not raw.lower().endswith(".md"):
         raw += ".md"
@@ -221,7 +221,7 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
     if managed_split(rel) is None:
         raise AdoptError(
             "INVALID_MANIFEST_PATH",
-            f"manifest_path must be under {managed_join('')}",
+            f"manifest_path must be under {managed_root_label()}",
         )
     from .governance import connector_boundary
 
@@ -721,7 +721,7 @@ def _resolve_selected_text_file(root: Path, raw: str) -> tuple[Path, str] | dict
         return {
             "path": rel,
             "code": "ALREADY_GOVERNED",
-            "reason": f"copy-as-sources expects legacy files outside {managed_join('')}",
+            "reason": f"copy-as-sources expects legacy files outside {managed_root_label()}",
             "ref": context_refs.vault_ref(rel),
         }
     if abs_path.suffix.lower() not in _TEXT_IMPORT_SUFFIXES:
@@ -1400,7 +1400,7 @@ def adopt(
     Args:
         path: Optional vault subtree to scan. Defaults to the vault root.
         mode: Adoption mode. ``scan-only`` is read-only; write modes are
-            explicit and only write under ``Knowledge Base/``.
+            explicit and only write under the managed root.
         max_depth: Folder-tree depth cap passed to ``overview``.
         include_hidden: Include hidden files/directories in the scan.
         samples: Sample filename count per folder.
@@ -1442,7 +1442,7 @@ def adopt(
         "scope_note": overview_module.SCOPE_NOTE,
         "write_contract": (
             "Default adoption is read-only. Originals stay where they are. "
-            "Governed Exomem writes happen only under Knowledge Base/ after an "
+            f"Governed Exomem writes happen only under {managed_root_label()} after an "
             "explicit save/copy/compile action."
         ),
         "governance": governance,

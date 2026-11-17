@@ -27,7 +27,7 @@ from . import authority, chain, connection, legacy_originals, replica, schema, s
 
 RECHECK_SECONDS = 10.0
 ATTENTION_SECONDS = 15 * 60.0
-REMEDY = ("wait for vault sync to deliver Knowledge Base/_Collections/collections.sqlite, or "
+REMEDY = ("wait for vault sync to deliver _Collections/collections.sqlite in the managed root, or "
           "continue from this host's copy with adopt-local: maintain_memory(mode=\"collections-store-adopt-local\") "
           "while the service runs, `exomem collections adopt-local` once it is stopped")
 SYNC_PENDING = "COLLECTION_STORE_SYNC_PENDING"

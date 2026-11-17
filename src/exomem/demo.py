@@ -28,7 +28,10 @@ from pathlib import Path
 from .vault_store import cli_fence
 
 SAMPLE_VAULT = Path(__file__).resolve().parent / "_sample_vault"
-TARGET_PATH = "Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md"
+# The bundled sample vault is `nested`: its pages sit under this wrapper folder, which the demo pins
+# as the managed-root name for its own run. The name is the sample's data, not the engine's default.
+SAMPLE_WRAPPER = "Knowledge Base"  # nosemgrep: managed-root-default-name-literal -- names the bundled nested sample's own folder
+TARGET_PATH = f"{SAMPLE_WRAPPER}/Notes/Insights/retrieval-needs-owned-files.md"
 
 # Correctly-spelled lean pins (the retired repo scripts carried rename-corrupted
 # variants of these names, which made them silent no-ops).
@@ -57,7 +60,7 @@ def _materialize_vault(override: Path | None) -> tuple[Path, bool]:
     if override is not None:
         return override, False
     tmp = Path(tempfile.mkdtemp(prefix="exomem-demo-"))
-    shutil.copytree(SAMPLE_VAULT / "Knowledge Base", tmp / "Knowledge Base")
+    shutil.copytree(SAMPLE_VAULT / SAMPLE_WRAPPER, tmp / SAMPLE_WRAPPER)
     return tmp, True
 
 
@@ -111,10 +114,10 @@ def run_demo(
         target, is_temp = _materialize_vault(vault)
         os.environ.update(LEAN_ENV)
         os.environ["EXOMEM_VAULT_PATH"] = str(target)
-        # The bundled sample vault ships with a literal "Knowledge Base/" tree,
-        # so pin the governed-folder name for the demo regardless of any
-        # EXOMEM_KB_DIRNAME the caller has set (restored in `finally`).
-        os.environ["EXOMEM_KB_DIRNAME"] = "Knowledge Base"
+        # The bundled sample vault ships a `nested` tree under SAMPLE_WRAPPER, so pin the
+        # managed-root name for the demo regardless of any EXOMEM_KB_DIRNAME the caller
+        # has set (restored in `finally`).
+        os.environ["EXOMEM_KB_DIRNAME"] = SAMPLE_WRAPPER
         if is_temp:
             state_root = target.with_name(f"{target.name}-state")
             os.environ["EXOMEM_STATE_ROOT"] = str(state_root)

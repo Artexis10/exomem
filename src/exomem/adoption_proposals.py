@@ -388,7 +388,7 @@ def _validate(root: Path, kind: str, payload: dict, run: dict) -> list[dict]:
         for src in sources:
             if not _is_governed_source(src):
                 findings.append(
-                    _finding("NOT_A_SOURCE", src, f"{src} is not a governed Knowledge Base Source")
+                    _finding("NOT_A_SOURCE", src, f"{src} is not a governed Source")
                 )
             elif not _page_exists(root, src):
                 findings.append(_finding("SOURCES_NOT_FOUND", src, f"{src} does not exist"))

@@ -54,7 +54,7 @@ INTRO = (
 
 WELCOME_OPTIONS = (
     ("create", "Create a fresh vault at {path}", "a new folder, {n} files; nothing outside it is touched"),
-    ("existing", "Use an existing vault", "connect to a folder that already holds a Knowledge Base"),
+    ("existing", "Use an existing vault", "connect to a folder that already holds an Exomem vault"),
     ("scan", "Scan a folder first", "a read-only report before you decide anything"),
     ("skipall", "Skip for now", "everything stays reachable from Home"),
 )
@@ -304,7 +304,7 @@ class FirstRunScreen(ExomemScreen):
             )
         else:
             path_input.value = self._path_draft
-            path_input.placeholder = "folder that already holds a Knowledge Base"
+            path_input.placeholder = "folder that already holds an Exomem vault"
             self._prose("note", "Nothing is written — the folder is opened as it stands.")
             self.set_footer(
                 [("enter", "connect"), ("tab", "complete"), ("esc", "back, typing kept")]
@@ -320,13 +320,13 @@ class FirstRunScreen(ExomemScreen):
             Text(""),
             Text("Will create", style=skin.secondary),
             self._preview_row(
-                f"  {shown}/Knowledge Base/",
+                f"  {shown}/",
                 f"the governed layer, {count} files" if count else "the governed layer",
                 budget,
             ),
             self._preview_row(f"  {skin.g('tree_mid')} Sources/", "raw captures, immutable", budget),
             self._preview_row(
-                f"  {skin.g('tree_end')} Notes/", "compiled conclusions with provenance", budget
+                f"  {skin.g('tree_end')} Research/", "compiled conclusions with provenance", budget
             ),
             Text(""),
         ]
@@ -403,7 +403,7 @@ class FirstRunScreen(ExomemScreen):
             if not state.initialized:
                 raise BackendError(
                     "NOT_A_VAULT",
-                    f"{folder} holds no Knowledge Base yet",
+                    f"{folder} is not an Exomem vault yet",
                     "create one here, or scan the folder first",
                 )
             return ("connected", state, {})
@@ -430,7 +430,7 @@ class FirstRunScreen(ExomemScreen):
             detail = self._receipt_detail("created", state.root, f"— {count} files, plain markdown")
         elif kind == "exists":
             detail = self._receipt_detail(
-                "connected", state.root, "— it already held a Knowledge Base"
+                "connected", state.root, "— it already held an Exomem vault"
             )
         else:
             detail = self._receipt_detail("connected", state.root, "— opened as it stands")
@@ -460,7 +460,7 @@ class FirstRunScreen(ExomemScreen):
             ]
             if error.code == "NOT_A_VAULT":
                 options = [
-                    ("create-here", "Create the governed layer here", "adds Knowledge Base/ — your files are untouched"),
+                    ("create-here", "Create the governed layer here", "adds Exomem folders — your files are untouched"),
                     ("scan", "Scan it first", "a read-only report before writing anything"),
                     ("relocate", "Choose another location", "back to the path, your typing is kept"),
                 ]
@@ -547,7 +547,7 @@ class FirstRunScreen(ExomemScreen):
             what="the scan changed nothing — what should happen next?",
             facts=[f"Likely packs: {suggested}"] if suggested else None,
             options=[
-                ("init-here", "Initialize the governed layer here", "adds Knowledge Base/ alongside your notes — originals untouched"),
+                ("init-here", "Initialize the governed layer here", "adds Exomem folders alongside your notes — originals untouched"),
                 ("elsewhere", "Create a fresh vault somewhere else", "leaves this folder exactly as it is"),
                 ("scan-other", "Scan another folder", "still read-only"),
             ],

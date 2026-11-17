@@ -356,6 +356,15 @@ def area_folder(note_type: note_types.NoteType, layout: Layout | str) -> str | N
     return _compiled_folder(note_type.folder, Layout(layout))
 
 
+def example_note_path(area: str, leaf: str) -> str:
+    """The vault path of a sample compiled page in `area`, laid out as the served vault lays it.
+
+    For an example inside a tool's contract or message, where a literal `Knowledge Base/Notes/...`
+    would name a wrapper folder that a `root` vault does not have.
+    """
+    return kbdir.managed_join(f"{_compiled_folder(area, kbdir.bound().layout)}/{leaf}")
+
+
 def home_folder(home: homes.Home, layout: Layout | str) -> str:
     """The folder of a home under `layout`, relative to the managed root."""
     return _compiled_folder(home.folder, Layout(layout))

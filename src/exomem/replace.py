@@ -46,6 +46,7 @@ from .kbdir import (
     managed_join,
     managed_relative,
     managed_root,
+    managed_root_label,
     resolve_stored_page_target,
 )
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
@@ -385,7 +386,7 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
         raise ReplaceError(
             code="INVALID_PATH",
             missing=["old_path"],
-            reason=f"path escapes {managed_join('')}: {e}",
+            reason=f"path escapes {managed_root_label()}: {e}",
         ) from None
     from .governance import egress
 

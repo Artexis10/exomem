@@ -61,7 +61,7 @@ def _summary(by_reason: dict[str, dict[str, int]], unfiled: dict[str, int]) -> s
         count = sum(entry["files"] for entry in by_reason.values())
         return (
             f"{count} file{' stays' if count == 1 else 's stay'} staged ({groups(True)}): adoption filed "
-            f"{'it' if count == 1 else 'them'}, but finish did not check {'this copy' if count == 1 else 'these copies'} against the Knowledge Base."
+            f"{'it' if count == 1 else 'them'}, but finish did not check {'this copy' if count == 1 else 'these copies'} against the managed root."
         )
     count = unfiled["files"]
     return f"{count} file{' needs' if count == 1 else 's need'} review: {groups(False)}."

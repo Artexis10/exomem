@@ -38,7 +38,7 @@ from . import overview as overview_module
 from . import personalize as personalize_module
 from .cli_ops import OpError
 from .governance.principal import library_scope
-from .kbdir import managed_join, managed_root_rel
+from .kbdir import managed_root_label
 from .vault_store import cli_fence
 
 _SKILL_NAME_MARKER = "name: exomem"
@@ -762,7 +762,7 @@ def run_setup(
     if junk_total:
         print_fn(f"    {junk_total} junk candidate(s) — zero-byte or sync-conflict copies.")
     kb_state = "already present" if scan["kb"]["present"] else "not present yet"
-    print_fn(f"    {managed_join('')}: {kb_state}")
+    print_fn(f"    {managed_root_label()}: {kb_state}")
     packs = adoption.get("pack_suggestions") or []
     if packs:
         print_fn(f"    Likely packs: {_format_pack_suggestions(packs)}")
@@ -775,7 +775,7 @@ def run_setup(
     # 3. init — never forced from the wizard
     try:
         init_module.init_vault(vault_path)
-        report("init", f"[done] {managed_join('')} scaffold created")
+        report("init", f"[done] {managed_root_label()} scaffold created")
     except FileExistsError:
         # The vault already has a Knowledge Base, so init is skipped — but the
         # governance docs inside it are product-owned and were last written by
@@ -786,14 +786,14 @@ def run_setup(
         try:
             refreshed = init_module.refresh_shipped_schema(vault_path)
         except OSError as exc:
-            report("init", f"[skipped: {managed_join('')} already exists] (refresh failed: {exc})")
+            report("init", f"[skipped: {managed_root_label()} already exists] (refresh failed: {exc})")
         else:
             suffix = (
                 f"; refreshed {len(refreshed)} shipped schema file(s)"
                 if refreshed
                 else "; shipped schema already current"
             )
-            report("init", f"[skipped: {managed_join('')} already exists]{suffix}")
+            report("init", f"[skipped: {managed_root_label()} already exists]{suffix}")
     except OpError as error:
         # A vault that init cannot create or read (a name it would create, a layout it cannot read)
         # is a failed step with its remedy; the steps after it name the missing vault themselves.
@@ -1114,10 +1114,10 @@ def setup_main(argv: list[str]) -> int:
         prog="exomem setup",
         description=(
             "Guided local setup: scan the vault, init the "
-            f"{managed_root_rel()}, pick a "
+            "managed root, pick a "
             "search profile, run doctor, register with Claude Code, and install "
             "the skill — one idempotent command. Existing vault content is never "
-            f"touched; exomem writes only under {managed_join('')}. For remote "
+            f"touched; exomem writes only under {managed_root_label()}. For remote "
             "connector setup (claude.ai / iOS), use `exomem setup --remote`."
         ),
     )

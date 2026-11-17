@@ -37,7 +37,7 @@ from . import (
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
 from .cli_ops import OpError
-from .kbdir import managed_root, managed_root_rel, outside_managed_root
+from .kbdir import managed_root, managed_root_label, outside_managed_root
 from .vault import (
     MISSING_CONTENT_HASH,
     VAULT_SCAN_SKIP_DIRS,
@@ -424,7 +424,7 @@ def reconcile_media(
     except ValueError as error:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must resolve inside {managed_root_rel()}: {binary}",
+            f"media path must resolve inside {managed_root_label()}: {binary}",
         ) from error
     if (
         reserved_paths.classify_logical(lexical_relative).disposition
@@ -1544,7 +1544,7 @@ def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must resolve inside {managed_root_rel()}: {binary}",
+            f"media path must resolve inside {managed_root_label()}: {binary}",
         ) from exc
     if not resolved.is_file():
         raise MediaProcessingError(
@@ -1563,7 +1563,7 @@ def _confine_sidecar(vault: Path, sidecar: Path) -> None:
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media sidecar must resolve inside {managed_root_rel()}: {sidecar}",
+            f"media sidecar must resolve inside {managed_root_label()}: {sidecar}",
         ) from exc
 
 

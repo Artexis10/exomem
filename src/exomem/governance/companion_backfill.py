@@ -97,7 +97,7 @@ def _canonical_path(value: object) -> str:
         or managed_split_parts(path.parts, layout=Layout.NESTED) is None
         or any(part in {"", ".", ".."} for part in path.parts)
     ):
-        raise _invalid("path must be a canonical Knowledge Base relative path")
+        raise _invalid("path must be a canonical managed-root-relative path")
     return normalized
 
 

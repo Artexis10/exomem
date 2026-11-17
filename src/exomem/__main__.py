@@ -5,7 +5,7 @@ Subcommands:
 - `setup` — guided one-command local onboarding (scan → init → doctor → register → skill)
 - `setup --remote` — guided remote-connector onboarding (tunnel → .env + GitHub OAuth
   → `doctor --profile remote --probe` gate → connector URL) for claude.ai / iOS access
-- `init` — bootstrap a fresh Knowledge Base into a vault
+- `init` — bootstrap a fresh Exomem scaffold into a vault
 - `install-skill` — install the Exomem skill into Claude Code
 - `personalize` — scan a vault and generate a starter `_access.yaml` (readonly/excluded siblings)
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code or Codex
@@ -34,7 +34,7 @@ Subcommands:
   also warms the lexical caches
 - `backfill-media` — make pre-existing Evidence binaries searchable (sidecar + OCR/ASR/PDF + CLIP)
 - `index` — build/refresh the semantic (bge) vector index incrementally; `--scope vault`
-  (or EXOMEM_INDEX_SCOPE=vault) makes notes OUTSIDE Knowledge Base/ semantically searchable
+  (or EXOMEM_INDEX_SCOPE=vault) makes notes OUTSIDE the managed root semantically searchable
 - `enroll-speaker` / `list-speakers` / `remove-speaker` — manage named-speaker voice profiles
   for opt-in diarization (desk-side admin; never an MCP tool)
 """
@@ -55,7 +55,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import semantic_authoring
-from .kbdir import Layout, managed_join, managed_root_rel
+from .kbdir import Layout, managed_join, managed_root_label, managed_root_rel
 
 
 def _module_available(name: str) -> bool:
@@ -1179,7 +1179,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+        help="vault root (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--dry-run",
@@ -1243,21 +1243,21 @@ def _index_main(argv: list[str]) -> int:
         description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
         "skip files already up to date, embed new/changed ones in batches, prune "
         "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
-        f"it never wipes the sidecar first. Covers {managed_join('')} by default, or "
-        f"the whole vault with --scope vault (so notes outside {managed_join('')} "
+        "it never wipes the sidecar first. Covers the managed root by default, or "
+        "the whole vault with --scope vault (so notes outside it "
         "become semantically searchable).",
     )
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+        help="vault root (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--scope",
         choices=("kb", "vault"),
         default=None,
         help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
-        f"'vault' indexes the whole vault, not just {managed_join('')}.",
+        "'vault' indexes the whole vault, not just the managed root.",
     )
     parser.add_argument(
         "--batch-size",
@@ -1603,7 +1603,7 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+        help="vault root (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
@@ -1689,7 +1689,7 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=None,
-        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+        help="vault root (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--profile",
@@ -1766,7 +1766,7 @@ def _relations_main(argv: list[str]) -> int:
         "--vault",
         default=None,
         help=(
-            f"vault root containing '{managed_join('')}'; reads its snapshot locally "
+            "vault root; reads its snapshot locally "
             "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
         ),
     )
@@ -2065,7 +2065,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+        help="vault root (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2098,7 +2098,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+        help="vault root (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2127,7 +2127,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+        help="vault root (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2459,7 +2459,7 @@ def _collections_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+            help="vault root (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -2615,7 +2615,7 @@ def _store_mode_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
+            help="vault root (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -3351,7 +3351,7 @@ def _cell_init_main(argv: list[str]) -> int:
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem init",
-        description=f"Bootstrap a fresh {managed_root_rel()} scaffold into a vault.",
+        description="Bootstrap a fresh Exomem scaffold into a vault.",
     )
     parser.add_argument(
         "--vault",
@@ -3360,7 +3360,7 @@ def _init_main(argv: list[str]) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help=f"Overlay the scaffold even if {managed_join('')} exists (existing files kept).",
+        help=f"Overlay the scaffold even if {managed_root_label()} exists (existing files kept).",
     )
     parser.add_argument(
         "--layout",
@@ -4795,7 +4795,7 @@ def _print_adopt_human(result: dict) -> None:
         f"{totals.get('dirs', 0)} folders"
     )
     if governance.get("kb_present"):
-        print(f"  Governed layer: {governance.get('governed_path') or managed_join('')}")
+        print(f"  Governed layer: {governance.get('governed_path') or managed_root_label()}")
     else:
         print("  Governed layer: not initialized yet")
     print("  Originals: untouched; non-KB files stay read-only input.")
@@ -5062,7 +5062,7 @@ def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
                 print(f"Error [{err['code']}]: {err['message']}", file=sys.stderr)
             return 1
 
-    parser = _CLIParser(prog="kb", description=f"Query and write the local {managed_root_rel()}.")
+    parser = _CLIParser(prog="kb", description="Query and write the local vault.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
     for name in sorted(cmds):
         cmd = cmds[name]

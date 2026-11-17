@@ -3157,7 +3157,7 @@ def _identity_guarded_delta_source(root: Path, rel_path: str) -> str | None:
     except OSError as error:
         raise activation_manifest.ActivationManifestError(
             "IDENTITY_CENSUS_ROOT_UNREADABLE",
-            "Knowledge Base root is unavailable for identity census",
+            "managed root is unavailable for identity census",
         ) from error
     if (
         not stat.S_ISDIR(kb_info.st_mode)
@@ -3166,7 +3166,7 @@ def _identity_guarded_delta_source(root: Path, rel_path: str) -> str | None:
     ):
         raise activation_manifest.ActivationManifestError(
             "IDENTITY_CENSUS_UNSAFE_ROOT",
-            "Knowledge Base root is unsafe for identity census",
+            "managed root is unsafe for identity census",
         )
 
     source_path = root / rel_path
@@ -4709,7 +4709,7 @@ def _build_identity_census(
     except OSError as error:
         raise activation_manifest.ActivationManifestError(
             "IDENTITY_CENSUS_ROOT_UNREADABLE",
-            "Knowledge Base root is unavailable for identity census",
+            "managed root is unavailable for identity census",
         ) from error
     if (
         not stat.S_ISDIR(root_info.st_mode)
@@ -4718,7 +4718,7 @@ def _build_identity_census(
     ):
         raise activation_manifest.ActivationManifestError(
             "IDENTITY_CENSUS_UNSAFE_ROOT",
-            "Knowledge Base root is unsafe for identity census",
+            "managed root is unsafe for identity census",
         )
     walk(kb)
     return (

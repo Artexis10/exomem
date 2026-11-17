@@ -18,7 +18,7 @@ from typing import Any
 
 from . import capabilities, operation_entries
 from .entity_types import ENTITY_TYPE_IDS, load_entity_types
-from .kbdir import managed_join
+from .kbdir import managed_join, managed_root_label
 from .text_scripts import comparison_words
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
@@ -576,7 +576,7 @@ def write_selected_packs(
     if not kb.is_dir():
         raise PackSelectionError(
             "KB_NOT_INITIALIZED",
-            f"{managed_join('')} is required before selecting packs",
+            f"{managed_root_label(sentence_start=True)} is required before selecting packs",
         )
     selected_ids = normalize_pack_ids(pack_ids)
     date_iso = (today or dt.date.today()).isoformat()

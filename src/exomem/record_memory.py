@@ -18,6 +18,7 @@ from . import (
     structured_collections,
 )
 from .cli_ops import OpError, action_argument_contract
+from .kbdir import managed_join
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
 
@@ -549,10 +550,10 @@ def _bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
         ),
         "example": {
             "action": "bulk_upsert",
-            "collection": "Knowledge Base/Records/Publications/_collection.md",
+            "collection": managed_join("Records/Publications/_collection.md"),
             "why": "import a normalised export",
             "expected_container_hash": "<hash from inspect or the previous response>",
-            "source": "Knowledge Base/Evidence/export-2026-09.md",
+            "source": managed_join("Evidence/export-2026-09.md"),
             "rows": [
                 {"item": {"published_on": "2026-09-01", "slug": "entry-one"}},
                 {"item": {"published_on": "2026-09-02", "slug": "entry-two"}, "body": "Notes."},

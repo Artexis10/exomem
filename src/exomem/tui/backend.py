@@ -162,7 +162,7 @@ class ExomemBackend:
             self._vault = root
             return VaultState(root, True)
         if root.is_dir():
-            return VaultState(root, False, "folder exists but holds no Knowledge Base yet")
+            return VaultState(root, False, "folder exists but is not an Exomem vault yet")
         return VaultState(root, False, "path does not exist")
 
     def adopt_vault_root(self, root: Path) -> VaultState:
@@ -616,7 +616,7 @@ class ExomemBackend:
             # state and the real next steps.
             raise BackendError(
                 "VAULT_EXISTS",
-                f"{folder} already holds (part of) a Knowledge Base",
+                f"{folder} already holds (part of) an Exomem vault",
                 "choose 'Use an existing vault' to connect to it, pick an empty "
                 "folder, or overlay an incomplete scaffold with `exomem init --force`",
             ) from exc

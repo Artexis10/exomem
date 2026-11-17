@@ -1769,7 +1769,7 @@ def bulk_upsert_records(
         )
         if log_plan.warning is not None:
             raise collections.CollectionError(
-                "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
+                "RECORD_AUDIT_UNAVAILABLE", f"{managed_join('log.md')} is required"
             )
         writes = [
             *(
@@ -5817,7 +5817,7 @@ def _require_activity_log(root: Path) -> None:
 
     if not store_read.holds_file(root, managed_join("log.md")):
         raise collections.CollectionError(
-            "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
+            "RECORD_AUDIT_UNAVAILABLE", f"{managed_join('log.md')} is required"
         )
 
 
@@ -5841,7 +5841,7 @@ def _plan_required_audit(
     )
     if plan.warning is not None:
         raise collections.CollectionError(
-            "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
+            "RECORD_AUDIT_UNAVAILABLE", f"{managed_join('log.md')} is required"
         )
     return plan
 
@@ -5865,7 +5865,7 @@ def _collection_archive_token(
         log_bytes, _guard = vault.read_guarded_bytes(root, vault.kb_root(root) / "log.md")
     except FileNotFoundError as error:
         raise collections.CollectionError(
-            "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
+            "RECORD_AUDIT_UNAVAILABLE", f"{managed_join('log.md')} is required"
         ) from error
     return hashlib.sha256(
         _canonical_json(

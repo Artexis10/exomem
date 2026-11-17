@@ -25,7 +25,7 @@ import yaml
 
 from . import access as access_module
 from . import overview as overview_module
-from .kbdir import is_in_managed_root, managed_join, managed_root
+from .kbdir import is_in_managed_root, managed_join, managed_root, managed_root_label
 from .vault_store import cli_fence
 
 # Classification of a top-level sibling folder.
@@ -202,7 +202,7 @@ def scan_and_classify(vault: str | Path, *, overview_fn=overview_module.overview
     (that's where ``_access.yaml`` lives), else raises ``PersonalizeError('NO_KB')``."""
     vault_path = Path(vault).expanduser()
     if not managed_root(vault_path).is_dir():
-        raise PersonalizeError("NO_KB", f"no {managed_join('')} under {vault_path} - run `exomem init` first")
+        raise PersonalizeError("NO_KB", f"no {managed_root_label()} under {vault_path} - run `exomem init` first")
     scan = overview_fn(vault_path)
     existing = access_module._load_config(vault_path)
     proposals = classify_siblings(scan, existing)

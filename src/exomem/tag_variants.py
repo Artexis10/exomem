@@ -42,6 +42,7 @@ from typing import Any
 import yaml
 
 from . import vault
+from .kbdir import managed_join
 from .vocabulary_fold import fold_term
 
 log = logging.getLogger(__name__)
@@ -770,7 +771,7 @@ def apply(
             if log_plan.warning is not None:
                 # The log entry is the rollback record; without it nothing is written.
                 raise ValueError(
-                    "TAG_VARIANT_AUDIT_UNAVAILABLE: Knowledge Base/log.md is required "
+                    f"TAG_VARIANT_AUDIT_UNAVAILABLE: {managed_join('log.md')} is required "
                     "to record the rollback"
                 )
             vault.batch_atomic_write([*writes, *log_plan.writes], vault_root=root)

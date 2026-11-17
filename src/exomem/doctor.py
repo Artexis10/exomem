@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Literal
 from . import __version__, cuda_containment, install_info, process_memory
 from .cli_ops import OpError
 from .collection_store.ownership import reader as ownership_reader
-from .kbdir import managed_join, managed_root, managed_root_rel
+from .kbdir import managed_join, managed_root, managed_root_label
 
 if TYPE_CHECKING:
     from .writer_lease import LeaseConfig
@@ -481,7 +481,7 @@ def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
             "fail",
             f"{path} contains no exomem schema contract "
             f"(looked in .exomem/schema/ and {managed_join('_Schema/')}).",
-            f"Pass the vault root, not the {managed_root_rel()} folder. For a new vault, run "
+            f"Pass the vault root, not the {managed_root_label()} folder. For a new vault, run "
             "`uv run python -m exomem init --vault <path>`.",
         )
     return path, _check("vault.path", "pass", f"Vault found at {path}.")

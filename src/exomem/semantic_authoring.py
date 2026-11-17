@@ -201,7 +201,7 @@ def _build_portable_categories() -> dict[str, Any]:
                 "- id: commit-to-morning-training\n"
                 "- tags: health\n"
                 "- relations: supports: "
-                "[[Knowledge Base/Notes/Health/Morning training]]\n"
+                "[[Morning training]]\n"
                 "\n"
                 "Commit to a fixed 6am training block on weekdays so consistency "
                 "compounds and health stays the durable lens for this decision.\n"

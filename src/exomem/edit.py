@@ -63,6 +63,7 @@ from .kbdir import (
     kb_page_target,
     managed_join,
     managed_relative,
+    managed_root_label,
     managed_split,
     resolve_stored_page_target,
 )
@@ -482,8 +483,8 @@ def _missing_page_error(vault_root: Path, path: str, rel: str) -> EditError:
         return EditError(
             code="OUTSIDE_GOVERNED_ROOT", missing=["path"],
             reason=(
-                f"page exists at {outside} but is outside {managed_join('')}"
-                f" — exomem only edits governed content under {managed_join('')};"
+                f"page exists at {outside} but is outside {managed_root_label()}"
+                f" — exomem only edits governed content under {managed_root_label()};"
                 " move it under the governed root or address it there"
             ),
         )
@@ -534,7 +535,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
         raise EditError(
             code="INVALID_PATH",
             missing=["path"],
-            reason=f"path escapes {managed_join('')}: {e}",
+            reason=f"path escapes {managed_root_label()}: {e}",
         ) from None
     # A page the caller may not see is answered exactly as a missing one, and
     # never loaded (see `egress.write_target_withheld`).

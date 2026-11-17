@@ -188,8 +188,8 @@ _REMEDIATION: dict[str, str | Callable[[], str]] = {
     ),
     "CREATE_ONLY_CONFLICT": "Choose an unused collection path or inspect the existing collection.",
     "UNSUPPORTED_MEDIA": "Use a supported audio, video, image, document, or text-media extension.",
-    "MEDIA_NOT_FOUND": "Check the governed Knowledge Base path and original filename.",
-    "MEDIA_PATH_OUTSIDE_KB": "Choose a media artifact inside the governed Knowledge Base.",
+    "MEDIA_NOT_FOUND": "Check the governed path and original filename.",
+    "MEDIA_PATH_OUTSIDE_KB": "Choose a media artifact inside the managed root.",
     "MEDIA_PATH_ACCESS_DENIED": (
         "Move the artifact to a writable governed subtree or update _access.yaml policy."
     ),

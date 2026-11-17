@@ -341,6 +341,18 @@ def managed_root_rel(*, layout: Layout | str | None = None) -> str:
     return ROOT_RELATIVE if _is_root(layout) else kb_dirname()
 
 
+def managed_root_label(*, layout: Layout | str | None = None, sentence_start: bool = False) -> str:
+    """The managed root as a person reads it in a message: ``Knowledge Base/`` in ``nested``, "the vault root" in ``root``.
+
+    For a message that names the place ("must stay under X", "X is required"). ``managed_join("")`` is
+    an empty string in ``root`` and ``managed_root_rel`` is ``.`` there, and neither names a place.
+    ``sentence_start`` capitalises the root form for a message that opens with the label.
+    """
+    if not _is_root(layout):
+        return kb_prefix()
+    return "The vault root" if sentence_start else "the vault root"
+
+
 def managed_root_key(*, layout: Layout | str | None = None) -> str:
     """The managed root as the vault-relative key that the store and the directory listings use for a folder.
 

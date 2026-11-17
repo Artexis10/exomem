@@ -65,6 +65,7 @@ from .kbdir import (
     managed_respell,
     managed_root,
     managed_root_key,
+    managed_root_label,
     managed_split,
     managed_split_parts,
     managed_state,
@@ -511,7 +512,7 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
     if not override:
         raise RuntimeError(
             f"{env_var} is not set. Point it at your vault root — the folder "
-            f"that contains '{managed_join('')}'. For example:\n"
+            "that holds your notes. For example:\n"
             f'  macOS/Linux:  export {env_var}="/path/to/your/Obsidian"\n'
             f'  Windows:      setx {env_var} "C:/path/to/your/Obsidian"'
         )
@@ -7662,8 +7663,8 @@ def resolve_under_vault(
         raise VaultPathError(
             code="INVALID_PATH",
             reason=(
-                f"path is outside Knowledge Base/: {raw!r} — exomem only "
-                "writes governed content under Knowledge Base/"
+                f"path is outside {managed_root_label()}: {raw!r} — exomem only "
+                f"writes governed content under {managed_root_label()}"
             ),
         )
 

@@ -59,7 +59,7 @@ from . import adopt as adopt_module
 from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .governance import raw_protection
-from .kbdir import is_in_managed_root, managed_join, managed_root
+from .kbdir import is_in_managed_root, managed_root, managed_root_label
 from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
 from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
@@ -148,7 +148,7 @@ _RECALL_SAMPLE = 10
 _REASONS = {
     "NOT_IN_INVENTORY": "path is not among the scanned adoption candidates",
     "UNSUPPORTED_IMPORT_TYPE": "the scan did not mark this file importable",
-    "ALREADY_GOVERNED": f"path is already inside {managed_join('')}",
+    "ALREADY_GOVERNED": f"path is already inside {managed_root_label()}",
     adoption_plan.OVER_CEILING: "file is larger than the adoption ceiling",
     "NOT_REGULAR_FILE": "only regular files import; links and special files do not",
     "HIDDEN_FOLDER": "hidden folders are not scanned unless include_hidden=true",
@@ -1187,7 +1187,7 @@ def _refuse_pending_renames(root: Path, verb: str, *, run_id: str | None = None,
         )
         raise AdoptionRunError(
             "RENAMES_PENDING",
-            f"{verb} is refused: run {runs} renamed {len(holds)} staged file(s) into the Knowledge Base "
+            f"{verb} is refused: run {runs} renamed {len(holds)} staged file(s) into {managed_root_label()} "
             f"and has not committed their Source pages. {route}",
         )
 
@@ -1316,7 +1316,7 @@ def start(
         if not initialize_kb:
             raise AdoptionRunError(
                 "KB_NOT_INITIALIZED",
-                f"{managed_join('')} is required; pass initialize_kb=true to bootstrap the scaffold first",
+                f"{managed_root_label(sentence_start=True)} is required; pass initialize_kb=true to bootstrap the scaffold first",
             )
         from . import init as init_module
 
@@ -4122,7 +4122,7 @@ def file(
                 )
                 raise AdoptionRunError(
                     exc.code,
-                    f"{managed_join('')} is required; run {begin}, then repeat the file call: it carries on that run",
+                    f"{managed_root_label(sentence_start=True)} is required; run {begin}, then repeat the file call: it carries on that run",
                 ) from exc
             raise
         return _filing_reply(root, store, run, stop={"code": exc.code, "reason": exc.reason})

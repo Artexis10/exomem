@@ -927,7 +927,7 @@ def apply(
         )
         if log_plan.warning is not None:
             raise collections.CollectionError(
-                "STRUCTURED_FILE_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
+                "STRUCTURED_FILE_AUDIT_UNAVAILABLE", f"{managed_join('log.md')} is required"
             )
 
         planned_paths = {

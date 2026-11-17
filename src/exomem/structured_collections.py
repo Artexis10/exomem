@@ -22,7 +22,7 @@ from urllib.parse import quote, unquote
 
 from . import call_spans, item_keys, memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import RECORDS_PROFILE, profile_for
-from .kbdir import managed_join, managed_split, managed_split_parts
+from .kbdir import managed_join, managed_root_label, managed_split, managed_split_parts
 from .planning_values import PlanningValues, Unavailable
 
 if TYPE_CHECKING:
@@ -319,7 +319,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             },
             "schema_version": {"type": "integer", "minimum": 1},
             "natural_key": {"declared_fields_only": True, "minimum_items": 1, "maximum_items": 16},
-            "records_paths": "manifest and canonical source must stay under Knowledge Base/Records",
+            "records_paths": "manifest and canonical source must stay under Records/ in the managed root",
         },
         "storage_strategies": {
             SQLITE_STORAGE: {
@@ -643,7 +643,7 @@ One item records the state observed for one identity on one effective date.
             "append_item": {
                 "panel_on": "2026-01-01",
                 "specimen_id": "SPECIMEN-EXAMPLE",
-                "source": "Knowledge Base/Sources/Examples/laboratory-report.md",
+                "source": managed_join("Sources/Examples/laboratory-report.md"),
                 "analytes": [
                     {
                         "name": "Example analyte",
@@ -3830,7 +3830,7 @@ def _vault_relative_path(root: Path, manifest_rel: str, value: object, name: str
         rel = (Path(manifest_rel).parent / raw).as_posix()
     if _unsafe_relative(rel) or managed_split(rel) is None:
         raise CollectionError(
-            "INVALID_COLLECTION_PATH", f"{name} must stay under the Knowledge Base"
+            "INVALID_COLLECTION_PATH", f"{name} must stay under {managed_root_label()}"
         )
     target = root / rel
     if not _is_safe_vault_target(root, target):
@@ -3844,7 +3844,7 @@ def _require_records_layer(path: str, name: str) -> None:
     below = managed_split_parts(parts)
     if below is None or len(below) < 2 or below[0] != RECORDS_PROFILE.placement_layer:
         raise CollectionError(
-            "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/Records"
+            "INVALID_COLLECTION_PATH", f"{name} must stay under {managed_join('Records')}"
         )
 
 
@@ -3854,7 +3854,7 @@ def _require_profile_layer(profile: str, path: str, name: str) -> None:
     below = managed_split_parts(parts)
     if below is None or len(below) < 2 or below[0] != layer:
         raise CollectionError(
-            "INVALID_COLLECTION_PATH", f"{name} must stay under Knowledge Base/{layer}"
+            "INVALID_COLLECTION_PATH", f"{name} must stay under {managed_join(layer)}"
         )
 
 

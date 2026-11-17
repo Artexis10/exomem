@@ -536,7 +536,7 @@ def _safe_next_actions(
             {
                 "action": "initialize-kb",
                 "description": (
-                    "Initialize the governed Knowledge Base only when ready; "
+                    "Initialize the governed layer only when ready; "
                     "the census does not require it."
                 ),
             }

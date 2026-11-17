@@ -101,6 +101,7 @@ from . import get_page as get_page_module
 from . import held_operation as held_operation_module
 from . import import_windows as import_windows_module
 from . import knowledge_packs as knowledge_packs_module
+from . import layout as layout_module
 from . import lifecycle_statuses as lifecycle_statuses_module
 from . import link as link_module
 from . import link_summary as link_summary_module
@@ -199,7 +200,13 @@ from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
 from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
-from .kbdir import is_in_managed_root, kb_page_target, managed_join, managed_root, managed_root_rel
+from .kbdir import (
+    is_in_managed_root,
+    kb_page_target,
+    managed_root,
+    managed_root_label,
+    managed_root_rel,
+)
 from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
@@ -1898,7 +1905,7 @@ def op_bootstrap(
                 f"run {call_text('connect_memory', {'operation': 'suggest-links'})} and, when directional meaning matters, suggest-relations on the draft",
                 (
                     "write accepted note-level edges under `## Relations`, for example "
-                    "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
+                    f"`- supports [[{layout_module.example_note_path('Research', 'example-target')}]]`; "
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
                 f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')}",
@@ -2164,7 +2171,7 @@ def op_bootstrap(
                     "validate_call": {
                         "tool": "edit_note",
                         "arguments": {
-                            "path": "Knowledge Base/Notes/Research/example.md",
+                            "path": layout_module.example_note_path("Research", "example.md"),
                             "why": "refresh relation review",
                             "operation": {
                                 "kind": "replace_string",
@@ -2177,7 +2184,7 @@ def op_bootstrap(
                     "commit_call": {
                         "tool": "edit_note",
                         "arguments": {
-                            "path": "Knowledge Base/Notes/Research/example.md",
+                            "path": layout_module.example_note_path("Research", "example.md"),
                             "why": "refresh relation review",
                             "operation": {
                                 "kind": "replace_string",
@@ -2732,7 +2739,7 @@ def op_find(
     explain: bool = False,
     purpose: str | None = None,
 ) -> list[RetrievalHit] | FindEnvelope:
-    """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Deterministic entity cues may add an abstention-aware `referents` envelope block without changing hits. Filters are AND'd; tag/project lists are OR'd within.
+    """Search / find / look up / query / retrieve / recall pages in the Exomem vault: notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Deterministic entity cues may add an abstention-aware `referents` envelope block without changing hits. Filters are AND'd; tag/project lists are OR'd within.
 
     Args:
         query: Free-text search string. In "hybrid"/"vector" mode it's
@@ -2775,10 +2782,12 @@ def op_find(
         continuation: Opaque governed-projection continuation returned by a prior page.
             It is bound to the same principal, authorization session, purpose, request,
             and retained projected snapshot. Omit for the first page.
-        scope: "kb" (default) searches Knowledge Base/ only. "vault"
-            searches the whole vault, including sibling folders
-            (Tracking/, Reference/, Finance/, ... and curated,
-            read-only trees kept outside Knowledge Base/). "kb-only" is
+        scope: "kb" (default) searches the managed root only: in a
+            nested vault a folder inside the vault, in a root vault the
+            vault root itself. Paths in these descriptions are relative to
+            it. "vault" searches the whole vault, including sibling
+            folders (Tracking/, Reference/, Finance/, ... and curated,
+            read-only trees kept outside the managed root). "kb-only" is
             the strict form of "kb": it can never widen even on
             request. `_Schema/`, `_trash/`, `_attachments/`, and
             `.obsidian/` are excluded under every scope. NOTE: an
@@ -2838,7 +2847,7 @@ def op_find(
             neutral knowledge lookup.
         widen_outside_kb: When true (OFF by default), scope="kb" also
             RESERVES up to `limit - 1` slots for pages outside
-            Knowledge Base/, so content in sibling folders is not
+            the managed root, so content in sibling folders is not
             silently invisible; reserved hits carry `outside_kb: true`.
             Out-of-KB recall is BM25/keyword (the vector sidecar is
             KB-scoped) over the maintained catalogue, with a relaxed
@@ -2900,7 +2909,7 @@ def op_find(
         excerpt[, outside_kb]
         [, status][, superseded_by][, signals]}. `outside_kb: true` is
         present only on hits the "kb" auto-widen pulled from beyond
-        Knowledge Base/ (the `path` also shows the sibling folder).
+        the managed root (the `path` also shows the sibling folder).
         `status` + `superseded_by` appear only when a hit is NOT plain
         `active` — i.e. a superseded tombstone (or draft) — so you can tell
         it from a live conclusion and follow `superseded_by` to the replacement.
@@ -3563,7 +3572,7 @@ def op_search(
     limit: int = 10,
     scope: str = "kb",
 ) -> SearchResponse:
-    """Search the Knowledge Base with a portable metadata-only response. Read-only.
+    """Search the vault with a portable metadata-only response. Read-only.
 
     This is the conservative companion to `find`: it returns result IDs, titles,
     URLs, and string metadata only. It never returns note excerpts, graph/ranking
@@ -3577,7 +3586,7 @@ def op_search(
         projects: Optional project filter; values are OR'd within the filter.
         tags: Optional tag filter; values are OR'd within the filter.
         limit: Maximum number of results. Capped to 50.
-        scope: "kb" for Knowledge Base first, or "vault" to search the broader vault.
+        scope: "kb" for the managed root first, or "vault" to search the broader vault.
 
     Returns:
         {"results": [{"id", "title", "url", "metadata"}, ...]}. `id` is the
@@ -3639,7 +3648,7 @@ def op_fetch(
     id: str,
     max_chars: int = 3000,
 ) -> FetchResponse:
-    """Fetch one Knowledge Base document by `search` result ID with bounded text. Read-only.
+    """Fetch one document by `search` result ID with bounded text. Read-only.
 
     This is a bounded read step between metadata-only `search` and full `get`.
     It returns the markdown body without raw frontmatter and caps body text at
@@ -4072,7 +4081,7 @@ def op_add(
     projects: list[str] | None = None,
     raw_protection: bool = False,
 ) -> dict:
-    """Capture raw content as an immutable source page in the Knowledge Base.
+    """Capture raw content as an immutable source page in the managed root.
 
     Writes a frontmatter-compliant page to Sources/<Kind>/[<Domain>/]YYYY-MM-DD-<slug>.md
     and updates Sources/index.md, the top-level index.md (Recent activity
@@ -4126,7 +4135,7 @@ def op_audit(
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
 ) -> dict:
-    """Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.
+    """Audit / lint / health-check the vault: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.
 
     Returns a structured report Claude can read to propose follow-up
     edits via `note`/`add`. Does NOT modify anything.
@@ -4212,7 +4221,7 @@ def op_attention(
     limit: int = 25,
     state: str = "open",
 ) -> dict:
-    """Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only.
+    """Your review queue: the one ranked list of what in the vault needs your attention today. Read-only.
 
     Composes the six default measurement-only epistemic queues into a single
     list, ranked by Reciprocal Rank Fusion over each queue's own ordering — a
@@ -4528,7 +4537,7 @@ def op_provenance_report(
         key: Filter to rows carrying this provenance key.
         value: With key, require this exact value.
         path: Restrict the scan to one vault-relative file (else the whole
-            Knowledge Base is walked).
+            managed root is walked).
 
     Returns:
         {findings: [{path, line_number, row_text, tags}], summary:
@@ -4564,7 +4573,7 @@ def op_propose_compilation(
     Args:
         sources: Vault-relative paths/wikilinks to the source(s) to compile.
             Same path conventions as `note.sources` (brackets and the
-            leading `Knowledge Base/` are tolerated).
+            leading `<managed root>/` are tolerated).
         suggested_title: Optional title override; otherwise one is derived
             from the source titles.
 
@@ -4604,9 +4613,9 @@ def op_get(
 ) -> GetResponse:
     """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).
 
-    Reads anywhere under the vault root — not just `Knowledge Base/`.
+    Reads anywhere under the vault root — not just the managed root.
     This lets you cite from curated, read-only sibling folders (e.g.
-    `Reference/`) kept outside Knowledge Base/ when compiling. Those are
+    `Reference/`) kept outside the managed root when compiling. Those are
     read-only by convention (marked in `_access.yaml`); `get` honors that
     by only reading.
 
@@ -4615,9 +4624,9 @@ def op_get(
 
     Args:
         path: Vault-relative path. Accepted shapes:
-            - `Knowledge Base/Notes/Insights/foo.md`
+            - `<managed root>/Notes/Insights/foo.md`
             - `Reference/Strategy.md`
-            - `Notes/Insights/foo` (auto-prepends `Knowledge Base/` if
+            - `Notes/Insights/foo` (auto-prepends `<managed root>/` if
               literal path doesn't resolve; auto-adds `.md`).
         frontmatter_only: If true, return ONLY the frontmatter (no body) —
             cheap for scanning many files by field (folds in the former
@@ -5753,7 +5762,7 @@ def op_note(
     summary: str | None = None,
     topics: str | list[str] | None = None,
 ) -> dict:
-    """Create a compiled note in the Knowledge Base.
+    """Create a compiled note in the managed root.
 
     Use this for distilled thinking — not raw capture. For raw capture
     (an article you read, a session transcript), use `add` instead.
@@ -5813,9 +5822,9 @@ def op_note(
         projects: List of project keys (plural). Optional for insight,
             failure, pattern, production-log. __PROJECT_KEYS_HINT__
         sources: Vault-relative wikilinks to existing pages this note draws
-            from, e.g. `["Knowledge Base/Sources/Articles/2026-05-18-foo"]`
-            or `["[[Knowledge Base/Sources/Articles/2026-05-18-foo]]"]`.
-                Brackets and the leading `Knowledge Base/` are tolerated. Every
+            from, e.g. `["<managed root>/Sources/Articles/2026-05-18-foo"]`
+            or `["[[<managed root>/Sources/Articles/2026-05-18-foo]]"]`.
+                Brackets and the leading `<managed root>/` are tolerated. Every
                 non-empty entry must already resolve to authorized captured Source
                 or Evidence material. A URL, connector ID, remote file ID, working
                 script, or derivative summary is not a substitute: capture the
@@ -6089,7 +6098,7 @@ def op_create_file(
     - Existing files unless `overwrite=true`.
 
     Args:
-        path: Vault-relative, e.g. `Knowledge Base/Identity/Career.md`.
+        path: Vault-relative, e.g. `<managed root>/Identity/Career.md`.
             Forward or back slashes accepted. Path-escape guarded.
         content: File body (or full file if `frontmatter` is None). Text
             only; for binaries use the /upload endpoint.
@@ -6167,13 +6176,13 @@ def op_overview(
 
     Answers "what does this vault look like?" in ONE call — use this instead
     of reading files one by one for structural questions. Reports totals,
-    whether a `Knowledge Base/` tree is present, a depth/breadth-capped folder
+    whether a managed root is present, a depth/breadth-capped folder
     tree (per-folder file counts, frontmatter coverage %, wikilink/md-link
     counts, dominant filename patterns, sample names), junk candidates
     (zero-byte files, sync-conflict duplicates like `note 2.md`), largest and
     oldest-unmodified files, and exactly what was skipped. Lists are capped;
     counts are always exact. Works on vaults with no initialized
-    `Knowledge Base/` (`kb.present` false).
+    a managed root (`kb.present` false).
 
     Args:
         path: Vault-relative subtree to report on. Empty string (default)
@@ -6221,7 +6230,7 @@ def op_adopt(
     notes, media, records, or project folders. `mode="scan-only"` returns a
     bounded read-only adoption report: what Exomem found, which content is
     governed versus read-only input, likely knowledge packs, and safe next
-    actions. Explicit write modes only write under `Knowledge Base/`:
+    actions. Explicit write modes only write under the managed root:
     `save-manifest` saves the report, `copy-as-sources` copies selected
     legacy text files into governed Sources with original path/hash provenance,
     and `compile-selected` copies selected legacy files when needed then returns
@@ -6238,7 +6247,7 @@ def op_adopt(
         include_hidden: Include hidden files/directories in the scan.
         samples: Sample filename count per folder.
         pack_limit: Maximum knowledge-pack suggestions to return.
-        manifest_path: Optional markdown destination under Knowledge Base/ for
+        manifest_path: Optional markdown destination under the managed root for
             save-manifest. A default under _Adoption/ is used when omitted.
         selected_paths: Explicit vault-relative legacy files for copy-as-sources or compile-selected.
         semantic_max_files: Maximum Markdown files read by the scan-only semantic census.
@@ -6444,11 +6453,11 @@ def op_delete(
     apply to files; `recursive` applies to folders.
 
     Deletes are NEVER permanent at this layer. The file moves to
-    `Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`
+    `<managed root>/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`
     with a `.meta.json` sidecar capturing original path, timestamp,
     inbound link count, and which force-flags were used. Recovery is
     `move_file` from the trash path back. Permanent removal happens
-    desk-side via `rm Knowledge Base/_trash/...`.
+    desk-side via `rm <managed root>/_trash/...`.
 
     Per SKILL.md rule 6, supersession via `replace` is still preferred
     for compiled material. Use this op for scratch, mistakes outside the
@@ -6603,7 +6612,7 @@ def op_append_to_file(
 def op_list_trash(vault_root: Path, date: str | None = None) -> dict:
     """Tier 2: enumerate recoverable trash entries. Read-only.
 
-    Walks Knowledge Base/_trash/YYYY-MM-DD/ and parses each .meta.json
+    Walks <managed root>/_trash/YYYY-MM-DD/ and parses each .meta.json
     sidecar. Returns entries most-recent-first with original path,
     timestamp, kind (file or directory), and which force-flags fired
     at trash time. Also surfaces drift: orphan_sidecars (sidecars with
@@ -6641,7 +6650,7 @@ def op_recover_from_trash(
 
     Args:
         trash_path: Vault-relative path to the trashed entry
-            (under `Knowledge Base/_trash/...`).
+            (under `<managed root>/_trash/...`).
         restore_path: Optional override; defaults to the original
             location from the sidecar.
         allow_curated: Required if restoring into a curated tree.
@@ -6670,7 +6679,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
 
     Useful before `move_file` (preview what update_wikilinks will touch)
     or `delete_file` (preview what would break). Matches three forms:
-    - Full path: `[[Knowledge Base/Notes/Insights/foo]]`
+    - Full path: `[[<managed root>/Notes/Insights/foo]]`
     - KB-stripped: `[[Notes/Insights/foo]]`
     - Bare basename (only when unique vault-wide): `[[foo]]`
 
@@ -8805,7 +8814,7 @@ def op_remember(
         project: Required for research-note. __PROJECT_KEYS_HINT__
         projects: Cross-project keys. __PROJECT_KEYS_HINT__
         sources: Wikilinks to governed pages this draws from, e.g.
-            ["Knowledge Base/Sources/Articles/2026-05-18-example"]; each gets
+            ["<managed root>/Sources/Articles/2026-05-18-example"]; each gets
             this note in its `ingested_into:`. Omitting on research-note,
             insight, failure or pattern only warns.
         bridge_of: Source paths or stable refs for a cross-domain bridge;
@@ -8923,7 +8932,7 @@ def op_edit_memory(
     unrelated edits leave legacy citations alone.
 
     Author typed relations under `## Relations`, for example
-    `- supports [[Knowledge Base/Notes/Research/example-target]]`.
+    `- supports [[<managed root>/Notes/Research/example-target]]`.
     Dataview `supports:: [[...]]` is not supported relation syntax.
     See references/writing.md.
 
@@ -9077,7 +9086,7 @@ def op_observe_memory(
         is_in_managed_root(resolved_path)
     ):
         raise ValueError(
-            f"INVALID_PATH: observe_memory parent reference resolves outside {managed_join('')}"
+            f"INVALID_PATH: observe_memory parent reference resolves outside {managed_root_label()}"
         )
     try:
         result = observe_memory_module.observe_memory(
@@ -10231,7 +10240,7 @@ def _process_media(
     except ValueError as exc:
         raise OpError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must be inside {managed_root_rel()}: {path}",
+            f"media path must be inside {managed_root_label()}: {path}",
         ) from exc
     from . import document_containers
 
@@ -10321,7 +10330,7 @@ def _selected_media_paths(
         except ValueError as error:
             raise OpError(
                 "MEDIA_PATH_OUTSIDE_KB",
-                f"media path must be inside {managed_root_rel()}: {value}",
+                f"media path must be inside {managed_root_label()}: {value}",
             ) from error
         relative = canonical_vault_rel(root, relative)
         if relative in seen:
@@ -12013,7 +12022,7 @@ def op_adoption_studio(
         path: For `file`, the staged folder `_Imports/<id>`; not with `upload`. For `start`, subtree
             (default: whole vault; ask which folder). For `status`, count filed originals under it.
         include_hidden: For `start`, include hidden files.
-        initialize_kb: For `start`, bootstrap a missing Knowledge Base.
+        initialize_kb: For `start`, bootstrap a missing managed root.
         collection: For `file` or `start`, a name kept across re-imports.
         include: For `select`, paths or folder rules {path, source_kind?,
             domain?} using registered keys; {path, adopt_as: note, note_type,
@@ -16369,7 +16378,7 @@ def product_front_door_catalog(
             if action in out:
                 out[action][bucket].extend(names)
     out["adopt"]["contract"] = (
-        "scan-only by default; write modes preserve originals and stay under Knowledge Base/"
+        "scan-only by default; write modes preserve originals and stay under the managed root"
     )
     out["ask"]["contract"] = (
         "retrieve with citations; prefer compiled notes, then sources/evidence for provenance"
