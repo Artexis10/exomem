@@ -251,9 +251,9 @@ _ADOPTION_TRIGGER = (
 #: took a document's identity from a search hit stored a citing work as the article it cites, and
 #: a remembered DOI as another Source's URL; the capture reply now shows the document's own.
 _ORIGINAL_CAPTURE = (
-    "Keep files the user hands you and documents an answer rests on as Sources by exact bytes; "
-    "custody verifies no claim. Take a document's title, authors and DOI from the document "
-    "itself; fix a wrong one with options.correction."
+    "Keep every file the user hands you, and documents an answer rests on, as Sources by exact "
+    "bytes, conclusive or not: custody verifies no claim. Take a document's title, authors and "
+    "DOI from it; fix a wrong one with options.correction."
 )
 
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
