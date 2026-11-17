@@ -230,9 +230,15 @@ page's name is chosen, Exomem SHALL count a live page's title (in NFC, case
 folded) as taking that stem, and the new page SHALL take the collision number, so
 that a bare link finds no stem match and reaches the title step, which reports the
 duplicate as ambiguous. The lookup SHALL NOT scan the vault: it SHALL use the
-title index that a running process already holds, and a process that holds none
-names the page from its folder alone. An explicit per-call `slug`, and a note
-whose name an adoption plan froze, SHALL NOT be moved by a live title.
+title index that a running process already holds. A process that holds none
+names the page from its folder alone, and the write SHALL carry one
+`title_check_unavailable` warning that says the title check could not run and the
+name came from its folder alone. An entity SHALL follow the same rule: a name
+that is free as a file but is another page's title takes the collision number,
+and an entity file that already exists still refuses with `ENTITY_EXISTS`. An
+explicit per-call `slug`, a vault in the `slug` style, and a note whose name an
+adoption plan froze SHALL NOT be moved by a live title and SHALL NOT carry the
+warning.
 
 #### Scenario: A new page does not take over a link to an older page with its title
 
@@ -242,12 +248,26 @@ whose name an adoption plan froze, SHALL NOT be moved by a live title.
 - **AND** its `FILENAME_ADJUSTED` warning names `Brûlerie Ötzberg-2` and says that a number was added
 - **AND** a bare link to `Brûlerie Ötzberg` is reported as matching two files by title, and is not moved to the second page
 
-#### Scenario: A process without a title index names the page from its folder
+#### Scenario: A process without a title index names the page from its folder and says so
 
 - **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, and a process that holds no title index
 - **WHEN** a second note with that title is written
 - **THEN** the write builds no title index and scans no vault
 - **AND** the file is named `Brûlerie Ötzberg.md`
+- **AND** the write carries a `title_check_unavailable` warning that says the name came from its folder alone
+
+#### Scenario: A write that names nothing by a title carries no title check warning
+
+- **GIVEN** a process that holds no title index
+- **WHEN** a note is written with an explicit `slug`, or in a vault in the `slug` style
+- **THEN** the write carries no `title_check_unavailable` warning
+
+#### Scenario: An entity does not take the stem of an older page with its title
+
+- **GIVEN** a page titled `Brûlerie Ötzberg` stored under its old slug, and a running process that holds the title index
+- **WHEN** an entity named `Brûlerie Ötzberg` is created
+- **THEN** the entity file is named `Brûlerie Ötzberg-2.md`
+- **AND** a bare link to `Brûlerie Ötzberg` is reported as matching two files by title
 
 ### Requirement: Derived-Name Length Is Capped
 

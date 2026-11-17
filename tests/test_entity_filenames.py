@@ -8,8 +8,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from test_default_filename_style import _hold_the_title_index
 
 from exomem import link as link_module
+from exomem import note as note_module
+from exomem import vault as vault_module
 
 TODAY = dt.date(2026, 5, 25)
 
@@ -96,3 +99,45 @@ def test_explicit_slug_still_names_the_file(vault: Path) -> None:
 
     assert Path(result.path).name == "brulerie-otzberg.md"
     assert _frontmatter(vault / result.path)["title"] == "Brûlerie Ötzberg"
+
+
+def _older_note_named_by_its_slug(vault: Path, title: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+    note_module.note(
+        vault,
+        content="## Claim\n\nAn invented claim for naming checks.\n",
+        note_type="insight",
+        title=title,
+        status="draft",
+        today=TODAY,
+    )
+    monkeypatch.delenv("EXOMEM_FILENAME_STYLE")
+
+
+def test_an_entity_does_not_take_the_stem_of_an_older_page_with_its_title(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _older_note_named_by_its_slug(vault, "Brûlerie Ötzberg", monkeypatch)
+    _hold_the_title_index(vault)
+
+    result = _create(vault, "Brûlerie Ötzberg")
+
+    assert Path(result.path).name == "Brûlerie Ötzberg-2.md"
+    (adjusted,) = [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
+    assert "'Brûlerie Ötzberg-2'" in adjusted and "a number was added" in adjusted
+    assert not [warning for warning in result.warnings if warning.startswith("title_check_unavailable")]
+    # The bare link finds no stem match, so it reaches the title step, which reports both pages.
+    _resolved, ambiguity = vault_module.normalize_wikilink("Brûlerie Ötzberg", vault)
+    assert ambiguity is not None and "matches 2 files by title" in ambiguity
+
+
+def test_an_entity_written_without_a_resident_title_index_says_its_name_was_not_checked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _older_note_named_by_its_slug(vault, "Brûlerie Ötzberg", monkeypatch)
+
+    result = _create(vault, "Brûlerie Ötzberg")
+
+    assert Path(result.path).name == "Brûlerie Ötzberg.md"
+    (unchecked,) = [warning for warning in result.warnings if warning.startswith("title_check_unavailable")]
+    assert "folder alone" in unchecked

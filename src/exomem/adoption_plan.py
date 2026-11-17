@@ -887,8 +887,9 @@ def plan_note(
     The leaf names the folder and file under the plan's day; this only keeps two notes
     of one plan apart.
     """
-    from .note import NoteError, planned_destination, title_holder
-    from .vault import InvalidSlugError, derives_title_name
+    from . import title_occupancy
+    from .note import NoteError, planned_destination
+    from .vault import InvalidSlugError
 
     title = note_title(text, item["title"])
     note: dict[str, Any] = {
@@ -902,7 +903,7 @@ def plan_note(
     # A page of a taken name takes the collision number that the leaf adds, so a retry keeps the vault's
     # style. The plan freezes the number, and the leaf applies it, so a plan lands where it was made.
     try:
-        held = title_holder(root) if derives_title_name(None, root) else None
+        held, _unchecked = title_occupancy.occupancy(root, None)
     except InvalidSlugError as error:
         return {"code": "WRITE_REFUSED", "reason": f"the note target is unavailable: {error}"}
     number = 1

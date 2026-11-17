@@ -60,6 +60,7 @@ from .vault import (
     resolve_filename_slug,
     sibling_name_variants,
     split_wikilink_target,
+    unique_path,
     writer_link_visibility,
     yaml_flow_list,
     yaml_scalar,
@@ -765,14 +766,22 @@ def link(
     except InvalidSlugError as error:
         raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
     folder = kb_root(vault_root) / "Entities" / definition.folder
-    entity_path = folder / f"{filename_slug}.md"
+    from . import title_occupancy
     from .governance import connector_boundary
 
-    prospective_path = entity_path.relative_to(vault_root).as_posix()
-    connector_boundary.require_create(vault_root, prospective_path)
-    rel_entity = canonical_vault_rel(vault_root, prospective_path)
-    if instances.page_scope(vault_root, rel_entity, authored) != selected_scope:
-        raise LinkError("REGISTRY_UNAVAILABLE", [], "destination uses a different registry instance")
+    title_held, title_warning = title_occupancy.occupancy(vault_root, slug)
+
+    def place(path: Path) -> str:
+        """The destination's checked vault-relative path: the boundary admits it and it is in this registry."""
+        prospective_path = path.relative_to(vault_root).as_posix()
+        connector_boundary.require_create(vault_root, prospective_path)
+        placed = canonical_vault_rel(vault_root, prospective_path)
+        if instances.page_scope(vault_root, placed, authored) != selected_scope:
+            raise LinkError("REGISTRY_UNAVAILABLE", [], "destination uses a different registry instance")
+        return placed
+
+    entity_path = folder / f"{filename_slug}.md"
+    rel_entity = place(entity_path)
     origin_block = None
     if isinstance(summary, str):
         try:
@@ -904,6 +913,11 @@ def link(
         if accepted_decision is not None:
             reason += " A distinct identity needs its own `slug`."
         raise LinkError("ENTITY_EXISTS", ["name"], reason)
+    if title_held is not None and title_held(entity_path.stem):
+        # The name is free as a file but is another page's title: taking it would move every bare link
+        # to that title here. The refusal above stays for a file that exists; this only numbers the name.
+        entity_path = unique_path(folder, entity_path.stem, vault_root=vault_root, title_held=title_held)
+        rel_entity = place(entity_path)
     type_resolution = vocabulary_resolution.entity_type_record(
         requested_type,
         definition,
@@ -1032,6 +1046,7 @@ def link(
     warnings = (
         list(slug_warnings)
         + ([adjusted] if adjusted else [])
+        + ([title_warning] if title_warning else [])
         + list(connection_warnings)
         + list(summary_warnings)
         + list(why_warnings)

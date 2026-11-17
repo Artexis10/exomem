@@ -141,10 +141,15 @@ A stem match beats a title match, so a new page named by a title that an older,
 slug-named page holds would move every bare link to that title. The write counts
 a live title as taking its stem and adds the collision number. The lookup borrows
 the title index of a running process, which never builds one, so a write does no
-vault scan. A process with no index names from the folder alone and says nothing:
-a warning on every cold write would be noise, and the duplicate stays reported as
-ambiguous by the resolver. A plan's leaf skips the check, because the plan froze
-its target and must land there.
+vault scan. A process with no index names from the folder alone and says so in a
+`title_check_unavailable` warning, shaped like `duplicate_check_unavailable`: an
+unchecked name is a visible state, not silence. A one-shot command is always in
+that state, and a server that dropped its index after a bulk graph rebuild is
+until a read warms it again. An entity follows the same rule, and the refusal of
+an existing entity file stays. A plan's leaf skips the check, because the plan
+froze its target and must land there. A plan checks titles when it is made and
+has no per-note warning channel, so a plan made in a cold process is unchecked
+without a warning.
 
 ### A style that cannot be read refuses
 

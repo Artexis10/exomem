@@ -72,6 +72,10 @@ def _adjusted(result: note_module.NoteResult) -> list[str]:
     return [warning for warning in result.warnings if warning.startswith("FILENAME_ADJUSTED")]
 
 
+def _unchecked(result: note_module.NoteResult) -> list[str]:
+    return [warning for warning in result.warnings if warning.startswith("title_check_unavailable")]
+
+
 @pytest.mark.parametrize(
     ("title", "stem"),
     [
@@ -337,6 +341,7 @@ def test_a_new_page_does_not_take_over_a_bare_link_to_an_older_page_with_its_tit
 
     # A stem match beats a title match, so the plain name would have moved the link to this page.
     assert Path(new.path).name == "Brûlerie Ötzberg-2.md"
+    assert not _unchecked(new)
     (adjusted,) = _adjusted(new)
     assert "'Brûlerie Ötzberg-2'" in adjusted and "a number was added" in adjusted
     _after, ambiguity = vault_module.normalize_wikilink("BRÛLERIE ÖTZBERG", vault)
@@ -358,6 +363,28 @@ def test_a_write_without_a_resident_title_index_builds_none_and_names_the_page_b
     new = _insight(vault, "Brûlerie Ötzberg")
 
     assert Path(new.path).name == "Brûlerie Ötzberg.md"
+    # The name was not checked against live titles, and the write says so.
+    (unchecked,) = _unchecked(new)
+    assert "folder alone" in unchecked
+
+
+def test_a_write_that_names_nothing_by_a_title_carries_no_title_check_warning(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cold process: a title name here would be unchecked. These names come from no title.
+    explicit = note_module.note(
+        vault,
+        content="## Claim\n\nAn invented claim for naming checks.\n",
+        note_type="insight",
+        title="Brûlerie Ötzberg",
+        slug="roastery-claim",
+        status="draft",
+        today=TODAY,
+    )
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
+    slugged = _insight(vault, "Brûlerie Ötzberg")
+
+    assert not _unchecked(explicit) and not _unchecked(slugged)
 
 
 def _write_project_keys(vault_root: Path, text: str) -> Path:

@@ -59,6 +59,7 @@ from . import (
     source_coverage,
     tag_variants,
     temporal,
+    title_occupancy,
     vocabulary_resolution,
 )
 from . import (
@@ -80,7 +81,6 @@ from .vault import (
     batch_atomic_write,
     canonical_vault_rel,
     content_hash,
-    derives_title_name,
     ensure_canonical_h1,
     escape_wikilinks_for_log,
     filename_adjusted_warning,
@@ -97,7 +97,6 @@ from .vault import (
     resolve_filename_slug,
     respell_new_path,
     rotate_log_if_needed,
-    title_key,
     unique_path,
     writer_link_visibility,
     yaml_flow_list,
@@ -1864,20 +1863,6 @@ def _numbered_slug(slug: str, name_prefix: str, number: int | None) -> str:
     return numbered_stem(name_prefix + slug, number).removeprefix(name_prefix)
 
 
-def title_holder(vault_root: Path) -> Callable[[str], bool] | None:
-    """Whether a stem is another live page's title, answered by the title index that is resident now.
-
-    A page named by another page's title takes over every bare link to it, because a stem match beats
-    a title match; `unique_path` therefore numbers such a name. The answer needs no vault scan: the
-    borrowed resolver is the one the server keeps resident, and borrowing never builds one. A process
-    whose resolver is cold or behind its watcher gets None, and the name is chosen from the folder alone.
-    """
-    resolver = find_module.borrow_query_resolver(vault_root, schedule_rebuild=False)
-    if resolver is None:
-        return None
-    return lambda stem: bool(resolver.titles.get(title_key(stem)))
-
-
 def planned_destination(
     vault_root: Path,
     *,
@@ -2106,7 +2091,13 @@ def note(
         for item in key_plan.introductions
     )
     placement_domain = domain_binding.destination if domain_binding is not None else domain
+    title_warning: str | None = None
     if token_value is None:
+        # A plan froze its target (`_path_date`) when the live titles were what they were then,
+        # so a plan's leaf must land there whatever the titles are now.
+        title_held, title_warning = title_occupancy.occupancy(
+            root, slug, frozen=_path_date is not None
+        )
         note_path = _resolve_path(
             vault_root=root,
             note_type=note_type,
@@ -2123,13 +2114,7 @@ def note(
             home_set=home_set,
             topics=topics or (),
             predecessor=_predecessor_path,
-            # A plan froze its target (`_path_date`) when the live titles were what they were then,
-            # so a plan's leaf must land there whatever the titles are now.
-            title_held=(
-                title_holder(vault_root)
-                if _path_date is None and derives_title_name(slug, vault_root)
-                else None
-            ),
+            title_held=title_held,
         )
         # Re-spell the destination to the real on-disk casing *before* it is
         # bound into the draft token: creating into an existing but
@@ -2279,8 +2264,8 @@ def note(
         date_prefix=name_prefix,
     )
     warnings = (
-        list(slug_warnings) + ([adjusted] if adjusted else []) + list(source_warnings)
-        + list(body_warnings) + tag_warnings + topic_warnings
+        list(slug_warnings) + ([adjusted] if adjusted else []) + ([title_warning] if title_warning else [])
+        + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
         + home_warnings
         + folder_split_warnings(root, note_path.parent)
     )
