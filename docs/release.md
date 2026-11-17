@@ -188,6 +188,27 @@ reads the refreshed catalog as it is, so no rebuild step is necessary. A vault
 that is not enrolled in governance has no governed catalog, and a downgrade
 does not affect it.
 
+### Shared original storage: downgrading below this release
+
+The release that adds shared original storage starts each new archive in shared
+storage at its first service start. A standalone server and a Cloud cell turn it
+on themselves. A managed worker turns it on once its launcher supports the
+format. A converted archive also uses shared storage. A release without shared
+storage refuses every such archive. An existing archive keeps ordinary storage
+until its owner converts it, so this floor does not apply to it.
+
+Before you downgrade the service of an archive:
+
+1. Look for `_Originals/format.json` in the archive's Knowledge Base.
+2. If the file does not exist, downgrade as usual. This floor does not apply.
+3. If the file exists, do not downgrade the service. Fix forward instead.
+4. If the archive must move to an older release, make a compatibility export
+   ("Export for a release without shared storage" in `docs/deployment.md`).
+5. Restore that export with the older release.
+
+The older release serves the restored archive, with each original as an
+ordinary file at its filing's path.
+
 ## Commit convention
 
 Release Please reads Conventional Commit messages after the latest release tag:
