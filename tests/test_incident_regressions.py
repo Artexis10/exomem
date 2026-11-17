@@ -31,8 +31,8 @@ REPLACEMENT = "## Findings\n\n- [finding] A different step.\n"
 
 
 def seeded_vault(root: Path, arm: Path = REPO_ROOT) -> tuple[dict, Path]:
-    """A fresh vault under ``root`` with the first case's note, written by ``arm``'s own product code."""
-    case = incidents.load_cases(None)[0]
+    """A fresh vault under ``root`` with the note of a case that seeds one, written by ``arm``'s own product code."""
+    case = incidents.load_cases(["capture-reported-failure"])[0]
     fresh_vault(root, arm)
     work = root / "work"
     work.mkdir()

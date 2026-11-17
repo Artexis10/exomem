@@ -163,6 +163,39 @@ and hooks, and its own docs and code supply the guidance text. Each session gets
 a neutral unit id, and the arms run interleaved. A unit passes, fails or is unknown: a harness fault,
 a seeding error or a judge error is unknown, never a failure.
 
+A case that tests where a note is filed seeds Records collections before the session. The seed runs
+through the product's own commands, so a collection, its method page and its rows are what the arm
+writes:
+
+- `seed_collections` lists collections. Each has a `manifest_path` (relative to the knowledge base), a
+  `manifest` (the frontmatter, or the whole text), and optional `body` and `rows`. A `method_page`
+  (`title`, `note_type`, `content`, optional `revisions`) is written first, and the manifest's
+  `capture.method` then links to it. Each revision replaces the page body, so the last one is the page
+  that the session reads.
+- `prominence` sets the capture prominence through the product's own preference file. A case that
+  needs the declared route to file without asking uses `maximal`. The default is the shipped one.
+- `collection_row` passes when the named `collection` has `equals` new rows (default 1) that hold every
+  `where` condition, and no `absent_in` collection has a new row. The conditions use the `contains`,
+  `not_contains`, `eq` and `ne` comparisons of `current_source`. A row is new when the seed did not
+  leave it.
+- `write_receipt` reads the tool results of the session. Each `tools` call that came before the first
+  `before` call must have a receipt that contains `contains`. It checks that a note written before its
+  row points at the Record that is still owed.
+- `judge` with `include_rows` shows the judge the rows that the session committed, so that it can tell
+  an answer that claims a filing from one that made it.
+
+`--actor openai` plays the session with an OpenAI Agents SDK agent on the same stdio server, with the
+arm's Exomem skill files and server instructions as its instructions, and no hooks. It is the client
+class of a chat client that has the tools and the skill text but no hook surface. The SDK is not a
+dependency of the product: run it over an interpreter that has the product's dependencies, with the
+eval key. A unit records its token usage and meters its spend through `harness openai-credits record`
+(consumer `capture-routing-eval`). A provider error or timeout makes the unit unknown. `--model`
+overrides the default `gpt-6.1-sol`:
+
+```
+PYTHONPATH=benchmarks:src bwsx-secret run --bindings ~/.config/bws/openai-agents.bindings.json eval -- uv run --no-project --python <interpreter with the product's dependencies> --with openai-agents python -m membench.outcome.incidents --actor openai --arm changed=. --case existing-workflow --repeats 1 --run-root /var/tmp/exomem-outcome-evals/runs/incidents-<id>
+```
+
 1. Add a case file when an agent misbehaves with Exomem in real use. A case is never removed or held out.
 2. Rerun the cases when guidance text, a prompt, the model or the code that reads the answer changes.
 3. Compare the base checkout with the change, with three repeats. The run root must be new and outside every repository:
