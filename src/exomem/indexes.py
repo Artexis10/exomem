@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
-from .kbdir import is_managed_root_name, managed_join, managed_relative, managed_splitter
+from .kbdir import is_managed_root_name, managed_join, managed_relative
 from .vault import (
     PathGuard,
     PlannedWrite,

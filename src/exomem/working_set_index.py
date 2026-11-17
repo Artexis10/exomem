@@ -49,7 +49,13 @@ from .collection_store.preview import (
     canonical_read,
     selected_writer,
 )
-from .kbdir import managed_root, managed_root_parts, managed_split, managed_state, outside_managed_root
+from .kbdir import (
+    managed_root,
+    managed_root_parts,
+    managed_split,
+    managed_state,
+    outside_managed_root,
+)
 from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
