@@ -1745,7 +1745,7 @@ def _commit_staged_sources(
     A correction names its predecessor, so it never meets an earlier Source that holds the same bytes.
     """
     from . import add as add_module
-    from . import document_identity
+    from . import document_identity, source_corrections
 
     resolution: dict | None = None
     manager = active_manager()
@@ -1832,6 +1832,8 @@ def _commit_staged_sources(
                     outcomes[index]["document_container"] = dict(payload["document_container"])
                 if identity is not None:
                     outcomes[index]["identity"] = identity.reply()
+                    # Stored with the row, so a replayed reply offers the same next step.
+                    outcomes[index]["correctable"] = source_corrections.can_record(vault_root, payload["ref"])
                 source_result_attribution.bind(outcomes[index], (result.ref,))
             except (SafeFetchError, PreserveError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)

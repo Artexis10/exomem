@@ -51,6 +51,28 @@ def receipt_root(root: Path) -> Path:
     return vault.kb_root(root) / "_Sources" / "corrections"
 
 
+_NOT_PERMITTED = (
+    "SOURCE_CORRECTION_NOT_PERMITTED: this connection cannot record a Source correction; "
+    "tell the person which value is wrong, and the vault owner can correct it"
+)
+
+
+def can_record(root: Path, reference: str) -> bool:
+    """Whether this caller may write the correction receipt of `reference`, checked as the commit checks it.
+
+    A restricted writer's grant does not reach the receipt root, so its commit would be refused after
+    the work; asking first lets the capture offer a correction only to a caller who can make one.
+    """
+    from .governance import connector_boundary
+
+    try:
+        path = _receipt_path(root, reference).relative_to(root).as_posix()
+        connector_boundary.require_write(root, path, content=None)
+    except (SourceCorrectionUnavailable, ValueError, connector_boundary.BoundaryUnavailable):
+        return False
+    return True
+
+
 def _receipt_path(root: Path, reference: str) -> Path:
     identity = memory_refs.parse_memory_ref(reference)
     if identity is None or memory_refs.memory_ref(identity) != reference:
@@ -281,6 +303,8 @@ class CorrectionPlan:
                 or egress.write_target_withheld(root, self.old_path)):
             raise SourceCorrectionUnavailable
         connector_boundary.require_write(root, self.old_path, content=self.old_source.encode("utf-8"))
+        if not can_record(root, self.old_ref):
+            raise ValueError(_NOT_PERMITTED)
 
     def receipt(self, root: Path, *, new_ref: str, new_path: str, timestamp: str) -> vault.PlannedWrite:
         entry = {

@@ -63,6 +63,21 @@ def _frontmatter(vault: Path, rel_path: str) -> dict:
     return yaml.safe_load(text.split("\n---\n", 1)[0].removeprefix("---\n"))
 
 
+def test_only_a_caller_who_can_write_the_receipt_is_offered_a_correction(vault, source_schema, saved, tmp_path, monkeypatch) -> None:
+    # A restricted writer's commit was refused at the receipt after the work, with an error naming nothing to change.
+    from conftest import initialize_vault_state_offline
+    from granted_writer import grant_writer
+
+    from exomem.governance import principal
+
+    assert source_corrections.can_record(vault, saved["ref"])
+    initialize_vault_state_offline(vault, source="restricted correction")
+    writer = grant_writer(vault, tmp_path, monkeypatch, writable_paths=["Sources/Inbox/writer/**"],
+                          capture_paths=["Knowledge Base/Sources/Inbox/writer"])("external")
+    with principal.request_scope(writer):
+        assert not source_corrections.can_record(vault, saved["ref"])
+
+
 def test_a_source_in_shared_original_storage_is_corrected_without_re_upload(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:
     # A new archive keeps originals in the content-addressed pool, where no file holds the logical path.
     from conftest import initialize_vault_state_offline

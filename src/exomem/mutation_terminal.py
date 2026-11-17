@@ -941,6 +941,8 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                     unverified.append("identity")
                 else:
                     row["identity"] = identity
+            if isinstance(item.get("correctable"), bool):
+                row["correctable"] = item["correctable"]
             container = item.get("document_container")
             if isinstance(container, Mapping):
                 # These scalar fields are the bounded container-inspection receipt protocol.
@@ -2334,7 +2336,7 @@ def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
     # No page hash rides the receipt: processing rewrites the page after capture, so the guard a correction
     # names comes from read_page, which gives the current hash.
     ref = row.get("ref")
-    if not ref:
+    if not ref or row.get("correctable") is False:
         return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."
     more = f" The other {flagged - 1} flagged files carry their own ref." if flagged > 1 else ""
     return document_identity.correction_call(str(ref), None) + more
