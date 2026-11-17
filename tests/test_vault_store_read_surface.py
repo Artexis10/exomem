@@ -72,6 +72,8 @@ SAMPLES = {
     "served_context": {},
     "configure_memory:inspect": {"action": "inspect"},
     "coordination_status": {},
+    "inspect_captured_sources": {"system": "archive"},
+    "inspect_capture_erasure_policy": {"system": "archive"},
     "bootstrap": {},
     "search": {"query": "lighthouse"},
     "fetch": {"id": CLAIM},

@@ -105,13 +105,16 @@ def test_file_diagnostic_accounts_work_and_removes_temporary_state(tmp_path):
     assert list(temporary.iterdir()) == []
 
 
+# A hang guard, not a latency budget: on CPython 3.11 a call stack that ends at a frame-chunk
+# boundary maps and unmaps a chunk on every call, which doubled this child's 27 s CI runtime.
+@pytest.mark.timeout(180)
 def test_phase_probes_prove_release_refusal_and_bulk_storage(tmp_path):
     """A filtered public read must not turn a partial audience's write into a commit."""
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
     completed = subprocess.run(
         [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store",
          "--size", "10", "--appends", "2", "--phase-probes"],
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True, text=True, timeout=150, check=False,
     )
     assert completed.returncode == 0, completed.stderr[-3000:]
     line = next(row for row in completed.stdout.splitlines() if row.startswith("RESULT-JSON:"))

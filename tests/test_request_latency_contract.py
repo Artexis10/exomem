@@ -131,6 +131,21 @@ def test_the_packaged_contract_keeps_owners_and_strict_comparisons() -> None:
     assert all(bar.requirement and bar.provenance for bar in contract.bars)
 
 
+@pytest.mark.parametrize("bar_id", ["passage-single", "passage-four"])
+def test_passage_bar_rejects_a_tail_at_its_strict_limit(bar_id):
+    """The passage gate must fail a complete but too-slow reference series."""
+    from exomem.request_latency_contract import load_contract
+
+    bar = load_contract().bar(bar_id)
+    for elapsed, expected in ((bar.threshold_ms - 1, "observed-within-bar"), (bar.threshold_ms, "failed")):
+        sample = latency_watch.make_sample(
+            at=NOW, tool="search_memory", client="reference", deep=False,
+            total_ms=elapsed, spans=None, bar_id=bar_id, source="declared-series", trusted_tool=True,
+        )
+        [row] = latency_watch.summarize([sample] * bar.min_samples, now=NOW)
+        assert row["verdict"] == expected
+
+
 def test_the_paired_mcp_read_bar_is_pending_and_never_labels_live_traffic() -> None:
     from exomem.request_latency_contract import load_contract
 
