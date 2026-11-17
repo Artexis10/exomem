@@ -36,6 +36,7 @@ from .kbdir import (
     managed_root_rel,
     managed_split_parts,
     managed_state,
+    outside_managed_root,
 )
 
 if TYPE_CHECKING:
@@ -3271,6 +3272,15 @@ class IdentityCatalogue:
                         managed_join(relative),
                     )
                 if record.identity.kind != "directory":
+                    continue
+                if (
+                    not prefix
+                    and outside_managed_root(record.relative_path)
+                    and logical.disposition is not PathDisposition.RESERVED
+                ):
+                    # An entry outside a root vault's managed root holds no private state unless the
+                    # registry reserves it, and an unreadable folder in it (a repository's, an
+                    # editor's) must not fail the whole catalogue.
                     continue
                 key = _identity_key(record.identity)
                 if key in seen_directories:

@@ -40,7 +40,7 @@ from .. import (
     semantic_contract,
     vault,
 )
-from ..kbdir import managed_root
+from ..kbdir import managed_files
 from ..restore_journal import CONTINUITY_EVIDENCE, MEMBERSHIP_EVIDENCE
 from . import (
     authorization_custody,
@@ -847,7 +847,7 @@ def _membership_manifest(
     affected = _affected_scope_ids(current, prospective, document_paths)
     rows: dict[str, str] = {}
     if affected:
-        for candidate in sorted(managed_root(vault_root).rglob("*")):
+        for candidate in managed_files(vault_root):
             if not candidate.is_file():
                 continue
             rel = candidate.relative_to(vault_root).as_posix()
@@ -1087,7 +1087,7 @@ def _purpose_direction(
     before: dict[str, int] = {}
     after: dict[str, int] = {}
     try:
-        for candidate in sorted(managed_root(vault_root).rglob("*")):
+        for candidate in managed_files(vault_root):
             if not candidate.is_file():
                 continue
             rel = candidate.relative_to(vault_root).as_posix()

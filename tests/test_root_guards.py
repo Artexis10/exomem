@@ -7,13 +7,14 @@ governed writer can reach the shipped contract or an editor's settings that sit 
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
 from exomem import activation_conventions as ac
-from exomem import commands
+from exomem import commands, kbdir, reserved_paths
 from exomem.governance.principal import library_scope
 from tests.conftest import FIXTURE_VAULT, bind_root_vault, initialize_vault_state_offline
 
@@ -110,8 +111,49 @@ def test_a_wrapper_prefixed_folder_rule_is_rejected_in_both_layouts(
     assert any(finding["code"] == "rule_kb_prefixed" for finding in in_root.findings)
     assert f"{KB}/Products" not in in_root.conventions.anchors["resource"].folders
 
-    from exomem import kbdir
-
     kbdir.unbind()
     in_nested = ac.load_conventions(proposal=proposal)
     assert any(finding["code"] == "rule_kb_prefixed" for finding in in_nested.findings)
+
+
+def test_a_scan_of_the_managed_files_prunes_a_root_vaults_outside_entries(root_vault: Path) -> None:
+    """The governance manifests hashed every file under the vault root, a repository's objects and the contract among them."""
+    (root_vault / ".git" / "objects").mkdir(parents=True)
+    (root_vault / ".git" / "objects" / "blob").write_bytes(b"x")
+    (root_vault / "_Imports" / "upload").mkdir(parents=True)
+    (root_vault / "_Imports" / "upload" / "draft.md").write_text("draft\n", encoding="utf-8")
+    (root_vault / "Insights").mkdir(exist_ok=True)
+    (root_vault / "Insights" / "kept.md").write_text("kept\n", encoding="utf-8")
+
+    scanned = {path.relative_to(root_vault).as_posix() for path in kbdir.managed_files(root_vault)}
+
+    assert "Insights/kept.md" in scanned
+    assert not [path for path in scanned if path.split("/")[0] in {".git", ".obsidian", ".exomem", "_Imports"}]
+
+
+def test_a_nested_scan_of_the_managed_files_reads_everything_below_the_wrapper(tmp_path: Path) -> None:
+    vault = tmp_path / "nested"
+    shutil.copytree(FIXTURE_VAULT, vault)
+    (vault / KB / ".obsidian").mkdir()
+    (vault / KB / ".obsidian" / "inside.md").write_text("inside\n", encoding="utf-8")
+    (vault / "Elsewhere").mkdir()
+    (vault / "Elsewhere" / "outside.md").write_text("outside\n", encoding="utf-8")
+
+    scanned = {path.relative_to(vault).as_posix() for path in kbdir.managed_files(vault)}
+
+    assert f"{KB}/.obsidian/inside.md" in scanned
+    assert "Elsewhere/outside.md" not in scanned
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root user reads a folder that has no permissions")
+def test_an_unreadable_editor_folder_does_not_fail_the_identity_catalogue(root_vault: Path) -> None:
+    """The catalogue walked the whole vault root, so one folder the service could not list failed every catalogue."""
+    locked = root_vault / ".obsidian" / "plugins"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        catalogue = reserved_paths.IdentityCatalogue.from_vault(root_vault)
+    finally:
+        locked.chmod(0o700)
+
+    assert catalogue.vault_root == root_vault

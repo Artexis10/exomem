@@ -273,6 +273,24 @@ def holds_managed_path(vault_root: Path, resolved: Path) -> bool:
     return not below.parts or not outside_managed_root(below.parts[0], key=str.casefold)
 
 
+def managed_files(vault_root: Path) -> list[Path]:
+    """Every non-directory path below the managed root, in path order, for a scan that reads each one.
+
+    In ``root`` the managed root's own listing skips the entries ``outside_managed_root`` names, so a
+    scan prunes a repository's objects, an editor's settings and the shipped contract instead of
+    reading them as content. In ``nested`` the root is the wrapper folder and nothing in it is outside.
+    A symlinked folder is listed by neither layout's walk and never entered.
+    """
+    root = managed_root(vault_root)
+    found: list[Path] = []
+    for directory, folders, names in os.walk(root):
+        if Path(directory) == root:
+            folders[:] = [name for name in folders if not outside_managed_root(name)]
+            names = [name for name in names if not outside_managed_root(name)]
+        found.extend(Path(directory, name) for name in names)
+    return sorted(found)
+
+
 def managed_form(path: str, *, layout: Layout | str | None = None) -> str:
     """``path`` as a vault-relative path, adding the managed root when ``path`` lacks it.
 
