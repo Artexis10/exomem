@@ -68,7 +68,7 @@ def can_record(root: Path, reference: str) -> bool:
     try:
         path = _receipt_path(root, reference).relative_to(root).as_posix()
         connector_boundary.require_write(root, path, content=None)
-    except (SourceCorrectionUnavailable, ValueError, connector_boundary.BoundaryUnavailable):
+    except (SourceCorrectionUnavailable, ValueError, OSError, connector_boundary.BoundaryUnavailable):
         return False
     return True
 
