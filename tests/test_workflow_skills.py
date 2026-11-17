@@ -128,7 +128,7 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
         "- [decision] Relocate to a coastal city next spring #life ^relocation",
         "- [nutrition] Evening protein improves adherence #experiment ^evening-protein",
         "- [constraint] Keep retry windows bounded #code ^retry-windows",
-        "[[Knowledge Base/Notes/Health/Morning training]]",
+        "[[Notes/Health/Morning training]]",
     ):
         assert expected_fragment in concise
 

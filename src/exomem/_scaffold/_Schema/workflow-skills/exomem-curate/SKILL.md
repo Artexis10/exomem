@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence.
 metadata:
-  skill_contract: c8cf5c6361d711d36d8ae6995d8cd11555388f6634ea3e58f3dcf4a52a4b9e87
+  skill_contract: 4af0d3547b84508041033d2c139125a234f6e3ecf21ffe5e779927340bead30a
   version: "0.2.0"
 ---
 
@@ -115,7 +115,7 @@ Preserve history. Prefer supersession when meaning changes. Keep links useful, n
 ## Mistakes to avoid
 Do not rewrite the content of raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, silently continue a partial or blocked run, or turn one confirmation into standing approval.
 
-<!-- exomem-semantic-authoring:v11 sha256:cf1305b2bd39ddad73c5d17b177a3ac0b60949251c965a058b2d41d2983ab7a1 -->
+<!-- exomem-semantic-authoring:v11 sha256:5de82f73c776018b7986148af8f57b17ad31db6508ee0ea4e42652e3325f3851 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -163,7 +163,7 @@ Rich example:
 ## Decision
 - id: commit-to-morning-training
 - tags: health
-- relations: supports: [[Morning training]]
+- relations: supports: [[Notes/Health/Morning training]]
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```

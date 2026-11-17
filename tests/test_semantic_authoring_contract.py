@@ -26,7 +26,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     11,
-    "sha256:cf1305b2bd39ddad73c5d17b177a3ac0b60949251c965a058b2d41d2983ab7a1",
+    "sha256:5de82f73c776018b7986148af8f57b17ad31db6508ee0ea4e42652e3325f3851",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -301,7 +301,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
                 "- id: commit-to-morning-training\n"
                 "- tags: health\n"
                 "- relations: supports: "
-                "[[Knowledge Base/Notes/Health/Morning training]]\n"
+                "[[Notes/Health/Morning training]]\n"
                 "\n"
                 "Commit to a fixed 6am training block on weekdays so consistency "
                 "compounds and health stays the durable lens for this decision.\n"

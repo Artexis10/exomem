@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Exomem memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: c8cf5c6361d711d36d8ae6995d8cd11555388f6634ea3e58f3dcf4a52a4b9e87
+  skill_contract: 4af0d3547b84508041033d2c139125a234f6e3ecf21ffe5e779927340bead30a
   version: "0.1.0"
 ---
 
@@ -96,7 +96,7 @@ Only mutate when the correct action is clear. Use supersession for meaningful ch
 ## Mistakes to avoid
 Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.
 
-<!-- exomem-semantic-authoring:v11 sha256:cf1305b2bd39ddad73c5d17b177a3ac0b60949251c965a058b2d41d2983ab7a1 -->
+<!-- exomem-semantic-authoring:v11 sha256:5de82f73c776018b7986148af8f57b17ad31db6508ee0ea4e42652e3325f3851 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -144,7 +144,7 @@ Rich example:
 ## Decision
 - id: commit-to-morning-training
 - tags: health
-- relations: supports: [[Morning training]]
+- relations: supports: [[Notes/Health/Morning training]]
 
 Commit to a fixed 6am training block on weekdays so consistency compounds and health stays the durable lens for this decision.
 ```

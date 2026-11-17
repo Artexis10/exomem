@@ -143,7 +143,7 @@ def test_shipped_contract_embeddings_are_canonical_and_public_safe() -> None:
         assert text.count(concise) == 1, f"{path} lost the canonical contract"
 
     # The embedded examples keep governed-relative wikilinks portable.
-    assert "[[Knowledge Base/Notes/Health/Morning training]]" in concise
+    assert "[[Notes/Health/Morning training]]" in concise
 
     # The authoritative, provenance-based gate proves public safety without
     # encoding any maintainer name, vault, or private-token denylist here.
