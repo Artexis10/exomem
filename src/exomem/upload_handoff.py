@@ -37,6 +37,10 @@ _TICKET_BYTES = 32
 MAX_BYTES = 100 * 1024 * 1024
 STORE_DIRNAME = "upload-handoffs"
 UNAVAILABLE_REASON = "no usable upload handoff"
+#: The upload route's content-free refusal for a ticket it cannot use: a new upload is always a valid way on.
+TICKET_UNUSABLE_REASON = f"{UNAVAILABLE_REASON}; request a new one with upload_files"
+#: A claimed ticket is spent whatever the send's outcome, so every refusal after the claim says so.
+SPENT_REMEDY = "This upload is used now; a retry needs a new one from upload_files."
 _now = time.time
 
 
@@ -116,15 +120,42 @@ def upload_endpoint(value: str) -> str:
     return value
 
 
+def _send_step(endpoint: str, lane: str, what: str, placeholder: str) -> dict:
+    """The one send line of every ticket lane, with the token and the file left for the agent to fill in.
+
+    The token stays out of the line: an egress scrubber rewrites a bearer value in reply text, and a
+    rewritten header cannot pass the upload route. Double quotes let a shell variable stand for it.
+    """
+    return {
+        "step": "send",
+        "text": (f"Send {what} once, as multipart form fields. Replace <token> with this reply's `token` "
+                 f"and {placeholder} with its path. A refused send also uses up this upload."),
+        "shell": (f'curl -sS -H "Authorization: Bearer <token>" -F lane={lane} -F hold=1 '
+                  f"-F 'file=@{placeholder}' {shlex.quote(endpoint)}"),
+    }
+
+
 def _import_steps(token: str, endpoint: str) -> list[dict]:
     """The two steps after an import ticket: send the archive, then repeat `imports.file` with the token."""
-    header = shlex.quote(f"Authorization: Bearer {token}")
     return [
-        {"step": "send", "text": "Send the tar or zip once, as multipart form fields. Replace <archive> with its path.",
-         "shell": f"curl -sS -H {header} -F lane=import -F hold=1 -F 'file=@<archive>' {shlex.quote(endpoint)}"},
+        _send_step(endpoint, held_uploads.IMPORT_LANE, "the tar or zip", "<archive>"),
         {"step": "import", "tool": "manage_memory",
          "arguments": {"operation": "imports.file", "arguments": {"upload": token}},
          "text": "Repeat this call until `filing` is `done`; a call that is cut short resumes where it stopped."},
+    ]
+
+
+def _file_steps(endpoint: str, lane: str) -> list[dict]:
+    """The two steps after a source or evidence ticket: send the file once, then save the held handle."""
+    from . import operation_entries
+
+    # The public tool that carries the command which commits this lane's hold; it raises when none does.
+    tool, _ = operation_entries.spell_call(held_uploads.LANE_COMMANDS[lane], {}, "public")
+    return [
+        _send_step(endpoint, lane, "the file", "<file>"),
+        {"step": "save", "tool": tool,
+         "text": "Pass the `file` that the send returns in `files`. Check each saved row's `hash` against "
+                 "expected_sha256 before you tell the person it is saved."},
     ]
 
 
@@ -187,6 +218,11 @@ def prepare_upload(
         binding = held_uploads.principal_binding(who)
         if binding is None:
             raise _unavailable()
+        # Lowercase hex survives the terminal scrubber without reducing the ticket's 256-bit entropy.
+        secret = secrets.token_hex(_TICKET_BYTES)
+        token = cloud_origin.handoff_token(route, secret) if route is not None else TOKEN_PREFIX + secret
+        # Named before the record exists, so a lane whose steps cannot be named leaves no ticket behind.
+        steps = _import_steps(token, endpoint) if lane == held_uploads.IMPORT_LANE else _file_steps(endpoint, lane)
         store = private_state.store(vault_root, STORE_DIRNAME)
         with FileLock(store / ".lock"):
             now = _now()
@@ -208,8 +244,6 @@ def prepare_upload(
                 if ttl < 1:
                     raise _unavailable()
             expires = now + ttl
-            # Lowercase hex survives the terminal scrubber without reducing the ticket's 256-bit entropy.
-            secret = secrets.token_hex(_TICKET_BYTES)
             key = hashlib.sha256(secret.encode("ascii")).hexdigest()
             private_state.write_record(store, key, {
                 "principal": asdict(who), "binding": binding,
@@ -217,16 +251,12 @@ def prepare_upload(
                 "expires": expires, "lane": lane,
                 "expected_sha256": expected, "max_bytes": limit,
             }, temp_suffix=".part")
-        token = cloud_origin.handoff_token(route, secret) if route is not None else TOKEN_PREFIX + secret
-        descriptor = {
+        return {
             "token": token, "upload_url": endpoint,
             "ttl_seconds": ttl, "hold": True, "lane": lane,
             "expected_sha256": expected, "max_bytes": limit,
-            "handoff_status": "handoff_prepared", "committed": False,
+            "handoff_status": "handoff_prepared", "committed": False, "next": steps,
         }
-        if lane == held_uploads.IMPORT_LANE:
-            descriptor["next"] = _import_steps(token, endpoint)
-        return descriptor
 
     try:
         asyncio.get_running_loop()

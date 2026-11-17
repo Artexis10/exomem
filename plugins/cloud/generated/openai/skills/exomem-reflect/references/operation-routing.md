@@ -127,17 +127,18 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
          `exomem attach <file> --handoff-file handoff.json --root <dir>`, where `<dir>`
          holds the file. It prints the reply.
        - When installing is not possible, or the installed release has no
-         `--handoff-file`, send the request that the CLI sends: one multipart `POST` to the
-         handoff's `upload_url`, with the header `Authorization: Bearer <token>` and
-         the form fields `file`, `hold=1` and `lane` (the handoff's `lane`), and no other
-         field such as `scope` or `category`; the service refuses them.
+         `--handoff-file`, run the `shell` line of the handoff's `next` send step. Replace
+         `<file>` with the file's path and `<token>` with `$TOKEN`, which the shell reads so
+         that the token stays out of the conversation:
 
          ```
          TOKEN=$(python3 -c 'import json; print(json.load(open("handoff.json"))["token"])')
-         URL=$(python3 -c 'import json; print(json.load(open("handoff.json"))["upload_url"])')
-         LANE=$(python3 -c 'import json; print(json.load(open("handoff.json"))["lane"])')
-         curl -sS -H "Authorization: Bearer $TOKEN" -F "file=@<file>" -F hold=1 -F "lane=$LANE" "$URL"
          ```
+
+         Add no other field, such as `scope` or `category`: the service refuses it, and a
+         refused send uses up the handoff. A handoff without `next` takes the same request
+         by hand: one multipart `POST` to its `upload_url`, with the header
+         `Authorization: Bearer <token>` and the form fields `file`, `hold=1` and `lane`.
     5. Check the reply: `state` is `held`, `hash` equals the digest and `size` equals the
        file's size. Pass its `file` object unchanged to
        `save_source(title="...", source_kind="...", files=[<file>], options={"expected_sha256": "<digest>"})`.

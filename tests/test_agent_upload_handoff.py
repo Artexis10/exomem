@@ -10,6 +10,7 @@ from io import BytesIO
 
 import httpx
 import pytest
+from _curl_send import curl_request
 from fastmcp import FastMCP
 
 from exomem import auth_sessions, held_uploads, server_auth, server_transfer
@@ -454,7 +455,7 @@ def test_ticket_cannot_cross_deployments(upload_env, monkeypatch):
     monkeypatch.setattr(upload_handoff.artifact_recovery, "deployment", lambda _: "another-deployment")
     response = _post(upload_env, ticket)
     assert response.status_code == 401
-    assert response.json()["reason"] == upload_handoff.UNAVAILABLE_REASON
+    assert response.json()["reason"] == upload_handoff.TICKET_UNUSABLE_REASON
 
 
 def test_only_one_concurrent_request_can_claim_a_ticket(upload_env):
@@ -671,3 +672,46 @@ def test_an_operator_can_finish_cancellations_without_a_launcher_deadline(upload
     ]) == 0
     assert json.loads(capsys.readouterr().out) == {"success": True, "data": {"completed": 0}}
     assert state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID not in state_migration.recorded_descriptor_ids(vault)
+
+
+def test_a_source_reply_names_the_send_that_holds_the_file(upload_env, tmp_path, monkeypatch):
+    # An agent that ran a send without the ticket's form fields got a 400 and lost the ticket.
+    from fastmcp import Client
+
+    from exomem import server
+    _, who, *_, receiver = upload_env
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(principal, "resolve_mcp_principal", lambda: who)
+    original = tmp_path / "original.txt"
+    original.write_bytes(b"exact original\n")
+    digest = hashlib.sha256(original.read_bytes()).hexdigest()
+
+    async def run():
+        async with Client(server.build_server(require_auth=False)) as client:
+            reply = (await client.call_tool(
+                "upload_files", {"lane": "source", "expected_sha256": digest})).structured_content
+            send, save = reply["next"]
+            url, request = curl_request(send["shell"], token=reply["token"], file=str(original))
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=receiver)) as http:
+                sent = await http.post(url, **request)
+            assert sent.status_code == 201, sent.text
+            # The save step names a tool that this surface lists.
+            saved = await client.call_tool(save["tool"], {
+                "title": "Exact original", "source_kind": "session", "files": [sent.json()["file"]]})
+            return saved.structured_content
+
+    [receipt] = asyncio.run(run())["files"]
+    assert receipt["outcome"] == "stored" and receipt["hash"] == digest
+
+
+def test_a_refused_send_says_a_retry_needs_a_new_upload(upload_env):
+    # The claim spends the ticket, so an agent that retries it unaided is refused again with no way on.
+    from exomem import upload_handoff
+    descriptor = _prepare(upload_env)
+    refused = _post(upload_env, descriptor, lane="")
+    assert refused.status_code == 400
+    assert "lane=source" in refused.json()["reason"]
+    assert upload_handoff.SPENT_REMEDY in refused.json()["reason"]
+    retried = _post(upload_env, descriptor)
+    assert retried.status_code == 401
+    assert retried.json()["reason"] == upload_handoff.TICKET_UNUSABLE_REASON
