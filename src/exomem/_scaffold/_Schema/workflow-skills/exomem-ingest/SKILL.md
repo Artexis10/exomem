@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 4866dd4d9c667c8c602e91da55212cc5b36bf5d6688e0758da192db0d25d1cbe
+  skill_contract: bddc5d20eff2c13e573921816f4c0d9042cf877746ff69f4a2864987a0483d4b
   version: "0.1.0"
 ---
 
@@ -73,6 +73,7 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
 2. Preserve raw material with `save_source`: `content` for authored text, `files` for original attachments. Original bytes remain intact.
+   Keep a file the user hands over as a Source without waiting to be asked. Keeping it verifies none of its claims.
    Never retype an original file. If its handle is unavailable, follow the Source upload route that the exposed tools serve.
    Use `save_evidence` or `save_evidence` for proof-bearing material.
    Pass `source_kind` and `domain` on a `save_source` call — both are open
@@ -111,6 +112,8 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
    Adjacent pages and `suggested_connections` are unreviewed candidates, never accepted edges.
 5. For selected compilation, follow the [source compilation pass](references/writing.md#source-compilation-pass); one inventory check closes the work.
    Raw capture may end after custody when compilation is outside the request and live policy.
+   Decide at capture: compile into an existing or new note when the Source's claims will be reused; otherwise report it as kept for custody only.
+   Correct a wrong Source's title, URL, kind or form with `save_source` and `options.correction` (its ref, page hash and a reason) and no `files`; the stored original is reused and the old Source stays readable.
 
 ## Vocabulary
 

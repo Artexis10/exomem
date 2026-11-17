@@ -247,6 +247,15 @@ _ADOPTION_TRIGGER = (
     "Source/Evidence by role, never MIME. Drafts not handed over stay ephemeral."
 )
 
+#: What an incoming original is worth as a save, and what custody does not prove. An agent that
+#: took a document's identity from a search hit stored a citing work as the article it cites, and
+#: a remembered DOI as another Source's URL; the capture reply now shows the document's own.
+_ORIGINAL_CAPTURE = (
+    "Keep files the user hands you and documents an answer rests on as Sources by exact bytes; "
+    "custody verifies no claim. Take a document's title, authors and DOI from the document "
+    "itself; fix a wrong one with options.correction."
+)
+
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
 #: Shared like the doctrine above, so the block and bootstrap give one route.
 _DELIVERY_CAPTURE = (
@@ -258,6 +267,8 @@ _DELIVERY_CAPTURE = (
 _ARTIFACT_ADOPTION_CAPTURE = (
     " "
     + _ADOPTION_TRIGGER
+    + " "
+    + _ORIGINAL_CAPTURE
     + " No handle: non-committing handoff. "
     + _DELIVERY_CAPTURE
     + " Missing collection: structural_suggestions."
@@ -809,7 +820,7 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
     return {
         "disposition": disposition,
         "link_acceptance": link_acceptance,
-        "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_DELIVERY_CAPTURE}",
+        "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_ORIGINAL_CAPTURE} {_DELIVERY_CAPTURE}",
     }
 
 
