@@ -7,6 +7,7 @@ import io
 import json
 import multiprocessing
 import os
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +40,7 @@ from exomem import (
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import connector_boundary, egress, lifecycle, page_admission, policy
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.vault_store import ownership, read, write
 
 
@@ -618,3 +619,104 @@ def test_equal_ranking_metadata_decodes_once_without_sharing_mutable_frontmatter
     first, second = [rows[path].ranking.frontmatter for path in list(bodies)[:2]]
     first["tags"].append("changed")
     assert second == expected[list(bodies)[1]].frontmatter
+
+
+
+@contextmanager
+def bound_to(root, store_writer):
+    """The vault with the store thread's writer bound: where a store-mode write decides its pages."""
+    token = preview._BOUND.set((root.resolve(), store_writer, False))
+    try:
+        yield
+    finally:
+        preview._BOUND.reset(token)
+
+
+OPEN_PAGE = "Knowledge Base/Notes/Open.md"
+HIDDEN_PAGE = "Knowledge Base/Notes/Hidden.md"
+BRIDGE_PAGE = "Knowledge Base/Notes/Bridge.md"
+EXTERNAL_AUDIT = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", purpose="audit")
+#: Each caller, the purpose its filter declares and whether the bound write's own authorization carries it,
+#: so that its set may be decided by scope class. A caller that the authorization does not carry is decided
+#: page by page, as the per-page chain refuses or withholds it.
+CALLERS = {
+    "owner": (owner_principal(surface="library"), None, True),
+    "external": (EXTERNAL, None, True),
+    "external with a purpose": (EXTERNAL_AUDIT, None, True),
+    "an authorization session": (
+        RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", authorization_session_id="session-one"),
+        None, False,
+    ),
+    "an unresolved principal": (RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", resolved=False), None, False),
+    "a purpose the write does not hold": (EXTERNAL, "audit", False),
+}
+STATES = (
+    "an empty policy", "rules and a grant", "a tombstone", "a tombstone that fails closed",
+    "a blocked policy", "stale facts",
+)
+
+
+def arrange_state(state, corpus, vault, handle, monkeypatch):  # noqa: F811
+    """Put the migrated vault in ``state``; whether a set of its pages may be decided by scope class there."""
+    if state == "an empty policy":
+        shutil.rmtree(vault / "Knowledge Base/_Governance")
+        assert policy.load(vault).empty
+        return True
+    apply_case(corpus, corpus.selectors[0], state == "rules and a grant")
+    if state == "a tombstone":
+        monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda root: frozenset({OPEN_PAGE}))
+    elif state == "a tombstone that fails closed":
+        monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda root: frozenset({lifecycle.FAIL_CLOSED_TOMBSTONE}))
+    elif state == "a blocked policy":
+        # A marker that no governance mutation owns fails the policy closed.
+        (policy.governance_root(vault) / ".policy-mutation.pending.json").write_text("{}")
+        assert policy.load(vault).blocked
+        return False
+    elif state == "stale facts":
+        with handle.transaction() as tx:
+            # Hidden's facts no longer describe its bytes and name Open's scopes: only its exact hash tells.
+            open_subject = tx.execute("SELECT subject FROM page_admission WHERE path = ?", (OPEN_PAGE,)).fetchone()[0]
+            tx.execute(
+                "UPDATE page_admission SET sha256 = 'stale', subject = ? WHERE path = ?", (open_subject, HIDDEN_PAGE)
+            )
+    return True
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize("state", STATES)
+def test_a_bound_set_decided_by_scope_class_answers_as_each_page_does_for_every_caller(
+    vault, monkeypatch, state  # noqa: F811
+):
+    """A store-mode write decides the pages of its sweeps as sets, by scope class, under its own authorization.
+    Each page of a set must get the verdict that the per-page chain gives it, for the owner and for each
+    restricted caller. A caller that the write's authorization does not carry stays on the per-page chain, and
+    so does each page whose facts cannot be proved: a container member, a RAW mark, a bridge, a collection
+    page, facts that no longer match the page's bytes."""
+    corpus = exception_corpus(vault)
+    (vault / BRIDGE_PAGE).write_text("---\ntitle: Bridge\nbridge_of: []\nbridge_scope: navigation\n---\nA bridge.\n")
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    # The companion child raises on either route, which fails a whole sweep; the test above holds it.
+    paths = [path for path in [*corpus.paths, BRIDGE_PAGE] if ".." not in path and path != corpus.child]
+    classed = []
+    scopes_many = page_admission.scopes_many
+
+    def counting(*arguments, **keywords):
+        classed.append(arguments[1])
+        return scopes_many(*arguments, **keywords)
+
+    monkeypatch.setattr(page_admission, "scopes_many", counting)
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        by_class = arrange_state(state, corpus, vault, handle, monkeypatch)
+        with bound_to(vault, CollectionWriter(vault, handle)):
+            for label, (who, declared, carried) in CALLERS.items():
+                with request_scope(who):
+                    for make in (egress.restricted_release_filter, egress.visible_page_filter):
+                        offered = published_admission.admission_of(make(vault, purpose=declared))
+                        case = (state, label, make.__name__)
+                        expected = {path: offered.decide(path, True) for path in paths}
+                        classed.clear()
+                        assert offered.decide_many(paths, True) == expected, case
+                        assert bool(classed) == (by_class and carried), (
+                            "a set is decided by class exactly for a caller that the write carries", case,
+                        )

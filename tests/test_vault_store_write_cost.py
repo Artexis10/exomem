@@ -11,6 +11,7 @@ that changes no registry input.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -21,13 +22,15 @@ import pytest
 import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import vault  # noqa: F401
+from test_vault_store_migration import ALPHA, BETA, vault  # noqa: F401
+from test_vault_store_readers import EXTERNAL, restrict_external
 
-from exomem import commands, entity_recurrence
+from exomem import commands, entity_recurrence, semantic_contract
 from exomem.collection_store import connection
 from exomem.collection_store import governance as store_governance
 from exomem.collection_store.writer import CollectionWriter
-from exomem.governance import egress, policy
+from exomem.governance import egress, policy, receipts
+from exomem.governance.principal import owner_principal, request_scope
 from exomem.vault_store import rederive, write
 
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
@@ -235,3 +238,69 @@ def test_a_store_writes_decisions_do_not_grow_with_the_pages_under_one_policy_lo
         for per_set in ("readers", "realpaths"):
             assert at_2n[per_set] - at_n[per_set] < grown, (per_set, measured)
         assert at_n["indexes"] == at_2n["indexes"] == 1, measured
+
+
+def emitted_receipts(root, monkeypatch, who, pages, *, before):
+    """The disclosure payloads that a command's boundary emits for ``who``, who decides ``pages`` one at
+    a time, then as a set, and builds the corpus context in it. ``before`` is what a write did before its
+    sets were decided by scope class and its corpus boundary kept no receipt."""
+    sent = []
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            receipts, "append_event",
+            lambda _root, **event: sent.append((event["event_type"], json.dumps(event["payload"], sort_keys=True))),
+        )
+        if before:
+            boundary = egress.disclosure_boundary
+
+            @contextmanager
+            def recording(vault_root, command_name, **options):
+                with boundary(vault_root, command_name, **{**options, "sink": False}) as collector:
+                    yield collector
+
+            patch.setattr(egress, "disclosure_boundary", recording)
+            patch.setattr(egress, "_bound_operation_decides_as", lambda *args: False)
+        with request_scope(who), egress.disclosure_boundary(root, "remember") as collector:
+            keep = egress.restricted_release_filter(root)
+            assert keep is not None
+            keep(pages[0])
+            egress.admitted(keep, pages)
+            semantic_contract.build_corpus_context_with_census(root)
+            egress.emit_boundary_receipt(collector)
+    return sent
+
+
+def assert_receipts_unchanged(root, monkeypatch, who, pages):
+    after = emitted_receipts(root, monkeypatch, who, pages, before=False)
+    before = emitted_receipts(root, monkeypatch, who, pages, before=True)
+    assert before and all(kind == "disclosure" for kind, _payload in before), before
+    assert after == before
+    return {outcome["decision"] for _kind, payload in before for outcome in json.loads(payload)["outcomes"]}
+
+
+@pytest.mark.timeout(300)
+def test_a_reads_emitted_receipt_is_the_one_it_emitted_before_the_corpus_boundary_kept_none(
+    vault, monkeypatch  # noqa: F811
+):
+    """Defect that this guards: a corpus boundary that records nothing must leave the receipt of the command
+    around it as it was, with the same outcomes (hashes, sizes, levels, scopes) in the same order. A restricted
+    caller reads in file mode, where a page is released or withheld."""
+    secret = "Knowledge Base/Notes/Secret.md"
+    (vault / secret).write_text("---\ntitle: Secret\ntags: [secret]\n---\nWithheld from the external audience.\n")
+    restrict_external(vault, "tags: [secret]")
+    decisions = assert_receipts_unchanged(vault, monkeypatch, EXTERNAL, [ALPHA, BETA, secret])
+    assert decisions == {"released", "withheld"}
+
+
+@pytest.mark.timeout(300)
+def test_a_writes_emitted_receipt_is_the_one_it_emitted_before_sets_took_the_class_route(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """Defect that this guards: a set that a store-mode write decides by scope class, and a corpus boundary
+    that records nothing, must leave the receipt of the write's own command as it was, outcome for outcome."""
+    grow(writer, 1, 8, on_disk=served)
+    restrict_external(served, "tags: [secret]")
+    assert_receipts_unchanged(
+        served, monkeypatch, owner_principal(surface="library"),
+        ["Knowledge Base/Notes/Note 2.md", "Knowledge Base/Notes/Note 3.md", "Knowledge Base/Entities/People/Person 4.md", ALPHA],
+    )
