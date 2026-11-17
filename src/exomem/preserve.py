@@ -584,7 +584,11 @@ def preserve(
         raise ValueError("native preservation destination changed")
 
     # A pooled filing has no file at its logical name, which stays taken while its companion binds it.
-    if artifact_path.exists() or originals.pooled(vault_root, artifact_path) is not None:
+    try:
+        taken = artifact_path.exists() or originals.pooled(vault_root, artifact_path) is not None
+    except originals.RetirementUnconfirmed:
+        taken = True  # A filing whose deletion its witness cannot confirm still holds its name.
+    if taken:
         if _allocation is not None:
             raise DefiniteNoEffect.destination_exists(_allocation["destination"])
         return _raise(
