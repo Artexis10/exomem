@@ -15,10 +15,12 @@ rewrites links.
 An `edit` step whose operation is `patch_frontmatter` MAY target a page in
 `Sources/` or `Evidence/` only for a field that the `page-fields` registry
 declares with `role: pointer`. That step SHALL run as the governed pointer
-write that corrects a pointer field in place. The plan approval SHALL be the
-write's approval. The step SHALL set no `updated`, and its sealed postcondition
-SHALL be its exact after bytes. Proposal SHALL refuse the same operation on any
-other field of such a page with `APPEND_ONLY`.
+write that corrects a pointer field in place, and it is the only route for
+such a correction. The plan approval SHALL be the write's approval. The step
+SHALL set no `updated`, and its sealed postcondition SHALL be its exact after
+bytes. Proposal SHALL refuse the same operation on any other field of such a
+page with `APPEND_ONLY`, and on a pointer field whose registry entry names a
+`writer` with `POINTER_FIELD_OWNED`, naming that operation.
 All existing leaf confirmation, draft, content-hash, relation, source/evidence,
 protected-tree, and path-confinement checks SHALL remain authoritative at plan
 validation and immediately before commit. Except in a pointer correction on an
@@ -97,6 +99,13 @@ leaf still refuses the step there.
 - **THEN** each Source differs only in its `project` value span, with
   `updated` unchanged
 - **AND** each step's evidence holds its pointer-write record
+
+#### Scenario: A plan patches a Source's classification
+
+- **WHEN** a plan carries an `edit` step whose `patch_frontmatter` operation
+  changes a Source's `domain`
+- **THEN** proposal refuses with `POINTER_FIELD_OWNED`, names reclassification,
+  and stores no plan
 
 #### Scenario: A rehome patches a field that is not a pointer
 

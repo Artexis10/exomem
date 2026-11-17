@@ -125,12 +125,20 @@ the per-request batch object of `collection_store.aliases.LinkTargets`.
 
 `unique_path` and every create-only check treat a prior path that a live page
 claims as taken. A page may move back to a path in its own lineage. A holder
-that the caller may not see answers with the non-disclosing `WRITE_REFUSED`.
+that the caller may not see answers with `WRITE_REFUSED`, which names no
+claimant, path or content. The refusal still tells the caller one fact: some
+live page claims that exact path. A twin vault without the claim accepts the
+same create, and `unique_path` picks a different name. The reservation holds
+anyway. Without it, the caller's page would win exact-path resolution and
+capture the claimant's old links, an integrity loss that outweighs the
+disclosure. The disclosure is narrow: the path is in a folder the caller may
+write, where the claimant was visible before it moved.
 
 A file without an `exomem_id` at a reserved path does not take the address.
 Following a dead link in an editor creates exactly such an empty file. The
 resolver keeps sending the link to the lineage claimant, and the audit flags
-the file for removal.
+the file for removal. A page with its own `exomem_id` at a reserved path does
+take the address; the owner's audit reports it (Risks).
 
 ### 4. The governed pointer write
 
@@ -149,16 +157,28 @@ change. The write admits a span only when it is one of these:
 - a wikilink target whose old and new forms resolve to the same `exomem_id`;
 - the value of a frontmatter field that the `page-fields` registry declares
   with `role: pointer`;
-- through a move, the page's own folder and the lineage entry that the move
-  appends or its undo removes.
+- through a move, the page's own folder and one lineage entry that the move
+  appends after every earlier byte of `moved_from`. No declaration admits a
+  removal or a `reclassified_from` change; an undo's removal is checked
+  against the entry its forward move appended.
+
+A collection value's span ends at its last item's line, so a comment or blank
+line after it lies outside every span. A page whose frontmatter uses YAML
+anchors or aliases refuses, because an alias lets an admitted change alter
+another field's parsed value. A moved append-only page proves its own lineage
+change and records it under the move's operation. Only a move, its undo and a
+reclassification write `moved_from` or `reclassified_from`; every other writer
+refuses a caller-supplied change with `LINEAGE_PROTECTED`, because a forged
+entry would claim another page's old path and its links.
 
 The write parses the page and compares the before and after span lists. Every
 byte outside an admitted, declared span must be identical. Any other
 difference refuses with `APPEND_ONLY`. A regex never decides what changed.
 Original media, body text and provenance therefore never change.
 
-A call approves the writes to the page it names: a direct move, promotion,
-reclassification or in-place correction needs no digest. A pointer write to a
+A call approves the writes to the page it names: a direct move, promotion or
+reclassification needs no digest, and a curation plan approval approves its
+in-place corrections. A pointer write to a
 page that the call did not name, such as a referrer repoint, needs a curation
 plan approval or a commit bound to the digest of the preview that listed it.
 The digest proves that the caller saw the side effects. It is not operator
@@ -174,20 +194,30 @@ the recorded before hash.
 
 **In-place correction.** A pointer field on an append-only page can be wrong
 without the page moving, for example a Source whose `project` names a project
-that the owner has merged into another. `edit_memory` already routes its
-`patch_frontmatter` operation to `set_frontmatter_field`, which refuses every
-append-only page with `APPEND_ONLY`. That refusal narrows: a field whose
-registry role is `pointer` passes to the pointer write, and every other field
-keeps the refusal. The correction patches the value span only. It sets no
-`updated` and keeps line endings, because `updated` is not a pointer and the
-span proof would refuse it. Curation needs no new step kind: its `edit` step
-already dispatches `patch_frontmatter` through `op_edit_memory`, so a plan
-carries the correction and the plan approval is its approval. Compensation
-reverses it through the pointer write's revert, because a superseding
-correction is refused on a Source.
+that the owner has merged into another. The correction runs only as a
+curation `edit` step with a `patch_frontmatter` operation: the user confirms
+the exact plan, and compensation reverts it through the pointer write's
+revert, because a superseding correction is refused on a Source. A direct
+`edit_memory` `patch_frontmatter` on an append-only page keeps its
+`APPEND_ONLY` refusal, which names the curation route for a pointer field.
+The correction patches the value span only. It sets no `updated` and keeps
+line endings, because `updated` is not a pointer and the span proof would
+refuse it.
 
-The registry replaces a code list. `access._APPEND_ONLY` stays as old C4 debt
-for the content refusal; this change does not extend it.
+A pointer field may name a `writer` in the registry, a closed attribute. Such
+a field changes on a captured page only through that operation, which checks
+what a plain correction cannot: `reclassify` records the classification
+history and relocates the source, `custody` checks the raw file's recorded
+identity, and `closure` writes the `ingested_into` back-reference when a
+compiled page cites the source. The `edit` step refuses such a field with
+`POINTER_FIELD_OWNED` and names the operation.
+
+The registry replaces a code list. Because the pointer set defines what may
+change on an append-only page, only the shipped pack grants a role: a vault
+overlay or a schema save may retire a shipped entry and nothing else, and no
+source may declare a key that the write protocol maintains. Widening the set
+is a contract change that ships through review. `access._APPEND_ONLY` stays as
+old C4 debt for the content refusal; this change does not extend it.
 
 ### 5. Moves repoint, and the preview names every outcome
 
@@ -309,8 +339,12 @@ target does.
   and store mode. The commit cannot tell that create from importer, recovery,
   init and log writes that also expect an absent path, so a recheck there would
   refuse writers that claim no reservation. A create that races a move onto
-  the move's old path can therefore commit within that one-write window. The
-  new page then takes the address, and the owner moves it to release the path.
+  the move's old path can therefore commit within that one-write window, and a
+  sync or an outside editor can bring in a page with its own `exomem_id` at a
+  claimed path. Such a page wins exact-path resolution, so the claimant's old
+  links resolve to it with no broken link to show it. The audit reports it to
+  the owner as `reserved_path_identified`, and the owner repoints the old links
+  or moves the page to its own name.
 - A restricted caller's revert leaves the Source with a lineage entry for the
   path it vacated, so that path stays reserved and a later revert finds no
   classification to restore. The owner reclassifies explicitly instead.

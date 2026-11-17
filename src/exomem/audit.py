@@ -3732,19 +3732,40 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
 
 
 def _prior_path_findings(vault_root: Path) -> list[AuditFinding]:
-    """A prior path two live pages claim, and a page without an identity at a claimed prior path."""
-    from . import prior_claims
+    """The prior-path findings (`prior_claims.issues`) that the caller may see.
 
+    A restricted caller sees a finding only when it may see every path the finding names, so a
+    finding never reveals a withheld claimant. Only the owner sees an identified page at a
+    claimed path: that finding pairs two pages' histories, which no partial view can judge.
+    """
+    from . import prior_claims
+    from .governance import egress
+
+    visible = egress.restricted_release_filter(vault_root)
     findings: list[AuditFinding] = []
     for item in prior_claims.issues(vault_root):
         request_budget.checkpoint()
         paths = [str(path) for path in item["paths"]]  # type: ignore[union-attr]
+        if visible is not None and (
+            item["kind"] == "reserved_path_identified"
+            or not all(visible(path) for path in (str(item["path"]), *paths))
+        ):
+            continue
         if item["kind"] == "prior_path_conflict":
             detail = (
                 f"prior_path_conflict: {item['path']} is claimed by {', '.join(paths)}; "
                 "links to it stay unresolved"
             )
             fix = "Repoint the links to the page they mean, then move or correct the other claimant."
+        elif item["kind"] == "reserved_path_identified":
+            detail = (
+                f"reserved_path_identified: {item['path']} holds its own exomem_id and sits where "
+                f"{', '.join(paths)} moved from; links written before that move now resolve to it"
+            )
+            fix = (
+                "Repoint the old links that mean the moved page, or move the page at the reserved "
+                "path to its own name."
+            )
         else:
             detail = (
                 f"reserved_path_occupied: {item['path']} has no exomem_id and sits where "

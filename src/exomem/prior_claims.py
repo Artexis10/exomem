@@ -288,9 +288,13 @@ def require_unreserved(
     """Refuse a write that would take `rel` while a live page claims it as a prior path.
 
     A caller that may see a claimant hears which page holds the path. A caller that may see
-    none gets the non-disclosing refusal that any unavailable target gets. A commit reads the
-    newest claims, because no commit guard rechecks a reservation made after its request began;
-    a validation passes `newest=False` and reads its request's revision.
+    none gets the refusal that any unavailable target gets, which names no claimant, path or
+    content. It still discloses one fact, that some live page claims this exact path; the
+    reservation holds anyway, because the caller's page would otherwise win exact-path
+    resolution and capture the claimant's old links. The path is in a folder the caller may
+    write, where the claimant was visible before it moved. A commit reads the newest claims,
+    because no commit guard rechecks a reservation made after its request began; a validation
+    passes `newest=False` and reads its request's revision.
     """
     from .governance import egress
 
@@ -321,6 +325,9 @@ def issues(vault_root: Path) -> list[dict[str, object]]:
     `prior_path_conflict`: two live pages claim one prior path, so its links stay unresolved.
     `reserved_path_occupied`: a page without a valid `exomem_id` sits at a claimed prior path;
     links to that path keep resolving to the claimant.
+    `reserved_path_identified`: a page with a valid `exomem_id` sits at a claimed prior path,
+    for example after a create raced the move or a sync brought the page in. Exact-path
+    resolution sends the old links to that page, not to the claimant, so nothing else shows it.
     """
     root = Path(vault_root)
     stored, _database = _index_files(root)
@@ -336,12 +343,13 @@ def issues(vault_root: Path) -> list[dict[str, object]]:
     occupied: dict[str, str] = {}
     for prior, path, status in rows:
         claimants.setdefault(str(prior), []).append(str(path))
-        if status is not None and status != "valid":
+        if status is not None:
             occupied[str(prior)] = str(status)
     found: list[dict[str, object]] = []
     for prior, paths in claimants.items():
         if len(paths) > 1:
             found.append({"kind": "prior_path_conflict", "path": prior, "paths": paths})
         if prior in occupied:
-            found.append({"kind": "reserved_path_occupied", "path": prior, "paths": paths})
+            kind = "reserved_path_identified" if occupied[prior] == "valid" else "reserved_path_occupied"
+            found.append({"kind": kind, "path": prior, "paths": paths})
     return found

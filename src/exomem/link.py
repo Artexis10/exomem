@@ -255,6 +255,17 @@ def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
     )
 
 
+def _refuse_reserved(vault_root: Path, rel_entity: str, *, newest: bool) -> None:
+    """Refuse an entity path that a live page's lineage still claims (`prior_claims`)."""
+    from . import prior_claims
+
+    try:
+        prior_claims.require_unreserved(vault_root, rel_entity, newest=newest)
+    except prior_claims.ReservedPathError as error:
+        code = "ENTITY_EXISTS" if error.code == "FILE_EXISTS" else error.code
+        raise LinkError(code, ["name"], error.reason) from None
+
+
 # ---------------- validation ----------------
 
 
@@ -893,6 +904,7 @@ def link(
         if accepted_decision is not None:
             reason += " A distinct identity needs its own `slug`."
         raise LinkError("ENTITY_EXISTS", ["name"], reason)
+    _refuse_reserved(vault_root, rel_entity, newest=not validate_only)
     type_resolution = vocabulary_resolution.entity_type_record(
         requested_type,
         definition,

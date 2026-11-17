@@ -88,6 +88,19 @@ withheld page that still links the vacated path resolves through the lineage,
 and its pointer-write record stays valid. A plain move back to an old path is
 a move and appends an entry.
 
+Only a move, its undo and a reclassification SHALL write `moved_from` or
+`reclassified_from`. Every other writer SHALL refuse a caller-supplied change
+to either key with `LINEAGE_PROTECTED`, as it refuses one to `updated`. This
+covers creates, frontmatter patches, full rewrites, supersede successors and
+a curation `create-note` step. A forged entry would otherwise claim another
+page's old path and take its links.
+
+A move SHALL append its entry after every earlier byte of the `moved_from`
+list, so the list's entries, comments and blank lines keep their bytes. When
+the moved page is in `Sources/` or `Evidence/`, the move SHALL prove that its
+lineage entry is the only change it makes beyond the caller's declared change,
+and SHALL record that pointer write under the move's operation.
+
 #### Scenario: A note moves twice
 
 - **WHEN** a note moves from path A to path B and then to path C
@@ -99,6 +112,20 @@ a move and appends an entry.
 - **WHEN** a Source that records a legacy `reclassified_from` entry moves
 - **THEN** its `reclassified_from` value keeps its bytes and the new entry goes
   to `moved_from`
+
+#### Scenario: A writer supplies a lineage entry
+
+- **WHEN** a restricted caller creates a note whose `moved_from` names a page
+  withheld from it
+- **THEN** the create refuses with `LINEAGE_PROTECTED`
+- **AND** links to the withheld page's old path still resolve to that page
+
+#### Scenario: A moved Source keeps its list's comments
+
+- **WHEN** a Source whose `moved_from` list is followed by a comment and a
+  blank line moves, and a curation plan then corrects its `project`
+- **THEN** the comment and the blank line keep their bytes after each write
+- **AND** the move's pointer-write record holds only the appended entry
 
 #### Scenario: A revert removes its own entry
 
@@ -201,11 +228,21 @@ two live pages claim as `prior_path_conflict`.
 `unique_path` and every create-only check SHALL treat a prior path that a live
 page claims as taken. A move of a page to a path in its own lineage SHALL be
 permitted. When the claimant is withheld from the caller, the refusal SHALL be
-the non-disclosing `WRITE_REFUSED`.
+`WRITE_REFUSED` and SHALL NOT name the claimant, its current path or its
+content. The refusal, and the different name that `unique_path` then picks,
+SHALL still disclose one fact: that some live page claims that exact path.
+The reservation SHALL hold anyway, because without it the caller's page would
+win exact-path resolution and capture the claimant's old links. The disclosed
+path is in a folder the caller may write, where the claimant was visible
+before it moved.
 
 A file without an `exomem_id` at a prior path that a live page claims SHALL
 NOT take that address: links to the path SHALL keep resolving to the lineage
 claimant, and the audit SHALL report the file as `reserved_path_occupied`.
+A page with a valid `exomem_id` at such a path wins exact-path resolution, so
+the audit SHALL report it to the owner as `reserved_path_identified`. A
+restricted caller's audit SHALL show a prior-path finding only when the caller
+may see every path it names, and SHALL NOT show `reserved_path_identified`.
 
 #### Scenario: A create lands on a reserved path
 
@@ -231,12 +268,27 @@ claimant, and the audit SHALL report the file as `reserved_path_occupied`.
 - **THEN** links to that path still resolve to the moved page
 - **AND** the audit reports the file as `reserved_path_occupied`
 
+#### Scenario: An identified page sits at the old path
+
+- **WHEN** a page with its own `exomem_id` arrives at a moved page's old path
+  through a sync or a create that raced the move
+- **THEN** the owner's audit reports it as `reserved_path_identified` and names
+  the moved page
+- **AND** a restricted caller's audit does not report it
+
 #### Scenario: A withheld page holds the reserved path
 
 - **WHEN** a restricted caller creates a page at a prior path that only a
   withheld page claims
 - **THEN** the create refuses with `WRITE_REFUSED`, byte for byte as for any
   unavailable target
+
+#### Scenario: A withheld claim is disclosed only as taken
+
+- **WHEN** a restricted caller creates a page at a prior path that only a
+  withheld page claims, in one vault and in a twin vault without that claim
+- **THEN** the create refuses in the first vault and commits in the twin
+- **AND** neither answer names the claimant, its current path or its content
 
 ### Requirement: Append-only pages change only in pointer spans
 
@@ -246,20 +298,27 @@ processing record or assign its `exomem_id` SHALL keep their own rules. Each
 caller of the pointer write SHALL declare the spans it intends to change. The
 write SHALL admit a span only when it is one of these:
 
-- a wikilink target whose old and new forms resolve to the same `exomem_id`;
+- a wikilink target whose old and new forms resolve to the same `exomem_id`,
+  outside an origin carrier;
 - the value of a frontmatter field that the `page-fields` registry declares
   with `role: pointer`;
-- through a move, the page's own folder and the lineage entry that the move
-  appends or its undo removes.
+- through a move, the page's own folder and one lineage entry appended after
+  every earlier byte of `moved_from`. No declaration SHALL admit a removal
+  from either lineage key or any change to `reclassified_from`; an undo's
+  removal is checked against the entry its forward move appended.
 
-The write SHALL parse the page and compare its before and after spans. Every
-byte outside an admitted, declared span MUST be identical, and any other
-difference SHALL refuse with `APPEND_ONLY`. Original media, body text and
-provenance MUST NOT change.
+The write SHALL parse the page and compare its before and after spans. A
+collection value's span SHALL end at its last item's line, so a comment or
+blank line after it lies outside every span. Every byte outside an admitted,
+declared span MUST be identical, and any other difference SHALL refuse with
+`APPEND_ONLY`. A page whose frontmatter uses YAML anchors or aliases SHALL
+refuse with `APPEND_ONLY`, because an alias lets an admitted change alter
+another field's parsed value. Original media, body text and provenance MUST
+NOT change.
 
 A call SHALL approve the pointer writes to the page it names: a direct move,
-promotion, reclassification or in-place pointer correction of that page SHALL
-need no digest. A pointer write to a page that the call did not name, such as
+promotion or reclassification of that page SHALL need no digest, and a curation
+plan approval SHALL approve its in-place pointer corrections. A pointer write to a page that the call did not name, such as
 a referrer repoint, SHALL be approved either by a curation plan approval or by
 a commit bound to the digest of the preview that listed the change. A commit
 without that digest, or with a digest whose bindings no longer match, SHALL
@@ -297,32 +356,52 @@ the recorded before hash.
   after hash
 - **THEN** the page's bytes equal its bytes before the write
 
+#### Scenario: A Source's frontmatter uses an alias
+
+- **WHEN** a pointer write targets a Source whose frontmatter uses a YAML
+  anchor or alias
+- **THEN** the write refuses with `APPEND_ONLY` and nothing changes
+
 #### Scenario: A revert after later work
 
 - **WHEN** the page no longer holds the recorded after hash
 - **THEN** the revert refuses and the page is unchanged
 
-### Requirement: A pointer field on an append-only page can be corrected in place
+### Requirement: A pointer field on an append-only page is corrected through a curation plan
 
-`edit_memory` with a `patch_frontmatter` operation SHALL correct one field of a
-page in `Sources/` or `Evidence/` when the `page-fields` registry declares that
-field with `role: pointer`. The correction SHALL run as a governed pointer
+A pointer field of a page in `Sources/` or `Evidence/` SHALL be corrected in
+place only by a curation `edit` step, whose exact plan the user confirms and
+whose compensation reverts it. The correction SHALL run as a governed pointer
 write and SHALL NOT move the page. It SHALL change only that field's value
 span. It SHALL NOT set `updated` or any other field, and SHALL keep every other
 byte, line endings included. The new value SHALL pass the same field
-validation as on any other page. The call that names the page SHALL be the
-correction's approval, and the correction SHALL create a pointer-write record.
-A `patch_frontmatter` operation on any other field of such a page SHALL keep
-refusing with `APPEND_ONLY`. A preview of the correction SHALL return the old
-and new value.
+validation as on any other page, and the correction SHALL create a
+pointer-write record. A direct `edit_memory` `patch_frontmatter` operation on
+such a page SHALL keep refusing with `APPEND_ONLY`; for a pointer field, the
+refusal SHALL name the curation route.
+
+A pointer field whose registry entry names a `writer` SHALL change on such a
+page only through that operation, and the `edit` step SHALL refuse it with
+`POINTER_FIELD_OWNED`, naming that operation. `reclassify` owns the
+classification fields, because it records the classification history and
+relocates the source. `custody` owns the raw-file pointers, because its repair
+checks the file's recorded identity. `closure` owns `ingested_into`, because a
+compiled page's `sources:` citation writes that back-reference.
 
 #### Scenario: A Source's project is corrected
 
-- **WHEN** a caller applies a `patch_frontmatter` correction of a Source's
-  `project` field
+- **WHEN** the user confirms a curation plan whose `edit` step corrects a
+  Source's `project` field
 - **THEN** only the `project` value span differs
 - **AND** the Source's `updated` field, body and original media keep their
   bytes, and the pointer-write record holds the old value
+
+#### Scenario: A direct correction names the curation route
+
+- **WHEN** a caller applies a `patch_frontmatter` operation to a Source's
+  `project` field through `edit_memory`
+- **THEN** the write refuses with `APPEND_ONLY`, names the curation `edit`
+  step, and nothing changes
 
 #### Scenario: A field that is not a pointer stays immutable
 
@@ -330,10 +409,16 @@ and new value.
   `title` field
 - **THEN** the write refuses with `APPEND_ONLY` and nothing changes
 
+#### Scenario: A classification field is corrected through reclassify
+
+- **WHEN** a curation `edit` step patches a Source's `source_type` field
+- **THEN** proposal refuses with `POINTER_FIELD_OWNED` and names
+  reclassification
+
 #### Scenario: A correction is reverted
 
-- **WHEN** the owner reverts a `project` correction while the Source holds the
-  recorded after hash
+- **WHEN** the owner approves the compensation of a `project` correction while
+  the Source holds the recorded after hash
 - **THEN** the Source's bytes equal its bytes before the correction
 
 ### Requirement: A move previews one outcome per referrer

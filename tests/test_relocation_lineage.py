@@ -194,6 +194,80 @@ def test_two_pages_claiming_one_prior_path_leave_its_link_unresolved_and_audit_n
     ]
 
 
+def _prior_findings(vault: Path, kind: str) -> list[tuple[str, list[str]]]:
+    return [
+        (finding.path, finding.paths)
+        for finding in audit._check_reference_identity(vault)
+        if (finding.meta or {}).get("kind") == kind
+    ]
+
+
+def test_a_conflict_that_names_a_withheld_claimant_is_absent_from_a_restricted_audit(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An audit that names every claimant of a prior path to a caller that may not see one."""
+    from exomem.governance import egress
+
+    left = "Knowledge Base/Notes/left.md"
+    hidden = "Knowledge Base/Notes/Withheld/right.md"
+    for rel in (left, hidden):
+        _write(vault, rel, f"---\ntitle: {rel}\ntype: note\nmoved_from:\n  - path: {A}\n---\nBody.\n")
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda path: path != hidden)
+
+    assert _prior_findings(vault, "prior_path_conflict") == []
+
+
+def test_an_identified_page_at_a_prior_path_is_reported_to_the_owner_only(
+    moved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page with its own identity that a sync or an outside editor drops at a moved page's old
+    path, which takes the old links with no finding, or whose finding pairs two pages' histories
+    for a caller whose view is partial."""
+    from exomem.governance import egress
+
+    _write(moved, A, _note("Harbour ledger", exomem_id=str(uuid.uuid4())))
+    memory_refs.ReferenceIndex(moved).rebuild_all()
+
+    owner = _prior_findings(moved, "reserved_path_identified")
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda _path: True)
+    restricted = _prior_findings(moved, "reserved_path_identified")
+
+    assert owner == [(A, [C])]
+    assert restricted == []
+
+
+def test_an_entity_created_again_under_its_moved_and_retitled_name_refuses(vault: Path) -> None:
+    """An entity create that skips the reservation, so a new page under a moved and retitled
+    entity's old name takes every link written to the entity before the move."""
+    from exomem import link as link_module
+
+    created = link_module.link(
+        vault, entity_type="concept", name="Tidal Ledger", summary="A ledger of tide readings.",
+        today=TODAY,
+    )
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    renamed = created.path.replace("Tidal Ledger.md", "Tidal Ledger Archive.md")
+    _move(vault, created.path, renamed)
+    page = vault / renamed
+    page.write_text(
+        page.read_text(encoding="utf-8")
+        .replace("title: Tidal Ledger\n", "title: Tidal Ledger Archive\n")
+        .replace("# Tidal Ledger\n", "# Tidal Ledger Archive\n"),
+        encoding="utf-8",
+    )
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+
+    with pytest.raises(link_module.LinkError) as refused:
+        link_module.link(
+            vault, entity_type="concept", name="Tidal Ledger", summary="A new ledger.", today=TODAY,
+        )
+
+    assert refused.value.code == "ENTITY_EXISTS"
+    assert not (vault / created.path).exists()
+    assert _resolve(vault, created.path.removesuffix(".md")) == (renamed.removesuffix(".md"), None)
+
+
 def test_a_create_at_a_reserved_path_refuses_and_a_move_back_commits(moved: Path) -> None:
     """A create that takes a moved page's links, or a refusal that blocks the page's own way back."""
     with pytest.raises(create_file.CreateFileError) as refused:

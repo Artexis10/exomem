@@ -30,6 +30,7 @@ from . import (
     metrics,
     note_types,
     origin_bindings,
+    page_lineage,
     prior_claims,
     promotions,
     provenance,
@@ -2029,6 +2030,11 @@ def _preflight_existing(
     # Evaluate the logical text so CRLF alone never looks like semantic drift.
     # The PathGuard and the transition token bind the exact bytes instead.
     before_source = exact_before_source.replace("\r\n", "\n").replace("\r", "\n")
+    lineage_change = page_lineage.changed_field(before_source, after_source)
+    if lineage_change is not None:
+        raise SemanticWriteError(
+            page_lineage.PROTECTED_CODE, page_lineage.protected_reason(lineage_change)
+        )
     after_source = _place_origin_source(path, after_source, before_source=before_source)
     origin_inputs = _prepare_origin_inputs(root, path, after_source, before_source=before_source)
     if expected_before_hash is not None and expected_before_hash != raw_before_hash:
@@ -4861,6 +4867,11 @@ def _preflight_creation(
         vault.parse_frontmatter(source, strict=True)
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
+    lineage_change = page_lineage.changed_field(None, source)
+    if lineage_change is not None:
+        raise SemanticWriteError(
+            page_lineage.PROTECTED_CODE, page_lineage.protected_reason(lineage_change)
+        )
     closure_plan = source_closure.prepare_source_closure(
         root,
         source,

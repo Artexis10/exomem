@@ -427,3 +427,68 @@ def test_a_sources_project_correction_applies_and_its_undo_restores_each_source(
 
     assert result["phase"] == "compensated"
     assert {rel: (vault / rel).read_text(encoding="utf-8") for rel in sources} == before
+
+
+def test_a_curation_edit_of_a_sources_classification_refuses_at_proposal(vault: Path) -> None:
+    """A reviewed plan that changes a Source's `source_type` as a plain pointer correction, which
+    skips the classification history and the relocation that reclassification makes."""
+    before = (vault / SOURCE).read_bytes()
+
+    with pytest.raises(curation.CurationError) as refused:
+        _propose(vault, _pointer_edit(vault, SOURCE, "source_type", "report"))
+
+    assert "POINTER_FIELD_OWNED" in str(refused.value)
+    assert "reclassif" in str(refused.value)
+    assert (vault / SOURCE).read_bytes() == before
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["catalogue-current", "catalogue-stale"])
+def test_a_plan_whose_mention_lookup_could_not_answer_warns_at_its_top_level(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, complete: bool
+) -> None:
+    """A preview that buries the unchecked-mentions notice in one step's binding, so the owner
+    approves a rehome without knowing that prose mentions of the old paths will stay."""
+    from exomem import path_mentions
+
+    monkeypatch.setattr(
+        path_mentions, "find_pages", lambda _root, _paths: path_mentions.Lookup((), complete)
+    )
+    _with_identity(vault, NOTES[0])
+
+    proposed = _propose(vault, _move_step(NOTES[0]), REPOINT)
+    previewed = curation.preview(vault, run_id=proposed["run_id"])
+
+    expected = [] if complete else [path_mentions.NOT_CHECKED]
+    assert proposed.get("warnings", []) == expected
+    assert previewed.get("warnings", []) == expected
+
+
+def test_a_rename_that_raised_in_this_process_is_retried_by_the_resume(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename that failed before it moved the page and leaves its intent record behind, so the
+    resume blocks the run as an unprovable history instead of moving the page."""
+    from exomem import reserved_paths
+
+    _with_identity(vault, NOTES[0])
+    proposed = _propose(vault, _move_step(NOTES[0]))
+    rename = reserved_paths.move_generic_path
+    calls = 0
+
+    def busy_once(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("the volume was busy")
+        return rename(*args, **kwargs)
+
+    monkeypatch.setattr(reserved_paths, "move_generic_path", busy_once)
+    with pytest.raises(curation.CurationError):
+        _run(vault, proposed)
+    assert (vault / NOTES[0]).exists()
+
+    result = _run_resume(vault, proposed)
+
+    assert result["phase"] == "completed"
+    assert calls == 2
+    assert _lineage(vault, _moved(NOTES[0])) == [NOTES[0]]

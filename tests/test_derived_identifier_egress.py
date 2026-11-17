@@ -3370,7 +3370,11 @@ def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_
     """A correction moves the source and rewrites the linking pages its writer may
     see, never one withheld from it. Its answer, and its revert's, carry nothing
     that depends on the withheld page, in every response detail: no graph outcome
-    either, since a withheld page can move whether the graph join finishes in time."""
+    either, since a withheld page can move whether the graph join finishes in time.
+    Each call starts on a current catalogue, so the path-mention check runs in every
+    twin and the comparison never turns on how fast one twin's catalogue caught up."""
+    from exomem import lexstore, path_mentions
+
     source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
     base = {
         source: _page("Tide table", "High water 06:12.", type="source", source_type="other"),
@@ -3400,11 +3404,14 @@ def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_
                 {"operation": "revert-reclassification", "path": destination,
                  "reason": "keep it in the drain queue"},
             ):
+                with library_scope():
+                    assert lexstore.ensure_fresh(vault)
                 answer = _call(vault, _writer(audience), "manage_memory_file", **request, **extra)
                 assert "__error__" not in answer, (variant, detail, answer)
                 answers[variant].append(_VOLATILE_TEXT.sub("<v>", _text(answer)))
 
     assert not any('"graph_sync' in answer for answer in answers["B"]), answers["B"]
+    assert not any(path_mentions.NOT_CHECKED in answer for answer in answers["B"])
     assert answers["A"] == answers["B"]
     assert answers["C"] == answers["B"]
     assert f"[[{source[:-3]}]]" in page_bytes(vaults["A"], hidden).decode()
@@ -3469,3 +3476,47 @@ def test_a_restricted_revert_leaves_a_withheld_repointed_page_resolving_and_answ
     assert f"[[{destination[:-3]}]]" in page_bytes(vaults["A"], hidden).decode()
     with library_scope():
         assert normalize_wikilink(destination[:-3], vaults["A"]) == (source[:-3], None)
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_cannot_forge_a_lineage_that_takes_a_withheld_pages_links(
+    tmp_path: Path, audience: str
+) -> None:
+    """A writer that names the owner's withheld page in its own note's `moved_from`, by a create
+    or a frontmatter patch, so the owner's links to that page resolve to the writer's note."""
+    from exomem.vault import normalize_wikilink
+
+    withheld = f"{WITHHELD_DIR}/harbour-plan.md"
+    own = f"{INSIGHTS}/claim.md"
+    vault = _materialize(
+        tmp_path / "vault",
+        {
+            **_filler(),
+            withheld: _page("Hidden Plan", "Withheld body text.", type="insight"),
+            f"{NOTES}/index.md": _page("Index", f"See [[{withheld[:-3]}]].", type="insight"),
+        },
+        audience,
+    )
+    forged = [{"path": withheld}]
+    reviewed = {"relation_disposition": "reviewed_none", "relation_review_reason": "a stub note"}
+    created = _call(
+        vault, _writer(audience), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active", moved_from=forged),
+        **reviewed,
+    )
+    plain = _call(
+        vault, _writer(audience), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active"), **reviewed,
+    )
+    patched = _call(
+        vault, _writer(audience), "edit_memory", path=own, why="record where it came from",
+        operation={"kind": "patch_frontmatter", "field": "moved_from", "value": forged},
+    )
+
+    assert "LINEAGE_PROTECTED" in _text(created), created
+    assert "__error__" not in plain, plain
+    assert "INVALID_SET: cannot set `moved_from:`" in _text(patched), patched
+    assert "moved_from" not in page_bytes(vault, own).decode()
+    with library_scope():
+        assert normalize_wikilink(withheld[:-3], vault) == (withheld[:-3], None)

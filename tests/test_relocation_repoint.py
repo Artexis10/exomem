@@ -302,11 +302,15 @@ def test_a_reclassified_source_does_not_say_how_many_pages_it_repointed(vault: P
     moved_text = (vault / moved["path"]).read_text(encoding="utf-8")
     entry_two = newest_entry(moved["path"])
     record_ids = [path.stem for path in private_state.store(vault, pointer_write.STORE).iterdir()]
+    operation_records = pointer_write.operation_records(vault, entry_two["operation"])
     writer_lease.invoke_command(
         MANAGE, vault, operation="revert-reclassification", path=moved["path"], reason="undo"
     )
 
-    assert len(record_ids) == 2
+    # One record for each repointed page and one for the Source's own lineage write.
+    assert sorted(operation_records) == sorted(
+        [*(page.relative_to(vault).as_posix() for page in referrers), moved["path"]]
+    )
     assert not any(record_id in moved_text for record_id in record_ids)
     assert entry_two["operation"] != entry_alone["operation"]
     assert {**entry_two, "operation": None} == {**entry_alone, "operation": None}

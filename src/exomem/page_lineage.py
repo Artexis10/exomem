@@ -23,6 +23,9 @@ from . import vault
 #: relocation specification fixes, not vocabulary, so code holds them.
 LINEAGE_FIELD = "moved_from"
 LEGACY_FIELD = "reclassified_from"
+#: Both lineage keys. Only a move, its undo and a reclassification write them; every other
+#: writer refuses a caller-supplied change to either, as it refuses one to `updated`.
+FIELDS = frozenset({LINEAGE_FIELD, LEGACY_FIELD})
 #: The entry key that names a path the page left; also fixed by the specification.
 PATH_KEY = "path"
 #: The entry key that names the undoable move that appended the entry. Its undo finds the
@@ -96,6 +99,34 @@ def may_hold_lineage(raw: bytes) -> bool:
     return LINEAGE_FIELD.encode() in raw or LEGACY_FIELD.encode() in raw
 
 
+#: The refusal of a write whose caller supplied a change to a page's lineage.
+PROTECTED_CODE = "LINEAGE_PROTECTED"
+
+
+def changed_field(before: str | None, after: str) -> str | None:
+    """The lineage key whose value differs between two page texts, or None.
+
+    `before` is None for a page the write creates. A writer other than a move, its undo or a
+    reclassification refuses such a change (`PROTECTED_CODE`), since a forged entry would claim
+    another page's old path and its links.
+    """
+    texts = [text for text in (before, after) if text is not None]
+    if not any(may_hold_lineage(text.encode("utf-8")) for text in texts):
+        return None
+    old = vault.parse_frontmatter(before)[0] if before is not None else {}
+    new = vault.parse_frontmatter(after)[0]
+    return next((key for key in sorted(FIELDS) if old.get(key) != new.get(key)), None)
+
+
+def protected_reason(key: str) -> str:
+    """The refusal text for a caller-supplied change to `key`."""
+    return (
+        f"`{key}` records the paths the page has left, and only the move, undo or "
+        "reclassification that relocates it writes that record. Keep the field exactly as the "
+        "page holds it, or omit it on a new page."
+    )
+
+
 def _parsed(text: str) -> tuple[dict[str, Any], str | None]:
     try:
         front, _body, block = vault.parse_frontmatter(text, strict=True)
@@ -109,6 +140,24 @@ def _splice(text: str, changes: Mapping[str, Any], delete_fields: tuple[str, ...
 
     try:
         return splice_markdown_frontmatter(text, changes, delete_fields=delete_fields)
+    except FrontmatterSpliceError as error:
+        raise LineageError(error.code, error.reason) from error
+
+
+def _append(text: str, entry: Mapping[str, Any]) -> str | None:
+    from .record_formats import FrontmatterSpliceError, append_markdown_sequence_item
+
+    try:
+        return append_markdown_sequence_item(text, LINEAGE_FIELD, entry)
+    except FrontmatterSpliceError as error:
+        raise LineageError(error.code, error.reason) from error
+
+
+def _remove_last(text: str, field: str) -> str | None:
+    from .record_formats import FrontmatterSpliceError, remove_last_markdown_sequence_item
+
+    try:
+        return remove_last_markdown_sequence_item(text, field)
     except FrontmatterSpliceError as error:
         raise LineageError(error.code, error.reason) from error
 
@@ -128,7 +177,10 @@ def append_entry(text: str, old_path: str, extra: Mapping[str, Any] | None = Non
             f"`{LINEAGE_FIELD}` is not a list of entries; correct it before moving the page",
         )
     entry = {PATH_KEY: old_path, **dict(extra or {})}
-    return _splice(text, {LINEAGE_FIELD: [*moved, entry]})
+    # The entry is appended after the list's bytes, so every earlier entry and comment keeps its
+    # bytes and a pointer-write proof can check them (`pointer_write.prove`).
+    appended = _append(text, entry) if moved else None
+    return appended if appended is not None else _splice(text, {LINEAGE_FIELD: [*moved, entry]})
 
 
 def latest_entry(front: Mapping[str, Any]) -> Any | None:
@@ -171,7 +223,8 @@ def remove_latest(text: str, expected_path: str) -> str:
             "the page's newest lineage entry does not name the path the undo returns it to",
         )
     if remaining:
-        return _splice(text, {field: remaining})
+        removed_bytes = _remove_last(text, field)
+        return removed_bytes if removed_bytes is not None else _splice(text, {field: remaining})
     return _splice(text, {}, delete_fields=(field,))
 
 

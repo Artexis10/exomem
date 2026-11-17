@@ -6,7 +6,7 @@ frontmatter entries and its wikilinks, and admits a difference only inside a dec
 
 - the value of a field that the `page-fields` registry declares with `role: pointer`;
 - a wikilink target whose old and new forms name the same `exomem_id`;
-- the lineage entry that a move appends or its undo removes.
+- one lineage entry that a move appends after every byte of the page's `moved_from` list.
 
 Every other byte must be identical, or the write refuses with `APPEND_ONLY`. The parse decides
 what changed: the frontmatter through the YAML composer, the links through the wikilink grammar
@@ -64,7 +64,8 @@ class Declared:
 
     `fields` are frontmatter fields; only registry pointer fields are admitted. `moves` maps each
     pending move's old path to its new path: a link may change from a form that names the old
-    page to a form that names the new one. `lineage` admits the page's own lineage entry.
+    page to a form that names the new one. `lineage` admits one entry appended to the page's
+    `moved_from` list, after its earlier bytes; never a removal or a `reclassified_from` change.
     """
 
     fields: Collection[str] = frozenset()
@@ -171,10 +172,14 @@ def _link_spans(
     The two texts must hold the same links in the same order with identical bytes between and
     around their targets; a changed target must name the same page in both forms.
     """
+    from .provenance import in_carrier
+
     old_links = list(vault.iter_body_wikilinks(before))
     new_links = list(vault.iter_body_wikilinks(after))
     if len(old_links) != len(new_links):
         raise _refuse(rel, "which links the page holds")
+    # An origin carrier is recorded data, which the move's link rewrite never changes.
+    in_old_carrier = in_carrier(before)
     spans: list[Span] = []
     old_at = new_at = 0
     for old, new in zip(old_links, new_links, strict=True):
@@ -184,6 +189,8 @@ def _link_spans(
             raise _refuse(rel, "text outside a link target")
         old_target, new_target = old.group(1), new.group(1)
         if old_target != new_target:
+            if in_old_carrier(old.start(), old.end()):
+                raise _refuse(rel, "a link inside an origin carrier")
             old_path, old_mark, old_anchor = old_target.partition("#")
             new_path, new_mark, new_anchor = new_target.partition("#")
             if (old_mark, old_anchor) != (new_mark, new_anchor) or not same_page(
@@ -267,6 +274,50 @@ def page_matcher(
     return same_page
 
 
+def _refuse_aliases(rel: str, yaml_text: str) -> None:
+    """Refuse a frontmatter that uses a YAML anchor or alias.
+
+    An alias makes one field's parsed value depend on another field's bytes, so an admitted
+    span could change a field that the write does not declare.
+    """
+    try:
+        aliased = any(
+            isinstance(token, (vault.yaml.AnchorToken, vault.yaml.AliasToken))
+            for token in vault.yaml.scan(yaml_text)
+        )
+    except vault.yaml.YAMLError as error:
+        raise PointerWriteError("INVALID_FRONTMATTER", "frontmatter is invalid") from error
+    if aliased:
+        raise PointerWriteError(
+            "APPEND_ONLY",
+            f"{rel} is append-only, and its frontmatter uses YAML anchors or aliases, so no "
+            "write can prove that only its declared fields change",
+        )
+
+
+def _require_lineage_append(
+    rel: str, old_yaml: str, new_yaml: str, old_entry: str | None, new_entry: str | None
+) -> None:
+    """Refuse a lineage change other than one entry appended after the list's earlier bytes."""
+    old_value = (vault.yaml.safe_load(old_yaml) or {}).get(page_lineage.LINEAGE_FIELD)
+    new_value = (vault.yaml.safe_load(new_yaml) or {}).get(page_lineage.LINEAGE_FIELD)
+    earlier = old_value or []
+    appended = (
+        isinstance(earlier, list)
+        and isinstance(new_value, list)
+        and new_value[:-1] == earlier
+        and len(new_value) == len(earlier) + 1
+        and page_lineage.entry_path(new_value[-1]) is not None
+        and isinstance(new_value[-1], Mapping)
+    )
+    # A non-empty list keeps its bytes, comments included; the entry follows them.
+    kept = not earlier or (
+        old_entry is not None and new_entry is not None and new_entry.startswith(old_entry)
+    )
+    if not (appended and kept):
+        raise _refuse(rel, f"its `{page_lineage.LINEAGE_FIELD}` field other than by one appended entry")
+
+
 def prove(
     vault_root: Path,
     rel: str,
@@ -294,14 +345,14 @@ def prove(
     if before[:old_start] != after[:new_start] or before[old_end:old_body] != after[new_end:new_body]:
         raise _refuse(rel, "its frontmatter fences")
     old_yaml, new_yaml = before[old_start:old_end], after[new_start:new_end]
+    _refuse_aliases(rel, old_yaml)
+    _refuse_aliases(rel, new_yaml)
     try:
         old_spans, new_spans = frontmatter_entry_spans(old_yaml), frontmatter_entry_spans(new_yaml)
     except FrontmatterSpliceError as error:
         raise PointerWriteError(error.code, error.reason) from error
     pointers = page_fields.pointer_fields(vault_root)
     admitted = {name for name in declared.fields if name in pointers}
-    if declared.lineage:
-        admitted |= {page_lineage.LINEAGE_FIELD, page_lineage.LEGACY_FIELD}
 
     def entry(yaml_text: str, spans: Mapping[str, tuple[int, int]], key: str) -> str | None:
         span = spans.get(key)
@@ -321,7 +372,12 @@ def prove(
         if old_entry == new_entry:
             continue
         handled.append(key)
-        if key in admitted:
+        if key == page_lineage.LINEAGE_FIELD and declared.lineage:
+            _require_lineage_append(rel, old_yaml, new_yaml, old_entry, new_entry)
+            old_at, old_bytes = cut(old_yaml, old_spans, key, old_start)
+            new_at, new_bytes = cut(new_yaml, new_spans, key, new_start)
+            spans.append(Span(FIELD_SPAN, key, old_at, new_at, old_bytes, new_bytes))
+        elif key in admitted:
             old_at, old_bytes = cut(old_yaml, old_spans, key, old_start)
             new_at, new_bytes = cut(new_yaml, new_spans, key, new_start)
             spans.append(Span(FIELD_SPAN, key, old_at, new_at, old_bytes, new_bytes))
@@ -533,9 +589,10 @@ def load_record(vault_root: Path, record_id: str) -> dict[str, Any]:
 
 
 def operation_records(vault_root: Path, operation: str | None) -> dict[str, str]:
-    """The record id of each page that operation `operation` repointed, by page.
+    """The record id of each append-only page that operation `operation` changed, by page.
 
-    An operation that repointed no page has no map, and so none. A caller loads only the
+    A move records its referrers' repoints and the moved page's own lineage write. An
+    operation that changed no append-only page has no map, and so none. A caller loads only the
     records of the pages it may restore (`load_record`).
     """
     if operation is None:
@@ -610,18 +667,3 @@ def revert_write(
         ),
     )
 
-
-def revert(vault_root: Path, record_id: str) -> PointerWrite:
-    """Restore the page a record names to its recorded before bytes, and record the revert."""
-    root = Path(vault_root)
-    loaded = load_record(root, record_id)
-    absolute, rel = vault.resolve_under_vault(
-        root, str(loaded.get("page")), must_exist=True, must_be_file=True
-    )
-    current, guard = vault.read_guarded_text(root, absolute)
-    write = revert_write(loaded, record_id, current, path=rel)
-    with recording(root, [(write, new_record_id())]):
-        vault.batch_atomic_write(
-            [vault.PlannedWrite(path=absolute, content=write.after, guard=guard)], vault_root=root
-        )
-    return write

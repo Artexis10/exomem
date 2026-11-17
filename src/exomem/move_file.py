@@ -164,8 +164,11 @@ def _in_episode_folder(vault_root: Path, rel: str) -> bool:
 def _admit_destination(vault_root: Path, rel: str) -> None:
     """Admit a move destination before any existence check.
 
-    A limited caller may create only in a capture namespace, so a hidden page
-    holding the name cannot change its answer.
+    A limited caller may create only in a capture namespace, and this policy answers first. A
+    hidden page can still change the later answer: a file at the name refuses with
+    `DEST_EXISTS`, and a withheld page that claims it as a prior path refuses with
+    `WRITE_REFUSED`. Neither names the page, and both disclose that the path is taken
+    (`prior_claims.require_unreserved` says why the reservation holds).
     """
     from .governance import connector_boundary
 
@@ -360,6 +363,57 @@ def _lineage_transform(
     return transform
 
 
+@dataclass(frozen=True)
+class MoverView:
+    """What a mover may see, as every relocation reads it (`mover_view`)."""
+
+    #: The caller's view. It always filters what the caller is shown: a bound store gives the
+    #: owner one too.
+    visible: Callable[[str], bool]
+    #: Whether the caller is restricted at all.
+    restricted: bool
+    #: A connector-limited mover never reads, rewrites or counts a page it cannot see, so its
+    #: answer is the same with and without hidden linkers. A hidden linker keeps its old link,
+    #: which resolves through the moved page's lineage.
+    limited: bool
+
+    @property
+    def scope(self) -> Callable[[str], bool] | None:
+        """The filter for the pages the mover reads and rewrites, or None for every page."""
+        return self.visible if self.limited else None
+
+
+def mover_view(vault_root: Path) -> MoverView:
+    """The caller's view for a relocation: one rule for a move and a curation link rewrite."""
+    from .governance import connector_boundary, egress
+    from .governance.principal import effective_principal
+
+    restricted = egress.caller_restricted(vault_root)
+    return MoverView(
+        visible=egress.restricted_release_filter(vault_root),
+        restricted=restricted,
+        limited=restricted
+        and not connector_boundary.unrestricted(vault_root, effective_principal()),
+    )
+
+
+def _own_lineage_write(
+    vault_root: Path, rel: str, before: str, after: str, reason: str
+) -> pointer_write.PointerWrite:
+    """The proven write by which a move's lineage entry changes an append-only page.
+
+    It admits one entry appended after every earlier byte of `moved_from` and nothing else, and
+    its record lets the move's change be read back. An undo removes an entry, which no
+    declaration admits; `page_lineage.remove_latest` checks that the entry is its own.
+    """
+    try:
+        return pointer_write.plan(
+            vault_root, rel, before, after, pointer_write.Declared(lineage=True), reason=reason
+        )
+    except pointer_write.PointerWriteError as error:
+        raise MoveFileError(code=error.code, reason=error.reason) from error
+
+
 def records_lineage(vault_root: Path, old_rel: str, new_rel: str, *, undo: bool) -> bool:
     """Whether the move leaves the moved page a lineage entry that resolves its old path.
 
@@ -481,6 +535,8 @@ def plan_inbound_rewrites(
         vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
     ) if pages else ()
     pointers = page_fields.pointer_fields(vault_root) if pages else frozenset()
+    # One matcher holds one resolver for every append-only referrer of the move.
+    matcher = pointer_write.page_matcher(vault_root, {old_rel: new_rel})
     # Read on the first append-only page the undo changes, so pages it does not plan never
     # reach the records.
     restore: dict[str, str] | None = None
@@ -544,6 +600,7 @@ def plan_inbound_rewrites(
                         if restored
                         else f"move of {old_rel} to {new_rel}"
                     ),
+                    same_page=matcher,
                 )
             except pointer_write.PointerWriteError as error:
                 reason = error.reason
@@ -1089,20 +1146,10 @@ def _move_file_local(
             index=recovered.index,
         )
 
-    from .governance import connector_boundary, egress
-    from .governance.principal import effective_principal
+    from .governance import connector_boundary
 
-    visible = egress.restricted_release_filter(vault_root)
-    # A connector-limited mover never reads, rewrites or counts a page it cannot
-    # see, so its answer is the same with and without hidden linkers. A hidden
-    # linker keeps its old link; the owner's audit reports it as a broken
-    # reference (named debt in the vault-consolidation change).
-    # Whether this mover is restricted. `visible` only applies a view: a bound store gives the
-    # owner one too.
-    restricted = egress.caller_restricted(vault_root)
-    limited_mover = restricted and not connector_boundary.unrestricted(
-        vault_root, effective_principal()
-    )
+    view = mover_view(vault_root)
+    visible, restricted, limited_mover = view.visible, view.restricted, view.limited
     # Scan inbound links BEFORE the move, while the old path still exists.
     stored_check: store_targets.InboundCheck | None = None
     if store_writer is not None and update_wikilinks:
@@ -1264,13 +1311,17 @@ def _move_file_local(
         lineage_entry = {**dict(lineage_entry or {}), page_lineage.OPERATION_KEY: operation}
     repoint_records = [(write, pointer_write.new_record_id()) for write in repoints]
     restore_records = [(write, pointer_write.new_record_id()) for write in restored]
+    # The moved append-only page's own lineage write, proven once its final bytes are known.
+    own_records: list[tuple[pointer_write.PointerWrite, str]] = []
 
     def record_pointer_writes() -> list[str]:
         """Record each pointer write around the commit: its record outlives the move only when
         its page holds the write (`pointer_write.recording`)."""
         return [
             *mutation_context.enter_context(
-                pointer_write.recording(vault_root, repoint_records, operation=operation)
+                pointer_write.recording(
+                    vault_root, [*repoint_records, *own_records], operation=operation
+                )
             ),
             *mutation_context.enter_context(pointer_write.recording(vault_root, restore_records)),
         ]
@@ -1372,13 +1423,16 @@ def _move_file_local(
     log_plan: LogWritePlan
     if old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md"):
         # The page's lineage changes last, so it records the move of the final bytes.
-        if not _exact_content:
-            content_transform = _compose_transforms(
-                content_transform,
-                _lineage_transform(
-                    old_rel, new_rel, lineage_entry, undo_lineage, keep_vacated=keep_vacated
-                ),
+        declared_transform = content_transform
+        lineage = (
+            None
+            if _exact_content
+            else _lineage_transform(
+                old_rel, new_rel, lineage_entry, undo_lineage, keep_vacated=keep_vacated
             )
+        )
+        if lineage is not None:
+            content_transform = _compose_transforms(declared_transform, lineage)
         try:
             source, source_guard = read_guarded_text(vault_root, old_abs)
             moved_source = source
@@ -1401,8 +1455,16 @@ def _move_file_local(
                     wikilinks_updated += source_changes
                     reported_touched.append(old_rel)
                     reported_updated += source_changes
-            if content_transform is not None:
-                moved_source = content_transform(moved_source)
+            if declared_transform is not None:
+                moved_source = declared_transform(moved_source)
+            if lineage is not None:
+                declared_source, moved_source = moved_source, lineage(moved_source)
+                if src_append and not undo_lineage:
+                    own_records[:] = [(
+                        _own_lineage_write(vault_root, new_rel, declared_source, moved_source,
+                                           f"lineage of the move of {old_rel} to {new_rel}"),
+                        pointer_write.new_record_id(),
+                    )]
             _admit_publication(vault_root, new_rel, moved_source.encode("utf-8"))
             log_rel_no_ext, log_body, log_plan = plan_activity_log()
             destination_guard = (

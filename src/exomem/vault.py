@@ -163,6 +163,11 @@ _EXCLUDED_FIELD_REMEDIES: Mapping[str, str] = {
 EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(_EXCLUDED_FIELD_REMEDIES)
 EXCLUDED_FIELD_CODE = "EXCLUDED_FIELD"
 
+#: The frontmatter key that names a page's note type, and the key that every governed write
+#: stamps with its instant. The page schema fixes both; they are protocol keys, not vocabulary.
+TYPE_FIELD = "type"
+UPDATED_FIELD = "updated"
+
 # The broader `auto_*` exclusion documented in
 # `_scaffold/_Schema/references/frontmatter.md` is deliberately deferred: it is
 # a prefix rule with a different compatibility surface from this exact-name set.

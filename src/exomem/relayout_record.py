@@ -18,6 +18,7 @@ The record's writer belongs to the layout change; this module only reads it. The
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -68,8 +69,8 @@ EMPTY = Relayouts()
 def parse(text: str | None) -> Relayouts:
     """The claiming rows of a record's text. A malformed record claims nothing.
 
-    The audit, not this reader, reports a malformed record: resolution keeps working on the
-    pages' own lineage.
+    No check reports a malformed record yet; resolution keeps working on the pages' own
+    lineage.
     """
     from . import memory_refs
 
@@ -111,18 +112,32 @@ _CACHE: dict[str, tuple[object, Relayouts]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
+def _parsed(key: str, raw: bytes | None) -> Relayouts:
+    """`parse` of record bytes, cached by their digest: a large record parses once per content."""
+    if raw is None:
+        return EMPTY
+    digest = hashlib.blake2b(raw, digest_size=16).digest()
+    with _CACHE_LOCK:
+        cached = _CACHE.get(key)
+    if cached is not None and cached[0] == digest:
+        return cached[1]
+    parsed = parse(raw.decode("utf-8", errors="replace"))
+    with _CACHE_LOCK:
+        _CACHE[key] = (digest, parsed)
+    return parsed
+
+
 def load(vault_root: Path, read_bytes: Callable[[str], bytes | None] | None = None) -> Relayouts:
     """The record's claiming rows.
 
     `read_bytes(rel)` reads the record where the caller's transaction sees it (a store
-    commit); without it the record is read as the vault serves it, cached by its file
-    signature so a refill of many pages parses it once.
+    commit), and the store serves it otherwise; both are cached by the record's digest. A
+    record on disk is cached by its file signature, so a refill of many pages parses it once.
     """
     root = Path(vault_root)
     rel = record_rel(root)
     if read_bytes is not None:
-        raw = read_bytes(rel)
-        return parse(None if raw is None else raw.decode("utf-8", errors="replace"))
+        return _parsed(f"bytes:{root}", read_bytes(rel))
     from .vault_store import read
 
     def served() -> tuple[bytes | None]:
@@ -134,8 +149,7 @@ def load(vault_root: Path, read_bytes: Callable[[str], bytes | None] | None = No
     # A one-tuple tells a served record the store lacks (no relayout) from a path it does not serve.
     stored = read.from_store(root, rel, served)
     if stored is not None:
-        raw = stored[0]
-        return parse(None if raw is None else raw.decode("utf-8", errors="replace"))
+        return _parsed(f"bytes:{root}", stored[0])
     path = root / rel
     try:
         info = path.stat()

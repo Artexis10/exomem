@@ -1842,21 +1842,25 @@ def _prepare_step(
             from . import set_frontmatter_field as frontmatter
 
             # A pointer correction of an append-only page (`normalize_target_path` admits only a
-            # frontmatter patch there): the leaf refuses any field that is not a registry pointer.
+            # frontmatter patch there): the leaf refuses any field that is not a registry pointer,
+            # or that another operation owns.
             path = args["path"]
             preimage, before_hash = _read_target(vault_root, path)
             operation = dict(args["operation"])
             if operation.get("expected_hash") != before_hash:
                 raise _error("CURATION_BINDING_STALE", f"reviewed hash for {path!r} is stale")
-            frontmatter.set_frontmatter_field(
-                vault_root,
-                path=path,
-                field=operation["field"],
-                value=operation.get("value"),
-                why=args["why"],
-                expected_hash=before_hash,
-                validate_only=True,
-            )
+            try:
+                frontmatter.set_pointer_field(
+                    vault_root,
+                    path=path,
+                    field=operation["field"],
+                    value=operation.get("value"),
+                    why=args["why"],
+                    expected_hash=before_hash,
+                    validate_only=True,
+                )
+            except frontmatter.SetFrontmatterError as error:
+                raise _error(error.code, error.reason) from error
             after_text = frontmatter.apply_pointer_patch(
                 vault_root, path, preimage, {operation["field"]: operation.get("value")}
             )
@@ -2587,12 +2591,29 @@ def seal_proposal(
         blockers = _binding_blockers(root, sealed, plan_registry_identities(root, sealed))
         if blockers:
             raise _error(blockers[0]["code"], blockers[0]["reason"])
-        return CurationStore(root).create_forward(
+        created = CurationStore(root).create_forward(
             prepared.plan,
             binding_manifest=prepared.binding_manifest,
             registry_ids=prepared.registry_ids,
             allow_records=allow_records,
         )
+    warnings = _plan_warnings(prepared.binding_manifest)
+    return {**created, "warnings": warnings} if warnings else created
+
+
+def _plan_warnings(binding_manifest: Iterable[Mapping[str, Any]]) -> list[str]:
+    """What a plan's preparation could not check, shown beside the plan, not only in a binding.
+
+    A repoint step whose catalogue lookup could not answer leaves prose mentions of the old
+    paths unchecked (`repoint_links.prepare`).
+    """
+    from . import path_mentions
+
+    unchecked = any(
+        isinstance(item.get("prepared"), Mapping) and item["prepared"].get("mentions_unchecked")
+        for item in binding_manifest
+    )
+    return [path_mentions.NOT_CHECKED] if unchecked else []
 
 
 def prepare_proposal(
@@ -2839,6 +2860,7 @@ def preview(
         "binding_manifest": plan["binding_manifest"],
         "binding_health": "stale" if blockers else "current",
         "blockers": blockers,
+        **({"warnings": warnings} if (warnings := _plan_warnings(plan["binding_manifest"])) else {}),
         "compensation_classes": [
             compensation_kind(step["kind"], binding)
             for step, binding in zip(plan["steps"], plan["binding_manifest"], strict=True)
@@ -3576,14 +3598,14 @@ def _dispatch_step(
         # is filed under the step's operation id, where its compensation finds it.
         assert run is not None
         try:
-            result = frontmatter.set_frontmatter_field(
+            result = frontmatter.set_pointer_field(
                 vault_root,
                 path=args["path"],
                 field=args["operation"]["field"],
                 value=args["operation"].get("value"),
                 why=args["why"],
                 expected_hash=binding["before_hash"],
-                _pointer_operation=run["operation"],
+                operation=run["operation"],
             )
         except frontmatter.SetFrontmatterError as error:
             raise _error(error.code, error.reason) from error
@@ -3851,6 +3873,32 @@ def _rename_placement(vault_root: Path, binding: Mapping[str, Any]) -> str:
     if at_new is None and at_old is not None:
         return _STALE
     return _UNCERTAIN
+
+
+def _void_unrenamed(
+    vault_root: Path,
+    store: CurationStore,
+    run_identity: str,
+    *,
+    step: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    operation_identity: str,
+) -> None:
+    """Void the intent record of a move that raised in this process and left its page in place.
+
+    The raise proves that no rename stands, which no later evidence can prove (`_UNPROVABLE`), so
+    a resume retries the step instead of blocking for good. A stop that kills the process leaves
+    the record, and the resume still refuses.
+    """
+    if step["kind"] not in _RENAME_STEP_KINDS:
+        return
+    try:
+        if store.rename_intent(run_identity, operation_identity) is None:
+            return
+        if _rename_placement(vault_root, binding) == _UNPROVABLE:
+            store.void_rename_intent(run_identity, operation_identity)
+    except (CurationError, OSError):
+        log.warning("could not void the intent record of %s", operation_identity, exc_info=True)
 
 
 def _forget_old_path(vault_root: Path, binding: Mapping[str, Any]) -> None:
@@ -4729,6 +4777,10 @@ def _execute_next(
                 effect=_effect_projection(str(step["kind"]), {}, execution_binding),
                 compensation=compensation,
             )
+        _void_unrenamed(
+            vault_root, store, run_identity, step=step, binding=execution_binding,
+            operation_identity=operation_identity,
+        )
         if error.code == "CURATION_OUTCOME_UNCERTAIN":
             _record_blocked_state(
                 store,
@@ -4779,6 +4831,10 @@ def _execute_next(
                 effect=_effect_projection(str(step["kind"]), {}, execution_binding),
                 compensation=compensation,
             )
+        _void_unrenamed(
+            vault_root, store, run_identity, step=step, binding=execution_binding,
+            operation_identity=operation_identity,
+        )
         stable_code = getattr(error, "code", None)
         if not isinstance(stable_code, str) and ":" in str(error):
             candidate = str(error).split(":", 1)[0]
@@ -5430,6 +5486,12 @@ class CurationStore:
             raise _error(
                 "CURATION_OUTCOME_UNCERTAIN", "the move's intent record could not be published"
             ) from error
+
+    def void_rename_intent(self, run_identity: str, operation_identity: str) -> None:
+        """Remove a move's intent record once its rename is known not to stand (`_void_unrenamed`)."""
+        path = self.rename_intent_path(run_identity, operation_identity)
+        self._assert_safe(path)
+        path.unlink(missing_ok=True)
 
     def rename_intent(self, run_identity: str, operation_identity: str) -> dict[str, Any] | None:
         """The move's intent record, or None when the step never reached its rename."""

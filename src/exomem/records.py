@@ -3320,6 +3320,20 @@ def _lifecycle_result(
     }
 
 
+def _require_unclaimed(
+    root: Path, paths: tuple[str, ...], *, taken: str = "CREATE_ONLY_CONFLICT"
+) -> None:
+    """Refuse a new collection file at a path that a moved page still claims (`prior_claims`)."""
+    from . import prior_claims
+
+    for rel in paths:
+        try:
+            prior_claims.require_unreserved(root, rel)
+        except prior_claims.ReservedPathError as error:
+            code = taken if error.code == "FILE_EXISTS" else error.code
+            raise collections.CollectionError(code, error.reason) from None
+
+
 def _preflight_collection_create(
     root: Path,
     path: Path,
@@ -3343,6 +3357,9 @@ def _preflight_collection_create(
     _assert_portable_absent(root, source)
     if source.exists() or _casefold_alias(source):
         raise collections.CollectionError("CREATE_ONLY_CONFLICT", "canonical source already exists")
+    # A markdown-items source is a folder, which no page's name reserves.
+    log_page = (manifest.storage.source,) if manifest.storage.strategy == "markdown-log" else ()
+    _require_unclaimed(root, (path.relative_to(root).as_posix(), *log_page))
     if scaffold and manifest.storage.strategy == "markdown-log":
         # Descriptor shape is validated above; this access pins the exact scaffold fields.
         manifest.storage.descriptor["section"]["title"]
@@ -5645,6 +5662,8 @@ def _new_item_path(
         Path(entry.relative_path).name.casefold() == target_name for entry in source_guard.entries
     ) or any(Path(path).name.casefold() == target_name for path in reserved):
         raise collections.CollectionError("RECORD_ID_CONFLICT", "item path already exists")
+    # An item that moved out of the collection still claims its old path and its links.
+    _require_unclaimed(root, (target.relative_to(root).as_posix(),), taken="RECORD_ID_CONFLICT")
     return target, (source_guard,)
 
 

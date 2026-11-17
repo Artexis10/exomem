@@ -3,10 +3,11 @@
 For when `edit` is overkill (it rewrites whole body or tags). This patches
 exactly one key, leaves the body alone, and always bumps `updated:`.
 
-Refuses Sources/ and Evidence/, except for a field that the `page-fields` registry
-declares a pointer: that correction goes through the governed pointer write, which
-patches the value span alone and sets no `updated`. Curated trees need
-`allow_curated=true`. `why` is required — lands in the log entry.
+Refuses Sources/ and Evidence/. A field that the `page-fields` registry declares a
+pointer is corrected there only by a curation `edit` step, whose plan the user confirms
+and whose compensation reverts it: `set_pointer_field` is that step's writer, through the
+governed pointer write, which patches the value span alone and sets no `updated`. Curated
+trees need `allow_curated=true`. `why` is required — lands in the log entry.
 """
 
 from __future__ import annotations
@@ -19,8 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    capabilities,
     page_fields,
     page_ids,
+    page_lineage,
     pointer_write,
     project_keys,
     semantic_writes,
@@ -30,6 +33,7 @@ from . import (
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     EXCLUDED_FIELD_CODE,
+    UPDATED_FIELD,
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
@@ -126,30 +130,9 @@ def set_frontmatter_field(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     _validate_frontmatter: Callable[[str, str], None] | None = None,
-    _pointer_operation: str | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
-    """Set one frontmatter field. `_pointer_operation` is curation's alone: the operation id
-    under which a pointer correction's record is found, so its compensation reverts it."""
-    if not field or not field.strip():
-        raise SetFrontmatterError(
-            code="INVALID_SET", reason="field is required"
-        )
-    if not why or not why.strip():
-        raise SetFrontmatterError(
-            code="INVALID_SET",
-            reason="why is required — frontmatter edits without rationale aren't auditable",
-        )
-    if field == "updated":
-        raise SetFrontmatterError(
-            code="INVALID_SET",
-            reason=(
-                "cannot set `updated:` directly — it is always bumped to the "
-                "write instant by this operation"
-            ),
-        )
-    excluded_reason = excluded_frontmatter_reason(field)
-    if excluded_reason is not None:
-        raise SetFrontmatterError(code=EXCLUDED_FIELD_CODE, reason=excluded_reason)
+    """Set one frontmatter field."""
+    _require_settable(field, why)
 
     try:
         abs_path, rel_path = resolve_under_vault(
@@ -159,20 +142,14 @@ def set_frontmatter_field(
         raise SetFrontmatterError(code=e.code, reason=e.reason) from e
 
     append_only = in_append_only_tree(rel_path)
-    if append_only and field in page_fields.pointer_fields(vault_root):
-        return _set_pointer_field(
-            vault_root, abs_path, rel_path, field=field, value=value, why=why,
-            expected_hash=expected_hash, today=today, validate_only=validate_only,
-            semantic_transition_token=semantic_transition_token, operation=_pointer_operation,
-        )
     if append_only:
-        raise SetFrontmatterError(
-            code="APPEND_ONLY",
-            reason=(
-                f"{rel_path} is in {append_only}/ which is append-only. "
-                f"Frontmatter edits would violate rule 2."
-            ),
+        reason = (
+            f"{rel_path} is in {append_only}/ which is append-only. "
+            f"Frontmatter edits would violate rule 2."
         )
+        if field in page_fields.pointer_fields(vault_root):
+            reason += " " + (owned_field_route(vault_root, field) or _curation_route())
+        raise SetFrontmatterError(code="APPEND_ONLY", reason=reason)
 
     curated = in_curated_tree(rel_path)
     if curated and not allow_curated:
@@ -340,29 +317,114 @@ def set_frontmatter_field(
     )
 
 
-def _set_pointer_field(
+def _require_settable(field: str, why: str) -> None:
+    """Refuse a field that no frontmatter write may set: the write stamp, lineage or an excluded key."""
+    if not field or not field.strip():
+        raise SetFrontmatterError(
+            code="INVALID_SET", reason="field is required"
+        )
+    if not why or not why.strip():
+        raise SetFrontmatterError(
+            code="INVALID_SET",
+            reason="why is required — frontmatter edits without rationale aren't auditable",
+        )
+    if field == UPDATED_FIELD:
+        raise SetFrontmatterError(
+            code="INVALID_SET",
+            reason=(
+                "cannot set `updated:` directly — it is always bumped to the "
+                "write instant by this operation"
+            ),
+        )
+    if field in page_lineage.FIELDS:
+        raise SetFrontmatterError(
+            code="INVALID_SET",
+            reason=(
+                f"cannot set `{field}:` directly — a page's lineage is written only by the move, "
+                "undo or reclassification that relocates it"
+            ),
+        )
+    excluded_reason = excluded_frontmatter_reason(field)
+    if excluded_reason is not None:
+        raise SetFrontmatterError(code=EXCLUDED_FIELD_CODE, reason=excluded_reason)
+
+
+def _curation_route() -> str:
+    return (
+        "Correct a pointer field there with a curation `edit` step: propose it with "
+        + capabilities.active_call_text(
+            "maintain_memory", {"mode": "curation", "curation_action": "propose"}
+        )
+        + ", and apply it after the user confirms the previewed plan; its compensation reverts it."
+    )
+
+
+def owned_field_route(vault_root: Path, field: str) -> str | None:
+    """The sentence naming the one operation that writes `field` on a captured page, or None.
+
+    A pointer field with a registry `writer` changes there only through that operation, because
+    it checks what a plain correction cannot. Code maps the closed `writer` values, never keys.
+    """
+    writer = page_fields.writers(vault_root).get(field)
+    if writer is None:
+        return None
+    if writer == page_fields.WRITER_RECLASSIFY:
+        call = capabilities.active_call_text(
+            "manage_memory_file", {"operation": "reclassify", "reason": "..."}
+        )
+        return f"`{field}` changes only through {call}, which relocates the source and records its history."
+    if writer == page_fields.WRITER_CUSTODY:
+        call = capabilities.active_call_text(
+            "manage_memory_file", {"operation": "reclassify", "artifact_path": "...", "reason": "..."}
+        )
+        return f"`{field}` changes only through {call}, which checks the raw file's recorded identity."
+    return (
+        f"`{field}` is the back-reference that a compiled page's `sources:` citation writes; "
+        "edit the citing page instead."
+    )
+
+
+def set_pointer_field(
     vault_root: Path,
-    abs_path: Path,
-    rel_path: str,
     *,
+    path: str,
     field: str,
     value: Any,
     why: str,
     expected_hash: str | None,
-    today: dt.date | None,
-    validate_only: bool,
-    semantic_transition_token: str | None,
+    today: dt.date | None = None,
+    validate_only: bool = False,
     operation: str | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
     """Correct a pointer field of an append-only page through the governed pointer write.
 
-    The value span is patched where the YAML parser places it and every other byte, line
-    endings included, is kept: `updated` is not a pointer, so the write's span proof would
-    refuse it. The call names the page, so it approves the write; the preview returns the
-    old and new value, and the commit leaves a pointer-write record that a revert can use.
+    Only a curation `edit` step calls this: the user confirms its exact plan, and `operation`
+    files the record where the step's compensation finds it. The value span is patched where
+    the YAML parser places it and every other byte, line endings included, is kept: `updated`
+    is not a pointer, so the write's span proof would refuse it. A field that another operation
+    owns (`owned_field_route`) refuses.
     """
     from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
 
+    _require_settable(field, why)
+    try:
+        abs_path, rel_path = resolve_under_vault(
+            vault_root, path, must_exist=True, must_be_file=True
+        )
+    except VaultPathError as e:
+        raise SetFrontmatterError(code=e.code, reason=e.reason) from e
+    if in_append_only_tree(rel_path) is None:
+        raise SetFrontmatterError(
+            code="INVALID_SET", reason=f"{rel_path} is not captured content; edit it as any page"
+        )
+    if field not in page_fields.pointer_fields(vault_root):
+        raise SetFrontmatterError(
+            code="APPEND_ONLY",
+            reason=f"`{field}` is not a pointer field, so it keeps its captured bytes in {rel_path}.",
+        )
+    owner = owned_field_route(vault_root, field)
+    if owner is not None:
+        raise SetFrontmatterError(code="POINTER_FIELD_OWNED", reason=owner)
     try:
         text, guard = read_guarded_text(vault_root, abs_path)
     except (OSError, UnicodeError) as error:
@@ -388,7 +450,7 @@ def _set_pointer_field(
         raise SetFrontmatterError(error.code, error.reason) from error
     now = today or temporal.now()
     try:
-        date_iso = semantic_writes.resolve_reviewed_date_iso(semantic_transition_token, now)
+        date_iso = semantic_writes.resolve_reviewed_date_iso(None, now)
     except semantic_writes.SemanticWriteError as error:
         raise SetFrontmatterError(error.code, error.reason) from error
     by_id = expected_hash is not None and page_ids.is_page_id(expected_hash)
@@ -401,7 +463,6 @@ def _set_pointer_field(
             expected_before_hash=guard.expected_content_hash
             if by_id
             else expected_hash or guard.expected_content_hash,
-            transition_token=semantic_transition_token,
             stamp=date_iso,
             validate_only=validate_only,
         )
