@@ -419,35 +419,33 @@ def test_a_warmed_store_releases_what_a_cold_one_releases_after_each_change(vaul
     who = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", purpose="audit")
 
     def released():
+        # No bound writer: a bound one decides every page by the per-page chain and never reads the memos.
         with request_scope(who), read.request_snapshot(vault):
             keep = egress.restricted_release_filter(vault)
             return egress.admitted(keep, asked)
 
-    def forget_every_memo():
-        page_admission.forget_scopes()
-        ownership._classified.cache_clear()
-
-    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
-        writer = CollectionWriter(vault, handle)
-        token = preview._BOUND.set((vault.resolve(), writer, False))
-        try:
-            warmup.warm_store_reads(vault)
-            before = released()
-            assert released() == before and OPEN in before
-            if event == "commit":
-                write.commit(writer, put(OPEN, note("secret").encode()))
-            elif event == "policy change":
-                apply_case(corpus, 'paths: ["Notes/Open.md"]', False)
-            elif event == "grant":
-                apply_case(corpus, 'tags: [secret]\nexclude:\n  tags: [public]', True)
-            else:
-                monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda _root: frozenset({OPEN}))
-            warm = released()
-            forget_every_memo()
-            assert warm == released()
-            assert warm != before, "the event must change a release, or a stale memo would pass"
-        finally:
-            preview._BOUND.reset(token)
+    decoded = count_subject_decodes(monkeypatch)
+    warmup.warm_store_reads(vault)
+    assert decoded, "the warm-up decodes the stored facts"
+    decoded.clear()
+    before = released()
+    assert not decoded, "the warm-up filled the scope-set memo, and the request read it"
+    assert OPEN in before and released() == before
+    page_admission.forget_scopes()
+    assert released() == before and decoded, "control: a request that the memo does not serve decodes the facts"
+    if event == "commit":
+        commit_here(vault, put(OPEN, note("secret").encode()))
+    elif event == "policy change":
+        apply_case(corpus, 'paths: ["Notes/Open.md"]', False)
+    elif event == "grant":
+        apply_case(corpus, 'tags: [secret]\nexclude:\n  tags: [public]', True)
+    else:
+        monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda _root: frozenset({OPEN}))
+    warm = released()
+    page_admission.forget_scopes()
+    ownership._classified.cache_clear()
+    assert warm == released()
+    assert warm != before, "the event must change a release, or a stale memo would pass"
 
 
 def test_a_scope_set_is_never_borrowed_from_another_page_with_the_same_subject_text(stored, writer, monkeypatch):  # noqa: F811
