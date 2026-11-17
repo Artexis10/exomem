@@ -555,8 +555,8 @@ class Rig:
         """A `store-mode` command and its JSON answer; a refusal is an answer, so it is returned.
 
         The exit status is under ``_exit``; an answer that is not JSON is under ``unparsed``, and
-        a refusal's code, which the command prints as ``CODE: message`` first on stderr, under
-        ``code``.
+        a refusal's code, which the command prints as a ``VAULT_STORE_CODE: message`` stderr line,
+        under ``code``.
         """
         done = self.cli(
             "store-mode", name, *arguments, "--vault", str(self.layout.vault), **options
@@ -566,9 +566,12 @@ class Rig:
             data = json.loads(lines[-1])
         except (IndexError, ValueError):
             data = {"unparsed": (done.stdout[-300:] + done.stderr[-300:]).strip()}
-            head, colon, _ = done.stderr.strip().partition(":")
-            if colon and head and not any(c.isspace() for c in head):
-                data["code"] = head
+            for line in done.stderr.splitlines():
+                # An earlier stderr line, such as a log warning, must not hide the refusal's own line.
+                head, colon, _ = line.partition(":")
+                if colon and head.startswith("VAULT_STORE_") and not any(c.isspace() for c in head):
+                    data["code"] = head
+                    break
         if not isinstance(data, dict):
             data = {"unparsed": str(data)[:300]}
         data["_exit"] = done.returncode
