@@ -37,6 +37,11 @@ _REFAN = frozenset({"degraded", "failed"})
 COMPONENTS = ("canonical", "copies", "attempts", "derived", "caches", "host_logs")
 #: Gate answers that come from a failed read, so a repeat of the same call can clear them.
 _READ_FAILURES = frozenset({"canonical_page_unavailable", "inbound_references_unavailable"})
+# Component reasons a repeat can clear: a store that could not be read or written this time. Every other
+# component reason (an index switched off, logs that are not content-private, custody that cannot be
+# proved) needs a change outside this call, so the answer settles on it. A closed set the eraser emits.
+_TRANSIENT = frozenset({"native_ledger_unreadable", "copy_unreadable", "page_unreadable", "heat_unreadable",
+                        "generation_unwritable"})
 
 
 def _identity_sha256(identity: dict) -> str:
@@ -99,10 +104,17 @@ class _Ledger:
             conn.execute("DELETE FROM source_erasure_progress WHERE source_ref=?", (reference,))
 
 
+def _transient(components: dict[str, Any]) -> bool:
+    return any(item.get("reason") in _TRANSIENT for item in components.values())
+
+
 def _retry_after_ms(components: dict[str, Any]) -> int:
     """When a repeat can see progress: the graph drain's next pass, or at once for steps the next call takes."""
     if "epistemic_graph" in components.get("derived", {}).get("pending", ()):
         return math.ceil(graph_drain.seconds_until_pass() * 1000)
+    if _transient(components):
+        # No schedule says when a failed read heals; one second keeps a caller's loop from spinning.
+        return 1000
     return 0
 
 
@@ -132,7 +144,7 @@ class _Eraser:
 
     def report(self, status: str, components: dict[str, Any] | None = None, reason: str | None = None) -> dict:
         # Settled: a repeat of this call cannot change the answer by itself. Pending components still advance.
-        settled = status != "pending" and reason not in _READ_FAILURES
+        settled = status != "pending" and reason not in _READ_FAILURES and not _transient(components or {})
         return {"target_source_ref": self.reference, "status": status, "target_retired": status == "complete",
                 "settled": settled, "retry_after_ms": None if settled else _retry_after_ms(components or {}),
                 "components": components or {}, "failure": None if reason is None else {"code": reason}}
@@ -207,18 +219,22 @@ class _Eraser:
                 self._results = source_result_custody.ResultCustody(self.root, journal=self.manager.idempotency.source_results)
             return self._results.retire(copy, self.reference)
         except (ValueError, OSError, source_result_custody.PublicationChanged):
-            return "unknown"
+            return "unreadable"
 
     def _copies(self, birth, progress: dict[str, Any]) -> dict[str, Any]:
         # Each call resumes where the last stopped, so copies no owner can close never starve later ones.
         sweep = progress.setdefault("copies", {"cursor": None, "unknown": False, "last_unknown": False})
+        sweep.setdefault("unreadable", False)
+        sweep.setdefault("last_unreadable", False)
         cursor, processed, ended = (tuple(sweep["cursor"]) if sweep["cursor"] else None), 0, False
         for _ in range(STEP_PAGES):
             found = self.store.lookup(self.reference, birth, limit=STEP_COPIES - processed, cursor=cursor)
             if found.state == "pending" and not found.image_ids:
                 break  # A catalogue still applying changes keeps the sweep where it stood.
             for copy in found.copies:
-                sweep["unknown"] |= self._close(copy) == "unknown"
+                closed = self._close(copy)
+                sweep["unreadable"] |= closed == "unreadable"
+                sweep["unknown"] |= closed in ("unknown", "unreadable")
                 processed += 1
             for image_id in found.image_ids:
                 try:
@@ -231,12 +247,17 @@ class _Eraser:
         if ended:
             # A finished sweep's unknown copies stay reported until a later sweep closes or clears them.
             sweep["last_unknown"], sweep["unknown"] = sweep["unknown"], False
+            sweep["last_unreadable"], sweep["unreadable"] = sweep["unreadable"], False
         sweep["cursor"] = cursor
         final = self.store.lookup(self.reference, birth, limit=1)
         if final.state == "ready" and not final.copies and not final.image_ids:
             return {"state": "acknowledged"}
         unknown = sweep["unknown"] or sweep["last_unknown"] or final.state == "unknown"
-        return {"state": "unknown" if unknown else "pending", "catalogue": final.state}
+        if not unknown:
+            return {"state": "pending", "catalogue": final.state}
+        unreadable = sweep["unreadable"] or sweep["last_unreadable"] or final.state == "unknown"
+        reason = "copy_unreadable" if unreadable else "copy_unprovable"
+        return {"state": "unknown", "catalogue": final.state, "reason": reason}
 
     def _graph_dropped(self, path: str, reused: bool) -> bool:
         """The graph keeps no row of the retired version, nor a queued repair or handoff record that names its page.
@@ -290,19 +311,23 @@ class _Eraser:
         if working_set_heat.holds(self.root, path) and working_set_heat.purge(self.root, [path]):
             progress["heat_purged"] = True
         held = working_set_heat.holds(self.root, path)
-        return "unknown" if held is None else "pending" if held else "acknowledged"
+        if held is None:
+            return "heat_disabled" if working_set_heat.disabled() else "heat_unreadable"
+        return "pending" if held else "acknowledged"
 
     def _derived(self, progress: dict[str, Any], manifest: source_custody.Manifest) -> dict[str, Any]:
         path, owners = progress.get("path"), progress.get("owners", {})
         if path is None:
             # Derived owners index installed pages only; an unpublished allocation never reached them.
-            return {"state": "acknowledged"} if manifest.publication == "allocated" else {"state": "unknown"}
+            if manifest.publication == "allocated":
+                return {"state": "acknowledged"}
+            return {"state": "unknown", "reason": "publication_unprovable"}
         try:
             text, _guard = vault.read_guarded_text(self.root, self.root / path)
         except FileNotFoundError:
             text = None
         except (OSError, ValueError):
-            return {"state": "unknown", "owners": owners}
+            return {"state": "unknown", "owners": owners, "reason": "page_unreadable"}
         if text is not None and memory_refs.ref_from_markdown(text) == self.reference:
             return {"state": "pending", "owners": owners}
         reused = text is not None
@@ -318,23 +343,26 @@ class _Eraser:
         heat = self._heat(path, reused, progress)
         if heat != "acknowledged":
             pending.append("working_set_heat")
+        if heat in ("heat_disabled", "heat_unreadable"):
+            return {"state": "unknown", "owners": owners, "pending": pending, "reason": heat}
         from . import epistemic_graph
 
         if "epistemic_graph" in pending and not epistemic_graph.graph_enabled():
             # A disabled graph index never drops its stored rows, so a repeat cannot progress: answer unknown and
             # settled instead of pending forever. Re-enabling the index lets a later call finish the erase.
             return {"state": "unknown", "owners": owners, "pending": pending, "reason": "graph_index_disabled"}
-        state = "unknown" if heat == "unknown" else "pending" if pending else "acknowledged"
-        return {"state": state, "owners": owners, "pending": pending}
+        return {"state": "pending" if pending else "acknowledged", "owners": owners, "pending": pending}
 
     def _caches(self, progress: dict[str, Any], derived: dict[str, Any]) -> dict[str, Any]:
         """Reusable caches check the retirement generation; one advance after the derived rows are gone voids them."""
         if derived["state"] != "acknowledged":
-            # The fence waits for the derived rows; while they cannot go, a repeat cannot fence either.
-            return {"state": "unknown" if derived["state"] == "unknown" else "pending"}
+            # The fence waits for the derived rows, so it carries their unknown and its reason.
+            if derived["state"] == "unknown":
+                return {"state": "unknown", "reason": derived.get("reason")}
+            return {"state": "pending"}
         if not progress.get("caches_fenced"):
             if not source_custody.advance_retirement_generation(self.root):
-                return {"state": "unknown"}
+                return {"state": "unknown", "reason": "generation_unwritable"}
             progress["caches_fenced"] = True
             self.ledger.save(self.reference, progress)
         return {"state": "acknowledged"}
@@ -366,12 +394,14 @@ class _Eraser:
             source_custody.retire(self.root, self.reference, self.fence)
         found: dict[str, Any] = {"copies": self._copies(manifest.generated_birth, progress)}
         bindings, _path = self._bindings()
-        found["canonical"] = {"state": {"none": "acknowledged", "open": "pending"}.get(bindings, "unknown")}
+        found["canonical"] = ({"state": "unknown", "reason": "native_ledger_unreadable"} if bindings == "unknown"
+                              else {"state": "acknowledged" if bindings == "none" else "pending"})
         found["attempts"] = {"state": "acknowledged" if self.attempts.retire_allocations(self.reference) else "pending"}
         found["derived"] = self._derived(progress, manifest)
         found["caches"] = self._caches(progress, found["derived"])
         # Without content-private logging, process logs may name the page; no owner can prove their absence.
-        found["host_logs"] = {"state": "acknowledged" if privacy_log.content_private_logging_enabled() else "unknown"}
+        found["host_logs"] = ({"state": "acknowledged"} if privacy_log.content_private_logging_enabled()
+                              else {"state": "unknown", "reason": "logs_not_content_private"})
         components = {name: found[name] for name in COMPONENTS}
         status = _status(components)
         self.ledger.save(self.reference, progress)

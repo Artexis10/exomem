@@ -170,7 +170,8 @@ The call refuses with a code that names what to change:
 
 Before its cutoff, the call answers `unknown` with a `failure.code` when Exomem cannot prove the erase is safe.
 The codes are `custody_missing`, `coverage_incomplete`, `dependency_uncertain`, `canonical_page_unavailable` and `inbound_references_unavailable`.
-Without content-private logging, `host_logs` stays `unknown`, because process logs can name the page.
+An `unknown` component names its `reason`. A reason that a repeat can clear, such as a store that could not be read this time (`page_unreadable`, `heat_unreadable`, `copy_unreadable`, `native_ledger_unreadable`, `generation_unwritable`), leaves the answer unsettled, so the caller repeats. Any other reason settles the answer until something outside the call changes.
+Without content-private logging, `host_logs` stays `unknown` with reason `logs_not_content_private`, because process logs can name the page.
 With the graph index disabled (`EXOMEM_DISABLE_GRAPH_INDEX`), `derived` and `caches` stay `unknown` with reason `graph_index_disabled`, because the disabled index keeps its stored rows. Re-enable the index and repeat the call to finish the erase.
 
 `delete_file`, `move_file` and `delete_directory` refuse an enrolled Source with `SOURCE_ERASE_REQUIRED`.

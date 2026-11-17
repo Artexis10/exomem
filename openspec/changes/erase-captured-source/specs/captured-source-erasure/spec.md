@@ -131,6 +131,12 @@ The result SHALL name the target reference, status, settled and target_retired. 
 - **THEN** the result is settled with status unknown and target_retired false
 - **AND** repeating the operation does not change that answer
 
+#### Scenario: A store cannot be read this time
+- **WHEN** a store that holds the Source's derived state cannot be read during one call
+- **THEN** that component reports unknown with a reason that names the failed read
+- **AND** the result is not settled and carries retry_after_ms
+- **AND** a repeat after the read recovers continues the cleanup to complete
+
 #### Scenario: Host policy is disabled during cleanup
 - **WHEN** an operation already holds its cutoff and host policy then stops enabling its identity system
 - **THEN** repeating that operation continues its cleanup to a settled result

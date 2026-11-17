@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 
 import pytest
@@ -469,6 +470,7 @@ def test_host_without_content_private_logs_reports_unknown(vault, attempts, eras
     result = drive(call, reference, source_hash)
     assert result["status"] == "unknown" and result["settled"] is True and result["target_retired"] is False
     assert {name for name, item in result["components"].items() if item["state"] != "acknowledged"} == {"host_logs"}
+    assert result["components"]["host_logs"]["reason"] == "logs_not_content_private"
     assert json.dumps(result).count(reference) == 1
 
 
@@ -488,6 +490,28 @@ def test_an_erase_whose_graph_index_was_disabled_settles_as_unknown(vault, attem
     assert result["status"] == "unknown" and result["settled"] is True, json.dumps(result)
     assert derived["state"] == "unknown" and derived["reason"] == "graph_index_disabled"
     assert result["retry_after_ms"] is None
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a file mode the process obeys")
+def test_a_read_that_fails_once_keeps_the_answer_open_until_a_repeat_finishes(vault, attempts, erasable):
+    """A store that could not be read this time is no lasting unknown: the caller must repeat, not stop."""
+    from exomem import working_set_heat
+
+    _manager, call = attempts
+    path, reference, source_hash = capture(vault, call)
+    first = erase(call, reference, source_hash)
+    assert first["settled"] is False
+    sidecar = working_set_heat.sidecar_path(vault)
+    assert sidecar.exists(), "the capture left no heat to make unreadable"
+    mode = sidecar.stat().st_mode
+    sidecar.chmod(0)
+    try:
+        second = erase(call, reference, source_hash)
+    finally:
+        sidecar.chmod(mode)
+    assert second["components"]["derived"]["reason"] == "heat_unreadable", json.dumps(second)
+    assert second["settled"] is False and second["retry_after_ms"] is not None
+    assert drive(call, reference, source_hash)["status"] == "complete"
 
 
 def published(vault) -> bool:
