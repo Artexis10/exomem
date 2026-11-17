@@ -947,8 +947,6 @@ def _check_source_identity_conflicts(
         except source_corrections.SourceCorrectionUnavailable:
             # An unreadable receipt is the correction chain's own finding; it says nothing about this Source's identity.
             continue
-        shown = check.get("declared_dois") or check.get("printed_dois") or []
-        claimed = check.get("claimed_dois") or []
         identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
         reference = memory_refs.memory_ref(identity) if identity else page.rel_path
         findings.append(
@@ -956,19 +954,11 @@ def _check_source_identity_conflicts(
                 category="source_identity_conflict",
                 severity="warn",
                 path=page.rel_path,
-                detail=(
-                    f"Source url names {', '.join(map(str, claimed[:3]))}, but its PDF "
-                    f"{'declares' if check.get('declared_dois') else 'prints'} {', '.join(map(str, shown[:3]))}"
-                ),
-                proposed_fix=(
-                    "Open the Source and compare its opening text with its url. If the url is wrong, call "
-                    "`save_source` with no files, the same title, the right url and "
-                    f'`options.correction` = {{"supersedes": "{reference}", "expected_hash": <the page\'s '
-                    'content hash from `read_page`>, "reason": "<what was wrong>"}; the stored original is kept.'
-                ),
+                detail=document_identity.finding(check) or "",
+                proposed_fix=document_identity.correction_call(reference, None),
                 meta={
                     "state": check.get("state"),
-                    "claimed_dois": list(claimed),
+                    "claimed_dois": list(check.get("claimed_dois") or []),
                     "declared_dois": list(check.get("declared_dois") or []),
                     "printed_dois": list(check.get("printed_dois") or []),
                 },

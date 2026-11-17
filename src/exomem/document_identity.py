@@ -176,19 +176,38 @@ def reply_block(value: Any) -> dict[str, Any] | None:
     ) if key in value}
 
 
-def finding(block: dict[str, Any]) -> str | None:
+def finding(check: Mapping[str, Any]) -> str | None:
     """The sentence that states a `conflict` or `not_shown` check, or None when the check found nothing to state.
 
-    It names where DOIs were found and never says the document is or is not the cited work.
+    `check` is a reply's `identity` block or a Source page's `identity_check` record. The sentence names
+    where DOIs were found and never says the document is or is not the cited work.
     """
-    claimed = ", ".join(block["claimed_dois"][:3])
-    if block["state"] == CONFLICT:
-        shown = block["declared_dois"] or block["printed_dois"]
-        where = "declares" if block["declared_dois"] else "prints"
-        return f"The PDF {where} {', '.join(shown[:3])}, but the url names {claimed}"
-    if block["state"] == NOT_SHOWN:
+    def first(key: str) -> list[str]:
+        value = check.get(key)
+        return [str(item) for item in value[:3]] if isinstance(value, list) else []
+
+    claimed = ", ".join(first("claimed_dois"))
+    if check.get("state") == CONFLICT:
+        declared = first("declared_dois")
+        shown = declared or first("printed_dois")
+        return f"The PDF {'declares' if declared else 'prints'} {', '.join(shown)}, but the url names {claimed}"
+    if check.get("state") == NOT_SHOWN:
         return f"The PDF shows no DOI, so the url's {claimed} is unconfirmed"
     return None
+
+
+def correction_call(ref: str, page_hash: str | None) -> str:
+    """The step that replaces a Source whose url may not name its document: compare, then a metadata-only correction.
+
+    `page_hash` is the guard the call names; None asks the agent to read the page's hash first.
+    """
+    guard = f'"{page_hash}"' if page_hash else "<the page's content hash from read_page>"
+    return (
+        "Compare the Source's opening text with its url. If the url is wrong, call save_source again with no "
+        "files, the same title, the right url, and options.correction = "
+        f'{{"supersedes": "{ref}", "expected_hash": {guard}, "reason": "<what was wrong>"}}; '
+        "the stored original is kept and nothing is uploaded again."
+    )
 
 
 def is_pdf(filename: str) -> bool:

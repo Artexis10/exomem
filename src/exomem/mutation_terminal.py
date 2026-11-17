@@ -2300,12 +2300,7 @@ def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
     if not ref or not page_hash:
         return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."
     more = f" The other {flagged - 1} flagged files carry their own ref and page_hash." if flagged > 1 else ""
-    return (
-        "Compare the opening text with the url. If the url is wrong, call save_source again with no files, "
-        "the same title, the right url, and options.correction = "
-        f'{{"supersedes": "{ref}", "expected_hash": "{page_hash}", "reason": "<what was wrong>"}}; '
-        f"the stored original is kept and nothing is uploaded again.{more}"
-    )
+    return document_identity.correction_call(str(ref), str(page_hash)) + more
 
 
 #: The records dispositions that leave a canonical Record to write: filing, a recurrence, or a
