@@ -802,7 +802,8 @@ Before an image-pin rollback, check the cell's Knowledge Base for
 `_Originals/format.json`. A cell that holds the file uses shared original
 storage, and an image from before the release that adds shared storage refuses
 it. A cell created on that release or later turns shared storage on at its first
-start. Do not pin such a cell to an older image: fix forward. "Shared original
+start. Do not pin such a cell to an older image: fix forward. If an older image
+refuses a cell without the file, fix forward too. "Shared original
 storage: downgrading below this release" in `docs/release.md` gives the way back
 for an archive that must move to an older release.
 
