@@ -9,7 +9,15 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
-from . import capabilities, cloud_cell, operation_entries, page_ids, relation_registry, source_result_attribution
+from . import (
+    capabilities,
+    cloud_cell,
+    document_identity,
+    operation_entries,
+    page_ids,
+    relation_registry,
+    source_result_attribution,
+)
 from . import curation as curation_module
 from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
@@ -924,6 +932,17 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
+            if "page_hash" in item:
+                # The guard a correction of this Source's page names.
+                if sha256(item["page_hash"]):
+                    row["page_hash"] = item["page_hash"]
+                else:
+                    unverified.append("page_hash")
+            if "identity" in item:
+                if (identity := document_identity.reply_block(item["identity"])) is None:
+                    unverified.append("identity")
+                else:
+                    row["identity"] = identity
             container = item.get("document_container")
             if isinstance(container, Mapping):
                 # These scalar fields are the bounded container-inspection receipt protocol.
@@ -2261,6 +2280,58 @@ def _partial_batch_summary(verb: OutcomeVerb, rows: Sequence[tuple[str, str]]) -
     return f"Nothing new {verb}; {len(already)} already {verb}, {lost}"
 
 
+def _identity_findings(artifact_receipt: Mapping[str, Any]) -> list[tuple[Mapping[str, Any], str]]:
+    """Each stored file row whose identity check found a conflict or no DOI, with its finding sentence."""
+    found: list[tuple[Mapping[str, Any], str]] = []
+    for row in artifact_receipt.get("files", ()):
+        block = row.get("identity")
+        if (
+            block is not None
+            and row.get("outcome") in {"stored", "replayed"}
+            and (sentence := document_identity.finding(block)) is not None
+        ):
+            found.append((row, sentence))
+    return found
+
+
+def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
+    """The metadata-only correction call that fixes a Source whose url does not match its document."""
+    ref, page_hash = row.get("ref"), row.get("page_hash")
+    if not ref or not page_hash:
+        return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."
+    more = f" The other {flagged - 1} flagged files carry their own ref and page_hash." if flagged > 1 else ""
+    return (
+        "Compare the opening text with the url. If the url is wrong, call save_source again with no files, "
+        "the same title, the right url, and options.correction = "
+        f'{{"supersedes": "{ref}", "expected_hash": "{page_hash}", "reason": "<what was wrong>"}}; '
+        f"the stored original is kept and nothing is uploaded again.{more}"
+    )
+
+
+#: The records dispositions that leave a canonical Record to write: filing, a recurrence, or a
+#: question for the user. `hold` defers to review by policy, so it adds nothing to the outcome.
+_UNFILED_DISPOSITIONS = frozenset({"file", "append_occurrence", "ask"})
+
+
+def _unfiled_record_clause(records_routing: Mapping[str, Any] | None) -> str:
+    """'; not filed in <collection>' when this write's own routing says a Record is still owed.
+
+    An agent that wrote only a supporting note told the user the incident was filed; the sentence
+    it repeats now says which canonical home still lacks the Record.
+    """
+    if not records_routing or records_routing.get("disposition") not in _UNFILED_DISPOSITIONS:
+        return ""
+    return f"; not filed in {records_routing['title']}"
+
+
+def _unfiled_record_step(records_routing: Mapping[str, Any] | None) -> str | None:
+    """The disposition's own instruction or question, as the reply's next step."""
+    if not records_routing or records_routing.get("disposition") not in _UNFILED_DISPOSITIONS:
+        return None
+    step = records_routing.get("question") if records_routing["disposition"] == "ask" else records_routing.get("instruction")
+    return step if isinstance(step, str) and step else None
+
+
 def _user_summary(
     result: Mapping[str, Any], verb: OutcomeVerb | None, batch: Sequence[tuple[str, str]] = ()
 ) -> str | None:
@@ -2385,15 +2456,24 @@ def project_terminal(
     stated_outcome = _stated_outcome(leaf)
     if user_summary is not None and stated_outcome is not None:
         user_summary = stated_outcome
+    records_routing = _records_routing_projection(leaf)
     if user_summary is not None:
         # Named at render time from the deployment, so a replay of the stored terminal reads the
         # same. Two connectors can present one display name; the sentence says which store it was.
-        compact["user_summary"] = f"{user_summary} ({cloud_cell.store_identity()['name']})"
+        compact["user_summary"] = (
+            f"{user_summary}{_unfiled_record_clause(records_routing)} "
+            f"({cloud_cell.store_identity()['name']})"
+        )
         # An update that dropped relations says so where the person reads, with the repair.
         if isinstance(leaf, Mapping) and leaf.get("relations_dropped") and isinstance(
             leaf.get("outcome"), str
         ):
             compact["user_summary"] += f". {leaf['outcome']}"
+    flagged = _identity_findings(artifact_receipt)
+    if flagged and "user_summary" in compact:
+        compact["user_summary"] += f". {flagged[0][1]}"
+        if len(flagged) > 1:
+            compact["user_summary"] += f" (and {len(flagged) - 1} more files have a finding)"
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
@@ -2595,7 +2675,6 @@ def project_terminal(
     structure_suggestion = _structure_suggestion_projection(leaf)
     if structure_suggestion is not None:
         compact["structure_suggestion"] = structure_suggestion
-    records_routing = _records_routing_projection(leaf)
     if records_routing is not None:
         compact["records_routing"] = records_routing
     entity_candidate = _entity_candidate_projection(leaf)
@@ -2668,12 +2747,17 @@ def project_terminal(
         refs = source_result_attribution.recipe(artifact_receipt or _path_projection(leaf)).sources
         if refs:
             source_result_attribution.bind(compact, refs, paths=(("user_summary",),))
+    if flagged:
+        compact["next_action"] = _correction_next_action(flagged[0][0], len(flagged))
+    elif (filing_step := _unfiled_record_step(records_routing)) is not None:
+        compact.setdefault("next_action", filing_step)
     reply, operational = _agent_reply(
         compact,
         result,
         capture_sweep=capture_sweep,
         warnings_listed_per_file=bool(artifact_receipt),
         leaf_owned=leaf_owned,
+        replaces_sweep_ask=bool(flagged),
     )
     if detail == "full":
         derived_diagnostics = result.get("_derived_diagnostics")
@@ -2703,6 +2787,7 @@ def _agent_reply(
     capture_sweep: Mapping[str, Any] | None,
     warnings_listed_per_file: bool,
     leaf_owned: frozenset[str],
+    replaces_sweep_ask: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Split the projected write reply into what the agent reads and what operators read.
 
@@ -2726,9 +2811,12 @@ def _agent_reply(
         # A write's own step (a guarded write waiting for review) is a sentence; the sweep's ask
         # follows it in the same `next_action`, so neither is lost. A step that is one closed
         # protocol value (a curation run's `resume`, `apply`) takes no prose, so the ask sits
-        # beside it. The check is the value's shape, one token, not its meaning.
+        # beside it. The check is the value's shape, one token, not its meaning. An identity
+        # finding's correction is the one step the agent takes first, so it carries no ask.
         own_step = reply.get("next_action")
-        if not isinstance(own_step, str):
+        if replaces_sweep_ask:
+            pass
+        elif not isinstance(own_step, str):
             reply["next_action"] = CAPTURE_SWEEP_NEXT
         elif len(own_step.split()) == 1:
             reply["capture_next"] = CAPTURE_SWEEP_NEXT

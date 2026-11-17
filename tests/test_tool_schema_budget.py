@@ -29,9 +29,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # wire measures 28,798 B, so the budget is 28,800 B; `recall_context`'s `native_skills`, which a hook fills so the
 # skills catalogue omits what the client already loads, took 162 B. The door operations `imports.file`, `review.held` and
 # `maintenance.held_resolve` add 56 B to the two door enums. `cancel_uploads`, which frees a caller's own waiting
-# uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` the last 45 B. Raise a ceiling
-# deliberately, in the diff that needs it.
-TOTAL_BUDGET = 28_800
+# uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` the last 45 B. The wire now
+# measures 28,900 B: `save_source.document_form`, the form of a Source as a record of a work, added 100 B.
+# Raise a ceiling deliberately, in the diff that needs it.
+TOTAL_BUDGET = 28_900
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -55,7 +56,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "recall_context": 2800,
     "save_episode": 1100,
     "save_evidence": 1200,
-    "save_source": 1300,
+    "save_source": 1400,
     "search_memory": 1050,
     "supersede_note": 1300,
     "upload_files": 800,

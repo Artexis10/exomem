@@ -153,6 +153,27 @@ def has_correction(root: Path, metadata: dict) -> bool:
         raise SourceCorrectionUnavailable from None
 
 
+def corrected_by(root: Path, ref: str, path: str) -> dict[str, str] | None:
+    """`{title, path}` of the page that now stands for the Source at `path`, else None.
+
+    One receipt lookup decides an uncorrected Source; only a corrected one resolves its chain. A chain
+    the caller may not read, or one that does not validate, adds nothing, as a page read of it refuses.
+    """
+    try:
+        entry, _guard = _receipt(root, ref)
+        if entry is None:
+            return None
+        current = resolve_current(root, path)
+        metadata, _body, _marker = vault.parse_frontmatter(current.source)
+    except (OSError, ValueError, TypeError, KeyError, memory_refs.ReferenceError, reserved_paths.ReservedPathLeafError):
+        return None
+    if current.selected_path == current.requested_path:
+        return None
+    title = metadata.get("title")
+    return {"title": title if isinstance(title, str) and title else Path(current.selected_path).stem,
+            "path": current.selected_path}
+
+
 @dataclass(frozen=True, slots=True)
 class CurrentSourceResolution:
     requested_path: str

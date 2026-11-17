@@ -1,0 +1,209 @@
+"""Identity evidence of a captured PDF: what the document shows against the DOI its url claims."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from _identity_pdf import XMP_HEAD, XMP_TAIL, make_pdf, xmp_with_doi
+
+from exomem import document_identity as identity
+
+CLAIM = "https://doi.org/10.5555/aaa"
+
+
+# --- the DOI syntax -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("see https://doi.org/10.5555/aaa.", ("10.5555/aaa",)),
+        ("DOI: 10.5555/AAA-1, and more", ("10.5555/aaa-1",)),
+        ("10.5555/(sici)1097-4571(1998)49:8<693", ("10.5555/(sici)1097-4571(1998)49:8",)),
+        ("(doi 10.5555/aaa)", ("10.5555/aaa",)),
+        ("https://x.example/doi/10.5555%2Faaa", ()),
+        ("first 10.5555/aaa then 10.5555/bbb then 10.5555/aaa", ("10.5555/aaa", "10.5555/bbb")),
+        ("version 10.12 of the tool, ratio 3/4", ()),
+        (f"10.5555/{'a' * 400}", ()),
+    ],
+)
+def test_the_doi_syntax_is_read_from_running_text(text: str, expected: tuple[str, ...]) -> None:
+    assert identity.dois_in(text) == expected
+
+
+def test_a_doi_split_after_the_prefix_is_joined() -> None:
+    assert identity.dois_in("doi:10.\n5555/aaa") == ("10.5555/aaa",)
+
+
+def test_a_doi_split_after_the_slash_is_joined() -> None:
+    assert identity.dois_in("https://doi.org/10.5555/\naaa") == ("10.5555/aaa",)
+
+
+def test_a_url_with_an_encoded_slash_is_claimed_after_decoding() -> None:
+    claimed = identity.check(["Harbour lanterns. 10.5555/aaa"], [], "https://doi.org/10.5555%2Faaa")
+
+    assert claimed.claimed_dois == ("10.5555/aaa",)
+
+
+# --- the states ------------------------------------------------------------------------------
+
+
+def test_a_url_without_a_doi_makes_no_claim() -> None:
+    result = identity.check(["Harbour lanterns, 10.5555/aaa"], [], "https://example.org/articles/harbour")
+
+    assert result.state == identity.NO_CLAIM
+    assert result.opening == "Harbour lanterns, 10.5555/aaa"
+
+
+def test_no_url_makes_no_claim() -> None:
+    assert identity.check(["Harbour lanterns"], [], None).state == identity.NO_CLAIM
+
+
+def test_metadata_that_declares_the_claimed_doi_is_declared() -> None:
+    result = identity.check(["Harbour lanterns"], ["PDF 1.7", "doi:10.5555/AAA"], CLAIM)
+
+    assert result.state == identity.DECLARED
+    assert result.declared_dois == ("10.5555/aaa",)
+
+
+def test_metadata_that_declares_only_another_doi_is_a_conflict_even_when_the_page_prints_the_claim() -> None:
+    result = identity.check(["Cites https://doi.org/10.5555/aaa"], ["10.5555/zzz"], CLAIM)
+
+    assert result.state == identity.CONFLICT
+    assert result.declared_dois == ("10.5555/zzz",)
+    assert result.printed_dois == ("10.5555/aaa",)
+
+
+def test_pages_that_print_the_claimed_doi_are_printed_never_verified() -> None:
+    result = identity.check(["Thesis summary of a cited article https://doi.org/10.5555/aaa"], [], CLAIM)
+
+    assert result.state == identity.PRINTED
+    assert "Thesis summary" in result.opening
+
+
+def test_pages_that_print_only_another_doi_are_a_conflict() -> None:
+    result = identity.check(["First page prints https://doi.org/10.5555/aaa"], [], "https://doi.org/10.5555/bbb")
+
+    assert result.state == identity.CONFLICT
+    assert result.claimed_dois == ("10.5555/bbb",)
+    assert result.printed_dois == ("10.5555/aaa",)
+
+
+def test_a_document_that_shows_no_doi_is_not_shown() -> None:
+    result = identity.check(["A study of harbour lanterns."], ["Harbour study"], CLAIM)
+
+    assert result.state == identity.NOT_SHOWN
+
+
+def test_the_opening_is_the_first_600_characters_with_whitespace_collapsed() -> None:
+    result = identity.check(["word  " * 300, "second page"], [], CLAIM)
+
+    assert len(result.opening) == 600
+    assert "  " not in result.opening
+
+
+def test_the_page_record_keeps_no_opening_text_and_the_reply_keeps_it() -> None:
+    result = identity.check(["Opening words 10.5555/zzz"], [], CLAIM)
+
+    assert "opening" not in result.frontmatter()
+    assert result.frontmatter()["checked_at"].endswith("Z")
+    assert result.reply()["opening"] == "Opening words 10.5555/zzz"
+
+
+def test_a_reply_block_that_does_not_read_as_one_is_refused_not_shown_as_a_state() -> None:
+    block = identity.check(["Opening 10.5555/zzz"], [], CLAIM).reply()
+
+    assert identity.reply_block(block) == block
+    assert identity.reply_block({**block, "printed_dois": "10.5555/zzz"}) is None
+    assert identity.reply_block({**block, "opening": "x" * 601}) is None
+    assert identity.reply_block({**block, "state": ""}) is None
+    assert identity.reply_block("conflict") is None
+
+
+# --- reading a real PDF -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def pdfs(tmp_path: Path) -> Path:
+    pytest.importorskip("fitz")
+    return tmp_path
+
+
+def test_a_doi_declared_in_xmp_makes_the_pdf_declared(pdfs: Path) -> None:
+    path = make_pdf(pdfs / "a.pdf", ["A study of harbour lanterns."], xmp=xmp_with_doi("10.5555/aaa"))
+
+    result = identity.inspect(path, CLAIM)
+
+    assert result.state == identity.DECLARED
+    assert result.declared_dois == ("10.5555/aaa",)
+
+
+def test_a_doi_in_an_xmp_text_element_is_found_without_naming_its_namespace(pdfs: Path) -> None:
+    xmp = f'{XMP_HEAD}<rdf:Description><custom:ref xmlns:custom="urn:x">doi:10.5555/aaa</custom:ref></rdf:Description>{XMP_TAIL}'
+    path = make_pdf(pdfs / "a.pdf", ["A study of harbour lanterns."], xmp=xmp)
+
+    assert identity.inspect(path, CLAIM).state == identity.DECLARED
+
+
+def test_a_doi_in_the_document_information_makes_the_pdf_declared(pdfs: Path) -> None:
+    path = make_pdf(pdfs / "a.pdf", ["A study of harbour lanterns."], info={"subject": "doi:10.5555/aaa"})
+
+    assert identity.inspect(path, CLAIM).state == identity.DECLARED
+
+
+def test_the_pdf_title_and_opening_come_from_the_document(pdfs: Path) -> None:
+    path = make_pdf(pdfs / "a.pdf", ["A study of harbour lanterns. 10.5555/aaa"], info={"title": "Harbour Lanterns"})
+
+    result = identity.inspect(path, CLAIM)
+
+    assert result.pdf_title == "Harbour Lanterns"
+    assert result.opening.startswith("A study of harbour lanterns.")
+
+
+def test_only_the_first_two_pages_are_read(pdfs: Path) -> None:
+    path = make_pdf(
+        pdfs / "a.pdf",
+        ["A study of harbour lanterns.", "Second page of the study.", "Third page prints 10.5555/aaa"],
+    )
+
+    assert identity.inspect(path, CLAIM).state == identity.NOT_SHOWN
+
+
+def test_an_encrypted_pdf_is_unavailable_and_names_the_reason(pdfs: Path) -> None:
+    path = make_pdf(pdfs / "locked.pdf", ["A study of harbour lanterns."], password="secret")
+
+    result = identity.inspect(path, CLAIM)
+
+    assert (result.state, result.reason) == (identity.UNAVAILABLE, identity.ENCRYPTED)
+    assert result.claimed_dois == ("10.5555/aaa",)
+
+
+def test_a_malformed_pdf_is_unavailable_and_raises_nothing(pdfs: Path) -> None:
+    path = pdfs / "broken.pdf"
+    path.write_bytes(b"%PDF-1.7 this is not a pdf")
+
+    result = identity.inspect(path, CLAIM)
+
+    assert (result.state, result.reason) == (identity.UNAVAILABLE, identity.UNREADABLE)
+
+
+def test_a_pdf_with_no_text_layer_is_unavailable_for_that_reason(pdfs: Path) -> None:
+    path = make_pdf(pdfs / "scan.pdf", ["", ""])
+
+    result = identity.inspect(path, CLAIM)
+
+    assert (result.state, result.reason) == (identity.UNAVAILABLE, identity.NO_TEXT_LAYER)
+
+
+def test_an_xmp_packet_with_entity_expansion_is_ignored_not_parsed(pdfs: Path) -> None:
+    bomb = (
+        '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "10.5555/zzz"><!ENTITY b "&a;&a;&a;&a;">]>'
+        "<x:xmpmeta xmlns:x='adobe:ns:meta/'>&b;</x:xmpmeta>"
+    )
+    path = make_pdf(pdfs / "a.pdf", ["A study of harbour lanterns. 10.5555/aaa"], xmp=bomb)
+
+    result = identity.inspect(path, CLAIM)
+
+    assert result.state == identity.PRINTED
+    assert result.declared_dois == ()

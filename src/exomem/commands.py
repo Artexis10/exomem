@@ -3296,10 +3296,16 @@ def op_find(
                 refs = ref_index.refs_for_paths(
                     [str(hit.get("path") or "") for hit in hit_dicts]
                 )
+            basis = note_types.Basis(vault_root)
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:
                     hit["ref"] = ref
+                    # One receipt lookup per Source hit, so a reader of a stale Source learns its successor.
+                    if basis.selects(hit.get("type"), note_types.captured_source) and (
+                        successor := source_corrections.corrected_by(vault_root, ref, str(hit["path"]))
+                    ):
+                        hit["corrected_by"] = successor
         if retrieval_trace is not None:
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
@@ -4015,6 +4021,7 @@ def _add_source(
     correction: source_corrections.SourceCorrection | None = None,
     reuse: bool = False,
     passages: list[source_capture.DeclaredPassage] | None = None,
+    document_form: str | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4048,6 +4055,7 @@ def _add_source(
                 correction=correction,
                 reuse_payload=reuse,
                 passages=passages,
+                document_form=document_form,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -9251,6 +9259,7 @@ def op_capture_source(
     correction: source_corrections.SourceCorrection | None = None,
     passages: Any = None,
     capture_reservation: capture_attempts_module.CaptureReservation | None = None,
+    document_form: str | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9275,8 +9284,10 @@ def op_capture_source(
         raw_protection: Owner-only original.
         source_identity: Durable text-capture identity.
         expected_sha256: Original SHA-256 (UTF-8 for content).
-        correction: Correct a Source; expected_hash is its page hash.
+        correction: Correct a Source; expected_hash is its page hash. With no files, content or
+            passages it keeps the stored original and takes the call's metadata.
         capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
+        document_form: What the document is as a record of a work; a new key registers.
     """
     if capture_reservation is not None:
         capture_attempts_module.require_active_capture(vault_root, capture_reservation)
@@ -9288,6 +9299,8 @@ def op_capture_source(
             raise ValueError("INVALID_PASSAGES: remove files and adoption when supplying passages")
         content = "\n\n".join(passage["text"] for passage in passages)
     content = content or ""
+    # A correction that supplies no new bytes keeps the predecessor's stored original.
+    metadata_only = correction is not None and not files and not content and passages is None and adoption is None
     if correction is not None:
         correction = source_corrections.validate_correction(correction)
         if source_identity is not None or adoption is not None or files and len(files) != 1:
@@ -9296,7 +9309,7 @@ def op_capture_source(
         source_capture.validate_sha256(expected_sha256)
         if files and len(files) != 1:
             raise ValueError("SOURCE_HASH_REQUIRES_ONE_FILE: expected_sha256 binds exactly one original file")
-        if not files:
+        if not files and not metadata_only:
             source_capture.verify_sha256(expected_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest())
     if files and content:
         raise ValueError("INVALID_SOURCE: supply content or files, not both")
@@ -9310,26 +9323,24 @@ def op_capture_source(
     from . import source_result_attribution
 
     out: dict
-    if files or adoption is not None:
+    stores_original = bool(files) or adoption is not None or metadata_only
+    if stores_original:
         from . import client_artifacts
 
-        captured = client_artifacts.capture_source_artifacts(
-            vault_root,
-            source_schema=source_schema,
-            title=title,
-            files=files,
-            slug=slug,
-            source_type=kind,
-            url=url,
-            tags=tags,
-            why_captured=why_captured,
-            domain=domain,
-            projects=projects,
-            adoption=adoption,
-            raw_protection=raw_protection,
-            expected_sha256=expected_sha256,
-            correction=correction,
-        )
+        source_fields: dict[str, Any] = {
+            "slug": slug, "source_type": kind, "url": url, "tags": tags, "why_captured": why_captured,
+            "domain": domain, "projects": projects, "raw_protection": raw_protection,
+            "expected_sha256": expected_sha256, "document_form": document_form,
+        }
+        if metadata_only:
+            captured = client_artifacts.capture_source_correction(
+                vault_root, source_schema=source_schema, title=title, correction=correction, **source_fields,
+            )
+        else:
+            captured = client_artifacts.capture_source_artifacts(
+                vault_root, source_schema=source_schema, title=title, files=files, adoption=adoption,
+                correction=correction, **source_fields,
+            )
         _note_committed_artifact_targets(captured)
         out = captured
         # Stored/replayed are the successful outcomes fixed by the artifact receipt protocol.
@@ -9360,6 +9371,7 @@ def op_capture_source(
             correction=correction,
             reuse=True,
             passages=passages,
+            document_form=document_form,
         )
         out = {"source": source}
         if source_identity is not None:
@@ -9383,7 +9395,7 @@ def op_capture_source(
         source_refs = {source["path"]: (source["ref"],)}
     out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths, source_refs=source_refs)
     if compile_guidance:
-        if files or adoption is not None:
+        if stores_original:
             # Originals remain usable while extraction is pending; preparation is optional.
             out["compile_guidance"] = {"semantic_compilation": out["semantic_compilation"]}
         else:
@@ -9927,6 +9939,13 @@ def op_transfer_artifact(
             f"INVALID_MODE: transfer_artifact lane must be one of {upload_tokens.UPLOAD_LANES}"
         )
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
+    if operation == "upload" and secret is None:
+        # An agent that asked without `hold` stopped here; the session-bound hold needs no token.
+        raise ValueError(
+            "UPLOAD_DISABLED: this server has no upload token, so send the file as a held upload: "
+            "call again with hold=true and expected_sha256 set to the file's SHA-256, then run the "
+            "returned send step"
+        )
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
     # Carrying the full principal (its session and purpose) requires private

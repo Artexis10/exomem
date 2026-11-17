@@ -1317,6 +1317,18 @@ def test_transfer_artifact_refuses_an_unknown_lane(vault: Path) -> None:
         commands.op_transfer_artifact(vault, operation="upload", lane="wherever")
 
 
+def test_an_upload_without_a_token_names_the_held_route(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agents that asked for a plain upload on a server without a token gave up and saved nothing."""
+    from exomem import commands
+
+    monkeypatch.delenv("EXOMEM_UPLOAD_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="hold=true and expected_sha256"):
+        commands.op_transfer_artifact(vault, operation="upload", lane="source")
+
+
 def test_an_upload_lands_in_the_lane_its_token_was_minted_for(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

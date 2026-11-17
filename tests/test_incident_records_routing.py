@@ -785,6 +785,42 @@ def test_compact_terminal_projects_a_disposition_and_a_predicate_route() -> None
     assert _terminal_routing(asked) == asked
 
 
+def _note_reply(routing: dict) -> dict:
+    from exomem import mutation_terminal
+
+    terminal = mutation_terminal.committed_terminal(
+        {"path": "Knowledge Base/Notes/Failures/widget-failure-007.md", "warnings": [], "records_routing": routing},
+        request_id="33333333-3333-4333-8333-333333333335",
+        receipt_id="receipt-unfiled",
+        idempotency_key="unfiled-key",
+    )
+    return mutation_terminal.project_terminal(terminal, outcome_verb="saved")
+
+
+def test_a_note_that_owes_a_record_says_where_it_was_not_filed() -> None:
+    """An agent wrote a diagnosis note and told the user the incident was filed; no Record existed."""
+    filed = _note_reply(dict(_FILED))
+    assert "; not filed in Widget incidents (" in filed["user_summary"]
+    assert filed["next_action"].startswith(_FILED["instruction"])
+
+    question = "Log “Widget panel froze” as a new entry?"
+    asked = _note_reply(
+        {k: v for k, v in _FILED.items() if k not in {"record_memory", "missing_fields"}}
+        | {"disposition": "ask", "question": question}
+    )
+    assert "; not filed in Widget incidents (" in asked["user_summary"]
+    assert asked["next_action"].startswith(question)
+
+
+def test_a_held_disposition_leaves_the_outcome_unchanged() -> None:
+    held = _note_reply(
+        {k: v for k, v in _FILED.items() if k not in {"record_memory", "missing_fields", "instruction"}}
+        | {"disposition": "hold"}
+    )
+    assert "not filed" not in held["user_summary"]
+    assert not str(held.get("next_action", "")).startswith("Perform")
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -936,6 +972,43 @@ def test_a_failure_note_is_filed_through_the_returned_payload(
     _path, first_ref = _created(written)
     _path, second_ref = _created(again)
     assert _sources_of(vault, appended["item_key"]) == [first_ref, second_ref]
+
+
+def test_a_singular_project_on_a_failure_note_still_routes_and_is_reported(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent passed `project` to a type that stores `projects`; the write dropped it silently and
+    the note routed weakly to the wrong collection. The value is applied, routed and reported."""
+    from exomem import commands
+    from exomem.vault import parse_frontmatter
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal")
+    arguments = {
+        "content": "## Observations\n\n- [failure] The panel stopped responding after load #widget-app ^widget-froze\n",
+        "title": "Widget panel froze on load",
+        "slug": "widget-froze",
+        "note_type": "failure",
+        "project": "widget-app",
+        "tags": ["widget-app", "failure"],
+        "sources": [evidence],
+    }
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
+    written = commands.op_remember(
+        vault,
+        **arguments,
+        draft_id=validation["draft_id"],
+        draft_hash=validation["draft_hash"],
+        draft_token=validation["draft_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation["draft_hash"],
+        relation_review_reason="No honest relation exists for this fixture.",
+    )
+
+    frontmatter, _body, _ = parse_frontmatter((vault / written["path"]).read_text(encoding="utf-8"))
+    assert frontmatter["projects"] == ["widget-app"]
+    assert any("`project` was applied as projects" in warning for warning in written["warnings"])
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["disposition"] == "file"
 
 
 def test_a_routed_failure_note_stays_coverage_visible_under_a_partial_census(

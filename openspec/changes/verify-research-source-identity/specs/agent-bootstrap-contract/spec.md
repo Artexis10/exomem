@@ -10,7 +10,8 @@ The served capture guidance and the shipped skill scaffold SHALL tell agents:
 - to decide whether the Source warrants compilation into an existing or new note, and otherwise to report it as kept for custody only;
 - to correct a wrong Source with a metadata-only correction.
 
-Each line SHALL ship only when a real-model comparison shows that the arm with it outperforms the arm without it on the incident cases.
+The guidance SHALL ship only when a real-model comparison shows that the arm with it outperforms the same code without it on the incident cases.
+The per-turn capture policy SHALL carry only the custody and identity rule; the document-form, compilation and correction details SHALL live in the skill scaffold.
 
 #### Scenario: An agent receives a misleading repository match
 

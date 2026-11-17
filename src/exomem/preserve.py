@@ -39,7 +39,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, semantic_contract, source_taxonomy, temporal
+from . import (
+    document_identity,
+    indexes,
+    memory_refs,
+    privacy_log,
+    semantic_contract,
+    source_taxonomy,
+    temporal,
+)
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .kbdir import managed_join, managed_relative
 from .ocr_facts import OcrFacts
@@ -1720,17 +1728,19 @@ def sidecar_extraction_writes(
     """
     parts = _parts_module()
     pieces = parts.split(text)
+    metadata = parse_frontmatter(before)[0]
     plan = parts.plan(
         vault_root,
         sidecar_path,
         pieces,
-        inherited=parse_frontmatter(before)[0],
+        inherited=metadata,
         date_iso=temporal.stamp(temporal.now()),
     )
     content = render_sidecar_extraction(
         before,
         text=pieces[0],
         parts=parts.layout(sidecar_path, pieces),
+        identity_check=document_identity.after_extraction(metadata, pieces[0]),
         **fields,
     )
     write = PlannedWrite(
@@ -1782,6 +1792,7 @@ def render_sidecar_extraction(
     reset_speakers: bool = False,
     parts: Layout | None = None,
     binary_hints: tuple[int, int] | None = None,
+    identity_check: dict | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -1833,6 +1844,9 @@ def render_sidecar_extraction(
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
+    if identity_check is not None:
+        # The recorded check could not read a scanned PDF; the OCR text now can (`document_identity.after_extraction`).
+        content = _set_frontmatter_field(content, "identity_check", document_identity.render(identity_check))
     if binary_hints is not None:
         content = _media_processing_module().record_read_hints(
             content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]

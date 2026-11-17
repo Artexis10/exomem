@@ -26,7 +26,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import lifecycle_statuses, memory_refs, note_types, source_closure, source_result_attribution, vault
+from . import (
+    lifecycle_statuses,
+    memory_refs,
+    note_types,
+    source_closure,
+    source_corrections,
+    source_result_attribution,
+    vault,
+)
 from .find_types import ParsedPage
 
 #: The closed reasons a derivative fails the citation-backlog criterion.
@@ -145,6 +153,8 @@ def evaluate(
     if not references:
         return Coverage(())
     snapshot = resolver()
+    # A note that cites a Source this one corrects cites the same stored bytes, so it counts as citing this one.
+    accepted = (source.rel_path, *_corrected_paths(root, source, lookup=lookup, resolver=snapshot))
     derivatives: list[Derivative] = []
     for reference in references:
         path = source_closure.locate(root, reference, resolver=snapshot)
@@ -155,23 +165,46 @@ def evaluate(
         status_class = status_basis.classify(
             page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter
         ).lifecycle_class
-        claim_resolved = _claims(root, page, source.rel_path, snapshot, type_basis)
+        claim_resolved = _claims(root, page, accepted, snapshot, type_basis)
         derivatives.append(
             Derivative(reference, page.rel_path, _reason(status_class, claim_resolved), status_class, claim_resolved)
         )
     return Coverage(tuple(derivatives))
 
 
+def _corrected_paths(
+    root: Path,
+    source: ParsedPage,
+    *,
+    lookup: Callable[[str], ParsedPage | None],
+    resolver: vault.WikilinkResolver,
+) -> tuple[str, ...]:
+    """The pages `source` corrects, nearest first, as far as the caller can see them.
+
+    Only a Source that names a predecessor pays for the walk, one admitted page read per hop.
+    """
+    paths: list[str] = []
+    page: ParsedPage | None = source
+    while page is not None and len(paths) < source_corrections.MAX_HOPS:
+        reference = page.frontmatter.get("supersedes")
+        path = source_closure.locate(root, reference, resolver=resolver) if isinstance(reference, str) else None
+        if path is None or path in paths or path == source.rel_path:
+            break
+        paths.append(path)
+        page = lookup(path)
+    return tuple(paths)
+
+
 def _claims(
     root: Path,
     page: ParsedPage,
-    source_path: str,
+    source_paths: Sequence[str],
     resolver: vault.WikilinkResolver,
     type_basis: note_types.Basis,
 ) -> bool:
-    """Whether the page's `sources:` claim resolves to `source_path` under source closure."""
+    """Whether the page's `sources:` claim resolves to one of `source_paths` under source closure."""
     return any(
-        source_closure.resolve_reference(root, value, resolver=resolver) == source_path
+        source_closure.resolve_reference(root, value, resolver=resolver) in source_paths
         for value in source_closure.claims_in(page.frontmatter, type_basis)
     )
 

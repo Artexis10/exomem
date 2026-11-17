@@ -82,6 +82,10 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # are what every note citing it rests on, so the owner sees it unasked; a vault
     # whose originals all verify never sees it.
     "original_fixity",
+    # A captured document whose own metadata or opening shows a DOI other than the one its Source
+    # claims, and that nobody corrected. Everything citing it rests on that identity, so the owner
+    # sees it unasked; a vault whose captures agree with their documents never sees it.
+    "source_identity_conflict",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large

@@ -49,7 +49,7 @@ import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from . import accel, asr_runtime, diarizer_sidecar, runtime_resources
 from .asr_facts import (
@@ -1492,6 +1492,21 @@ def _maybe_image_tags(ocr_text: str, path: Path, engine: str) -> tuple[str, str]
     return text, f"{engine}+tags"
 
 
+def pdf_page_text(page: Any) -> str:
+    """The text a PDF page's own text layer holds, stripped. A short one means a scan."""
+    return page.get_text().strip()
+
+
+def has_text_layer(page_text: str) -> bool:
+    """Whether a page's embedded text is long enough to be read, not rasterized and OCR'd."""
+    return len(page_text) >= _PDF_OCR_MIN_CHARS
+
+
+def page_marker(number: int) -> str:
+    """The line that opens page `number` in a PDF extraction, so a reader can cite the page a passage sits on."""
+    return f"[page {number}]"
+
+
 def _extract_pdf(path: Path) -> ExtractResult:
     try:
         import fitz  # PyMuPDF
@@ -1506,8 +1521,8 @@ def _extract_pdf(path: Path) -> ExtractResult:
     try:
         with fitz.open(path) as doc:
             for number, page in enumerate(doc, start=1):
-                page_text = page.get_text().strip()
-                if len(page_text) < _PDF_OCR_MIN_CHARS:
+                page_text = pdf_page_text(page)
+                if not has_text_layer(page_text):
                     # Scanned/image-only page → rasterize and OCR it.
                     scanned_pages += 1
                     ocr_text = _ocr_pdf_page(page)
@@ -1515,8 +1530,7 @@ def _extract_pdf(path: Path) -> ExtractResult:
                         page_text = ocr_text
                         ocr_pages += 1
                 if page_text:
-                    # A line of its own, so a reader can cite the page a passage sits on.
-                    parts.append(f"[page {number}]\n{page_text}")
+                    parts.append(f"{page_marker(number)}\n{page_text}")
     except MemoryError:
         raise
     except Exception as e:

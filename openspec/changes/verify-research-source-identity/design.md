@@ -14,7 +14,7 @@ A binary Source is its original plus a Markdown page that holds frontmatter and 
 **Non-goals**
 - Exomem does not decide whether a document is the work its title names. A citing work can print the cited title and DOI. That judgement stays with the calling agent, which reads the opening text the reply returns. No server model is added.
 - No capture is refused for identity reasons. Custody comes first.
-- Office documents and images get no identity check at capture; their state is `unavailable`.
+- Office documents and images get no identity check at capture, and their file rows carry no `identity` block.
 - Retrieval ranking and answer attribution are out of scope. The context compiler programme owns them.
 
 ## Decisions
@@ -70,7 +70,7 @@ The audit's Source pass already reads each Source's frontmatter. A Source whose 
 
 ### Guidance earns its place
 
-Each added contract or scaffold line is ablated in the real-model incident cases. A line that does not beat the arm without it is removed before release.
+The added contract and scaffold text is ablated as one group in the real-model incident cases: the changed code with the guidance against the same code without it. Guidance that does not beat that arm is removed before release. The per-turn capture policy is at its byte ceiling, so it carries only the custody and identity rule, and its pinned budgets rise by that line's size.
 
 ## Risks / Trade-offs
 
