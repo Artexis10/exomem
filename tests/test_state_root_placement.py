@@ -183,6 +183,7 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "consolidation-tree",
     "governance-tree",
     "generated-fragments",
+    "original-pool",
     "procedure-approvals",
     "source-corrections",
     "source-custody",

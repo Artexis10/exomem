@@ -1,4 +1,4 @@
-"""Launcher custody for temporary-upload format changes."""
+"""Launcher custody for original-storage and temporary-upload format changes."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ from filelock import FileLock
 from . import state_migration
 
 # The worker command protocol fixes these IDs; they describe implemented formats.
-LIFECYCLE_IDS = (state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,)
+LIFECYCLE_IDS = (
+    state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID,
+    state_migration.HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
+)
 
 _supported: frozenset[str] = frozenset()
 # One activation per vault and process; later cancellations skip the manifest entirely.

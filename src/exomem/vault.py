@@ -5926,6 +5926,22 @@ def _governed_advisory_target(
     return target
 
 
+def _owner_writes(*writes: Callable[[], None] | None) -> Callable[[], None] | None:
+    """The owner's durable writes that run before a batch's first install, in order.
+
+    Pooled original bytes come first: a filing's binding must never commit before its bytes.
+    """
+    selected = tuple(write for write in writes if write is not None)
+    if not selected:
+        return None
+
+    def run() -> None:
+        for write in selected:
+            write()
+
+    return run
+
+
 class _NativePrepared(Exception):
     """Owner-local final preparation snapshot; no canonical effect has started."""
 
@@ -5969,6 +5985,7 @@ def batch_atomic_write(
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
+    _publish_originals: Callable[[], None] | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
@@ -6004,6 +6021,7 @@ def batch_atomic_write(
                 defer_graph_completion=defer_graph_completion,
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
+                publish_originals=_publish_originals,
             )
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
@@ -6033,7 +6051,10 @@ def batch_atomic_write(
                     _validate_prepared_bindings=_validate_prepared_bindings, _prepare=_prepare,
                     _payload_custody=_payload_custody,
                 )
-        from . import curation_witness
+        from . import curation_witness, trash_metadata
+
+        if vault_root is not None:
+            caller_writes = trash_metadata.prepare_binding_changes(Path(vault_root), caller_writes)
 
         augmented_writes, curation_witness_state = curation_witness.augment_batch(
             caller_writes,
@@ -6062,7 +6083,9 @@ def batch_atomic_write(
                 _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 publication_intents_out=publication_intents_out,
                 _validate_prepared_bindings=_validate_prepared_bindings,
-                _before_first_install=curation_witness.publication_hook(curation_witness_state),
+                _before_first_install=_owner_writes(
+                    _publish_originals, curation_witness.publication_hook(curation_witness_state)
+                ),
                 _payload_custody=_payload_custody,
             )
         except BaseException:
@@ -6148,6 +6171,7 @@ def _batch_atomic_write_locked(
     """
     caller_writes = list(writes)
     writes = list(caller_writes)
+    media_change = None
     graph_checkpoint_path: Path | None = None
     graph_floor_path: Path | None = None
     graph_debt_checkpoint: PlannedWrite | None = None
@@ -6668,6 +6692,17 @@ def _batch_atomic_write_locked(
             if index == 0 and _prepare is not None:
                 _prepare(caller_writes)
                 raise ValueError("native preparation must stop before publication")
+            if index == 0 and vault_root is not None:
+                from . import media_bindings
+
+                media_change = media_bindings.begin_file_change(
+                    Path(vault_root),
+                    {write.path.relative_to(vault_root).as_posix(): write.content.encode("utf-8")
+                     for write in caller_writes if isinstance(write.content, str) and write.path.suffix.lower() == ".md"
+                     and write.path.is_relative_to(vault_root)},
+                    (write.path.relative_to(vault_root).as_posix() for write in caller_writes
+                     if write.path.is_relative_to(vault_root)),
+                )
             if index == 0 and _before_first_install is not None:
                 # The owner's own durable write, never in `replaced`: a rollback does not revert it.
                 _before_first_install()
@@ -6848,6 +6883,8 @@ def _batch_atomic_write_locked(
                 False,
                 diagnostics=rollback_errors,
             ) from commit_error
+        if media_change is not None:
+            media_bindings.finish_file_change(Path(vault_root), media_change, committed=False)
         if fast_receipt is not None:
             _abort_rolled_back_receipt(Path(os.path.abspath(vault_root)), fast_receipt)
         if cleanup_retained:
@@ -6889,6 +6926,9 @@ def _batch_atomic_write_locked(
             except held_fs.CustodyAcknowledgementPending:
                 # Native rollback and cleanup finished; the owner retains its unresolved canonical reservations.
                 pass
+
+    if media_change is not None:
+        media_bindings.finish_file_change(Path(vault_root), media_change, committed=True)
 
     if vault_root is not None:
         # Before the write acknowledges, so the free-text census names every
@@ -7785,6 +7825,11 @@ class FrontmatterError(ValueError):
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+
+# PyYAML's safe constructors reject a malformed scalar (`!!bool invalid`, `2026-99-99`) with these
+# exceptions, not a YAMLError, so `parse_frontmatter` raises them in every mode. FrontmatterError is a ValueError.
+MALFORMED_FRONTMATTER_ERRORS = (ValueError, KeyError, AttributeError)
 
 
 def yaml_safe_load(text: str):

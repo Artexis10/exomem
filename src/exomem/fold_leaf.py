@@ -49,7 +49,10 @@ def _hash_at(vault_root: Path, path: str) -> str | None:
     from . import curation
 
     if curation._guarded_absent(vault_root, path):  # noqa: SLF001 - curation's own guarded reader
-        return None
+        # A digest-addressed original has no file at its path. Its binding names the digest that its
+        # bytes were published under; fixity owns re-verifying those bytes.
+        filing = addressed(vault_root, path, "CURATION_OUTCOME_UNCERTAIN")
+        return None if filing is None else filing.binary_sha256
     return curation._guarded_digest(vault_root, path, stale=False)  # noqa: SLF001
 
 
@@ -142,6 +145,14 @@ def move_to_trash(
 
 
 # ---------------------------------------------------------------- what the two fold kinds share
+
+
+def addressed(vault_root: Path, path: str, code: str) -> originals.OriginalSnapshot | None:
+    """`originals.digest_addressed` for a fold, which refuses with ``code`` when a Trash retirement is unconfirmed."""
+    try:
+        return originals.digest_addressed(vault_root, path)
+    except originals.RetirementUnconfirmed as error:
+        raise refuse(code, error.reason) from error
 
 
 def refuse(code: str, reason: str):

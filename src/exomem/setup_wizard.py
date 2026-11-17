@@ -773,8 +773,10 @@ def run_setup(
 
     # 3. init — never forced from the wizard
     try:
-        init_module.init_vault(vault_path)
+        created = init_module.init_vault(vault_path)
         report("init", f"[done] {managed_join('')} scaffold created")
+        if (storage := created.get("original_storage")) is not None and storage["layout"] != "shared":
+            print_fn(f"    {storage['action']}")
     except FileExistsError:
         # The vault already has a Knowledge Base, so init is skipped — but the
         # governance docs inside it are product-owned and were last written by

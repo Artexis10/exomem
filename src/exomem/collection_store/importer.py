@@ -49,7 +49,7 @@ import secrets
 import time
 import zlib
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -531,9 +531,84 @@ def _resolved(writer, row: Mapping[str, Any], manifest, request: _Request) -> _R
 class Source:
     ref: str
     path: Path
-    guard: vault.PathGuard
+    guard: vault.PathGuard | _BoundGuard
     members: tuple[_Member, ...] = ()
     canonical_ref: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundGuard:
+    """The identity of a preserved original that no file holds at its path: the digest and size its filing binds.
+
+    A shared archive keeps those bytes once, in an object that the digest names, so an unchanged binding names
+    unchanged bytes. A deleted filing no longer resolves, like a file that changed.
+    """
+
+    root: Path
+    ref: str
+    sha256: str
+    size: int
+
+    @classmethod
+    def capture(cls, root: Path, ref: str) -> _BoundGuard | None:
+        from .. import originals
+
+        snapshot = originals.digest_addressed(root, ref)
+        if snapshot is None or snapshot.binary_sha256 is None or snapshot.binary_size is None:
+            return None
+        return cls(root, ref, snapshot.binary_sha256, snapshot.binary_size)
+
+    def recheck(self, root: Path) -> None:
+        try:
+            current = type(self).capture(root, self.ref)
+        except ValueError as error:  # A retirement its witness no longer confirms is not the proven filing.
+            raise vault.PathGuardError("PATH_GUARD_CHANGED", "import source binding changed") from error
+        if current != self:
+            raise vault.PathGuardError("PATH_GUARD_CHANGED", "import source binding changed")
+
+
+class _BoundStream:
+    """A shared original's pinned bytes; closing the stream releases the pin and checks the binding held."""
+
+    def __init__(self, guard: _BoundGuard) -> None:
+        from .. import media_store
+
+        self.guard, self._held = guard, ExitStack()
+        with _bound_refusal():
+            try:
+                self._source = self._held.enter_context(media_store.open_original(guard.root, guard.ref))
+                guard.recheck(guard.root)  # The pinned object is the one the proven binding names.
+            except BaseException:
+                self._held.close()
+                raise
+
+    def read(self, size: int = -1) -> bytes:
+        return self._source.stream.read(size)
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        return self._source.stream.seek(offset, whence)
+
+    def close(self) -> None:
+        with _bound_refusal():
+            self._held.close()
+
+    def __enter__(self) -> _BoundStream:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+@contextmanager
+def _bound_refusal() -> Iterator[None]:
+    """Refuse a shared original that its pin or binding check could not hold as a changed import source."""
+    from .. import held_fs, media_store, reserved_paths
+
+    try:
+        yield
+    except (media_store.MediaStoreError, reserved_paths.ReservedPathLeafError, held_fs.HeldFsError,
+            ValueError) as error:
+        raise vault.PathGuardError("PATH_GUARD_CHANGED", "import source binding changed") from error
 
 
 def resolve_source(
@@ -552,13 +627,17 @@ def resolve_source(
     found: list[tuple[Source, str, int]] = []
 
     def released(relative: str, path: Path) -> bool:
-        guard = vault.PathGuard.capture(
-            root,
-            relative,
-            leaf_policy="generation",
-            expected_generation=vault.stat_generation(os.lstat(path)),
-        )
-        source = Source(relative, path, guard)
+        try:
+            generation = vault.stat_generation(os.lstat(path))
+        except FileNotFoundError:
+            # A shared archive's filing, which `records.resolve_preserved_source` resolved without a file.
+            bound = _BoundGuard.capture(root, relative)
+            if bound is None:
+                return False
+            source = Source(relative, path, bound)
+        else:
+            guard = vault.PathGuard.capture(root, relative, leaf_policy="generation", expected_generation=generation)
+            source = Source(relative, path, guard)
         proved: list[tuple[str, int]] = []
 
         def prove() -> str:
@@ -589,6 +668,8 @@ def resolve_source(
 
 
 def _open_source(source: Source):
+    if isinstance(source.guard, _BoundGuard):
+        return _BoundStream(source.guard)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(source.path, flags)
     handle = os.fdopen(descriptor, "rb", buffering=0)

@@ -31,8 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `maintenance.held_resolve` add 56 B to the two door enums. `cancel_uploads`, which frees a caller's own waiting
 # uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` 45 B. The wire measured 28,779 B
 # before the one `review` string that carries a profile preview's proof on `create_note`, `edit_note` and
-# `add_observation`; that string added 336 B, 112 B each. Raise a ceiling deliberately, in the diff that needs it.
-TOTAL_BUDGET = 29_150
+# `add_observation`; that string added 336 B, 112 B each. The door operation `maintenance.convert_originals`, the
+# owner's conversion into shared original storage, added the last 64 B to the two door enums. Raise a ceiling
+# deliberately, in the diff that needs it.
+TOTAL_BUDGET = 29_200
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -46,9 +48,9 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_note": 2700,
     "edit_plan_item": 750,
     "edit_record": 800,
-    "inspect_memory": 2150,
+    "inspect_memory": 2200,
     "list_review_items": 750,
-    "manage_memory": 2450,
+    "manage_memory": 2500,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,

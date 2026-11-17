@@ -728,6 +728,40 @@ def test_a_commit_resumed_after_its_file_landed_answers_already_stored(vault, mo
     assert sorted(path.name for path in folder.iterdir()) == ["samples.json", "samples.json.md"]
 
 
+def test_a_commit_resumed_after_a_pooled_file_landed_answers_already_stored(vault, monkeypatch) -> None:
+    """Catches the resume check that opens the file at its path: a shared original keeps none there, so the retry
+    ends in CommitFailed for a file that is stored and the client never gets its receipt."""
+    from exomem import artifact_lifecycle, original_pool, originals, preserve
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    client = _client(vault, monkeypatch)
+    data = b"Gauge notes, side A: the river read 2.4 m at dawn.\n"
+    session, secret = upload_sessions.create(
+        vault,
+        binding="bearer:test",
+        length=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        target={"filename": "notes.txt", "scope": "Device", "category": "Uploads",
+                "description": None, "raw_protection": False, "archive": None},
+        max_bytes=upload_sessions.DEFAULT_MAX_BYTES,
+    )
+    patch = upload_sessions.Patch(session, 0, len(data))
+    patch.write(data)
+    assert patch.close() == (len(data), True)
+    # What the stopped commit had already done: the filing's page and its shared object are in the vault.
+    landed = preserve.preserve_stream(
+        vault, scope="Device", category="Uploads", filename="notes.txt", stream=io.BytesIO(data)
+    )
+    assert not (vault / landed.path).exists()
+    assert originals.pooled(vault, landed.path) is not None
+
+    state = _settled(client, f"/upload/sessions/{session.id}", secret)
+
+    assert state["state"] == "committed", state
+    assert (state["receipt"]["state"], state["receipt"]["path"]) == ("already_stored", landed.path)
+
+
 def test_a_session_commit_stores_a_fresh_media_file_pending_so_reconciliation_commits_nothing_more(
     vault, monkeypatch
 ) -> None:

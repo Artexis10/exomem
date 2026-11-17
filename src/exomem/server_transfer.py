@@ -45,7 +45,7 @@ from . import (
 )
 from .governance import egress
 from .governance import principal as principal_module
-from .vault import VaultPathError, resolve_under_vault
+from .vault import VaultPathError
 
 DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 #: Loopback uploads never cross the Cloudflare edge, whose ~100 MB cap sets the public
@@ -447,19 +447,8 @@ def load_transfer_config() -> TransferConfig:
 
 
 def _download_target(vault_root: Path, path: str) -> tuple[Path, str]:
-    """Resolve a download path; an evicted original resolves by its binding (D1)."""
-    try:
-        return resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
-    except VaultPathError as missing:
-        if missing.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
-            raise
-        try:
-            abs_path, rel = resolve_under_vault(vault_root, path, must_be_file=True)
-            if originals.evicted(vault_root, rel):
-                return abs_path, rel
-        except (VaultPathError, reserved_paths.ReservedPathLeafError):
-            pass
-        raise missing
+    """Resolve a download by logical identity, including evicted and pooled originals."""
+    return originals.resolve_original_path(vault_root, path)
 
 
 def download_principal(
@@ -1333,7 +1322,8 @@ def register_transfer_routes(
                 )
                 # The destination decision comes before existence, which it never reveals.
                 preserve_module.admit_destination(vault_root, artifact)
-                if artifact.exists():
+                # A pooled filing has no file at its logical name, which stays taken.
+                if artifact.exists() or originals.pooled(vault_root, artifact) is not None:
                     return _tus_refusal(
                         "ARTIFACT_EXISTS",
                         f"{artifact.relative_to(vault_root).as_posix()!r} already exists; "
@@ -1553,9 +1543,23 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 # The grant route's pin: hydrate only after the release gate, and
                 # keep eviction out until the bytes are read.
                 with media_store.local_originals(vault_root, (rel,), read=True):
-                    snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                    try:
+                        # An ordinary file is served as it stands, and the release gate below judges its bytes.
+                        snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                    except reserved_paths.ReservedPathLeafError as error:
+                        if error.code != "MISSING":
+                            raise
+                        # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
+                        snapshot = media_store.read_original_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
+            except originals.RetirementUnconfirmed as error:
+                # Named by the request's spelling, as NOT_FOUND is: the release gate passed only this path.
+                return JSONResponse(
+                    {"code": error.code, "reason": f"the Trash retirement of the original that {requested} names "
+                     "could not be confirmed; empty or restore that Trash entry first"},
+                    status_code=409,
+                )
             except media_store.MediaStoreError as error:
                 return _hydration_too_large(error) or JSONResponse(
                     {"code": "ORIGINAL_UNAVAILABLE", "reason": "the stored original is unavailable; retry later"},

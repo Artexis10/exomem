@@ -266,6 +266,9 @@ class ArtifactCensus:
     by_stem: Mapping[str, tuple[str, ...]]
     literals: LiteralAliases
     listings: Mapping[str, _Listing]
+    #: The same aliases of the originals that pages named like companions may bind (`_Tables.add_file`). Their
+    #: literal aliases are in `literals`.
+    filings: ArtifactCensus | None = None
 
     @classmethod
     def empty(cls) -> ArtifactCensus:
@@ -301,9 +304,24 @@ class _Tables:
         self.by_path: dict[str, list[str]] = {}
         self.by_name: dict[str, list[str]] = {}
         self.by_stem: dict[str, list[str]] = {}
+        self.filings: tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]] = ({}, {}, {})
         self.literal_aliases: set[str] = set()
 
     def add_file(self, rel: str) -> None:
+        suffix = self._add(rel, self.by_path, self.by_name, self.by_stem)
+        # A page `<name>.md` whose `<name>` has a suffix of its own has the shape of the companion of an original at
+        # `<name>`, which a pooled archive keeps no file for. Its aliases are listed with no file read; the gate keeps
+        # that original only where the page binds it (`egress._ArtifactReferenceGate._filing`).
+        if suffix == ".md" and PurePosixPath(rel[:-3]).suffix:
+            self._add(rel[:-3], *self.filings)
+
+    def _add(
+        self,
+        rel: str,
+        by_path: dict[str, list[str]],
+        by_name: dict[str, list[str]],
+        by_stem: dict[str, list[str]],
+    ) -> str:
         name = rel.rpartition("/")[2]
         aliases = {rel, unquote(rel)}
         below = self.under(rel)
@@ -316,21 +334,27 @@ class _Tables:
         stem = name[: -len(suffix)] if suffix else name
         aliases.add(rel[: -len(suffix)] if suffix else rel)
         for alias in aliases:
-            add_alias(self.by_path, alias, rel)
+            add_alias(by_path, alias, rel)
             if len(alias) >= 3:
                 self.literal_aliases.add(alias)
-        add_alias(self.by_name, name, rel)
-        add_alias(self.by_stem, stem, rel)
+        add_alias(by_name, name, rel)
+        add_alias(by_stem, stem, rel)
         if len(name) >= 3:
             self.literal_aliases.add(name)
+        return suffix
 
     def census(self, listings: Mapping[str, _Listing]) -> ArtifactCensus:
+        by_path, by_name, by_stem = self.filings
         return ArtifactCensus(
             by_path=_alias_table(self.by_path),
             by_name=_alias_table(self.by_name),
             by_stem=_alias_table(self.by_stem),
             literals=LiteralAliases.build(self.literal_aliases),
             listings=MappingProxyType(listings),
+            filings=ArtifactCensus(
+                _alias_table(by_path), _alias_table(by_name), _alias_table(by_stem),
+                LiteralAliases(), MappingProxyType({}),
+            ),
         )
 
 
@@ -504,6 +528,14 @@ class CensusView:
         if self.overlay is None:
             return (self.base.literals,)
         return (self.base.literals, self.overlay.literals)
+
+    @property
+    def filings(self) -> CensusView:
+        """The originals that pages named like companions may bind, as candidates that the gate confirms."""
+        empty = ArtifactCensus.empty()
+        base = self.base.filings or empty
+        overlay = None if self.overlay is None else self.overlay.filings or empty
+        return CensusView(base, overlay, self.published)
 
 
 #: Files the overlay may hold before the published census is withdrawn. A

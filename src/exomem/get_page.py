@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, call_spans, privacy_log, procedure_approval, reserved_paths
+from . import access, call_spans, originals, privacy_log, procedure_approval, reserved_paths
 from . import find as find_module
 from .governance import principal
 from .kbdir import managed_join, managed_split
@@ -225,7 +225,10 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
                 ),
                 code="AMBIGUOUS_PATH",
             ) from None
-        if error.code in {
+        if error.code == "MISSING" and originals.pooled(vault_root, resolution.resolved_relative) is not None:
+            # A shared original keeps no file at its path, so its filing reads the shared copy.
+            snapshot = _read_shared_original(vault_root, resolution, missing_path)
+        elif error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",
             "MISSING",
@@ -236,12 +239,13 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
                 code="NOT_FOUND",
                 reason=f"file does not exist: {missing_path}",
             ) from None
-        raise unreadable_or_absent(
-            vault_root,
-            (resolution.relative, resolution.resolved_relative),
-            missing_path,
-            "file could not be read safely",
-        ) from None
+        else:
+            raise unreadable_or_absent(
+                vault_root,
+                (resolution.relative, resolution.resolved_relative),
+                missing_path,
+                "file could not be read safely",
+            ) from None
     return PreparedPageRead(
         target=resolution.resolved,
         path=resolution.relative,
@@ -250,6 +254,29 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         raw=snapshot.data,
         mtime=snapshot.mtime,
     )
+
+
+def _read_shared_original(
+    vault_root: Path, resolution: VaultPathResolution, missing_path: str
+) -> reserved_paths.GenericFileSnapshot:
+    """Read a pooled filing's bytes through the logical-path resolver every original's reader uses."""
+    from . import held_fs, media_store
+
+    try:
+        return media_store.read_original_bytes(vault_root, resolution.resolved_relative)
+    except (
+        reserved_paths.ReservedPathLeafError,
+        media_store.MediaStoreError,
+        held_fs.HeldFsError,
+        OSError,
+        ValueError,
+    ):
+        raise unreadable_or_absent(
+            vault_root,
+            (resolution.relative, resolution.resolved_relative),
+            missing_path,
+            "file could not be read safely",
+        ) from None
 
 
 def spellings(path: str) -> tuple[str, ...]:

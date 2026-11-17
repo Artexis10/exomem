@@ -164,9 +164,13 @@ def list_trash(
                         raise
                     # An excluded private alias cannot prove a stored original.
                     stored = False
-                if not stored:
+                # A trashed digest-addressed original is its page alone; that page belongs to this entry.
+                addressed = None if stored else trash_metadata.addressed_original(vault_root, target_rel)
+                if not stored and addressed is None:
                     orphan_sidecars.append(sidecar_rel)
                     continue
+                if addressed is not None:
+                    retained_companions.add(Path(addressed[0]).name)
                 target_kind = "file"
             else:
                 try:
