@@ -2696,6 +2696,9 @@ def _list_stored_tree(
 ) -> tuple[GenericTreeEntry, ...]:
     """`list_generic_tree` for a store-mode vault: the disk's entries that the store does not own,
     then the store's pages and folders, offered to ``select`` together.
+
+    A disk folder at a stored page's path is not listed, nor is anything in it: the store decides
+    which pages exist, and telling a folder from a file there would cost a stat per page.
     """
     from .vault_store import read
 
