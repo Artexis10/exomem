@@ -620,6 +620,33 @@ def _connect_existing_owner_target(
                     raise
 
 
+def holds_page(vault_root: Path, rel_path: str, *, source_hash: str, reference: str) -> bool | None:
+    """Whether the stored graph keeps a row of one page version, or None when it cannot be read.
+
+    Reads past the availability gates that make a refused snapshot look empty: an eraser needs
+    the stored rows. The version matters because a later page may reuse the path.
+    """
+    path = sidecar_path(vault_root)
+    if not path.exists():
+        return False
+    try:
+        conn = _connect_existing_owner_target(vault_root, path, readonly=True)
+        try:
+            # Each lookup leads with an indexed path: graph_nodes(path) and two primary keys.
+            # A page's edges are replaced with its nodes, so the version's nodes stand for them.
+            return conn.execute(
+                "SELECT 1 FROM graph_nodes WHERE path = ? AND source_hash = ? "
+                "UNION ALL SELECT 1 FROM graph_parent_refs WHERE path = ? AND parent_ref = ? "
+                "UNION ALL SELECT 1 FROM graph_dependency_coverage "
+                "WHERE source_path = ? AND source_hash = ? LIMIT 1",
+                (rel_path, source_hash, rel_path, reference, rel_path, source_hash),
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except (OSError, RuntimeError, sqlite3.Error):
+        return None
+
+
 #: Everything SQLite can create beside a private rebuild.  A publication moves
 #: or copies only the main file, so any of these outliving it is stranded in the
 #: state root -- where it ages into a `doctor` WARN on a healthy vault and, being
@@ -8211,7 +8238,9 @@ class EpistemicGraphIndex:
             "indexed": (),
         }
         if not paths:
-            return report
+            committed = graph_sync.read_checkpoint(self.vault_root)
+            if committed is None or not committed.changes_no_input:
+                return report
         if not graph_enabled():
             return {**report, "disabled": 1}
         if not self.path.exists():

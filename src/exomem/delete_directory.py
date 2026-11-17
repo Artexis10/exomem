@@ -35,6 +35,7 @@ from . import (
     originals,
     reserved_paths,
     semantic_contract,
+    source_custody,
     trash_metadata,
 )
 from .delete_file import planned_trash_path
@@ -360,6 +361,14 @@ def _delete_directory_local(
     )
     if files and not recursive:
         raise _not_empty(rel_path, len(files))
+    for item in tree:
+        if item.relative_path.lower().endswith(".md"):
+            try:
+                markdown = item.snapshot.data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if (held := source_custody.erase_refusal(vault_root, markdown)) is not None:
+                raise DeleteDirectoryError(*held)
 
     # Inbound-wikilink scan: any .md file inside the tree could have
     # external referents. Aggregate the count across all .md children.

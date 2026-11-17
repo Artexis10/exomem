@@ -38,6 +38,7 @@ from . import (
     originals,
     reserved_paths,
     semantic_contract,
+    source_custody,
     trash_metadata,
 )
 from .fold_leaf import Placement
@@ -271,6 +272,8 @@ def _delete_file_local(
             ),
         )
 
+    if (held := source_custody.erase_refusal_at(vault_root, rel_path)) is not None:
+        raise DeleteFileError(*held)
     append_only = in_append_only_tree(rel_path)
     # A fold is the only caller past this refusal: it proves identical bytes remain held elsewhere.
     if append_only and _fold is None:

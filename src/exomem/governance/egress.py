@@ -6150,7 +6150,7 @@ def _postfilter(
     if result is None:
         return None
     inventory_projection = result if command_name == "inspect_captured_sources" and isinstance(result, dict) else None
-    capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
+    capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture", "erase_captured_source"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
     if inventory_projection is not None or capture_attempt or command_name == "inspect_capture_erasure_policy":
         from ..source_capture import require_authority
 
@@ -6473,6 +6473,8 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "settle_source_capture",
         # Host policy metadata contains no Source content; namespace authority still gates lookup and release.
         "inspect_capture_erasure_policy",
+        # Erasure names its target reference and needs whole-namespace authority at lookup and release.
+        "erase_captured_source",
         "preserve_evidence",
         "preserve_artifacts",
         "compile_source",

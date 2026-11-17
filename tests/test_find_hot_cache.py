@@ -273,3 +273,36 @@ def test_explicit_config_objects_keyed_separately(vault: Path, monkeypatch) -> N
     find_module.find(vault, query="metabolism")
     find_module.find(vault, query="metabolism", config=tuned)
     assert calls["n"] == 2
+
+
+@library_scope()
+def test_a_find_that_read_before_an_erasure_cutoff_does_not_publish_its_result(vault: Path, monkeypatch) -> None:
+    """A builder that read a retired Source before its cutoff must not leave that text for later readers."""
+    from exomem import source_custody
+
+    generation = {"value": 0}
+    monkeypatch.setattr(source_custody, "retirement_generation", lambda root: generation["value"])
+    semantic = find_module._find_semantic
+
+    def cutoff_while_building(*args, **kwargs):
+        result = semantic(*args, **kwargs)
+        generation["value"] += 1  # An erasure reaches its cutoff while this find still builds.
+        return result
+
+    monkeypatch.setattr(find_module, "_find_semantic", cutoff_while_building)
+    assert find_module.find(vault, query="metabolism"), "the overlapping read still finishes"
+    assert not find_module._FIND_CACHE
+
+
+@library_scope()
+def test_a_result_cached_before_an_erasure_cutoff_is_not_served_after_it(vault: Path, monkeypatch) -> None:
+    """The page files may change after the cutoff, so a matching freshness key alone cannot serve the old result."""
+    from exomem import source_custody
+
+    calls = _count_semantic(monkeypatch)
+    generation = {"value": 0}
+    monkeypatch.setattr(source_custody, "retirement_generation", lambda root: generation["value"])
+    find_module.find(vault, query="metabolism")
+    generation["value"] += 1
+    find_module.find(vault, query="metabolism")
+    assert calls["n"] == 2
