@@ -140,9 +140,9 @@ is the work its title names. `state` is one of:
 
 - `no_claim`: the `url` names no DOI.
 - `declared`: the metadata of the PDF holds the DOI of the `url`.
-- `printed`: the first two pages print that DOI.
-- `conflict`: the PDF shows only other DOIs.
-- `not_shown`: the PDF shows no DOI.
+- `printed`: the first page prints that DOI.
+- `conflict`: the metadata and first page show only other DOIs.
+- `not_shown`: the metadata and first page show no DOI.
 - `unavailable`: the PDF could not be read, and `reason` says why. A scanned PDF is checked again after OCR.
 
 `opening` holds the first 600 characters of the pages read. `claimed_dois`,

@@ -44,6 +44,28 @@ def test_a_doi_split_after_the_slash_is_joined() -> None:
     assert identity.dois_in("https://doi.org/10.5555/\naaa") == ("10.5555/aaa",)
 
 
+def test_a_doi_wrapped_after_a_dot_before_a_digit_is_joined() -> None:
+    assert identity.dois_in("https://doi.org/10.5555/glx.2018.\n0048") == ("10.5555/glx.2018.0048",)
+
+
+def test_a_sentence_ending_dot_does_not_join_the_next_line() -> None:
+    assert identity.dois_in("doi:10.5555/abc.\nThe next paragraph") == ("10.5555/abc",)
+
+
+def test_a_claimed_doi_one_numeric_step_past_the_printed_one_is_a_conflict() -> None:
+    # A remembered DOI from the same journal and year must not read as the printed one's rendition.
+    result = identity.check(["Harbour lanterns. https://doi.org/10.5555/glx.2018"], [], "https://doi.org/10.5555/glx.2018.0066")
+
+    assert result.state == identity.CONFLICT
+
+
+def test_a_page_that_wraps_the_doi_still_catches_a_remembered_neighbour() -> None:
+    result = identity.check(["Harbour lanterns. https://doi.org/10.5555/glx.2018.\n0048"], [], "https://doi.org/10.5555/glx.2018.0066")
+
+    assert result.state == identity.CONFLICT
+    assert result.printed_dois == ("10.5555/glx.2018.0048",)
+
+
 def test_a_url_with_an_encoded_slash_is_claimed_after_decoding() -> None:
     claimed = identity.check(["Harbour lanterns. 10.5555/aaa"], [], "https://doi.org/10.5555%2Faaa")
 

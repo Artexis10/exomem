@@ -31,4 +31,4 @@
 - [x] 6.1 Add deterministic tests: each identity state, a citing work, an unreadable PDF, a metadata-only correction, a changed original, an undo, a duplicate re-capture, `corrected_by` and the audit family.
 - [x] 6.2 Time PDF capture before and after on 1 MB, 20 MB and 300-page generated PDFs.
 - [ ] 6.3 Add the research-provenance incident cases and the `source_saved`, `source_count`, `current_source` and `compiled_with_backlinks` checks. Run base against changed on real models and record the per-case result.
-- [ ] 6.4 Regenerate derived artifacts and run the public-artifact privacy gate.
+- [x] 6.4 Regenerate derived artifacts and run the public-artifact privacy gate.

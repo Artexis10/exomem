@@ -83,7 +83,13 @@ MAX_DOI_CHARS = 3 + 9 + 1 + MAX_DOI_SUFFIX_CHARS
 # surrogate code points: no DOI holds one, and a page or a metadata string can.
 _BREAK = r"(?:[ \t]*\r?\n[ \t]*)?"
 _SUFFIX_STOPS = r"\s\"'<>?#&\u201d\u2019\u00bb\u203a\x00-\x1f\x7f-\x9f\ud800-\udfff\ue000-\uf8ff"
-_DOI = re.compile(rf"(?<![0-9A-Za-z])10\.{_BREAK}(\d{{4,9}})/{_BREAK}([^{_SUFFIX_STOPS}]+)", re.IGNORECASE)
+_SUFFIX = rf"[^{_SUFFIX_STOPS}]+"
+# A line may also break inside the suffix: after `-` or `/`, which never end a sentence, and after `.`
+# only before a digit, so `glx.2018.` then `0048` joins while a sentence-ending `.` does not.
+_SUFFIX_BREAK = r"(?:(?<=[-/])|(?<=\.)(?=[ \t]*\r?\n[ \t]*\d))[ \t]*\r?\n[ \t]*"
+_DOI = re.compile(
+    rf"(?<![0-9A-Za-z])10\.{_BREAK}(\d{{4,9}})/{_BREAK}({_SUFFIX}(?:{_SUFFIX_BREAK}{_SUFFIX})*)", re.IGNORECASE
+)
 _TRAILING = ".,;:!]}"
 # Typesetting, not the DOI: a text layer sets a DOI's hyphens as Unicode dashes (U+2010 to U+2015) or a
 # minus sign (U+2212), and puts invisible break and direction marks inside a long one. Matching reads
@@ -96,8 +102,10 @@ _TYPESET = str.maketrans(
 # A publisher URL names a DOI and then a rendition of it: Springer `.../10.1007/x.pdf`, bioRxiv `...v2`
 # or `v1.full.pdf`, Frontiers `/full`, IOP `/pdf`, a trailing `/`. These are identifier and URL format
 # shapes (ISO 26324 plus publisher URL layouts), not meaning, so a claimed DOI that extends a found one
-# at `/`, `.` or `v<digits>` names that DOI.
-_RENDITION = re.compile(r"[/.]|v\d")
+# by a path (`/...`), a version (`v<digits>`, then letters-only extensions) or letters-only extensions
+# names that DOI. A `.` followed by digits is a further DOI step, not a rendition: a page that wraps
+# `...2018.` before `0048` must not let a claimed `...2018.0066` read as printed.
+_RENDITION = re.compile(r"/.*|v\d+(?:\.[A-Za-z]+)*|(?:\.[A-Za-z]+)+", re.DOTALL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +200,7 @@ def finding(check: Mapping[str, Any]) -> str | None:
         shown = declared or first("printed_dois")
         return f"The PDF {'declares' if declared else 'prints'} {', '.join(shown)}, but the url names {claimed}"
     if check.get("state") == NOT_SHOWN:
-        return f"The PDF shows no DOI, so the url's {claimed} is unconfirmed"
+        return f"The PDF's metadata and first page show no DOI, so the url's {claimed} is unconfirmed"
     return None
 
 
@@ -219,7 +227,7 @@ def dois_in(text: str) -> tuple[str, ...]:
     """The DOIs a text names, lowercased, in order of appearance and without repeats."""
     found: dict[str, None] = {}
     for match in _DOI.finditer(text.translate(_TYPESET)):
-        suffix = _trim(match.group(2))
+        suffix = _trim(re.sub(r"\s+", "", match.group(2)))
         if suffix and len(suffix) <= MAX_DOI_SUFFIX_CHARS:
             found[f"10.{match.group(1)}/{suffix}".lower()] = None
     return tuple(found)
@@ -250,7 +258,7 @@ def opening_text(pages: Sequence[str]) -> str:
 
 def names(claimed: str, found: str) -> bool:
     """Whether a DOI claimed from a URL names the DOI a document shows: the same, or a rendition of it."""
-    return claimed == found or (claimed.startswith(found) and _RENDITION.match(claimed, len(found)) is not None)
+    return claimed == found or (claimed.startswith(found) and _RENDITION.fullmatch(claimed, len(found)) is not None)
 
 
 def check(
