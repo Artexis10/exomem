@@ -12,7 +12,7 @@ The system SHALL treat a semantic unit as a position unit only when its resolved
 - **THEN** recall does not treat that unit as a position unit
 
 ### Requirement: Recall Serves The Positions That Bear On A Turn
-When task discovery serves leads for a turn, a maps response SHALL carry a `positions` block. The block SHALL hold position units found on the served leads and on the pages those leads link to that the caller may see. It SHALL serve only current units, under the same admission as the stance and the domain profiles: a unit on a superseded or historical page, an expired unit and a superseded unit are not served. It SHALL rank every current unit in reach by relevance to the turn and then by recency, and give each unit its text, its authored date where present, its page title and its unit reference. The block SHALL have its own bound, the vault budget `positions_max_chars`, and SHALL NOT draw on the turn allowance `max_chars`. Overflow SHALL become references within the same bound, never a cut unit, and a bound of 0 SHALL turn the block off. The block SHALL omit a unit that the `stance` or `domain_profiles` block covers in the same response, whether it sends that unit or the caller already holds it. A turn with no served leads, or with no position unit in reach, SHALL report the block's state and carry no items.
+When task discovery serves leads for a turn, a maps response SHALL carry a `positions` block. The block SHALL hold position units found on the served leads and on the pages those leads link to that the caller may see. It SHALL serve only current units, under the same admission as the stance and the domain profiles: a unit on a superseded or historical page, an expired unit and a superseded unit are not served. It SHALL rank every current unit in reach by relevance to the turn and then by recency, and give each unit its text, its authored date where present, its page title and its unit reference. The block SHALL have its own bound, the vault budget `positions_max_chars`, and SHALL NOT draw on the turn allowance `max_chars`. Overflow SHALL become references within the same bound, never a cut unit, and a bound of 0 SHALL turn the block off. The block SHALL NOT read a page that supplies the stance or a domain profile, a page marked `stance: true` or a page of a profile note type, whether or not the `stance` or `domain_profiles` block serves that page on the turn. A turn with no served leads, or with no position unit in reach, SHALL report the block's state and carry no items.
 
 #### Scenario: A position late on a linked long page reaches the agent
 - **WHEN** a turn's served lead is a short page that links to a long page, and the long page holds a position unit in its last fifth
@@ -25,6 +25,10 @@ When task discovery serves leads for a turn, a maps response SHALL carry a `posi
 #### Scenario: A unit already served as session context is not repeated
 - **WHEN** a position unit sits on a page that the same packet serves under `stance` or `domain_profiles`, and that unit is among the lines served there, or among the lines the caller holds there from an earlier turn
 - **THEN** the `positions` block omits it
+
+#### Scenario: A session page the turn did not select is not read as positions
+- **WHEN** a served lead links to a profile page of a domain the turn does not touch, or to a stance page whose line the stance bound left out
+- **THEN** no unit of either page appears in the `positions` block
 
 #### Scenario: A position on a superseded page is not served
 - **WHEN** a served lead links to a page whose author marked it superseded by a newer page

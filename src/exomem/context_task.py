@@ -417,12 +417,12 @@ def compile_context(
     timings: find_types.FindTimings | None = None,
     index_token: tuple[int, int, int] | None = None,
     prepare_slice: Callable[[], tuple[frozenset[str], int]] | None = None,
-    reach: dict[str, str] | None = None,
+    reach: set[str] | None = None,
 ) -> dict[str, Any]:
     """Revalidate before selection, then allocate complete source-bound read routes.
 
-    `reach`, when given, receives the pages this response serves for the turn, `{path: title}`: each lead that
-    this block or the turn slice routes, and each link target that the block lists.
+    `reach`, when given, receives the paths of the pages this response serves for the turn: each lead that this
+    block or the turn slice routes, and each link target that the block lists.
     """
     from . import working_set_runtime
 
@@ -601,19 +601,19 @@ def compile_context(
 
 
 def _record_reach(
-    reach: dict[str, str], candidates: Sequence[Mapping[str, Any]], served: Sequence[Mapping[str, Any]],
+    reach: set[str], candidates: Sequence[Mapping[str, Any]], served: Sequence[Mapping[str, Any]],
     covered: frozenset[str], target_paths: Mapping[str, str],
 ) -> None:
-    """The served leads and the link targets they list, each with the title this caller is shown."""
+    """The paths of the served leads and of the link targets they list."""
     listed = {id(item) for item in served}
     for item in candidates:
         if id(item) not in listed and item["ref"] not in covered and item["source_ref"] not in covered:
             continue
-        reach.setdefault(item["source_ref"], str(item.get("title") or item["source_ref"]))
+        reach.add(item["source_ref"])
         for link in item.get("links") or ():
             path = target_paths.get(link["target_ref"])
             if path:
-                reach.setdefault(path, str(link.get("title") or path))
+                reach.add(path)
 
 
 def pin(root: Path, caller: Any, block: Mapping[str, Any], *, limit: int) -> dict[str, Any]:

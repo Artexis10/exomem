@@ -59,6 +59,6 @@ The framing passage is therefore part of the contract, not decoration. It never 
 
 ## Coordination
 
-- A unit that the `stance` or `domain_profiles` block covers in the same response is skipped, so no unit arrives twice. Those blocks record the units they cover in the invocation, including the lines a caller already holds, because a held block carries no lines on the wire.
+- A page that supplies the stance or a domain profile is never read for positions, even on a turn where its own block does not serve it. Its units are standing lines with their own framing, so no unit arrives twice and no standing line arrives framed as a dated view.
 - Unit admission, currency and egress pinning for session blocks live in the shared `session_units` module, which the positions block reuses rather than adding a third copy.
 - The populated bootstrap core is near its hard ceiling, so this change adds no bootstrap text. The scaffold skill carries the reading guidance.

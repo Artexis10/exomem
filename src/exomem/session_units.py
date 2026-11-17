@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import lifecycle_statuses, semantic_contract, vault, working_set, working_set_currency
-from .governance import egress, principal
+from .governance import egress
 
 
 @dataclass(slots=True)
@@ -136,17 +136,3 @@ def serve(
         served.units.append(working_set._served_unit(item))  # noqa: SLF001 - the shape admission decided
         used += line_cost
     return served
-
-
-def cover(root: Path, caller: Any, lines: Iterable[dict[str, Any]]) -> None:
-    """Record that a session block covers these lines in this invocation, whether it sends them or the caller
-    already holds them at the block's current generation."""
-    held = principal.invocation_served()
-    if held is not None:
-        held.setdefault(("session_units", str(root), caller.binding), set()).update(str(line["ref"]) for line in lines)
-
-
-def covered(root: Path, caller: Any) -> frozenset[str]:
-    """The unit refs the session blocks compiled so far in this invocation cover for this caller."""
-    held = principal.invocation_served()
-    return frozenset(held.get(("session_units", str(root), caller.binding), ())) if held is not None else frozenset()

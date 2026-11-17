@@ -1295,9 +1295,9 @@ def activation_packet(
     that takes nothing from `max_chars`. `snapshot` is the request's freshness snapshot: the keyword query reads the
     lexical catalogue at its pinned checkpoint, as the turn slice does, and walks no vault. Without one it does not run.
 
-    `positions` compiles the recorded-positions block once the task context is served, from the caller view, after
-    the stance and the domain profiles, whose covered units it does not repeat. The block has its own bound and
-    takes nothing from `max_chars`.
+    `positions` compiles the recorded-positions block once the task context is served, from the caller view. It
+    reads no page that supplies the stance or a domain profile. The block has its own bound and takes nothing from
+    `max_chars`.
     """
     with working_set_runtime.turn_vector_scope():
         if purpose is not None:
@@ -1474,8 +1474,8 @@ def _activation_packet(
         if positions is not None:
             from . import positions as positions_block
 
-            # Compiled after the stance and the profiles, so it can skip the units they cover. The block has its own
-            # bound, the vault's `positions_max_chars`, so it neither reduces `max_chars` nor counts as spent from it.
+            # Compiled once the task context has recorded its reach. The block has its own bound, the vault's
+            # `positions_max_chars`, so it neither reduces `max_chars` nor counts as spent from it.
             with find_types.timing_span(timings, "working_set.positions"):
                 try:
                     packet["positions"] = positions(prepared.caller)

@@ -94,7 +94,6 @@ def compile_block(
         cached = _CACHE.get(key)
         if cached is not None and (cached[0] is None or today < cached[0]):
             _CACHE.move_to_end(key)
-            session_units.cover(root, caller, cached[1]["items"])
             block, served = _as_held(copy.deepcopy(cached[1]), copy.deepcopy(cached[2]), known_generation)
             _pin(root, caller, block, served)
             return block
@@ -111,7 +110,6 @@ def compile_block(
         _CACHE.move_to_end(key)
         while len(_CACHE) > CACHE_SIZE:
             _CACHE.popitem(last=False)
-    session_units.cover(root, caller, block["items"])
     block, served = _as_held(block, result.units, known_generation)
     _pin(root, caller, block, served)
     return block

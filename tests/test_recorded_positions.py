@@ -130,6 +130,47 @@ def test_a_position_served_or_held_as_stance_is_not_repeated(vault: Path, monkey
         assert packet["positions"]["overflow_refs"] == []
 
 
+def test_a_stance_or_profile_page_the_turn_did_not_serve_is_not_read_as_positions(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standing line framed as a dated view reads as an opinion to weigh, not a rule to apply.
+
+    A profile of a domain the turn never touched served its line as a position on a glaze turn, and so did the
+    stance line that the stance bound left out.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _write(vault, "Knowledge Base/_Schema/source-taxonomy.yaml", "schema_version: 1\ndomains:\n  cooking: {label: Cooking}\n")
+    # The short stance line fits 220 characters; the long one does not, so the stance block omits it.
+    _write(vault, "Knowledge Base/_Schema/activation-conventions.yaml", "schema_version: 1\nbudgets:\n  stance_max_chars: 220\n")
+    _write(
+        vault, "Knowledge Base/Notes/Profiles/cooking-profile.md",
+        "---\ntype: profile\nstatus: active\ntopics: [cooking]\n---\n\n# cooking-profile\n\n"
+        "- [preference] I prefer slow braises and never deep frying (2026-01-10) ^braises\n",
+    )
+    _page(
+        vault, "studio-standing-rules", "stance: true\n",
+        body="- [preference] I prefer witness cones on every shelf (2026-02-20) ^cones\n"
+        "- [preference] I prefer the kiln room kept below thirty degrees, with both extractor fans running and the door "
+        "propped open, whenever a firing passes cone six, and I log the room temperature beside the firing chart every "
+        "hour until the kiln has cooled below two hundred degrees (2026-02-21) ^ventilation\n",
+    )
+    _page(
+        vault, "glaze-firing-schedule",
+        body="Glaze firing schedule for the kiln: candle overnight, then ramp.\n\n"
+        "- [preference] I prefer a slow candle for thick glaze (2026-03-01) ^candle\n\n"
+        "See [[studio-standing-rules]] and [[cooking-profile]].\n",
+    )
+    _ready(vault)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert "braises" not in str(packet.get("domain_profiles"))
+    assert [item["ref"].rpartition("#")[2] for item in packet["stance"]["items"]] == ["cones"]
+    assert packet["stance"]["omitted"] == 1
+    assert [item["ref"].rpartition("#")[2] for item in packet["positions"]["items"]] == ["candle"]
+    assert (packet["positions"]["overflow_refs"], packet["positions"]["omitted"]) == ([], 0)
+
+
 def test_the_block_keeps_its_own_bound_and_never_costs_the_task_leads(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3,9 +3,10 @@
 A unit is a position only when its category or its kind carries the registry trait `position`. One batched
 unit query over the served leads and the link targets they list finds the pages in that reach that hold one.
 `session_units` then admits those pages' position units from the pages' own bytes, under the same page
-lifecycle, supersession, expiry and egress rules as the stance and the domain profiles. The block has its own
-bound, the vault's `budgets.positions_max_chars`, beside the turn allowance. Positions answer the turn, so the
-block is compiled on every turn and never marked held for the conversation.
+lifecycle, supersession, expiry and egress rules as the stance and the domain profiles. A page that supplies the
+stance or a domain profile is never read here: it has its own block and framing. The block has its own bound, the
+vault's `budgets.positions_max_chars`, beside the turn allowance. Positions answer the turn, so the block is
+compiled on every turn and never marked held for the conversation.
 """
 
 from __future__ import annotations
@@ -13,17 +14,20 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from . import (
+    activation,
     activation_conventions,
     lexstore,
+    note_types,
     semantic_language_registry,
     session_units,
     working_set,
+    working_set_currency,
     working_set_runtime,
 )
 from .governance import egress, principal
@@ -87,14 +91,13 @@ def _limit(root: Path) -> int:
 
 
 def compile_block(
-    root: Path, caller: Any, *, reach: Mapping[str, str], turn: str, focus: str, snapshot: Any,
+    root: Path, caller: Any, *, reach: Collection[str], turn: str, focus: str, snapshot: Any,
     today: date | None = None,
 ) -> dict[str, Any]:
-    """The current position units on `reach` ({page path: title}) that this caller may see, ranked for the turn.
+    """The current position units on the `reach` page paths that this caller may see, ranked for the turn.
 
-    A unit that a session block compiled earlier in this invocation covers (`session_units.covered`) is not
-    repeated, whether that block sends it or the caller already holds it. Every outcome is pinned for terminal
-    egress, so an empty or unavailable block reaches the wire with its own state and reason.
+    Every outcome is pinned for terminal egress, so an empty or unavailable block reaches the wire with its own
+    state and reason.
     """
     block, served = _compile(root, caller, reach=reach, query=f"{turn}\n{focus}", snapshot=snapshot, today=today or date.today())
     _pin(root, caller, block, served)
@@ -102,7 +105,7 @@ def compile_block(
 
 
 def _compile(
-    root: Path, caller: Any, *, reach: Mapping[str, str], query: str, snapshot: Any, today: date,
+    root: Path, caller: Any, *, reach: Collection[str], query: str, snapshot: Any, today: date,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     limit = _limit(root)
     if limit == 0:
@@ -144,13 +147,26 @@ def _compile(
         return _empty("unavailable", "lane_failed"), []
     hits = list(result.value or ())
     page_dates = {hit.parent_path: hit.parent_updated for hit in hits}
-    admitted, basis = session_units.admit(
-        root, caller, set(page_dates), lambda page: True,
-        units=lambda unit: unit.category in categories or unit.kind in kinds,
-    )
+    types = note_types.Basis(root)
+
+    def accepts(page: Any) -> bool:
+        # A page that supplies the stance or a domain profile is read by its own block, under its own framing, even
+        # on a turn where that block does not serve it; framed here, a standing line would read as a dated view and
+        # a stance line could arrive twice. These are the closed attributes stance and domain_profiles select by.
+        return page.frontmatter.get("stance") is not True and not types.selects(
+            activation.normalized_page_type(page.page_type), note_types.profile,
+        )
+
+    try:
+        admitted, basis = session_units.admit(
+            root, caller, set(page_dates), accepts,
+            units=lambda unit: unit.category in categories or unit.kind in kinds,
+        )
+    except working_set_currency.CurrencyUnavailable:
+        # A page resolution changed while the units were read; the turn may retry, so say so rather than empty.
+        return _empty("unavailable", "currency"), []
     order = {item.ref: index for index, item in enumerate(admitted)}
-    covered = session_units.covered(root, caller)
-    current = session_units.current([item for item in admitted if item.ref not in covered], basis, today=today)
+    current = session_units.current(admitted, basis, today=today)
     block = _empty()
     served: list[dict[str, Any]] = []
     leftover: list[working_set.LaneItem] = []

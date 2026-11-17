@@ -166,7 +166,6 @@ def compile_block(
             pinned.extend(units)
             continue
         if entry["generation"] == known.get(domain):
-            session_units.cover(root, caller, entry["lines"])
             block["profiles"].append({**entry, "state": "unchanged", "lines": []})
             continue
         cost = sum(len(item_line(entry["label"], line)) + 1 for line in entry["lines"])
@@ -177,7 +176,6 @@ def compile_block(
             pinned.extend(units)
             continue
         block["profiles"].append(entry)
-        session_units.cover(root, caller, entry["lines"])
         pinned.extend(units)
         used += cost
     # A turn that touched a profile the budget could not hold is not an empty one: `omitted` names it.
