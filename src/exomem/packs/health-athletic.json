@@ -44,12 +44,12 @@
     "medical-record"
   ],
   "suggested_folders": [
-    "Knowledge Base/Sources/Sessions",
-    "Knowledge Base/Sources/Papers",
-    "Knowledge Base/Evidence/Health",
-    "Knowledge Base/Notes/Experiments/Health",
-    "Knowledge Base/Notes/Research/Health",
-    "Knowledge Base/Entities/People"
+    "Sources/Sessions",
+    "Sources/Papers",
+    "Evidence/Health",
+    "Notes/Experiments/Health",
+    "Notes/Research/Health",
+    "Entities/People"
   ],
   "suggested_workflows": [
     {

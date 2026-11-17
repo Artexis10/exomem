@@ -44,7 +44,7 @@ Each pack is a JSON object with these required fields:
 | `default_note_types` | Common compiled-note types for the pack. |
 | `default_entity_types` | Common entity types for the pack. |
 | `default_block_types` | Common conceptual blocks such as receipt, decision, protocol, or incident. |
-| `suggested_folders` | Governed KB locations the pack commonly uses; selection does not create them. |
+| `suggested_folders` | Folders under the managed root that the pack commonly uses; selection does not create them. |
 | `suggested_workflows` | Beginner-facing workflows with `title`, `intent`, `route`, and `example`. |
 | `primitives` | Durable primitives the pack commonly uses. |
 | `actions` | Simple actions the pack supports. Existing packs may use legacy product verbs `save`, `adopt`, `ask`, `prove`, `review`, `update`, `connect`; new packs may also use `create_note`, `capture`, and `maintain`. |

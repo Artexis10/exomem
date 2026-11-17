@@ -652,7 +652,7 @@ def test_finish_leaves_every_folder_and_file_of_a_run_started_with_consume_false
     assert residual["removed_empty_folders"] == 0 and finished["finish"]["consumed"] == 0
     # finish checked neither copy, so the sentence the person reads before a discard must not vouch for them.
     assert residual["summary"] == (
-        "2 files stay staged (1 artifact, 1 text): adoption filed them, but finish did not check these copies against the Knowledge Base."
+        "2 files stay staged (1 artifact, 1 text): adoption filed them, but finish did not check these copies against the managed root."
     )
     actions = {action["action"]: action["description"] for action in finished["next_actions"]}
     assert "review-residual" in actions and "agrees" in actions["discard"]

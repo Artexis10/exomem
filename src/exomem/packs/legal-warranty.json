@@ -24,12 +24,12 @@
     "proof"
   ],
   "suggested_folders": [
-    "Knowledge Base/Sources/Invoices",
-    "Knowledge Base/Evidence/Legal",
-    "Knowledge Base/Evidence/Warranty",
-    "Knowledge Base/Notes/Research/Legal",
-    "Knowledge Base/Entities/People",
-    "Knowledge Base/Entities/Decisions"
+    "Sources/Invoices",
+    "Evidence/Legal",
+    "Evidence/Warranty",
+    "Notes/Research/Legal",
+    "Entities/People",
+    "Entities/Decisions"
   ],
   "suggested_workflows": [
     {

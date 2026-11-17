@@ -25,7 +25,6 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 # Required fields appear in the source frontmatter section as "| <field> | yes |".
 REQUIRED_FIELD_ROW_PATTERN = re.compile(
     r"\|\s*`([a-z_]+)`\s*\|\s*yes\s*\|", re.IGNORECASE

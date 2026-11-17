@@ -30,13 +30,13 @@
     "proof"
   ],
   "suggested_folders": [
-    "Knowledge Base/Sources/Sessions",
-    "Knowledge Base/Sources/Articles",
-    "Knowledge Base/Evidence/Business",
-    "Knowledge Base/Notes/Research/Business",
-    "Knowledge Base/Entities/People",
-    "Knowledge Base/Entities/Organizations",
-    "Knowledge Base/Entities/Decisions"
+    "Sources/Sessions",
+    "Sources/Articles",
+    "Evidence/Business",
+    "Notes/Research/Business",
+    "Entities/People",
+    "Entities/Organizations",
+    "Entities/Decisions"
   ],
   "suggested_workflows": [
     {

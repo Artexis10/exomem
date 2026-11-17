@@ -147,6 +147,8 @@ class KnowledgePack:
         """
         shape = capabilities.current_tool_shape() if shape is None else shape
         data = self.as_dict()
+        # Pack data stores each folder relative to the managed root; the bound layout places it.
+        data["suggested_folders"] = tuple(managed_join(folder) for folder in data["suggested_folders"])
         references = data.pop("references")
         if not references:
             return data

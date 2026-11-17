@@ -50,12 +50,12 @@
     "proof"
   ],
   "suggested_folders": [
-    "Knowledge Base/Sources/Invoices",
-    "Knowledge Base/Evidence/Personal",
-    "Knowledge Base/Notes/Research/Personal",
-    "Knowledge Base/Notes/Insights",
-    "Knowledge Base/Entities/People",
-    "Knowledge Base/Entities/Concepts"
+    "Sources/Invoices",
+    "Evidence/Personal",
+    "Notes/Research/Personal",
+    "Notes/Insights",
+    "Entities/People",
+    "Entities/Concepts"
   ],
   "suggested_workflows": [
     {

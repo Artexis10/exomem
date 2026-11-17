@@ -30,12 +30,12 @@
     "release"
   ],
   "suggested_folders": [
-    "Knowledge Base/Sources/Articles",
-    "Knowledge Base/Sources/Videos",
-    "Knowledge Base/Evidence/Creative",
-    "Knowledge Base/Notes/Productions",
-    "Knowledge Base/Notes/Insights",
-    "Knowledge Base/Entities/Concepts"
+    "Sources/Articles",
+    "Sources/Videos",
+    "Evidence/Creative",
+    "Notes/Productions",
+    "Notes/Insights",
+    "Entities/Concepts"
   ],
   "suggested_workflows": [
     {

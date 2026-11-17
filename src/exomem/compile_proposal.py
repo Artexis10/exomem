@@ -18,7 +18,13 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, memory_refs, source_corrections, source_coverage, source_result_attribution
+from . import (
+    corpus_aware,
+    memory_refs,
+    source_corrections,
+    source_coverage,
+    source_result_attribution,
+)
 from . import find as find_module
 from .governance import egress
 from .vault import normalize_wikilink

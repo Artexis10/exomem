@@ -30,13 +30,13 @@
     "runbook"
   ],
   "suggested_folders": [
-    "Knowledge Base/Sources/Sessions",
-    "Knowledge Base/Sources/Articles",
-    "Knowledge Base/Notes/Research/Technical",
-    "Knowledge Base/Notes/Failures",
-    "Knowledge Base/Notes/Patterns",
-    "Knowledge Base/Entities/Libraries",
-    "Knowledge Base/Entities/Decisions"
+    "Sources/Sessions",
+    "Sources/Articles",
+    "Notes/Research/Technical",
+    "Notes/Failures",
+    "Notes/Patterns",
+    "Entities/Libraries",
+    "Entities/Decisions"
   ],
   "suggested_workflows": [
     {
