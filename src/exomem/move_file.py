@@ -803,8 +803,8 @@ def _move_file_local(
     else:
         _refuse_taken_destination(vault_root, new_rel)
 
-    if source_custody.enrolled_path(vault_root, old_rel):
-        raise MoveFileError(*source_custody.ERASE_REQUIRED)
+    if (held := source_custody.erase_refusal_at(vault_root, old_rel)) is not None:
+        raise MoveFileError(*held)
 
     # Append-only guards. Rule 2 protects content *immutability*, not file
     # *location*: a move that stays WITHIN the same append-only tree

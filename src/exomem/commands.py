@@ -4053,7 +4053,8 @@ def _add_source(
         # FastMCP serializes raised exceptions; we want a structured shape.
         raise ValueError(_leaf_error_message(e)) from e
     if result.capture_outcome != "reused":
-        query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
+        query_log.log_write_call(tool="add", written_path=None if result.path_withheld else result.path,
+                                 cited_sources=[])
     return result.as_dict()
 
 

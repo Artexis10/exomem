@@ -5,7 +5,7 @@ Ordinary deletion preserves raw evidence and trash; index removal alone cannot e
 
 ## What Changes
 
-- Add one explicit, owner-enabled erasure operation for independent identity-bearing text captures, including captures promoted into Evidence.
+- Add one explicit, owner-enabled erasure operation for independent identity-bearing text captures.
 - Keep host policy disabled by default and ordinary append-only capture, editing and deletion behavior unchanged.
 - Bind every erase operation to one immutable Source reference and expected hash, so delayed retries cannot delete a new incarnation.
 - Retain resumable cleanup progress and report complete, pending, failed or unknown outcomes without inventing absence.

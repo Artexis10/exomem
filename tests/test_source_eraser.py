@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import secrets
 import time
 
 import pytest
@@ -19,6 +20,7 @@ from exomem import (
     file_watcher,
     generated_fragment_store,
     graph_drain,
+    held_fs,
     memory_refs,
     privacy_log,
     source_custody,
@@ -53,14 +55,34 @@ def erase(call, reference, source_hash, operation_id="erase-one", identity=IDENT
                 expected_source_ref=reference, expected_source_hash=source_hash)
 
 
+def later_write(call):
+    """Another capture, as a live vault's traffic: the graph's handoff record names a page until a later write."""
+    marker = secrets.token_hex(4)
+    args = {**authored(), "title": f"Later note {marker}", "content": "A later, unrelated record.",
+            "source_identity": {"system": "archive", "record_id": f"later-{marker}", "revision": "one"}}
+    call("capture_source", **args, capture_reservation=reserve(call, args))
+
+
 def drive(call, reference, source_hash, operation_id="erase-one", seconds=30.0):
-    """Retry as a caller does: a pending answer means the next call makes progress."""
+    """Retry as a caller does: a pending answer, or a busy writer, means a later call makes progress.
+
+    Each call holds the writer boundary, so a caller that repeats at once starves the graph drain it waits for.
+    """
     deadline = time.monotonic() + seconds
-    result = erase(call, reference, source_hash, operation_id)
-    while result["status"] == "pending" and time.monotonic() < deadline:
-        time.sleep(0.05)
-        result = erase(call, reference, source_hash, operation_id)
-    return result
+    wrote = False
+    while True:
+        try:
+            result = erase(call, reference, source_hash, operation_id)
+        except OpError as busy:
+            if busy.code != "MUTATION_BUSY" or time.monotonic() >= deadline:
+                raise
+        else:
+            if result["status"] != "pending" or time.monotonic() >= deadline:
+                return result
+            if not wrote:
+                later_write(call)
+                wrote = True
+        time.sleep(0.5)
 
 
 def lookup_empty(vault, manager, reference):
@@ -79,6 +101,7 @@ def test_erase_retires_the_page_copies_and_derived_rows_until_complete(vault, at
     path, reference, source_hash = capture(vault, call)
     result = drive(call, reference, source_hash)
     assert result["status"] == "complete" and result["target_retired"] is True, json.dumps(result, indent=1)
+    assert result["settled"] is True
     assert {item["state"] for item in result["components"].values()} == {"acknowledged"}
     assert not (vault / path).exists()
     assert not any((vault / "Knowledge Base" / ".trash").rglob("*")) if (vault / "Knowledge Base" / ".trash").exists() else True
@@ -92,6 +115,74 @@ def test_erase_retires_the_page_copies_and_derived_rows_until_complete(vault, at
     assert fresh != reference
 
 
+def _holders(roots, needles: list[str]) -> list[str]:
+    """Every live SQLite table and plain file under these roots whose bytes or name hold one of the needles."""
+    import sqlite3
+
+    encoded = [needle.encode("utf-8") for needle in needles]
+    found = set()
+    for root in roots:
+        for file in sorted(item for item in root.rglob("*") if item.is_file()):
+            name = file.relative_to(root).as_posix()
+            if any(needle in name for needle in needles):
+                found.add(f"{name} (name)")
+            if file.name.endswith(("-wal", "-shm", "-journal")):
+                continue  # Their committed rows are read through the database that owns them.
+            for attempt in range(3):
+                try:
+                    found |= {f"{name}{place}" for place in _file_holders(file, encoded)}
+                    break
+                except FileNotFoundError:
+                    break  # A temporary file that vanished holds nothing.
+                except (OSError, sqlite3.Error) as error:
+                    if attempt == 2:
+                        found.add(f"{name} (unreadable: {error})")  # An unread store is no proof of absence.
+                    time.sleep(0.2)
+    return sorted(found)
+
+
+def _file_holders(file, encoded):
+    import sqlite3
+
+    data = file.read_bytes()
+    if not data.startswith(b"SQLite format 3\x00"):
+        return [""] if any(needle in data for needle in encoded) else []
+    places = set()
+    # Opened writable: a read-only reader cannot join a WAL database whose shared index it may not create.
+    conn = sqlite3.connect(file, timeout=5)
+    try:
+        # A virtual table's rows live in its shadow tables, which this loop reads as ordinary tables.
+        tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                                                 "AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'")]
+        for table in tables:
+            for row in conn.execute(f'SELECT * FROM "{table}"'):
+                for value in row:
+                    raw = value.encode("utf-8") if isinstance(value, str) else value
+                    if isinstance(raw, bytes) and any(needle in raw for needle in encoded):
+                        places.add(f":{table}")
+    finally:
+        conn.close()
+    return places
+
+
+def test_complete_leaves_no_row_or_file_that_names_or_holds_the_source(vault, attempts, erasable, tmp_path):
+    """The birth claim: after complete, no live store under the vault or its state names the page or holds its text."""
+    from exomem import state_paths
+
+    _manager, call = attempts
+    path, reference, source_hash = capture(vault, call)
+    call("ask_memory", query="café dawn")
+    roots = [vault, state_paths.state_store_root(), tmp_path / "attempt-state"]
+    needles = [path, path.rsplit("/", 1)[-1].removesuffix(".md"), "opens at dawn"]
+    assert _holders(roots, needles)  # The sweep sees the Source while it exists.
+
+    result = drive(call, reference, source_hash)
+
+    assert result["status"] == "complete", json.dumps(result)
+    holders = _holders(roots, needles)
+    assert holders == [], "\n".join(holders)
+
+
 def test_repeat_returns_the_same_target_and_a_conflicting_rebind_is_refused(vault, attempts, erasable):
     _manager, call = attempts
     _path, reference, source_hash = capture(vault, call)
@@ -102,6 +193,67 @@ def test_repeat_returns_the_same_target_and_a_conflicting_rebind_is_refused(vaul
                                             source_identity={**IDENTITY, "record_id": "second"})
     with pytest.raises(Exception, match="SOURCE_ERASURE_OPERATION_CONFLICT"):
         erase(call, other_ref, other_hash, identity={**IDENTITY, "record_id": "second"})
+    # The binding keeps a digest of the identity: the caller's record names never reach the operation ledger.
+    with _manager.idempotency._connect() as conn:
+        stored = [str(value) for row in conn.execute("SELECT * FROM source_erasure_operations") for value in row]
+    assert stored and not [value for value in stored if "survey" in value or "archive" in value], stored
+
+
+def test_an_enrolled_capture_leaves_its_path_out_of_the_write_log(vault, attempts, erasable, monkeypatch, tmp_path):
+    """Off a Cloud cell the write log persists where the eraser cannot reach; an erasable path must never land there."""
+    from test_vault_store_embeddings import install_encoder
+
+    monkeypatch.setattr(privacy_log, "content_private_logging_enabled", lambda env=None: False)
+    # The suite's embedding switch also silences the query logs.
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_QUERY_LOG", raising=False)
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
+    install_encoder(monkeypatch)
+    _manager, call = attempts
+    path, _reference, _hash = capture(vault, call)
+    plain = call("capture_source", title="Tide table", content="Tides turn at noon.", source_kind="session")
+
+    records = [json.loads(line) for line in (tmp_path / "logs" / "writes.jsonl").read_text().splitlines()]
+
+    assert [record["written_path"] for record in records] == [None, plain["path"]], records
+    assert path not in (tmp_path / "logs" / "writes.jsonl").read_text()
+
+
+def test_an_admitted_erasure_finishes_after_the_policy_is_disabled(vault, attempts, erasable, monkeypatch):
+    """Turning the policy off must not strand a Source whose cutoff is written; it only refuses new operations."""
+    _manager, call = attempts
+    _path, reference, source_hash = capture(vault, call)
+    _other, other_ref, other_hash = capture(vault, call, title="Second survey",
+                                            source_identity={**IDENTITY, "record_id": "second"})
+    first = erase(call, reference, source_hash)
+    assert first["status"] == "pending" and first["settled"] is False, first
+    monkeypatch.delenv("EXOMEM_SOURCE_ERASURE_POLICY")
+
+    result = drive(call, reference, source_hash)
+
+    assert result["status"] == "complete", json.dumps(result)
+    with pytest.raises(OpError, match="SOURCE_ERASURE_DISABLED"):
+        erase(call, other_ref, other_hash, operation_id="erase-two", identity={**IDENTITY, "record_id": "second"})
+
+
+def test_a_catalogue_built_before_the_erase_is_not_adopted_after_it(vault, attempts, erasable):
+    """A standby builds its catalogue apart from the erase; adopting it after the cutoff would serve the Source again."""
+    import sqlite3
+
+    from exomem import lexstore
+
+    _manager, call = attempts
+    assert lexstore.get_store(vault).rebuild_atomic()  # A live cell keeps its lexical index built.
+    path, reference, source_hash = capture(vault, call)
+    detached = lexstore.build_detached_catalog(vault)
+    assert detached is not None
+    try:
+        assert drive(call, reference, source_hash)["status"] == "complete"
+        assert lexstore.adopt_detached_catalog(vault, detached) is False
+    finally:
+        lexstore.discard_detached_catalog(vault, detached)
+    with sqlite3.connect(lexstore.lexical_path(vault)) as conn:
+        assert conn.execute("SELECT count(*) FROM pages WHERE path = ?", (path,)).fetchone()[0] == 0
 
 
 def test_disabled_policy_refuses_before_any_lookup(vault, attempts, monkeypatch):
@@ -252,17 +404,40 @@ def test_a_copy_reserved_before_its_native_binding_closes_as_no_effect(vault, at
     assert lookup_empty(vault, manager, reference)
 
 
-def test_host_without_content_private_logs_reports_unknown(vault, attempts, monkeypatch):
-    monkeypatch.setenv("EXOMEM_SOURCE_ERASURE_POLICY", '{"enabled_systems":["archive"]}')
+def test_host_without_content_private_logs_reports_unknown(vault, attempts, erasable, monkeypatch):
+    """Every other owner finishes, so the answer settles; logs it cannot vouch for keep it from complete."""
     monkeypatch.setattr(privacy_log, "content_private_logging_enabled", lambda env=None: False)
     _manager, call = attempts
     _path, reference, source_hash = capture(vault, call)
     result = drive(call, reference, source_hash)
-    assert result["status"] == "unknown" and result["target_retired"] is False
-    assert result["components"]["host_logs"] == {"state": "unknown"}
+    assert result["status"] == "unknown" and result["settled"] is True and result["target_retired"] is False
+    assert {name for name, item in result["components"].items() if item["state"] != "acknowledged"} == {"host_logs"}
     assert json.dumps(result).count(reference) == 1
 
 
+def published(vault) -> bool:
+    """The service's maintained warm-up, run inline: the service's own catalogue repair can win the race once."""
+    try:
+        publish_reference(vault)
+    except AssertionError:
+        return False
+    return True
+
+
+async def until(condition, what, seconds=20.0, pause=0.05):
+    """Wait on a product signal; the bound only turns a hang into a named failure."""
+    deadline = time.monotonic() + seconds
+    while True:
+        result = condition()
+        if asyncio.iscoroutine(result):
+            result = await result
+        if result:
+            return result
+        assert time.monotonic() < deadline, f"timed out waiting for {what() if callable(what) else what}"
+        await asyncio.sleep(pause)
+
+
+@pytest.mark.timeout(180)  # Above the sum of its named waits, so a slow host reports which wait failed.
 def test_service_erases_a_captured_source_with_passages_until_every_owner_acknowledges(vault, monkeypatch):
     """The highest-level proof: a service reserves, captures, finds a passage, erases, and nothing answers after."""
     from fastmcp import Client
@@ -286,6 +461,11 @@ def test_service_erases_a_captured_source_with_passages_until_every_owner_acknow
                 payload = result.structured_content or {"error": " ".join(getattr(b, "text", "") for b in result.content)}
                 return payload.get("result", payload)
 
+            async def answered(query):
+                # The service republishes its passage index in the background; an unavailable index is no answer yet.
+                found = await call("search_memory", {"query": query, "limit": 1, "options": {"result_level": "passage"}})
+                return found if "hits" in found else None
+
             listed = (await call("read_instructions", {"topic": "manage_memory"}))["operations"].get("sources", [])
             assert "erase" not in listed
             wire = capture_attempts.CaptureWireV1.model_validate(args)
@@ -299,25 +479,35 @@ def test_service_erases_a_captured_source_with_passages_until_every_owner_acknow
             text = (vault / path).read_text(encoding="utf-8")
             reference, source_hash = memory_refs.ref_from_markdown(text), vault_module.content_hash(text)
             embeddings.index_incremental(vault)
-            publish_reference(vault)
+            await until(lambda: published(vault), "the lexical catalogue to publish")
             # The service's watcher publishes the inventory; this test drives it synchronously.
             watcher = file_watcher.FileWatcher(vault)
             watcher._raw_witness.activate()
             assert watcher._flush_raw(census=True)
             monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
             monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
-            found = await call("search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}})
+            found = await until(lambda: answered("lantern"), "the passage index to answer")
             assert [hit["ref"] for hit in found["hits"]] == [reference], found
             listed = await call("inspect_memory", {"operation": "sources.inventory", "arguments": {"system": "archive"}})
             assert [item["source_ref"] for item in listed["items"]] == [reference], listed
 
             request = {"operation_id": "erase-one", "source_identity": IDENTITY,
                        "expected_source_ref": reference, "expected_source_hash": source_hash}
-            deadline = time.monotonic() + 60
-            result = await call("manage_memory", {"operation": "sources.erase", "arguments": request})
-            while result.get("status") == "pending" and time.monotonic() < deadline:
-                await asyncio.sleep(0.1)
-                result = await call("manage_memory", {"operation": "sources.erase", "arguments": request})
+            last = {}
+
+            async def settled():
+                last.update(await call("manage_memory", {"operation": "sources.erase", "arguments": request}))
+                return dict(last) if last.get("settled") else None
+
+            assert not await settled()  # The first call fences the Source; its owners finish on later calls.
+            # Later traffic replaces the graph's handoff record of the page, as a live vault's next write does.
+            later = await call("save_source", {"title": "Tide table", "source_kind": "session",
+                                               "options": {"passages": [{"key": "t/1", "text": "Tides turn at noon."}]}})
+            assert "error" not in later, later
+            # The documented loop: repeat until settled, then read the status. Each call holds the writer boundary
+            # that the graph drain needs, so the caller pauses between calls as drive() does.
+            result = await until(settled, lambda: f"the erase to settle; last answer {json.dumps(last)}",
+                                 seconds=60.0, pause=0.5)
             assert result["status"] == "complete" and result["target_retired"] is True, json.dumps(result)
             assert {item["state"] for item in result["components"].values()} == {"acknowledged"}, result
 
@@ -325,8 +515,12 @@ def test_service_erases_a_captured_source_with_passages_until_every_owner_acknow
             assert watcher._flush_raw(census=True)
             after = await call("inspect_memory", {"operation": "sources.inventory", "arguments": {"system": "archive"}})
             assert after["complete"] is True and after["items"] == [], after
-            gone = await call("search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}})
-            assert gone.get("hits") == [], gone
+            # The suite runs no watcher to keep the recall projection current, so the warm-up stands in again.
+            await until(lambda: published(vault), "the lexical catalogue to publish after the erase")
+            gone = await until(lambda: answered("lantern"), "the passage index to answer after the erase")
+            # The later Source is the only page left, so passage search may rank it; never the erased one.
+            erased = {hit["passage_hash"] for hit in found["hits"]}
+            assert all(hit["ref"] != reference and hit["passage_hash"] not in erased for hit in gone["hits"]), gone
             assert lookup_empty(vault, writer_lease.active_manager(), reference)
             again = await call("save_source", {"title": args["title"], "source_kind": "session", "detail": "full",
                                                "options": {"source_identity": IDENTITY, "passages": args["passages"]}})
@@ -343,10 +537,12 @@ def test_service_erases_a_captured_source_with_passages_until_every_owner_acknow
 _CHILD = """
 import os, sys, time
 from pathlib import Path
-from exomem import _held_fs_posix, commands, index_sync, privacy_log, source_custody, source_eraser, writer_lease
+from exomem import (_held_fs_posix, commands, graph_drain, held_fs, index_sync, privacy_log, source_custody, source_eraser,
+                    writer_lease)
+from exomem.cli_ops import OpError
 from exomem.governance.principal import owner_principal, request_scope
 
-vault, state, reference, source_hash, phase = sys.argv[1:]
+vault, state, reference, source_hash, phase, pages = sys.argv[1:]
 privacy_log.content_private_logging_enabled = lambda env=None: True  # As the erasable fixture does.
 
 def die(*args, **kwargs):
@@ -356,52 +552,108 @@ def then_die(real):
     return lambda *args, **kwargs: (real(*args, **kwargs), die())
 
 held = _held_fs_posix.PosixHeldFilesystem
-real_retire = source_custody.retire
+real_retire, real_rename, real_unlink = source_custody.retire, held.rename, held.unlink
+
+def in_pages(file, leaf):
+    # Only the page's own staging name counts: the capability probe and other artifact publications use temp names too.
+    found, wanted = os.fstat(file.parent_descriptor), os.stat(pages)
+    return leaf.startswith(held_fs.PUBLISH_TEMP_PREFIX) and (found.st_dev, found.st_ino) == (wanted.st_dev, wanted.st_ino)
+
+def staging_rename(self, source, parent, leaf, **kwargs):
+    result = real_rename(self, source, parent, leaf, **kwargs)
+    if in_pages(source, leaf):
+        die()
+    return result
+
+def staging_unlink(self, file):
+    named = in_pages(file, file.name)
+    result = real_unlink(self, file)
+    if named:
+        die()
+    return result
 if phase == "before_fence":
     source_custody.retire = die
 elif phase == "after_fence":
     source_eraser._Eraser._copies = die
 elif phase == "after_move":
-    held.rename = then_die(held.rename)
+    held.rename = staging_rename
 elif phase == "after_unlink":
-    held.unlink = then_die(held.unlink)
+    held.unlink = staging_unlink
 elif phase == "before_derived":
     index_sync.delete_after_remove = die
 elif phase == "after_derived":
     index_sync.delete_after_remove = then_die(index_sync.delete_after_remove)
 elif phase == "before_completion_record":
     source_custody.retire = lambda root, ref, fence: die() if fence.complete else real_retire(root, ref, fence)
+elif phase == "after_completion_record":
+    source_custody.retire = lambda root, ref, fence: (real_retire(root, ref, fence), fence.complete and die())[0]
 manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=Path(state)))
 command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "erase_captured_source")
 arguments = {"operation_id": "erase-one", "source_identity": {"system": "archive", "record_id": "survey", "revision": "one"},
              "expected_source_ref": reference, "expected_source_hash": source_hash}
+graph_drain.start(Path(vault))  # This process stands in for the service, which runs the graph drain beside the erase.
 deadline = time.monotonic() + 30
 while time.monotonic() < deadline:
-    with request_scope(owner_principal(surface="mcp")):
-        last = manager.invoke(command, (Path(vault),), arguments)
-    time.sleep(0.05)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            last = manager.invoke(command, (Path(vault),), arguments)
+    except OpError as busy:
+        if busy.code != "MUTATION_BUSY":
+            raise
+    time.sleep(0.5)  # Each call holds the writer boundary that the graph drain needs.
 print(last, file=sys.stderr)  # The phase never ran; the parent shows why.
 os._exit(0)
 """
 
 
-@pytest.mark.parametrize("phase", ["before_fence", "after_fence", "after_move", "after_unlink", "before_derived",
-                                   "after_derived", "before_completion_record"])
-def test_a_process_killed_at_each_phase_is_finished_by_a_later_retry(vault, attempts, erasable, tmp_path, phase):
-    """Each phase leaves a different durable state; a retry must reach complete from every one of them."""
+def _kill(vault, tmp_path, path: str, reference: str, source_hash: str, phase: str) -> None:
     import subprocess
     import sys
 
-    manager, call = attempts
-    path, reference, source_hash = capture(vault, call)
     writer_lease.reset_managers_for_tests()
     child = subprocess.run([sys.executable, "-c", _CHILD, str(vault), str(tmp_path / "attempt-state"), reference,
-                            source_hash, phase], capture_output=True, text=True, timeout=120)
+                            source_hash, phase, str((vault / path).parent)], capture_output=True, text=True, timeout=120)
     assert child.returncode == 77, child.stderr[-2000:]
+    graph_drain.note_graph_debt()  # A restarted service drains at startup the debt that the killed process queued.
+
+
+def _staged(vault, path: str) -> list[str]:
+    return [item.name for item in (vault / path).parent.iterdir() if item.name.startswith(held_fs.PUBLISH_TEMP_PREFIX)]
+
+
+@pytest.mark.parametrize("phase", ["before_fence", "after_fence", "after_move", "after_unlink", "before_derived",
+                                   "after_derived", "before_completion_record", "after_completion_record"])
+def test_a_process_killed_at_each_phase_is_finished_by_a_later_retry(vault, attempts, erasable, tmp_path, phase):
+    """Each phase leaves a different durable state; a retry must reach complete from every one of them."""
+    _manager, call = attempts
+    path, reference, source_hash = capture(vault, call)
+    later_write(call)  # The killed process has no traffic of its own to retire the graph's record of the page.
+    _kill(vault, tmp_path, path, reference, source_hash, phase)
+    if phase in ("after_move", "after_unlink"):
+        # The kill landed on the page itself: moved to its staging name, or already unlinked from it.
+        assert not (vault / path).exists() and len(_staged(vault, path)) == (phase == "after_move")
     result = drive(call, reference, source_hash)
     assert result["status"] == "complete", json.dumps(result)
     assert not (vault / path).exists()
     assert lookup_empty(vault, writer_lease.active_manager(), reference)
+    # Saved progress names the page; a retry that answers from the completion record must drop it too.
+    assert _holders([tmp_path / "attempt-state"], [path]) == []
+
+
+def test_a_crash_after_the_page_move_finishes_when_another_source_takes_the_freed_name(vault, attempts, erasable,
+                                                                                       tmp_path):
+    """Checking the page name first would find the other Source there and leave the retired bytes staged forever."""
+    _manager, call = attempts
+    path, reference, source_hash = capture(vault, call)
+    _kill(vault, tmp_path, path, reference, source_hash, "after_move")
+    reused, reused_ref, _hash = capture(vault, call, source_identity={**IDENTITY, "record_id": "second"})
+    assert reused == path and len(_staged(vault, path)) == 1
+
+    result = drive(call, reference, source_hash)
+
+    assert result["status"] == "complete", json.dumps(result)
+    assert _staged(vault, path) == []
+    assert memory_refs.ref_from_markdown((vault / path).read_text(encoding="utf-8")) == reused_ref
 
 
 def test_a_delayed_retry_from_a_fresh_process_finishes_without_touching_later_captures(vault, attempts, erasable,
@@ -524,7 +776,7 @@ def _progress_cost(vault, attempts, monkeypatch, copies: int, unrelated: int) ->
     from exomem import source_eraser
 
     # The graph's currency probe reads two fixed sidecar rows; a background build's timing must not change the count.
-    monkeypatch.setattr(source_eraser._Eraser, "_owner_done", lambda self, component, outcome, graph: True)
+    monkeypatch.setattr(source_eraser._Eraser, "_owner_done", lambda self, component, outcome, path, reused: True)
     counts, caller = {"statements": 0, "steps": 0}, threading.get_ident()
     connect = sqlite3.connect
 
@@ -550,6 +802,7 @@ def _progress_cost(vault, attempts, monkeypatch, copies: int, unrelated: int) ->
     return counts["statements"], counts["steps"]
 
 
+@pytest.mark.timeout(180)  # Seeding 200 copies is 200 durable writes: 20 to 56 s alone on a loaded host.
 @pytest.mark.parametrize(("copies", "unrelated"), [(2, 0), (200, 0), (200, 20_000)])
 def test_a_progress_call_costs_the_same_however_many_copies_or_unrelated_sources(vault, attempts, erasable, monkeypatch,
                                                                                  record_property, copies, unrelated):

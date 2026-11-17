@@ -819,6 +819,21 @@ def test_delete_file_refuses_an_enrolled_source_and_names_erase(vault, attempts,
     assert (vault / path).read_bytes() == before
 
 
+def test_a_disabled_cell_refuses_an_enrolled_source_without_naming_erase(vault, attempts, registered_custody, monkeypatch):
+    """Pointing at sources.erase where the policy refuses it sends the caller to an operation that cannot run."""
+    from exomem import delete_file
+
+    manager, call = attempts
+    path, before = _captured(vault, call)
+    monkeypatch.setenv("EXOMEM_SOURCE_ERASURE_POLICY", '{"enabled_systems":[]}')
+    with request_scope(owner_principal(surface="mcp")), manager.mutation_guard(vault):
+        with pytest.raises(delete_file.DeleteFileError) as refused:
+            delete_file.delete_file(vault, path=path, confirm=True)
+    assert refused.value.code == "SOURCE_ERASE_REQUIRED"
+    assert "sources.erase" not in refused.value.reason and "capture custody" in refused.value.reason
+    assert (vault / path).read_bytes() == before
+
+
 def test_move_file_refuses_an_enrolled_source_inside_its_own_tree(vault, attempts, registered_custody):
     """A move within Sources/ is otherwise allowed, and would strand the copy the native ledger holds."""
     from exomem import move_file
@@ -848,5 +863,6 @@ def test_delete_directory_refuses_a_folder_holding_an_enrolled_source(vault, reg
             vault, reference=reference, source_hash=vault_module.content_hash(text)))
         with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
             delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True)
-    assert refused.value.code == "SOURCE_ERASE_REQUIRED" and "sources.erase" in refused.value.reason
+    # This page carries no capture identity, so sources.erase cannot target it either.
+    assert refused.value.code == "SOURCE_ERASE_REQUIRED" and "capture custody" in refused.value.reason
     assert page.read_text() == text

@@ -231,8 +231,8 @@ def _delete_file_local(
             ),
         )
 
-    if source_custody.enrolled_path(vault_root, rel_path):
-        raise DeleteFileError(*source_custody.ERASE_REQUIRED)
+    if (held := source_custody.erase_refusal_at(vault_root, rel_path)) is not None:
+        raise DeleteFileError(*held)
     append_only = in_append_only_tree(rel_path)
     # A fold is the only caller past this refusal: it proves identical bytes remain held elsewhere.
     if append_only and _fold is None:

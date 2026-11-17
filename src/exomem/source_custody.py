@@ -330,18 +330,74 @@ def issue_birth(root: Path, reference: str, allocate: Callable[[], ProducerBirth
     publish(root, PlannedCustody((_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES),)))
 
 
-#: Lifecycle operations refuse an enrolled Source with this code and name its one removal operation.
-ERASE_REQUIRED = ("SOURCE_ERASE_REQUIRED", "this captured Source is held for erasure; remove it with sources.erase")
+#: Lifecycle operations refuse an enrolled Source with this code; the reason names sources.erase only where it can run.
+ERASE_REQUIRED = "SOURCE_ERASE_REQUIRED"
 
 
-_GENERATIONS: dict[str, int] = {}
+#: Vault state, not process memory: a standby that builds a catalogue in another process must see a cutoff.
+_GENERATION_NAME = ".source-retirement-generation"
+_GENERATIONS: dict[str, tuple[tuple[int, int, int], int]] = {}
 _GENERATIONS_LOCK = threading.Lock()
 
 
-def retirement_generation(root: Path) -> int:
-    """A per-vault counter that reusable caches capture before reading and check before inserting."""
+def _generation_path(root: Path) -> Path:
+    from .state_paths import vault_state_dir
+
+    return vault_state_dir(Path(root)) / _GENERATION_NAME
+
+
+def retirement_generation(root: Path) -> int | None:
+    """A per-vault counter that reusable caches capture before reading and check before inserting.
+
+    None when it cannot be read: no cutoff can then be ruled out, so a cache neither stores nor serves.
+    """
+    path = _generation_path(root)
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    # A replacement is a new file, so its identity and time change on every advance.
+    signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
     with _GENERATIONS_LOCK:
-        return _GENERATIONS.get(str(Path(root).resolve()), 0)
+        cached = _GENERATIONS.get(str(path))
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    try:
+        value = int(path.read_text(encoding="ascii"))
+    except (OSError, ValueError):
+        return None
+    with _GENERATIONS_LOCK:
+        _GENERATIONS[str(path)] = (signature, value)
+    return value
+
+
+def advance_retirement_generation(root: Path) -> bool:
+    """Void every reusable cache entry read before now, in any process; False when vault state refused it."""
+    import os
+
+    from .state_paths import ensure_vault_state_dir
+
+    _boundary(root)
+    current = retirement_generation(root)
+    if current is None:
+        return False
+    try:
+        directory = ensure_vault_state_dir(Path(root))
+    except OSError:
+        return False
+    temporary = directory / f"{_GENERATION_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "x", encoding="ascii") as handle:
+            handle.write(f"{current + 1}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, directory / _GENERATION_NAME)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def retire(root: Path, reference: str, fence: RetirementFence) -> None:
@@ -353,32 +409,44 @@ def retire(root: Path, reference: str, fence: RetirementFence) -> None:
     if manifest.retirement is None or manifest.retirement.complete != fence.complete:
         updated = Manifest.model_validate({**manifest.model_dump(), "retirement": fence.model_dump()})
         publish(root, PlannedCustody((_write(root, manifest_path(root, reference), updated, guard, MAX_MANIFEST_BYTES),)))
-    with _GENERATIONS_LOCK:
-        key = str(Path(root).resolve())
-        _GENERATIONS[key] = _GENERATIONS.get(key, 0) + 1
+    # The eraser's caches component advances again once derived rows are gone and reports a refusal there.
+    advance_retirement_generation(root)
 
 
-def enrolled(root: Path, markdown: str) -> bool:
-    """Whether this page is an enrolled Source incarnation, which only ``sources.erase`` may move or remove.
+def erase_refusal(root: Path, markdown: str) -> tuple[str, str] | None:
+    """The refusal for moving or removing this page when it is an enrolled Source incarnation, else None.
 
     A trashed or moved copy would sit outside the copy census that lets an erase report completion.
     """
     if not available():
-        return False
+        return None
     reference = memory_refs.ref_from_markdown(markdown)
-    return reference is not None and read_manifest(root, reference)[0] is not None
+    if reference is None or read_manifest(root, reference)[0] is None:
+        return None
+    from . import source_erasure
+
+    try:
+        fields, _body, _raw = vault.parse_frontmatter(markdown)
+        system = source_capture.validate_identity(fields.get("source_identity"))["system"]
+        policy = source_erasure.SourceErasurePolicy.from_env()
+        removable = source_erasure.admission_refusal(root, policy, system) is None
+    except (ValueError, source_capture.SourceCaptureError, OpError):
+        removable = False
+    if removable:
+        return ERASE_REQUIRED, "this captured Source is held for erasure; remove it with sources.erase"
+    return ERASE_REQUIRED, "this captured Source is held under capture custody, and this cell cannot remove it"
 
 
-def enrolled_path(root: Path, relative: str) -> bool:
+def erase_refusal_at(root: Path, relative: str) -> tuple[str, str] | None:
     """Read one file-mode page, or the page of the original that it names as ``<filename>.md``."""
     if not available():
-        return False
+        return None
     page = relative if relative.lower().endswith(".md") else f"{relative}.md"
     try:
         markdown = reserved_paths.read_generic_bytes(root, page).data.decode("utf-8")
     except (reserved_paths.ReservedPathLeafError, UnicodeDecodeError):
-        return False  # The caller's own read reports a missing, held or unreadable page.
-    return enrolled(root, markdown)
+        return None  # The caller's own read reports a missing, held or unreadable page.
+    return erase_refusal(root, markdown)
 
 
 def _exact_primary(root: Path, *, path: str, reference: str | None, source_hash: str) -> bool:

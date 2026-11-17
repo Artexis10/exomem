@@ -143,6 +143,8 @@ class AddResult:
     same_url: dict[str, object] | None = None
     # True when the duplicate index could not answer, so the capture was stored without a duplicate check.
     duplicate_check_unavailable: bool = False
+    # An erasable Source's path names its content, so no call or write log keeps it. Never sent to callers.
+    path_withheld: bool = False
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -1061,6 +1063,7 @@ def add(
         capture_outcome="created" if source_identity is not None else None,
         same_url=same_url,
         duplicate_check_unavailable=duplicate_unavailable,
+        path_withheld=custody_started,
     )
 
 

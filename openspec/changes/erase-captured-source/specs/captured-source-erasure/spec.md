@@ -72,6 +72,10 @@ Complete retirement SHALL include canonical data, owned originals and staging, t
 - **THEN** the request refuses and names the erasure operation
 - **AND** no trash or moved copy exists outside the copy census
 
+#### Scenario: A cell that cannot erase meets an enrolled Source
+- **WHEN** a caller deletes or moves an enrolled Source and host policy no longer admits erasure for its identity system
+- **THEN** the request refuses, reports the Source as held under capture custody and does not name the erasure operation
+
 #### Scenario: An enrolled capture left no shared activity
 - **WHEN** the target was captured under custody by a build that keeps enrolled Sources off the shared pages
 - **THEN** cleanup finds no shared navigation or activity entry for the target and needs no shared-page removal
@@ -116,7 +120,21 @@ Complete retirement SHALL include canonical data, owned originals and staging, t
 
 ### Requirement: Retirement exposes honest resumable progress
 
-The result SHALL name the target reference, status and target_retired. Status SHALL be complete, pending, failed or unknown. Only complete acknowledged cleanup SHALL set target_retired true. Progress SHALL survive restart and remain bounded per invocation. Missing reads and partial owner evidence MUST NOT become empty success.
+The result SHALL name the target reference, status, settled and target_retired. Status SHALL be complete, pending, failed or unknown. Settled SHALL be false while status is pending or a failed read leaves the answer open, and true otherwise. A caller SHALL repeat the operation until settled is true, then read status. Only complete acknowledged cleanup SHALL set target_retired true. Progress SHALL survive restart and remain bounded per invocation. Missing reads and partial owner evidence MUST NOT become empty success. An operation admitted before host policy disables erasure SHALL finish its cleanup; the policy SHALL refuse only new operations.
+
+#### Scenario: Cleanup finishes
+- **WHEN** every owner acknowledges its cleanup
+- **THEN** the result is settled with status complete and target_retired true
+
+#### Scenario: An owner cannot answer
+- **WHEN** the other owners acknowledge their cleanup but one owner cannot prove its state
+- **THEN** the result is settled with status unknown and target_retired false
+- **AND** repeating the operation does not change that answer
+
+#### Scenario: Host policy is disabled during cleanup
+- **WHEN** an operation already holds its cutoff and host policy then stops enabling its identity system
+- **THEN** repeating that operation continues its cleanup to a settled result
+- **AND** a new operation for any Source of that system refuses
 
 #### Scenario: Cleanup response is lost
 - **WHEN** the caller retries its retained operation after restart

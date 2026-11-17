@@ -1932,6 +1932,8 @@ class DetachedCatalog:
     cancelled: threading.Event = field(default_factory=threading.Event)
     finished: threading.Event = field(default_factory=threading.Event)
     builder: threading.Thread | None = None
+    #: The Source retirement generation before the walk; a cutoff since then voids the rows it parsed.
+    retired_through: int | None = None
 
 
 class _DetachedBuildCancelled(Exception):
@@ -4764,11 +4766,11 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
     if not removed_rel_paths or not lexical_path(vault_root).exists():
         return True
     try:
-        get_store(vault_root).delete_rel_paths(removed_rel_paths)
+        # A deferred delete schedules its repair but leaves the rows in place until then.
+        return get_store(vault_root).delete_rel_paths(removed_rel_paths) is not False
     except Exception as e:  # noqa: BLE001
         log.warning("lexical sidecar delete skipped (%s)", e)
         return False
-    return True
 
 
 # ---------------------------------------------------- exact receipt custody
@@ -8076,6 +8078,8 @@ class LexicalStore:
                         self._delete_rowid(conn, row[0])
                     else:
                         self._delete_semantic_units(conn, rel)
+                    # The delete triggers stamped a fresh revision for rows that no longer exist (see delete_page_rows).
+                    conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
                 for rel in suppressed:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
@@ -9466,6 +9470,9 @@ class LexicalStore:
             _DETACHED[temp_path] = detached
         built = False
         try:
+            from . import source_custody
+
+            detached.retired_through = source_custody.retirement_generation(self.vault_root)
             identity = catalog_semantic_identity(self.vault_root)
             policy = recall_policy.recall_policy_identity(self.vault_root)
             members, signatures = self._walk_entries(cancel=detached.cancelled)
@@ -9542,7 +9549,13 @@ class LexicalStore:
                 else max(0.0, min(_PUBLICATION_TIMEOUT_ADOPT, timeout))
             )
             with self._publication_lock(timeout=wait):
-                if self._detached_catalog_current(detached.path):
+                from . import source_custody
+
+                retired = source_custody.retirement_generation(self.vault_root)
+                if retired is None or retired != detached.retired_through:
+                    # Its rows may hold a Source erased after the walk; the ordinary rebuild serves instead.
+                    log.info("lexical detached catalogue predates a Source retirement; not adopted")
+                elif self._detached_catalog_current(detached.path):
                     published = self._replace_live_catalog(detached.path)
                 else:
                     log.info("lexical detached catalogue is no longer current; not adopted")

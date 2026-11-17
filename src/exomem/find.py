@@ -1783,12 +1783,12 @@ def find(
     retired_through = source_custody.retirement_generation(vault_root)
 
     def _publishable() -> bool:
-        return retired_through == source_custody.retirement_generation(vault_root)
+        return retired_through is not None and retired_through == source_custody.retirement_generation(vault_root)
 
-    def _dependency() -> tuple[tuple[str, str], tuple[str, str], int]:
+    def _dependency() -> tuple[tuple[str, str], tuple[str, str], int | None]:
         return (status_basis.dependency, type_basis.dependency, retired_through)
 
-    def _current(dependency: tuple[tuple[str, str], tuple[str, str], int]) -> bool:
+    def _current(dependency: tuple[tuple[str, str], tuple[str, str], int | None]) -> bool:
         return (status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
                 and dependency[2] == source_custody.retirement_generation(vault_root))
 
