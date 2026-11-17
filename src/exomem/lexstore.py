@@ -4591,9 +4591,8 @@ def browse_window_result(
     col = _browse_scope_column(scope)
 
     def query(conn: sqlite3.Connection) -> list[BrowseRow] | None:
-        if not conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (BROWSE_INDEX,)
-        ).fetchone():
+        # The pragma reads the index's own entry, not a table of the store.
+        if not conn.execute("SELECT 1 FROM pragma_index_info(?)", (BROWSE_INDEX,)).fetchone():
             return None
         own, via, plan_params = _browse_plan_sql(vault_root, eligibility, col)
         params: list[object] = [*plan_params, *plan_params]
