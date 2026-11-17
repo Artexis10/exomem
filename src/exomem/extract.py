@@ -68,6 +68,7 @@ from .media_types import (
 from .media_types import (
     has_text_layer,
     pdf_page_text,
+    pymupdf_allocation_failure,
 )
 from .media_types import (
     media_type_for as _registry_media_type_for,
@@ -1525,7 +1526,7 @@ def _extract_pdf(path: Path) -> ExtractResult:
     except MemoryError:
         raise
     except Exception as e:
-        if _is_pymupdf_allocation_failure(e):
+        if pymupdf_allocation_failure(e):
             raise MediaMemoryExhausted(f"pymupdf: {e}") from e
         raise
     if not parts and scanned_pages and not media_engines.stage_enabled("image"):
@@ -1597,24 +1598,6 @@ def _markitdown_attempts(error: BaseException) -> list[tuple[type[BaseException]
         if exc_info[1] is not None and getattr(exc_info[1], "attempts", None):
             found.extend(_markitdown_attempts(exc_info[1]))
     return found
-
-
-def _is_pymupdf_allocation_failure(error: BaseException) -> bool:
-    """Whether PyMuPDF reports that MuPDF's allocator failed.
-
-    MuPDF raises a failed allocation as FZ_ERROR_SYSTEM (PyMuPDF's `FzErrorSystem`)
-    with its own message, `malloc (N bytes) failed` or the calloc and realloc forms.
-    Matching that whole message, never a substring, keeps a file path out of it:
-    other system errors name the file.
-    """
-    import fitz
-
-    system_error = getattr(getattr(fitz, "mupdf", None), "FzErrorSystem", None)
-    if system_error is None or not isinstance(error, system_error):
-        return False
-    message = str(getattr(error, "m_text", "") or "")
-    # nosemgrep: ep-word-search -- MuPDF's own allocator message format (source/fitz/memory.c).
-    return re.fullmatch(r"(?:malloc|calloc|realloc)(?: of array)? \(\d+(?: x \d+)? bytes\) failed", message) is not None
 
 
 def _extract_opendocument(path: Path, media_type: str) -> ExtractResult:
@@ -1826,7 +1809,7 @@ def _ocr_pdf_page(page) -> str:
     except MemoryError:
         raise  # a hard-limit failure is a memory stop, never a missing page
     except Exception as e:  # noqa: BLE001 — OCR fallback is best-effort
-        if _is_pymupdf_allocation_failure(e):
+        if pymupdf_allocation_failure(e):
             raise MediaMemoryExhausted(f"pymupdf: {e}") from e
         log.warning("PDF page OCR fallback failed: %s", e)
         return ""

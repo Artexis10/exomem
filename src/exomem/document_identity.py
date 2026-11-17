@@ -388,7 +388,8 @@ def read_pdf(path: Path) -> PdfEvidence:
             except Exception:  # noqa: BLE001 - an XMP stream that inflates past the memory cap is hostile: no packet
                 packet = ""
     except Exception as error:  # noqa: BLE001 - PyMuPDF raises many types for damaged input; each means unreadable
-        return PdfEvidence(unavailable=TOO_LARGE if _out_of_memory(error, fitz) else UNREADABLE)
+        exhausted = isinstance(error, MemoryError) or media_types.pymupdf_allocation_failure(error)
+        return PdfEvidence(unavailable=TOO_LARGE if exhausted else UNREADABLE)
     # A title is untrusted text that the Source page stores in frontmatter: keep printable characters only.
     title = "".join(ch for ch in " ".join((information.get("title") or "").split()) if ch.isprintable())
     title = title[:MAX_TITLE_CHARS].strip() or None
@@ -397,22 +398,6 @@ def read_pdf(path: Path) -> PdfEvidence:
         metadata_values=(*information.values(), *xmp_values(packet)),
         title=title,
     )
-
-
-def _out_of_memory(error: Exception, fitz: Any) -> bool:
-    """Whether a read failed because an allocation hit the child's memory cap.
-
-    MuPDF reports a failed allocation as its `FZ_ERROR_SYSTEM` code. Some PyMuPDF calls re-raise it as a
-    plain RuntimeError whose text leads with that code, so the code token is read from the library's
-    fixed `code=<n>:` rendering; nothing here interprets a message's words.
-    """
-    if isinstance(error, MemoryError):
-        return True
-    code = getattr(error, "m_code", None)
-    if code is None:
-        prefix = str(error).split(":", 1)[0]
-        code = prefix.removeprefix("code=") if prefix.startswith("code=") else None
-    return str(code) == str(fitz.mupdf.FZ_ERROR_SYSTEM)
 
 
 def xmp_values(packet: str) -> tuple[str, ...]:

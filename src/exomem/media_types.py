@@ -1,4 +1,4 @@
-"""Import-light extension registry for locally extractable artifacts, and the PDF text-layer rule.
+"""Import-light extension registry for locally extractable artifacts, and the PDF reading rules.
 
 The bounded identity read imports this module in a fresh child process for every captured PDF, so
 it stays free of heavy imports.
@@ -6,6 +6,7 @@ it stays free of heavy imports.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -75,3 +76,26 @@ def pdf_page_text(page: Any) -> str:
 def has_text_layer(page_text: str) -> bool:
     """Whether a page's embedded text is long enough to be read, not rasterized and OCR'd."""
     return len(page_text) >= _PDF_OCR_MIN_CHARS
+
+
+def pymupdf_allocation_failure(error: BaseException) -> bool:
+    """Whether PyMuPDF reports that MuPDF's allocator failed.
+
+    MuPDF raises a failed allocation as FZ_ERROR_SYSTEM (PyMuPDF's `FzErrorSystem`)
+    with its own message, `malloc (N bytes) failed` or the calloc and realloc forms.
+    Some PyMuPDF calls, page text among them, re-raise it as a RuntimeError that reads
+    `code=<FZ_ERROR_SYSTEM>: <message>`. Matching that whole message, never a substring,
+    keeps a file path out of it: other system errors name the file.
+    """
+    import fitz
+
+    mupdf = getattr(fitz, "mupdf", None)
+    system_error = getattr(mupdf, "FzErrorSystem", None)
+    if system_error is not None and isinstance(error, system_error):
+        message = str(getattr(error, "m_text", "") or "")
+    elif isinstance(error, RuntimeError) and str(error).startswith(prefix := f"code={getattr(mupdf, 'FZ_ERROR_SYSTEM', '')}: "):
+        message = str(error).removeprefix(prefix)
+    else:
+        return False
+    # nosemgrep: ep-word-search -- MuPDF's own allocator message format (source/fitz/memory.c).
+    return re.fullmatch(r"(?:malloc|calloc|realloc)(?: of array)? \(\d+(?: x \d+)? bytes\) failed", message) is not None
