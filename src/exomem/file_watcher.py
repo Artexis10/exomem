@@ -947,6 +947,13 @@ def _register_self_write_and_close(
         if intents:
             abort_publication_intents(intents, force_paths=paths)
         log.debug("self-write suppression registration failed", exc_info=True)
+    except BaseException:  # noqa: BLE001
+        # An interrupt-level escape (e.g. ReadBudgetExhausted under the
+        # worker's copied request context) still owns the intents: abort them
+        # so none stays active, then let the interrupt through.
+        if intents:
+            abort_publication_intents(intents, force_paths=paths)
+        raise
     return published
 
 

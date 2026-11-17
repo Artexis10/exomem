@@ -14,6 +14,8 @@ keyed write for the whole command:
 
 from __future__ import annotations
 
+import hashlib
+import os
 import threading
 import time
 from pathlib import Path
@@ -722,3 +724,53 @@ def test_a_moved_enumeration_replans_the_capture_as_retryable_busy(
         for error in converted
     )
     assert calls >= 2  # the absorbed retry re-planned and enumerated again
+
+
+def _intent_for(vault: Path, target: Path, payload: bytes):
+    staged = vault / f"{target.stem}.staged.md"
+    staged.write_bytes(payload)
+    descriptor = os.open(staged, os.O_RDONLY)
+    try:
+        (intent,) = file_watcher.register_publication_intents(
+            vault, [(target, descriptor, hashlib.sha256(payload).hexdigest())]
+        )
+    finally:
+        os.close(descriptor)
+    return intent
+
+
+def test_an_interrupt_level_publish_failure_still_closes_the_intents(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A BaseException inside publish (e.g. ReadBudgetExhausted under the worker's
+    copied request context) must not leave intents active, on either route."""
+    from exomem import request_budget
+
+    def explode(*args, **kwargs):
+        raise request_budget.ReadBudgetExhausted()
+
+    monkeypatch.setattr(
+        file_watcher.index_sync, "publish_corpus_delta", explode
+    )
+
+    # Inline route (no boundary held): the interrupt re-raises, intents abort.
+    target = _page(vault, "interrupt-inline")
+    intent = _intent_for(vault, target, b"inline bytes")
+    with pytest.raises(request_budget.ReadBudgetExhausted):
+        file_watcher.register_self_write_and_close(vault, [target], [intent])
+    assert intent.disposition != "active"
+
+    # Worker route (boundary held): the caller sees the bounded False, and the
+    # worker still aborted the intents rather than leaving them active.
+    writer, _holder = _managers(vault.parent / "state")
+    target2 = _page(vault, "interrupt-worker")
+    intent2 = _intent_for(vault, target2, b"worker bytes")
+    with writer.mutation_guard(vault, request_id="interrupt", operation="sidecar"):
+        published = file_watcher.register_self_write_and_close(
+            vault, [target2], [intent2]
+        )
+    assert published is False
+    deadline = time.monotonic() + _OBSERVE_SECONDS
+    while intent2.disposition == "active" and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert intent2.disposition != "active"

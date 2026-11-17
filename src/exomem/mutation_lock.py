@@ -361,7 +361,7 @@ _BOUNDARY_ACQUIRED_OBSERVER: ContextVar[Callable[[], None] | None] = ContextVar(
 
 @contextmanager
 def on_boundary_acquired(callback: Callable[[], None]) -> Iterator[None]:
-    """Call ``callback`` once after this context's next vault-boundary acquisition.
+    """Call ``callback`` once per outer vault-boundary acquisition while this context is bound.
 
     Fires on a depth 0->1 acquisition of a ``COORDINATOR_VAULT_BOUNDARY``
     coordinator only: a re-entrant hold, a borrowed hold (`may_borrow`) and the
