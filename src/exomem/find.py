@@ -8547,6 +8547,8 @@ def recall_resolver_snapshot_at_checkpoint(
 ):
     """Borrow a read-only resolver only when exact event lineage is resident.
 
+    The resolver alone; `recall_resolver_publication_at_checkpoint` also returns its token.
+
     Incremental graph maintenance must not rebuild a resolver from current disk
     and label it with an older live checkpoint: that loses the pre-delta
     topology needed to prove bounded edge repair. A cache miss is therefore an
@@ -8558,6 +8560,20 @@ def recall_resolver_snapshot_at_checkpoint(
     body-only path stay O(delta) without copying every resolver map. A caller
     that needs to mutate or reconstruct topology must fork explicitly.
     """
+    borrowed = recall_resolver_publication_at_checkpoint(vault_root, checkpoint)
+    return borrowed[0] if borrowed is not None else None
+
+
+def recall_resolver_publication_at_checkpoint(
+    vault_root: Path,
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+) -> tuple[WikilinkResolver, object] | None:
+    """`recall_resolver_snapshot_at_checkpoint` with the token of the maps it borrowed.
+
+    The token is read under the lock that a publisher patches the maps under, so a caller that
+    compares it later learns whether a patch landed after this borrow; read from the resolver
+    after the lock, it could already name patched maps.
+    """
     root = Path(vault_root)
     identity = _recall_checkpoint_identity(checkpoint)
     with _RESOLVER_LOCK:
@@ -8568,7 +8584,7 @@ def recall_resolver_snapshot_at_checkpoint(
             or _RECALL_RESOLVER_CHECKPOINTS.get(root) != checkpoint
         ):
             return None
-        return cached[1]
+        return cached[1], cached[2]
 
 
 def borrow_recall_resolver(

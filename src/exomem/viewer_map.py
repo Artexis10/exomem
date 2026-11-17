@@ -179,13 +179,13 @@ def _viewer_map(
         checkpoint = current_checkpoint()
         projection = ((checkpoint.triple, checkpoint.policy_version, checkpoint.access_policy_fingerprint)
                       if checkpoint is not None else None)
-        resolver = (find.recall_resolver_snapshot_at_checkpoint(vault_root, checkpoint)
+        borrowed = (find.recall_resolver_publication_at_checkpoint(vault_root, checkpoint)
                     if checkpoint is not None and projection is not None
                     and (stored or metadata.get("recall_projection_identity") == graph._availability_freshness_value(projection))
                     else None)
         if checkpoint != current_checkpoint():
-            resolver = None
-        publication = resolver.publication if resolver is not None else None
+            borrowed = None
+        resolver, publication = borrowed if borrowed is not None else (None, None)
 
         def resolver_patched() -> bool:
             # A store commit patches the shared resolver in place and drops its token, while a pinned
