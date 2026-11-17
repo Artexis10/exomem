@@ -30,6 +30,7 @@ from exomem.kbdir import managed_root
 from exomem.reserved_paths import PathDisposition, classify_logical
 from exomem.trash_metadata import is_inside_trash, is_trash_path
 from exomem.vault_store import ownership
+from exomem.vault_store import read as store_read
 from tests.conftest import FIXTURE_VAULT, bind_root_vault, initialize_vault_state_offline
 
 KB = "Knowledge Base"
@@ -115,6 +116,8 @@ def test_a_page_is_in_a_scope_when_the_walk_of_that_scope_lists_it(scoped_vault:
     for rel in (*PAGES, *OUTSIDE):
         assert lexstore.page_membership(rel) == (rel in in_kb, rel in in_vault), rel
         assert freshness.scopes_for(scoped_vault, scoped_vault / rel) == (rel in in_kb, rel in in_vault), rel
+        assert store_read.corpus_member(rel, "kb") == (rel in in_kb), rel
+        assert store_read.corpus_member(rel, "vault") == (rel in in_vault), rel
 
 
 def test_the_root_vault_paths_answer_for_their_own_folders(scoped_vault: Path) -> None:
