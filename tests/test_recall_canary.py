@@ -12,6 +12,20 @@ from exomem import recall_canary as gate
 from exomem.request_latency_contract import load_contract
 
 
+@pytest.mark.parametrize("operation", ["sources.inventory", "files.list"])
+def test_case_loader_accepts_only_the_declared_source_inventory_read(operation):
+    """Inventory qualification needs its public read; unrelated inspection stays rejected."""
+    case = {"id": "inventory", "tool": "inspect_memory",
+            "arguments": {"operation": operation, "arguments": {"system": "reference"}},
+            "expected": {"response_schema": {"type": "object"}}}
+    if operation == "sources.inventory":
+        [loaded] = gate.load_cases(json.dumps([case]).encode())
+        assert loaded.arguments == case["arguments"]
+    else:
+        with pytest.raises(ValueError):
+            gate.load_cases(json.dumps([case]).encode())
+
+
 def _canary_case(**expected):
     return {
         "id": "case-01",

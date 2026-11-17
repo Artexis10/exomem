@@ -22,12 +22,14 @@ configured recall model, exactly as before.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import os
 import sqlite3
 import threading
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 #: The encoder every sidecar without a record was written by.
@@ -68,6 +70,13 @@ class SpaceIdentity:
     model: str
     fingerprint: str | None
     dim: int
+
+    @property
+    def identity_digest(self) -> str:
+        """An opaque protocol identity without exposing model names or local paths."""
+        return hashlib.sha256(json.dumps(
+            asdict(self), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
 
     def accepts(self, model: str, fingerprint: str | None) -> bool:
         """Whether vectors from `model` (with `fingerprint`, when known) belong here."""

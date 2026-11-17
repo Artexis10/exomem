@@ -277,7 +277,7 @@ def register_rest_facade(
         surface="rest",
         profile="openapi",
         tier2_enabled=expose_tier2,
-        product_commands=tuple(command.public_name for command in rest_commands),
+        product_commands=tuple(command.public_name for command in rest_commands if command.agent_listed),
         compatibility_commands=tuple(command.name for command in rest_commands if command.preferred_name),
     )
 

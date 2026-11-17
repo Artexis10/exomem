@@ -1251,7 +1251,10 @@ def test_continue_adoption_prompt_is_gated(
 #: which are the owner's own portability and operator surface rather than a
 #: disclosure surface. Every entry is a deliberate, reviewed exemption — the
 #: list is the argument, so adding to it is a decision someone has to defend.
-_NO_VAULT_CONTENT_ROUTE_MODULES = frozenset({"server_assets.py"})
+#: `cell_identity.py` serves the Cloud cell's discovery document: the cell id, a
+#: package-file digest, the service features its commands declare and an opaque
+#: encoder-identity digest, so no page, Source or vault byte reaches it.
+_NO_VAULT_CONTENT_ROUTE_MODULES = frozenset({"server_assets.py", "cell_identity.py"})
 
 
 def _gated(text: str) -> bool:

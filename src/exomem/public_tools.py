@@ -227,6 +227,13 @@ class SearchMemory(Wire):
 
 
 def _search(wire: dict[str, Any], ctx: Context) -> Translated:
+    if (wire.get("options") or {}).get("result_level") == "passage":
+        from . import passage_evidence
+
+        try:
+            passage_evidence.validate_ranking_options(wire.get("options") or {})
+        except ValueError as error:
+            raise Refusal("INVALID_PASSAGE_OPTION", str(error).partition(": ")[2]) from None
     leaf = {
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),

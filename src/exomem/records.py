@@ -504,6 +504,11 @@ def append_record(
                 collections.SourceVersion(canonical_path.relative_to(root).as_posix(), item_hash),
             )
         )
+        from . import record_source_custody
+
+        dependencies = record_source_custody.prepare(root, operation_id=audit_correlation,
+            effects={audit_correlation: record_source_custody.Effect(record_source_custody.facts(body, prepared=origin_inputs))},
+            preview=_prepare is not None)
         audit = _audit_body(
             transition_id=audit_correlation,
             parent_id=parent,
@@ -519,6 +524,7 @@ def append_record(
             after_container_hash=after_hash,
             payload_hash=payload_hash,
             why=why,
+            _dependencies=dependencies,
         )
         log_plan = _plan_required_audit(root, manifest, key, audit, after_hash)
         writes = [
@@ -554,6 +560,7 @@ def append_record(
                 *((delivery_guard,) if delivery_guard is not None else ()),
             ),
             origin_inputs=(origin_inputs,),
+            dependency_plan=dependencies,
             _prepare=prepare_final if _prepare is not None else None,
             _validate_inputs=_validate_inputs,
         )
@@ -640,6 +647,7 @@ def _publish_with_origin(
     *,
     required_guards: tuple[Any, ...],
     origin_inputs: tuple[Any, ...] = (),
+    dependency_plan: Any = None,
     _prepare: Callable[[list[vault.PlannedWrite]], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
 ) -> None:
@@ -659,13 +667,19 @@ def _publish_with_origin(
         origin_guards = tuple(
             guard for item in prepared for guard in item.required_guards(root, writes)
         )
-        vault.batch_atomic_write(
-            writes,
-            vault_root=root,
-            required_guards=(*required_guards, *origin_guards),
-            _validate_prepared_bindings=revalidate if prepared or _validate_inputs is not None else None,
-            _prepare=_prepare,
-        )
+        if dependency_plan is not None and _prepare is None:
+            dependency_plan.begin(root)
+        try:
+            vault.batch_atomic_write(
+                writes,
+                vault_root=root,
+                required_guards=(*required_guards, *origin_guards),
+                _validate_prepared_bindings=revalidate if prepared or _validate_inputs is not None else None,
+                _prepare=_prepare,
+            )
+        finally:
+            if dependency_plan is not None and _prepare is None:
+                dependency_plan.observe(root, writes)
     except vault.BatchWriteError:
         raise
     except provenance.OriginError as error:
@@ -1102,6 +1116,16 @@ class _BulkPlan:
     existing: record_formats.Record | None
     source: str | None
     rationale: str
+    source_proof: ResolvedSource
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSource:
+    """A released path and its guarded incarnation, kept together through preparation."""
+
+    path: str
+    guard: vault.PathGuard
+    canonical_ref: str | None
 
 
 def _bulk_reject(index: int, code: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -1180,19 +1204,21 @@ def _resolve_bulk_source(
     root: Path,
     reference: object,
     allowed: Callable[[str], bool],
-    cache: dict[str, tuple[str, vault.PathGuard] | None],
-) -> tuple[str, vault.PathGuard] | None:
+    cache: dict[str, ResolvedSource | None],
+) -> ResolvedSource | None:
     """Resolve one provenance reference to a preserved, released Sources/Evidence page."""
     if type(reference) is not str:
         return None
     if reference in cache:
         return cache[reference]
-    resolved: tuple[str, vault.PathGuard] | None = None
+    resolved: ResolvedSource | None = None
     found = resolve_preserved_source(root, reference, lambda relative, _path: allowed(relative))
     if found is not None:
         try:
-            _text, guard = vault.read_guarded_text(root, found[0])
-            resolved = (found[1], guard)
+            from . import memory_refs
+
+            text, guard = vault.read_guarded_text(root, found[0])
+            resolved = ResolvedSource(found[1], guard, memory_refs.ref_from_markdown(text))
         except (vault.VaultPathError, vault.PathGuardError, OSError, UnicodeDecodeError):
             resolved = None
     cache[reference] = resolved
@@ -1313,7 +1339,7 @@ def bulk_upsert_records(
         for record in snapshot.records:
             by_key.setdefault(record.identity.key, []).append(record)
         allowed = record_governance.full_release_filter(root)
-        source_cache: dict[str, tuple[str, vault.PathGuard] | None] = {}
+        source_cache: dict[str, ResolvedSource | None] = {}
         has_sources_field = _bulk_sources_field(manifest)
         seen: dict[str, int] = {}
         outcomes: list[dict[str, Any]] = []
@@ -1363,7 +1389,7 @@ def bulk_upsert_records(
                         )
                     )
                     continue
-                source_rel, source_guard_row = resolved
+                source_rel, source_guard_row = resolved.path, resolved.guard
                 values = _bulk_row_values(manifest, raw["item"], source_rel)
             except collections.CollectionError as error:
                 outcomes.append(_bulk_error_row(index, error))
@@ -1450,6 +1476,7 @@ def bulk_upsert_records(
                     existing=current_record,
                     source=source_rel,
                     rationale=rationale,
+                    source_proof=resolved,
                 )
             )
             outcomes.append(
@@ -1521,6 +1548,7 @@ def bulk_upsert_records(
         new_item_guards: dict[int, vault.DirectoryCensusGuard] = {}
         audit_bodies: list[str] = []
         origin_inputs: list[Any] = []
+        dependency_effects = {}
         history_writes: list[vault.PlannedWrite] = []
         by_index = {row["index"]: row for row in outcomes}
 
@@ -1528,6 +1556,7 @@ def bulk_upsert_records(
             return pos + sum(d for p, d in shifts if p < pos or (p == pos and not is_end))
 
         for plan in plans:
+            prepared = None
             transition = _transition_id()
             next_text = record_formats.render_manifest_audit_head(
                 prev_text, transition, semantic_profile=manifest.semantic_profile
@@ -1693,6 +1722,12 @@ def bulk_upsert_records(
                         after_item_hash=item_hash,
                     )
                 )
+            from . import record_source_custody
+
+            dependency_effects[transition] = record_source_custody.Effect(
+                current=record_source_custody.facts(body if plan.kind == "insert" else after_body,
+                                                  explicit=plan.source_proof, prepared=prepared),
+                prior=record_source_custody.facts(record.body if record is not None else None))
             audit_bodies.append(
                 _audit_body(
                     transition_id=transition,
@@ -1718,6 +1753,10 @@ def bulk_upsert_records(
             prev_container = next_container
 
         profile = profile_for(manifest.semantic_profile)
+        dependencies = record_source_custody.prepare(root, operation_id=batch_id, effects=dependency_effects)
+        audit_bodies = [dependencies.audit_body(profile.activity_prefix, body) for body in audit_bodies]
+        history_writes = [dependencies.history(write, json.loads(write.content)["transition_id"])
+                          if write.content else write for write in history_writes]
         log_plan = vault.plan_log_writes_many(
             root,
             date_iso=dt.date.today().isoformat(),
@@ -1758,6 +1797,7 @@ def bulk_upsert_records(
                 *source_guards.values(),
             ),
             origin_inputs=tuple(origin_inputs),
+            dependency_plan=dependencies,
         )
         return _report(
             committed=True,
@@ -1997,6 +2037,13 @@ def update_record(
                 ),
             )
         after_item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+        from . import record_source_custody
+
+        dependencies = record_source_custody.prepare(root, operation_id=audit_correlation,
+            effects={audit_correlation: record_source_custody.Effect(
+                current=record_source_custody.facts(body if body is not None else record.body, prepared=origin_inputs),
+                prior=record_source_custody.facts(record.body))},
+            preview=_prepare is not None)
         audit = _audit_body(
             transition_id=audit_correlation,
             parent_id=parent,
@@ -2012,6 +2059,7 @@ def update_record(
             after_container_hash=after_container_hash,
             payload_hash=None,
             why=why,
+            _dependencies=dependencies,
         )
         log_plan = _plan_required_audit(root, manifest, item_key, audit, after_container_hash)
         record_governance.precommit_authorize_mutation(
@@ -2057,6 +2105,7 @@ def update_record(
             after_item_hash=after_item_hash,
             binding=_history_binding,
         )
+        kept = dependencies.history(kept, audit_correlation)
         _publish_with_origin(
             root,
             [
@@ -2070,6 +2119,7 @@ def update_record(
                 *(guard for guard in snapshot.path_guards if guard.target != record.source.path),
             ),
             origin_inputs=(origin_inputs,),
+            dependency_plan=dependencies,
             _prepare=prepare_final if _prepare is not None else None,
             _validate_inputs=_validate_inputs,
         )
@@ -4171,6 +4221,14 @@ def _select_audit_history(
 
 
 def _valid_audit_event(event: Any, semantic_profile: str = "records") -> bool:
+    from . import record_source_custody
+
+    if (isinstance(event, dict) and type(event.get("version")) is int
+            and event["version"] == record_source_custody.EVENT_VERSION):
+        if not record_source_custody.valid_metadata(event):
+            return False
+        original = {key: value for key, value in event.items() if key not in record_source_custody.METADATA_FIELDS}
+        return _valid_audit_event({**original, "version": 1}, semantic_profile)
     if isinstance(event, dict) and event.get("version") == _LIFECYCLE_EVENT_VERSION:
         return _valid_lifecycle_audit_event(event, semantic_profile)
     if not _audit_event_syntax(event, semantic_profile):
@@ -5825,6 +5883,7 @@ def _audit_body(
     after_container_hash: str | None,
     payload_hash: str | None,
     why: str,
+    _dependencies: Any = None,
 ) -> str:
     """Render one strict, content-free activity event."""
     profile = profile_for(manifest.semantic_profile)
@@ -5854,6 +5913,8 @@ def _audit_body(
         "payload_hash": payload_hash,
         "rationale": why,
     }
+    if _dependencies is not None:
+        event = _dependencies.event(profile.activity_prefix, event)
     return profile.activity_prefix + json.dumps(
         event, ensure_ascii=False, separators=(",", ":"), allow_nan=False, sort_keys=True
     )

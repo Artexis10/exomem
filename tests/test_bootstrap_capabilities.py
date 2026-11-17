@@ -287,6 +287,7 @@ def test_all_rest_bootstrap_profiles_match_openapi_operations(
         for command in commands.product_commands_for(
             "rest", expose_tier2=tier2_enabled
         )
+        if command.agent_listed
     )
 
     for profile in PROFILES:
@@ -323,6 +324,7 @@ def test_all_cli_bootstrap_profiles_match_parser_registry(
         for command in commands.product_commands_for(
             "cli", expose_tier2=tier2_enabled
         )
+        if command.agent_listed
     )
     aliases = set(_simple_cli_action_names())
     assert aliases == set(commands.simple_action_names())
@@ -388,6 +390,7 @@ def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> 
     payload = commands.op_bootstrap(vault, section="all")
     expected = tuple(
         command.public_name for command in commands.product_commands_for("mcp", expose_tier2=True)
+        if command.agent_listed
     )
     _assert_conforms(
         payload,
