@@ -323,13 +323,14 @@ def pools_original(vault_root: Path, artifact_path: Path) -> bool:
     """Whether a new filing's bytes go to the shared original pool rather than its logical path.
 
     Notes stay ordinary pages. Every other original of an activated archive is pooled; its
-    companion alone binds the logical path.
+    companion alone binds the logical path. A name with no suffix stays an ordinary file
+    (`originals.may_share_bytes`), like a dataset.
     """
     from . import original_pool
-    from .originals import is_note_path
+    from .originals import is_note_path, may_share_bytes
 
     relative = artifact_path.relative_to(vault_root).as_posix()
-    return not is_note_path(relative) and original_pool.enabled(vault_root)
+    return not is_note_path(relative) and may_share_bytes(relative) and original_pool.enabled(vault_root)
 
 
 def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, stream: IO[bytes],

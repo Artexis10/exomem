@@ -78,6 +78,22 @@ def test_a_conversion_keeps_identical_filings_as_one_shared_object_and_their_pag
     assert {page: (vault / page).read_bytes() for page in pages} == pages
 
 
+def test_a_suffixless_original_stays_an_ordinary_file_through_conversion(vault, supported):
+    """A pooled filing exists solely as a companion the census tells from a note by its suffix, so a
+    suffix-less original converts like a dataset — it keeps its file — while a suffixed one pools."""
+    plain, _page = _file(vault, "receipts", "LICENSE", RECEIPT)
+    pdf, _pdf_page = _file(vault, "receipts", "scan.pdf", INVOICE)
+
+    preview = _convert(vault)
+    report = _convert(vault, dry_run=False, plan_id=preview["plan_id"])
+
+    assert (preview["would_convert"], report["converted"]) == (1, 1)
+    assert (vault / plain).read_bytes() == RECEIPT
+    assert originals.pooled(vault, plain) is None
+    assert _read(vault, pdf) == INVOICE
+    assert originals.pooled(vault, pdf) is not None
+
+
 def test_a_protected_filing_keeps_its_grant_bound_page_byte_identical(vault, supported):
     """Catches a conversion that rewrites a protected page, whose grants bind its exact bytes."""
     original, page = _file(vault, "contracts", "letter.pdf", INVOICE, protected=True)

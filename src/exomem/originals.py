@@ -290,6 +290,17 @@ def may_pool(bound: str) -> bool:
     return not is_trash_path(bound)
 
 
+def may_share_bytes(relative: str) -> bool:
+    """Whether an original at `relative` may keep its bytes only in the shared pool.
+
+    A pool-only filing exists on disk solely as its companion page `<name>.md`, which the egress
+    artifact census tells from a note by `<name>` carrying a suffix of its own. A name without a
+    suffix (`LICENSE`, or a dotfile like `.blob`) gives a companion indistinguishable from a note,
+    so such an original keeps an ordinary file at its logical path instead, like a dataset.
+    """
+    return bool(PurePosixPath(relative).suffix)
+
+
 def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
     """The filing of an original whose bytes are a shared pool object, which has no file at its logical path.
 
