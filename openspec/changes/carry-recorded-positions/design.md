@@ -6,7 +6,7 @@ Task discovery serves pages as leads. A page's semantic units reach the agent on
 A long page puts its late units behind every earlier section. Context engineering guidance names exactly this risk: give the model the minimum high-signal context it needs, and keep larger material behind references (Anthropic, "Effective context engineering for AI agents", 2025).
 The person's recorded positions are high-signal. They belong in the packet itself, not behind a page read.
 
-The design rests on replays of the failing conversation with a real model. Those replays reused one vault across repeats, so they show mechanisms, not rates; the blind held-out run decides. That follows the practice of diagnosing one production failure from its trace and keeping the failure as a regression case (Langfuse, "Evaluating LLM applications"; Anthropic, "Demystifying evals for AI agents", 2026).
+The design rests on replays of the failing conversation with a real model. Those replays were small and scanned by text, not judged, so they show mechanisms, not rates; the blind held-out run is the measurement. That follows the practice of diagnosing one production failure from its trace and keeping the failure as a regression case (Langfuse, "Evaluating LLM applications"; Anthropic, "Demystifying evals for AI agents", 2026).
 
 ## Decisions
 
@@ -53,7 +53,16 @@ The replays separated surfacing from presentation.
 Raw units appended to the recall result changed nothing.
 The same units, framed as the person's recorded positions, did change the replies, and no reply simply agreed with the position. The framing says to carry each position with attribution, to judge the evidence independently, and that each position stays theirs for the conversation.
 The framing passage is therefore part of the contract, not decoration. It never asks for agreement, because agreement on command would turn a qualified hypothesis into an asserted fact.
-In replays, a framing that asked the agent to attribute each line as its text does suppressed carrying the person's positions. The framing therefore names the units as the person's own, and capture keeps the agent's own analysis out of position categories.
+Under a framing that asked the agent to attribute each line as its text does, the replies, in these replays, did not carry the person's positions. The framing therefore names the units as the person's own, and capture keeps the agent's own analysis out of position categories.
+
+## Measured
+
+One blind held-out run measured the change. It held 9 unseen cases: 6 positive cases and 3 controls, in which the saved position is contradicted, withdrawn or out of the trait's reach. Two arms ran, the behaviour before this change and this change, with 2 repeats each. A judge scored every reply blind against a reference written for its case. Each figure below is the mean per-case difference, this change minus before, with its 95% confidence interval.
+
+- **Position carried.** Replies preserved the person's persisted position and attributed it to them in about two thirds more of the positive cases: +0.67 (0.33 to 0.92).
+- **Final-turn correctness.** It improved: +0.39 (0.17 to 0.61).
+- **No automatic agreement.** It held within its preset bound: −0.06 (−0.17 to 0).
+- **No invented facts.** It did not clear its preset bound; its interval is −0.28 to 0. The change's replies had two isolated slips, an arithmetic error and an unsupported claim to have written a note, against none before. The reference for this criterion was grounded in the seed notes.
 
 ## Risks
 
