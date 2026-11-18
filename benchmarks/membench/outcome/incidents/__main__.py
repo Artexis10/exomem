@@ -1,40 +1,74 @@
 """Replay product incidents on real models, one fresh session per run, and compare code versions.
 
 Each file under ``cases/`` holds one incident's cases. A case seeds one note through the arm's own
-writer, sends one user turn to Claude Code in print mode, and checks the outcome:
+writer, sends one user turn to Claude Code in print mode (or to the OpenAI actor), and checks the outcome:
 
 - ``seed_corrected``: the seeded note's body changed, or the arm's own status registry reports it
   superseded (a correction through either route counts);
 - ``called_any``: the session called at least one of the named Exomem tools;
 - ``judge``: a blind model fills the case's JSON schema from the user turn and the answer, and every
   ``require`` field must match. ``include_sources`` adds the Sources the session saved (title, kind, url,
-  document form and identity check state); ``reference`` states what the case's files really are.
+  document form and identity check state); ``include_rows`` adds the Records rows the session committed
+  (with ``collection_row``); ``reference`` states what the case's files really are.
 - ``source_saved``, ``source_count``, ``current_source``, ``compiled_with_backlinks``: the vault's Sources
   and the pages citing them, read by the arm's own code (``arm_side.py sources``), matched to the case's
   files by the SHA-256 of the stored original. ``current_source`` compares stored frontmatter fields
   exactly (``contains``, ``not_contains``, ``eq``, ``ne``; case-insensitive) on the Sources that no
   correction receipt supersedes; ``if_none`` is what it settles to when no such Source exists (false
   by default, because a case that expects a Source has failed when none is kept).
+- ``collection_row``: the rows of the Records collections that the case seeded, read by the arm's own records
+  query (``arm_side.py records``) and compared with the rows the seed left. ``collection`` gains exactly
+  ``equals`` new rows (one by default), each holding every ``where`` condition (the ``current_source``
+  comparisons, over the row's fields), and no ``absent_in`` collection gains a row;
+- ``write_receipt``: the tool results the session saw. Every receipt of a ``tools`` call that came before the
+  session's first ``before`` call contains ``contains`` (true when the session made no such call), so a note
+  written before the row has to carry the product's pointer to the Record that is still owed.
 
 A case may declare ``files`` (built into the work directory at unit time, see ``fixtures.py``),
-``seed_sources`` (captured as Sources before the session) and ``"transport": "http"``, which serves the
-arm over loopback HTTP so the agent can send a file's bytes (``server.py``). Stdio is the default.
+``seed_sources`` (captured as Sources before the session), ``seed_collections`` (Records collections created
+before the session through the arm's own records command: ``manifest_path`` relative to the knowledge base, the
+``manifest`` as a frontmatter mapping or whole text, optional ``body`` and ``rows``, and an optional
+``method_page`` ``{title, note_type, content, revisions}`` written first so the manifest's ``capture.method``
+link resolves, each revision replacing its body, so the last one is the page's current version), a capture
+``prominence`` (set through the arm's own preference path, so the declared-route ``file`` disposition is
+reachable; the shipped default applies when absent) and ``"transport": "http"``, which serves the arm over
+loopback HTTP (``server.py``): a long-lived server that the Claude actor's first turn waits to be warm, and
+the only transport over which an agent can send a file's bytes (a case with ``files`` also gets the handoff
+tools). Stdio is the default. ``"remote_owner": true`` makes the loopback sign-in act as the vault's owner,
+which the arm needs to serve a routed collection's declared method to it. Both actors begin only once
+``recall_context`` answers without an ``index_warming`` abstention (``warmup.py``); the unit records
+``warm_seconds``, and a server that does not warm in time makes the unit unknown. An arm whose manifest does
+not parse ``capture`` is seeded without the declaration and the unit records ``capture_supported: false``.
+A case that seeds collections then has the arm build its indexes (the unit records ``index_build_seconds``),
+as a long-lived vault has them built.
 
 An arm is a checkout: its ``src`` runs the MCP server, its ``plugins/claude-code`` supplies the skill
 and hooks, and its own docs and code supply the guidance text, in native MCP activation mode. Every
 session gets its own vault, state and hook home under a neutral unit id; the arms run interleaved in
 one window, and the arm of a unit is recorded only in ``results.jsonl``.
 
+``--actor openai`` replaces Claude Code with an OpenAI Agents SDK agent on the same stdio server and no
+hooks: the client class of a chat client that has MCP tools and the skill text but no hook surface (see
+``openai_actor.py``). Its unit records token usage and the spend receipt of ``harness openai-credits``.
+
 A unit passes (true), fails (false) or is unknown (null): a harness fault, a seeding error or a
 judge error is unknown, never a failure.
 
     PYTHONPATH=benchmarks:src python -m membench.outcome.incidents \\
         --arm base=../exomem-base --arm changed=. --repeats 3 --run-root /var/tmp/exomem-outcome-evals/runs/incidents-<id>
+
+The same run with the OpenAI actor, under an ``OPENAI_API_KEY`` for the eval account (the Agents SDK
+layers over the interpreter that has the product's dependencies):
+
+    PYTHONPATH=benchmarks:src uv run --no-project --python <that interpreter> --with openai-agents \\
+        python -m membench.outcome.incidents --actor openai --arm changed=. --case existing-workflow --repeats 1 \\
+        --run-root /var/tmp/exomem-outcome-evals/runs/incidents-<id>
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -56,7 +90,9 @@ from epistemic.journeys.f27_replay import (
     fault_reason,
     refuse_unsafe_out_dir,
 )
+from epistemic.journeys.f33_referent_replay import tool_calls
 
+from exomem import prominence as product_prominence
 from membench.trackc.witness_join import parse_stream_json_transcript
 
 from .. import billing
@@ -74,6 +110,7 @@ from ..isolation import (
 )
 from ..judging import Judge, JudgeSpec, grade_item
 from ..record import checkout_state
+from . import openai_actor, warmup
 from .fixtures import KINDS, build_files
 from .server import lay_exomem_command, loopback_mcp
 
@@ -84,9 +121,18 @@ SESSION_TIMEOUT_SECONDS = 900
 JUDGE_TIMEOUT_SECONDS = 300
 SOURCE_CHECKS = ("source_saved", "source_count", "current_source", "compiled_with_backlinks")
 #: The checks this runner implements; a case's `pass` names a subset.
-CHECKS = ("seed_corrected", "called_any", "judge", *SOURCE_CHECKS)
+CHECKS = (
+    "seed_corrected",
+    "called_any",
+    "judge",
+    "collection_row",
+    "write_receipt",
+    *SOURCE_CHECKS,
+)
 TRANSPORTS = ("stdio", "http")
-#: The comparisons of a `current_source` condition: the check's own closed set, not a vocabulary.
+#: The actors a unit may be played by: the runner's own two session drivers.
+ACTORS = ("claude", "openai")
+#: The comparisons of a `current_source` or `collection_row` condition: the checks' own closed set, not a vocabulary.
 CONDITIONS = {
     "contains": lambda text, wanted: wanted in text,
     "not_contains": lambda text, wanted: wanted not in text,
@@ -127,6 +173,11 @@ def validate_case(case: dict) -> None:
         )
     if case.get("transport", "stdio") not in TRANSPORTS:
         raise SystemExit(f"case {case['id']}: transport must be one of {TRANSPORTS}")
+    # Only the loopback server has a sign-in whose principal could be the owner.
+    if "remote_owner" in case and (
+        type(case["remote_owner"]) is not bool or case.get("transport") != "http"
+    ):
+        raise SystemExit(f"case {case['id']}: `remote_owner` is a boolean of an http case")
     if "seed" not in case and "seed_corrected" in rule:
         raise SystemExit(f"case {case['id']}: `seed_corrected` needs a `seed` note")
     if {file["kind"] for file in files.values()} - KINDS:
@@ -153,6 +204,52 @@ def validate_case(case: dict) -> None:
             )
     if "source_count" in rule and type(rule["source_count"].get("equals")) is not int:
         raise SystemExit(f"case {case['id']}: source_count needs an integer `equals`")
+    validate_collections(case)
+
+
+def validate_collections(case: dict) -> None:
+    """Refuse a case whose seeded collections, prominence or row and receipt checks could not read what they name."""
+    rule, seeded = case["pass"], case.get("seed_collections", ())
+    # An unknown level would reach the arm's own preference writer and fail every unit the same way.
+    if "prominence" in case and case["prominence"] not in product_prominence.CANON:
+        raise SystemExit(f"case {case['id']}: prominence must be one of {product_prominence.CANON}")
+    for collection in seeded:
+        page = collection.get("method_page")
+        if not {"manifest_path", "manifest"} <= set(collection) or (
+            page is not None and not {"title", "note_type", "content"} <= set(page)
+        ):
+            raise SystemExit(
+                f"case {case['id']}: a seed collection has a manifest_path, a manifest and, when it names a "
+                "method page, that page's title, note_type and content"
+            )
+    if "collection_row" in rule:
+        spec = rule["collection_row"]
+        named = [spec.get("collection"), *spec.get("absent_in", ())]
+        # A misspelled path reads no collection, so the check could never see a row it expects or forbids.
+        if set(named) - {collection["manifest_path"] for collection in seeded}:
+            raise SystemExit(
+                f"case {case['id']}: collection_row names {named}, and `seed_collections` creates each of them"
+            )
+        if any(c["op"] not in CONDITIONS for c in spec.get("where", ())):
+            raise SystemExit(
+                f"case {case['id']}: collection_row conditions need ops among {sorted(CONDITIONS)}"
+            )
+        # A negative count could never hold, and a count that is not an int would compare unequal to every row count.
+        if "equals" in spec and (type(spec["equals"]) is not int or spec["equals"] < 0):
+            raise SystemExit(
+                f"case {case['id']}: collection_row `equals` is an integer, zero or more"
+            )
+    if rule.get("judge", {}).get("include_rows") and "collection_row" not in rule:
+        raise SystemExit(
+            f"case {case['id']}: the judge's `include_rows` shows what `collection_row` reads"
+        )
+    if "write_receipt" in rule:
+        spec = rule["write_receipt"]
+        # An empty clause is contained in every receipt, so the check would pass whatever the product said.
+        if not spec.get("tools") or not spec.get("contains"):
+            raise SystemExit(
+                f"case {case['id']}: write_receipt needs the `tools` whose receipts it reads and a non-empty `contains`"
+            )
 
 
 def load_cases(selected: list[str] | None, cases_dir: Path | None = None) -> list[dict]:
@@ -264,6 +361,66 @@ def compiled_with_backlinks(facts: dict, fixtures: dict[str, str], names: list[s
     return None if any(page["live"] is None for page in linked) else False
 
 
+def gained_rows(listed: dict, before: dict[str, list[str]], name: str) -> list[dict]:
+    """The rows of the collection ``name`` that the seed did not leave: the session's own."""
+    return [row for row in listed[name]["rows"] if row["record_id"] not in before[name]]
+
+
+def collection_row(listed: dict, before: dict[str, list[str]], spec: dict) -> bool | None:
+    """The collection gained exactly ``equals`` rows (one by default), each holding every condition, and no
+    ``absent_in`` collection gained one.
+
+    A row is new when the seed did not leave its ``record_id``. None when the arm could not list a collection
+    the check reads: an unreadable collection is unknown, never an empty one.
+    """
+    named = [spec["collection"], *spec.get("absent_in", ())]
+    if any("error" in listed[name] for name in named):
+        return None
+    rows = gained_rows(listed, before, spec["collection"])
+    return (
+        len(rows) == spec.get("equals", 1)
+        and all(condition_holds(row, c) for row in rows for c in spec.get("where", ()))
+        and not any(gained_rows(listed, before, name) for name in spec.get("absent_in", ()))
+    )
+
+
+def result_text(content: object) -> str:
+    """A tool result as text: the string itself, or the text of each block of a block list."""
+    if isinstance(content, list):
+        return "\n".join(
+            block["text"] for block in content if isinstance(block, dict) and "text" in block
+        )
+    return content if isinstance(content, str) else json.dumps(content, default=str)
+
+
+def refused(call: dict) -> bool:
+    """Whether a call saved nothing: the transport marked it an error, or the server answered with its error
+    envelope, ``{"error": {...}}``, which the stdio server sends as the result when it refuses a write."""
+    if call["is_error"]:
+        return True
+    try:
+        body = json.loads(call["result"] or "")
+    except ValueError:
+        return False
+    return isinstance(body, dict) and isinstance(body.get("error"), dict)
+
+
+def write_receipt(calls: list[dict], spec: dict) -> bool | None:
+    """Every receipt of a ``tools`` call that came before the first ``before`` call contains ``contains``.
+
+    True when the session made no such call. A refused call left nothing saved, so it owes no receipt.
+    None when a call that was owed a receipt has no result to read.
+    """
+    first = next(
+        (index for index, call in enumerate(calls) if call["name"] in spec.get("before", ())),
+        len(calls),
+    )
+    owed = [call for call in calls[:first] if call["name"] in spec["tools"] and not refused(call)]
+    if any(call["result"] is None for call in owed):
+        return None
+    return all(spec["contains"] in result_text(call["result"]) for call in owed)
+
+
 SOURCE_CHECK_FUNCTIONS = {
     "source_saved": source_saved,
     "source_count": source_count,
@@ -297,9 +454,14 @@ def session_sources(facts: dict, before: list[str]) -> list[dict]:
     return saved
 
 
-def judge_context(spec: dict, saved: list[dict] | None) -> str:
+def judge_context(spec: dict, saved: list[dict] | None, rows: dict | None = None) -> str:
     """What the judge reads besides the turn and the answer; the same view for every arm."""
     parts = []
+    if spec.get("include_rows"):
+        shown = json.dumps(rows, indent=1, default=str) if rows else "none"
+        parts.append(
+            f"Records the assistant committed in this session, by collection, as stored:\n{shown}"
+        )
     if spec.get("include_sources"):
         shown = json.dumps(saved, indent=1) if saved else "none"
         parts.append(f"Sources the assistant saved in this session, as stored:\n{shown}")
@@ -341,17 +503,28 @@ def reads_sources(case: dict) -> bool:
     )
 
 
-def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max_turns: int):
-    """Seed the arm's vault and guidance, then run one session. Returns (seeded note, finished process, record)."""
-    work, block = root / "work", root / "custom-instructions.txt"
-    plugin, vault = arm / "plugins" / "claude-code", fresh_vault(root, arm)
+def collection_paths(rule: dict) -> list[str]:
+    """The Records collections that a ``collection_row`` check reads, as the case names them."""
+    spec = rule.get("collection_row")
+    return [spec["collection"], *spec.get("absent_in", ())] if spec else []
+
+
+def seed_unit(case: dict, arm: Path, root: Path) -> tuple[dict | None, dict, Path]:
+    """Seed the arm's vault, whoever plays the session. Returns (seeded note, unit record, work directory).
+
+    The record keeps what a check compares the session's result with: the Sources and the Records rows that
+    exist before the session, which are the seed's and not the session's to be judged on.
+    """
+    work, vault = root / "work", fresh_vault(root, arm)
     work.mkdir(parents=True)
     http = case.get("transport", "stdio") == "http"
     record = {
-        "instruction_block": lay_instruction_block(block, arm),
         "transport": "http" if http else "stdio",
         "fixtures": build_files(case.get("files", {}), work),
     }
+    if "prominence" in case:
+        # The arm's own preference path: its server and its hooks read the same pinned config file.
+        record["capture_prominence"] = run_arm_side(arm, root, "prominence", case["prominence"])
     seeded = run_arm_side(
         arm, root, "seed", str(vault), str(work), stdin=json.dumps(case.get("seed"))
     )
@@ -359,25 +532,67 @@ def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max
         run_arm_side(
             arm, root, "seed_sources", str(vault), str(work), stdin=json.dumps(case["seed_sources"])
         )
+    if case.get("seed_collections"):
+        record["collections"] = run_arm_side(
+            arm, root, "seed_collections", str(vault), stdin=json.dumps(case["seed_collections"])
+        )
+        # One property of the arm, read once by its own code: whether its manifest carries `capture`.
+        record["capture_supported"] = record["collections"][0]["capture_supported"]
+        # A real vault has its indexes built; the arm's own classes build them, the same way for every arm.
+        record["index_build_seconds"] = run_arm_side(arm, root, "build_indexes", str(vault))["seconds"]
     if reads_sources(case):
-        # The Sources that exist before the session: seeded ones are not the session's to be judged on.
         before = run_arm_side(arm, root, "sources", str(vault))
         record["sources_before"] = [row["path"] for row in before["sources"]]
+    if "collection_row" in case["pass"]:
+        listed = run_arm_side(arm, root, "records", str(vault), *collection_paths(case["pass"]))
+        # A collection that cannot be listed before the session has no rows to tell the session's from.
+        if any("error" in rows for rows in listed.values()):
+            raise RuntimeError(
+                f"a seeded collection could not be listed: {json.dumps(listed)[:300]}"
+            )
+        record["rows_before"] = {
+            name: [row["record_id"] for row in rows["rows"]] for name, rows in listed.items()
+        }
+    return seeded, record, work
+
+
+def play_claude(
+    case: dict,
+    arm: Path,
+    root: Path,
+    work: Path,
+    record: dict,
+    *,
+    executable: Path,
+    model: str,
+    max_turns: int,
+) -> dict:
+    """Run one Claude Code session on the seeded vault.
+
+    Returns the session as every actor does: ``answer``, ``tools`` (the Exomem tools called), ``calls``
+    (each with its input and result), ``fault`` (why the session proves nothing, or None), ``record`` (what
+    the unit keeps about the session) and ``extra`` (what the unit result adds).
+    """
+    block = root / "custom-instructions.txt"
+    plugin = arm / "plugins" / "claude-code"
+    http = record["transport"] == "http"
+    level = case.get("prominence", SHIPPED_PROMINENCE)
+    record["instruction_block"] = lay_instruction_block(block, arm, level)
     tools = ["Read", "Skill"]
     allowed = ["mcp__exomem", "Skill", "Read(./**)", plugin_read_allow(plugin)]
     # The server's native MCP activation mode: the hooks route through the tools, not inject text.
     env = {**claude_env()[0], **hook_env(root), "EXOMEM_RETRIEVE_INJECT": "mcp"}
-    if http:
+    if case.get("files"):
         # What the documented handoff needs from a client: a digest, a descriptor file, and a send. The upload
         # reply names a multipart POST as the send, so `curl` is allowed beside `exomem attach`; the server is
-        # loopback and its bearer dies with the run.
+        # loopback and its bearer dies with the run. A case with no file to hand over gets none of it.
         tools += ["Bash", "Write"]
         # An `Edit` rule covers the Write tool, and the descriptor goes into the work directory.
         allowed += ["Bash(exomem attach:*)", "Bash(sha256sum:*)", "Bash(curl:*)", "Edit(./**)"]
         env["PATH"] = f"{lay_exomem_command(root, arm)}{os.pathsep}{env['PATH']}"
     actor = Arm(
         arm_id="incident",
-        prominence=SHIPPED_PROMINENCE,
+        prominence=level,
         tools=",".join(tools),
         uses_plugin=True,
         allowed_tools=",".join(allowed),
@@ -388,7 +603,19 @@ def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max
     def mint(session: dict) -> str:
         return run_arm_side(arm, root, "mint", stdin=json.dumps(session))["token"]
 
-    with loopback_mcp(root, arm, mint) if http else nullcontext(mcp_server(root, arm)) as server:
+    serving = (
+        loopback_mcp(root, arm, mint, remote_owner=case.get("remote_owner", False))
+        if http
+        else nullcontext(mcp_server(root, arm))
+    )
+    with serving as server:
+        if http:
+            # The loopback server is the long-lived service that the client talks to, so the turn starts on a
+            # warm one. A stdio server is started by Claude Code itself and cannot be warmed beforehand.
+            try:
+                asyncio.run(warmup.await_warm(warmup.ask_over(server), record))
+            except warmup.StillWarming as error:
+                return {"answer": "", "tools": [], "calls": [], "fault": str(error)}
         mcp = root / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"exomem": server}}))
         argv = build_turn_argv(
@@ -410,11 +637,42 @@ def play(case: dict, arm: Path, root: Path, *, executable: Path, model: str, max
     record["seconds"] = round(time.monotonic() - start, 1)
     record["claude_md_sha256"] = hashlib.sha256((work / "CLAUDE.md").read_bytes()).hexdigest()
     (root / "stream.jsonl").write_text(done.stdout)
-    return seeded, done, record
+    transcript = parse_stream_json_transcript(done.stdout.splitlines())
+    init = init_event(done.stdout)
+    record |= {
+        "notional_usd": transcript.total_cost_usd,
+        "model_reported": init.get("model"),
+        "api_key_source": init.get("apiKeySource"),
+        "billing": billing.of_key_source(init.get("apiKeySource")),
+    }
+    fault = fault_reason(done, transcript) or "; ".join(init_faults(init, model=model, exomem=True))
+    invocations, firings = count_hook_activity(done.stdout)
+    prefix = "mcp__exomem__"  # the tool-name prefix that the "exomem" server name in the MCP config fixes
+    return {
+        "answer": transcript.result_text.strip(),
+        "tools": [use.name.removeprefix(prefix) for use in transcript.memory_tool_uses()],
+        "calls": [
+            {
+                "name": call["name"].removeprefix(prefix),
+                "input": call["input"],
+                "result": None if call["result"] is None else result_text(call["result"]),
+                "is_error": call["is_error"],
+            }
+            for call in tool_calls(done.stdout)
+            if call["name"].startswith(prefix)
+        ],
+        "fault": fault or None,
+        "extra": {"hook_invocations": invocations, "capture_nudge_firings": firings},
+    }
 
 
 def judge_answer(
-    case: dict, answer: str, root: Path, judge: Judge, saved: list[dict] | None = None
+    case: dict,
+    answer: str,
+    root: Path,
+    judge: Judge,
+    saved: list[dict] | None = None,
+    rows: dict | None = None,
 ) -> tuple[bool | None, str | None]:
     """The judge check and, when it is not true or false on a verdict, the reason.
 
@@ -427,7 +685,9 @@ def judge_answer(
     row = grade_item(
         judge,
         root.name,
-        JUDGE_PROMPT.format(turn=case["prompt"], answer=answer, extra=judge_context(spec, saved)),
+        JUDGE_PROMPT.format(
+            turn=case["prompt"], answer=answer, extra=judge_context(spec, saved, rows)
+        ),
         spec["schema"],
         out_dir=root,
         pass_name="verdicts",
@@ -442,26 +702,17 @@ def judge_answer(
     return all(row["verdict"].get(k) == v for k, v in spec["require"].items()), None
 
 
-def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> dict:
+def run_unit(
+    case: dict, arm: Path, root: Path, *, judge: Judge, actor: str = "claude", **session
+) -> dict:
     """One fresh session. `passed` is true, false or null; null always comes with a `reason`."""
-    seeded, done, record = play(case, arm, root, **session)
-    transcript = parse_stream_json_transcript(done.stdout.splitlines())
-    init = init_event(done.stdout)
-    record |= {
-        "notional_usd": transcript.total_cost_usd,
-        "model_reported": init.get("model"),
-        "api_key_source": init.get("apiKeySource"),
-        "billing": billing.of_key_source(init.get("apiKeySource")),
-    }
-    fault = fault_reason(done, transcript) or "; ".join(
-        init_faults(init, model=session["model"], exomem=True)
-    )
-    if fault:
-        return {**record, "passed": None, "reason": f"harness fault: {fault}"}
+    seeded, record, work = seed_unit(case, arm, root)
+    record["actor"] = actor
+    played = PLAYERS[actor](case, arm, root, work, record, **session)
+    if played["fault"]:
+        return {**record, "passed": None, "reason": f"harness fault: {played['fault']}"}
     vault = str(root / "vault")
-    # `mcp__exomem__` is the tool-name prefix that the "exomem" server name in the MCP config fixes.
-    tools = [use.name.removeprefix("mcp__exomem__") for use in transcript.memory_tool_uses()]
-    rule, checks, reasons, extra = case["pass"], {}, [], {}
+    rule, checks, reasons, extra = case["pass"], {}, [], dict(played.get("extra", {}))
     if seeded:
         after = run_arm_side(arm, root, "probe", vault, seeded["path"])
         extra["seed_after"] = {
@@ -476,8 +727,32 @@ def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> d
         if corrected is None:
             reasons.append("the arm's status registry could not classify the seeded note")
     if "called_any" in rule:
-        checks["called_any"] = bool(set(tools) & set(rule["called_any"]))
+        checks["called_any"] = bool(set(played["tools"]) & set(rule["called_any"]))
+    if "collection_row" in rule:
+        listed = run_arm_side(arm, root, "records", vault, *collection_paths(rule))
+        extra["rows_after"] = {
+            name: [row["record_id"] for row in rows.get("rows", ())]
+            for name, rows in listed.items()
+        }
+        checks["collection_row"] = collection_row(
+            listed, record["rows_before"], rule["collection_row"]
+        )
+        if checks["collection_row"] is None:
+            reasons.append("the arm could not list a collection that the check reads")
+    if "write_receipt" in rule:
+        checks["write_receipt"] = write_receipt(played["calls"], rule["write_receipt"])
+        if checks["write_receipt"] is None:
+            reasons.append("a write that was owed a receipt has no result in the session")
     facts = saved = None
+    committed = (
+        {
+            name: gained_rows(listed, record["rows_before"], name)
+            for name in listed
+            if "rows" in listed[name]
+        }
+        if "collection_row" in rule
+        else None
+    )
     if "sources_before" in record:
         facts = run_arm_side(arm, root, "sources", vault)
         saved = session_sources(facts, record["sources_before"])
@@ -489,10 +764,9 @@ def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> d
                     reasons.append(UNKNOWN_REASONS[name])
     if "judge" in rule:
         checks["judge"], reason = judge_answer(
-            case, transcript.result_text.strip(), root, judge, saved
+            case, played["answer"], root, judge, saved, committed
         )
         reasons += [reason] if reason else []
-    invocations, firings = count_hook_activity(done.stdout)
     return (
         record
         | extra
@@ -500,11 +774,30 @@ def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> d
             "passed": settle(checks),
             "reason": "; ".join(reasons) or None,
             "checks": checks,
-            "tools": tools,
-            "hook_invocations": invocations,
-            "capture_nudge_firings": firings,
+            "tools": played["tools"],
+            "calls": played["calls"],
         }
     )
+
+
+def play_openai(
+    case: dict, arm: Path, root: Path, work: Path, record: dict, *, model: str, max_turns: int
+) -> dict:
+    """Run one OpenAI Agents SDK session on the seeded vault (``openai_actor.py``), as `play_claude` returns it."""
+    return openai_actor.play(
+        case,
+        arm,
+        root,
+        record,
+        server_instructions=run_arm_side(arm, root, "instructions")["server"],
+        model=model,
+        max_turns=max_turns,
+        timeout=SESSION_TIMEOUT_SECONDS,
+    )
+
+
+#: The session drivers by actor name; each returns the session as `play_claude` documents.
+PLAYERS = {"claude": play_claude, "openai": play_openai}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -512,12 +805,28 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--arm", action="append", required=True, help="NAME=CHECKOUT, repeatable")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--case", action="append", help="case id to run; default all")
-    parser.add_argument("--model", default=ACTOR_MODEL)
-    parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
+    parser.add_argument("--actor", choices=ACTORS, default="claude", help="who plays the session")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=f"default: {ACTOR_MODEL} (claude), {openai_actor.OPENAI_MODEL} (openai)",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help=f"default: {DEFAULT_MAX_TURNS} (claude), {openai_actor.MAX_TURNS} (openai)",
+    )
     parser.add_argument("--run-root", type=Path, required=True)
     # A held-out set lives outside the repository, so no prompt, fixture or iterating session sees it.
     parser.add_argument("--cases-dir", type=Path, default=None, help="directory of case files")
     args = parser.parse_args(argv)
+    model = args.model or (ACTOR_MODEL if args.actor == "claude" else openai_actor.OPENAI_MODEL)
+    max_turns = args.max_turns or (
+        DEFAULT_MAX_TURNS if args.actor == "claude" else openai_actor.MAX_TURNS
+    )
+    if args.actor == "openai":
+        openai_actor.require_sdk(os.environ)
     arms = {name: Path(path).resolve() for name, path in (item.split("=", 1) for item in args.arm)}
     for name, path in arms.items():
         if (
@@ -539,7 +848,7 @@ def main(argv: list[str] | None = None) -> None:
     judge = Judge(JudgeSpec.of("claude", executable=str(envelope.executable)), run_root / "judge")
     manifest = {
         "cli": envelope.version,
-        "actor": {"model_requested": args.model, "max_turns": args.max_turns},
+        "actor": {"name": args.actor, "model_requested": model, "max_turns": max_turns},
         # The billing source every session of this run must report (``billing.py``).
         "billing": billing.declared(),
         "judge": judge.spec.record(),
@@ -550,6 +859,9 @@ def main(argv: list[str] | None = None) -> None:
         },
     }
     (run_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    session = {"model": model, "max_turns": max_turns}
+    if args.actor == "claude":
+        session["executable"] = envelope.executable
     tally: dict[tuple[str, str], Counter] = {}
     for rep in range(1, args.repeats + 1):
         for case in cases:
@@ -562,9 +874,8 @@ def main(argv: list[str] | None = None) -> None:
                         arms[name],
                         run_root / "units" / unit,
                         judge=judge,
-                        executable=envelope.executable,
-                        model=args.model,
-                        max_turns=args.max_turns,
+                        actor=args.actor,
+                        **session,
                     )
                 except Exception as error:  # noqa: BLE001 - a runner or seeding error is unknown, never a product failure
                     record = {"passed": None, "reason": f"error: {error!r:.400}"}

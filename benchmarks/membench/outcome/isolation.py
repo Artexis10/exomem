@@ -109,16 +109,18 @@ def hook_env(root: Path, session: str | None = None) -> dict[str, str]:
     return pins
 
 
-def lay_instruction_block(path: Path, checkout: Path = REPO_ROOT) -> dict:
-    """Write the documented custom-instruction block for the shipped prominence to ``path``.
+def lay_instruction_block(
+    path: Path, checkout: Path = REPO_ROOT, level: str = SHIPPED_PROMINENCE
+) -> dict:
+    """Write the documented custom-instruction block for ``level`` (the shipped prominence by default) to ``path``.
 
     Read out of the doc that ``checkout`` publishes it in at run time, so the arm cannot drift from
     what users are told. Returns the record a manifest keeps: the prominence, where it was read, its digest.
     """
-    block, citation = custom_instructions_block(SHIPPED_PROMINENCE, checkout)
+    block, citation = custom_instructions_block(level, checkout)
     path.write_text(block, encoding="utf-8")
     return {
-        "prominence": SHIPPED_PROMINENCE,
+        "prominence": level,
         "source": citation,
         "sha256": hashlib.sha256(block.encode()).hexdigest(),
     }

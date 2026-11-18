@@ -1374,6 +1374,31 @@ def _observed_claim_counts(
     return counts
 
 
+def routing_visibility(
+    vault_root: Path,
+    *,
+    authorize_path: Any = None,
+    principal: Any = None,
+    purpose: str | None = None,
+) -> Any:
+    """The `keep(path) -> bool` predicate that decides which pages a routed write may name to its caller.
+
+    A write bound to a store decides by that store's own authorization; any other by `authorize_path` or
+    the release plane. Whatever a route names beside the collection, such as its capture method, takes this
+    one predicate, so no page is shown by one rule and withheld by another.
+    """
+    from .governance import egress as egress_module
+
+    root = Path(vault_root)
+    writer = bound_writer(root)
+    keep = (
+        writer._operation.allows_file
+        if writer is not None
+        else authorize_path or egress_module.release_walk_filter(root, principal=principal, purpose=purpose)
+    )
+    return keep if keep is not None else (lambda _path: True)
+
+
 @canonical_read
 def routing_targets(
     vault_root: Path,
@@ -1386,7 +1411,6 @@ def routing_targets(
     """Recompose routing targets after filtering every supporting item."""
     from . import structured_collections as collections_module
     from .collection_store import ownership
-    from .governance import egress as egress_module
 
     root = Path(vault_root)
     writer = bound_writer(root)
@@ -1395,15 +1419,9 @@ def routing_targets(
     if not isinstance(rows, Mapping):
         return []
     try:
-        keep = (writer._operation.allows_file if writer is not None else
-                authorize_path or egress_module.release_walk_filter(
-                    root, principal=principal, purpose=purpose
-                ))
+        keep = routing_visibility(root, authorize_path=authorize_path, principal=principal, purpose=purpose)
     except Exception:  # noqa: BLE001 -- disclosure failure costs the advisory
         return []
-    if keep is None:
-        def keep(_path: str) -> bool:
-            return True
     manifests: dict[str, Any] = {}
     for manifest_path, row in rows.items():
         if type(manifest_path) is not str or not isinstance(row, Mapping):
@@ -1484,6 +1502,7 @@ def _routing_targets(
                 ),
                 natural_key_values=frozenset(natural_values),
                 match=collection_claims.normalize_match(manifest.claim_match),
+                capture_method=manifest.capture_method,
             )
         )
     return targets

@@ -2884,13 +2884,30 @@ def _records_routing_from_terms(
     terms: Sequence[str],
     facets: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any] | None:
-    """Route authored terms through visible projected claims. Advisory; fail open."""
-    try:
-        from . import collection_claims, due_state
+    """Route authored terms through visible projected claims, naming the collection's capture method.
 
-        return collection_claims.route(
-            terms, due_state.routing_targets(vault_root), facets=facets
+    Advisory; fail open.
+    """
+    try:
+        from . import capture_method, collection_claims, due_state
+
+        targets = due_state.routing_targets(vault_root)
+        routed = collection_claims.route(terms, targets, facets=facets)
+        if routed is None:
+            return None
+        declared = next(
+            (target.capture_method for target in targets if target.collection == routed["collection"]), None
         )
+        # Naming the method is a courtesy of the route, never a condition of it: a method that does not
+        # resolve for this caller leaves the route as it was.
+        method = (
+            capture_method.resolve(vault_root, declared, readable=due_state.routing_visibility(vault_root))
+            if declared
+            else None
+        )
+        if method is None:
+            return routed
+        return {**routed, "method": {"title": method.title, "read_ref": method.ref}}
     except Exception:  # noqa: BLE001 -- routing advice never breaks a commit
         log.debug("collection claims routing failed (non-fatal)", exc_info=True)
         return None

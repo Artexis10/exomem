@@ -6,6 +6,10 @@ never parses a note itself.
 
     python arm_side.py seed VAULT WORK          # note JSON (or null) on stdin; places WORK/CLAUDE.md; prints the note
     python arm_side.py seed_sources VAULT WORK  # list of Sources on stdin; captures each; prints the receipts
+    python arm_side.py seed_collections VAULT   # list of collections on stdin; creates each; prints the pages written
+    python arm_side.py prominence LEVEL         # sets the capture prominence; prints the level the arm then resolves
+    python arm_side.py records VAULT PATH...    # prints the rows of each Records collection, by knowledge-base path
+    python arm_side.py instructions             # prints the text the arm's server hands every client
     python arm_side.py probe VAULT PATH         # prints the note at the vault-relative PATH
     python arm_side.py sources VAULT            # prints every Source page and every page citing Sources
     python arm_side.py mint                     # session JSON on stdin; prints a sign-in token for a loopback server
@@ -116,6 +120,188 @@ def seed_sources(vault: Path, work: Path, sources: list[dict]) -> list[dict]:
     return receipts
 
 
+def method_link(vault: Path, path: str, title: str, form: str) -> str:
+    """How a manifest's ``capture.method`` names the page just written: its ``exomem://`` ref (the form the
+    guidance recommends, which needs no resolver), its ``[[title]]`` or its vault-relative path."""
+    from exomem import memory_refs
+    from exomem.vault import parse_frontmatter
+
+    if form == "title":
+        return f"[[{title}]]"
+    if form == "path":
+        return path
+    frontmatter, _, _ = parse_frontmatter((vault / path).read_text(encoding="utf-8"))
+    return memory_refs.memory_ref(frontmatter["exomem_id"])
+
+
+def parses_capture() -> bool:
+    """Whether the arm's own manifest carries a declared capture method.
+
+    An arm from before the declaration shipped stores a `capture` block inertly and never reads it, so
+    seeding one would measure an arm that cannot see the method, and reading it back would fail.
+    """
+    from exomem import structured_collections
+
+    return hasattr(structured_collections.CollectionManifest, "capture_method")
+
+
+def manifest_method(vault: Path, path: str) -> str | None:
+    """The ``capture.method`` that the arm's own manifest parser reads from the collection at ``path``."""
+    from exomem import structured_collections
+
+    return structured_collections.load_manifest(vault, vault / path).capture_method
+
+
+def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
+    """Create each Records collection as the arm's own records command does, with its method page and rows.
+
+    A collection is ``{manifest_path, manifest, body?, rows?, method_page?}``. ``manifest_path`` is relative to
+    the knowledge base. ``manifest`` is the manifest's frontmatter (the arm's own serializer writes it) or its
+    whole text. A method page is ``{title, note_type, content, revisions?, link?}``: it is written before the
+    manifest, which then declares ``capture.method`` as the page's ``link`` form (``ref`` by default), so the
+    link resolves by construction. An arm that does not parse ``capture`` (``parses_capture``) gets the same page
+    as a note and a manifest without the block, and reports ``capture_supported: false``. Each revision replaces the page's body through the arm's edit command, so
+    its current version is the last one. A refused write raises: a case whose seed is missing would measure
+    nothing. The arm's own due-state heal then runs, as the maintenance job of a vault that has held its
+    collections for a while would have run it: the write path routes by that projection.
+    """
+    from exomem import commands, due_state
+    from exomem.governance.principal import owner_principal, request_scope
+    from exomem.vault import (
+        content_hash,
+        kb_root,
+        render_frontmatter_document,
+        serialize_frontmatter,
+    )
+
+    why = "seeded by the incident harness"
+    capture_supported, written = parses_capture(), []
+    with request_scope(owner_principal(surface="mcp")):
+        for spec in collections:
+            page = spec.get("method_page")
+            if page:
+                note = commands.op_note(
+                    vault, title=page["title"], note_type=page["note_type"], content=page["content"]
+                )
+                for body in page.get("revisions", ()):
+                    # The arm's edit is guarded twice: by the hash of the page as it now stands, and by a
+                    # reviewed relation outcome that a preview of the same edit issues.
+                    edit = {
+                        "why": why,
+                        "new_body": body,
+                        "expected_hash": content_hash(
+                            (vault / note["path"]).read_text(encoding="utf-8")
+                        ),
+                    }
+                    preview = commands.op_edit(vault, note["path"], validate_only=True, **edit)
+                    commands.op_edit(
+                        vault,
+                        note["path"],
+                        transition_token=preview["semantic"]["transition_token"],
+                        relation_disposition="reviewed_none",
+                        relation_review_hash=preview["semantic"]["relation_review_hash"],
+                        relation_review_reason="The harness revises the method's wording only.",
+                        **edit,
+                    )
+            manifest = spec["manifest"]
+            if page and capture_supported:
+                manifest = {
+                    **manifest,
+                    "capture": {
+                        "method": method_link(
+                            vault, note["path"], page["title"], page.get("link", "ref")
+                        )
+                    },
+                }
+            if not isinstance(manifest, str):
+                manifest = render_frontmatter_document(
+                    serialize_frontmatter(manifest), spec.get("body", ""), blank_line=True
+                )
+            path = (kb_root(vault) / spec["manifest_path"]).relative_to(vault).as_posix()
+            created = commands.op_record_memory(
+                vault, action="create", manifest_path=path, manifest_text=manifest, why=why
+            )
+            for item in spec.get("rows", ()):
+                created = commands.op_record_memory(
+                    vault, action="append", collection=path, item=item, why=why
+                )
+                if created.get("error") or created.get("operation") != "append":
+                    raise RuntimeError(
+                        f"seeding a row of {path!r} failed: {json.dumps(created)[:300]}"
+                    )
+            written.append(
+                {
+                    "path": path,
+                    "method_page": note["path"] if page else None,
+                    "method_declared": manifest_method(vault, path)
+                    if page and capture_supported
+                    else None,
+                    "capture_supported": capture_supported,
+                }
+            )
+    due_state.reconcile(vault)
+    return written
+
+
+def build_indexes(vault: Path) -> dict:
+    """Build the on-disk indexes that a long-lived vault already has, through the arm's own classes.
+
+    The link graph, the working-set index, the context catalogue and the lexical store. The service builds
+    them as its watcher sees pages change; a vault seeded a moment ago has none, and a turn on it would
+    read ``partial`` for as long as the server runs, because the graph lane has nothing to read.
+    """
+    import time
+
+    from exomem import context_catalogue, epistemic_graph, lexstore, working_set_index
+
+    started = time.perf_counter()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    context_catalogue.ContextCatalogue(vault).rebuild()
+    lexstore.ensure_fresh(vault)
+    return {"seconds": round(time.perf_counter() - started, 2)}
+
+
+def prominence(level: str) -> dict:
+    """Set the capture prominence through the arm's own preference path, and read back what it resolves.
+
+    The server and the hooks of the unit read the same pinned config file, so the declared-route
+    disposition of a write follows this level. ``capture_level`` is what the arm then applies to capture.
+    """
+    from exomem import prominence as arm_prominence
+
+    arm_prominence.write_prominence(level)
+    return {"level": level, "capture_level": arm_prominence.effective_capture_level()}
+
+
+def records(vault: Path, collections: list[str]) -> dict:
+    """The rows of each collection, as the arm's own records query returns them, by knowledge-base path.
+
+    A collection the arm cannot read reports ``error`` and no rows: unknown, never an empty collection.
+    """
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+    from exomem.vault import kb_root
+
+    listed = {}
+    with request_scope(owner_principal(surface="mcp")):
+        for relative in collections:
+            path = (kb_root(vault) / relative).relative_to(vault).as_posix()
+            answer = commands.op_record_memory(vault, action="query", collection=path, limit=500)
+            rows = answer.get("rows")
+            listed[relative] = (
+                {"rows": rows} if isinstance(rows, list) else {"error": json.dumps(answer)[:300]}
+            )
+    return listed
+
+
+def instructions() -> dict:
+    """The text the arm's own server hands every client when it connects."""
+    from exomem.server import SERVER_INSTRUCTIONS
+
+    return {"server": SERVER_INSTRUCTIONS}
+
+
 def sources(vault: Path) -> dict:
     """Every Source page, and every other page that cites Sources, as the arm's own code reads them.
 
@@ -219,6 +405,16 @@ if __name__ == "__main__":
         result = seed(Path(args[0]), Path(args[1]), json.load(sys.stdin))
     elif command == "seed_sources":
         result = seed_sources(Path(args[0]), Path(args[1]), json.load(sys.stdin))
+    elif command == "seed_collections":
+        result = seed_collections(Path(args[0]), json.load(sys.stdin))
+    elif command == "build_indexes":
+        result = build_indexes(Path(args[0]))
+    elif command == "prominence":
+        result = prominence(args[0])
+    elif command == "records":
+        result = records(Path(args[0]), args[1:])
+    elif command == "instructions":
+        result = instructions()
     elif command == "sources":
         result = sources(Path(args[0]))
     elif command == "mint":

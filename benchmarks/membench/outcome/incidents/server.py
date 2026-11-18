@@ -82,11 +82,15 @@ def _stop(server: subprocess.Popen) -> None:
 
 
 @contextmanager
-def loopback_mcp(root: Path, arm: Path, mint: Callable[[dict], str]) -> Iterator[dict]:
+def loopback_mcp(
+    root: Path, arm: Path, mint: Callable[[dict], str], *, remote_owner: bool = False
+) -> Iterator[dict]:
     """Serve the arm's product on 127.0.0.1 and yield the session's ``--mcp-config`` entry.
 
     ``mint`` turns the session fields into the owner's sign-in token (``arm_side.py mint``). The server is
-    stopped when the block ends, whatever the block raises.
+    stopped when the block ends, whatever the block raises. ``remote_owner`` makes that sign-in act as the
+    vault's owner, as the personal service's setup wizard configures it; otherwise the sign-in is a separate
+    principal, and the arm withholds the task context (declared methods and leads) from it.
     """
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -104,6 +108,7 @@ def loopback_mcp(root: Path, arm: Path, mint: Callable[[dict], str]) -> Iterator
         "EXOMEM_GITHUB_USERNAME": login,
         "EXOMEM_GITHUB_USER_ID": str(user_id),
         "EXOMEM_JWT_SIGNING_KEY": signing_root,
+        **({"EXOMEM_OWNER_OAUTH_SUBJECT": f"github:{user_id}"} if remote_owner else {}),
     }
     token = mint(
         {
