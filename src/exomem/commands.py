@@ -10172,7 +10172,12 @@ def _process_media(
             }
 
         results: list[dict[str, object]] = []
-        for binary, relative in selected_paths:
+        for index, (binary, relative) in enumerate(selected_paths):
+            if index:
+                # Each path re-takes the boundary; a keyed write that arrived
+                # meanwhile gets it first, so a long batch slows but never
+                # starves one.
+                manager.yield_to_waiting_writes(vault_root)
             try:
                 result = _run_media_operation(
                     vault_root, binary, operation, language, multilingual, _commit_guard

@@ -349,6 +349,45 @@ def absorbing_busy() -> Iterator[None]:
         _ABSORBING_BUSY.reset(token)
 
 
+#: Called once after THIS thread acquires a vault mutation boundary at depth
+#: 0->1 (`on_boundary_acquired`). For a keyed write whose queue turn ends the
+#: moment its attempt holds the boundary, not when its command returns: the
+#: boundary acquisition is the turn, so it is observed here rather than at the
+#: guard call sites, which a store thread may run on the request's behalf.
+_BOUNDARY_ACQUIRED_OBSERVER: ContextVar[Callable[[], None] | None] = ContextVar(
+    "exomem_boundary_acquired_observer", default=None
+)
+
+
+@contextmanager
+def on_boundary_acquired(callback: Callable[[], None]) -> Iterator[None]:
+    """Call ``callback`` once per outer vault-boundary acquisition while this context is bound.
+
+    Fires on a depth 0->1 acquisition of a ``COORDINATOR_VAULT_BOUNDARY``
+    coordinator only: a re-entrant hold, a borrowed hold (`may_borrow`) and the
+    reserved-identity locks never notify. The callback may run on a store
+    thread when it copied this context to run the write there, so it must be
+    thread-safe, and it must never block on the caller: an observer that could
+    wait would turn a boundary acquisition into a wait-for edge. Exceptions
+    are logged at DEBUG and never break the acquisition.
+    """
+    token = _BOUNDARY_ACQUIRED_OBSERVER.set(callback)
+    try:
+        yield
+    finally:
+        _BOUNDARY_ACQUIRED_OBSERVER.reset(token)
+
+
+def _notify_boundary_acquired(coordinator: VaultMutationCoordinator) -> None:
+    observer = _BOUNDARY_ACQUIRED_OBSERVER.get()
+    if observer is None or coordinator.kind != COORDINATOR_VAULT_BOUNDARY:
+        return
+    try:
+        observer()
+    except Exception:  # noqa: BLE001 - an observer must never break the acquire
+        logger.debug("boundary acquisition observer failed", exc_info=True)
+
+
 def record_client_visible_busy() -> None:
     """Count one MUTATION_BUSY that actually reached a client.
 
@@ -2705,6 +2744,9 @@ class VaultMutationCoordinator:
                 state.acquired_at = acquired_at
                 state.long_holder_seconds = self.long_holder_seconds
                 state.long_warning_emitted = False
+            # The acquire succeeded and the boundary is this thread's: a keyed
+            # write's queue turn ends here, before the hold's work starts.
+            _notify_boundary_acquired(self)
             _log_mutation_lock_event(
                 "mutation_lock_acquired",
                 level=_boundary_event_level(

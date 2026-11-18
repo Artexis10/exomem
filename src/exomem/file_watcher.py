@@ -31,11 +31,13 @@ registry is opportunistic: a missed registration merely costs the old harmless e
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import hashlib
 import json
 import logging
 import os
+import queue
 import stat
 import threading
 import time
@@ -46,11 +48,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import (
+    call_spans,
     capture_inventory,
     freshness,
+    graph_read_publication,
     index_sync,
     media_processing,
     mode,
+    mutation_lock,
     semantic_contract,
     semantic_writes,
     state_paths,
@@ -783,12 +788,13 @@ def _publish_registry_change(
     if not freshness.event_indexes_enabled():
         # Kill switch on: don't even pay the resolve() syscalls in _rel_posix.
         return False
-    corpus_published = index_sync.publish_corpus_delta(
-        vault_root,
-        changed=[path for path in changed if _semantic_markdown(vault_root, path)],
-        deleted=[rel for rel in deleted_rels if _semantic_markdown(vault_root, vault_root / rel)],
-        attempts=2,
-    )
+    with call_spans.span("commit_tail.self_write.corpus"):
+        corpus_published = index_sync.publish_corpus_delta(
+            vault_root,
+            changed=[path for path in changed if _semantic_markdown(vault_root, path)],
+            deleted=[rel for rel in deleted_rels if _semantic_markdown(vault_root, vault_root / rel)],
+            attempts=2,
+        )
     if witness is not None:
         with _WATCHERS_LOCK:
             publishers = tuple(watcher for watcher in _WATCHERS.get(_canon_root(vault_root), ()) if watcher._raw_witness is witness)
@@ -799,13 +805,15 @@ def _publish_registry_change(
     try:
         from . import vault as vault_module
 
-        vault_module.on_inbound_files_changed(vault_root, changed_rels, deleted_rels)
+        with call_spans.span("commit_tail.self_write.inbound"):
+            vault_module.on_inbound_files_changed(vault_root, changed_rels, deleted_rels)
     except Exception:  # noqa: BLE001
         log.debug("self-write inbound publish failed", exc_info=True)
     try:
         from . import find as find_module
 
-        find_module.on_resolver_files_changed(vault_root, changed_rels, deleted_rels)
+        with call_spans.span("commit_tail.self_write.resolver"):
+            find_module.on_resolver_files_changed(vault_root, changed_rels, deleted_rels)
     except Exception:  # noqa: BLE001
         log.debug("self-write resolver publish failed", exc_info=True)
     return corpus_published
@@ -884,7 +892,9 @@ def register_self_write(
             if intent is not None:
                 registered.add(intent)
         _prune_locked(now)
-    published = _publish_registry_change(vault_root, changed=paths, deleted_rels=[])
+    published = _publish_registry_change(
+        vault_root, changed=paths, deleted_rels=[]
+    )
     if published:
         registered, verification_failures = _verify_publication_intents_after_publish(
             intended.values()
@@ -903,25 +913,18 @@ def register_self_write(
     return registered
 
 
-def register_self_write_and_close(
-    vault_root: Path, paths: Iterable[Path], intents: Iterable[_PublicationIntent]
+def _register_self_write_and_close(
+    vault_root: Path,
+    paths: list[Path],
+    intents: tuple[_PublicationIntent, ...],
 ) -> bool:
-    """Register a batch's self-writes, then close its publication intents.
-
-    Returns whether the corpus delta was published. A published delta finalizes
-    the intents, so a later event with the same bytes is the writer's own echo
-    and one with different bytes stays an outside edit. Otherwise every intent
-    aborts and its paths replay to the watchers. Best-effort: a failure aborts
-    the intents too. The synchronous fan-out and a batch under derived custody
-    both close their intents here, so readers see the published delta before
-    the reply in either route.
-    """
-    paths = list(paths)
-    intents = tuple(intents)
+    """`register_self_write_and_close`'s body, shared by its inline and worker routes."""
     published = False
     try:
         registered, published = register_self_write(
-            vault_root, paths, return_publication_result=True
+            vault_root,
+            paths,
+            return_publication_result=True,
         )
         if published:
             finalize_publication_intents(intents, succeeded=registered)
@@ -931,7 +934,170 @@ def register_self_write_and_close(
         if intents:
             abort_publication_intents(intents, force_paths=paths)
         log.debug("self-write suppression registration failed", exc_info=True)
+    except BaseException:  # noqa: BLE001
+        # An interrupt-level escape (e.g. ReadBudgetExhausted under the
+        # worker's copied request context) still owns the intents: abort them
+        # so none stays active, then let the interrupt through.
+        if intents:
+            abort_publication_intents(intents, force_paths=paths)
+        raise
     return published
+
+
+#: How long a commit under the vault boundary waits for its self-write
+#: publication before handing the rest to the worker below. The publication's
+#: inner locks (`_CORPUS_CONTEXT_UPDATE_LOCK`, `_INBOUND_*`, `_RESOLVER_LOCK`)
+#: can sit behind another long hold; the boundary's tail must stay bounded.
+_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS = 3.0
+
+
+class _PublicationHandedOff:
+    """Closed result of `register_self_write_and_close` for the handed-off case.
+
+    Distinct from ``False``: the corpus delta is still owed, but the publish
+    worker owns it, so a caller must not republish the same delta inline.
+    Callers compare with ``is`` / ``is False``, never a truthiness test.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "PUBLICATION_HANDED_OFF"
+
+
+PUBLICATION_HANDED_OFF = _PublicationHandedOff()
+
+_PUBLISH_REQUESTS: queue.Queue = queue.Queue()
+_PUBLISH_WORKER_LOCK = threading.Lock()
+_PUBLISH_WORKER_STARTED = False
+
+
+def _self_write_publish_loop() -> None:
+    """Run each handed-off publication in submission order, forever.
+
+    One worker keeps publications in commit order: a later commit's delta never
+    lands before the one queued ahead of it. Each item runs in the context its
+    submitter captured, so spans and request context attribute as they did."""
+    while True:
+        context, work, done, outcome, deferred = _PUBLISH_REQUESTS.get()
+        try:
+            outcome.append(context.run(work))
+        except BaseException as error:  # noqa: BLE001 - report it to the waiter, never kill the worker
+            outcome.append(error)
+        finally:
+            done.set()
+            if deferred is not None:
+                deferred()
+
+
+def _self_write_publish_queue() -> queue.Queue:
+    global _PUBLISH_WORKER_STARTED
+    with _PUBLISH_WORKER_LOCK:
+        if not _PUBLISH_WORKER_STARTED:
+            threading.Thread(
+                target=_self_write_publish_loop,
+                name="exomem-self-write-publish",
+                daemon=True,
+            ).start()
+            _PUBLISH_WORKER_STARTED = True
+    return _PUBLISH_REQUESTS
+
+
+def register_self_write_and_close(
+    vault_root: Path, paths: Iterable[Path], intents: Iterable[_PublicationIntent]
+) -> bool | _PublicationHandedOff:
+    """Register a batch's self-writes, then close its publication intents.
+
+    Returns whether the corpus delta was published. A published delta finalizes
+    the intents, so a later event with the same bytes is the writer's own echo
+    and one with different bytes stays an outside edit. Otherwise every intent
+    aborts and its paths replay to the watchers. Best-effort: a failure aborts
+    the intents too. The synchronous fan-out and a batch under derived custody
+    both close their intents here, so readers see the published delta before
+    the reply in either route.
+
+    Called while the vault mutation boundary is held, the whole body runs on
+    one module-level worker instead of inline: its registry locks can sit
+    behind another holder's work, and the boundary's tail must stay bounded.
+    The caller waits up to `_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS`; past that
+    it returns `PUBLICATION_HANDED_OFF` — still owed, like False, but the
+    worker owns the delta and the intents (finalizing them on a publish,
+    aborting them with `force_paths` otherwise) — so a caller must not touch
+    the intents or republish the delta inline after handing them here. A cold
+    whole-vault corpus build then runs on the worker: the boundary is not held
+    for it beyond that bound.
+    """
+    paths = list(paths)
+    intents = tuple(intents)
+    if not mutation_lock.current_thread_holds_boundary():
+        return _register_self_write_and_close(vault_root, paths, intents)
+    # The read association's begin/finish only take their try-hold reentrantly,
+    # so the begin must run on this thread while the boundary is held. The
+    # worker's publish adopts it (ADOPTED_OBSERVATION) instead of beginning its
+    # own, and the finish lands here when the publish answered within the
+    # bound, or on the worker — with a bounded wait for the boundary this
+    # thread is about to release — once it is handed off.
+    changed = tuple(path for path in paths if _semantic_markdown(vault_root, path))
+    observation = (
+        graph_read_publication.begin_observation(vault_root, changed, ())
+        if changed
+        else None
+    )
+    claimed = threading.Event()
+    resolved = threading.Event()
+    token = graph_read_publication.ADOPTED_OBSERVATION.set(observation)
+    try:
+        context = contextvars.copy_context()
+    finally:
+        graph_read_publication.ADOPTED_OBSERVATION.reset(token)
+    done = threading.Event()
+    outcome: list[Any] = []
+    deferred = None
+    if observation is not None:
+
+        def deferred() -> None:
+            # The caller claims the finish itself when its wait saw `done`: a
+            # reentrant finish inside its own hold lets the staged proof
+            # complete at that hold's release, as an inline publish did. The
+            # worker finishes only once the caller is resolved without
+            # claiming — the timed-out handoff — and the caller's flag set
+            # makes a late wake a no-op either way.
+            resolved.wait(_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS + 5.0)
+            if claimed.is_set():
+                return
+            claimed.set()
+            graph_read_publication.finish_observation(
+                vault_root,
+                observation,
+                timeout_seconds=_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS,
+                complete_retry_seconds=10.0,
+            )
+
+    _self_write_publish_queue().put(
+        (
+            context,
+            functools.partial(
+                _register_self_write_and_close,
+                vault_root,
+                paths,
+                intents,
+            ),
+            done,
+            outcome,
+            deferred,
+        )
+    )
+    with call_spans.span("commit_tail.self_write.wait"):
+        finished = done.wait(_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS)
+    if finished and observation is not None:
+        claimed.set()
+    resolved.set()
+    if not finished:
+        log.info("self-write publication handed off past the boundary")
+        return PUBLICATION_HANDED_OFF
+    if observation is not None:
+        graph_read_publication.finish_observation(vault_root, observation)
+    return outcome[0] is True
 
 
 def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:
