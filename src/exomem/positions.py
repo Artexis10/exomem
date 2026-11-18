@@ -34,7 +34,7 @@ from .governance import egress, principal
 
 #: The framing passage. It is part of the contract: it never asks the agent to agree with a position. It names the
 #: units as the person's own because the owner gives the trait only to categories that record their positions; in
-#: replays, asking the agent to attribute each line as its text does suppressed carrying the person's position.
+#: replays, asking the agent to attribute each line as its text does left the person's position out of the replies.
 ABOUT = (
     "The person's own recorded positions on this subject, from their notes. Where the turn bears on one, say how "
     "the new evidence relates to it, attributed to them; judge the evidence yourself and say plainly where it does "

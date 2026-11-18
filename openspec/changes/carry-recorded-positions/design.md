@@ -57,12 +57,12 @@ Under a framing that asked the agent to attribute each line as its text does, th
 
 ## Measured
 
-One blind held-out run measured the change. It held 9 unseen cases: 6 positive cases and 3 controls, in which the saved position is contradicted, withdrawn or out of the trait's reach. Two arms ran, the behaviour before this change and this change, with 2 repeats each. A judge scored every reply blind against a reference written for its case. Each figure below is the mean per-case difference, this change minus before, with its 95% confidence interval.
+One blind held-out run measured the change. It held 9 unseen cases: 6 positive cases and 3 controls, in which the saved position is contradicted, withdrawn or out of the trait's reach. Two arms ran, the behaviour before this change and this change, with 2 repeats each. A judge scored every reply blind against a reference written for its case. The judge came from the same model family as the agent under test and scored both arms the same way. Each figure below is the mean per-case difference, this change minus before, with its 95% confidence interval.
 
-- **Position carried.** Replies preserved the person's persisted position and attributed it to them in about two thirds more of the positive cases: +0.67 (0.33 to 0.92).
+- **Position carried.** Final replies preserved the person's persisted position and attributed it to them in about two thirds more of the positive cases: +0.67 (0.33 to 0.92). Counting either reply, the gain is +0.42 (0.08 to 0.75): without the block, the agent often stated the position in its first reply and dropped it once the person questioned the reading.
 - **Final-turn correctness.** It improved: +0.39 (0.17 to 0.61).
 - **No automatic agreement.** It held within its preset bound: −0.06 (−0.17 to 0).
-- **No invented facts.** It did not clear its preset bound; its interval is −0.28 to 0. The change's replies had two isolated slips, an arithmetic error and an unsupported claim to have written a note, against none before. The reference for this criterion was grounded in the seed notes.
+- **No invented facts.** It did not clear its preset bound; its interval is −0.28 to 0. The change's replies had two isolated slips against none before: an arithmetic error, and a write to a note that the case marked as one that must not change. The reference for this criterion was grounded in the seed notes.
 
 ## Risks
 
