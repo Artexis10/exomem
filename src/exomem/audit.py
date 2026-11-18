@@ -3297,7 +3297,7 @@ def _check_unprocessed_sources(
                             ),
                             proposed_fix=(
                                 "Compile a note that cites it (the citation clears the mark), "
-                                "or remove `custody_only` if it should be processed."
+                                "or correct the Source with options.custody_only: false if it should wait for compilation."
                             ),
                             meta=meta,
                         ),
