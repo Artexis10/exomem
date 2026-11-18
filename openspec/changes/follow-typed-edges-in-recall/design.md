@@ -60,14 +60,24 @@ assembly, not traversal.
    No sampled page hit them under all families.
 7. **Agent default.** The connection line ends with one instruction: read a connection when its
    reason bears on the answer. The scaffold skill text says the same in one line.
-8. **Measurement.** `served_context` records each offered connection's relation, target ref and
+8. **Room for the task section.** The map compiles first at `max_chars` less the turn-slice reserve
+   (`TURN_SLICE_SHARE`). At 4,000 characters and a quarter share, the map took about 3,000 characters
+   and the task section 400 to 750, about one lead with its reason. On a vault copy with 60 recorded
+   query turns, lead-first allocation alone served 72 leads and 10 connections (main: 93 and 8). A
+   half share at 4,000 served 181 and 88 but cut the map from 16 lines to 6. A half share at 6,000
+   served 307 leads and 216 connections and kept the map at 17 lines, at similar latency. The share
+   becomes 0.5 and the default `max_chars` and hook render ceiling become 6,000. The cost is about 500
+   more tokens per recall; the ceiling stays 8,000.
+9. **Measurement.** `served_context` records each offered connection's relation, target ref and
    tier, so a later read can be credited. The mechanism metric is connections served per lead
    on leads that have edges.
 
 ## Risks / Trade-offs
 
-- Fewer leads fit when each carries a connection. The outcome round compares lead-first with
-  links-last on the same frozen cases.
+- Fewer leads fit when each carries a connection; the larger packet and share offset this. The
+  outcome round compares main with this change on the same frozen cases.
+- Every recall injects about 500 more tokens. A client can lower `max_chars` or the hook's
+  `EXOMEM_RETRIEVE_INJECT_MAX_CHARS`.
 - The wider `recall` neighbourhood gives the unit lanes more pages, which can add noise. It is
   measured with the same round, and a vault can narrow the profile.
 - Inbound context reads touch other pages. They are bounded to served connections and come from
@@ -80,5 +90,4 @@ override keeps working. A rollback reverts the code and packs.
 
 ## Open Questions
 
-None blocking. The allocation seam is agreed with the owner of the task-context presentation
-before merge.
+None blocking.

@@ -69,3 +69,32 @@ depth at most 2, within the existing node and edge bounds.
 #### Scenario: A plainly linked note reaches the unit lanes
 - **WHEN** a resolved anchor links a note only through `links_to`
 - **THEN** that note is inside the anchor neighbourhood the unit lanes read
+
+## MODIFIED Requirements
+
+### Requirement: Read-only activation operation
+The product SHALL expose a read-only operation `activate_context` that accepts a raw
+user turn (`turn`, non-empty text), an optional `max_chars` (default 6000, clamped
+to 500..8000), an optional declared `purpose`, and an optional `include_timings`
+flag, and returns a working-memory packet. The operation SHALL be reachable over the
+same leaf function on MCP, the CLI (`exomem activate "<turn>"`) and the personal REST
+facade (`/api/activate_context`). It SHALL perform no vault write, SHALL NOT change the
+hits, ordering or envelope of `ask_memory`/`find` for any input, and SHALL run no model
+other than the retrieval scorers ordinary recall already runs.
+
+#### Scenario: Same packet on every door
+- **WHEN** the same turn is submitted through MCP, the CLI and the REST facade against
+  the same vault state and index generation
+- **THEN** the three responses carry the same anchors, roles, units, pointers and
+  budget accounting
+
+#### Scenario: Ordinary recall is untouched
+- **WHEN** `ask_memory` is called with any arguments before and after this change is
+  installed and the activation index exists
+- **THEN** its hits, ordering and envelope are byte-identical
+
+#### Scenario: Kill switch abstains without building
+- **WHEN** `EXOMEM_DISABLE_WORKING_SET` is set in the server process
+- **THEN** `activate_context` returns a packet with `abstained: true` and
+  `abstention.reason = "disabled"`, no activation index is created or opened, and the
+  tool remains on the surface so the tool-surface digest is independent of the switch

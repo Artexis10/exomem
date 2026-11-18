@@ -35,6 +35,11 @@ An agent cannot judge a bare `links_to` line worth a read, so it does not follow
   families to the epistemic ones. Activation uses it for anchor neighbourhoods, and a vault can
   extend it.
 - The connection line tells the agent to read a connection when its reason bears on the answer.
+- The turn slice's share of the packet rises from a quarter to a half, and the default packet size
+  (`max_chars` and the hook's render ceiling) rises from 4,000 to 6,000 characters. With the map
+  holding about 3,000 of 4,000 characters, the task section had room for about one lead with its
+  reason. The larger packet keeps the map at its current size and gives leads and connections
+  about five times the room.
 
 No public input schema changes. The graph remains optional: when it cannot answer, leads and
 anchors are served without connections and the packet reports the gap as today.
@@ -51,6 +56,7 @@ None.
   and the recall profile for anchor neighbourhoods.
 - `graph-traversal-profiles`: a shipped `recall` profile.
 - `context-roles`: a shipped `connections` role on the `graph` lane.
+- `retrieve-inject-hook`: the default render ceiling becomes 6,000 characters.
 
 ## Impact
 
