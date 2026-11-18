@@ -27,15 +27,14 @@ from exomem import (
     graph_sync,
     index_sync,
     media_processing,
-    semantic_contract,
     writer_lease,
 )
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 _OBSERVE_SECONDS = 15.0
-_HOLD_SECONDS = 30.0
 _MEDIA = [f"Knowledge Base/Evidence/Audio/interleave-clip-{index}.m4a" for index in range(5)]
 _SLUGS = [f"interleave-{index}" for index in range(6)]
+_NOTE_RELS = [f"Knowledge Base/Notes/Insights/{slug}.md" for slug in _SLUGS]
 _WORKER_THREAD = "exomem-self-write-publish"
 
 
@@ -72,14 +71,6 @@ def _invoke(command, vault: Path, **kwargs):
                 raise
             time.sleep(delay)
             delay = min(delay * 1.5, 2.0)
-
-
-def _managers(state_dir: Path) -> tuple[writer_lease.LeaseManager, writer_lease.LeaseManager]:
-    config = writer_lease.LeaseConfig(state_dir=state_dir)
-    return (
-        writer_lease.LeaseManager(config, mutation_timeout_seconds=0.05),
-        writer_lease.LeaseManager(config),
-    )
 
 
 def _note_kwargs(vault: Path, index: int, *, links: list[str]) -> dict:
@@ -151,6 +142,12 @@ def _drain_to_empty(root: Path) -> None:
         ):
             return
         graph_drain._work_once(root)  # noqa: SLF001 - the tests' drain driver
+    raise AssertionError(
+        "the graph drain did not empty: "
+        f"paths={deferred_index.list_graph_paths(root)} "
+        f"full_rebuild={deferred_index.graph_full_rebuild_pending(root)} "
+        f"available={EpistemicGraphIndex(root).available()}"
+    )
 
 
 def _await_publication_settle(root: Path) -> None:
@@ -188,17 +185,57 @@ def _corpus_paths(root: Path) -> set[str]:
     return paths
 
 
+def _authored_edges(note_paths: list[str]) -> set[tuple[str, str, str]]:
+    """Only the edges the writes authored — wikilinks and the typed relation.
+    Compiled pages also carry `derived_from` self-edges the test did not write;
+    they are deliberately out of scope."""
+    slug_paths = dict(zip(_SLUGS, note_paths, strict=True))
+    authored: set[tuple[str, str, str]] = set()
+    for index, slug in enumerate(_SLUGS):
+        if index > 0:
+            authored.add((slug_paths[slug], slug_paths[_SLUGS[index - 1]], "links_to"))
+        if index == 0:
+            authored.add((slug_paths[slug], f"{_MEDIA[0]}.md", "links_to"))
+        if index == 1:
+            authored.add((slug_paths[slug], slug_paths[_SLUGS[0]], "supports"))
+    return authored
+
+
+def _integrity_failures(vault: Path, note_paths: list[str]) -> list[str]:
+    """Every way the settled derived state diverges from what was written."""
+    failures: list[str] = []
+    sidecars = [f"{rel}.md" for rel in _MEDIA]
+    edges = _graph_edges(vault)
+    for src, dst, rel in _authored_edges(note_paths):
+        if (src, dst, rel) not in edges:
+            failures.append(f"edge {src} -[{rel}]-> {dst} missing")
+        elif rel == "links_to" and src not in _inbound(vault, dst):
+            failures.append(f"{src} missing from {dst}'s inbound sources")
+    projected = _corpus_paths(vault)
+    graph_files = _graph_files(vault)
+    for rel in (*note_paths, *sidecars):
+        if rel not in graph_files:
+            failures.append(f"{rel} missing from the graph")
+        if rel not in projected:
+            failures.append(f"{rel} missing from the corpus projection")
+    with file_watcher._WATCHERS_LOCK:  # noqa: SLF001
+        failures.extend(
+            f"publication intent still active: {intent.path}"
+            for key, intent in file_watcher._PUBLICATION_INTENTS.items()  # noqa: SLF001
+            if intent.disposition == "active"
+        )
+    return failures
+
+
 def _interleave(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, forced_handoff: bool
-) -> tuple[list[dict], dict, dict]:
+    vault: Path, monkeypatch: pytest.MonkeyPatch, *, force_handoff: bool
+) -> tuple[list[str], list, dict]:
     """Run the batch and the note writes, settle, and return
-    ``(note_results, batch_result, probe)``."""
+    ``(note_paths, close_results, publishes)``."""
     for rel in _MEDIA:
         binary = vault / rel
         binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_bytes(b"\x00\x00\x00\x18ftypM4A fake audio")
-
-    writer, _holder = _managers(tmp_path / "writer-state")
 
     first_hold = threading.Event()
     real_committing = media_processing._committing  # noqa: SLF001
@@ -213,35 +250,43 @@ def _interleave(
 
     monkeypatch.setattr(media_processing, "_committing", slow_committing)  # noqa: SLF001
 
-    # Every publish the self-write path runs, wherever it lands.
+    # Record every self-write close outcome; a handoff releases the worker's
+    # blocked publish below.
+    close_results: list = []
+    release_blocked = threading.Event()
+    real_close = file_watcher.register_self_write_and_close
+
+    def recorded_close(*args, **kwargs):
+        result = real_close(*args, **kwargs)
+        close_results.append(result)
+        if result is file_watcher.PUBLICATION_HANDED_OFF:
+            release_blocked.set()
+        return result
+
+    monkeypatch.setattr(file_watcher, "register_self_write_and_close", recorded_close)
+
+    # Every publish the self-write path runs, wherever it lands. With
+    # force_handoff the first worker publish that touches a test note blocks
+    # until a caller has observed PUBLICATION_HANDED_OFF, so a handoff is
+    # guaranteed rather than timing-dependent.
     publishes: dict[str, list] = {"inline": [], "worker": []}
-    publishes_done = threading.Event()
     real_publish = index_sync.publish_corpus_delta
 
     def probe(root_arg, **kwargs):
-        lane = "worker" if threading.current_thread().name == _WORKER_THREAD else "inline"
+        changed = {str(path) for path in kwargs.get("changed", ())}
+        if (
+            force_handoff
+            and threading.current_thread().name == _WORKER_THREAD
+            and any("interleave-" in path for path in changed)
+            and not release_blocked.is_set()
+        ):
+            release_blocked.wait(_OBSERVE_SECONDS * 4)
         result = real_publish(root_arg, **kwargs)
+        lane = "worker" if threading.current_thread().name == _WORKER_THREAD else "inline"
         publishes[lane].extend(str(path) for path in kwargs.get("changed", ()))
-        publishes_done.set()
         return result
 
     monkeypatch.setattr(index_sync, "publish_corpus_delta", probe)
-
-    corpus_held = threading.Event()
-    release_corpus = threading.Event()
-
-    def hold_corpus_lock() -> None:
-        with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:  # noqa: SLF001 - the incident's contended lock
-            corpus_held.set()
-            # ~4s so some publications exceed the in-boundary bound and hand off.
-            assert release_corpus.wait(_OBSERVE_SECONDS * 2)
-
-    if forced_handoff:
-        bulk = threading.Thread(target=hold_corpus_lock, daemon=True)
-        bulk.start()
-        assert corpus_held.wait(_OBSERVE_SECONDS)
-        release_later = threading.Timer(4.0, release_corpus.set)
-        release_later.start()
 
     batch_result: dict = {}
     batch_error: list[BaseException] = []
@@ -360,9 +405,6 @@ def _interleave(
     finally:
         for thread in threads:
             thread.join(timeout=_OBSERVE_SECONDS * 3)
-        if forced_handoff:
-            release_corpus.set()
-            release_later.cancel()
 
     assert not any(thread.is_alive() for thread in threads), (
         f"threads still running: {[thread.name for thread in threads if thread.is_alive()]}"
@@ -370,14 +412,17 @@ def _interleave(
     assert not batch_error and not note_errors, (batch_error, note_errors)
 
     _await_publication_settle(vault)
-    _drain_to_empty(vault)
     # The fixture vault has never been read; ensure one whole graph exists. An
     # owner may already be mid-rebuild, so wait out the live claim, drive the
     # queued drain work, and only then build synchronously if still missing.
     deadline = time.monotonic() + 120.0
     while not EpistemicGraphIndex(vault).available():
         graph_sync.drain_active_rebuilds(timeout=60.0)
-        _drain_to_empty(vault)
+        if (
+            deferred_index.list_graph_paths(vault)
+            or deferred_index.graph_full_rebuild_pending(vault) is not None
+        ):
+            graph_drain._work_once(vault)  # noqa: SLF001
         if EpistemicGraphIndex(vault).available():
             break
         if time.monotonic() > deadline:
@@ -386,22 +431,21 @@ def _interleave(
             EpistemicGraphIndex(vault).rebuild_all()
         except graph_sync.GraphRebuildInProgress:
             continue
-        _drain_to_empty(vault)
-    created = [note_results[slug] for slug in _SLUGS]
-    return [*created, note_results["edit"], note_results["observe"]], batch_result["result"], publishes
+    _drain_to_empty(vault)
+    note_paths = [note_results[slug]["path"] for slug in _SLUGS]
+    return note_paths, close_results, publishes
 
 
-@pytest.mark.parametrize("forced_handoff", [False, True], ids=["inline", "handed-off"])
+@pytest.mark.parametrize("force_handoff", [False, True], ids=["within-bound", "handed-off"])
 def test_interleaved_media_and_note_writes_leave_the_graph_complete(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, forced_handoff: bool
+    vault: Path, monkeypatch: pytest.MonkeyPatch, force_handoff: bool
 ) -> None:
-    results, _batch, publishes = _interleave(
-        vault, tmp_path, monkeypatch, forced_handoff=forced_handoff
+    note_paths, close_results, publishes = _interleave(
+        vault, monkeypatch, force_handoff=force_handoff
     )
 
-    # Every write committed exactly once: six creates, one edit, one observation.
-    assert len(results) == 8
-    note_paths = [result["path"] for result in results[:6]]
+    # Six creates, one edit, one observation: every write committed exactly once.
+    assert len(note_paths) == 6
     assert len(set(note_paths)) == 6
     for rel in note_paths:
         assert (vault / rel).is_file(), rel
@@ -409,48 +453,18 @@ def test_interleaved_media_and_note_writes_leave_the_graph_complete(
     for rel in sidecars:
         assert (vault / rel).is_file(), rel
 
-    slug_paths = {slug: path for slug, path in zip(_SLUGS, note_paths, strict=True)}
-    edges = _graph_edges(vault)
-    index = EpistemicGraphIndex(vault)
-    assert index.available()
-    # Every expected outgoing edge, plain links and the typed relation alike.
-    for index_, slug in enumerate(_SLUGS):
-        source = slug_paths[slug]
-        targets = {dst for src, dst, _rel in edges if src == source}
-        if index_ > 0:
-            expected = slug_paths[_SLUGS[index_ - 1]]
-            assert expected in targets, f"{source} -> {expected}: {targets}"
-            assert source in _inbound(vault, expected)
-        if index_ == 0:
-            media_dst = f"{_MEDIA[0]}.md"
-            assert media_dst in targets, f"{source} -> {media_dst}: {targets}"
-            assert source in _inbound(vault, media_dst)
-        if index_ == 1:
-            expected = slug_paths[_SLUGS[0]]
-            assert (source, expected, "supports") in edges, (
-                f"typed relation missing: {edges}"
-            )
-            assert source in _inbound(vault, expected)
+    failures = _integrity_failures(vault, note_paths)
+    assert not failures, failures
 
-    # Every written page reached the corpus projection and the graph's files.
-    projected = _corpus_paths(vault)
-    graph_files = _graph_files(vault)
-    for rel in (*note_paths, *sidecars):
-        assert rel in graph_files, f"{rel} missing from the graph"
-        assert rel in projected, f"{rel} missing from the corpus projection"
-
-    # No publication intent left active, and every batch unit completed.
-    with file_watcher._WATCHERS_LOCK:  # noqa: SLF001
-        active = [
-            intent.path
-            for key, intent in file_watcher._PUBLICATION_INTENTS.items()  # noqa: SLF001
-            if intent.disposition == "active"
-        ]
-    assert not active
-    if forced_handoff:
+    if force_handoff:
+        assert any(
+            result is file_watcher.PUBLICATION_HANDED_OFF for result in close_results
+        ), f"no publication handed off: {close_results}"
         assert publishes["worker"], "no publication actually ran on the handoff worker"
 
     # The derived graph equals a fresh rebuild — nothing dropped or doubled.
+    index = EpistemicGraphIndex(vault)
+    assert index.available()
     drained = _graph_edges(vault)
     files_before = _graph_files(vault)
     index.rebuild_all()
@@ -458,56 +472,58 @@ def test_interleaved_media_and_note_writes_leave_the_graph_complete(
     assert _graph_files(vault) == files_before
 
 
-def test_a_dropped_handoff_publication_is_detected(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_dropped_handoff_publication_still_heals(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Negative control: silently drop one worker publication and the
-    completeness assertions above must notice."""
+    """A silently dropped worker publication is lost, and the settle-time
+    machinery — the `freshness.reconcile` walk and `on_inbound_files_changed`
+    patching — re-derives it, so every completeness assertion still holds."""
     real_publish = index_sync.publish_corpus_delta
     dropped: list[str] = []
-    armed = threading.Event()
 
     def drop_first_worker_publish(root_arg, **kwargs):
-        if (
-            armed.is_set()
-            and threading.current_thread().name == _WORKER_THREAD
-            and not dropped
-        ):
-            dropped.extend(str(path) for path in kwargs.get("changed", ()))
-            return True  # swallowed: no abort, no replay
+        if threading.current_thread().name == _WORKER_THREAD and not dropped:
+            changed = {str(path) for path in kwargs.get("changed", ())}
+            if any("interleave-" in path for path in changed):
+                dropped.extend(sorted(changed))
+                return True  # swallowed: no abort, no replay
         return real_publish(root_arg, **kwargs)
 
     monkeypatch.setattr(index_sync, "publish_corpus_delta", drop_first_worker_publish)
 
-    real_close = file_watcher._register_self_write_and_close  # noqa: SLF001
-
-    def armed_close(*args, **kwargs):
-        armed.set()
-        return real_close(*args, **kwargs)
-
-    monkeypatch.setattr(file_watcher, "_register_self_write_and_close", armed_close)
-
-    results, _batch, _publishes = _interleave(
-        vault, tmp_path, monkeypatch, forced_handoff=True
+    note_paths, close_results, _publishes = _interleave(
+        vault, monkeypatch, force_handoff=True
     )
     assert dropped, "no publication ever ran on the worker to be dropped"
-
-    failures: list[str] = []
-    slug_paths = {result["path"] for result in results[:6]}
-    sidecars = {f"{rel}.md" for rel in _MEDIA}
-    edges = _graph_edges(vault)
-    projected = _corpus_paths(vault)
-    graph_files = _graph_files(vault)
-    for rel in (*slug_paths, *sidecars):
-        if rel not in graph_files:
-            failures.append(f"{rel} missing from the graph")
-        if rel not in projected:
-            failures.append(f"{rel} missing from the corpus projection")
-    for src in slug_paths:
-        for dst in {d for s, d, _r in edges if s == src}:
-            if src not in _inbound(vault, dst):
-                failures.append(f"{src} missing from {dst}'s inbound sources")
-    assert failures, (
-        f"a silently dropped handed-off publication changed nothing the graph "
-        f"or the projection serves: dropped={dropped}"
+    assert any(
+        result is file_watcher.PUBLICATION_HANDED_OFF for result in close_results
     )
+
+    failures = _integrity_failures(vault, note_paths)
+    assert not failures, failures
+
+
+def test_a_missing_authored_edge_is_detected(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: the graph fan-out drops one path's authored edges at
+    the row-building seam both the upsert and the rebuild share, and the
+    completeness check reports exactly those missing edges."""
+    victim = _NOTE_RELS[3]
+    real_edges = epistemic_graph._structural_edges_for_page  # noqa: SLF001
+
+    def skip_victim(vault_root, page, state, **kwargs):
+        if page.rel_path == victim:
+            return []
+        return real_edges(vault_root, page, state, **kwargs)
+
+    monkeypatch.setattr(
+        epistemic_graph, "_structural_edges_for_page", skip_victim  # noqa: SLF001
+    )
+
+    note_paths, _close_results, _publishes = _interleave(
+        vault, monkeypatch, force_handoff=False
+    )
+
+    failures = _integrity_failures(vault, note_paths)
+    assert failures == [f"edge {victim} -[links_to]-> {_NOTE_RELS[2]} missing"], failures
