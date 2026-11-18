@@ -1820,6 +1820,31 @@ def _connection_context(
     return None
 
 
+def _link_display_prose(vault_root: Path, text: str, *, resolver: Any) -> str:
+    """`text` with each wikilink shown as the name a reader sees: the alias, else the resolved
+    title, else the target's last path segment. Callers quote a line only once every link on
+    it resolves to a page the caller may see, so each rendered name is visible."""
+    from . import vault as vault_module
+
+    pieces: list[str] = []
+    cursor = 0
+    for match in vault_module.iter_body_wikilinks(text):
+        inner = match.group(1)
+        _target, _separator, alias = inner.partition("|")
+        display = alias.strip()
+        if not display:
+            _norm, _warning, candidate = vault_module._normalize_wikilink(
+                inner, vault_root, resolver=resolver, strict=False
+            )
+            title = getattr(candidate, "display_title", None) if candidate is not None else None
+            display = str(title) if title else vault_module.split_wikilink_target(inner)[0].rsplit("/", 1)[-1]
+        pieces.append(text[cursor : match.start()])
+        pieces.append(display)
+        cursor = match.end()
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _connection_why(
     vault_root: Path, *, relation: str, direction: str, authoring_rel: str,
     target_rel: str, authoring_body: str | None, target_body: str | None,
@@ -1843,8 +1868,14 @@ def _connection_why(
             )
             if not bare:
                 marker = markdown_relations.bullet_marker_length(line)
-                prose = " ".join(egress.without_wikilinks(line[marker:]).split())
-                if prose and prose.casefold().rstrip(":") != relation.casefold():
+                # A bullet that is only links carries no prose of its own, so the lede stands in.
+                stripped = " ".join(egress.without_wikilinks(line[marker:]).split())
+                if stripped and stripped.casefold().rstrip(":") != relation.casefold():
+                    prose = " ".join(
+                        _link_display_prose(vault_root, line[marker:], resolver=resolver).split()
+                    )
+                    for mark in ".,;:!?":
+                        prose = prose.replace(f" {mark}", mark)
                     context = egress.prose_for_caller(vault_root, prose, owner_path=authoring_rel)
     if not context and target_body:
         context = working_set_index.lede(
@@ -1944,7 +1975,12 @@ def read_connections(
         for _tier, _open_flag, _position, connection in ordered:
             if budget_exhausted("working_set.connection_why"):
                 # The connections still serve; only the context clause goes unfilled.
-                out.append(connection)
+                out.append(
+                    replace(
+                        connection,
+                        why=f"{connection.relation} ({connection.direction})",
+                    )
+                )
                 continue
             authoring_rel = seed if connection.direction == "outbound" else connection.target_path
             target_rel = connection.target_path if connection.direction == "outbound" else seed
@@ -2804,6 +2840,8 @@ def _graph_lane(
     ]
     if not seeds:
         return ()
+    if budget_exhausted("working_set.graph_connections"):
+        return ()
     indexable = _store_indexable(vault_root)
     catalogue = context_catalogue.ContextCatalogue(Path(vault_root))
     by_path = {
@@ -2814,8 +2852,6 @@ def _graph_lane(
         and (indexable is None or indexable(entry.path))
     }
     if not by_path:
-        return ()
-    if budget_exhausted("working_set.graph_connections"):
         return ()
     try:
         connections = read_connections(

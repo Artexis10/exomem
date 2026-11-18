@@ -64,9 +64,9 @@ def test_a_lead_lists_typed_links_first_and_adds_no_neighbour_as_a_lead(vault: P
         ("links_to", "inbound", "Knowledge Base/Notes/Insights/inbound-note.md", "inbound-note", 3),
     ]
     # The report is linked once in prose as well as by the relation bullet; the `why`
-    # quotes the first line that carries its link.
-    assert links[0]["why"] == "evidenced_by (outbound): The report is ."
-    assert links[2]["why"] == "links_to (inbound): See ."
+    # quotes the first line that carries its link, with each link shown as its title.
+    assert links[0]["why"] == "evidenced_by (outbound): The report is calibration-report."
+    assert links[2]["why"] == "links_to (inbound): See alignment-visit."
     assert all(len(link["why"]) <= 140 for link in links)
     assert "links_omitted" not in _lead(task, lead)
     # The old fixed expansion made each neighbour a lead tagged `graph`.

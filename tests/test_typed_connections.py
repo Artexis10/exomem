@@ -57,8 +57,9 @@ def test_an_inbound_replaces_edge_ranks_before_the_pages_own_links(vault: Path, 
     assert first["relation"] == "supersedes"
     assert first["direction"] == "inbound"
     assert first["tier"] == -1
-    # The authoring line carries prose beyond the relation and link, so it is quoted.
-    assert first["why"] == "supersedes (inbound): supersedes after the review board"
+    # The authoring line carries prose beyond the relation and link, so it is quoted with the
+    # link shown as the lead's title.
+    assert first["why"] == "supersedes (inbound): supersedes alignment-visit after the review board"
 
 
 def test_invented_vault_relations_rank_by_behaviour_not_key(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,3 +199,48 @@ def test_recall_traverse_link_and_source_edges_but_not_implements(vault: Path) -
     assert {edge["relation_type"] for edge in context["edges"]} >= {"derived_from", "links_to"}
     assert "implements" not in {edge["relation_type"] for edge in context["edges"]}
     assert "implementation" not in context["included_relation_families"]
+
+
+def test_a_quoted_line_names_every_link_it_carries(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A line holding two visible links shows both titles in the `why`, not an empty gap."""
+    first = _linked(vault, "calibration-report")
+    second = _linked(vault, "site-notes")
+    lead = _page(vault, "alignment-visit", body=(
+        f"{LEAD_BODY}\nBoth [[{first.removesuffix('.md')}]] and [[{second.removesuffix('.md')}]] apply here.\n"
+    ))
+    task = _discover(vault, monkeypatch)
+    links = _lead(task, lead)["links"]
+    assert {link["target_ref"] for link in links} == {first, second}
+    for link in links:
+        assert link["why"] == "links_to (outbound): Both calibration-report and site-notes apply here."
+
+
+def test_a_spent_connection_budget_still_names_the_relation(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the why budget exhausted the connection still serves, its reason reduced to relation and direction."""
+    target = _linked(vault, "calibration-report")
+    lead = _page(vault, "alignment-visit", body=f"{LEAD_BODY}\n- [[{target.removesuffix('.md')}]]\n")
+    real = working_set.budget_exhausted
+    monkeypatch.setattr(
+        working_set, "budget_exhausted",
+        lambda stage, **kwargs: stage == "working_set.connection_why" or real(stage, **kwargs),
+    )
+    task = _discover(vault, monkeypatch)
+    assert _lead(task, lead)["links"][0]["why"] == "links_to (outbound)"
+
+
+def test_each_served_lead_keeps_its_first_connection_until_room_runs_out(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leads are admitted with their first connection; the lead no room holds is cut, and methods are never displaced."""
+    targets = [_linked(vault, f"reference-{index}") for index in range(3)]
+    for index, target in enumerate(targets):
+        _page(vault, f"alignment-{index}", body=(
+            f"{LEAD_BODY}\n- [technique] Inspect the optical alignment. ^step{index}\n"
+            f"- [[{target.removesuffix('.md')}]]\n"
+        ))
+    packet = _discover_packet(vault, monkeypatch, max_chars=1700)
+    task = packet["task_context"]
+    served = task["candidates"]
+    assert 0 < len(served) < 3
+    assert all(len(item["links"]) == 1 and "links_omitted" not in item for item in served)
+    assert len(task["methods"]["items"]) == len(served)
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
