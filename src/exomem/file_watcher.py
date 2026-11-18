@@ -51,6 +51,7 @@ from . import (
     call_spans,
     capture_inventory,
     freshness,
+    graph_read_publication,
     index_sync,
     media_processing,
     mode,
@@ -769,11 +770,7 @@ def _semantic_markdown(root: Path, path: Path) -> bool:
 
 
 def _publish_registry_change(
-    vault_root: Path,
-    changed: list[Path],
-    deleted_rels: list[str],
-    *,
-    populate_on_miss: bool = True,
+    vault_root: Path, changed: list[Path], deleted_rels: list[str]
 ) -> bool:
     """Update freshness + inbound for a server-authored change.
 
@@ -781,12 +778,7 @@ def _publish_registry_change(
     write DID change the vault — so the freshness/inbound registries must still
     see it, or `find` would serve stale results for that file until the next
     reconcile. A live registry is patched immediately; an in-flight replacement
-    seed retains the target state for its final swap (guards inside).
-
-    ``populate_on_miss=False`` skips the cold whole-vault corpus build, for a
-    publication handed off from inside the mutation boundary: the build can
-    outlast the boundary's bounded tail, and a reader builds the corpus on
-    demand anyway."""
+    seed retains the target state for its final swap (guards inside)."""
     witness = capture_inventory.raw_witness(vault_root)
     if witness is not None:
         for path in (*changed, *(vault_root / rel for rel in deleted_rels)):
@@ -802,7 +794,6 @@ def _publish_registry_change(
             changed=[path for path in changed if _semantic_markdown(vault_root, path)],
             deleted=[rel for rel in deleted_rels if _semantic_markdown(vault_root, vault_root / rel)],
             attempts=2,
-            populate_on_miss=populate_on_miss,
         )
     if witness is not None:
         with _WATCHERS_LOCK:
@@ -833,7 +824,6 @@ def register_self_write(
     paths: Iterable[Path],
     *,
     return_publication_result: bool = False,
-    populate_on_miss: bool = True,
 ) -> set[_PublicationIntent] | tuple[set[_PublicationIntent], bool]:
     """Record server-authored markdown replacements so their watcher echo is
     dropped. Best-effort: unreadable/gone files are skipped (they simply won't
@@ -903,7 +893,7 @@ def register_self_write(
                 registered.add(intent)
         _prune_locked(now)
     published = _publish_registry_change(
-        vault_root, changed=paths, deleted_rels=[], populate_on_miss=populate_on_miss
+        vault_root, changed=paths, deleted_rels=[]
     )
     if published:
         registered, verification_failures = _verify_publication_intents_after_publish(
@@ -927,8 +917,6 @@ def _register_self_write_and_close(
     vault_root: Path,
     paths: list[Path],
     intents: tuple[_PublicationIntent, ...],
-    *,
-    populate_on_miss: bool,
 ) -> bool:
     """`register_self_write_and_close`'s body, shared by its inline and worker routes."""
     published = False
@@ -937,7 +925,6 @@ def _register_self_write_and_close(
             vault_root,
             paths,
             return_publication_result=True,
-            populate_on_miss=populate_on_miss,
         )
         if published:
             finalize_publication_intents(intents, succeeded=registered)
@@ -992,13 +979,15 @@ def _self_write_publish_loop() -> None:
     lands before the one queued ahead of it. Each item runs in the context its
     submitter captured, so spans and request context attribute as they did."""
     while True:
-        context, work, done, outcome = _PUBLISH_REQUESTS.get()
+        context, work, done, outcome, deferred = _PUBLISH_REQUESTS.get()
         try:
             outcome.append(context.run(work))
         except BaseException as error:  # noqa: BLE001 - report it to the waiter, never kill the worker
             outcome.append(error)
         finally:
             done.set()
+            if deferred is not None:
+                deferred()
 
 
 def _self_write_publish_queue() -> queue.Queue:
@@ -1034,19 +1023,55 @@ def register_self_write_and_close(
     it returns `PUBLICATION_HANDED_OFF` — still owed, like False, but the
     worker owns the delta and the intents (finalizing them on a publish,
     aborting them with `force_paths` otherwise) — so a caller must not touch
-    the intents or republish the delta inline after handing them here. That
-    handed-off publication also skips the cold whole-vault corpus build, which
-    a reader runs on demand.
+    the intents or republish the delta inline after handing them here. A cold
+    whole-vault corpus build then runs on the worker: the boundary is not held
+    for it beyond that bound.
     """
     paths = list(paths)
     intents = tuple(intents)
     if not mutation_lock.current_thread_holds_boundary():
-        return _register_self_write_and_close(
-            vault_root, paths, intents, populate_on_miss=True
-        )
+        return _register_self_write_and_close(vault_root, paths, intents)
+    # The read association's begin/finish only take their try-hold reentrantly,
+    # so the begin must run on this thread while the boundary is held. The
+    # worker's publish adopts it (ADOPTED_OBSERVATION) instead of beginning its
+    # own, and the finish lands here when the publish answered within the
+    # bound, or on the worker — with a bounded wait for the boundary this
+    # thread is about to release — once it is handed off.
+    changed = tuple(path for path in paths if _semantic_markdown(vault_root, path))
+    observation = (
+        graph_read_publication.begin_observation(vault_root, changed, ())
+        if changed
+        else None
+    )
+    claimed = threading.Event()
+    resolved = threading.Event()
+    token = graph_read_publication.ADOPTED_OBSERVATION.set(observation)
+    try:
+        context = contextvars.copy_context()
+    finally:
+        graph_read_publication.ADOPTED_OBSERVATION.reset(token)
     done = threading.Event()
     outcome: list[Any] = []
-    context = contextvars.copy_context()
+    deferred = None
+    if observation is not None:
+
+        def deferred() -> None:
+            # The caller claims the finish itself when its wait saw `done`: a
+            # reentrant finish inside its own hold lets the staged proof
+            # complete at that hold's release, as an inline publish did. The
+            # worker finishes only once the caller is resolved without
+            # claiming — the timed-out handoff — and the caller's flag set
+            # makes a late wake a no-op either way.
+            resolved.wait(_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS + 5.0)
+            if claimed.is_set():
+                return
+            claimed.set()
+            graph_read_publication.finish_observation(
+                vault_root,
+                observation,
+                timeout_seconds=_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS,
+            )
+
     _self_write_publish_queue().put(
         (
             context,
@@ -1055,17 +1080,22 @@ def register_self_write_and_close(
                 vault_root,
                 paths,
                 intents,
-                populate_on_miss=False,
             ),
             done,
             outcome,
+            deferred,
         )
     )
     with call_spans.span("commit_tail.self_write.wait"):
         finished = done.wait(_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS)
+    if finished and observation is not None:
+        claimed.set()
+    resolved.set()
     if not finished:
         log.info("self-write publication handed off past the boundary")
         return PUBLICATION_HANDED_OFF
+    if observation is not None:
+        graph_read_publication.finish_observation(vault_root, observation)
     return outcome[0] is True
 
 

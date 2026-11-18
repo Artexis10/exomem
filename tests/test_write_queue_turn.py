@@ -312,7 +312,9 @@ def test_a_publication_blocked_on_the_corpus_lock_releases_the_boundary_then_fin
     )
     assert published is file_watcher.PUBLICATION_HANDED_OFF  # the worker publishes after release
     assert completed.wait(_OBSERVE_SECONDS)
-    assert calls and calls[0].get("populate_on_miss") is False
+    # The worker holds no boundary, so its publish uses the default: a cold
+    # corpus still gets warmed, just not under the boundary's bounded tail.
+    assert calls and "populate_on_miss" not in calls[0]
 
 
 def test_the_bounded_tail_is_generic_across_inner_locks(
@@ -388,7 +390,7 @@ def test_a_publish_with_no_boundary_held_stays_inline_and_populates_on_miss(
     file_watcher.register_self_write_and_close(vault, [page], [])
 
     assert completed.wait(_OBSERVE_SECONDS)
-    assert calls and calls[0].get("populate_on_miss") is True
+    assert calls and "populate_on_miss" not in calls[0]
 
 
 def test_a_multi_path_reprocess_lets_a_keyed_edit_commit_mid_batch(

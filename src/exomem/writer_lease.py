@@ -431,6 +431,27 @@ def _drain_post_terminal_housekeeping(queue: list[Callable[[], None]]) -> None:
             logger.warning("post-terminal housekeeping failed", exc_info=True)
 
 
+def _moved_planned_write(error: BaseException) -> bool:
+    """Whether a planned-write-moved race lies anywhere in the cause chain.
+
+    Tool layers wrap the raw signal (`AuxiliaryGuardMoved`,
+    `RawEnumerationMoved`) in their own error types (`NoteError`,
+    `SemanticWriteError`) before it reaches the lease; the chain still carries
+    it, and only these two markers ever name the absorbable pre-commit race —
+    never a guard on the write's own basis."""
+    from .relation_review import AuxiliaryGuardMoved
+    from .source_capture import RawEnumerationMoved
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (AuxiliaryGuardMoved, RawEnumerationMoved)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _with_post_terminal_fanout_acknowledgement(
     result: Any, reports: list[Any], *, drain_failed: bool
 ) -> Any:
@@ -7461,18 +7482,17 @@ class LeaseManager:
         def absorbing_guard_race() -> Any:
             # The write's turn now ends at boundary acquisition, so its
             # pre-boundary planning can run beside an earlier write's commit:
-            # a guard that planned a since-committed file fails with
-            # PathGuardError, where the in-boundary commit already calls the
-            # same race a moved planned write. Report it the same way and the
-            # loop re-plans it behind the line. After a commit it is never a
-            # race, so it propagates.
-            from .source_capture import RawEnumerationMoved
-            from .vault import PathGuardError
-
+            # a server-planned auxiliary that moved (AuxiliaryGuardMoved) or a
+            # staged source that vanished mid-enumeration (RawEnumerationMoved)
+            # is what the in-boundary commit already calls a moved planned
+            # write. Report it the same way and the loop re-plans it behind
+            # the line. A guard on the write's own basis, and anything after a
+            # commit, still propagates.
             try:
                 return attempt()
-            except (PathGuardError, RawEnumerationMoved) as error:
-                if commit_state["observed"]:
+            except Exception as error:
+                # Tool layers may wrap the marker before it reaches here.
+                if commit_state["observed"] or not _moved_planned_write(error):
                     raise
                 raise mutation_lock.planned_write_moved_busy() from error
 
@@ -7648,18 +7668,16 @@ class LeaseManager:
         retry_token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(
             _CapturePreparationRetry(attempt.deadline, admit_preparation_retry) if eligible else None
         )
-        from .source_capture import RawEnumerationMoved
-        from .vault import PathGuardError
-
         try:
             with mutation_lock.absorbing_busy() if eligible else nullcontext():
                 try:
                     return run()
-                except (PathGuardError, RawEnumerationMoved) as error:
+                except Exception as error:
                     # A planned file a queued writer committed while this
                     # attempt waited: the request thread's next attempt
-                    # re-plans it, as the in-line route already does.
-                    if commit_state["observed"]:
+                    # re-plans it, as the in-line route already does. Tool
+                    # layers may wrap the marker before it reaches here.
+                    if commit_state["observed"] or not _moved_planned_write(error):
                         raise
                     raise mutation_lock.planned_write_moved_busy() from error
         except OpError as error:
