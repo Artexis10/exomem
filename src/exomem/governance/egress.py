@@ -2283,6 +2283,13 @@ def _page_bytes(vault_root: Path, rel_path: str) -> bytes:
     from ..vault_store import read
 
     stored = read.owned_bytes(vault_root, rel_path)
+    if stored is None and not _is_markdown_path(rel_path):
+        from .. import media_store, reserved_paths
+
+        try:
+            return media_store.read_original_bytes(vault_root, rel_path).data
+        except reserved_paths.ReservedPathLeafError as error:
+            raise OSError("original bytes are unavailable") from error
     return (vault_root / rel_path).read_bytes() if stored is None else stored
 
 
@@ -6193,7 +6200,7 @@ def _postfilter(
     if result is None:
         return None
     inventory_projection = result if command_name == "inspect_captured_sources" and isinstance(result, dict) else None
-    capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
+    capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture", "erase_captured_source"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
     if inventory_projection is not None or capture_attempt or command_name == "inspect_capture_erasure_policy":
         from ..source_capture import require_authority
 
@@ -6520,6 +6527,8 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "settle_source_capture",
         # Host policy metadata contains no Source content; namespace authority still gates lookup and release.
         "inspect_capture_erasure_policy",
+        # Erasure names its target reference and needs whole-namespace authority at lookup and release.
+        "erase_captured_source",
         "preserve_evidence",
         "preserve_artifacts",
         "compile_source",
@@ -6716,6 +6725,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "fix": "dry-run-default",
         "reconcile": "dry-run-opt-in",
         "backfill-ids": "dry-run-default",
+        "convert-originals": "dry-run-default",
         "maintenance-job": "structure",
         "maintenance-job-cancel": "mutation",
         "held-resolve": "mutation",
@@ -6731,7 +6741,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "list": "structure",
         "create": "validation",
         "append": "validation",
-        "move": "mutation",
+        # A move with `validate_only` is its preview, which writes nothing.
+        "move": "validation",
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
@@ -7524,10 +7535,13 @@ class _ArtifactReferenceGate:
         self.purpose = _declared_purpose(self.vault_root, self.who, purpose)
         self.verdicts: dict[str, bool] = {}
         self.census = artifact_census.CensusView.empty()
+        self.filings = self.census.filings
         self.tombstone_paths: Mapping[str, tuple[str, ...]] = {}
         self.tombstone_literals = artifact_census.LiteralAliases()
         # Path-shaped tokens that the census lacked, checked on disk once each.
         self._directly: dict[str, tuple[str, ...]] = {}
+        # Originals that the census lists no file for, each judged once on what its page binds; see `_filing`.
+        self._filed: dict[str, tuple[str, ...] | None] = {}
         # One gate pass shares one lifecycle view, as the release walk does.
         with call_spans.span("egress.artifact_gate.tombstones"):
             self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
@@ -7554,19 +7568,56 @@ class _ArtifactReferenceGate:
     def _index(self) -> None:
         self._index_entered = True
         self.census = artifact_census.request_census(self.vault_root)
+        self.filings = self.census.filings
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
             self.tombstones, managed_root_rel()
         )
 
-    def _paths_for(self, alias: str) -> tuple[str, ...]:
+    def _paths_for(self, alias: str) -> tuple[str, ...] | None:
         key = alias.casefold()
-        return tuple(sorted({*self.census.paths(key), *self.tombstone_paths.get(key, ())}))
+        found = (*self.census.paths(key), *self.tombstone_paths.get(key, ()))
+        return self._with_filings(found, self.filings.paths(key))
 
     def _directly_named(self, token: str) -> tuple[str, ...]:
         found = self._directly.get(token)
         if found is None:
             found = self._directly[token] = artifact_census.direct_paths(self.vault_root, token)
         return found
+
+    def _filing(self, logical: str) -> tuple[str, ...] | None:
+        """The path that a reference to the original at `logical`, a path the census lists no file at, is judged on.
+
+        The page `<logical>.md` proposed it. A pooled filing keeps no file at its path, and that path is decided as
+        an ordinary file's is, from the shared object's held metadata, as its download is. An original that the page
+        binds but whose bytes are elsewhere, such as an evicted one, is judged on the page. A page that binds no
+        original, such as a note with a dot in its name, gives no path, and an unreadable page gives `None`.
+        """
+        if logical not in self._filed:
+            companion = f"{logical}.md"
+            try:
+                bound = originals.bound_companion(self.vault_root, logical)
+                if bound is None or bound[0] != companion:
+                    self._filed[logical] = ()
+                else:
+                    pooled = originals.pooled(self.vault_root, logical) is not None
+                    self._filed[logical] = (logical if pooled else companion,)
+            except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+                self._filed[logical] = None  # An unreadable page cannot prove it binds nothing; withhold the mention.
+        return self._filed[logical]
+
+    def _with_filings(self, found: Iterable[str], proposed: tuple[str, ...]) -> tuple[str, ...] | None:
+        """`found`, and the originals among the census's `proposed` filings that their pages bind.
+
+        A proposed original that an ordinary file holds is in `found` already. `None` means one page was unreadable.
+        """
+        judged = set(found)
+        for logical in proposed:
+            if logical not in judged:
+                filed = self._filing(logical)
+                if filed is None:
+                    return None
+                judged.update(filed)
+        return tuple(sorted(judged))
 
     @staticmethod
     def _unwrap(value: str) -> tuple[str, bool]:
@@ -7608,23 +7659,23 @@ class _ArtifactReferenceGate:
         token = unquote(token).replace("\\", "/").strip().strip("/")
         if not token:
             return ()
-        direct = self._paths_for(token)
-        if direct:
+        # Each lookup also takes the originals that a pooled archive keeps no file for, so that a reference to one
+        # resolves to the same paths as a reference to an ordinary file would. `None` withholds the reference.
+        if (direct := self._paths_for(token)) != ():
             return direct
         sibling = None
         if directory is not None and "/" not in token:
             sibling = f"{directory.rstrip('/')}/{token}" if directory else token
-            direct = self._paths_for(sibling)
-            if direct:
+            if (direct := self._paths_for(sibling)) != ():
                 return direct
         if "/" not in token:
-            named = self.census.names(token.casefold())
-            if named:
-                return tuple(sorted(named))
+            key = token.casefold()
+            if (named := self._with_filings(self.census.names(key), self.filings.names(key))) != ():
+                return named
             if wikilink or "." not in token:
-                stemmed = self.census.stems(Path(token).stem.casefold())
-                if stemmed:
-                    return tuple(sorted(stemmed))
+                key = Path(token).stem.casefold()
+                if (stemmed := self._with_filings(self.census.stems(key), self.filings.stems(key))) != ():
+                    return stemmed
         if self.census.published:
             # A published census lists no directory, so a file created a moment
             # ago may be missing from it. A token with the shape of a vault path

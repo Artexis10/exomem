@@ -247,6 +247,15 @@ _ADOPTION_TRIGGER = (
     "Source/Evidence by role, never MIME. Drafts not handed over stay ephemeral."
 )
 
+#: Where a captured document's identity comes from. An agent that took it from a search hit stored a
+#: citing work as the article it cites, and a remembered DOI as another Source's URL; the capture
+#: reply now shows the document's own. A custody line here did not change whether agents keep a
+#: user's file (real-model rounds, 2026-11-17), so this carries identity only.
+_ORIGINAL_CAPTURE = (
+    "Take a document's title, authors and DOI from the document itself; fix a wrong Source "
+    "with options.correction."
+)
+
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
 #: Shared like the doctrine above, so the block and bootstrap give one route.
 _DELIVERY_CAPTURE = (
@@ -255,6 +264,8 @@ _DELIVERY_CAPTURE = (
     "inference."
 )
 
+#: The identity rule rides the per-turn `capture_policy` only: the bootstrap core is at its byte
+#: ceiling, and the scaffold's research and ingest skills carry the full rule.
 _ARTIFACT_ADOPTION_CAPTURE = (
     " "
     + _ADOPTION_TRIGGER
@@ -809,7 +820,7 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
     return {
         "disposition": disposition,
         "link_acceptance": link_acceptance,
-        "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_DELIVERY_CAPTURE}",
+        "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_ORIGINAL_CAPTURE} {_DELIVERY_CAPTURE}",
     }
 
 

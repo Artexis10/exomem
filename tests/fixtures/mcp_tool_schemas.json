@@ -677,6 +677,7 @@
             "files.reclassify",
             "files.create",
             "files.append",
+            "files.move",
             "episodes.material",
             "episodes.inspect",
             "episodes.candidates",
@@ -703,6 +704,7 @@
             "maintenance.cutover",
             "maintenance.fix",
             "maintenance.backfill_ids",
+            "maintenance.convert_originals",
             "maintenance.reconcile",
             "maintenance.job",
             "maintenance.structured_files",
@@ -841,6 +843,7 @@
             "session.close",
             "maintenance.fix",
             "maintenance.backfill_ids",
+            "maintenance.convert_originals",
             "maintenance.reconcile",
             "maintenance.cancel_job",
             "maintenance.held_resolve",
@@ -1386,6 +1389,10 @@
         },
         "why": {
           "type": "string"
+        },
+        "document_form": {
+          "type": "string",
+          "description": "The form of this record of the work, as an open slug such as abstract."
         },
         "options": {
           "type": "object",

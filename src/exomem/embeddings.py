@@ -48,7 +48,7 @@ from . import (
 )
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM as VECTOR_DIM  # the legacy width, re-exported
-from .embedding_index import EmbeddingIndex, expected_parent_state
+from .embedding_index import EmbeddingIndex, PageScorer, expected_parent_state
 from .vector_index_common import vec_gate as _vec_gate
 
 log = logging.getLogger(__name__)
@@ -1756,6 +1756,33 @@ def peek_embedding_index(vault_root: Path) -> EmbeddingIndex | None:
     if index.path != serving_path:
         return None
     return index
+
+
+def resident_page_scorer(vault_root: Path) -> PageScorer | None:
+    """A scorer bound to the resident recall matrix that serves now, or None when none serves this read.
+
+    Scoring pages through it costs those pages' rows, not the vault. It never encodes and never loads a matrix on this
+    thread: a one-shot process never loads one, so a cold matrix there reads None, and a service whose matrix is cold
+    starts its one background load and reads None. Its `token` names the matrix it scores against, so a result kept
+    under that token is correct for as long as a later read gets the same token. A vector scored through it must be
+    in the sidecar's space: a caller that encoded one checks the encoder's fingerprint against the sidecar's first.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    from . import readiness
+
+    try:
+        index = peek_embedding_index(vault_root)
+        if index is None or readiness.should_defer("embeddings"):
+            return None
+        if not readiness.runtime_managed() and index.resident_matrix() is None:
+            return None
+        return index.page_scorer()
+    except recall_space.CorpusMatrixCold:
+        return None
+    except Exception:  # noqa: BLE001 - a failed read is a reading that did not run; the caller reports that state
+        log.debug("resident page scorer unavailable", exc_info=True)
+        return None
 
 
 def get_embedding_index(vault_root: Path, *, path: Path | None = None) -> EmbeddingIndex:

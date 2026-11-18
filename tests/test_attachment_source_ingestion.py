@@ -784,9 +784,15 @@ def test_the_moved_page_points_at_the_moved_bytes(
         promotion_reason="the appliance failed; this is the proof of purchase",
     )
 
+    from exomem import page_lineage, record_formats
+
     page = (vault / f"{destination}.md").read_text(encoding="utf-8")
     assert f"evidence_file: {destination}" in page
-    assert added.artifact_path not in page
+    # The page's lineage keeps the path it left; nothing else names the old bytes.
+    unmoved = record_formats.splice_markdown_frontmatter(
+        page, {}, delete_fields=(page_lineage.LINEAGE_FIELD,)
+    )
+    assert added.artifact_path not in unmoved
     # Identity survives the move: this is the same captured item, reclassified.
     assert "title: Warranty receipt" in page
     assert "original_filename: receipt.png" in page
@@ -1315,6 +1321,18 @@ def test_transfer_artifact_refuses_an_unknown_lane(vault: Path) -> None:
 
     with pytest.raises(ValueError, match="INVALID_MODE"):
         commands.op_transfer_artifact(vault, operation="upload", lane="wherever")
+
+
+def test_an_upload_without_a_token_names_the_held_route(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agents that asked for a plain upload on a server without a token gave up and saved nothing."""
+    from exomem import commands
+
+    monkeypatch.delenv("EXOMEM_UPLOAD_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="hold=true and expected_sha256"):
+        commands.op_transfer_artifact(vault, operation="upload", lane="source")
 
 
 def test_an_upload_lands_in_the_lane_its_token_was_minted_for(

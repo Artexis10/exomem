@@ -1047,6 +1047,21 @@ def _drain_background_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -
 
 
 @pytest.fixture(autouse=True)
+def _launcher_support_ends_with_its_test():
+    """No test hands its launcher-support claim to the next.
+
+    A standalone server start claims support for every lifecycle format for the rest of its process. In the
+    suite, that claim would let a later test's new vault start shared storage, which records a format that a
+    managed upgrade then requires.
+    """
+    from exomem import artifact_lifecycle
+
+    claimed = artifact_lifecycle._supported
+    yield
+    artifact_lifecycle._supported = claimed
+
+
+@pytest.fixture(autouse=True)
 def _quiesce_graph_rebuilds():
     """Let no graph rebuild outlive the test that started it.
 
@@ -1210,6 +1225,10 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # synchronous by default and let its focused recovery tests opt back into
     # the real background path.
     monkeypatch.setenv("EXOMEM_SYNC_DUE_STATE_WARM", "1")
+    # The ownership rotation asks about never-asked pages once a day, so any test that
+    # reads due state would otherwise gain items it did not create. Its own tests set a
+    # daily slice.
+    monkeypatch.setenv("EXOMEM_OWNERSHIP_ROTATION_DAILY", "0")
 
 
 @pytest.fixture

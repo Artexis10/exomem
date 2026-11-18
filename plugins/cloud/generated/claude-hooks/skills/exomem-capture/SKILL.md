@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 4224edce1af25b35f8b365df6267fd7ce234f0cacad05b51c76d324f05ad0caf
+  skill_contract: dd7e6c0eaccb191345b9313dadaf81159181c4f621c16d0cd9d0948b3066300d
   version: "0.1.0"
 ---
 
@@ -24,8 +24,9 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Content outside the managed Knowledge Base is
+read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
@@ -126,7 +127,7 @@ carry transient progress; capture reusable decisions and verified milestones.
    `references/writing.md` § Names in another script.
 
 ## Lifecycle
-Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
+Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome. When a write receipt or recall names a collection's capture method, read it and follow it.
 
 ## Artifact role and current state
 Read the supporting units for `artifact_role_promotion` and
@@ -189,7 +190,7 @@ transient participant stays in source/note context. Do not create a parallel
 page when an existing active note or entity should be edited, linked, or
 superseded.
 
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

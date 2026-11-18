@@ -751,11 +751,44 @@ before the upgrade, as "A release that changes the collection store's schema" in
 
 ### A supervisor older than the vault's state
 
-Held-upload cancellation also requires lifecycle support from the launcher
-and the upgrade operator. A new worker alone cannot activate this format. The
-worker accepts support only through its launch arguments; an inherited
-environment setting cannot supply it. Update an older launcher through the
-offline maintenance procedure before cancelling held uploads.
+Shared original storage and held-upload cancellation also require lifecycle
+support from the launcher and the upgrade operator. A new worker alone cannot
+activate either format. The worker accepts support only through its launch
+arguments; an inherited environment setting cannot supply it. Update an older
+launcher through the offline maintenance procedure before you convert
+originals or cancel held uploads. Until then, a conversion refuses with
+`ORIGINAL_POOL_LIFECYCLE_REQUIRED` and moves nothing.
+
+A new archive records that it starts in shared original storage. The first
+worker start with launcher support turns that storage on before the worker
+serves a request. A standby has no launcher support, so a promoted worker
+turns it on at promotion. Behind an older launcher, the worker keeps the new
+archive in ordinary storage and keeps the record. Its startup log and the
+`original_storage` block of `/health/ready` name the fix: update the launcher,
+then restart the service. Originals filed before then keep their ordinary
+files.
+
+An archive can keep its originals in shared storage while its state does not
+record that format, for example after a plain folder copy or a Cloud import.
+A worker with launcher support records the format at its start. Behind an
+older launcher, the worker refuses to start with
+`SHARED_ORIGINALS_LAUNCHER_UPDATE_REQUIRED`, because an older release would
+read the archive's originals as missing. Update the launcher, then restart the
+service.
+
+#### Rollback floor for shared original storage
+
+An archive or Cloud cell created on this release or a later one records
+shared original storage once that storage turns on. A release without shared
+storage then refuses it at startup. To recover, roll forward to this release
+or a later one. To move the archive to an earlier release instead, make a
+compatibility export, as "Downgrade to a release without shared storage" in
+`docs/deployment.md` describes.
+
+An upgrade never changes the format of an existing archive or cell. Only the
+owner's conversion moves an existing archive into shared storage. Until that
+conversion, shared storage never stops an archive created before this release
+from returning to an earlier release.
 
 An upgrade that removes cancellation support first stops the serving worker
 and its descendants. The current interpreter then finishes cancellation
@@ -767,8 +800,10 @@ Cancellation cleanup retires only its temporary-upload requirement. It cannot
 remove any other recorded format requirement.
 
 A standalone server, including a Cloud cell, is its own launcher, so it can
-cancel held uploads without this update. An older release refuses a vault that
-recorded the cancellation format. Before you start an older release on that
+convert originals and cancel held uploads without this update. An older
+release refuses an archive in shared original storage, and no offline cleanup
+removes that format. An older release also refuses a vault that recorded the
+cancellation format. Before you start an older release on that
 vault, stop the server, then run
 `exomem maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations`.
 

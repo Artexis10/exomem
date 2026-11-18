@@ -180,6 +180,9 @@ class CaptureAttemptLedger:
             conn.execute("CREATE INDEX IF NOT EXISTS capture_attempts_expiry ON capture_attempts (boundary_id, state, expires_at, ticket) WHERE custody_pending=0")
             conn.execute("CREATE INDEX IF NOT EXISTS capture_attempts_gc ON capture_attempts (boundary_id, gc_after, ticket) WHERE gc_after IS NOT NULL AND custody_pending=0")
             conn.execute("CREATE TABLE IF NOT EXISTS capture_attempt_custody (ticket TEXT PRIMARY KEY, allocation TEXT, observed_ref TEXT, publication_state TEXT NOT NULL)")
+            # Erasure reaches a retired Source's allocations by reference without scanning attempts.
+            conn.execute("CREATE INDEX IF NOT EXISTS capture_attempt_custody_source ON capture_attempt_custody "
+                         "(json_extract(allocation,'$.source_ref')) WHERE allocation IS NOT NULL")
             conn.execute("CREATE TABLE IF NOT EXISTS capture_attempt_residue (ticket TEXT NOT NULL, owner TEXT NOT NULL, locator TEXT NOT NULL, version TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(ticket,owner,locator,version))")
             self.ledger_id = conn.execute("SELECT ledger_id FROM capture_attempt_ledger WHERE singleton=1").fetchone()[0]
 
@@ -236,6 +239,30 @@ class CaptureAttemptLedger:
                 conn.execute("UPDATE capture_attempt_custody SET publication_state='published' WHERE ticket=?", (ticket,))
                 self._refresh_custody_pending(conn, ticket)
 
+    def retire_allocations(self, reference: str, *, limit: int = 16) -> bool:
+        """Drop a retired Source's private path from its allocations; True once none retains it."""
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT ticket,allocation FROM capture_attempt_custody "
+                                "WHERE json_extract(allocation,'$.source_ref')=? AND allocation IS NOT NULL "
+                                "AND (json_extract(allocation,'$.canonical_path') IS NOT NULL "
+                                "OR publication_state NOT IN ('published','retired')) LIMIT ?",
+                                (reference, limit + 1)).fetchall()
+            for ticket, raw in rows[:limit]:
+                allocation = {key: value for key, value in json.loads(raw).items() if key != "canonical_path"}
+                conn.execute("UPDATE capture_attempt_custody SET allocation=?,publication_state=CASE "
+                             "WHEN publication_state='published' THEN 'published' ELSE 'retired' END WHERE ticket=?",
+                             (_json(allocation), ticket))
+                self._refresh_custody_pending(conn, ticket)
+        return len(rows) <= limit
+
+    def allocated_identity(self, reference: str) -> dict | None:
+        """The reserved identity of one attempt that allocated this reference, without a Source read."""
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT a.reservation FROM capture_attempt_custody c JOIN capture_attempts a "
+                               "ON a.ticket=c.ticket WHERE json_extract(c.allocation,'$.source_ref')=? "
+                               "AND c.allocation IS NOT NULL LIMIT 1", (reference,)).fetchone()
+        return None if row is None else CaptureReservation.model_validate_json(row[0]).source_identity
+
     def reserve_residue(self, ticket: str, owner) -> None:
         with self.store._connect() as conn:
             if conn.execute("SELECT 1 FROM capture_attempt_residue WHERE ticket=? AND owner=? AND locator=? AND version=?",
@@ -255,7 +282,7 @@ class CaptureAttemptLedger:
         conn.execute(
             "UPDATE capture_attempts SET custody_pending="
             "EXISTS(SELECT 1 FROM capture_attempt_residue WHERE ticket=? AND state!='retired') OR "
-            "EXISTS(SELECT 1 FROM capture_attempt_custody WHERE ticket=? AND allocation IS NOT NULL AND publication_state!='published') "
+            "EXISTS(SELECT 1 FROM capture_attempt_custody WHERE ticket=? AND allocation IS NOT NULL AND publication_state NOT IN ('published','retired')) "
             "WHERE ticket=?", (ticket, ticket, ticket),
         )
 
@@ -271,7 +298,7 @@ class CaptureAttemptLedger:
         if row[0] is not None:
             allocation = json.loads(row[0])
             targets.append({"source_ref": allocation["source_ref"], "source_hash": allocation["source_hash"]})
-            if row[2] != "published":
+            if row[2] not in ("published", "retired"):
                 state = "unknown"
         unresolved = [{"owner": item[0], "locator": item[1], "version": item[2]} for item in residues if item[3] != "retired"]
         return {"custody_state": "pending" if unresolved else state, "owned_targets": targets,

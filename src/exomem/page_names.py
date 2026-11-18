@@ -30,6 +30,7 @@ from . import (
     reserved_paths,
     semantic_contract,
     vault,
+    writer_lease,
 )
 from .cli_ops import OpError
 from .governance import egress
@@ -87,7 +88,7 @@ def read_identity(root: Path, rel_path: str) -> PageIdentity | None:
 
 
 class AmbiguousTitle(OpError):
-    """Several pages the caller may see share a title; the refusal lists up to `MAX_CANDIDATES`."""
+    """Several pages the caller may see answer one name; the refusal lists up to `MAX_CANDIDATES`."""
 
 
 def resolve_reference(root: Path, value: str, *, serve_stale: bool = False) -> str:
@@ -138,8 +139,14 @@ def _identity_owners(root: Path, serve_stale: bool) -> Iterable[str]:
     return tuple(owner for _path, owner in owners)
 
 
-def _paths_for_head(root: Path, head: str, *, serve_stale: bool) -> list[str]:
-    """The pages this caller may see whose id head is `head`."""
+def _paths_for_head(
+    root: Path, head: str, *, serve_stale: bool, resolver_for: Callable[[], Any | None] | None = None
+) -> list[str]:
+    """The pages this caller may see whose id head is `head`.
+
+    A page that holds no id is found through the broad resolver, which `resolver_for` supplies as for a
+    title (see `resolve_page`); when it gives none, such a page stays unresolved.
+    """
     # The head holds the first 35 bits of an id, and its first 8 hex digits are all inside them, so
     # they narrow the owners before each survivor is checked in full.
     leading = base64.b32decode((head + "a").upper()).hex()[:8]
@@ -162,7 +169,9 @@ def _paths_for_head(root: Path, head: str, *, serve_stale: bool) -> list[str]:
         if paths:
             return sorted(paths)
         # A page with no id of its own is named by a hash of its path.
-        resolver = find.shared_resolver(root)
+        resolver = resolver_for() if resolver_for is not None else find.shared_resolver(root)
+        if resolver is None:
+            return []
         visible = egress.visible_page_filter(root)
         return sorted(
             candidate.path
@@ -180,10 +189,9 @@ def _carries_head(root: Path, rel_path: str, head: str) -> bool:
     return found is not None and found.id.split(".", 1)[0] == head
 
 
-def _ambiguous(
-    root: Path, shown: str, paths: list[str], field: str, *, by_id: bool
-) -> AmbiguousTitle:
-    """The refusal for several visible pages that one title or id head names."""
+def _ambiguous(root: Path, paths: list[str], field: str, *, named: str) -> AmbiguousTitle:
+    """The refusal for several visible pages that one value names; `named` says what they share,
+    by the step that matched them (`resolve_page`)."""
     identities = [
         found
         for found in (read_identity(root, path) for path in paths[:_MAX_CANDIDATES_READ])
@@ -196,7 +204,6 @@ def _ambiguous(
     candidates = [
         {**found.row(), "path": found.path} if twins else found.row() for found in shown_pages
     ]
-    named = f"match the id {shown}" if by_id else f"are titled \u201c{shown}\u201d"
     return AmbiguousTitle(
         "AMBIGUOUS_REFERENCE",
         f"{len(paths)} pages {named}.",
@@ -223,14 +230,20 @@ def resolve_page(
     prefer: Callable[[str], bool] | None = None,
     field: str = "path",
     serve_stale: bool = False,
+    resolver_for: Callable[[], Any | None] | None = None,
 ) -> str:
     """The path of the page `value` names, as a title or a short id when it is neither a ref nor a path.
 
-    Order: a memory ref; an existing file path; a short id; a title. A value that names nothing is
-    returned as the path it always was, so today's NOT_FOUND and create-missing paths still apply.
+    Order: a memory ref; an existing file path; a short id; in a read, a path or a bare stem that a
+    moved page left, as a link to it resolves; a title. A write keeps its value literal, so it never
+    lands on the page that left it. A value that names nothing is returned as the path it always
+    was, so today's NOT_FOUND and create-missing paths still apply.
     `prefer` narrows several title matches to the pages it accepts (an edit prefers a page it can
     edit) before the call refuses. `field` is the command argument that held `value`, which the
     refusal's retry replaces with the id of the page the caller picks.
+    `resolver_for` gives the broad resolver that the title and the no-id short-id steps read. Left out it is the shared one,
+    which a cold process builds in full, as a write may. A read on a request path passes a lookup that
+    never builds; when it returns None the title stays unresolved, as one that names nothing.
     """
     root = Path(root)
     raw = str(value or "").strip()
@@ -238,7 +251,9 @@ def resolve_page(
     if not raw or raw.lower().startswith("exomem://") or _names_a_file(root, raw, visible):
         return resolve_reference(root, value, serve_stale=serve_stale)
     if page_ids.is_page_id(raw):
-        paths = _paths_for_head(root, raw.split(".", 1)[0], serve_stale=serve_stale)
+        paths = _paths_for_head(
+            root, raw.split(".", 1)[0], serve_stale=serve_stale, resolver_for=resolver_for
+        )
         if len(paths) > 1:
             # Two pages share a 35-bit head; the version the caller read tells them apart.
             paths = [
@@ -247,12 +262,31 @@ def resolve_page(
                 if (found := read_identity(root, path)) is not None and found.id == raw
             ] or paths
         if len(paths) > 1:
-            raise _ambiguous(root, raw, paths, field, by_id=True)
+            raise _ambiguous(root, paths, field, named=f"match the id {raw}")
         if paths:
             return resolve_reference(root, paths[0])
         # No page holds that id: the value may still be a title of the same shape.
+    resolver = resolver_for() if resolver_for is not None else find.shared_resolver(root)
+    if resolver is None:
+        return resolve_reference(root, raw)
+    moved: list[str] = []
+    # The resolver's own lineage steps. A short id has already won; a live stem or title wins
+    # over a prior stem inside `prior_stem_pages`.
+    lineage, left = (
+        (vault.prior_path_pages, f"once lived at \u201c{raw}\u201d")
+        if "/" in raw
+        else (vault.prior_stem_pages, f"once had the file name \u201c{raw}\u201d")
+    )
+    if writer_lease.invocation_reads():
+        with egress.decide_without_receipt():
+            moved = lineage(root, raw, resolver, visible=visible)
+    if len(moved) > 1 and prefer is not None:
+        moved = [path for path in moved if prefer(path)] or moved
+    if len(moved) > 1:
+        raise _ambiguous(root, moved, field, named=left)
+    if moved:
+        return resolve_reference(root, moved[0], serve_stale=serve_stale)
     key = vault.title_key(raw)
-    resolver = find.shared_resolver(root)
     with egress.decide_without_receipt():
         matches = vault.wikilink_candidates(
             resolver.candidates_by_key,
@@ -267,7 +301,7 @@ def resolve_page(
     if len(paths) > 1 and prefer is not None:
         paths = [path for path in paths if prefer(path)] or paths
     if len(paths) > 1:
-        raise _ambiguous(root, raw, paths, field, by_id=False)
+        raise _ambiguous(root, paths, field, named=f"are titled \u201c{raw}\u201d")
     return resolve_reference(root, paths[0] if paths else raw)
 
 

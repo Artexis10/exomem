@@ -212,7 +212,7 @@ def _inbound(vault_root: Path, path: str) -> list[dict[str, Any]]:
     keep = egress.restricted_release_filter(vault_root)
     return [
         {"path": link.path, "line": link.line_number}
-        for link in vault_module.find_inbound_wikilinks(vault_root, path, visible=keep)
+        for link in vault_module.find_inbound_wikilinks(vault_root, path, visible=keep, lineage=False)
     ]
 
 

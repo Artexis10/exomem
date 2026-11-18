@@ -1515,3 +1515,58 @@ def test_the_promote_endpoint_hands_the_supervisors_request_budget_to_the_standb
         )
         assert invalid.status_code == 400, unusable
     assert received == [30.0, None], "an unusable budget must not reach promotion"
+
+
+def test_a_promotion_refused_for_an_arrived_pooled_archive_tells_the_supervisor_to_update_the_launcher(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Catches a refused promotion whose reply says "this worker is not a standby", which sends the operator after the
+    wrong fault: the copy's shared storage lacks its recorded format and only a launcher update lets it be served."""
+    import shutil
+
+    from fastmcp import FastMCP
+    from starlette.testclient import TestClient
+
+    from exomem import artifact_lifecycle, init, original_pool, server_assets, state_migration
+
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    init.init_vault(tmp_path / "source")
+    vault = tmp_path / "copied"
+    shutil.copytree(tmp_path / "source", vault, symlinks=True)  # A plain copy records no format in its new state.
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    state_migration.require_vault_state_ready(vault)
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    mcp = FastMCP("promote-refusal-test")
+    server_assets.register_asset_routes(mcp, vault_root=vault)
+
+    refused = TestClient(mcp.http_app()).post("/control/promote", json={"migrated": False, "request_seconds": 30})
+
+    assert refused.status_code == 409
+    assert refused.json()["code"] == original_pool.LauncherUpdateRequired.code
+    assert "docs/managed-service-upgrades.md" in refused.json()["error"]
+
+
+def test_promotion_activates_a_new_archives_shared_storage_that_the_standby_could_not(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Catches a managed upgrade whose promoted worker never activates a new archive's shared storage: a standby proves
+    no launcher support, so promotion is that worker's first capable start."""
+    from exomem import artifact_lifecycle, init, original_pool, state_migration
+
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset())
+    vault = tmp_path / "vault"
+    init.init_vault(vault)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    assert not artifact_lifecycle.supports(state_migration.SHARED_ORIGINALS_COMPATIBILITY_ID)
+
+    service_standby.promote(vault, migrated=False)
+
+    assert original_pool.enabled(vault)
+    assert not state_migration.shared_originals_intent(vault)

@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.188.0](https://github.com/Artexis10/exomem/compare/v0.187.0...v0.188.0) (2026-11-17)
+
+
+### Features
+
+* **ownership:** ask the connected agent whether a page belongs in its project ([#2903](https://github.com/Artexis10/exomem/issues/2903)) ([32e22c0](https://github.com/Artexis10/exomem/commit/32e22c042a64a1250aa91048b133c7b8805fdce8))
+* **storage:** keep one copy of identical originals in shared storage ([#2887](https://github.com/Artexis10/exomem/issues/2887)) ([fd2c06f](https://github.com/Artexis10/exomem/commit/fd2c06ff59d8ac807a58d85891a2a6d149fabcfd))
+
+## [0.187.0](https://github.com/Artexis10/exomem/compare/v0.186.0...v0.187.0) (2026-11-17)
+
+
+### Features
+
+* **curation:** move and rename pages with lineage, governed pointer writes and undo ([#2883](https://github.com/Artexis10/exomem/issues/2883)) ([6e0f2e8](https://github.com/Artexis10/exomem/commit/6e0f2e813707d2f6a65b791acc08d59344af7081))
+* **profiles:** serve domain profiles, curate them with the owner, and carry routing tables as vault skills ([#2897](https://github.com/Artexis10/exomem/issues/2897)) ([2c31896](https://github.com/Artexis10/exomem/commit/2c31896222d16887b9e328fa8accee3a7fb29891))
+* **sources:** erase a captured Source in file mode ([#2898](https://github.com/Artexis10/exomem/issues/2898)) ([0618f47](https://github.com/Artexis10/exomem/commit/0618f474479168eaec410e72c4a8d3ca15bdc743))
+
+
+### Bug Fixes
+
+* **reconcile:** ignore trash of files outside the Knowledge Base when proving lifecycle cleanup ([#2896](https://github.com/Artexis10/exomem/issues/2896)) ([26d7d8e](https://github.com/Artexis10/exomem/commit/26d7d8ee2eeb0585e8fa5d8e3b4af25e9a5b0be6))
+* **vault-store:** report store-mode state from the store and fence the CLI before the registry path ([#2894](https://github.com/Artexis10/exomem/issues/2894)) ([01cd0fb](https://github.com/Artexis10/exomem/commit/01cd0fbde884af88665b689ba8cc6226c29dd389))
+
+## [0.186.0](https://github.com/Artexis10/exomem/compare/v0.185.0...v0.186.0) (2026-11-17)
+
+
+### Features
+
+* **naming:** name new notes and entities by their title ([#2890](https://github.com/Artexis10/exomem/issues/2890)) ([ec6bf42](https://github.com/Artexis10/exomem/commit/ec6bf422b23b8531e2a2fabd4ad08bf1778a06c1))
+* rank declared passages, inventory captured Sources and bind Source dependencies ([#2852](https://github.com/Artexis10/exomem/issues/2852)) ([4b186f4](https://github.com/Artexis10/exomem/commit/4b186f470f918338eb92fda020e7c4f82ab4ed48))
+
+
+### Bug Fixes
+
+* **service:** keep a managed worker's idle supervisor connections past the pool expiry ([#2891](https://github.com/Artexis10/exomem/issues/2891)) ([e638179](https://github.com/Artexis10/exomem/commit/e63817968b7bd3bf55102ca9189c4dca983f59e3))
+* **upload:** name the send in every file upload reply and the way on after a refused send ([#2893](https://github.com/Artexis10/exomem/issues/2893)) ([c493bd0](https://github.com/Artexis10/exomem/commit/c493bd060916f3b4f89a2289ed94e2bcde06375a))
+
 ## [0.185.0](https://github.com/Artexis10/exomem/compare/v0.184.1...v0.185.0) (2026-11-16)
 
 

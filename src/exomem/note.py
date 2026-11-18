@@ -708,6 +708,7 @@ def _legacy_note(
                     # Invalid slug — fall through to validation which will reject.
                     pass
 
+    adjusted_arguments: dict = {}
     err = _validate(
         note_type=note_type,
         content=content,
@@ -726,9 +727,11 @@ def _legacy_note(
         bridge_review=None,
         vault_root=vault_root,
         project_registry=planned_registry,
+        adjust=adjusted_arguments,
     )
     if err is not None:
         raise NoteError(code=err.code, missing=err.missing, reason=err.reason)
+    projects = adjusted_arguments.get("projects", projects)
 
     # Two precisions from one clock read. `date_iso` is the bare day that
     # names files and index bullets; `stamp_iso` is what gets recorded as
@@ -898,6 +901,7 @@ def _legacy_note(
     writes.append(PlannedWrite(path=note_path, content=note_md))
     warnings: list[str] = (
         list(autoregister_warnings)
+        + list(adjusted_arguments.get("warnings", ()))
         + list(slug_warnings)
         + list(source_warnings)
         + list(body_warnings)
@@ -1058,7 +1062,14 @@ def _validate(
     bridge_review: str | None,
     vault_root: Path,
     project_registry: project_keys_module.ProjectRegistry | None = None,
+    adjust: dict | None = None,
 ) -> _Err | None:
+    """Refuse an invalid note; a caller that passes ``adjust`` also gets what was applied or ignored.
+
+    ``adjust["projects"]`` is the project list to write when the call named one project for a type
+    that stores a list, and ``adjust["warnings"]`` names every argument the write applied
+    differently or ignored, so the reply can say so instead of dropping it silently.
+    """
     missing: list[str] = []
     reasons: list[str] = []
 
@@ -1156,7 +1167,14 @@ def _validate(
                 "the `projects` arg was ignored"
             )
     elif note_type in ("insight", "failure", "pattern"):
-        if project:
+        if project and not projects and adjust is not None:
+            # One named project is unambiguous for a type that stores a list, so apply it as one.
+            projects = [project]
+            adjust["projects"] = projects
+            reasons.append(
+                f"{note_type} takes plural `projects`; `project` was applied as projects: [{project}]"
+            )
+        elif project:
             reasons.append(
                 f"{note_type} uses plural `projects`, not `project`; the `project` arg was ignored"
             )
@@ -1219,6 +1237,8 @@ def _validate(
             missing=missing,
             reason="; ".join(reasons),
         )
+    if adjust is not None and reasons:
+        adjust["warnings"] = reasons
     return None
 
 
@@ -2050,6 +2070,7 @@ def note(
     except ValueError as error:
         raise NoteError("INVALID_NOTE", ["project"], str(error)) from error
 
+    adjusted_arguments: dict = {}
     err = _validate(
         note_type=note_type,
         content=content,
@@ -2068,9 +2089,11 @@ def note(
         bridge_review=bridge_review,
         vault_root=root,
         project_registry=key_plan.registry,
+        adjust=adjusted_arguments,
     )
     if err is not None:
         raise NoteError(err.code, err.missing, err.reason)
+    projects = adjusted_arguments.get("projects", projects)
     if note_type == "experiment" and domain_binding is None:
         try:
             domain_binding = vocabulary_resolution.resolve_notes_domain(
@@ -2273,7 +2296,8 @@ def note(
         date_prefix=name_prefix,
     )
     warnings = (
-        list(slug_warnings) + ([adjusted] if adjusted else []) + ([title_check.warning] if title_check.warning else [])
+        list(adjusted_arguments.get("warnings", ()))
+        + list(slug_warnings) + ([adjusted] if adjusted else []) + ([title_check.warning] if title_check.warning else [])
         + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
         + home_warnings
         + folder_split_warnings(root, note_path.parent)

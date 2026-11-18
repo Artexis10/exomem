@@ -668,6 +668,12 @@ def current(store) -> Invocation | None:
     return invocation if invocation is not None and invocation.journal.store is store else None
 
 
+def active(root: Path) -> bool:
+    """Whether this Source invocation persists its result under custody for ``root``."""
+    invocation = _INVOCATION.get()
+    return invocation is not None and invocation.root.absolute() == Path(root).absolute()
+
+
 def record_target(reference: str, path: str) -> None:
     """Bind the actual producer's allocated target, before a batch can retain its failure summary."""
     invocation = _INVOCATION.get()

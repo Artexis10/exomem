@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 4224edce1af25b35f8b365df6267fd7ce234f0cacad05b51c76d324f05ad0caf
+  skill_contract: dd7e6c0eaccb191345b9313dadaf81159181c4f621c16d0cd9d0948b3066300d
   version: "0.1.0"
 ---
 
@@ -24,8 +24,9 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Content outside the managed Knowledge Base is
+read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
@@ -73,6 +74,7 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
 2. Preserve raw material with `save_source`: `content` for authored text, `files` for original attachments. Original bytes remain intact.
+   A Source's custody verifies none of its claims.
    Never retype an original file. If its handle is unavailable, follow the Source upload route that the exposed tools serve.
    Use `save_evidence` or `save_evidence` for proof-bearing material.
    Pass `source_kind` and `domain` on a `save_source` call — both are open
@@ -111,6 +113,8 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
    Adjacent pages and `suggested_connections` are unreviewed candidates, never accepted edges.
 5. For selected compilation, follow the [source compilation pass](references/writing.md#source-compilation-pass); one inventory check closes the work.
    Raw capture may end after custody when compilation is outside the request and live policy.
+   Decide at capture: compile into an existing or new note when the Source's claims will be reused; otherwise report it as kept for custody only.
+   Correct a wrong Source's title, URL, kind or form with `save_source` and `options.correction` (its ref, page hash and a reason) and no `files`; the stored original is reused and the old Source stays readable.
 
 ## Vocabulary
 
@@ -141,7 +145,7 @@ Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typ
 ## Mistakes to avoid
 Do not skip raw preservation. Do not paste large raw artifacts into compiled notes. Do not claim media content was inspected unless an extraction, frame, transcript, OCR, or artifact view was actually used.
 
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

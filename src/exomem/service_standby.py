@@ -1320,6 +1320,13 @@ def _promote_owned(
         # `standby: false` measured part of its state as a standby, and the
         # supervisor reads readiness as soon as this POST returns.
         runtime_readiness.invalidate_cached_readiness()
+    from . import original_pool
+
+    # Launcher support counts only now that this worker is no standby, and the
+    # supervisor admits no request until promotion returns. Its one refusal, a
+    # shared-storage archive this launcher cannot record, fails the promotion,
+    # so the supervisor never routes a request here.
+    original_pool.activate_at_start(Path(vault_root))
     # Everything this process owes the handoff is settled above. `release()`
     # starts the promoted worker's own warm, which reads `_carried` on its way
     # through `begin_warm`, so nothing below may still be deciding what it holds.

@@ -20,6 +20,7 @@ from exomem import (
     collection_claims,
     due_state,
     prominence,
+    records_disposition,
     semantic_writes,
     vocabulary_fold,
 )
@@ -262,6 +263,48 @@ def test_malformed_match_predicates_refuse_naming_the_key(
         collections.parse_manifest_bytes(tmp_path, tmp_path / INCIDENTS, text.encode("utf-8"))
 
     assert refused.value.code == "INVALID_COLLECTION_CLAIMS"
+    assert fragment in str(refused.value)
+
+
+_METHOD = 'capture:\n  method: "[[Dock capture method]]"\n'
+
+
+def test_manifest_capture_method_parses_and_is_described(tmp_path: Path) -> None:
+    text = _incident_manifest(claims=_INCIDENT_CLAIMS + _INCIDENT_MATCH + _METHOD)
+
+    manifest = collections.parse_manifest_bytes(tmp_path, tmp_path / INCIDENTS, text.encode("utf-8"))
+
+    assert manifest.capture_method == "[[Dock capture method]]"
+    assert collections.parse_manifest_bytes(
+        tmp_path, tmp_path / INCIDENTS, _incident_manifest().encode("utf-8")
+    ).capture_method is None
+    described = collections.manifest_authoring_contract()
+    assert set(described["json_schema"]["properties"]["capture"]["properties"]) == {"method"}
+    assert "method" in described["capture"]["purpose"]
+
+
+@pytest.mark.parametrize(
+    ("capture", "fragment"),
+    [
+        ("capture: [dock]\n", "capture must be a mapping"),
+        ("capture: {}\n", "capture.method is required"),
+        ("capture:\n  method: x\n  colour: red\n", "capture has unknown key: colour"),
+        # Unquoted, YAML reads a wiki link as a nested list.
+        ("capture:\n  method: [[Dock capture method]]\n", "capture.method must be a string"),
+        ("capture:\n  method: '  '\n", "capture.method must be a string"),
+        (f"capture:\n  method: {'x' * 600}\n", "capture.method exceeds 512 characters"),
+    ],
+    ids=["not-a-mapping", "no-method", "unknown-key", "unquoted-link", "blank", "too-long"],
+)
+def test_malformed_capture_refuses_naming_the_key(
+    tmp_path: Path, capture: str, fragment: str
+) -> None:
+    text = _incident_manifest(claims=_INCIDENT_CLAIMS + capture)
+
+    with pytest.raises(collections.CollectionError) as refused:
+        collections.parse_manifest_bytes(tmp_path, tmp_path / INCIDENTS, text.encode("utf-8"))
+
+    assert refused.value.code == "INVALID_COLLECTION_CAPTURE"
     assert fragment in str(refused.value)
 
 
@@ -610,6 +653,26 @@ def test_moderate_routes_keep_the_plain_advisory(
     assert "disposition" not in delivered
 
 
+@pytest.mark.parametrize(
+    ("note_type", "acts"), [("failure", True), ("decision", False)], ids=["failure-shaped", "not-failure-shaped"]
+)
+def test_a_strong_route_no_declaration_produced_still_needs_a_failure_shaped_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, note_type: str, acts: bool
+) -> None:
+    """Only a full `claims.match` lifts the gate: a natural-key route has no declaration behind it."""
+    _write_incidents(tmp_path, claims=_INCIDENT_CLAIMS)
+    due_state.reconcile(tmp_path, now=NOW)
+    monkeypatch.setattr(prominence, "effective_capture_level", lambda *_a, **_k: "maximal")
+    state = _routed_state(tmp_path)
+    state.frontmatter = {**state.frontmatter, "type": note_type}
+    state.document = SimpleNamespace(units=())  # no unit category speaks for the note either
+    natural_key_route = {"collection": INCIDENTS, "title": "Incidents", "strength": "strong"}
+
+    delivered = records_disposition.disposition(tmp_path, natural_key_route, state, level="maximal")
+
+    assert (delivered is not None and delivered["disposition"] == "file") is acts
+
+
 # --- Part 5: collection_candidate noise budget -----------------------------
 
 _GENERIC = ("result", "technique", "timing", "evidence", "method", "constraint", "workflow")
@@ -785,6 +848,42 @@ def test_compact_terminal_projects_a_disposition_and_a_predicate_route() -> None
     assert _terminal_routing(asked) == asked
 
 
+def _note_reply(routing: dict) -> dict:
+    from exomem import mutation_terminal
+
+    terminal = mutation_terminal.committed_terminal(
+        {"path": "Knowledge Base/Notes/Failures/widget-failure-007.md", "warnings": [], "records_routing": routing},
+        request_id="33333333-3333-4333-8333-333333333335",
+        receipt_id="receipt-unfiled",
+        idempotency_key="unfiled-key",
+    )
+    return mutation_terminal.project_terminal(terminal, outcome_verb="saved")
+
+
+def test_a_note_that_owes_a_record_says_where_it_was_not_filed() -> None:
+    """An agent wrote a diagnosis note and told the user the incident was filed; no Record existed."""
+    filed = _note_reply(dict(_FILED))
+    assert "; not filed in Widget incidents (" in filed["user_summary"]
+    assert filed["next_action"].startswith(_FILED["instruction"])
+
+    question = "Log “Widget panel froze” as a new entry?"
+    asked = _note_reply(
+        {k: v for k, v in _FILED.items() if k not in {"record_memory", "missing_fields"}}
+        | {"disposition": "ask", "question": question}
+    )
+    assert "; not filed in Widget incidents (" in asked["user_summary"]
+    assert asked["next_action"].startswith(question)
+
+
+def test_a_held_disposition_leaves_the_outcome_unchanged() -> None:
+    held = _note_reply(
+        {k: v for k, v in _FILED.items() if k not in {"record_memory", "missing_fields", "instruction"}}
+        | {"disposition": "hold"}
+    )
+    assert "not filed" not in held["user_summary"]
+    assert not str(held.get("next_action", "")).startswith("Perform")
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -836,21 +935,22 @@ def _remember_failure(
     body: str,
     slug: str,
     *,
-    project: str = "widget-app",
+    project: str | None = "widget-app",
     title: str = "Widget panel froze on load",
     tags: list[str] | None = None,
     unit_tag: str | None = None,
+    note_type: str = "failure",
 ) -> dict:
     from exomem import commands
 
     arguments = {
-        "content": f"## Observations\n\n- [failure] {body} #{unit_tag or project} ^{slug}\n",
+        "content": f"## Observations\n\n- [{note_type}] {body} #{unit_tag or project} ^{slug}\n",
         "title": title,
         "slug": slug,
-        "note_type": "failure",
-        "projects": [project],
+        "note_type": note_type,
         "tags": tags if tags is not None else [project, "failure"],
         "sources": [evidence],
+        **({"projects": [project]} if project else {}),
     }
     validation = commands.op_remember(vault, validate_only=True, **arguments)
     return commands.op_remember(
@@ -936,6 +1036,101 @@ def test_a_failure_note_is_filed_through_the_returned_payload(
     _path, first_ref = _created(written)
     _path, second_ref = _created(again)
     assert _sources_of(vault, appended["item_key"]) == [first_ref, second_ref]
+
+
+def test_a_singular_project_on_a_failure_note_still_routes_and_is_reported(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent passed `project` to a type that stores `projects`; the write dropped it silently and
+    the note routed weakly to the wrong collection. The value is applied, routed and reported."""
+    from exomem import commands
+    from exomem.vault import parse_frontmatter
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal")
+    arguments = {
+        "content": "## Observations\n\n- [failure] The panel stopped responding after load #widget-app ^widget-froze\n",
+        "title": "Widget panel froze on load",
+        "slug": "widget-froze",
+        "note_type": "failure",
+        "project": "widget-app",
+        "tags": ["widget-app", "failure"],
+        "sources": [evidence],
+    }
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
+    written = commands.op_remember(
+        vault,
+        **arguments,
+        draft_id=validation["draft_id"],
+        draft_hash=validation["draft_hash"],
+        draft_token=validation["draft_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation["draft_hash"],
+        relation_review_reason="No honest relation exists for this fixture.",
+    )
+
+    frontmatter, _body, _ = parse_frontmatter((vault / written["path"]).read_text(encoding="utf-8"))
+    assert frontmatter["projects"] == ["widget-app"]
+    assert any("`project` was applied as projects" in warning for warning in written["warnings"])
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["disposition"] == "file"
+
+
+def test_a_partly_declared_collection_wins_the_write_over_a_wider_undeclared_one(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure note names no project, so the declaration is only partly held."""
+    from exomem import commands
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal")
+    commands.op_record_memory(
+        vault,
+        action="create",
+        manifest_path=LEDGER,
+        manifest_text=_incident_manifest(claims="claims:\n  tags: [panel, stall, render, queue]\n")
+        .replace("21111111-1111-4111-8111-111111111111", "31111111-1111-4111-8111-111111111111")
+        .replace("Widget incidents", "Panel ledger"),
+        why="track panel stalls",
+    )
+    due_state.reconcile(vault)
+
+    written = _remember_failure(
+        vault, evidence, "The panel stalled while rendering", "panel-stall-render",
+        project=None, title="Panel stall render", tags=["dogfood", "regressions"],
+        unit_tag="dogfood",
+    )
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None
+    assert routing["collection"] == INCIDENTS
+    assert routing["strength"] == "moderate" and "disposition" not in routing
+
+
+def test_a_declared_route_files_whatever_type_it_declares(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The collection's declaration, not the page's type word, decides that it is acted on."""
+    from exomem import commands
+
+    declares_insights = _INCIDENT_CLAIMS + "  match:\n    type: [insight]\n    project: [widget-app]\n"
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=declares_insights)
+
+    written = _remember_failure(
+        vault, evidence, "Batching panel renders removes the stall", "batch-panel-renders",
+        title="Batch panel renders", note_type="insight",
+    )
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["strength"] == "strong"
+    assert routing["disposition"] == "file"
+    assert "recurring incident" not in routing["instruction"]
+    # The unreflected-observation entry that an edit consults exists for a declared route too.
+    edited = _edit_note(
+        vault, _created(written)[0], "removes the stall", "removes the stall on first load"
+    )
+    reoffered = _raw_routing(edited)
+    assert reoffered is not None and reoffered["disposition"] == "file"
+    appended = commands.op_record_memory(vault, **routing["record_memory"])
+    assert appended["operation"] == "append"
 
 
 def test_a_routed_failure_note_stays_coverage_visible_under_a_partial_census(
@@ -1125,6 +1320,111 @@ def test_declared_winners_rank_by_predicates_held_then_coverage() -> None:
         match={"type": frozenset({"failure"}), "project": frozenset({"widget-app"})},
     )
     assert route(["Panel froze on load"], [narrow, twin], facets=facets) is None
+
+
+def _declared_and_undeclared() -> tuple[RoutingTarget, RoutingTarget]:
+    """One collection that declares membership and shares 2 words, one that declares none and shares 3."""
+    declaring = _target(
+        INCIDENTS,
+        {"panel", "render"},
+        match={"type": frozenset({"failure"}), "project": frozenset({"widget-app"})},
+    )
+    undeclared = _target(LEDGER, {"cache", "login", "sync"})
+    return declaring, undeclared
+
+
+_PAGE = ["Panel render cache login sync"]
+_TYPE_AND_PROJECT = {"type": frozenset({"failure"}), "project": frozenset({"widget-app"})}
+
+
+def test_a_partly_held_declaration_outranks_a_wider_undeclared_word_route() -> None:
+    declaring, undeclared = _declared_and_undeclared()
+
+    # The page states its type but no project: the declaration is only partly held.
+    advisory = route(_PAGE, [undeclared, declaring], facets={"type": ["failure"]})
+
+    assert advisory is not None
+    assert advisory["collection"] == INCIDENTS
+    # A partial declaration ranks; only a full one is `strong`.
+    assert advisory["strength"] == "moderate"
+    assert "matched_predicates" not in advisory
+
+
+def test_a_partly_held_declaration_still_needs_its_own_word_route() -> None:
+    """Held predicates outrank words only for a collection that is itself a valid word route."""
+    below_floor = _target(
+        INCIDENTS,
+        {"panel"},
+        match={"type": frozenset({"failure"}), "project": frozenset({"widget-app"})},
+    )
+    no_words = _target(
+        LEDGER,
+        {"unrelated", "terms"},
+        match={"type": frozenset({"failure"}), "project": frozenset({"widget-app"})},
+    )
+    undeclared = _target("Knowledge Base/Records/Other/_collection.md", {"cache", "login", "sync"})
+
+    advisory = route(_PAGE, [below_floor, no_words, undeclared], facets={"type": ["failure"]})
+
+    # Sharing one word is under the coverage floor and none is under it too: today's winner stays.
+    assert advisory is not None
+    assert advisory["collection"] == undeclared.collection
+    assert advisory["strength"] == "moderate"
+
+
+def test_a_partly_held_declaration_needs_a_subject_signal_too() -> None:
+    # `panel` and `render` are claimed by every collection, so they say nothing about this one.
+    declaring = _target(INCIDENTS, {"panel", "render"}, match=_TYPE_AND_PROJECT)
+    twin = _target("Knowledge Base/Records/Twin/_collection.md", {"panel", "render"})
+    undeclared = _target(LEDGER, {"panel", "render", "cache", "login", "sync"})
+
+    advisory = route(_PAGE, [declaring, twin, undeclared], facets={"type": ["failure"]})
+
+    assert advisory is not None
+    assert advisory["collection"] == LEDGER
+
+
+def test_partly_held_declarations_rank_by_predicates_held_then_coverage_and_tie_silent() -> None:
+    three = {
+        "type": frozenset({"failure"}),
+        "category": frozenset({"ux"}),
+        "project": frozenset({"widget-app"}),
+    }
+    two_held = _target(INCIDENTS, {"panel", "render"}, match=three)
+    one_held = _target(LEDGER, {"cache", "login", "sync"}, match=_TYPE_AND_PROJECT)
+    facets = {"type": ["failure"], "category": ["ux"]}
+
+    # Two predicates held beat one held with more words.
+    ranked = route(_PAGE, [one_held, two_held], facets=facets)
+    assert ranked is not None and ranked["collection"] == INCIDENTS
+    assert ranked["strength"] == "moderate"
+
+    # With the held count equal, coverage decides.
+    wider = _target(
+        "Knowledge Base/Records/Wider/_collection.md", {"cache", "login", "sync"}, match=three
+    )
+    by_coverage = route(_PAGE, [two_held, wider], facets=facets)
+    assert by_coverage is not None and by_coverage["collection"] == wider.collection
+
+    # Equal held count and equal coverage stay silent.
+    twin = _target("Knowledge Base/Records/Twin/_collection.md", {"cache", "login", "sync"}, match=three)
+    assert route(_PAGE, [wider, twin], facets=facets) is None
+
+
+def test_a_contradicted_declaration_never_outranks_words() -> None:
+    declaring, undeclared = _declared_and_undeclared()
+
+    advisory = route(_PAGE, [declaring, undeclared], facets={"type": ["failure"], "project": ["gadget"]})
+
+    assert advisory is not None and advisory["collection"] == LEDGER
+
+
+def test_turn_routing_without_facets_ignores_declarations() -> None:
+    declaring, undeclared = _declared_and_undeclared()
+
+    advisory = route(_PAGE, [declaring, undeclared])
+
+    assert advisory is not None and advisory["collection"] == LEDGER
 
 
 def _write_record(
@@ -1519,3 +1819,227 @@ def test_evidence_layer_type_is_silence_for_typed_collections(vault: Path) -> No
     routing = preserved.get("records_routing")
     assert routing is not None and routing["collection"] == INCIDENTS
     assert "matched_predicates" not in routing
+
+
+# --- Part 5: the collection's capture method --------------------------------
+
+METHOD = "Knowledge Base/Notes/Insights/dock-capture-method.md"
+METHOD_ID = "71111111-1111-4111-8111-111111111111"
+METHOD_REF = f"exomem://memory/{METHOD_ID}"
+_DECLARES_METHOD = _INCIDENT_CLAIMS + _INCIDENT_MATCH + 'capture:\n  method: "[[Dock capture method]]"\n'
+
+
+def _write_method_page(root: Path, *, title: str = "Dock capture method") -> None:
+    page = root / METHOD
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\n"
+        "type: insight\n"
+        f"exomem_id: {METHOD_ID}\n"
+        f"title: {title}\n"
+        "status: active\n"
+        "created: 2026-09-01\n"
+        "updated: 2026-09-01\n"
+        "tags: [capture]\n"
+        "sources: []\n"
+        "---\n\n"
+        f"# {title}\n\nPhotograph the pallet, then name the bay in the entry.\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "[[Dock capture method]]",
+        "[[Dock capture method#Steps|how we capture]]",
+        METHOD_REF,
+        METHOD,
+    ],
+    ids=["title", "alias-and-anchor", "ref", "path"],
+)
+def test_a_capture_method_resolves_to_its_pages_stable_identity(
+    vault: Path, reference: str
+) -> None:
+    from exomem import capture_method
+
+    _write_method_page(vault)
+
+    method = capture_method.resolve(vault, reference)
+
+    assert method == capture_method.CaptureMethod(
+        path=METHOD, ref=METHOD_REF, title="Dock capture method"
+    )
+
+
+def test_a_method_page_whose_path_exceeds_the_terminals_ref_bound_resolves_to_nothing(vault: Path) -> None:
+    """A page that holds no id is named by its path; one too long for the write terminal must not sink the advisory."""
+    from exomem import capture_method
+
+    long_path = "/".join(["d" * 100] * 5) + "/Long method.md"
+    page = vault / long_path
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: insight\ntitle: Long method\nstatus: active\n---\n\n# Long method\n\nSteps.\n", encoding="utf-8")
+    assert len(long_path) > 512
+    short = vault / "Short method.md"
+    short.write_text("---\ntype: insight\ntitle: Short method\nstatus: active\n---\n\n# Short method\n\nSteps.\n", encoding="utf-8")
+
+    assert capture_method.resolve(vault, "Short method.md") == capture_method.CaptureMethod(
+        path="Short method.md", ref="Short method.md", title="Short method"
+    )
+    assert capture_method.resolve(vault, long_path) is None
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["[[No such page]]", f"exomem://memory/{METHOD_ID[:-1]}9", "../outside.md", "  "],
+    ids=["unknown-title", "unknown-ref", "outside-the-vault", "blank"],
+)
+def test_a_capture_method_that_names_no_page_resolves_to_nothing(
+    vault: Path, reference: str
+) -> None:
+    from exomem import capture_method
+
+    _write_method_page(vault)
+    (vault.parent / "outside.md").write_text("---\ntitle: Elsewhere\n---\n", encoding="utf-8")
+
+    assert capture_method.resolve(vault, reference) is None
+
+
+def test_a_withheld_capture_method_resolves_like_a_missing_one(vault: Path) -> None:
+    """No answer here may show that a page the caller cannot read exists."""
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import capture_method
+    from exomem.governance import principal
+
+    _write_method_page(vault)
+    _withhold(vault, METHOD, ceiling=0)
+
+    with principal.request_scope(_external()):
+        withheld = [capture_method.resolve(vault, ref) for ref in ("[[Dock capture method]]", METHOD_REF, METHOD)]
+        missing = [capture_method.resolve(vault, ref) for ref in ("[[Gone method]]", f"exomem://memory/{METHOD_ID[:-1]}9", f"{METHOD}.gone")]
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        released = capture_method.resolve(vault, METHOD_REF)
+
+    assert withheld == missing == [None, None, None]
+    assert released is not None and released.ref == METHOD_REF
+
+
+def test_a_capture_method_title_is_bounded_and_carries_no_link(vault: Path) -> None:
+    from exomem import capture_method
+
+    _write_method_page(vault, title="Capture [[Other page]] " + "dock " * 80)
+
+    method = capture_method.resolve(vault, METHOD_REF)
+
+    assert method is not None
+    assert 0 < len(method.title) <= capture_method.TITLE_MAX_CHARS
+    assert "[[" not in method.title
+
+
+def test_a_routed_write_names_the_collections_capture_method(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_method_page(vault)
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    written = _remember_failure(vault, evidence, "Pallet bay mislabeled", "pallet-bay")
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["strength"] == "strong"
+    assert routing["method"] == {"title": "Dock capture method", "read_ref": METHOD_REF}
+    assert routing["disposition"] == "file" and "method.read_ref" in routing["instruction"]
+
+
+def test_a_partly_declared_route_still_names_the_capture_method(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_method_page(vault)
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    written = _remember_failure(vault, evidence, "Pallet bay mislabeled", "pallet-bay", project=None)
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["strength"] == "moderate"
+    assert routing["method"] == {"title": "Dock capture method", "read_ref": METHOD_REF}
+
+
+def test_an_unresolved_capture_method_costs_the_route_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route and its ready call survive; only the pointer is omitted, and inspection says why."""
+    from exomem import commands
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    written = _remember_failure(vault, evidence, "Pallet bay mislabeled", "pallet-bay")
+
+    routing = _terminal_routing(written["creation"]["records_routing"])
+    assert routing is not None and routing["disposition"] == "file"
+    assert "method" not in routing and "method.read_ref" not in routing["instruction"]
+    inspection = commands.op_record_memory(vault, action="inspect", collection=INCIDENTS)
+    assert {"code": "CAPTURE_METHOD_UNAVAILABLE", "reason": "declared capture method is unavailable"} in inspection["diagnostics"]
+    assert inspection["lifecycle_guards"]
+
+
+def test_a_resolved_capture_method_leaves_inspection_without_a_finding(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands
+
+    _write_method_page(vault)
+    _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    inspection = commands.op_record_memory(vault, action="inspect", collection=INCIDENTS)
+
+    assert "CAPTURE_METHOD_UNAVAILABLE" not in str(inspection["diagnostics"])
+
+
+def test_inspection_returns_the_capture_block_a_manifest_declares(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inspection is how an agent discovers a collection, so the declared method rides in its contract."""
+    from exomem import commands
+
+    _write_method_page(vault)
+    _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+
+    inspection = commands.op_record_memory(vault, action="inspect", collection=INCIDENTS)
+
+    assert inspection["contract"]["capture"] == {"method": "[[Dock capture method]]"}
+
+
+@pytest.mark.parametrize(
+    ("level", "names_the_method"),
+    [("maximal", True), ("balanced", True), ("light", False)],
+    ids=["file", "ask", "hold"],
+)
+def test_only_a_disposition_that_acts_tells_the_agent_to_follow_the_method(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level: str, names_the_method: bool
+) -> None:
+    _write_method_page(tmp_path)
+    _write_incidents(tmp_path, claims=_DECLARES_METHOD)
+    due_state.reconcile(tmp_path, now=NOW)
+
+    delivered = _deliver(tmp_path, monkeypatch, level)
+
+    assert delivered is not None
+    assert delivered["method"] == {"title": "Dock capture method", "read_ref": METHOD_REF}
+    assert ("method.read_ref" in delivered["instruction"]) is names_the_method
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        {"title": "t" * 161, "read_ref": METHOD_REF},
+        {"title": "Dock capture method", "read_ref": METHOD_REF, "body": "inline"},
+    ],
+    ids=["over-the-bound", "extra-key"],
+)
+def test_compact_terminal_drops_a_malformed_method(method: object) -> None:
+    ok = {"title": "Dock capture method", "read_ref": METHOD_REF}
+
+    assert _terminal_routing({**_FILED, "method": ok}) == {**_FILED, "method": ok}
+    assert _terminal_routing({**_FILED, "method": method}) is None

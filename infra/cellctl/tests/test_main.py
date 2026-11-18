@@ -51,6 +51,8 @@ def test_an_ordinary_model_env_loads(monkeypatch) -> None:
         "EXOMEM_JWT_SIGNING_KEY",
         "EXOMEM_WRITER_LEASE_URL",
         "EXOMEM_OAUTH_STORAGE_TOKEN",
+        # Chart-wide, it would enable erasure in every owner's cell.
+        "EXOMEM_SOURCE_ERASURE_POLICY",
         "exomem_embed_backend",
         "BAD NAME",
     ],

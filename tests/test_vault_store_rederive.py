@@ -176,6 +176,39 @@ def test_legacy_evidence_hashes_refresh_after_a_store_upgrade(vault, monkeypatch
     assert not lexstore.full_rebuild_in_flight(vault)
 
 
+def test_a_store_migrated_under_an_older_lexical_schema_answers_the_duplicate_index_once_the_pass_settles(
+    vault, monkeypatch  # noqa: F811
+):
+    """After a lexical schema bump the owner pass must stamp the store, or its index answers None for good."""
+    from duplicate_fixtures import legacy_evidence_filing
+    from test_vault_store_migration import build_indexes
+
+    from exomem import duplicates, freshness, lexstore
+
+    original = b"original kept by a store migrated before the schema bump"
+    rel = legacy_evidence_filing(vault, original)
+    digest = hashlib.sha256(original).hexdigest()
+    with monkeypatch.context() as earlier:
+        # The build that migrated the vault: one lexical schema and one owner generation older.
+        earlier.setattr(lexstore, "SCHEMA_VERSION", lexstore.SCHEMA_VERSION - 1)
+        earlier.setattr(rederive, "OWNER_SCHEMA_VERSION", rederive.OWNER_SCHEMA_VERSION - 1)
+        freshness.clear()
+        lexstore.clear_stores()
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+    lexstore.clear_stores()
+
+    assert mode.status(vault)["owner_schema"] == "behind"
+    assert lexstore.payload_candidates(vault, digest) is None
+    with store_writer(vault) as bound:
+        settle_to_the_end(vault, bound)
+
+    assert mode.status(vault)["owner_schema"] == "current"
+    assert lexstore.payload_candidates(vault, digest) == (rel,)
+    lookup = duplicates.find_duplicate(vault, sha256=digest, lane=duplicates.EVIDENCE, protected=False)
+    assert lookup.available and lookup.hit is not None and lookup.hit.path == rel
+
+
 def test_a_policy_commit_returns_before_its_rows_and_the_job_then_matches_a_cold_derivation(
     stored, writer, tmp_path  # noqa: F811
 ):

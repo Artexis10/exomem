@@ -21,12 +21,13 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, closing, contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from itertools import chain
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from . import (
     held_fs,
@@ -48,6 +49,9 @@ from .media_jobs import (
 )
 from .originals import OriginalSnapshot, StoredObject, original_state
 
+if TYPE_CHECKING:
+    from .vault import PlannedWrite
+
 log = logging.getLogger(__name__)
 
 
@@ -55,6 +59,18 @@ class MediaStoreError(RuntimeError):
     def __init__(self, code: str, reason: str):
         self.code = code
         super().__init__(f"{code}: {reason}")
+
+
+def register_path_custody() -> None:
+    """Use existing path receipts; eviction alone verifies this optional derived inventory."""
+    from . import freshness, media_bindings
+
+    freshness.register_custody_seam(freshness.CustodySeam(
+        name="media_store",
+        apply=lambda root, changed, deleted, digests: media_bindings.repair_paths(root, (*changed, *deleted)),
+        # Missing binding facts retain bytes and must never gate an unrelated read.
+        invalidate_scope=lambda root, scope: media_bindings.external_change(root),
+    ))
 
 
 # The refusal that the classification rule records for an original that stays on the volume (D12).
@@ -95,13 +111,17 @@ class Store(Protocol):
     def open(self, name: str, version: str): ...
 
 
-def _digest(stream: BinaryIO) -> ObjectHead:
+def _digest(stream: BinaryIO, *, deadline: float | None = None) -> ObjectHead:
+    """The size and SHA-256 of a stream; a request's `deadline` stops the pass as the ordinary hold's hash does."""
     digest = hashlib.sha256()
     size = 0
-    while chunk := stream.read(1024 * 1024):
+    while True:
+        reserved_paths._copy_deadline(deadline)
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            return ObjectHead(size, digest.hexdigest())
         size += len(chunk)
         digest.update(chunk)
-    return ObjectHead(size, digest.hexdigest())
 
 
 def _chunks(stream: BinaryIO):
@@ -222,12 +242,23 @@ def _source_identity(source: reserved_paths.GenericBinarySource) -> str:
 
 
 def _identity(vault: Path, path: Path) -> str:
-    with reserved_paths.open_generic_binary(vault, path.relative_to(vault).as_posix()) as source:
+    try:
+        with reserved_paths.open_generic_binary(vault, path.relative_to(vault).as_posix()) as source:
+            return _source_identity(source)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            raise
+        snapshot = original_state(vault, path)
+        if snapshot.local_path is None:
+            raise
+    from . import original_pool
+
+    with original_pool.open_object(vault, snapshot.binary_sha256, snapshot.binary_size) as source:
         return _source_identity(source)
 
 
 def _recorded_identity(vault: Path, path: Path, snapshot: OriginalSnapshot) -> str | None:
-    """The cache identity that a record holds for this cached original's reference and digest, else None.
+    """The verified physical identity for this digest; ordinary rows also retain their reference check.
 
     Reads without creating state or a store client.
     """
@@ -240,8 +271,12 @@ def _recorded_identity(vault: Path, path: Path, snapshot: OriginalSnapshot) -> s
     try:
         if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'media_cache' AND type = 'table'").fetchone() is None:
             return None
-        row = conn.execute("SELECT * FROM media_cache WHERE binary_rel = ?", (store._relative(path),)).fetchone()
-        if row is None or row["reference"] != _reference_key(snapshot.reference) or row["sha256"] != snapshot.binary_sha256:
+        from . import media_bindings
+
+        key = media_bindings.snapshot_key(vault, snapshot)
+        row = conn.execute("SELECT * FROM media_cache WHERE binary_rel = ?", (key,)).fetchone()
+        if (row is None or row["sha256"] != snapshot.binary_sha256
+                or key == store._relative(path) and row["reference"] != _reference_key(snapshot.reference)):
             return None
         return row["identity"]
     finally:
@@ -310,7 +345,8 @@ def recover_cache(vault: Path, path: Path, snapshot: OriginalSnapshot) -> bool:
     if snapshot.state != "cached" or snapshot.reference is None:
         return False
     with _pin(vault, path) as (ledger, _token):
-        with reserved_paths.open_generic_binary(vault, ledger._relative(path)) as source:
+        # A pooled original has no file at its logical path; its shared object is the bytes to verify.
+        with _open_local_original(vault, ledger._relative(path), snapshot) as source:
             if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                 return False
             source.require_current()
@@ -329,15 +365,20 @@ def recover_cache(vault: Path, path: Path, snapshot: OriginalSnapshot) -> bool:
 def _record_cache(conn, store: MediaJobStore, snapshot: OriginalSnapshot, source: reserved_paths.GenericBinarySource) -> None:
     assert snapshot.reference is not None
     source.require_current()
+    from . import media_bindings
+
+    key = media_bindings.snapshot_key(store.vault_root, snapshot)
     # `last_read` is the legacy record time; only `owner_read` decides idleness (D3, M4).
     conn.execute(
         "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size, evicted) "
         "VALUES (?, ?, ?, ?, ?, ?, 0) "
         "ON CONFLICT(binary_rel) DO UPDATE SET reference=excluded.reference, sha256=excluded.sha256, "
         "identity=excluded.identity, last_read=excluded.last_read, size=excluded.size, evicted=0",
-        (store._relative(snapshot.path), _reference_key(snapshot.reference), snapshot.binary_sha256,
+        (key, _reference_key(snapshot.reference), snapshot.binary_sha256,
          _source_identity(source), time.time(), snapshot.binary_size),
     )
+    if snapshot.local_path is not None:
+        media_bindings.coalesce_cache(conn, (key,))
 
 
 def _clear_dead_access(conn, store: MediaJobStore, rows) -> int:
@@ -349,14 +390,37 @@ def _clear_dead_access(conn, store: MediaJobStore, rows) -> int:
         if row["source_custody_json"] is not None:
             # Native custody must prove this allocation; a reusable temporary name cannot authorize deletion.
             continue
-        # Only a reserved publish name is removed, so a damaged row cannot name an original.
+        conn.execute("UPDATE media_access SET hydrating = 0 WHERE token = ?", (row["token"],))
+        # Only a reserved publish name or a recorded pool stage is removed, so a damaged row cannot name an original.
         temporary = row["temporary_name"]
-        if temporary is not None and held_fs.is_publish_temporary(temporary) and not _remove_temporary(
-                store.vault_root, row["binary_rel"], temporary):
+        if temporary is not None and not _remove_reserved_temporary(store.vault_root, row):
             continue  # The row keeps its bytes reserved until a later clear removes the file.
         conn.execute("DELETE FROM media_access WHERE token = ?", (row["token"],))
         cleared += 1
     return cleared
+
+
+def _remove_reserved_temporary(vault: Path, row) -> bool:
+    """Use the reservation's recorded custody, never a filename alone, for private stages."""
+    from . import original_pool
+
+    key, name = row["hydration_key"], row["temporary_name"]
+    if key is not None and key != row["binary_rel"]:
+        try:
+            identity = None
+            if row["temporary_identity"] is not None:
+                values = json.loads(row["temporary_identity"])
+                # StableIdentity's closed filesystem schema fixes these four fields.
+                if (not isinstance(values, list) or len(values) != 4
+                        or type(values[0]) is not int or type(values[1]) is not int
+                        or values[2] != "file" or type(values[3]) is not int or values[3] != 1):
+                    return False
+                identity = held_fs.StableIdentity(*values)
+            original_pool.remove_stage(vault, key, name, identity)
+            return True
+        except (ValueError, TypeError, OSError, held_fs.HeldFsError):
+            return False
+    return held_fs.is_publish_temporary(name) and _remove_temporary(vault, row["binary_rel"], name)
 
 
 def _remove_temporary(vault: Path, binary_rel: str, name: str) -> bool:
@@ -392,15 +456,19 @@ def clear_dead_reservations(vault: Path) -> int:
 
 
 @contextmanager
-def _pin(vault: Path, path: Path, *, read: bool = False):
+def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None = None):
     """Keep an original on the volume; `read` marks an owner's playback, download or viewing (D3, M4)."""
     store = MediaJobStore(vault)
+    relative = store._relative(path)
     token = uuid.uuid4().hex
     conn = store._connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start) VALUES (?, ?, ?, ?)",
-                     (token, store._relative(path), os.getpid(), process_start(os.getpid())))
+        # A logical lookup can race canonical rebinding. NULL retains pooled
+        # objects until acquisition binds this token to the actual held bytes.
+        captured = object_key
+        conn.execute("INSERT INTO media_access(token, binary_rel, pid, pid_start, object_key) VALUES (?, ?, ?, ?, ?)",
+                     (token, relative, os.getpid(), process_start(os.getpid()), captured))
         conn.commit()
     finally:
         conn.close()
@@ -411,16 +479,37 @@ def _pin(vault: Path, path: Path, *, read: bool = False):
         try:
             with conn:
                 if read:
-                    conn.execute("UPDATE media_cache SET owner_read = ? WHERE binary_rel = ?",
-                                 (time.time(), store._relative(path)))
+                    conn.execute("UPDATE media_cache SET owner_read = MAX(COALESCE(owner_read, :read_at), :read_at) "
+                                 "WHERE binary_rel = "
+                                 "(SELECT object_key FROM media_access WHERE token = :token) "
+                                 "AND identity = (SELECT object_identity FROM media_access WHERE token = :token) "
+                                 "AND ((SELECT object_sha256 FROM media_access WHERE token = :token) IS NULL "
+                                 "OR sha256 = (SELECT object_sha256 FROM media_access WHERE token = :token))",
+                                 {"token": token, "read_at": time.time()})
                 # A row that still names a temporary keeps it reserved until a clear removes the file.
                 conn.execute("DELETE FROM media_access WHERE token = ? AND temporary_name IS NULL", (token,))
         finally:
             conn.close()
 
 
+def _bind_pin(store: MediaJobStore, token: str, snapshot: OriginalSnapshot,
+              source: reserved_paths.GenericBinarySource, *, job: MediaJob | None = None) -> None:
+    """Narrow an unresolved pin only while the caller holds the acquired original."""
+    from . import media_bindings
+
+    source.require_current()
+    key = media_bindings.snapshot_key(store.vault_root, snapshot)
+    if job is not None and not store.bind_original(job, key):
+        # A stale claim or changed acquired object cannot process replacement bytes.
+        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the job no longer owns these original bytes")
+    with closing(store._connect()) as conn, conn:
+        conn.execute("UPDATE media_access SET object_key = ?, object_identity = ?, object_sha256 = ? "
+                     "WHERE token = ? AND object_key IS NULL",
+                     (key, _source_identity(source), snapshot.binary_sha256, token))
+
+
 def _reserve(store: MediaJobStore, token: str, needed: int, limits: media_capacity.HydrationLimits, *,
-             hydration: bool, temporary: str | None = None) -> None:
+             hydration: bool, temporary: str | None = None, hydration_key: str | None = None) -> None:
     """Reserve `needed` bytes of the hydration capacity on this pin's row (D12, choice 3).
 
     A hydration reserves its plaintext, takes a slot and names its temporary file. An
@@ -432,15 +521,21 @@ def _reserve(store: MediaJobStore, token: str, needed: int, limits: media_capaci
         raise MediaStoreError(HYDRATION_TOO_LARGE_CODE, "the original exceeds the whole hydration capacity")
     conn = store._connect()
     try:
+        conn.execute("PRAGMA synchronous=FULL")
         conn.execute("BEGIN IMMEDIATE")
         _clear_dead_access(conn, store, conn.execute(
-            "SELECT * FROM media_access WHERE temporary_bytes > 0 OR hydrating = 1").fetchall())
+            "SELECT * FROM media_access WHERE temporary_bytes > 0 OR hydrating = 1 OR temporary_name IS NOT NULL").fetchall())
         row = conn.execute("SELECT COALESCE(SUM(temporary_bytes), 0), COALESCE(SUM(hydrating), 0) "
                            "FROM media_access WHERE temporary_bytes > 0 OR hydrating = 1").fetchone()
-        busy = needed + row[0] > maximum or hydration and row[1] >= concurrent
+        same_object = hydration_key is not None and conn.execute(
+            "SELECT 1 FROM media_access WHERE hydration_key = ? AND temporary_name IS NOT NULL AND token != ? LIMIT 1",
+            (hydration_key, token)).fetchone() is not None
+        busy = same_object or needed + row[0] > maximum or hydration and row[1] >= concurrent
         if not busy:
-            conn.execute("UPDATE media_access SET temporary_bytes = ?, hydrating = ?, temporary_name = ? "
-                         "WHERE token = ?", (needed, int(hydration), temporary, token))
+            # The destination coordinates downloads; only acquisition may establish object_key.
+            conn.execute("UPDATE media_access SET temporary_bytes = ?, hydrating = ?, temporary_name = ?, "
+                         "hydration_key = ?, temporary_identity = NULL WHERE token = ?",
+                         (needed, int(hydration), temporary, hydration_key, token))
         conn.commit()  # The cleared rows stay cleared when the capacity is busy.
     finally:
         conn.close()
@@ -455,10 +550,13 @@ SUPPRESS = "suppress"
 
 def managed_event(vault: Path, path: Path) -> str | None:
     """Tell the watcher to defer an in-flight event or suppress proven cache bytes."""
-    if originals.binding_for(vault) is None:
-        return None
     relative = Path(path).relative_to(vault).as_posix()
     if reserved_paths.classify_logical(relative).blocked:
+        return None
+    if originals.pooled(vault, path) is not None:
+        # A pooled filing keeps no file at its logical path, with or without a media store: no file is no outside delete.
+        return SUPPRESS
+    if originals.binding_for(vault) is None:
         return None
     store = MediaJobStore(vault, create=False)
     if store.path.exists():
@@ -477,8 +575,24 @@ def managed_event(vault: Path, path: Path) -> str | None:
     return None
 
 
-def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[OriginalSnapshot]:
-    """Discover sidecar bindings, including unsupported or physically absent originals."""
+# A note or an original that is not a plain file (a symlink, a hard link or a reserved name) is not a binding to
+# trust. These are the leaf boundary's structural refusal codes; any other one, such as a transient I/O refusal,
+# reaches the caller, which must not miss a binding.
+_UNTRUSTED_LEAF = frozenset({"UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"})
+
+
+def bound_originals(
+    vault: Path, *, root: Path | None = None, selects: Callable[[str], bool] | None = None,
+    unconfirmed: Callable[[originals.RetirementUnconfirmed], None] | None = None,
+) -> Iterator[OriginalSnapshot]:
+    """Discover sidecar bindings, including unsupported or physically absent originals.
+
+    `selects` takes a binding's vault-relative original path; a binding it rejects is never resolved.
+
+    A binding whose Trash retirement is unconfirmed raises `originals.RetirementUnconfirmed`: its original is
+    unknown, and a walk that left it out would read as complete. A sweep that may leave it out passes
+    `unconfirmed`, which receives the error, and the walk goes on without that binding.
+    """
     from .backfill import iter_kb_files
     from .vault import parse_frontmatter
 
@@ -487,6 +601,7 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
         return
     from .vault_store import read as store_read
 
+    archive = originals.ArchiveReads(vault)
     for sidecar in iter_kb_files(root):
         if sidecar.suffix.lower() != ".md":
             continue
@@ -495,18 +610,23 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             raw = reserved_paths.read_generic_bytes(vault, rel)
             fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), custody=True)
             relative = originals.bound_path(fields)
-            if not isinstance(relative, str):
+            if not isinstance(relative, str) or (selects is not None and not selects(relative)):
                 continue
-            snapshot = original_state(vault, relative)
+            snapshot = original_state(vault, relative, archive=archive)
             if snapshot.sidecar_path == sidecar and snapshot.binary_sha256 is not None:
                 yield snapshot
+        except originals.RetirementUnconfirmed as error:
+            # A page that names another companion's original, such as a trashed page that still names its old
+            # path, binds nothing here; the walk meets that companion's own unknown binding where it lies.
+            if error.companion != rel:
+                continue
+            if unconfirmed is None:
+                raise
+            unconfirmed(error)
         except (UnicodeError, ValueError):
             continue
         except reserved_paths.ReservedPathLeafError as error:
-            # A note or an original that is not a plain file (a symlink, a hard link or a reserved name) is
-            # not a binding to trust. These are the leaf boundary's structural refusal codes; any other one,
-            # such as a transient I/O refusal, reaches the caller, which must not miss a binding.
-            if error.code in ("UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"):
+            if error.code in _UNTRUSTED_LEAF:
                 continue
             # A store-mode file whose page the store moved or deleted is a projection the projector
             # has not settled yet: it binds nothing, and the page binds at its new path.
@@ -515,7 +635,9 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             raise
 
 
-def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:
+def _status_candidates(vault: Path, table: str,
+                       query: str | Callable[[sqlite3.Connection], tuple[str, tuple[object, ...]]],
+                       parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:
     # These sources and states belong to this fixed status protocol; neither is vault vocabulary.
     coverage: dict[str, object] = {
         "source": table, "limit": STATUS_JOB_LIMIT, "coverage": "partial", "total": None,
@@ -529,6 +651,8 @@ def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[ob
         try:
             if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = ? AND type = 'table'", (table,)).fetchone() is None:
                 return [], {**coverage, "state": "unavailable"}
+            if callable(query):
+                query, parameters = query(conn)
             return conn.execute(query, (*parameters, STATUS_JOB_LIMIT)).fetchall(), coverage
         finally:
             conn.close()
@@ -572,11 +696,29 @@ def _processing_status_row(vault: Path, path: str | Path) -> dict[str, object]:
         return _unavailable_original(relative)
 
 
+def _logical_cache_members(vault: Path, conn) -> tuple[str, tuple[object, ...]]:
+    """Expand physical cache rows to filings, retaining each filing's own recovery reference."""
+    from . import original_pool
+
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone():
+        return "SELECT binary_rel, reference, sha256, size FROM media_cache ORDER BY binary_rel", ()
+    prefix = original_pool.pool_root(vault).relative_to(vault).as_posix() + "/"
+    return ("SELECT COALESCE(b.binary_rel, c.binary_rel) AS binary_rel, "
+            "CASE WHEN b.binary_rel IS NULL THEN c.reference ELSE b.reference END AS reference, "
+            "COALESCE(b.sha256, c.sha256) AS sha256, COALESCE(b.size, c.size) AS size "
+            "FROM media_cache c LEFT JOIN media_bindings b ON b.object_key = c.binary_rel "
+            "WHERE b.binary_rel IS NOT NULL OR substr(c.binary_rel, 1, length(?)) != ? "
+            "ORDER BY c.binary_rel, b.binary_rel", (prefix, prefix))
+
+
 def processing_status(vault: Path, *, path: str | None = None) -> tuple[list[dict[str, object]], dict[str, object]]:
     if path is not None:
         return [_processing_status_row(vault, path)], {"source": "sidecar", "coverage": "exact-path"}
-    candidates, coverage = _status_candidates(vault, "media_cache",
-        "SELECT binary_rel FROM media_cache ORDER BY binary_rel LIMIT ?")
+    def query(conn):
+        members, parameters = _logical_cache_members(vault, conn)
+        return members + " LIMIT ?", parameters
+
+    candidates, coverage = _status_candidates(vault, "media_cache", query)
     rows = [_processing_status_row(vault, row["binary_rel"]) for row in candidates]
     return [row for row in rows if row["state"] in {"stored", "unavailable"}], coverage
 
@@ -608,17 +750,62 @@ def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.Referenc
 
 
 def enqueue_offloads(vault: Path) -> int:
+    from . import media_bindings, original_pool
     from .writer_lease import get_manager
 
     if originals.binding_for(vault) is None:
         return 0
+    if original_pool.enabled(vault):
+        media_bindings.recover(vault)  # The census takes its own guard, so it runs before the scan's.
     with get_manager().consistency_guard(vault, operation="media_offload_scan", holder_kind="background"):
         placeholders = ",".join("?" for _code in media_allowance.ALLOWANCE_REFUSAL_CODES)
         rows, _coverage = _status_candidates(vault, "media_offload_refusals",
             f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
             media_allowance.ALLOWANCE_REFUSAL_CODES)
         usage = media_allowance.reference_usage(vault) if rows else None
-        return sum(_enqueue_offload(vault, item.path, usage=usage) for item in bound_originals(vault))
+        return sum(_enqueue_offload(vault, path, usage=usage) for path in _offload_candidates(vault))
+
+
+def _offload_candidates(vault: Path) -> Iterator[Path]:
+    """Each bound original that the offload scan checks.
+
+    A shared archive resolves only the bindings of its current projection that hold no recovery reference, so a
+    scan of an offloaded archive reads no companion. Any other archive, and a projection that its census could not
+    make current, walks every companion. A projected binding resolves as the walk resolves the companion it meets.
+    """
+    from . import media_bindings, original_pool
+    from .vault import VAULT_SCAN_SKIP_DIRS
+    from .vault_store import read as store_read
+
+    root = Path(vault).resolve()
+    rows = media_bindings.unreferenced(root) if original_pool.enabled(root) else None
+    if rows is None:
+        yield from (item.path for item in bound_originals(vault, unconfirmed=skip_unknown_original))
+        return
+    managed = managed_root(root)
+    for binary_rel, companion_rel in rows:
+        binary = root / binary_rel
+        # The walk meets only a companion beside its original, under the managed root, below no folder it prunes.
+        if (companion_rel not in originals.companion_paths(binary_rel) or not binary.is_relative_to(managed)
+                or any(part in VAULT_SCAN_SKIP_DIRS for part in binary.parent.relative_to(managed).parts)):
+            continue
+        try:
+            snapshot = _bound_file(root, binary_rel)
+        except originals.RetirementUnconfirmed as error:
+            skip_unknown_original(error)
+            continue
+        except reserved_paths.ReservedPathLeafError as error:
+            # A companion that the store moved or deleted binds at its new path.
+            if error.code == "MISSING" and store_read.serves(root, companion_rel):
+                continue
+            raise
+        if snapshot is not None:
+            yield snapshot.path
+
+
+def skip_unknown_original(error: originals.RetirementUnconfirmed) -> None:
+    """Log a background sweep's skipped binding as unknown; the sweep claims nothing about it."""
+    log.warning("skipped the original that %s names: its state is unknown (%s)", error.companion, error.code)
 
 
 def _guard(vault: Path, operation: str):
@@ -851,8 +1038,18 @@ def _upload_decision(
     return media_allowance.decide(census.used_bytes, projected, allowance_bytes, census.observed_at)
 
 
-def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:
-    from . import preserve
+@dataclass(frozen=True, slots=True)
+class ReferencePublication:
+    """The exact guarded companion image prepared before a placement transition."""
+
+    snapshot: OriginalSnapshot
+    write: PlannedWrite
+    retirement_meta: str | None = None
+
+
+def prepare_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None,
+                      *, retirement_meta: str | None = None) -> ReferencePublication:
+    """Prepare the existing reference edit once, retaining its source guard and hash."""
     from .vault import (
         PlannedWrite,
         content_hash,
@@ -861,8 +1058,6 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
         render_frontmatter_document,
         serialize_frontmatter,
     )
-    from .vault_store import read
-
     text, guard = read_guarded_text(vault, snapshot.sidecar_path)
     if content_hash(text) != snapshot.sidecar_hash:
         raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the sidecar binding changed")
@@ -871,21 +1066,33 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
         fields.pop("stored_object", None)
     else:
         fields["stored_object"] = reference.fields()
+    if retirement_meta is not None:
+        fields["original_retirement_meta"] = retirement_meta
     rendered = render_frontmatter_document(serialize_frontmatter(fields), body)
-    preserve.commit_media_sidecar_writes(vault, (PlannedWrite(
+    return ReferencePublication(snapshot, PlannedWrite(
         snapshot.sidecar_path, rendered, guard=guard, expected_hash=content_hash(text),
-    ),))
+    ), retirement_meta)
+
+
+def _commit_reference(vault: Path, publication: ReferencePublication) -> None:
+    from . import preserve
+    from .vault_store import read
+
+    snapshot, write = publication.snapshot, publication.write
+    rendered = write.content.encode("utf-8")
+    with trash_metadata.completing_retirement(publication):
+        preserve.commit_media_sidecar_writes(vault, (write,))
     # Keep protection through an uncertain writer or catalog result. Explicitly
     # confirm durable bytes even when a prior attempt already wrote this value.
     relative = snapshot.sidecar_path.relative_to(vault).as_posix()
     # A store-mode vault's page is the store's, committed durably above, and its Markdown file may
     # not be projected yet: the read-back is the store's page, with no file to sync.
     if (stored := read.owned_bytes(vault, relative)) is not None:
-        if stored != rendered.encode("utf-8"):
+        if stored != rendered:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
         return
     with reserved_paths.open_generic_binary(vault, relative) as source:
-        if source.stream.read() != rendered.encode("utf-8"):
+        if source.stream.read() != rendered:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
         try:
             os.fsync(source.stream.fileno())
@@ -907,6 +1114,10 @@ def _flush_through_writer(vault: Path, relative: str, expected: held_fs.StableId
                 os.fsync(writable.descriptor)
 
 
+def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:
+    _commit_reference(vault, prepare_reference(vault, snapshot, reference))
+
+
 def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:
     """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
     with _transport("head"):
@@ -925,7 +1136,7 @@ def _confirmed(store: Store, reference: StoredObject) -> bool:
     return head is not None and not head.condemned
 
 
-def forget_original(vault: Path, path: str | Path) -> None:
+def forget_original(vault: Path, path: str | Path, *, prepared: ReferencePublication | None = None) -> None:
     """Remove a deleted original's binding before its explicit deletion fan-out."""
     if originals.binding_for(vault) is None:
         return
@@ -938,7 +1149,14 @@ def forget_original(vault: Path, path: str | Path) -> None:
         if original_state(vault, path) != snapshot:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the deletion binding changed")
         _release_name(MediaJobStore(vault), reference.object)
-        _publish_reference(vault, snapshot, None)
+        if prepared is None:
+            _publish_reference(vault, snapshot, None)
+        else:
+            acquired = prepared.snapshot
+            if (acquired.path, acquired.sidecar_path, acquired.sidecar_hash, acquired.reference) != (
+                    snapshot.path, snapshot.sidecar_path, snapshot.sidecar_hash, snapshot.reference):
+                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the prepared deletion binding changed")
+            _commit_reference(vault, prepared)
 
     _publishing(vault, "media_store_forget_original", forget)
 
@@ -1132,7 +1350,8 @@ def _no_census() -> None:
     return None
 
 
-def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> StoredObject | None:
+def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None,
+            job: MediaJob | None = None) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
 
     None means that the original stays local: notes and datasets are never
@@ -1142,14 +1361,15 @@ def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None) -> St
     if batch is not None:
         batch.begin()
     try:
-        return _offload_member(Path(vault).resolve(), path, batch)
+        return _offload_member(Path(vault).resolve(), path, batch, job=job)
     except BaseException:
         if batch is not None:
             batch.failed()
         raise
 
 
-def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> StoredObject | None:
+def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
+                    job: MediaJob | None = None) -> StoredObject | None:
     config = _settings(vault)
     if config.get("enabled") is not True:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
@@ -1170,8 +1390,10 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             head = _verified_head(backend, snapshot.reference)
             if head is not None and not head.condemned:
                 with ExitStack() as stack:
-                    source = (stack.enter_context(reserved_paths.open_generic_binary(vault, ledger._relative(path)))
+                    source = (stack.enter_context(_open_local_original(vault, ledger._relative(path), snapshot))
                               if snapshot.state == "cached" else None)
+                    if source is not None:
+                        _bind_pin(ledger, token, snapshot, source, job=job)
                     if source is not None and _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
                     def confirm() -> None:
@@ -1212,7 +1434,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
         key_version = str(config["key_version"])
         if reuse is not None and not _confirmed(backend, reuse.reference):
             reuse = None
-        with reserved_paths.open_generic_binary(vault, path.relative_to(vault).as_posix()) as source:
+        with _open_local_original(vault, path.relative_to(vault).as_posix(), snapshot) as source:
+            _bind_pin(ledger, token, snapshot, source, job=job)
             if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                 raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
             source.stream.seek(0)
@@ -1288,8 +1511,19 @@ def _hydrate(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, tok
     The reservation names the temporary before it exists, so a stop at any point
     leaves a row that names its file, and nothing at the original's path.
     """
-    from . import source_original_custody
+    from . import media_bindings, source_original_custody
 
+    current = original_state(vault, snapshot.path)
+    if replace(current, state=snapshot.state, local_path=snapshot.local_path) != snapshot:
+        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed before hydration")
+    if current.state != "evicted":
+        return  # Another completed hydration needs no second provider read.
+    relative = ledger._relative(snapshot.path)
+    # Only a filing hydrates into the pool; a Trash entry comes back as an ordinary file at its own Trash path.
+    key = media_bindings.object_key(vault, relative, snapshot.binary_sha256)
+    if key != relative:
+        _hydrate_shared(vault, snapshot, ledger, token, key)
+        return
     temporary = held_fs.publish_temporary_name()
     custody = None
     with ExitStack() as lifetime:
@@ -1319,11 +1553,82 @@ def _release(ledger: MediaJobStore, token: str, *, temporary_gone: bool = True) 
         with conn:
             conn.execute("UPDATE media_access SET hydrating = 0, temporary_bytes = "
                          "CASE WHEN :gone THEN 0 ELSE temporary_bytes END, temporary_name = "
-                         "CASE WHEN :gone THEN NULL ELSE temporary_name END, source_custody_json = "
+                         "CASE WHEN :gone THEN NULL ELSE temporary_name END, hydration_key = "
+                         "CASE WHEN :gone THEN NULL ELSE hydration_key END, temporary_identity = "
+                         "CASE WHEN :gone THEN NULL ELSE temporary_identity END, source_custody_json = "
                          "CASE WHEN :gone THEN NULL ELSE source_custody_json END WHERE token = :token",
                          {"gone": temporary_gone, "token": token})
     finally:
         conn.close()
+
+
+def _hydrate_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, token: str, key: str) -> None:
+    """Reserve one physical download, verify every byte, then publish without logical binary copies."""
+    from . import original_pool
+
+    config = _settings(vault)
+    assert snapshot.reference is not None and snapshot.binary_size is not None and snapshot.binary_sha256 is not None
+    limits = media_capacity.hydration_limits(config)
+    if limits is None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "media hydration limits are not configured")
+    temporary = reserved_paths._owner_stage_name()
+    _reserve(ledger, token, snapshot.binary_size, limits, hydration=True, temporary=temporary, hydration_key=key)
+    created = None
+    collision = False
+
+    def record_created(identity: held_fs.StableIdentity) -> None:
+        nonlocal created
+        created = identity  # Live failure cleanup retains proof even if the transaction fails.
+        encoded = json.dumps((identity.device, identity.inode, identity.kind, identity.link_count))
+        with closing(ledger._connect()) as conn:
+            conn.execute("PRAGMA synchronous=FULL")
+            with conn:
+                changed = conn.execute("UPDATE media_access SET temporary_identity = ? "
+                                       "WHERE token = ? AND temporary_name = ? AND hydration_key = ?",
+                                       (encoded, token, temporary, key)).rowcount
+                if changed != 1:
+                    raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the hydration reservation changed")
+
+    try:
+        current = original_state(vault, snapshot.path)
+        if replace(current, state=snapshot.state, local_path=snapshot.local_path) != snapshot:
+            raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed before hydration")
+        if current.state != "evicted":
+            return
+        with closing(_decrypted_chunks(store_for(vault), snapshot.reference, str(config["identity_path"]))) as chunks:
+            with original_pool.prepare(vault, snapshot.binary_sha256, snapshot.binary_size,
+                    held_fs.Chunks(lambda: chunks), temporary_name=temporary, on_created=record_created) as prepared:
+                for _attempt in range(3):
+                    try:
+                        with _guard(vault, "media_store_hydrate"):
+                            current = original_state(vault, snapshot.path)
+                            # Another filing can publish these same bytes while this download runs.
+                            if replace(current, state=snapshot.state, local_path=snapshot.local_path) != snapshot:
+                                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the original changed during hydration")
+                            prepared.publish()
+                            current = original_state(vault, snapshot.path)
+                            if current.local_path != original_pool.object_path(vault, snapshot.binary_sha256):
+                                return  # A separately verified ordinary original won its logical destination.
+                            with closing(ledger._connect()) as conn, conn:
+                                _record_cache(conn, ledger, current, prepared.source)
+                            return
+                    except original_pool.PublicationRace:
+                        prepared.confirm_existing()  # Hash a concurrent winner outside the canonical guard.
+                raise MediaStoreError(STORE_BUSY_CODE, "shared original publication is in use")
+    except held_fs.HeldFsError as error:
+        collision = created is None and error.code == "DESTINATION_EXISTS"
+        raise
+    except ValueError as error:
+        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original failed authenticated verification") from error
+    finally:
+        gone = collision
+        if not collision:
+            try:
+                original_pool.remove_stage(vault, key, temporary, created)
+                gone = True
+            except (ValueError, OSError, held_fs.HeldFsError):
+                pass  # Unknown or replaced stages retain cleanup custody and their byte charge.
+        _release(ledger, token, temporary_gone=gone)
 
 
 def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, token: str,
@@ -1385,12 +1690,8 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
         raise
 
 
-def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
-    """Download, decrypt and write in one pass; return the plaintext's head once both checks pass.
-
-    A thread feeds the download to `age` while this thread writes its output, so a
-    full local disk raises here as a local error, never as a store or verification failure.
-    """
+def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) -> Iterator[bytes]:
+    """Stream plaintext; exhaustion verifies the ciphertext and age's authenticated exit."""
     process = subprocess.Popen(["age", "--decrypt", "--identity", identity],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert process.stdin is not None and process.stdout is not None
@@ -1413,14 +1714,10 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
 
     feeder = threading.Thread(target=feed, name="media-hydration-feed", daemon=True)
     feeder.start()
-    plaintext, size = hashlib.sha256(), 0
     try:
         # read1 returns what age has written so far, so the file grows as the download arrives.
         while chunk := process.stdout.read1(1024 * 1024):
-            plaintext.update(chunk)
-            size += len(chunk)
-            sink.write(chunk)
-        sink.flush()
+            yield chunk
         returncode = process.wait()
     except BaseException:
         process.kill()
@@ -1433,6 +1730,17 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
         raise feed_errors[0]
     if returncode or ObjectHead(fed[0], ciphertext.hexdigest()) != ObjectHead(reference.ciphertext_size, reference.ciphertext_sha256):
         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext or its authenticated decryption failed")
+
+
+def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
+    """Download and decrypt in one pass; local sink failures remain local errors."""
+    plaintext, size = hashlib.sha256(), 0
+    with closing(_decrypted_chunks(backend, reference, identity)) as chunks:
+        for chunk in chunks:
+            plaintext.update(chunk)
+            size += len(chunk)
+            sink.write(chunk)
+        sink.flush()
     return ObjectHead(size, plaintext.hexdigest())
 
 
@@ -1459,6 +1767,7 @@ def _payload_path(companion: str, binary: originals.BinaryBinding, displaced: bo
 def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
     """Each original whose bytes are not on the volume and whose version the store holds, Trash included.
 
+    A pooled original is no member: its pool object ships as a canonical member, so the store adds nothing.
     Yields the path that the archive gives it, once however many pages bind it: a live original's bound path,
     or a Trash payload's path beside its companion. A companion that cannot be read binds nothing, so the ledger, which keeps a row
     for each evicted path, gives the version of an original behind one. Raises `MEDIA_LEDGER_UNRESOLVED`
@@ -1472,7 +1781,7 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
             vault, binding, unreadable=lambda path, _error: unreadable.add(path)):
         counted.add(ledger._relative(ledger.vault_root / binary.path))
         path = _payload_path(companion, binary, displaced)
-        if path not in yielded and not _on_volume(vault, path):
+        if path not in yielded and not _on_volume(vault, path) and not _pool_holds(vault, binary):
             yielded.add(path)
             yield path, binary, reference
     if not unreadable:
@@ -1480,19 +1789,22 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
     with closing(ledger._connect(readonly=True)) as conn:
         # Every row, not only the marked ones: a row whose bytes went missing before a census marked it
         # still names the version that the store holds.
-        rows = conn.execute("SELECT binary_rel, reference, sha256, size FROM media_cache ORDER BY binary_rel").fetchall()
+        members, parameters = _logical_cache_members(vault, conn)
+        rows = conn.execute(members, parameters).fetchall()
     for relative, key, sha256, size in rows:
         if relative in counted or _on_volume(vault, relative) or not any(
                 companion in unreadable for companion, _data in originals.companion_candidates(vault, relative)):
             continue
         try:
             reference = originals.stored_reference(json.loads(key))
-        except ValueError:
+        except (ValueError, TypeError):
             reference = None
         if (reference is None or reference.store != binding.store or not isinstance(size, int) or size < 0
                 or not originals.is_sha256(sha256)):
             raise MediaStoreError("MEDIA_LEDGER_UNRESOLVED", "an evicted original's ledger row holds no version to read")
-        yield relative, originals.BinaryBinding(relative, sha256, size), reference
+        held = originals.BinaryBinding(relative, sha256, size)
+        if not _pool_holds(vault, held):
+            yield relative, held, reference
 
 
 def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
@@ -1504,6 +1816,31 @@ def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
                 raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext exceeds its recorded size")
             remaining -= len(chunk)
             yield chunk
+
+
+def _bound_file(vault: Path, relative: str) -> OriginalSnapshot | None:
+    """The binding of one original path, as `bound_originals` would yield it, read from its own companions only."""
+    try:
+        snapshot = original_state(vault, relative)
+    except originals.RetirementUnconfirmed:
+        raise  # Its original is unknown; an operation that left it out would read as complete.
+    except (UnicodeError, ValueError):
+        return None
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code in _UNTRUSTED_LEAF:
+            return None
+        raise
+    return snapshot if snapshot.binary_sha256 is not None else None
+
+
+def _retired(vault: Path, snapshot: OriginalSnapshot) -> bool:
+    """Whether canonical Trash metadata retired the companion that binds a missing original.
+
+    Raises `originals.RetirementUnconfirmed` when a witness names the companion but no longer confirms it.
+    """
+    found = originals.bound_companion(vault, snapshot.path.relative_to(vault).as_posix())
+    return found is not None and trash_metadata.retired_companion(
+        vault, found[0], found[1], hashlib.sha256(found[2]).hexdigest())
 
 
 @contextmanager
@@ -1528,16 +1865,25 @@ def local_originals(vault: Path, paths: tuple[str | Path, ...], *, read: bool = 
         prefixes.append(relative)
         if originals.is_note_path(relative):
             prefixes.append(relative[:-3])
-    scan_roots = {target if target.is_dir() else target.parent
-                  for prefix in prefixes for target in (root / prefix,)}
+    folders = {prefix for prefix in prefixes if (root / prefix).is_dir()}
+    def selected(relative: str) -> bool:
+        return any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes)
+
     seen: set[Path] = set()
     with ExitStack() as stack:
-        for snapshot in (item for scan_root in scan_roots for item in bound_originals(root, root=scan_root)):
+        # Only the selected bindings are resolved, so a sibling's unknown original never refuses this operation.
+        # A file's companions lie beside it (`originals.companion_paths`), so it resolves alone; a folder walks.
+        for snapshot in chain(
+                (item for folder in sorted(folders)
+                 for item in bound_originals(root, root=root / folder, selects=selected)),
+                (item for prefix in prefixes
+                 if prefix not in folders and (item := _bound_file(root, prefix)) is not None)):
             if snapshot.path in seen:
                 continue
             seen.add(snapshot.path)
-            relative = snapshot.path.relative_to(root).as_posix()
-            if not any(relative == prefix or relative.startswith(prefix + "/") for prefix in prefixes):
+            if snapshot.state == "missing" and _retired(root, snapshot):
+                # A companion retired to Trash stays at its path with no bytes and no reference: nothing to fetch
+                # or pin, so the operation carries the page as it is. Any other missing original still refuses.
                 continue
             stack.enter_context(pin_original(root, snapshot.path, read=read))
         yield
@@ -1557,6 +1903,10 @@ def pin_original(vault: Path, path: str | Path, *, read: bool = False):
         snapshot = original_state(root, target)
         if snapshot.state == "evicted":
             _hydrate(root, snapshot, ledger, token)
+            snapshot = original_state(root, target)
+        # The pin names the physical bytes it holds, so eviction of a shared object sees every filing's pin.
+        with _open_local_original(root, target.relative_to(root).as_posix(), snapshot) as source:
+            _bind_pin(ledger, token, snapshot, source)
         yield
 
 
@@ -1586,28 +1936,106 @@ def moved_originals(vault: Path, rel: str):
 
 
 @contextmanager
-def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False):
+def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot, *, physical: bool = False,
+                         check_size: bool = True):
+    """Resolve an authorized logical filing to bytes; private pool addresses stay below this boundary.
+
+    A shared object whose size differs from its binding raises `original_pool.ObjectMismatch`, unless the caller
+    hashes every byte itself and passes `check_size=False`.
+    """
+    if snapshot.local_path is None:
+        with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
+            yield source
+        return
+    from . import original_pool
+
+    assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    bound = originals.BinaryBinding(relative, snapshot.binary_sha256, snapshot.binary_size)
+
+    def require_binding() -> None:
+        # The bound path, digest and size name the bytes; the companion's other fields, such as the
+        # extraction text that a pinned job writes, may change while the bytes are held.
+        current = originals.bound_companion(vault, relative)
+        if (current is None or vault / current[0] != snapshot.sidecar_path
+                or originals.binary_binding(current[1]) != bound):
+            raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
+
+    try:
+        require_binding()
+        size = snapshot.binary_size if check_size else None
+        with original_pool.open_object(vault, snapshot.binary_sha256, size) as source:
+            def require_current() -> None:
+                source.require_current()
+                require_binding()
+
+            yield reserved_paths.GenericBinarySource(source.stream, source.version, require_current, source.current_version)
+            require_current()
+    except held_fs.HeldFsError as error:
+        raise reserved_paths.ReservedPathLeafError(error.code) from error
+
+
+def pooled_head(vault: Path, relative: str, snapshot: OriginalSnapshot) -> ObjectHead:
+    """The size and digest that a pooled filing's shared object holds now, read behind the filing's binding check."""
+    with _open_local_original(vault, relative, snapshot) as source:
+        head = _digest(source.stream)
+        source.require_current()
+    return head
+
+
+def _read_state(vault: Path, target: Path) -> OriginalSnapshot:
+    """The state that a read acts on; a retirement that its witness no longer confirms refuses as unverified."""
+    try:
+        return original_state(vault, target)
+    except originals.RetirementUnconfirmed as error:
+        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", error.reason) from error
+
+
+@contextmanager
+def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False,
+                  job: MediaJob | None = None, deadline: float | None = None):
     """Pin before resolution; retain verified bytes through the caller's read.
 
-    `read` marks an owner's playback or viewing; processing and imports record no read.
+    `read` marks an owner's playback or viewing; processing and imports record no read. A request passes its
+    `deadline`, which bounds the hash of a cached original whose recorded identity no longer matches.
     """
+    from . import original_pool
+
     vault = Path(vault).resolve()
     target = Path(path)
     if not target.is_absolute():
         target = vault / target
     relative = target.relative_to(vault).as_posix()
     if originals.binding_for(vault) is None:
-        with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
-            yield source
-        return
+        with ExitStack() as local:
+            try:
+                source = local.enter_context(reserved_paths.open_generic_binary(vault, relative, physical=physical))
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code != "MISSING":
+                    raise
+                snapshot = _read_state(vault, target)
+                if snapshot.local_path is None:
+                    raise error
+            else:
+                if job is not None:
+                    source.require_current()
+                    # The claimed job proves the ledger exists, so this store skips the schema setup.
+                    if not MediaJobStore(vault, create=False).bind_original(job, relative):
+                        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the job no longer owns these original bytes")
+                yield source
+                return
     with _pin(vault, target, read=read) as (ledger, token):
-        snapshot = original_state(vault, target)
+        snapshot = _read_state(vault, target)
         if snapshot.state == "evicted":
             _hydrate(vault, snapshot, ledger, token)
-            snapshot = original_state(vault, target)
-        with reserved_paths.open_generic_binary(vault, relative, physical=physical) as source:
+            snapshot = _read_state(vault, target)
+        with ExitStack() as opened:
+            try:
+                source = opened.enter_context(_open_local_original(vault, relative, snapshot, physical=physical))
+            except original_pool.ObjectMismatch as error:
+                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the shared original differs from its binding") from error
+            _bind_pin(ledger, token, snapshot, source, job=job)
             if snapshot.reference is not None and not cache_matches(vault, target, snapshot=snapshot):
-                if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+                if _digest(source.stream, deadline=deadline) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                     raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the cached original differs")
                 source.require_current()
                 conn = ledger._connect()
@@ -1618,6 +2046,62 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
                     conn.close()
                 source.stream.seek(0)
             yield source
+
+
+@contextmanager
+def logical_view(vault: Path, path: str | Path, *, job: MediaJob | None = None):
+    """A readable path with the original's own filename, for a decoder that dispatches on it.
+
+    An ordinary file is its own view. Shared or evicted bytes stay pinned for the whole use and
+    appear under the logical name in a private directory; nothing appears at the logical path.
+    """
+    vault = Path(vault).resolve()
+    target = Path(path) if Path(path).is_absolute() else vault / path
+    if target.is_file():
+        yield target
+        return
+    with open_original(vault, target, job=job) as source, reserved_paths.private_copy_directory() as private:
+        if target.is_file():
+            yield target  # Hydration restored an unpooled original at its own path.
+            return
+        view = private / target.name
+        local = original_state(vault, target).local_path
+        try:
+            if local is None:
+                raise OSError("no shared object to link")
+            os.symlink(local, view)
+        except OSError:
+            # A platform without unprivileged links copies the pinned bytes instead.
+            source.stream.seek(0)
+            with open(view, "xb") as sink:
+                shutil.copyfileobj(source.stream, sink, 1024 * 1024)
+        yield view
+
+
+def hold_original(vault: Path, path: str, *, recorded_sha256: Callable[[held_fs.FileVersion], str | None],
+                  deadline: float | None = None):
+    """Retain a logical original for checked whole-file and range delivery, including pooled bytes."""
+    return reserved_paths._hold_binary_file(vault, path, open_original(vault, path, read=True, deadline=deadline),
+                                           recorded_sha256=recorded_sha256, deadline=deadline)
+
+
+def read_original_bytes(vault: Path, path: str, *, max_bytes: int | None = None) -> reserved_paths.GenericFileSnapshot:
+    """Read one authorized logical original, retaining its physical version through the complete read."""
+    stored = reserved_paths._read_stored_generic(vault, path, physical=False)
+    if stored is not None:
+        if max_bytes is not None and len(stored.data) > max_bytes:
+            raise reserved_paths.ReservedPathLeafError("TOO_LARGE")
+        return stored
+    with open_original(vault, path) as source:
+        if max_bytes is not None and source.version.size > max_bytes:
+            raise reserved_paths.ReservedPathLeafError("TOO_LARGE")
+        data = source.stream.read() if max_bytes is None else source.stream.read(max_bytes + 1)
+        if max_bytes is not None and len(data) > max_bytes:
+            raise reserved_paths.ReservedPathLeafError("TOO_LARGE")
+        source.require_current()
+        version = source.version
+        return reserved_paths.GenericFileSnapshot(data, version.identity, version.mtime_ns / 1e9,
+            (version.size, version.mtime_ns, version.change_time_ns))
 
 
 # The outcomes of one eviction attempt, a closed set that `evict_to_target` branches on (D3, M3).
@@ -1667,6 +2151,18 @@ def _prune(vault: Path, ledger: MediaJobStore, path: Path, snapshot: OriginalSna
                     or original_state(vault, path) != snapshot):
                 conn.rollback()
                 return False
+            binding = conn.execute("SELECT object_key FROM media_bindings WHERE binary_rel = ?", (relative,)).fetchone()
+            if binding is not None and binding[0] != relative:
+                from . import media_bindings
+
+                # A representative filing cannot retire its siblings' shared cache proof.
+                if snapshot.state != "evicted" or not media_bindings.current(vault, conn):
+                    conn.rollback()
+                    return False
+                conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ? AND sha256 = ?",
+                             (binding[0], snapshot.binary_sha256))
+                conn.commit()
+                return True
             if snapshot.state == "evicted":
                 # The flag orders the claims of the original's jobs (D3, M4).
                 conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
@@ -1704,6 +2200,8 @@ def _evict_one(vault: Path, path: Path) -> str:
     snapshot = _cached_original(vault, ledger, path)
     if isinstance(snapshot, str):
         return snapshot
+    if snapshot.local_path is not None:
+        return _evict_shared(vault, snapshot, ledger, config)
     bounds = media_capacity.bounds_for(config, vault)
     assert snapshot.binary_size is not None and snapshot.reference is not None
     if bounds is None or not bounds.hydration_fits(snapshot.binary_size):
@@ -1737,7 +2235,7 @@ def _evict_one(vault: Path, path: Path) -> str:
             relative = ledger._relative(path)
             _clear_dead_access(conn, ledger, conn.execute(
                 "SELECT * FROM media_access WHERE binary_rel = ?", (relative,)).fetchall())
-            if conn.execute("SELECT 1 FROM media_drain WHERE latched = 1").fetchone():
+            if conn.execute("SELECT 1 FROM media_drain WHERE latched = 1 AND proof_version = 1").fetchone():
                 # A census found no evicted original and cellctl may now act on it, so nothing evicts again (D12).
                 # The policy read above may be stale, so the latch decides whatever it said; the next drain tick
                 # clears a latch that a served store still holds.
@@ -1769,33 +2267,126 @@ def _evict_one(vault: Path, path: Path) -> str:
             conn.close()
 
 
+def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, config: dict[str, object]) -> str:
+    """Confirm distinct own recovery versions outside the guard; unlink once under physical pin exclusion."""
+    from . import media_bindings, original_pool
+
+    assert snapshot.local_path is not None and snapshot.binary_sha256 is not None and snapshot.binary_size is not None
+    key = snapshot.local_path.relative_to(vault).as_posix()
+    with closing(ledger._connect(readonly=True)) as conn:
+        facts = media_bindings.object_facts(conn, key)
+    bounds = media_capacity.bounds_for(config, vault)
+    if (facts is None or facts.resident_only or not facts.recoverable or facts.pinned
+            or bounds is None or not bounds.hydration_fits(facts.size)):
+        return KEPT
+    with original_pool.open_object(vault, facts.sha256, facts.size) as source:
+        version = source.version
+    try:
+        backend = store_for(vault)
+        if not all(_confirmed(backend, reference) for reference in facts.references):
+            return KEPT
+    except MediaStoreError as error:
+        return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
+    with _guard(vault, "media_store_evict_shared"), closing(ledger._connect()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _clear_dead_access(conn, ledger, conn.execute(
+            "SELECT * FROM media_access WHERE object_key = ?", (key,)).fetchall())
+        latest = media_bindings.object_facts(conn, key)
+        if (latest is None or latest.checkpoint != facts.checkpoint or not media_bindings.current(vault, conn)
+                or latest.sha256 != facts.sha256 or latest.size != facts.size or latest.references != facts.references
+                or latest.resident_only or not latest.recoverable or latest.pinned
+                or latest.owner_read is not None and time.time() - latest.owner_read < float(config["minimum_idle_seconds"])):
+            conn.rollback()
+            return KEPT
+        original_pool.evict_object(vault, facts.sha256, expected_version=version)
+        conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (key,))
+        conn.commit()
+        return EVICTED
+
+
 # A demand lapses 15 minutes after its series last renewed it (D3).
 DEMAND_LEASE_SECONDS = 15 * 60
 # Each read takes at most this many candidates, so a pass never loads the whole cache at once.
 _EVICTION_BATCH = 64
-_ELIGIBLE = (
-    "FROM media_cache WHERE evicted = 0 AND size IS NOT NULL AND size <= :hydration "
-    "AND (owner_read IS NULL OR owner_read <= :idle_before) "
-    "AND NOT EXISTS (SELECT 1 FROM media_access WHERE media_access.binary_rel = media_cache.binary_rel) "
-    f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel AND {_JOB_PINS})"
-)
 # Unread originals first, those with no pending job before those with one, each largest first;
 # then owner-read originals, largest first and longest idle on ties (D3, M4). The path makes the
 # order total, so a pass reads past the candidates it keeps by their count.
-_EVICTION_ORDER = (
-    "ORDER BY owner_read IS NOT NULL, "
-    "CASE WHEN owner_read IS NULL THEN EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel "
-    "AND jobs.state = 'pending') ELSE 0 END, size DESC, owner_read, binary_rel"
-)
+def _cache_selection(vault: Path, conn, parameters: dict[str, object]) -> tuple[str, str, dict[str, object]]:
+    """Select physical candidates without treating unknown or resident shared bytes as reclaimable room."""
+    from . import media_bindings, original_pool
+
+    physical = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone()
+    access = "media_access.binary_rel = media_cache.binary_rel"
+    jobs = "jobs.binary_rel = media_cache.binary_rel"
+    queued = "EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = media_cache.binary_rel AND jobs.state = 'pending')"
+    lifetime = ""
+    if physical:
+        pooled = "substr(media_cache.binary_rel, 1, length(:pool_prefix)) = :pool_prefix"
+        access = ("media_access.object_key = media_cache.binary_rel OR media_access.object_key IS NULL "
+                  f"AND (media_access.binary_rel = media_cache.binary_rel OR {pooled})")
+        jobs = ("jobs.object_key = media_cache.binary_rel OR jobs.object_key IS NULL "
+                f"AND (jobs.binary_rel = media_cache.binary_rel OR {pooled})")
+        # Two indexed lookups: an OR inside one subquery made each candidate scan every pending job. CROSS JOIN
+        # fixes SQLite's loop order, so the object's few filings drive the path lookups.
+        queued += (" OR EXISTS (SELECT 1 FROM media_bindings pb CROSS JOIN jobs ON jobs.binary_rel = pb.binary_rel "
+                   "WHERE pb.object_key = media_cache.binary_rel AND jobs.state = 'pending')")
+        lifetime = (f" AND (NOT ({pooled}) OR (:bindings_current AND "
+                    "EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = media_cache.binary_rel) AND "
+                    "NOT EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = media_cache.binary_rel "
+                    "AND (b.resident_only = 1 OR b.reference IS NULL OR b.sha256 != media_cache.sha256 "
+                    "OR b.size != media_cache.size))))")
+        parameters = {**parameters, "pool_prefix": original_pool.pool_root(vault).relative_to(vault).as_posix() + "/",
+                      "bindings_current": media_bindings.current(vault, conn)}
+    eligible = ("FROM media_cache WHERE evicted = 0 AND size IS NOT NULL AND size <= :hydration "
+                "AND (owner_read IS NULL OR owner_read <= :idle_before) "
+                f"AND NOT EXISTS (SELECT 1 FROM media_access WHERE ({access})) "
+                f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE ({jobs}) AND {_JOB_PINS})" + lifetime)
+    order = (f"ORDER BY owner_read IS NOT NULL, CASE WHEN owner_read IS NULL THEN {queued} ELSE 0 END, "
+             "size DESC, owner_read, binary_rel")
+    return eligible, order, parameters
 
 
-# An offload job that no claimed, unfinished job pins; a pinned original is counted as job-pinned instead.
-_UNPINNED_OFFLOAD = (
-    "SELECT DISTINCT offload.binary_rel FROM jobs AS offload WHERE offload.media_type = :offload "
-    "AND offload.do_offload = 1 AND offload.state IN ('pending', 'running') "
-    f"AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.binary_rel = offload.binary_rel AND {_JOB_PINS})"
-)
-_PINNED_ORIGINALS = f"SELECT DISTINCT jobs.binary_rel FROM jobs WHERE {_JOB_PINS}"
+def _occupancy_paths(vault: Path, conn, *, pinned: bool):
+    """Count each physical job input once, keeping pending, cached and pinned bytes disjoint."""
+    from . import media_bindings, original_pool
+
+    physical = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone()
+    key, join = "jobs.binary_rel", ""
+    parameters = {"offload": OFFLOAD_MEDIA_TYPE}
+    if physical:
+        key = ("COALESCE(jobs.object_key, b.object_key, jobs.binary_rel)" if pinned else
+               "COALESCE(b.object_key, jobs.binary_rel)")
+        join = " LEFT JOIN media_bindings b ON b.binary_rel = jobs.binary_rel"
+        parameters.update(pool_prefix=original_pool.pool_root(vault).relative_to(vault).as_posix() + "/",
+                          bindings_current=media_bindings.current(vault, conn))
+    where = (_JOB_PINS if pinned else
+             "jobs.media_type = :offload AND jobs.do_offload = 1 AND jobs.state IN ('pending', 'running')")
+    query = f"SELECT {key} AS object_key FROM jobs{join} WHERE {where}"
+    if physical and pinned:
+        # An unresolved claimed pin conservatively retains every pooled object until acquisition.
+        query += (" UNION SELECT object_key FROM media_bindings WHERE EXISTS "
+                  f"(SELECT 1 FROM jobs WHERE {_JOB_PINS} AND object_key IS NULL)")
+    if physical:
+        pool = "substr(inputs.object_key, 1, length(:pool_prefix)) = :pool_prefix"
+        retained = (f" AND (NOT ({pool}) OR (:bindings_current AND "
+                    "EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = inputs.object_key) "
+                    "AND NOT EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = inputs.object_key "
+                    "AND b.resident_only = 1)))")
+        pin = ("jobs.object_key = inputs.object_key OR jobs.object_key IS NULL "
+               f"AND (jobs.binary_rel = inputs.object_key OR {pool})")
+    else:
+        retained, pin = "", "jobs.binary_rel = inputs.object_key"
+    if not pinned:
+        retained += f" AND NOT EXISTS (SELECT 1 FROM jobs WHERE ({pin}) AND {_JOB_PINS})"
+        if physical:
+            retained += (" AND NOT EXISTS (SELECT 1 FROM media_bindings b WHERE b.object_key = inputs.object_key "
+                         "AND b.reference IS NULL AND NOT EXISTS (SELECT 1 FROM jobs j "
+                         "WHERE j.binary_rel = b.binary_rel AND j.do_offload = 1 AND j.state IN ('pending', 'running')))")
+        # A confirmed cached copy already belongs to the cache figure, even if an offload retry remains.
+        retained += (" AND NOT EXISTS (SELECT 1 FROM media_cache c WHERE c.binary_rel = inputs.object_key "
+                     "AND c.evicted = 0)")
+    return (row[0] for row in conn.execute(
+        f"WITH inputs AS ({query}) SELECT DISTINCT inputs.object_key FROM inputs WHERE 1{retained}", parameters))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1840,12 +2431,13 @@ def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_secon
         with closing(ledger._connect(readonly=True)) as conn:
             evictable = 0
             if eviction_idle_seconds is not None:
+                eligible, _order, parameters = _cache_selection(vault, conn,
+                    {"hydration": bounds.hydration_bytes, "idle_before": time.time() - eviction_idle_seconds})
                 evictable = int(conn.execute(
-                    "SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE,
-                    {"hydration": bounds.hydration_bytes, "idle_before": time.time() - eviction_idle_seconds},
+                    "SELECT COALESCE(SUM(size), 0) " + eligible, parameters,
                 ).fetchone()[0])
-            pending = _volume_bytes(vault, (row[0] for row in conn.execute(_UNPINNED_OFFLOAD, {"offload": OFFLOAD_MEDIA_TYPE})), largest)
-            pinned = _volume_bytes(vault, (row[0] for row in conn.execute(_PINNED_ORIGINALS)), largest)[1]
+            pending = _volume_bytes(vault, _occupancy_paths(vault, conn, pinned=False), largest)
+            pinned = _volume_bytes(vault, _occupancy_paths(vault, conn, pinned=True), largest)[1]
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     return Occupancy(evictable, pending[0], pending[1], pinned)
@@ -2013,9 +2605,13 @@ def _refresh_candidates(ledger: MediaJobStore) -> None:
 def _candidates(ledger: MediaJobStore, parameters: dict[str, object], offset: int) -> list[tuple[str, int]]:
     conn = ledger._connect()
     try:
-        rows = conn.execute("SELECT binary_rel, size " + _ELIGIBLE + " " + _EVICTION_ORDER + " LIMIT :batch OFFSET :offset",
+        eligible, order, parameters = _cache_selection(ledger.vault_root, conn, parameters)
+        # The physical row owns age and size; an indexed representative supplies the logical access path.
+        rows = conn.execute("SELECT COALESCE((SELECT b.binary_rel FROM media_bindings b "
+                            "WHERE b.object_key = media_cache.binary_rel ORDER BY b.binary_rel LIMIT 1), binary_rel) "
+                            "AS logical_rel, size " + eligible + " " + order + " LIMIT :batch OFFSET :offset",
                             {**parameters, "batch": _EVICTION_BATCH, "offset": offset}).fetchall()
-        return [(row["binary_rel"], int(row["size"])) for row in rows]
+        return [(row["logical_rel"], int(row["size"])) for row in rows]
     finally:
         conn.close()
 
@@ -2028,7 +2624,8 @@ def _room_covers(vault: Path, ledger: MediaJobStore, parameters: dict[str, objec
     """
     conn = ledger._connect()
     try:
-        if conn.execute("SELECT COALESCE(SUM(size), 0) " + _ELIGIBLE, parameters).fetchone()[0] < shortfall:
+        eligible, _order, parameters = _cache_selection(vault, conn, parameters)
+        if conn.execute("SELECT COALESCE(SUM(size), 0) " + eligible, parameters).fetchone()[0] < shortfall:
             return False
     finally:
         conn.close()
@@ -2111,6 +2708,8 @@ def evict_to_target(vault: Path) -> int:
 # A complete census repeats at most this often; an unknown one waits as long. One hour keeps a walk of the
 # Knowledge Base rare while a restore that brings back evicted originals is seen within the hour.
 CENSUS_INTERVAL_SECONDS = 3600
+# The drain wire protocol counts physical objects, independent of logical filing count.
+DRAIN_UNIT = "physical_objects"
 
 
 # What a drain pass yielded to; the codes of a busy slot or store are the hydration's own.
@@ -2129,6 +2728,7 @@ class DrainRecord:
     attempt_failed: bool  # The latest attempt could not count, so the figures above are from an earlier census.
     waiting: str | None
     blocked_by: tuple[str, ...]  # The originals whose companion stopped the latest attempt, vault-relative.
+    unit: str = DRAIN_UNIT
 
 
 def drain_record(vault: Path) -> DrainRecord | None:
@@ -2140,11 +2740,17 @@ def drain_record(vault: Path) -> DrainRecord | None:
         with closing(ledger._connect(readonly=True)) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_drain'").fetchone() is None:
                 return None  # A ledger from before the record has no table.
-            row = conn.execute("SELECT evicted, bytes, captured_at, latched, attempted_at, attempt_failed, waiting, blocked_by FROM media_drain").fetchone()
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(media_drain)")}
+            proof = "proof_version" if "proof_version" in columns else "0 AS proof_version"
+            row = conn.execute("SELECT evicted, bytes, captured_at, latched, attempted_at, attempt_failed, waiting, "
+                               f"blocked_by, {proof} FROM media_drain").fetchone()
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     if row is None:
         return None
+    if row["proof_version"] != 1:
+        return DrainRecord(None, None, None, False, row["attempted_at"], True, row["waiting"],
+                           tuple(json.loads(row["blocked_by"] or "[]")))
     return DrainRecord(row["evicted"], row["bytes"], row["captured_at"], bool(row["latched"]), row["attempted_at"],
                        bool(row["attempt_failed"]), row["waiting"], tuple(json.loads(row["blocked_by"] or "[]")))
 
@@ -2176,18 +2782,72 @@ def _on_volume(vault: Path, relative: str) -> bool:
     return True
 
 
-def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str, tuple[originals.BinaryBinding, StoredObject]]:
-    """The originals whose companion binds a reference to the store and whose bytes are not on the volume.
+def _pool_holds(vault: Path, binary: originals.BinaryBinding) -> bool:
+    """Whether the shared pool holds this binding's bytes locally; an export ships that object as a canonical member."""
+    from . import original_pool
 
-    Each is keyed by where its bytes belong, so an original in Trash is counted, and drained, at its Trash path.
-    Raises when a companion or a path cannot be read: an incomplete census is unknown, never a lower count.
-    """
-    found: dict[str, tuple[originals.BinaryBinding, StoredObject]] = {}
-    for companion, binary, reference, displaced in media_allowance.bound_references(vault, binding):
-        path = _payload_path(companion, binary, displaced)
-        if not _on_volume(vault, path):
-            found.setdefault(path, (binary, reference))  # As in `evicted_members`, the first page to bind a path wins.
-    return found
+    return original_pool.enabled(vault) and original_pool.locally_present(vault, binary.sha256, binary.size)
+
+
+def _physical_drain_census(vault: Path, conn: sqlite3.Connection) -> None:
+    """Stream unique objects into temporary ledger state; absence without own recovery is unknown."""
+    from contextlib import nullcontext
+
+    from . import original_pool
+    from .vault_store import mode, read
+
+    conn.execute("CREATE TEMP TABLE drain_census (object_key TEXT PRIMARY KEY, sha256 TEXT, size INTEGER, "
+                 "binary_rel TEXT, reference TEXT, present INTEGER NOT NULL DEFAULT 0)")
+    if conn.execute("SELECT 1 FROM media_bindings GROUP BY object_key "
+                    "HAVING MIN(sha256) != MAX(sha256) OR MIN(size) != MAX(size) LIMIT 1").fetchone():
+        raise ValueError("one physical original has inconsistent bindings")
+    conn.execute(
+        "INSERT INTO drain_census(object_key, sha256, size, binary_rel, reference) "
+        "SELECT object_key, MIN(sha256), MIN(size), "
+        "COALESCE(MIN(CASE WHEN reference IS NOT NULL THEN binary_rel END), MIN(binary_rel)), MIN(reference) "
+        "FROM media_bindings GROUP BY object_key")
+    conn.commit()
+    blocked = []
+    with (read.snapshot(vault, join_request=False) if mode.store_mode_for_reads(vault) else nullcontext(None)) as view:
+        cursor = conn.execute("SELECT * FROM drain_census ORDER BY object_key")
+        while batch := cursor.fetchmany(256):
+            owned = read.owned_as_pages(vault, (row["object_key"] for row in batch)) if view else {}
+            stored = view.held_pages(key for key, serves in owned.items() if serves) if view else ()
+            updates = []
+            for row in batch:
+                key = row["object_key"]
+                if owned.get(key):
+                    present = key in stored
+                elif original_pool.is_canonical_member(key):
+                    if key != original_pool.object_path(vault, row["sha256"]).relative_to(vault).as_posix():
+                        raise ValueError("physical original has an invalid pool identity")
+                    present = original_pool.locally_present(vault, row["sha256"], row["size"])
+                else:
+                    present = _on_volume(vault, key)
+                updates.append((int(present), key))
+                if not present and row["reference"] is None:
+                    blocked.append(row["binary_rel"])
+                    blocked.sort()
+                    del blocked[media_allowance.BLOCKERS_SHOWN:]
+            conn.executemany("UPDATE drain_census SET present = ? WHERE object_key = ?", updates)
+    if blocked:
+        raise _CompanionBlocks(sorted(blocked))
+    # Preserve old-ledger witnesses when no complete binding projection had acquired them.
+    for row in conn.execute("SELECT binary_rel FROM media_cache c WHERE NOT EXISTS "
+                            "(SELECT 1 FROM drain_census d WHERE d.object_key = c.binary_rel) ORDER BY binary_rel"):
+        relative = row[0]
+        if original_pool.is_canonical_member(relative) or _on_volume(vault, relative):
+            continue
+        try:
+            _require_released(vault, relative)
+        except ValueError:
+            blocked.append(relative)
+            if len(blocked) == media_allowance.BLOCKERS_SHOWN:
+                break
+    if blocked:
+        raise _CompanionBlocks(blocked)
+    conn.commit()
+
 
 
 def _require_released(vault: Path, relative: str) -> None:
@@ -2206,61 +2866,20 @@ def _require_released(vault: Path, relative: str) -> None:
 
 
 class _CompanionBlocks(ValueError):
-    """Originals with no bytes whose companion is no release; `blocked` holds their paths, kept off the message that the worker logs."""
+    """Bound originals without local bytes or proven release; paths stay off worker log messages."""
 
     def __init__(self, blocked: list[str]) -> None:
-        super().__init__("a companion that is no release stands where an original with no bytes has its own")
+        super().__init__("an original has no local bytes or proven release")
         self.blocked = blocked
 
 
-def _released_rows(vault: Path, ledger: MediaJobStore, evicted: Iterable[str]) -> list[str]:
-    """The ledger's evicted rows that the walk did not confirm, each shown to be an original that is no longer evicted.
-
-    Every ledger row that the walk did not count is checked, whatever its mark: a stopped eviction leaves the
-    bytes gone from a row not yet marked, and a damaged companion hides such an original from the walk. Raises
-    `_CompanionBlocks` for the rows whose bytes are gone and whose companion is not released.
-    """
-    counted = {ledger._relative(ledger.vault_root / path) for path in evicted}
-    with closing(ledger._connect(readonly=True)) as conn:
-        rows = [(row[0], bool(row[1])) for row in conn.execute("SELECT binary_rel, evicted FROM media_cache ORDER BY binary_rel")
-                if row[0] not in counted]
-    blocked: list[str] = []
-    for relative, _marked in rows:
-        if _on_volume(vault, relative):
-            continue
-        try:
-            _require_released(vault, relative)
-        except ValueError:  # A damaged companion: the cause may name a path, so it is not chained.
-            blocked.append(relative)
-            if len(blocked) == media_allowance.BLOCKERS_SHOWN:
-                break
-    if blocked:
-        raise _CompanionBlocks(blocked)
-    return [relative for relative, marked in rows if marked]
 
 
-def _align_ledger(conn: sqlite3.Connection, ledger: MediaJobStore,
-                  evicted: dict[str, tuple[originals.BinaryBinding, StoredObject]], released: list[str]) -> None:
-    """Make the ledger's evicted rows the census: mark each counted original with its size, clear the released rows."""
-    for path, (binary, reference) in evicted.items():
-        conn.execute(
-            "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size, evicted) "
-            "VALUES (?, ?, ?, '', ?, ?, 1) ON CONFLICT(binary_rel) DO UPDATE SET size = excluded.size, evicted = 1",
-            (ledger._relative(ledger.vault_root / path), _reference_key(reference), binary.sha256, time.time(), binary.size))
-    for relative in released:
-        conn.execute("UPDATE media_cache SET evicted = 0 WHERE binary_rel = ?", (relative,))
 
 
 def drain_census(vault: Path) -> tuple[int, int]:
-    """Count the evicted originals from the companions, align the ledger and record the count (D12).
-
-    The walk, the ledger write and the latch share one hold of the consistency guard, which an eviction also
-    takes, so no eviction runs between the count and the latch. A complete zero latches eviction off while the
-    store is turned off; a complete count above zero clears the latch. Raises `MediaStoreError` when any
-    companion or path cannot be read, or when the companion of a ledger row with no bytes is damaged: an unknown
-    census changes neither the latch nor the record, and names the first such originals for the status.
-    """
-    from .writer_lease import get_manager
+    """Count physical objects off-volume; publish only an unchanged complete binding frontier."""
+    from . import media_bindings
 
     vault = Path(vault).resolve()
     config, binding = originals.configuration(vault), originals.binding_for(vault)
@@ -2269,20 +2888,53 @@ def drain_census(vault: Path) -> tuple[int, int]:
     ledger = MediaJobStore(vault)
     now = datetime.now(UTC)
     try:
-        with get_manager().consistency_guard(vault, operation="media_drain_census", holder_kind="background"):
-            evicted = _evicted_originals(vault, binding)
-            released = _released_rows(vault, ledger, evicted)
-            count, size = len(evicted), sum(binary.size for binary, _reference in evicted.values())
-            with closing(ledger._connect()) as conn:
-                conn.execute("PRAGMA synchronous=FULL")  # A latch that a power loss drops would let eviction resume.
+        if not media_bindings.rebuild(vault):
+            blocked = []
+            with closing(ledger._connect(readonly=True)) as conn:
+                for row in conn.execute("SELECT c.binary_rel, b.binary_rel AS filing FROM media_cache c "
+                                        "LEFT JOIN media_bindings b ON b.object_key = c.binary_rel ORDER BY c.binary_rel"):
+                    relative = row["filing"] or row["binary_rel"]
+                    if reserved_paths.classify_logical(relative).blocked or _on_volume(vault, relative):
+                        continue
+                    try:
+                        _require_released(vault, relative)
+                    except ValueError:
+                        blocked.append(relative)
+                        if len(blocked) == media_allowance.BLOCKERS_SHOWN:
+                            break
+            if blocked:
+                raise _CompanionBlocks(blocked)
+            raise ValueError("the canonical binding inventory could not complete")
+        with closing(ledger._connect()) as conn:
+            with _guard(vault, "media_drain_census_start"):
+                before = media_bindings.checkpoint(conn)
+                if not media_bindings.current(vault, conn):
+                    raise ValueError("the canonical binding inventory is incomplete")
+                policy = media_bindings.policy_key(vault)
+                config = originals.configuration(vault)
+                if config is None:
+                    raise ValueError("the media store policy disappeared")
+            _physical_drain_census(vault, conn)
+            count, size = conn.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) "
+                                       "FROM drain_census WHERE present = 0").fetchone()
+            with _guard(vault, "media_drain_census_publish"):
+                conn.execute("PRAGMA synchronous=FULL")
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    _align_ledger(conn, ledger, evicted, released)
+                    if (media_bindings.checkpoint(conn) != before or not media_bindings.current(vault, conn)
+                            or media_bindings.policy_key(vault) != policy):
+                        raise ValueError("the canonical bindings changed during the census")
+                    conn.execute("UPDATE media_cache SET evicted = 0 WHERE evicted != 0")
                     conn.execute(
-                        "INSERT INTO media_drain(singleton, evicted, bytes, captured_at, latched, attempted_at) "
-                        "VALUES (1, :count, :size, :at, :latched, :at) ON CONFLICT(singleton) DO UPDATE SET "
+                        "INSERT INTO media_cache(binary_rel, reference, sha256, identity, last_read, size, evicted) "
+                        "SELECT object_key, reference, sha256, '', ?, size, 1 FROM drain_census WHERE present = 0 "
+                        "ON CONFLICT(binary_rel) DO UPDATE SET reference = excluded.reference, "
+                        "sha256 = excluded.sha256, size = excluded.size, evicted = 1", (time.time(),))
+                    conn.execute(
+                        "INSERT INTO media_drain(singleton, evicted, bytes, captured_at, latched, attempted_at, proof_version) "
+                        "VALUES (1, :count, :size, :at, :latched, :at, 1) ON CONFLICT(singleton) DO UPDATE SET "
                         "evicted = :count, bytes = :size, captured_at = :at, latched = :latched, attempted_at = :at, "
-                        "attempt_failed = 0, blocked_by = NULL",
+                        "attempt_failed = 0, blocked_by = NULL, proof_version = 1",
                         {"count": count, "size": size, "at": now.isoformat(timespec="seconds"),
                          "latched": int(count == 0 and config.get("enabled") is False)})
                     conn.commit()
@@ -2297,9 +2949,10 @@ def drain_census(vault: Path) -> tuple[int, int]:
                          (now.isoformat(timespec="seconds"),
                           json.dumps(error.blocked) if isinstance(error, _CompanionBlocks) else None))
         raise MediaStoreError("MEDIA_CENSUS_UNKNOWN", f"the companions or the ledger cannot be read ({type(error).__name__})") from error
-    # The ledger commit comes first: a record that said zero before the latch held could be acted on too early.
+    # A committed latch precedes its externally consumed three-token record.
     media_drain_record.write(vault, count, size, now)
     return count, size
+
 
 
 def _census_due(vault: Path) -> bool:
@@ -2378,14 +3031,20 @@ def _drain_pass(vault: Path, claimable: Callable[[], object | None] | None) -> t
             usage = shutil.disk_usage(vault)
             # What one more original may add: below the threshold less the margin, within the hydration capacity.
             fits = min(bounds.hydration_bytes, int(threshold * usage.total) - int(margin * usage.total) - usage.used)
-            row = conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 1 AND size IS NOT NULL AND size <= ? "
-                               "ORDER BY size, binary_rel LIMIT 1 OFFSET ?", (fits, skipped)).fetchone()
+            row = conn.execute(
+                "SELECT COALESCE((SELECT b.binary_rel FROM media_bindings b WHERE b.object_key = c.binary_rel "
+                "AND b.reference IS NOT NULL ORDER BY b.binary_rel LIMIT 1), c.binary_rel) AS binary_rel "
+                "FROM media_cache c WHERE c.evicted = 1 AND c.size IS NOT NULL AND c.size <= ? "
+                "ORDER BY c.size, c.binary_rel LIMIT 1 OFFSET ?", (fits, skipped)).fetchone()
         if row is None:
             return hydrated, None
         if owner_read is not None and time.time() - owner_read < idle:
             return hydrated, WAIT_OWNER_READ
         if claimable() is not None:
             return hydrated, WAIT_PENDING_JOB
+        if reserved_paths.classify_logical(row["binary_rel"]).blocked:
+            skipped += 1  # An orphan physical row supplies no filing authority for hydration.
+            continue
         try:
             done = hydrate_evicted(vault, vault / row["binary_rel"])
         except MediaStoreError as error:

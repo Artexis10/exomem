@@ -66,6 +66,11 @@ from .media_types import (
     DOC_READERS as _DOC_READERS,
 )
 from .media_types import (
+    has_text_layer,
+    pdf_page_text,
+    pymupdf_allocation_failure,
+)
+from .media_types import (
     media_type_for as _registry_media_type_for,
 )
 from .ocr_facts import OcrFacts
@@ -100,9 +105,6 @@ def _semantic_segments_module():
 # tiny native parsers — no dependency. Only formats the vault actually holds.
 
 WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
-# A PDF page yielding fewer than this many characters of embedded text is treated as
-# scanned → rasterize + OCR fallback.
-_PDF_OCR_MIN_CHARS = 16
 
 
 #: What `## Extracted text` holds when an extraction found no text at all.
@@ -1492,6 +1494,34 @@ def _maybe_image_tags(ocr_text: str, path: Path, engine: str) -> tuple[str, str]
     return text, f"{engine}+tags"
 
 
+def page_marker(number: int) -> str:
+    """The line that opens page `number` in a PDF extraction, so a reader can cite the page a passage sits on."""
+    return f"[page {number}]"
+
+
+# nosemgrep: ep-word-search -- reads back the marker line `page_marker` writes, a format this module owns.
+_PAGE_MARKER_LINE = re.compile(r"^\[page (\d+)\]\n", re.MULTILINE)
+
+
+def leading_pages(text: str, count: int) -> tuple[str, ...]:
+    """The text of pages 1 to `count` of a PDF extraction, read back from its `page_marker` lines.
+
+    A page that held no text has no marker and reads as "". Text with no marker at all reads as page 1.
+    """
+    pages = [""] * count
+    marks: list[re.Match[str]] = []
+    for mark in _PAGE_MARKER_LINE.finditer(text):
+        marks.append(mark)
+        if int(mark.group(1)) > count:
+            break
+    if not marks:
+        pages[0] = text.strip()
+    for mark, following in zip(marks, [*marks[1:], None], strict=True):
+        if 1 <= (number := int(mark.group(1))) <= count:
+            pages[number - 1] = text[mark.end():following.start() if following else None].strip()
+    return tuple(pages)
+
+
 def _extract_pdf(path: Path) -> ExtractResult:
     try:
         import fitz  # PyMuPDF
@@ -1506,8 +1536,8 @@ def _extract_pdf(path: Path) -> ExtractResult:
     try:
         with fitz.open(path) as doc:
             for number, page in enumerate(doc, start=1):
-                page_text = page.get_text().strip()
-                if len(page_text) < _PDF_OCR_MIN_CHARS:
+                page_text = pdf_page_text(page)
+                if not has_text_layer(page_text):
                     # Scanned/image-only page → rasterize and OCR it.
                     scanned_pages += 1
                     ocr_text = _ocr_pdf_page(page)
@@ -1515,12 +1545,11 @@ def _extract_pdf(path: Path) -> ExtractResult:
                         page_text = ocr_text
                         ocr_pages += 1
                 if page_text:
-                    # A line of its own, so a reader can cite the page a passage sits on.
-                    parts.append(f"[page {number}]\n{page_text}")
+                    parts.append(f"{page_marker(number)}\n{page_text}")
     except MemoryError:
         raise
     except Exception as e:
-        if _is_pymupdf_allocation_failure(e):
+        if pymupdf_allocation_failure(e):
             raise MediaMemoryExhausted(f"pymupdf: {e}") from e
         raise
     if not parts and scanned_pages and not media_engines.stage_enabled("image"):
@@ -1592,24 +1621,6 @@ def _markitdown_attempts(error: BaseException) -> list[tuple[type[BaseException]
         if exc_info[1] is not None and getattr(exc_info[1], "attempts", None):
             found.extend(_markitdown_attempts(exc_info[1]))
     return found
-
-
-def _is_pymupdf_allocation_failure(error: BaseException) -> bool:
-    """Whether PyMuPDF reports that MuPDF's allocator failed.
-
-    MuPDF raises a failed allocation as FZ_ERROR_SYSTEM (PyMuPDF's `FzErrorSystem`)
-    with its own message, `malloc (N bytes) failed` or the calloc and realloc forms.
-    Matching that whole message, never a substring, keeps a file path out of it:
-    other system errors name the file.
-    """
-    import fitz
-
-    system_error = getattr(getattr(fitz, "mupdf", None), "FzErrorSystem", None)
-    if system_error is None or not isinstance(error, system_error):
-        return False
-    message = str(getattr(error, "m_text", "") or "")
-    # nosemgrep: ep-word-search -- MuPDF's own allocator message format (source/fitz/memory.c).
-    return re.fullmatch(r"(?:malloc|calloc|realloc)(?: of array)? \(\d+(?: x \d+)? bytes\) failed", message) is not None
 
 
 def _extract_opendocument(path: Path, media_type: str) -> ExtractResult:
@@ -1821,7 +1832,7 @@ def _ocr_pdf_page(page) -> str:
     except MemoryError:
         raise  # a hard-limit failure is a memory stop, never a missing page
     except Exception as e:  # noqa: BLE001 — OCR fallback is best-effort
-        if _is_pymupdf_allocation_failure(e):
+        if pymupdf_allocation_failure(e):
             raise MediaMemoryExhausted(f"pymupdf: {e}") from e
         log.warning("PDF page OCR fallback failed: %s", e)
         return ""

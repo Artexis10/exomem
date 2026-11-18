@@ -43,8 +43,11 @@ CORE_HEADROOM_WARNING_BYTES = 512
 #: bytes), which the verdict registry requires: the payload teaches the shipped verdicts only.
 #: It was raised again to 5,400 for the ten governed unit-metadata keys and the `belief` kind
 #: that the language added (5,080 to 5,313 bytes): the contract names every key the parser reads.
+#: `authoring` was raised from 20,900 to 23,000 for the three ownership routes (about 1,150
+#: bytes, 20,8xx to 21,960): the served contract carries the test and the deferral rule the
+#: ownership question reads, so that no copy of the wording lives in code.
 SECTION_BYTE_CEILINGS = {
-    "authoring": 20_900,
+    "authoring": 23_000,
     "vocabulary": 11_900,
     "records_planning": 5_900,
     "routing": 12_500,
@@ -462,7 +465,9 @@ def test_the_session_profile_is_live_state_only(monkeypatch):
         assert static_rules not in session
     for live in ("engagement", "governance", "active_capabilities", "sections", "authoring_contract"):
         assert live in session
-    assert len(_text(session)) < 22_000
+    # 22,000 -> 22,200 on 2026-11-17: the vocabulary section lists the new document-forms registry
+    # (147 B), which an agent reads to choose a Source's `document_form`.
+    assert len(_text(session)) < 22_200
 
 
 def test_the_bootstrap_names_the_store_it_reaches(monkeypatch):

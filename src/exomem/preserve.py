@@ -23,6 +23,7 @@ themselves never get an LLM — extraction happens in the caller (the sandbox).
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import io
@@ -39,7 +40,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, semantic_contract, source_taxonomy, temporal
+from . import (
+    document_identity,
+    indexes,
+    memory_refs,
+    originals,
+    privacy_log,
+    semantic_contract,
+    source_taxonomy,
+    temporal,
+)
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .kbdir import managed_join, managed_relative
 from .ocr_facts import OcrFacts
@@ -340,6 +350,21 @@ def _sidecar_path(artifact: Path, *, protected: bool) -> Path:
     return artifact.with_name(f"{artifact.name}.md")
 
 
+def _refuse_reserved_capture(vault_root: Path, paths: tuple[Path, ...]) -> None:
+    """Refuse a capture whose artifact or page would take a path a moved page still claims.
+
+    A moved artifact leaves with its page, so both of its old names stay reserved (`prior_claims`).
+    """
+    from . import prior_claims
+
+    for path in dict.fromkeys(paths):
+        try:
+            prior_claims.require_unreserved(vault_root, path.relative_to(vault_root).as_posix())
+        except prior_claims.ReservedPathError as error:
+            code = "ARTIFACT_EXISTS" if error.code == "FILE_EXISTS" else error.code
+            _raise(code, ["filename"], f"{error.reason}; pick a new filename")
+
+
 def _sidecar_paths(artifact: Path, *, protected: bool, source: bool = False) -> tuple[Path, ...]:
     canonical = _sidecar_path(artifact, protected=protected)
     if source and not protected:
@@ -348,6 +373,22 @@ def _sidecar_paths(artifact: Path, *, protected: bool, source: bool = False) -> 
         if legacy != canonical:
             return canonical, legacy
     return (canonical,)
+
+
+def _pooled_sha256(vault_root: Path, artifact: Path) -> str | None:
+    """The SHA-256 that the shared object of a pooled filing holds now, else None.
+
+    A shared original keeps no file at its logical path. None also covers an object that cannot be read.
+    """
+    from . import held_fs, media_store, reserved_paths
+
+    try:
+        filing = originals.pooled(vault_root, artifact)
+        if filing is None:
+            return None
+        return media_store.pooled_head(vault_root, artifact.relative_to(vault_root).as_posix(), filing).sha256
+    except (OSError, ValueError, media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return None
 
 
 def stored_artifact(
@@ -365,13 +406,17 @@ def stored_artifact(
     sidecar = _sidecar_path(artifact, protected=protected)
     digest = hashlib.sha256()
     try:
-        with artifact.open("rb") as source:
-            while chunk := source.read(_STREAM_CHUNK):
-                digest.update(chunk)
+        try:
+            with artifact.open("rb") as source:
+                while chunk := source.read(_STREAM_CHUNK):
+                    digest.update(chunk)
+            stored_sha256 = digest.hexdigest()
+        except FileNotFoundError:
+            stored_sha256 = _pooled_sha256(vault_root, artifact)
         ref = memory_refs.ref_from_markdown(sidecar.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return None
-    if digest.hexdigest() != sha256 or not isinstance(ref, str) or not ref:
+    if stored_sha256 != sha256 or not isinstance(ref, str) or not ref:
         return None
     return DuplicateArtifact(
         hash=sha256,
@@ -554,7 +599,12 @@ def preserve(
     if _allocation is not None and _allocation["artifact"] != artifact_path.relative_to(vault_root).as_posix():
         raise ValueError("native preservation destination changed")
 
-    if artifact_path.exists():
+    # A pooled filing has no file at its logical name, which stays taken while its companion binds it.
+    try:
+        taken = artifact_path.exists() or originals.pooled(vault_root, artifact_path) is not None
+    except originals.RetirementUnconfirmed:
+        taken = True  # A filing whose deletion its witness cannot confirm still holds its name.
+    if taken:
         if _allocation is not None:
             raise DefiniteNoEffect.destination_exists(_allocation["destination"])
         return _raise(
@@ -680,6 +730,14 @@ def preserve(
         elif text_clean:
             # An explicit uploader extraction keeps its existing behavior.
             inspection = None
+        from .add import pools_original
+
+        # A dataset stays an ordinary resident file beside its notes (design D1); other binaries pool.
+        pooled_artifact = (isinstance(staged_content, PreparedBinaryContent)
+                           and not (inspection is not None and inspection.dataset_format)
+                           and pools_original(vault_root, artifact_path))
+        if pooled_artifact:
+            writes = [write for write in writes if write.path != artifact_path]
         # A media binary (audio/video/image/pdf) with no provided text gets a STUB
         # sidecar — pointer + media_type + `extracted_by: pending` — so it's a
         # first-class find() result immediately and the extraction worker fills the
@@ -693,6 +751,7 @@ def preserve(
         # only `.md` is indexed. A preserved transcript used to land exactly
         # that way, which is why citing it reported the source as missing.
         sidecar_path = _sidecar_path(folder / filename_safe, protected=raw_protection)
+        _refuse_reserved_capture(vault_root, (artifact_path, sidecar_path))
         if sidecar_path.exists():
             return _raise(
                 "COMPANION_EXISTS",
@@ -906,9 +965,20 @@ def preserve(
         from . import curation_witness
 
         curation_witness.bind_native_core(vault_root, [write for write in writes if write.path in core_paths])
-        batch_atomic_write(writes, vault_root=vault_root,
-                           _prepare=prepare_final if _prepare is not None else None,
-                           _validate_prepared_bindings=_validate_inputs)
+        with contextlib.ExitStack() as pooled_stack:
+            publish_original = None
+            pooled_guards: tuple[PathGuard, ...] = ()
+            if pooled_artifact:
+                from .add import staged_pool_publication
+
+                publish_original = staged_pool_publication(
+                    pooled_stack, vault_root, artifact_stage, artifact_hash, artifact_size)
+                # A pooled filing leaves no ordinary file at its logical path; one appearing there would shadow it.
+                pooled_guards = (PathGuard.capture(vault_root, rel_artifact, leaf_policy="absent"),)
+            batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
+                               _prepare=prepare_final if _prepare is not None else None,
+                               _validate_prepared_bindings=_validate_inputs,
+                               _publish_originals=publish_original)
         written_artifact = True
         from . import lexstore
 
@@ -1403,6 +1473,17 @@ def _render_sidecar(
     return "\n".join(lines)
 
 
+def _require_unclaimed_page(vault_root: Path, page: Path) -> None:
+    """Raise `prior_claims.ReservedPathError` when a moved page still claims `page`.
+
+    A binary at such a path arrived after its namesake pair moved. A page for it there would
+    capture the moved page's old links, so the binary stays unpaged until it is renamed.
+    """
+    from . import prior_claims
+
+    prior_claims.require_unreserved(vault_root, page.relative_to(vault_root).as_posix())
+
+
 def ensure_media_sidecar(
     vault_root: Path, binary_path: Path, *, today: dt.date | None = None
 ) -> tuple[Path, bool]:
@@ -1428,6 +1509,7 @@ def ensure_media_sidecar(
     connector_boundary.require_create(vault_root, sidecar.relative_to(vault_root).as_posix(), replace_existing=True)
     if sidecar.exists():
         return sidecar, False
+    _require_unclaimed_page(vault_root, sidecar)
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
     tree, scope, category = artifact_location(rel)
     md = _render_sidecar(
@@ -1485,6 +1567,7 @@ def ensure_artifact_page(
     connector_boundary.require_create(vault_root, page.relative_to(vault_root).as_posix(), replace_existing=True)
     if page.exists():
         return page, False
+    _require_unclaimed_page(vault_root, page)
 
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
     tree, scope, category = artifact_location(rel)
@@ -1720,17 +1803,19 @@ def sidecar_extraction_writes(
     """
     parts = _parts_module()
     pieces = parts.split(text)
+    metadata = parse_frontmatter(before)[0]
     plan = parts.plan(
         vault_root,
         sidecar_path,
         pieces,
-        inherited=parse_frontmatter(before)[0],
+        inherited=metadata,
         date_iso=temporal.stamp(temporal.now()),
     )
     content = render_sidecar_extraction(
         before,
         text=pieces[0],
         parts=parts.layout(sidecar_path, pieces),
+        identity_check=document_identity.after_extraction(metadata, pieces[0]),
         **fields,
     )
     write = PlannedWrite(
@@ -1782,6 +1867,7 @@ def render_sidecar_extraction(
     reset_speakers: bool = False,
     parts: Layout | None = None,
     binary_hints: tuple[int, int] | None = None,
+    identity_check: dict | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -1833,6 +1919,9 @@ def render_sidecar_extraction(
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
+    if identity_check is not None:
+        # The recorded check could not read a scanned PDF; the OCR text now can (`document_identity.after_extraction`).
+        content = _set_frontmatter_field(content, "identity_check", document_identity.render(identity_check))
     if binary_hints is not None:
         content = _media_processing_module().record_read_hints(
             content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]
@@ -2021,6 +2110,10 @@ def commit_media_sidecar_writes(
             ),
             operation="vault_store_media_sidecar_commit",
         )
+    from . import trash_metadata
+
+    # The catalog binds the page bytes before the batch, so a Trash backlink that the batch ends goes first.
+    writes = trash_metadata.withdraw_ended_backlinks(vault_root, writes)
     intent_count = len(publication_intents_out) if publication_intents_out is not None else 0
 
     def graph_replacement_provider():

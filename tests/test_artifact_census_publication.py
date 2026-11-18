@@ -308,3 +308,45 @@ def test_a_generic_directory_move_adds_the_files_it_brings_to_the_census(
     arrived = f"{WITHHELD_DIR}/Lot/orchid-batch-chart.pdf"
     assert arrived in artifact_census.published_view(vault).paths(arrived.casefold())
     assert walks == []
+
+
+@pytest.mark.parametrize("pooled", [False, True], ids=["ordinary", "pooled"])
+@pytest.mark.parametrize("published", [False, True], ids=["walked", "published"])
+def test_a_pooled_original_is_named_to_a_restricted_caller_exactly_as_an_ordinary_file_is(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, published: bool, pooled: bool
+) -> None:
+    """Catches a gate that judges a shared original by its companion page. A shared original keeps no file at its
+    path, so its name resolved to nothing, or to the page `<name>.md`, and a scope on the original's path or suffix
+    withheld an ordinary file's name but showed the pooled one's. The ordinary arm is the reference: every arm must
+    redact alike. A visible original's name and a note whose name merely contains a dot stay readable."""
+    from exomem import artifact_lifecycle, original_pool
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    if pooled:
+        original_pool.enable(vault)
+    _withhold_from_external(vault, "**/*.pdf")
+    if published:
+        _publish(vault)
+
+    with library_scope():
+        filed = preserve.preserve_bytes(
+            vault, scope="Rental", category="clips", filename="orchid-quarterly-terms.pdf",
+            data=b"%PDF-1.4", text="terms",
+        )
+        preserve.preserve_bytes(
+            vault, scope="Rental", category="clips", filename="orchid-site-plan.png",
+            data=b"\x89PNG\r\n\x1a\nplan", text="plan",
+        )
+        create_file.create_file(vault, path=f"{KB}/Notes/Scratch/orchid-roadmap.v2.md", content="Internal note.\n")
+    assert (vault / filed.path).exists() is not pooled
+
+    # The scope matches the original's own path, not its companion page `orchid-quarterly-terms.pdf.md`.
+    assert _gate(vault, "See orchid-quarterly-terms.pdf for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, "See orchid-site-plan.png for the plan.") == "See orchid-site-plan.png for the plan."
+
+    _withhold_from_external(vault, "Evidence/**", "Notes/Scratch/**")
+    below = filed.path.removeprefix(f"{KB}/")
+    assert _gate(vault, "See orchid-quarterly-terms.pdf for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, "See [[orchid-quarterly-terms]] for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, f"See {below} for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, "Ships as orchid-roadmap.v2 soon.") == "Ships as orchid-roadmap.v2 soon."

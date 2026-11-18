@@ -205,6 +205,7 @@ SAMPLES = {
     "maintain_memory:fix": {"mode": "fix"},
     "maintain_memory:reconcile": {"mode": "reconcile", "dry_run": True},
     "maintain_memory:backfill-ids": {"mode": "backfill-ids"},
+    "maintain_memory:convert-originals": {"mode": "convert-originals"},
     "maintain_memory:maintenance-job": {"mode": "maintenance-job"},
     "maintain_memory:structured-files": {"mode": "structured-files", "collection": DATASET},
     "maintain_memory:tag-variants": {"mode": "tag-variants"},
@@ -229,6 +230,10 @@ SAMPLES = {
     "manage_memory_file:append": {
         "operation": "append", "validate_only": True, "path": CLAIM,
         "content": "\nThe keeper adds oil at dusk.\n",
+    },
+    "manage_memory_file:move": {
+        "operation": "move", "validate_only": True, "old_path": CLAIM,
+        "new_path": "Knowledge Base/Notes/Archive/Lantern Claim.md",
     },
     "manage_memory_file:trash-list": {"operation": "trash-list"},
     "manage_memory_file:propose-reclassification": {
@@ -513,6 +518,10 @@ def prepare_sample(root, monkeypatch, request, sample):
     if sample == "maintain_memory:reconcile":
         # Reconcile verifies the receipt journal, which each call extends: keep it as prepared.
         monkeypatch.setattr(egress, "emit_boundary_receipt", lambda _collector: None)
+    if sample == "maintain_memory:convert-originals":
+        # Its preview refuses where the launcher cannot start a conversion; this sample proves its inventory read.
+        from exomem import artifact_lifecycle
+        monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
     if sample == "schema_memory:census":
         from exomem import relation_census
         monkeypatch.setattr(relation_census, "_cohort_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
@@ -584,6 +593,12 @@ STORE_READ_GAPS = {
         "audit", "browse_memory", "list_directory", "maintain_memory:audit", "maintain_memory:fix",
         "manage_memory_file:list", "review_memory:audit",
     ), HELD_LISTING_PROBES),
+    "manage_memory_file:move": (
+        "the store-mode move preview runs the move's own checks, which stat the moved page and walk "
+        "its linkers on disk (store_targets.resolve_existing, store_targets.inbound_links, "
+        "move_file.plan_inbound_rewrites); the answer is the store's",
+        frozenset({"page filesystem read"}),
+    ),
 }
 
 

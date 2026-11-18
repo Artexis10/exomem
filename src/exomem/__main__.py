@@ -50,6 +50,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -147,23 +148,18 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
     return raw[0] in _simple_cli_action_names()
 
 
+# The backup Job's commands, which `main` runs before it loads the CLI, the server framework or the native
+# runtime: each bounds itself in seconds on one CPU.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_LEAN_COMMANDS: frozenset[str] = frozenset(
+    {"cell-media-census", "cell-media-manifest", "cell-media-collect"}
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw[:1] == ["cell-media-census"]:
-        # The backup Job bounds this command in seconds on one CPU, and it reads one file, so it loads no CLI,
-        # server framework or native runtime.
-        from .cell_media_census import main as census_main
-
-        return census_main(raw[1:])
-    if raw[:1] == ["cell-media-manifest"]:
-        # The backup Job runs this on a read-only clone: it reads the vault and the media ledger, nothing more.
-        from .media_manifest import main as manifest_main
-
-        return manifest_main(raw[1:])
-    if raw[:1] == ["cell-media-collect"]:
-        from .media_collect import main as collect_main
-
-        return collect_main(raw[1:])
+    if raw[:1] and raw[0] in _LEAN_COMMANDS:
+        return _run_command(raw[0], raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
     preload_local_dotenv_policy()
@@ -248,99 +244,8 @@ def _unsupported_platform_refusal(raw: list[str]) -> str | None:
 
 
 def _dispatch_main(raw: list[str]) -> int:
-    if raw and raw[0] == "setup":
-        from .setup_wizard import setup_main
-
-        return setup_main(raw[1:])
-    if raw and raw[0] == "init":
-        return _init_main(raw[1:])
-    if raw and raw[0] == "reclaim-schema":
-        return _reclaim_schema_main(raw[1:])
-    if raw and raw[0] == "install-skill":
-        return _install_skill_main(raw[1:])
-    if raw and raw[0] == "package-skills":
-        return _package_skills_main(raw[1:])
-    if raw and raw[0] == "personalize":
-        from .personalize import personalize_main
-
-        return personalize_main(raw[1:])
-    if raw and raw[0] == "install-hook":
-        return _install_hook_main(raw[1:])
-    if raw and raw[0] == "demo":
-        from .demo import main as demo_main
-
-        return demo_main(raw[1:])
-    if raw and raw[0] == "studio":
-        return _studio_main(raw[1:])
-    if raw and raw[0] == "tui":
-        return _tui_main(raw[1:])
-    if raw and raw[0] == "doctor":
-        return _doctor_main(raw[1:])
-    if raw and raw[0] == "install-info":
-        return _install_info_main(raw[1:])
-    if raw and raw[0] == "auth":
-        return _auth_main(raw[1:])
-    if raw and raw[0] == "attach":
-        return _attach_main(raw[1:])
-    if raw and raw[0] == "status":
-        return _status_main(raw[1:])
-    if raw and raw[0] == "warm":
-        return _warm_main(raw[1:])
-    if raw and raw[0] == "mode":
-        return _mode_main(raw[1:])
-    if raw and raw[0] == "dreamer":
-        return _dreamer_main(raw[1:])
-    if raw and raw[0] == "prominence":
-        return _prominence_main(raw[1:])
-    if raw and raw[0] == "backfill-media":
-        return _backfill_media_main(raw[1:])
-    if raw and raw[0] == "index":
-        return _index_main(raw[1:])
-    if raw and raw[0] == "enroll-speaker":
-        return _enroll_speaker_main(raw[1:])
-    if raw and raw[0] == "list-speakers":
-        return _list_speakers_main(raw[1:])
-    if raw and raw[0] == "remove-speaker":
-        return _remove_speaker_main(raw[1:])
-    if raw and raw[0] == "trace":
-        return _trace_main(raw[1:])
-    if raw and raw[0] == "logs":
-        return _logs_main(raw[1:])
-    if raw and raw[0] == "lease":
-        return _lease_main(raw[1:])
-    if raw and raw[0] == "governance-schema":
-        return _governance_schema_main(raw[1:])
-    if raw and raw[0] == "relations":
-        return _relations_main(raw[1:])
-    if raw and raw[0] == "collections":
-        return _collections_main(raw[1:])
-    if raw and raw[0] == "store-mode":
-        return _store_mode_main(raw[1:])
-    if raw and raw[0] == "import":
-        from .local_import import main as local_import_main
-        return local_import_main(raw[1:])
-    if raw and raw[0] == "cloud":
-        if raw[1:2] == ["export"]:
-            from .cloud_export_client import main as cloud_export_main
-            return cloud_export_main(raw[2:])
-        if raw[1:2] == ["download"]:
-            from .cloud_download_client import main as cloud_download_main
-            return cloud_download_main(raw[2:])
-        from .cloud_import_client import main as cloud_main
-        return cloud_main(raw[1:])
-    if raw and raw[0] == "cell-import":
-        from .cloud_import_job import main as import_main
-        return import_main(raw[1:])
-    if raw and raw[0] == "cell-export":
-        from .cloud_export import main as export_main
-        return export_main(raw[1:])
-    if raw and raw[0] == "cell-init":
-        return _cell_init_main(raw[1:])
-    # `exomem activate "<turn>"` — the spelled-out contract for the context
-    # compiler. A thin alias over the registry command so there is exactly one
-    # leaf; the long form `exomem activate_context` keeps working.
-    if raw and raw[0] == "activate":
-        return _activate_main(raw[1:])
+    if raw and raw[0] in _COMMANDS:
+        return _run_command(raw[0], raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -1305,10 +1210,12 @@ def _backfill_media_main(argv: list[str]) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from . import backfill, state_migration
+    from .vault_store import cli_fence
 
     # Ordinary CLI entry is a read-only placement gate. Legacy state must be
     # moved by the explicit offline maintenance command before stores open.
     state_migration.require_vault_state_ready(Path(args.vault).expanduser())
+    cli_fence.require("backfill-media", Path(args.vault).expanduser())
 
     backfill.backfill_media(
         Path(args.vault).expanduser(),
@@ -1377,10 +1284,12 @@ def _index_main(argv: list[str]) -> int:
     # Contending is never the right move, so make it unrepresentable.
     from . import graph_sync as _graph_sync
     from . import state_migration
+    from .vault_store import cli_fence
 
     # Placement must resolve before even the graph-owner probe reads its
     # coordination state.
     state_migration.require_vault_state_ready(Path(args.vault).expanduser())
+    cli_fence.require("index", Path(args.vault).expanduser())
 
     owner = _graph_sync.live_graph_owner(Path(args.vault).expanduser())
     if owner is not None:
@@ -1924,6 +1833,9 @@ def _relations_main(argv: list[str]) -> int:
                 )
             vault_root = Path(vault).expanduser()
             served_by = "local-snapshot"
+            from .vault_store import cli_fence
+
+            cli_fence.require("relations", vault_root)
             # A terminal on the owner's machine reading its own sidecar is the
             # owner-local caller, the one audience a governed vault serves.
             from .collection_store import ownership
@@ -2020,8 +1932,10 @@ def _warm_main(argv: list[str]) -> int:
     vault_root = Path(args.vault).expanduser() if args.vault else None
     if vault_root is not None:
         from . import state_migration
+        from .vault_store import cli_fence
 
         state_migration.require_vault_state_ready(vault_root)
+        cli_fence.require("warm", vault_root)
 
     # Which models this install can actually load. The reranker and the torch
     # CLIP are sentence-transformers models, so the `embeddings-onnx` lane
@@ -2551,7 +2465,9 @@ def _collections_main(argv: list[str]) -> int:
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
     from .structured_collections import CollectionError
+    from .vault_store import cli_fence
 
+    cli_fence.require(f"collections {args.command}", Path(args.vault))
     try:
         if args.command == "backup":
             result = owner.backup(
@@ -2972,6 +2888,14 @@ def _governance_schema_main(argv: list[str]) -> int:
         )
         return 1
 
+    from .vault_store import cli_fence
+
+    try:
+        cli_fence.require(f"governance-schema {args.command}", vault)
+    except cli_fence.StoreFenceRefusal as refused:
+        _governance_schema_print_error(refused.code, refused.reason, as_json=as_json)
+        return 1
+
     from .governance import authorization_custody, schema_downmigration, schema_migration
 
     moment = int(time.time())
@@ -3317,8 +3241,10 @@ def _reclaim_schema_main(argv: list[str]) -> int:
 
     from . import init as init_module
     from .cli_ops import OpError
+    from .vault_store import cli_fence
 
     vault = Path(args.vault or os.environ.get("EXOMEM_VAULT_PATH") or ".")
+    cli_fence.require("reclaim-schema", vault)
     try:
         report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
     except OpError as error:
@@ -3372,11 +3298,19 @@ def _cell_init_main(argv: list[str]) -> int:
         return 1
 
     from . import cell_init, cloud_cell, privacy_log
+    from .vault_store import cli_fence
 
     # The same content redaction the server installs (design D3 "Output"): a
     # failure below must never let a query- or path-shaped detail escape
     # through a log line this process emits before it exits.
     privacy_log.install_hosted_log_redaction()
+
+    try:
+        cli_fence.require("cell-init", vault)
+    except cli_fence.StoreFenceRefusal as refused:
+        # The refusal's code is a fixed code, and the step names where it stopped.
+        _cell_init_failure_line(refused.code, "vault_store")
+        return 1
 
     try:
         # `/data/host` (design D3.1) is enforced only inside a real cloud
@@ -3426,8 +3360,10 @@ def _init_main(argv: list[str]) -> int:
 
     from . import init as init_module
     from .cli_ops import OpError
+    from .vault_store import cli_fence
 
     vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH") or "."
+    cli_fence.require("init", Path(vault))
     try:
         report = init_module.init_vault(Path(vault), force=args.force)
     except FileExistsError as e:
@@ -3438,6 +3374,11 @@ def _init_main(argv: list[str]) -> int:
         return 1
     print(f"Initialized {managed_root_rel()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
+    if (storage := report.get("original_storage")) is not None:
+        if storage["layout"] == "shared":
+            print("  Originals are stored once, however many filings share their bytes.")
+        else:
+            print(f"  {storage['action']}")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
@@ -3559,6 +3500,10 @@ def _package_skills_main(argv: list[str]) -> int:
     # Personalized packaging is explicit.  A configured runtime vault must never
     # silently turn the default public package command into a private build.
     vault = Path(args.vault) if args.vault else None
+    if vault is not None:
+        from .vault_store import cli_fence
+
+        cli_fence.require("package-skills", vault)
     try:
         report = package_module.package_skills(
             Path(args.out) if args.out else None,
@@ -5220,6 +5165,136 @@ def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
     else:
         _print_human(result, op=cmd.name)
     return 1 if isinstance(result, dict) and result.get("strict_failed") else 0
+
+
+def _setup_main(argv: list[str]) -> int:
+    from .setup_wizard import setup_main
+
+    return setup_main(argv)
+
+
+def _personalize_main(argv: list[str]) -> int:
+    from .personalize import personalize_main
+
+    return personalize_main(argv)
+
+
+def _demo_main(argv: list[str]) -> int:
+    from .demo import main as demo_main
+
+    return demo_main(argv)
+
+
+def _import_main(argv: list[str]) -> int:
+    from .local_import import main as local_import_main
+
+    return local_import_main(argv)
+
+
+def _cloud_main(argv: list[str]) -> int:
+    if argv[:1] == ["export"]:
+        from .cloud_export_client import main as cloud_export_main
+
+        return cloud_export_main(argv[1:])
+    if argv[:1] == ["download"]:
+        from .cloud_download_client import main as cloud_download_main
+
+        return cloud_download_main(argv[1:])
+    from .cloud_import_client import main as cloud_main
+
+    return cloud_main(argv)
+
+
+def _cell_import_main(argv: list[str]) -> int:
+    from .cloud_import_job import main as import_main
+
+    return import_main(argv)
+
+
+def _cell_export_main(argv: list[str]) -> int:
+    from .cloud_export import main as export_main
+
+    return export_main(argv)
+
+
+def _cell_media_census_main(argv: list[str]) -> int:
+    # It reads one file, so it loads no CLI, server framework or native runtime.
+    from .cell_media_census import main as census_main
+
+    return census_main(argv)
+
+
+def _cell_media_manifest_main(argv: list[str]) -> int:
+    # It runs on a read-only clone: it reads the vault and the media ledger, nothing more.
+    from .media_manifest import main as manifest_main
+
+    return manifest_main(argv)
+
+
+def _cell_media_collect_main(argv: list[str]) -> int:
+    from .media_collect import main as collect_main
+
+    return collect_main(argv)
+
+
+#: One entry per subcommand that `_dispatch_main` routes before the registry path. `vault_store/cli_fence.py`
+#: declares what each one touches, and its handler refuses a store-mode vault where it resolves the vault.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_COMMANDS: dict[str, Callable[[list[str]], int]] = {
+    "setup": _setup_main,
+    "init": _init_main,
+    "reclaim-schema": _reclaim_schema_main,
+    "install-skill": _install_skill_main,
+    "package-skills": _package_skills_main,
+    "personalize": _personalize_main,
+    "install-hook": _install_hook_main,
+    "demo": _demo_main,
+    "studio": _studio_main,
+    "tui": _tui_main,
+    "doctor": _doctor_main,
+    "install-info": _install_info_main,
+    "auth": _auth_main,
+    "attach": _attach_main,
+    "status": _status_main,
+    "warm": _warm_main,
+    "mode": _mode_main,
+    "dreamer": _dreamer_main,
+    "prominence": _prominence_main,
+    "backfill-media": _backfill_media_main,
+    "index": _index_main,
+    "enroll-speaker": _enroll_speaker_main,
+    "list-speakers": _list_speakers_main,
+    "remove-speaker": _remove_speaker_main,
+    "trace": _trace_main,
+    "logs": _logs_main,
+    "lease": _lease_main,
+    "governance-schema": _governance_schema_main,
+    "relations": _relations_main,
+    "collections": _collections_main,
+    "store-mode": _store_mode_main,
+    "import": _import_main,
+    "cloud": _cloud_main,
+    "cell-import": _cell_import_main,
+    "cell-export": _cell_export_main,
+    "cell-init": _cell_init_main,
+    "cell-media-census": _cell_media_census_main,
+    "cell-media-manifest": _cell_media_manifest_main,
+    "cell-media-collect": _cell_media_collect_main,
+    # A thin alias over the registry command, so there is exactly one leaf; the long form
+    # `exomem activate_context` keeps working.
+    "activate": _activate_main,
+}
+
+
+def _run_command(name: str, argv: list[str]) -> int:
+    """Run one table entry, and report a store-mode refusal as one line instead of a traceback."""
+    from .vault_store import cli_fence
+
+    try:
+        return _COMMANDS[name](argv)
+    except cli_fence.StoreFenceRefusal as refused:
+        print(f"Error [{refused.code}]: {refused.reason}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

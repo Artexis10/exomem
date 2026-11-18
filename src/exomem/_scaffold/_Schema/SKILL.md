@@ -1,8 +1,8 @@
 ---
 name: exomem
-description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
+description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 4224edce1af25b35f8b365df6267fd7ce234f0cacad05b51c76d324f05ad0caf
+  skill_contract: dd7e6c0eaccb191345b9313dadaf81159181c4f621c16d0cd9d0948b3066300d
   version: "0.32.0"
 ---
 
@@ -24,7 +24,9 @@ an explicit fallback when Exomem cannot capture; move durable results when it ca
 **Sources are immutable. Compiled material is governed. Evidence is preserved.**
 Raw inputs go to `Sources/`; proof-bearing artifacts to `Evidence/`; conclusions
 to `Notes/`; stable reusable identities to `Entities/`. Sources/Evidence are
-append-only. Everything outside `Knowledge Base/` is read-only input, and
+append-only: their content never changes, and their links and registered pointer
+fields such as `project` change only through governed moves and pointer
+corrections. Everything outside `Knowledge Base/` is read-only input, and
 in-vault readonly/excluded paths remain protected. Prefer supersession over
 removal; never invent IDs, sources, relations, or numeric confidence scores.
 A degree of belief is a `## Belief` unit that records what its holder stated, with
@@ -105,8 +107,9 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Content outside the managed Knowledge Base is
+read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.

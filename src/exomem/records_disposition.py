@@ -1,10 +1,10 @@
-"""Act, don't advise: what a strong incident route asks the agent to do.
+"""Act, don't advise: what a strong route asks the agent to do.
 
 A `records_routing` advisory used to be passive: it named a collection and left
 the rest to an agent that, measured on a live vault, ignored it. For the case
-that matters most -- a new failure-shaped observation routed STRONG into a
-Records collection -- the advisory now carries a `disposition` chosen by the
-effective capture prominence:
+that matters most -- a new observation routed STRONG into a Records collection,
+by the collection's own declaration or as a failure-shaped note -- the advisory
+now carries a `disposition` chosen by the effective capture prominence:
 
 - `maximal`  -> `file`: a ready Records append call, fields filled
   from the note where the manifest's fields map and the note cited in
@@ -29,8 +29,8 @@ recur it into its own item, or ask twice.
 The runtime never appends. Appending is `proactive_capture` and belongs to the
 agent under the served capture disposition, through the same Records command
 path, writer lease and validation as any other append; the payload only saves
-the agent from composing it. Moderate routes and observations that are not
-failure-shaped keep the plain advisory.
+the agent from composing it. Moderate routes, and strong routes that no declaration
+produced for a note that is not failure-shaped, keep the plain advisory.
 
 The call is stored in the grouped form and spelled for the surface that serves it
 (`capabilities.active_spell_call`): the payload key is the tool the host can call, and
@@ -57,7 +57,8 @@ from .collection_store.preview import canonical_read, selected_writer
 
 log = logging.getLogger(__name__)
 
-#: Folded type/category values that make an observation failure-shaped.
+#: Folded type/category values that make an observation failure-shaped. C4/C6 old
+#: debt, kept only for strong routes no `claims.match` declaration produced.
 FAILURE_SHAPES = frozenset(  # PROVISIONAL
     {"bug", "defect", "error", "failure", "incident", "outage", "regression"}
 )
@@ -80,7 +81,7 @@ _PAGE_ONLY_FIELDS = frozenset({"status"})
 # spelling the host cannot call (`capabilities.active_spell_call`).
 _FILE_INSTRUCTION = (
     "Perform this {tool} call now, without asking: the user's prominence "
-    "delegates filing a recurring incident. Fill any missing_fields from the note "
+    "delegates this filing. Fill any missing_fields from the note "
     "first, and report what was filed in one line."
 )
 _OCCURRENCE_INSTRUCTION = (
@@ -90,6 +91,8 @@ _OCCURRENCE_INSTRUCTION = (
 _ASK_INSTRUCTION = (
     "Ask the question once, in these words or the user's own, and act only on a yes."
 )
+# Appended to an instruction that acts or asks, when the route names the collection's capture method.
+_METHOD_CLAUSE = " The collection declares a capture method: read method.read_ref and follow it when you act."
 _HOLD_INSTRUCTION = (
     "Do nothing now; the observation stays in the review surface until someone files it."
 )
@@ -386,20 +389,24 @@ def disposition(
     level: str,
     created: bool = True,
 ) -> dict[str, Any] | None:
-    """Fields to add to a strong, failure-shaped `records_routing`; None otherwise.
+    """Fields to add to a strong `records_routing`; None otherwise.
 
-    A disposition the compact terminal could not carry (an over-long question
-    or payload) is dropped on its own, before anything is marked asked, so the
-    plain advisory still reaches the agent.
+    A route that a full `claims.match` declaration produced (it carries
+    `matched_predicates`) is acted on whatever the note's type words; any other
+    strong route is acted on only for a failure-shaped note. A disposition the
+    compact terminal could not carry (an over-long question or payload) is
+    dropped on its own, before anything is marked asked, so the plain advisory
+    still reaches the agent.
     """
     from . import collection_claims, due_state, memory_refs, semantic_writes
 
     if routing.get("strength") != "strong":
         return None
-    facets = collection_claims.normalize_match(semantic_writes._records_routing_facets(state))
-    shapes = facets.get("type", frozenset()) | facets.get("category", frozenset())
-    if not shapes & FAILURE_SHAPES:
-        return None
+    if not routing.get("matched_predicates"):
+        facets = collection_claims.normalize_match(semantic_writes._records_routing_facets(state))
+        shapes = facets.get("type", frozenset()) | facets.get("category", frozenset())
+        if not shapes & FAILURE_SHAPES:
+            return None
     collection = str(routing.get("collection") or "")
     manifest = due_state._load_manifest(Path(vault_root), collection) if collection else None
     if manifest is None:
@@ -442,17 +449,18 @@ def disposition(
     hold = {"disposition": "hold", "signal_version": signal_version, "instruction": _HOLD_INSTRUCTION}
     if level not in {"balanced", "maximal"}:
         return hold
+    follow = _METHOD_CLAUSE if routing.get("method") else ""
     if level == "balanced":
         asked = {
             "disposition": "ask",
             "signal_version": signal_version,
             "question": _question(title, str(manifest.title), recurrence),
-            "instruction": _ASK_INSTRUCTION,
+            "instruction": _ASK_INSTRUCTION + follow,
         }
         if not _fits(asked, collection):
             return None
         return asked if first_ask(Path(vault_root), signal_version) else hold
-    why = f"Recurring incident observed in {observation_ref or title}"
+    why = f"Captured from {observation_ref or title}"
     if recurrence is not None:
         call = _occurrence_call(
             Path(vault_root), manifest, collection, str(recurrence["key"]), observation_ref, why
@@ -469,7 +477,7 @@ def disposition(
     result = {
         "disposition": kind,
         "signal_version": signal_version,
-        "instruction": instruction.format(tool=tool),
+        "instruction": instruction.format(tool=tool) + follow,
         tool: arguments,
         **extra,
     }

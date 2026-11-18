@@ -220,6 +220,8 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 )
 # True only inside ``progress_check``: a check that need not ask the coordinator itself.
 _PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
+# True only while `invoke_command` runs a command its declared access classifies as a read.
+_INVOCATION_READS: ContextVar[bool] = ContextVar("exomem_invocation_reads", default=False)
 
 
 @contextmanager
@@ -427,6 +429,27 @@ def _drain_post_terminal_housekeeping(queue: list[Callable[[], None]]) -> None:
             work()
         except Exception:  # noqa: BLE001 - the canonical terminal is already durable
             logger.warning("post-terminal housekeeping failed", exc_info=True)
+
+
+def _moved_planned_write(error: BaseException) -> bool:
+    """Whether a planned-write-moved race lies anywhere in the cause chain.
+
+    Tool layers wrap the raw signal (`AuxiliaryGuardMoved`,
+    `RawEnumerationMoved`) in their own error types (`NoteError`,
+    `SemanticWriteError`) before it reaches the lease; the chain still carries
+    it, and only these two markers ever name the absorbable pre-commit race —
+    never a guard on the write's own basis."""
+    from .relation_review import AuxiliaryGuardMoved
+    from .source_capture import RawEnumerationMoved
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (AuxiliaryGuardMoved, RawEnumerationMoved)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _with_post_terminal_fanout_acknowledgement(
@@ -4723,6 +4746,11 @@ _CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
     "retry after retry_after_ms, with the same idempotency key if the write carried one."
 )
 
+#: How long one unit of batch work waits for a queued keyed write before it
+#: takes the boundary anyway (`LeaseManager.yield_to_waiting_writes`). A batch
+#: slows for a writer; it never waits one out forever.
+_BATCH_YIELD_MAX_SECONDS = 30.0
+
 
 def _writes_absorb_contention() -> bool:
     return os.environ.get("EXOMEM_CAPTURE_CONTENTION_ABSORB", "1").strip().lower() not in {
@@ -4975,6 +5003,9 @@ class _ContentionWait:
         self.slot_counted = False
         self.absorbed = 0
         self.last_attempt_seconds = 0.0
+        # `release_turn` can run on the store thread that took the boundary on
+        # this write's behalf while `close` runs here, so both take this lock.
+        self._release_lock = threading.Lock()
 
     def take_slot(self) -> bool:
         if not self.holds_slot:
@@ -5012,13 +5043,30 @@ class _ContentionWait:
     def waited_ms(self) -> int:
         return round((time.monotonic() - self.started) * 1000)
 
-    def close(self) -> None:
+    def release_turn(self) -> None:
+        """End this write's place in line: its attempt now holds the boundary.
+
+        Called from `mutation_lock.on_boundary_acquired` when the attempt's
+        first boundary acquisition lands, which may be on a store thread
+        running the write in a copied context. The write stays in its command,
+        but it no longer waits, so its ticket and its waiter slot belong to
+        the writers behind it. A busy refusal later in the same attempt joins
+        the line again, at the back, through `take_slot`/`join_line`.
+        """
+        with self._release_lock:
+            self._release_locked()
+
+    def _release_locked(self) -> None:
         if self.slot_counted:
             _release_capture_waiter_slot()
         self.holds_slot = self.slot_counted = False
         if self.ticket is not None:
             self.queue.leave(self.ticket)
             self.ticket = None
+
+    def close(self) -> None:
+        with self._release_lock:
+            self._release_locked()
 
 
 class LeaseManager:
@@ -5455,6 +5503,35 @@ class LeaseManager:
         for the boundary commits when it releases (`VaultMutationCoordinator.waiter_count`).
         """
         return self._mutation_coordinator_for(vault_root).waiter_count()
+
+    def yield_to_waiting_writes(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        max_wait: float = _BATCH_YIELD_MAX_SECONDS,
+    ) -> float:
+        """Between two units of batch work, wait while a keyed write waits; return the wait.
+
+        A multi-path media request and the background media worker re-take the
+        boundary per unit. Between units this gives a write that waits in the
+        capture line or at the boundary itself the room to take it first, so
+        batch work slows but never starves a foreground write. The wait never
+        runs under a boundary this thread holds -- pausing there would make
+        every queued writer wait it out too -- and `waiter_count` already sees
+        the writes queued outside `hold()` (`queued_writers`). A ticket this
+        thread's own wait still holds changes nothing: a ticket of ours in the
+        line means another write is its head or behind it, and either way a
+        waiter exists, and a head ticket alone counts nobody.
+        """
+        if mutation_lock.current_thread_holds_boundary():
+            return 0.0
+        from . import foreground_priority
+
+        mutation = self._mutation_coordinator_for(vault_root)
+        with call_spans.span("batch.yield_to_writes"):
+            return foreground_priority.wait_while(
+                lambda: mutation.waiter_count() > 0, max_wait=max_wait
+            )
 
     def lend_boundary(
         self,
@@ -6006,7 +6083,9 @@ class LeaseManager:
         capture_attempt_operation = capture_attempt_control or (
             command.name == "capture_source" and kwargs.get("capture_reservation") is not None
         )
-        bypass_generic_replay = authorization_issuance or capture_attempt_operation
+        # Erasure binds each operation_id to one target and reports fresh progress on every retry.
+        bypass_generic_replay = (authorization_issuance or capture_attempt_operation
+                                 or command.name == "erase_captured_source")
         capture_attempt_wire = None
         if capture_attempt_operation:
             from . import capture_attempts
@@ -6938,14 +7017,16 @@ class LeaseManager:
         # it (`reconcile.reconcile`). Its long read-only and self-locked phases run with no
         # hold, so other writers commit between phases. The graph join after it holds none.
         narrow_reconcile = runs_reconcile and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
-        # A curation proposal prepares read-only, then seals; `seal_proposal` takes
-        # the mutation boundary itself and re-checks every binding under it, so
-        # preparation can run without the lock. Apply, resume and compensation
-        # write step by step and keep the wide boundary.
+        # A curation proposal, forward or compensating, prepares read-only, then
+        # seals; the seal (`seal_proposal`, `propose_compensation`) takes the
+        # mutation boundary itself and re-checks every binding under it, so
+        # preparation can run without the lock. Apply, resume and applying a
+        # compensation write step by step and keep the wide boundary. The two
+        # actions are members of the closed curation action enum.
         narrow_curation_proposal = (
             command.name == "maintain_memory"
             and kwargs.get("mode") == "curation"
-            and kwargs.get("curation_action") == "propose"
+            and kwargs.get("curation_action") in ("propose", "propose-compensation")
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # Only record owns a short guard around fresh admission, revision
@@ -7398,6 +7479,23 @@ class LeaseManager:
             finally:
                 _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
 
+        def absorbing_guard_race() -> Any:
+            # The write's turn now ends at boundary acquisition, so its
+            # pre-boundary planning can run beside an earlier write's commit:
+            # a server-planned auxiliary that moved (AuxiliaryGuardMoved) or a
+            # staged source that vanished mid-enumeration (RawEnumerationMoved)
+            # is what the in-boundary commit already calls a moved planned
+            # write. Report it the same way and the loop re-plans it behind
+            # the line. A guard on the write's own basis, and anything after a
+            # commit, still propagates.
+            try:
+                return attempt()
+            except Exception as error:
+                # Tool layers may wrap the marker before it reaches here.
+                if commit_state["observed"] or not _moved_planned_write(error):
+                    raise
+                raise mutation_lock.planned_write_moved_busy() from error
+
         def absorbable(error: OpError) -> bool:
             if error.code != "MUTATION_BUSY":
                 return False
@@ -7407,7 +7505,12 @@ class LeaseManager:
             return True
 
         return self._absorb_contention(
-            command.name, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
+            command.name,
+            wait,
+            absorbing_guard_race,
+            absorbable=absorbable,
+            request_id=request_id,
+            join_on_arrival=True,
         )
 
     def _absorb_contention(
@@ -7484,7 +7587,14 @@ class LeaseManager:
                     )
                 attempt_started = time.monotonic()
                 try:
-                    result = attempt()
+                    # The write's turn ends the moment its attempt holds the
+                    # boundary, not when its command returns: a long batch
+                    # command must not park every later keyed write for its
+                    # whole run. On the store route the boundary lands on the
+                    # store thread in a copy of this context, so the same
+                    # observer still fires.
+                    with mutation_lock.on_boundary_acquired(wait.release_turn):
+                        result = attempt()
                 except OpError as error:
                     if not absorbable(error):
                         raise
@@ -7560,7 +7670,16 @@ class LeaseManager:
         )
         try:
             with mutation_lock.absorbing_busy() if eligible else nullcontext():
-                return run()
+                try:
+                    return run()
+                except Exception as error:
+                    # A planned file a queued writer committed while this
+                    # attempt waited: the request thread's next attempt
+                    # re-plans it, as the in-line route already does. Tool
+                    # layers may wrap the marker before it reaches here.
+                    if commit_state["observed"] or not _moved_planned_write(error):
+                        raise
+                    raise mutation_lock.planned_write_moved_busy() from error
         except OpError as error:
             before_commit = not commit_state["observed"]
             if error.code == "MUTATION_BUSY":
@@ -8513,6 +8632,15 @@ def record_caller_refusal(
         pass
 
 
+def invocation_reads() -> bool:
+    """Whether the dispatched command now running is declared read-only (`Command.read_only`).
+
+    False inside a write and outside a dispatched command (a CLI helper, the watcher, a direct
+    call), so a step that only a read may take stays off wherever the access is not known.
+    """
+    return _INVOCATION_READS.get()
+
+
 def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
@@ -9045,6 +9173,16 @@ def invoke_command(
         dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
+        # Only a command declared read-only reads by a page's prior path. A write-capable command
+        # keeps its target literal in every mode, so a preview (validate_only, dry_run) names the
+        # page its commit acts on, and a write outside the writer stays a write.
+        reads = _INVOCATION_READS.set(command.read_only)
+        try:
+            return _invoke_leaf()
+        finally:
+            _INVOCATION_READS.reset(reads)
+
+    def _invoke_leaf() -> Any:
         with _owner_authority_scope(command.name):
             # This fixed capture field gates cached terminals and key mismatch, too.
             if command.name == "capture_source" and kwargs.get("source_identity") is not None:

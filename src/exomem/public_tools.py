@@ -626,6 +626,7 @@ class SaveSource(Wire):
     projects: list[str] | None = None
     tags: list[str] | None = None
     why: str | None = None
+    document_form: str | None = Field(default=None, description="The form of this record of the work, as an open slug such as abstract.")
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction.")
     detail: Detail | None = _DETAIL
 
@@ -635,7 +636,7 @@ def _save_source(wire: dict[str, Any], ctx: Context) -> Translated:
         "title": wire["title"], "content": wire.get("content"), "url": wire.get("url"),
         "tags": wire.get("tags"), "why_captured": wire.get("why"), "source_kind": wire.get("source_kind"),
         "domain": wire.get("domain"), "files": wire.get("files"), "response_detail": wire.get("detail"),
-        "projects": wire.get("projects"),
+        "projects": wire.get("projects"), "document_form": wire.get("document_form"),
     }
     return "capture_source", _leaf_call(wire, "options", ctx, "capture_source", "save_source", leaf)
 

@@ -617,6 +617,10 @@ class CollectionWriter:
                 self.root, field_plan.manifest, diagnostics, policy=self._operation.policy,
                 authorize_path=self._operation.allows_file,
             )
+            record_governance._inspection_capture(
+                self.root, field_plan.manifest, diagnostics, policy=self._operation.policy,
+                authorize_path=self._operation.allows_file,
+            )
             # Recipient inspection cannot publish full-state guards or import provenance; owners retain them below.
             references = (reference_report.check_collection(self.root, self.handle.path,
                                                           manifest.collection_id)
@@ -677,6 +681,10 @@ class CollectionWriter:
         held_ids = {subject.row_id for subject in allowed if isinstance(subject.row_id, str)}
         diagnostics = record_governance._inspection_diagnostics(inspection.diagnostics)
         record_governance._inspection_templates(
+            self.root, manifest, diagnostics, policy=self._operation.policy,
+            authorize_path=self._operation.allows_file,
+        )
+        record_governance._inspection_capture(
             self.root, manifest, diagnostics, policy=self._operation.policy,
             authorize_path=self._operation.allows_file,
         )
@@ -773,6 +781,8 @@ class CollectionWriter:
         if declared.kind == "intended" and facade_profile != "records":
             payload["contract"].pop("plans")
             payload["contract"].pop("claims", None)
+            # The closed planning contract refuses an extra key (PLAN_RESPONSE_TOO_LARGE); this hides a declared capture block.
+            payload["contract"].pop("capture", None)
             return planning._project_inspection(payload, manifest), selection
         observations = due_state.collection_observation_coverage(
             self.root, manifest.path, authorize_path=self._operation.allows_file,

@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
 
-from .. import access, registry_history, vault
+from .. import access, lexstore, registry_history, vault
 from ..kbdir import managed_join
 from . import derive, mode
 
@@ -41,8 +41,24 @@ PASS = "vault_store_registry_pass"
 OWNER_SCHEMA = "vault_store_owner_schema"
 # Inbound rows were complete at v1; later owners must not invalidate that readiness proof.
 LINK_ROWS_VERSION = 1
-# v3 rederives payload hashes that older builds omitted from legacy Evidence pages.
-OWNER_SCHEMA_VERSION = 3
+#: The generation of the owners' derivation. Version 3 rederives payload hashes that older builds omitted
+#: from legacy Evidence pages, and was the generation at lexical schema ``LEXICAL_SCHEMA_AT_V3``.
+#: Version 4 derives the prior-path rows of every page's lineage.
+OWNER_DERIVATION_VERSION = 4
+LEXICAL_SCHEMA_AT_V3 = 17
+
+
+def owner_schema_for(lexical_schema: int) -> int:
+    """The owner generation of a build whose lexical catalogue is at ``lexical_schema``.
+
+    Every lexical schema bump moves it, so a store that an older build derived is behind, its pass
+    derives each page again and stamps the schema (``settle``). Without that, such a store would keep
+    the stamp that migration copied, and its lexical readers would answer None for good.
+    """
+    return OWNER_DERIVATION_VERSION + lexical_schema - LEXICAL_SCHEMA_AT_V3
+
+
+OWNER_SCHEMA_VERSION = owner_schema_for(lexstore.SCHEMA_VERSION)
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
@@ -266,6 +282,8 @@ def settle(root: Path, writer) -> str:
                 # Every page reflects the overlay at ``target``, so it replaces the damaged record.
                 _set(tx, OVERLAY_REVISION, str(target))
             if registry.owner_schema_behind:
+                # The pass has derived every page under this generation, so the lexical stamp may say so.
+                lexstore.stamp_catalogue_schema(tx)
                 _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
@@ -287,8 +305,8 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
     tx.executemany(
         "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
     )
-    if "page_admission" in created:
-        # Earlier batches wrote no page facts, so an older cursor cannot skip those pages.
+    if "page_admission" in created or "prior_paths" in created:
+        # Earlier batches wrote no page facts or prior paths, so an older cursor cannot skip those pages.
         tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))

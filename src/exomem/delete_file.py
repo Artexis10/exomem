@@ -30,7 +30,17 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
+from . import (
+    held_fs,
+    media_bindings,
+    media_types,
+    original_pool,
+    originals,
+    reserved_paths,
+    semantic_contract,
+    source_custody,
+    trash_metadata,
+)
 from .fold_leaf import Placement
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import managed_form, managed_join, managed_relative, managed_split
@@ -114,6 +124,21 @@ def free_trash_path(planned: Path, taken: Callable[[Path], bool]) -> Path:
     return candidate
 
 
+def _digest_addressed_filing(
+    vault_root: Path, rel_path: str, named_original: originals.OriginalSnapshot | None
+) -> originals.OriginalSnapshot | None:
+    """The digest-addressed original whose filing ``rel_path`` names, by its binary or by its page."""
+    if named_original is not None:
+        return originals.digest_addressed(vault_root, rel_path, snapshot=named_original)
+    if not rel_path.lower().endswith(".md"):
+        # A page store resolves an original by its record, which a converted filing keeps.
+        return originals.digest_addressed(vault_root, rel_path)
+    filing = originals.digest_addressed(vault_root, rel_path[:-3])
+    if filing is None or filing.sidecar_path != Path(vault_root).resolve() / rel_path:
+        return None
+    return filing
+
+
 def delete_file(
     vault_root: Path,
     *,
@@ -130,7 +155,10 @@ def delete_file(
     _fold: Placement | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
     with ExitStack() as originals_context:
-        return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash, originals_context=originals_context, _fold=_fold)
+        try:
+            return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash, originals_context=originals_context, _fold=_fold)
+        except originals.RetirementUnconfirmed as error:
+            raise DeleteFileError(code=error.code, reason=error.reason) from error
 
 
 def _delete_file_local(
@@ -172,10 +200,8 @@ def _delete_file_local(
         else:
             abs_path, rel_path = store_targets.resolve_existing(vault_root, path)
     except VaultPathError as e:
-        if (
-            store_writer is not None
-            or e.code != "NOT_FOUND"
-            or originals.binding_for(vault_root) is None
+        if e.code != "NOT_FOUND" or (
+            originals.binding_for(vault_root) is None and not original_pool.enabled(vault_root)
         ):
             raise DeleteFileError(code=e.code, reason=e.reason) from e
         try:
@@ -186,13 +212,26 @@ def _delete_file_local(
         from .governance import egress
 
         visible = egress.restricted_release_filter(vault_root)
-        if evicted_original.state != "evicted" or (visible is not None and not visible(rel_path)):
+        # A store records every evicted original it holds; only a digest-addressed one has no record.
+        addressed = originals.digest_addressed(vault_root, abs_path, snapshot=evicted_original) is not None
+        if (not addressed and (store_writer is not None or evicted_original.state != "evicted")) or (
+            visible is not None and not visible(rel_path)
+        ):
             raise DeleteFileError(code=e.code, reason=e.reason) from e
-    stored_page = store_writer is not None and store_ownership.classify(
-        rel_path
-    ) is store_ownership.Ownership.PAGE
-    if store_writer is not None:
+    if store_writer is not None and evicted_original is None:
         evicted_original = store_targets.evicted_original(vault_root, rel_path)
+    # A digest-addressed original's filing is its companion page. Trashing either half moves only that
+    # page, under the original's Trash identity: a page trashed alone would strand its shared bytes.
+    filing = _digest_addressed_filing(vault_root, rel_path, evicted_original)
+    if filing is not None and evicted_original is None and not rel_path.lower().endswith(".md"):
+        # A filing named by its original is bound by its binding's digest, as an evicted one is.
+        evicted_original = filing
+    binary_rel = rel_path if filing is None else Path(filing.path).relative_to(Path(vault_root).resolve()).as_posix()
+    source_rel = rel_path if filing is None else (
+        Path(filing.sidecar_path).relative_to(Path(vault_root).resolve()).as_posix())
+    stored_page = store_writer is not None and store_ownership.classify(
+        source_rel
+    ) is store_ownership.Ownership.PAGE
     try:
         # A stored page has no file to acquire; its spelling is checked when its bytes are read.
         if evicted_original is None and not stored_page:
@@ -213,10 +252,12 @@ def _delete_file_local(
         ) from None
     from .collection_store import authority as collection_authority
 
-    collection_authority.refuse_view_paths(vault_root, (rel_path,), DeleteFileError)
+    filing_paths = tuple(dict.fromkeys((rel_path, source_rel, binary_rel)))
+    collection_authority.refuse_view_paths(vault_root, filing_paths, DeleteFileError)
 
     try:
-        lifecycle.assert_not_protected(vault_root, rel_path)
+        for filing_path in filing_paths:
+            lifecycle.assert_not_protected(vault_root, filing_path)
     except lifecycle.LifecycleError as error:
         raise DeleteFileError(code=error.code, reason=error.reason) from error
 
@@ -231,6 +272,8 @@ def _delete_file_local(
             ),
         )
 
+    if (held := source_custody.erase_refusal_at(vault_root, rel_path)) is not None:
+        raise DeleteFileError(*held)
     append_only = in_append_only_tree(rel_path)
     # A fold is the only caller past this refusal: it proves identical bytes remain held elsewhere.
     if append_only and _fold is None:
@@ -240,6 +283,13 @@ def _delete_file_local(
                 f"{rel_path} is in {append_only}/ which is append-only "
                 f"(SKILL.md rule 2). Deletions are forbidden — supersede instead."
             ),
+        )
+
+    if filing is not None and _fold is not None:
+        # A fold keeps its retained copy's page in place; moving this page would break its undo.
+        raise DeleteFileError(
+            "FOLD_UNSUPPORTED",
+            f"{rel_path} is a shared original: duplicate folding cannot trash it yet. Keep both filings.",
         )
 
     curated = in_curated_tree(rel_path)
@@ -253,7 +303,8 @@ def _delete_file_local(
         )
 
     stored_original = None
-    if originals.binding_for(vault_root) is not None and not originals.is_note_path(rel_path):
+    # A digest-addressed filing keeps its recovery reference in the companion that goes to Trash.
+    if filing is None and originals.binding_for(vault_root) is not None and not originals.is_note_path(rel_path):
         candidate = originals.original_state(vault_root, rel_path)
         if candidate.reference is not None:
             stored_original = candidate
@@ -264,9 +315,9 @@ def _delete_file_local(
     catalog_before_hash: str | None = None
     # The page as it stood, so the Sources it cited are re-judged once it is gone.
     prior_markdown: str | None = None
-    if rel_path.lower().endswith(".md"):
+    if source_rel.lower().endswith(".md"):
         try:
-            snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
+            snapshot = reserved_paths.read_generic_bytes(vault_root, source_rel)
             catalog_before_hash = hashlib.sha256(snapshot.data).hexdigest()
             text = snapshot.data.decode("utf-8")
             prior_markdown = text
@@ -276,7 +327,7 @@ def _delete_file_local(
                 raise DeleteFileError(
                     code="SUPERSEDED_HISTORY",
                     reason=(
-                        f"{rel_path} has `superseded_by:` set — it's part of "
+                        f"{source_rel} has `superseded_by:` set — it's part of "
                         f"the supersession chain. Trashing it breaks the "
                         f"chain. Pass `force_superseded=true` to override."
                     ),
@@ -329,20 +380,32 @@ def _delete_file_local(
     # A stored page's links are in the store as of the last commit and the disk shows only its
     # projection and the notes nothing has imported, so a store-mode check reads both. The commit
     # binds the sources that the store named; the others are checked here, once, as file mode does.
-    stored_check = (
+    # A trashed filing orphans links to its page and to its original; its own page's links orphan nothing.
+    stored_checks = (
         None
         if store_writer is None
-        else store_targets.inbound_links(vault_root, [rel_path])[rel_path]
+        else store_targets.inbound_links(vault_root, list(filing_paths))
     )
-    if stored_check is None:
+    stored_check = None if stored_checks is None else stored_checks[source_rel]
+    inbound_all = []
+    if stored_checks is None:
         visible = egress.restricted_release_filter(vault_root)
-        inbound_all = [
-            match
-            for match in find_inbound_wikilinks(vault_root, rel_path)
-            if visible is None or visible(match.path)
-        ]
+        for filing_path in filing_paths:
+            inbound_all.extend(
+                match
+                for match in find_inbound_wikilinks(
+                    vault_root, filing_path, target_has_no_file=filing is not None and filing_path == binary_rel
+                )
+                if visible is None or visible(match.path)
+            )
     else:
-        inbound_all = store_targets.visible_links(vault_root, {rel_path: stored_check})[rel_path]
+        visible_links = store_targets.visible_links(vault_root, stored_checks)
+        for filing_path in filing_paths:
+            inbound_all.extend(visible_links[filing_path])
+    if filing is not None:
+        inbound_all = list({
+            (match.path, match.line_number): match for match in inbound_all if match.path != source_rel
+        }.values())
     inbound_ignored = [m for m in inbound_all if m.path in expected_set]
     inbound = [m for m in inbound_all if m.path not in expected_set]
 
@@ -375,7 +438,8 @@ def _delete_file_local(
     # Move to trash.
     now = now or dt.datetime.now()
     today = today or now.date()
-    trash_abs = vault_root / planned_trash_path(vault_root, rel_path, now)
+    # A filing takes its original's Trash identity; its page lands in that identity's companion slot.
+    trash_abs = vault_root / planned_trash_path(vault_root, binary_rel, now)
     trash_dir = trash_abs.parent
     trash_filename = trash_abs.name
 
@@ -415,6 +479,7 @@ def _delete_file_local(
         trash_filename = trash_abs.name
 
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
+    moved_trash_rel = trash_rel if filing is None else originals.sidecar_path(Path(trash_rel)).as_posix()
     meta_abs = trash_dir / f"{trash_filename}{METADATA_SUFFIX}"
     meta_rel = meta_abs.relative_to(vault_root).as_posix()
     today_iso = today.isoformat()
@@ -430,11 +495,11 @@ def _delete_file_local(
         log_body += " force_superseded=true."
     if curated and allow_curated:
         log_body += f" allow_curated=true (target tree: {curated})."
-    removal = catalog_publication.CatalogRemoval(rel_path, catalog_before_hash)
+    removal = catalog_publication.CatalogRemoval(source_rel, catalog_before_hash)
     store_log: LogWritePlan | None = None
     catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
     if store_writer is not None:
-        store_targets.refuse_kind_change("delete_file", rel_path, trash_rel)
+        store_targets.refuse_kind_change("delete_file", source_rel, moved_trash_rel)
         # Before validation returns, so a plan that validates is a plan that commits. The log entry
         # commits with the trash, so the catalog names the same writes that file mode's does.
         store_log = plan_log_entry(
@@ -446,7 +511,7 @@ def _delete_file_local(
             error_class=DeleteFileError,
             writes=store_log.writes,
             removals=(removal,),
-            graph_replacement_provider=_removed_graph(vault_root, rel_path, store_log.writes),
+            graph_replacement_provider=_removed_graph(vault_root, source_rel, store_log.writes),
         )
 
     source_hash: str | None = None
@@ -474,7 +539,7 @@ def _delete_file_local(
         )
 
     metadata_bytes = _trash_metadata_bytes(
-        rel_path, now, inbound_all, inbound_ignored, inbound,
+        binary_rel, now, inbound_all, inbound_ignored, inbound,
         fm=fm, force_orphan=force_orphan, force_superseded=force_superseded,
         allow_curated=bool(curated and allow_curated),
     )
@@ -490,12 +555,14 @@ def _delete_file_local(
             # Immediately before the move: the retained copy must still hold identical bytes.
             _fold.verify()
         return _trash_in_store(
-            store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
+            store_writer, vault_root, rel_path=source_rel, trash_rel=moved_trash_rel, meta_rel=meta_rel,
             metadata_bytes=metadata_bytes, judged_hash=catalog_before_hash or source_hash,
             linked_from=stored_check.bound,
             prior_markdown=prior_markdown, stored_original=stored_original,
             log_plan=store_log, catalog_target=catalog_target, inbound=len(inbound),
             inbound_ignored=len(inbound_ignored), warnings=warnings,
+            filing=None if filing is None else _StoreFiling(
+                rel_path, binary_rel, trash_rel, stored_checks[binary_rel].bound),
         )
     log_plan = plan_log_entry(
         vault_root,
@@ -509,7 +576,7 @@ def _delete_file_local(
             vault_root,
             writes=log_plan.writes,
             removals=(removal,),
-            graph_replacement_provider=_removed_graph(vault_root, rel_path, log_plan.writes),
+            graph_replacement_provider=_removed_graph(vault_root, source_rel, log_plan.writes),
             now=int(time.time()),
         )
     except catalog_publication.CatalogPublicationError as error:
@@ -519,7 +586,9 @@ def _delete_file_local(
         ) from error
     from .media_store import local_originals
 
-    originals_context.enter_context(local_originals(vault_root, (rel_path,)))
+    if filing is None:
+        # A digest-addressed filing moves no bytes, so nothing is fetched or pinned for it.
+        originals_context.enter_context(local_originals(vault_root, (rel_path,)))
     from . import graph_sync
 
     if _fold is not None:
@@ -529,9 +598,9 @@ def _delete_file_local(
     try:
         transition = graph_sync.begin_deletion_transition(
             vault_root,
-            source_rel=rel_path,
-            trash_rel=trash_rel,
-            removed_rel_paths=[rel_path] if rel_path.lower().endswith(".md") else [],
+            source_rel=source_rel,
+            trash_rel=moved_trash_rel,
+            removed_rel_paths=[source_rel] if source_rel.lower().endswith(".md") else [],
         )
     except lifecycle.LifecycleError as error:
         raise DeleteFileError(code=error.code, reason=error.reason) from error
@@ -548,8 +617,11 @@ def _delete_file_local(
     lifecycle_operation = transition.operation
 
     # A preview of one object cannot authorize deleting a replacement; rename rechecks this manifest.
+    # A filing named by its original binds that digest through the exact page it read.
+    previewed = (expected_hash, rel_path) if filing is None or source_rel == rel_path else (
+        filing.sidecar_hash if filing.binary_sha256 == expected_hash else None, source_rel)
     if expected_hash is not None and not any(
-        item.source_path == rel_path and item.content_hash == expected_hash
+        item.source_path == previewed[1] and item.content_hash == previewed[0]
         for item in lifecycle_operation.manifest
     ):
         transition.abort()
@@ -564,12 +636,12 @@ def _delete_file_local(
     # keep the prior behavior: their OCR/ASR text lives in a separate `.md`
     # sidecar, not the binary, so deleting the binary alone leaves no CLIP or
     # scene-frame residue to purge.
-    is_media = media_types.media_type_for(rel_path) in {"image", "video"}
+    is_media = media_types.media_type_for(binary_rel) in {"image", "video"}
     frame_children: list[str] = []
     if is_media:
         from . import scene_frames
 
-        frame_children = scene_frames.list_scene_frame_children(vault_root, abs_path)
+        frame_children = scene_frames.list_scene_frame_children(vault_root, vault_root / binary_rel)
 
     # Register the self-authored removal BEFORE the move so the watcher's
     # delete event for the KB path is dropped (we purge the sidecar ourselves
@@ -578,7 +650,7 @@ def _delete_file_local(
     # rel_path here is a harmless no-op; the frame `.md` sidecars are what need
     # suppressing.
     suppress_rels = (
-        [rel_path] if rel_path.lower().endswith(".md") else []
+        [source_rel] if source_rel.lower().endswith(".md") else []
     ) + frame_children
     if suppress_rels:
         try:
@@ -592,8 +664,13 @@ def _delete_file_local(
         item.source_path == rel_path and item.content_hash == stored_original.binary_sha256
         and item.size == stored_original.binary_size for item in lifecycle_operation.manifest
     )
-    # A stored companion needs durable placement to resolve its historical binary path in Trash.
-    placement_required = binary_placement_required or "stored_object" in fm
+    retirement = None
+    if binary_placement_required:
+        metadata_bytes, retirement = trash_metadata.prepare_retirement(
+            vault_root, stored_original, trash_rel, metadata_bytes)
+    # A stored companion needs durable placement to resolve its historical binary path in Trash; so does
+    # a trashed filing, whose page keeps naming its original path.
+    placement_required = binary_placement_required or "stored_object" in fm or filing is not None
     placement_files: list[tuple[str, bytes]] = [(meta_rel, metadata_bytes)] if placement_required else []
     if binary_placement_required:
         assert stored_original is not None and stored_original.reference is not None
@@ -606,6 +683,10 @@ def _delete_file_local(
         companion = originals.sidecar_path(Path(trash_rel)).as_posix()
         companion_bytes = render_frontmatter_document(serialize_frontmatter(fields), "").encode("utf-8")
         placement_files.append((companion, companion_bytes))
+    # The placement and the rename change bindings before any batch; one projection delta covers them.
+    originals_context.enter_context(media_bindings.operation(vault_root, dict.fromkeys((
+        source_rel, moved_trash_rel, binary_rel, trash_rel, originals.sidecar_path(Path(trash_rel)).as_posix(),
+    ))))
     try:
         with trash_metadata.preserve_placement(vault_root, transition, placement_files):
             try:
@@ -647,28 +728,32 @@ def _delete_file_local(
 
     from .media_store import forget_original
 
-    # Explicit deletion retires the binding; cache eviction never calls here.
-    forget_original(vault_root, rel_path)
+    if filing is None:
+        # Explicit deletion retires the binding; cache eviction never calls here. A trashed filing's
+        # binding stays in its Trash page, which still pins its shared bytes for recovery.
+        forget_original(vault_root, rel_path, prepared=retirement)
 
     # The part pages of a long extraction go to Trash beside their page, so a recovery brings
     # them back; only emptying Trash removes them. A failed move leaves them in place.
     carried_parts: list[str] = []
-    if rel_path.lower().endswith(".md"):
+    if source_rel.lower().endswith(".md"):
         from . import extraction_parts
 
         try:
-            carried_parts = [before for before, _after in extraction_parts.carry(vault_root, rel_path, trash_rel)]
+            carried_parts = [
+                before for before, _after in extraction_parts.carry(vault_root, source_rel, moved_trash_rel)
+            ]
         except OSError:
-            log.warning("the part pages of %s stayed in place", rel_path, exc_info=True)
+            log.warning("the part pages of %s stayed in place", source_rel, exc_info=True)
             warnings.append(
-                f"trashed the page; its part pages stayed in {extraction_parts.folder_for(Path(rel_path)).as_posix()}"
+                f"trashed the page; its part pages stayed in {extraction_parts.folder_for(Path(source_rel)).as_posix()}"
             )
 
     if prior_markdown is not None:
         from . import due_state
 
         due_state.refresh_after_writes(
-            vault_root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
+            vault_root, [due_state.PageWrite(source_rel, prior_markdown=prior_markdown)]
         )
 
     # Drop Markdown rows from the semantic index sidecars. A removed media
@@ -677,11 +762,12 @@ def _delete_file_local(
     # (index_sync.delete_after_remove). A non-.md, non-media path has an exact
     # affected Markdown set of zero and must not enter fan-out.
     index_feedback: dict | None = None
-    if rel_path.lower().endswith(".md") or is_media:
+    if source_rel.lower().endswith(".md") or is_media:
         fanout_unverified = False
         try:
             from . import index_sync
-            raw_report = index_sync.delete_after_remove(vault_root, [rel_path, *carried_parts])
+            removed_paths = [*dict.fromkeys((source_rel, *((binary_rel,) if is_media else ())))]
+            raw_report = index_sync.delete_after_remove(vault_root, [*removed_paths, *carried_parts])
             report = (
                 raw_report
                 if isinstance(raw_report, index_sync.IndexSyncReport)
@@ -820,6 +906,16 @@ def _trash_metadata_bytes(
     return json.dumps(meta, indent=2, default=str).encode("utf-8")
 
 
+@dataclass(frozen=True, slots=True)
+class _StoreFiling:
+    """A digest-addressed filing that a store-mode Trash moves by its page alone."""
+
+    named: str  # The path the caller named: the original's or its page's.
+    original: str  # The original's logical path, which a converted filing's store record may still hold.
+    entry: str  # The original's Trash identity; its page lands in that identity's companion slot.
+    linked_from: frozenset[str]  # The pages that may link to the original's path.
+
+
 def _trash_in_store(
     writer,
     vault_root: Path,
@@ -837,6 +933,7 @@ def _trash_in_store(
     inbound: int,
     inbound_ignored: int,
     warnings: list[str],
+    filing: _StoreFiling | None = None,
 ) -> DeleteFileResult:
     """Move one stored page, or one binary, to the trash in a single store transaction.
 
@@ -852,6 +949,10 @@ def _trash_in_store(
     its tombstone and receipt around the commit (``vault_store.governed``). The log entry commits
     with the trash, and an active catalog publication, prepared before validation returned,
     publishes after the commit.
+
+    A digest-addressed ``filing`` moves its page alone and leaves its shared bytes in place. The
+    store record that a converted filing keeps at its original's path goes in the same commit, as
+    a new filing has none: the page that the Trash placement maps is the whole entry.
     """
     from . import extraction_parts
     from .vault import CreateOnlyConflict, PathGuardError
@@ -859,16 +960,25 @@ def _trash_in_store(
     from .vault_store import binaries, governed
     from .vault_store import media as store_media
     from .vault_store import read as store_read
-    from .vault_store.write import Expect, PageMove, StoreConflict
+    from .vault_store.write import BinaryDelete, Expect, PageMove, StoreConflict
 
     root = Path(vault_root)
     page = store_ownership.classify(rel_path) is store_ownership.Ownership.PAGE
+    retirement = None
+    if not page and stored_original is not None and stored_original.reference is not None:
+        metadata_bytes, retirement = trash_metadata.prepare_retirement(root, stored_original, trash_rel, metadata_bytes)
     # The sidecar is a file that the commit records, so it waits in a temporary until the commit.
     sidecar = binaries.Placement(meta_rel, metadata_bytes)
     moves: list[PageMove] = []
     expect: dict[str, Expect] = {}
     entries: list[binaries.Entry] = []
+    binary_deletes: list[BinaryDelete] = []
     with store_read.snapshot(root) as view:
+        if filing is not None and (record := view.binary(filing.original)) is not None:
+            binary_deletes.append(BinaryDelete(filing.original, on_disk=True))
+            expect[filing.original] = Expect(
+                revision=record.revision, sha256=record.sha256, linked_from=filing.linked_from
+            )
         if page:
             # A schema overlay page that is not Markdown has no judged bytes unless a preview
             # hashed it: it is bound as this read finds it.
@@ -914,12 +1024,13 @@ def _trash_in_store(
                 vault_root=root,
                 lifecycle=store_batch.Lifecycle(
                     moves=tuple(moves),
+                    binary_deletes=tuple(binary_deletes),
                     binary_moves=moved.binary_moves,
                     expect=expect,
                 ),
             )
     except StoreConflict as conflict:
-        if conflict.path == rel_path:
+        if conflict.path == rel_path or (filing is not None and conflict.path == filing.original):
             raise DeleteFileError(
                 "STALE_DELETE", f"delete source changed since it was read ({conflict.reason})"
             ) from conflict
@@ -937,8 +1048,12 @@ def _trash_in_store(
         from .media_store import forget_original
 
         # Explicit deletion retires the binding; cache eviction never calls here.
-        forget_original(root, rel_path)
+        forget_original(root, rel_path, prepared=retirement)
         store_media.after_removal(root, [rel_path])
+    elif filing is not None:
+        # A trashed filing's binding stays in its Trash page, which still pins its shared bytes for
+        # recovery; only what derives from its original's path goes.
+        store_media.after_removal(root, [filing.original])
     if prior_markdown is not None:
         from . import due_state
 
@@ -952,8 +1067,8 @@ def _trash_in_store(
     if log_plan.warning:
         warnings.append(log_plan.warning)
     return DeleteFileResult(
-        path=rel_path,
-        trash_path=trash_rel,
+        path=rel_path if filing is None else filing.named,
+        trash_path=trash_rel if filing is None else filing.entry,
         trash_meta_path=meta_rel,
         inbound_link_count=inbound,
         inbound_ignored_count=inbound_ignored,

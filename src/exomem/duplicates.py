@@ -197,8 +197,13 @@ def binding_unproven(vault_root, rel: str, payload: PagePayload) -> bool:
     )
 
 
-def original_size(vault_root, rel: str, payload: PagePayload) -> int | None:
-    """The size of the original that the page at `rel` names when it still hashes to the payload it records, else None."""
+def original_size(vault_root, rel: str, payload: PagePayload, *, bound: bool = False) -> int | None:
+    """The size of the original that the page at `rel` names when it still hashes to the payload it records, else None.
+
+    `bound` also counts an original with no file at its path. A pooled one is read again from its shared object.
+    An evicted one has no local bytes, so its binding's digest and size stand for its stored version. A caller
+    that needs the bytes, as the audit and a fold do, leaves `bound` off.
+    """
     artifact = payload.artifact_path
     # The page is vault data. An original outside its own folder is some other file's bytes.
     if artifact is None or PurePosixPath(artifact).parent != PurePosixPath(rel).parent:
@@ -211,14 +216,30 @@ def original_size(vault_root, rel: str, payload: PagePayload) -> int | None:
             while chunk := original.stream.read(1 << 20):
                 digest.update(chunk)
                 size += len(chunk)
-    except (OSError, reserved_paths.ReservedPathLeafError):
+    except reserved_paths.ReservedPathLeafError as error:
+        return _bound_original_size(vault_root, artifact, payload) if bound and error.code == "MISSING" else None
+    except OSError:
         return None
     return size if digest.hexdigest() == payload.sha256 else None
 
 
-def original_intact(vault_root, rel: str, payload: PagePayload) -> bool:
+def _bound_original_size(vault_root, artifact: str, payload: PagePayload) -> int | None:
+    """The size of a pooled or evicted original that its filing's binding names, else None."""
+    from . import held_fs, media_store
+
+    try:
+        snapshot = originals.original_state(vault_root, artifact)
+        if snapshot.local_path is not None:
+            head = media_store.pooled_head(vault_root, artifact, snapshot)
+            return head.size if head.sha256 == payload.sha256 else None
+    except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return None
+    return snapshot.binary_size if snapshot.state == "evicted" and snapshot.binary_sha256 == payload.sha256 else None
+
+
+def original_intact(vault_root, rel: str, payload: PagePayload, *, bound: bool = False) -> bool:
     """Whether the original that the page at `rel` names still hashes to the payload it records."""
-    return original_size(vault_root, rel, payload) is not None
+    return original_size(vault_root, rel, payload, bound=bound) is not None
 
 
 def find_duplicate(
@@ -266,9 +287,9 @@ def named_duplicate(
 
     The one re-verification of a candidate, shared by `find_duplicate` and by a door that already holds the
     page it means (an apply of a plan that named it) and so needs no catalogue. The page's bytes are read
-    again and re-derived (a text payload) or re-hashed (an original), and only a caller who may read the page in
-    full gets it; a page that fails any test reads as absent. `keeps_original` narrows the form as in
-    `find_duplicate`.
+    again and re-derived (a text payload) or re-hashed (an original, a pooled one included; an evicted original
+    counts by its binding), and only a caller who may read the page in full gets it; a page that fails any test
+    reads as absent. `keeps_original` narrows the form as in `find_duplicate`.
     """
     if vault.in_append_only_tree(rel) != lane or raw_protection.marked(rel) != protected:
         return None
@@ -278,7 +299,7 @@ def named_duplicate(
         return None
     if keeps_original is not None and (payload.artifact_path is not None) != keeps_original:
         return None
-    if payload.artifact_path is not None and not original_intact(vault_root, rel, payload):
+    if payload.artifact_path is not None and not original_intact(vault_root, rel, payload, bound=True):
         return None
     return Duplicate(path=rel, ref=payload.ref, payload=payload)
 

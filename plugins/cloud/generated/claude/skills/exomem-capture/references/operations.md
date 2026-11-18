@@ -18,7 +18,7 @@ commands.
 | `review` | Review stale, contradictory, or unprocessed knowledge | `list_review_items` and `decide_review_item` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `inspect_memory` and `manage_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `inspect_memory(operation="imports.scan")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids` or `reconcile` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
+| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids`, `reconcile` or `convert-originals` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `inspect_memory` and `manage_memory`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
@@ -77,9 +77,18 @@ identifiers on either route.
 
 Use `inspect_memory(operation="curation.work_item")` when one reviewed structural improvement
 spans multiple compiled notes or combines typed creation, relation acceptance,
-edit, supersession, move, delete, or recovery. The active agent remains the
+edit, supersession, or move. The active agent remains the
 semantic author: `curation_action="work-item"` assembles only explicit refs and
 paths, and `curation_action="propose"` validates the agent-authored typed plan.
+`read_instructions(topic="curation.propose")` returns worked split, move and
+rehome plans.
+
+A `move` step records the old path in the page's `moved_from`, so old links
+keep resolving. Its optional `fields` patch sets pointer fields only. One
+`repoint-links` step, last in the plan, rewrites every link to the plan's
+moved pages in one batch. In a Source or Evidence page it changes only the
+link span. Preview lists one outcome per referrer. Curation refuses `delete`
+and `recover`.
 
 Call `curation_action="preview"` once for the immutable plan and show its exact
 actions, blockers, fingerprint, and compensation classes. That review is
@@ -95,8 +104,10 @@ confirmation before `curation_action="apply-compensation"`. Never treat
 compensation as rollback, reuse a forward approval, grant standing approval, or
 route Planning, Records, Sources, Evidence, workflow contracts, schema/admin
 paths, or trash internals through curation page steps. The two fold steps in
-[vault-care](vault-care.md#curation) are the only exception: they retire a
+[vault-care](vault-care.md#curation) are the only steps that retire a
 duplicate Source or Evidence page, or an episode's old recap files.
+`repoint-links` and an `edit` with `patch_frontmatter` of a registered pointer
+field change only the pointers of a Source or Evidence page, never its content.
 
 ## Records
 
@@ -248,6 +259,14 @@ another page. It is advisory only: it is absent when no step is open, it never
 changes `status`, `mutated`, `warnings_count`, mutation identity, or replay, and a
 failure to compute it omits the field rather than affecting the write. The runtime
 never creates, moves, renames, or deletes anything as a result.
+
+The same field has kind `ownership` while the written page is asked whether it belongs
+in its project and that question is unanswered. It carries the review item's `ref`,
+`fingerprint` and `id`, and one `question`. The question holds the ownership test and the
+call that keeps the page where it is; it never reports a path, title, or count belonging
+to another page. It has the same advisory limits, and a response carries at most one
+`structure_suggestion`, with the ownership one first. The `structural_suggestions`
+delegation class and the `ownership_review` family disposition both withhold it.
 
 `detail="full"` adds the existing leaf result under
 `diagnostics`. The detail choice

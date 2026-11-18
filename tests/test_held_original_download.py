@@ -20,6 +20,7 @@ from test_cloud_upload_bridge import _run
 from test_cloud_upload_bridge import cell as cell
 from test_media_store import _offload
 from test_media_store import selected_store as selected_store
+from test_pooled_export_fixity import _pool
 
 from exomem import (
     artifact_recovery,
@@ -119,6 +120,20 @@ def test_a_download_of_an_evicted_original_writes_no_second_copy(cell, selected_
     assert response.status_code == 200, response.text
     assert response.content == expected
     assert copies == []
+
+
+def test_a_shared_original_downloads_through_the_cell_route_byte_for_byte(cell, monkeypatch):
+    """Catches a shared-copy hold that the request enters in a worker thread and cannot release when the response
+    closes it on the event loop, which fails every download of a pooled filing."""
+    key, app, vault = cell
+    original, path = _preserved_original(vault)
+    expected = original.read_bytes()
+    _pool(vault, monkeypatch, original)
+
+    response = _run(app, lambda client: _get(client, path, _headers(key, path)))
+
+    assert response.status_code == 200, response.text
+    assert response.content == expected
 
 
 def test_a_file_that_changes_during_the_response_never_gets_a_complete_looking_body(cell):

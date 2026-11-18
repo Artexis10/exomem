@@ -652,12 +652,12 @@ _DECLARED_UNBOUNDED_JOINS = {
     "complete_component borrow, each for one batch, and lend makes no offer after its room",
     (
         "media_store.py",
-        "_decrypt_into",
+        "_decrypted_chunks",
         "process.wait",
     ): "age exits once its output reaches EOF or after kill; its input ends with the feed",
     (
         "media_store.py",
-        "_decrypt_into",
+        "_decrypted_chunks",
         "feeder.join",
     ): "the feed ends at the object's end, a broken pipe, or the edge store's per-read timeout",
     (

@@ -1188,11 +1188,21 @@ def resolve_preserved_source(
     """
     if type(reference) is not str or not reference or len(reference.encode("utf-8")) > 1024:
         return None
+    lanes = tuple(managed_join(f"{lane}/") for lane in _BULK_SOURCE_LANES)
     try:
-        path, relative = vault.resolve_under_vault(
-            root, reference, must_exist=True, must_be_file=True
-        )
-        lanes = tuple(managed_join(f"{lane}/") for lane in _BULK_SOURCE_LANES)
+        try:
+            path, relative = vault.resolve_under_vault(
+                root, reference, must_exist=True, must_be_file=True
+            )
+        except vault.VaultPathError:
+            from . import originals
+
+            # A shared archive keeps a preserved original's bytes in its pool, so its filing has no file at its
+            # path. The read gate decides: a deleted filing resolves to nothing, like an absent one.
+            path, relative = vault.resolve_under_vault(root, reference)
+            if (os.path.lexists(path) or not relative.startswith(lanes)
+                    or originals.digest_addressed(root, relative) is None):
+                return None
         if relative == reference and relative.startswith(lanes) and released(relative, path):
             return path, relative
     except (vault.VaultPathError, vault.PathGuardError, OSError, ValueError, UnicodeDecodeError):
@@ -2234,7 +2244,9 @@ def create_collection(
             raise collections.CollectionError(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
-        manifest = _preflight_collection_create(root, path, manifest_text, scaffold=scaffold)
+        manifest = _preflight_collection_create(
+            root, path, manifest_text, scaffold=scaffold, commit=True
+        )
         _refuse_store_only_features(manifest)
         manifest_guard = vault.PathGuard.capture(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
@@ -2422,7 +2434,7 @@ def _validate_collection_create_for_profile(
             "INVALID_COLLECTION_MANIFEST", "manifest text is required"
         )
     manifest = _preflight_collection_create(
-        root, root / manifest_path, manifest_text, scaffold=scaffold
+        root, root / manifest_path, manifest_text, scaffold=scaffold, commit=False
     )
     if manifest.semantic_profile != semantic_profile:
         raise collections.CollectionError(
@@ -3370,12 +3382,35 @@ def _lifecycle_result(
     }
 
 
+def _require_unclaimed(
+    root: Path,
+    paths: tuple[str, ...],
+    *,
+    taken: str = "CREATE_ONLY_CONFLICT",
+    newest: bool = True,
+) -> None:
+    """Refuse a new collection file at a path that a moved page still claims (`prior_claims`).
+
+    A commit reads the newest claims; a validation passes `newest=False` and reads its request's
+    store revision, as every other read of that request does.
+    """
+    from . import prior_claims
+
+    for rel in paths:
+        try:
+            prior_claims.require_unreserved(root, rel, newest=newest)
+        except prior_claims.ReservedPathError as error:
+            code = taken if error.code == "FILE_EXISTS" else error.code
+            raise collections.CollectionError(code, error.reason) from None
+
+
 def _preflight_collection_create(
     root: Path,
     path: Path,
     manifest_text: str,
     *,
     scaffold: bool,
+    commit: bool,
 ) -> collections.CollectionManifest:
     record_governance.require_candidate_manifest_visibility(root, path.relative_to(root).as_posix())
     _assert_portable_absent(root, path)
@@ -3393,6 +3428,9 @@ def _preflight_collection_create(
     _assert_portable_absent(root, source)
     if source.exists() or _casefold_alias(source):
         raise collections.CollectionError("CREATE_ONLY_CONFLICT", "canonical source already exists")
+    # A markdown-items source is a folder, which no page's name reserves.
+    log_page = (manifest.storage.source,) if manifest.storage.strategy == "markdown-log" else ()
+    _require_unclaimed(root, (path.relative_to(root).as_posix(), *log_page), newest=commit)
     if scaffold and manifest.storage.strategy == "markdown-log":
         # Descriptor shape is validated above; this access pins the exact scaffold fields.
         manifest.storage.descriptor["section"]["title"]
@@ -5703,6 +5741,8 @@ def _new_item_path(
         Path(entry.relative_path).name.casefold() == target_name for entry in source_guard.entries
     ) or any(Path(path).name.casefold() == target_name for path in reserved):
         raise collections.CollectionError("RECORD_ID_CONFLICT", "item path already exists")
+    # An item that moved out of the collection still claims its old path and its links.
+    _require_unclaimed(root, (target.relative_to(root).as_posix(),), taken="RECORD_ID_CONFLICT")
     return target, (source_guard,)
 
 

@@ -3,23 +3,37 @@
 For when `edit` is overkill (it rewrites whole body or tags). This patches
 exactly one key, leaves the body alone, and always bumps `updated:`.
 
-Refuses Sources/ and Evidence/. Curated trees need `allow_curated=true`.
-`why` is required — lands in the log entry.
+Refuses Sources/ and Evidence/. A field that the `page-fields` registry declares a
+pointer is corrected there only by a curation `edit` step, whose plan the user confirms
+and whose compensation reverts it: `set_pointer_field` is that step's writer, through the
+governed pointer write, which patches the value span alone and sets no `updated`. Curated
+trees need `allow_curated=true`. `why` is required — lands in the log entry.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import page_ids, project_keys, semantic_writes, temporal, vocabulary_resolution
+from . import (
+    capabilities,
+    page_fields,
+    page_ids,
+    page_lineage,
+    pointer_write,
+    project_keys,
+    semantic_writes,
+    temporal,
+    vocabulary_resolution,
+)
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     EXCLUDED_FIELD_CODE,
+    UPDATED_FIELD,
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
@@ -51,6 +65,8 @@ class SetFrontmatterResult:
     new_value: Any
     warnings: list[str]
     semantic: dict | None = None
+    #: The record of a pointer write to an append-only page, which its revert names.
+    pointer_write: str | None = None
 
     def as_dict(self) -> dict:
         result = {
@@ -62,6 +78,8 @@ class SetFrontmatterResult:
         }
         if self.semantic is not None:
             result["semantic"] = self.semantic
+        if self.pointer_write is not None:
+            result["pointer_write"] = self.pointer_write
         return result
 
 
@@ -113,26 +131,8 @@ def set_frontmatter_field(
     relation_review_reason: str | None = None,
     _validate_frontmatter: Callable[[str, str], None] | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
-    if not field or not field.strip():
-        raise SetFrontmatterError(
-            code="INVALID_SET", reason="field is required"
-        )
-    if not why or not why.strip():
-        raise SetFrontmatterError(
-            code="INVALID_SET",
-            reason="why is required — frontmatter edits without rationale aren't auditable",
-        )
-    if field == "updated":
-        raise SetFrontmatterError(
-            code="INVALID_SET",
-            reason=(
-                "cannot set `updated:` directly — it is always bumped to the "
-                "write instant by this operation"
-            ),
-        )
-    excluded_reason = excluded_frontmatter_reason(field)
-    if excluded_reason is not None:
-        raise SetFrontmatterError(code=EXCLUDED_FIELD_CODE, reason=excluded_reason)
+    """Set one frontmatter field."""
+    _require_settable(field, why)
 
     try:
         abs_path, rel_path = resolve_under_vault(
@@ -143,13 +143,13 @@ def set_frontmatter_field(
 
     append_only = in_append_only_tree(rel_path)
     if append_only:
-        raise SetFrontmatterError(
-            code="APPEND_ONLY",
-            reason=(
-                f"{rel_path} is in {append_only}/ which is append-only. "
-                f"Frontmatter edits would violate rule 2."
-            ),
+        reason = (
+            f"{rel_path} is in {append_only}/ which is append-only. "
+            f"Frontmatter edits would violate rule 2."
         )
+        if field in page_fields.pointer_fields(vault_root):
+            reason += " " + (owned_field_route(vault_root, field) or _curation_route())
+        raise SetFrontmatterError(code="APPEND_ONLY", reason=reason)
 
     curated = in_curated_tree(rel_path)
     if curated and not allow_curated:
@@ -315,6 +315,252 @@ def set_frontmatter_field(
         warnings=warnings,
         semantic=committed.as_dict(),
     )
+
+
+def _require_settable(field: str, why: str) -> None:
+    """Refuse a field that no frontmatter write may set: the write stamp, lineage or an excluded key."""
+    if not field or not field.strip():
+        raise SetFrontmatterError(
+            code="INVALID_SET", reason="field is required"
+        )
+    if not why or not why.strip():
+        raise SetFrontmatterError(
+            code="INVALID_SET",
+            reason="why is required — frontmatter edits without rationale aren't auditable",
+        )
+    if field == UPDATED_FIELD:
+        raise SetFrontmatterError(
+            code="INVALID_SET",
+            reason=(
+                "cannot set `updated:` directly — it is always bumped to the "
+                "write instant by this operation"
+            ),
+        )
+    if field in page_lineage.FIELDS:
+        raise SetFrontmatterError(
+            code="INVALID_SET",
+            reason=(
+                f"cannot set `{field}:` directly — a page's lineage is written only by the move, "
+                "undo or reclassification that relocates it"
+            ),
+        )
+    excluded_reason = excluded_frontmatter_reason(field)
+    if excluded_reason is not None:
+        raise SetFrontmatterError(code=EXCLUDED_FIELD_CODE, reason=excluded_reason)
+
+
+def _curation_route() -> str:
+    return (
+        "Correct a pointer field there with a curation `edit` step: propose it with "
+        + capabilities.active_call_text(
+            "maintain_memory", {"mode": "curation", "curation_action": "propose"}
+        )
+        + ", and apply it after the user confirms the previewed plan; its compensation reverts it."
+    )
+
+
+def owned_field_route(vault_root: Path, field: str) -> str | None:
+    """The sentence naming the one operation that writes `field` on a captured page, or None.
+
+    A pointer field with a registry `writer` changes there only through that operation, because
+    it checks what a plain correction cannot. Code maps the closed `writer` values, never keys.
+    """
+    writer = page_fields.writers(vault_root).get(field)
+    if writer is None:
+        return None
+    if writer == page_fields.WRITER_RECLASSIFY:
+        call = capabilities.active_call_text(
+            "manage_memory_file", {"operation": "reclassify", "reason": "..."}
+        )
+        return f"`{field}` changes only through {call}, which relocates the source and records its history."
+    if writer == page_fields.WRITER_CUSTODY:
+        call = capabilities.active_call_text(
+            "manage_memory_file", {"operation": "reclassify", "artifact_path": "...", "reason": "..."}
+        )
+        return f"`{field}` changes only through {call}, which checks the raw file's recorded identity."
+    return (
+        f"`{field}` is the back-reference that a compiled page's `sources:` citation writes; "
+        "edit the citing page instead."
+    )
+
+
+def set_pointer_field(
+    vault_root: Path,
+    *,
+    path: str,
+    field: str,
+    value: Any,
+    why: str,
+    expected_hash: str | None,
+    today: dt.date | None = None,
+    validate_only: bool = False,
+    operation: str | None = None,
+) -> SetFrontmatterResult | SetFrontmatterValidation:
+    """Correct a pointer field of an append-only page through the governed pointer write.
+
+    Only a curation `edit` step calls this: the user confirms its exact plan, and `operation`
+    files the record where the step's compensation finds it. The value span is patched where
+    the YAML parser places it and every other byte, line endings included, is kept: `updated`
+    is not a pointer, so the write's span proof would refuse it. A field that another operation
+    owns (`owned_field_route`) refuses.
+    """
+    from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+    _require_settable(field, why)
+    try:
+        abs_path, rel_path = resolve_under_vault(
+            vault_root, path, must_exist=True, must_be_file=True
+        )
+    except VaultPathError as e:
+        raise SetFrontmatterError(code=e.code, reason=e.reason) from e
+    if in_append_only_tree(rel_path) is None:
+        raise SetFrontmatterError(
+            code="INVALID_SET", reason=f"{rel_path} is not captured content; edit it as any page"
+        )
+    if field not in page_fields.pointer_fields(vault_root):
+        raise SetFrontmatterError(
+            code="APPEND_ONLY",
+            reason=f"`{field}` is not a pointer field, so it keeps its captured bytes in {rel_path}.",
+        )
+    owner = owned_field_route(vault_root, field)
+    if owner is not None:
+        raise SetFrontmatterError(code="POINTER_FIELD_OWNED", reason=owner)
+    try:
+        text, guard = read_guarded_text(vault_root, abs_path)
+    except (OSError, UnicodeError) as error:
+        raise SetFrontmatterError(
+            code="UNREADABLE", reason=f"could not safely read {rel_path}"
+        ) from error
+    front, _body, block = parse_frontmatter(text)
+    if block is None:
+        raise SetFrontmatterError(
+            code="FRONTMATTER_REQUIRED",
+            reason=f"{rel_path} has no frontmatter block; a pointer correction never synthesizes one.",
+        )
+    old_value = front.get(field)
+    value = _governed_enum_value(field, value, page_type=front.get("type"), page=(vault_root, rel_path, front))
+    project_plan = _plan_project_keys(vault_root, field, value)
+    try:
+        after = splice_markdown_frontmatter(text, {field: value})
+        write = pointer_write.plan(
+            vault_root, rel_path, text, after, pointer_write.Declared(fields={field}),
+            reason=why.strip(),
+        )
+    except (FrontmatterSpliceError, pointer_write.PointerWriteError) as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    now = today or temporal.now()
+    try:
+        date_iso = semantic_writes.resolve_reviewed_date_iso(None, now)
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    by_id = expected_hash is not None and page_ids.is_page_id(expected_hash)
+    try:
+        preflight = semantic_writes.preflight_existing(
+            vault_root,
+            path=rel_path,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=guard.expected_content_hash
+            if by_id
+            else expected_hash or guard.expected_content_hash,
+            stamp=date_iso,
+            validate_only=validate_only,
+        )
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    if by_id and not page_ids.guard_matches(str(expected_hash), guard.expected_content_hash or ""):
+        raise SetFrontmatterError(
+            code="STALE_EDIT",
+            reason=(
+                f"{rel_path} changed on disk since you read it (expected_hash mismatch). "
+                "Re-read the page with `get` and retry the edit against the current content."
+            ),
+        )
+    if validate_only:
+        return SetFrontmatterValidation(
+            path=rel_path, field=field, old_value=old_value, new_value=value,
+            validate_only=True, semantic=preflight.as_dict(),
+        )
+    rel_no_ext = rel_path.removesuffix(".md")
+    record_id = pointer_write.new_record_id()
+    try:
+        log_plan = plan_log_writes(
+            vault_root,
+            date_iso=date_iso,
+            op="set_frontmatter_field",
+            rel_path_no_ext=rel_no_ext,
+            body=(
+                f"set_frontmatter_field via exomem (pointer write {record_id}). {why.strip()} "
+                f"Field: {field!r}. Old: {old_value!r}. New: {value!r}."
+            ),
+            operation_token=preflight.transition_token,
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise SetFrontmatterError(
+            "LOG_PLAN_CONFLICT", "frontmatter log update could not be planned safely"
+        ) from error
+    warnings = [note for note in (log_plan.warning, log_plan.rotation_note) if note is not None]
+    try:
+        with pointer_write.recording(vault_root, [(write, record_id)], operation=operation):
+            committed = semantic_writes.commit_existing(
+                vault_root,
+                preflight=preflight,
+                auxiliary_writes=(*project_plan, *log_plan.writes),
+                derived_auxiliary_writes=tuple(
+                    ("operation-log", write) for write in log_plan.writes
+                ),
+            )
+    except semantic_writes.SemanticWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    return SetFrontmatterResult(
+        path=rel_path, field=field, old_value=old_value, new_value=value,
+        warnings=warnings, semantic=committed.as_dict(), pointer_write=record_id,
+    )
+
+
+def apply_pointer_patch(
+    vault_root: Path, rel_path: str, text: str, fields: Mapping[str, Any]
+) -> str:
+    """`text` with each field of `fields` set, as `set_frontmatter_field` would set it.
+
+    A rehome moves a page and changes where it belongs in one commit (a curation `move` step's
+    `fields` patch). The caller limits `fields` to registry pointer fields, and
+    `pointer_patch_writes` plans the registry writes that their values need.
+    """
+    from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
+
+    front, _body, block = parse_frontmatter(text)
+    if block is None:
+        raise SetFrontmatterError(
+            code="FRONTMATTER_REQUIRED",
+            reason=f"{rel_path} has no frontmatter block to hold the patched fields",
+        )
+    values = {
+        field: _governed_enum_value(
+            field, value, page_type=front.get("type"), page=(vault_root, rel_path, front)
+        )
+        for field, value in fields.items()
+    }
+    try:
+        return splice_markdown_frontmatter(text, values)
+    except FrontmatterSpliceError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+
+
+def pointer_patch_writes(vault_root: Path, fields: Mapping[str, Any]) -> tuple[PlannedWrite, ...]:
+    """The registry writes that the values of a `fields` patch need, one per registry file."""
+    writes: dict[Path, PlannedWrite] = {}
+    for field, value in fields.items():
+        for write in _plan_project_keys(vault_root, field, value):
+            held = writes.get(write.path)
+            if held is not None and held.content != write.content:
+                raise SetFrontmatterError(
+                    code="FIELDS_PATCH_CONFLICT",
+                    reason="the patched fields register different keys in one registry; "
+                    "patch them in separate steps",
+                )
+            writes[write.path] = write
+    return tuple(writes.values())
 
 
 def _plan_project_keys(

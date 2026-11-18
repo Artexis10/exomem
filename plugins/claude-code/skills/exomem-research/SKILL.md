@@ -2,7 +2,7 @@
 name: exomem-research
 description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 metadata:
-  skill_contract: 4224edce1af25b35f8b365df6267fd7ce234f0cacad05b51c76d324f05ad0caf
+  skill_contract: dd7e6c0eaccb191345b9313dadaf81159181c4f621c16d0cd9d0948b3066300d
   version: "0.1.0"
 ---
 
@@ -24,8 +24,9 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Content outside the managed Knowledge Base is
+read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
@@ -73,6 +74,8 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 ## Workflow
 1. Search Exomem first with `search_memory` for prior conclusions and related sources.
 2. Gather external sources only as needed; preserve important raw sources with `save_source`, passing `files` when the client can hand over an attachment. `save_evidence`, `save_evidence`, and the `upload_files` fallback are for proof-bearing artifacts, not for raw material.
+   Take a document's title, authors, year, venue and DOI from the document itself, never from a search hit, a repository match or memory. Compare what you saved with the reply's `identity` block, which shows the document's opening and the DOIs it carries. A document that cites the work is not the work. When they differ, correct the Source with `options.correction` and no `files`.
+   Set `document_form`. When the full text is unavailable, save the publisher's abstract or citation record and label it so; never present it as the full text.
 3. Attribute findings to sources and distinguish evidence from interpretation.
 4. Draft the result as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
 5. Reuse meaningful connections from the research context; use `inspect_memory(operation="connections.suggest_links")` when candidates are still missing and review related prior notes. Then write with `create_note`, including the sources and accepted connections in the first write.
@@ -94,7 +97,7 @@ Save findings that answer the question, change a decision, or create reusable co
 ## Mistakes to avoid
 Do not research from scratch before checking Exomem. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
 
-<!-- exomem-semantic-authoring:v11 sha256:501f8d894ee844122158c1f9ed31f163bedfcb878a546c5ead5b1db1b2c85946 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

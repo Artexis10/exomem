@@ -409,8 +409,12 @@ def graph_recovery_payload(vault_root) -> dict:
     durable clock advancing. It names no path and no note — an age and a flag.
     """
     from . import graph_sync
+    from .vault_store import mode as store_mode
 
     try:
+        if store_mode.store_mode_for_reads(vault_root):
+            # A store has no recovery clock; reading file mode's epoch would also stamp or clear its marker.
+            return {"recovery_required": False, "recovery_age_s": None}
         age = graph_sync.observe_recovery_state(vault_root)
     except Exception:  # noqa: BLE001 - telemetry must never break readiness
         return {"recovery_required": False, "recovery_age_s": None}
