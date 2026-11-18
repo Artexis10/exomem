@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 2e610f10ff132773e5dcbda779bcdbbcb7e1c1e1047521fbc124d354e5b1122a
+  skill_contract: 50aa01c0de3581ac96b0ba2085986a39491e0fa204323fb84271b7aa0f1e0354
   version: "0.1.0"
 ---
 
@@ -114,6 +114,7 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 5. For selected compilation, follow the [source compilation pass](references/writing.md#source-compilation-pass); one inventory check closes the work.
    Raw capture may end after custody when compilation is outside the request and live policy.
    Decide at capture: compile into an existing or new note when the Source's claims will be reused; otherwise report it as kept for custody only.
+   When you keep a handed file only for safekeeping and nothing in it warrants a note, pass `options.custody_only: true`; the reply says so, and a later note that cites it clears the mark.
    Correct a wrong Source's title, URL, kind or form with `save_source` and `options.correction` (its ref, page hash and a reason) and no `files`; the stored original is reused and the old Source stays readable.
 
 ## Vocabulary

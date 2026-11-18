@@ -118,7 +118,8 @@ log = logging.getLogger(__name__)
 # 5 adds `EPISODE_BACKLOG`, for the same reason as 3.
 # 6 adds `note_cohesion`, for the same reason as 3.
 # 7 adds `ownership_review`, for the same reason as 3.
-SCHEMA_VERSION = 7
+# 8 adds `CUSTODY_BACKLOG`, for the same reason as 3.
+SCHEMA_VERSION = 8
 STATE_FILENAME = ".due-state.json"
 
 #: The family persisted beside the projection rather than in it. Only `reconcile`
@@ -142,6 +143,11 @@ SOURCE_BACKLOG = "unprocessed_source"
 #: it, because recaps are skipped there, and it ships `off` (`review_state.DEFAULT_DISPOSITIONS`).
 EPISODE_BACKLOG = review_state_module.EPISODE_BACKLOG
 
+#: The custody backlog family: a Source marked `custody_only: true` that no live page compiles.
+#: It is the quiet sibling of `SOURCE_BACKLOG` — the same pass emits it, always `info`, and the
+#: default attention union never holds it, so a write settles its rows exactly like a Source's.
+CUSTODY_BACKLOG = "custody_source"
+
 #: The four due-state categories, in the tiebreak preference the attention surface
 #: already uses. `prediction_window` leads because it fires on a date a human wrote
 #: down; `supersession_integrity` follows because it is the only defect among them;
@@ -163,6 +169,7 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "note_cohesion",
     SOURCE_BACKLOG,
     EPISODE_BACKLOG,
+    CUSTODY_BACKLOG,
 )
 
 #: The backlog families, in served order after every dated obligation; a write's own
@@ -171,12 +178,13 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
 #: the wrong home, or that outgrew its subject, is nearer to work than a capture or a recap
 #: nobody compiled; ownership leads cohesion because a page's home decides what its size
 #: means. The Source backlog leads the episode backlog. Counts are exact; nothing here is
-#: capped.
+#: capped. The custody backlog trails: it waits by choice, so it never leads another family's row.
 BACKLOG_CATEGORIES: tuple[str, ...] = (
     "ownership_review",
     "note_cohesion",
     SOURCE_BACKLOG,
     EPISODE_BACKLOG,
+    CUSTODY_BACKLOG,
 )
 
 #: The categories a single write can soundly settle in full on its own.
@@ -2057,7 +2065,11 @@ def _backlog_rows(
     compiles a Source, a draft or a retired note does not.
     """
     rows: dict[str, Any] = {}
-    for family, paths in ((SOURCE_BACKLOG, source_paths), (EPISODE_BACKLOG, episode_paths)):
+    for family, paths in (
+        (SOURCE_BACKLOG, source_paths),
+        (EPISODE_BACKLOG, episode_paths),
+        (CUSTODY_BACKLOG, source_paths),
+    ):
         backlog = dict(categories.get(family) or {})
         entries = grouped.get(family) or {}
         for path in paths:

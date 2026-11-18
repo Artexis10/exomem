@@ -9,7 +9,7 @@
 ## 2. Receipts
 
 - [x] 2.1 Make a `content` capture's reply say that Exomem kept text, not the original file.
-- [ ] 2.2 Decide and implement the recorded "kept for custody only" state that `unprocessed-sources` honours.
+- [x] 2.2 Implement `options.custody_only`: record `custody_only: true` on the Source, say "kept for custody only" in the outcome line, skip it in `unprocessed_source`, and list it in a new `custody_source` family that stays `info` and outside the default attention set. Teach the option in the ingest and capture skill text.
 
 ## 3. Harness
 

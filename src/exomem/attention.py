@@ -101,6 +101,9 @@ ATTENTION_CATEGORIES: tuple[str, ...] = (
     *audit_module.TYPED_SEMANTIC_CATEGORIES,
     *audit_module.EPISTEMIC_REVIEW_CATEGORIES,
     *audit_module.DUPLICATE_CATEGORIES,
+    # Registered so a client can list it by name; never in the default union, because a
+    # custody Source waits by choice and the queue only ever counts it.
+    "custody_source",
 )
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
 _SEVERITY_BY_RANK: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}
@@ -702,6 +705,9 @@ def activation(
 _TRIAGEABLE_CATEGORIES: tuple[str, ...] = (
     *DEFAULT_ATTENTION_CATEGORIES,
     *audit_module.EPISTEMIC_REVIEW_CATEGORIES,
+    # `custody_source` is registered and opt-in: the projection can publish a ref for it,
+    # which must resolve, yet it never joins the default union.
+    "custody_source",
 )
 
 

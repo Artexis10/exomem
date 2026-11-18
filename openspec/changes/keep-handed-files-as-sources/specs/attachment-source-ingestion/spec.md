@@ -19,3 +19,20 @@ When `save_source` stores supplied text rather than an uploaded original, its ou
 #### Scenario: An agent pastes a transcript's text
 - **WHEN** an agent saves a transcript's text through `content` instead of uploading the file
 - **THEN** the reply's outcome line says the text was kept and the original file was not
+
+### Requirement: A kept-for-custody Source waits in its own quiet count
+
+`save_source` SHALL accept `options.custody_only: true`, which records `custody_only: true` on the new Source and adds "kept for custody only" to the reply's outcome line. The `unprocessed_source` audit family SHALL skip a Source that records `custody_only: true`. The `custody_source` audit family SHALL list each such Source that no live page compiles, at `info` severity whatever its age, oldest first. The family SHALL NOT be in the default attention set. A Source that a live page compiles SHALL appear in neither family.
+
+#### Scenario: A screenshot kept only for safekeeping
+- **WHEN** an agent saves a handed screenshot with `options.custody_only: true`
+- **THEN** the reply's outcome line says the file was kept for custody only
+- **AND** the Source appears in `custody_source` at `info` severity and not in `unprocessed_source`
+
+#### Scenario: An old custody Source never becomes a warning
+- **WHEN** a Source marked `custody_only: true` has waited more than 90 days with no note citing it
+- **THEN** its `custody_source` finding stays at `info` severity
+
+#### Scenario: Compiling a custody Source clears it
+- **WHEN** a live note cites a Source marked `custody_only: true`
+- **THEN** the Source appears in neither `custody_source` nor `unprocessed_source`

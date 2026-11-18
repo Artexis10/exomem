@@ -507,6 +507,7 @@ def add(
     document_form: str | None = None,
     identity_check: Mapping[str, object] | None = None,
     ingested_into: Sequence[str] = (),
+    custody_only: bool | None = None,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -596,6 +597,7 @@ def add(
                 expected_sha256=expected_sha256,
                 correction=correction_plan,
                 document_form=document_form, identity_check=identity_check, ingested_into=ingested_into,
+                custody_only=custody_only,
                 _allocation=_allocation,
                 _prepare=prepare_raw if _prepare is not None else None,
                 _validate_inputs=_validate_inputs,
@@ -835,6 +837,7 @@ def add(
         document_form=form_plan.key,
         identity_check=identity_check,
         ingested_into=ingested_into,
+        custody_only=custody_only,
     )
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
@@ -1694,6 +1697,7 @@ def _render_source(
     document_form: str | None = None,
     identity_check: Mapping[str, object] | None = None,
     ingested_into: Sequence[str] = (),
+    custody_only: bool | None = None,
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
 
@@ -1726,6 +1730,8 @@ def _render_source(
     lines.extend(extra_lines)
     if document_form:
         lines.append(f"document_form: {document_form}")
+    if custody_only:
+        lines.append("custody_only: true")
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
         # can differ (a Markdown original is stored under `.md.txt`; captures before it used `.md.bin`).

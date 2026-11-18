@@ -2413,7 +2413,20 @@ def _user_summary(
     sentence = _lead(head, names)
     if _text_only_source_capture(result, head, verb):
         sentence += " (text only; no original file stored)"
+    if _custody_only_source_capture(result, head, verb):
+        sentence += " (kept for custody only)"
     return sentence
+
+
+def _custody_only_source_capture(result: Mapping[str, Any], head: str, verb: OutcomeVerb | None) -> bool:
+    """The capture stored a Source marked custody_only; say so on a fresh save, never on a reuse."""
+    leaf = result.get("leaf_result")
+    return (
+        verb == "saved"
+        and head == verb.capitalize()
+        and isinstance(leaf, Mapping)
+        and leaf.get("custody_only") is True
+    )
 
 
 def _text_only_source_capture(result: Mapping[str, Any], head: str, verb: OutcomeVerb | None) -> bool:

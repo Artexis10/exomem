@@ -4030,6 +4030,7 @@ def _add_source(
     reuse: bool = False,
     passages: list[source_capture.DeclaredPassage] | None = None,
     document_form: str | None = None,
+    custody_only: bool | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4064,6 +4065,7 @@ def _add_source(
                 reuse_payload=reuse,
                 passages=passages,
                 document_form=document_form,
+                custody_only=custody_only,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -4156,6 +4158,8 @@ def op_audit(
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
     - `unprocessed_source`: source without a live citing derivative (no page
       in its `ingested_into:` is live and cites it in its own `sources:`)
+    - `custody_source`: the same uncompiled condition on a Source marked
+      `custody_only: true`; the quiet count, always `info`
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
       original or remove the unsupported citation; audit never reconstructs it.
@@ -9290,6 +9294,7 @@ def op_capture_source(
     passages: Any = None,
     capture_reservation: capture_attempts_module.CaptureReservation | None = None,
     document_form: str | None = None,
+    custody_only: bool | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9318,7 +9323,10 @@ def op_capture_source(
             passages it keeps the stored original; fields the call omits carry over.
         capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
         document_form: What the document is as a record of a work; a new key registers.
+        custody_only: Keep the Source for safekeeping with no note expected; a correction carries it.
     """
+    if custody_only is not None and type(custody_only) is not bool:
+        raise ValueError("INVALID_CUSTODY_ONLY: custody_only must be true or false")
     if capture_reservation is not None:
         capture_attempts_module.require_active_capture(vault_root, capture_reservation)
     if passages is not None:
@@ -9365,6 +9373,7 @@ def op_capture_source(
             "slug": slug, "source_type": kind, "url": url, "tags": tags, "why_captured": why_captured,
             "domain": domain, "projects": projects, "raw_protection": raw_protection,
             "expected_sha256": expected_sha256, "document_form": document_form,
+            "custody_only": custody_only,
         }
         if metadata_only:
             captured = client_artifacts.capture_source_correction(
@@ -9406,8 +9415,11 @@ def op_capture_source(
             reuse=True,
             passages=passages,
             document_form=document_form,
+            custody_only=custody_only,
         )
         out = {"source": source, "text_only": True}
+        if custody_only is True:
+            out["custody_only"] = True
         if source_identity is not None:
             out["capture_outcome"] = source["capture_outcome"]
             out["mutated"] = source["capture_outcome"] == "created"

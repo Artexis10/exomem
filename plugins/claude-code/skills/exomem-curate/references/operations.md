@@ -596,6 +596,9 @@ cannot be undone.
   proof-bearing artifacts. Same handle shape either way. Use one call for the
   whole batch. A successful response contains the stored path, `size`, and
   `hash`; never treat an upload token as proof that bytes landed.
+  When you keep a handed file only for safekeeping and nothing in it warrants a
+  note, pass `options.custody_only: true`; the reply says so, and a later note
+  that cites it clears the mark.
 
 - **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
   `operation-routing.md` ("A shared file that is evidence"). It needs no user token

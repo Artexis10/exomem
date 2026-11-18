@@ -1864,6 +1864,9 @@ def _commit_staged_sources(
         out["summary"]["already_stored"] = already_stored
     if resolution is not None:
         out["vocabulary_resolution"] = resolution
+    if source_fields.get("custody_only") is True:
+        # The resolved mark (a correction carries its predecessor's): the outcome line says so.
+        out["custody_only"] = True
     return _unless_written(out)
 
 
@@ -1894,6 +1897,7 @@ def capture_source_correction(
     carried: dict[str, object] = {
         **{name: metadata[name] for name in ("source_type", "url", "domain", "document_form")
            if isinstance(metadata.get(name), str) and metadata[name]},
+        **({"custody_only": True} if metadata.get("custody_only") is True else {}),
         **{name: [str(item) for item in metadata[name]] for name in ("tags", "projects")
            if isinstance(metadata.get(name), list) and metadata[name]},
     }

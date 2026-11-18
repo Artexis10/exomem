@@ -1095,3 +1095,71 @@ def test_an_index_that_cannot_answer_reads_as_unchecked_never_as_zero(vault: Pat
     assert result["findings"] == []
     assert result["metadata"]["duplicates"] == {"index": "unchecked"}
     assert result["metadata"]["coverage"]["duplicate_content"] == "unknown"
+
+
+# --- custody: a Source marked custody_only waits in its own quiet family ------------------------------
+
+
+def _custody_source(vault: Path, name: str, captured: str) -> str:
+    rel = f"Knowledge Base/Sources/Articles/{name}"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nsource_type: article\n"
+        f"captured: {captured}\ncustody_only: true\ningested_into: []\n---\n\nKept bytes.\n",
+        encoding="utf-8",
+    )
+    return rel
+
+
+def _cite_source(vault: Path, rel: str, note_rel: str = "Knowledge Base/Notes/Insights/uses-kept.md") -> None:
+    target = vault / note_rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: insight\ntitle: Uses the kept file\nstatus: active\n"
+        "created: 2026-11-02\nupdated: 2026-11-02\n"
+        f'sources:\n  - "[[{rel.removesuffix(".md")}]]"\n---\n\nCompiled.\n',
+        encoding="utf-8",
+    )
+    source = vault / rel
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "ingested_into: []", f'ingested_into:\n  - "[[{note_rel.removesuffix(".md")}]]"'
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_custody_source_waits_in_its_own_quiet_count(vault: Path) -> None:
+    rel = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    with library_scope():
+        report = audit_module.audit(vault, categories=["unprocessed_source", "custody_source"])
+        unprocessed_only = audit_module.audit(vault, categories=["unprocessed_source"])
+
+    custody = [(f.category, f.severity) for f in report.findings if f.path == rel]
+    assert custody == [("custody_source", "info")]
+    assert rel not in {f.path for f in unprocessed_only.findings}
+
+
+def test_a_custody_source_never_ages_into_a_warning(vault: Path) -> None:
+    rel = _custody_source(vault, "2026-01-01-kept-file.md", "2026-01-01")
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"], today=dt.date(2026, 7, 20))
+
+    (finding,) = [f for f in report.findings if f.path == rel]
+    assert finding.severity == "info"
+    assert "200d old" in finding.detail
+
+
+def test_a_compiled_custody_source_is_in_neither_family(vault: Path) -> None:
+    rel = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    _cite_source(vault, rel)
+    with library_scope():
+        report = audit_module.audit(vault, categories=["unprocessed_source", "custody_source"])
+
+    assert rel not in {f.path for f in report.findings}
+
+
+def test_custody_source_is_registered_but_never_in_default_attention() -> None:
+    assert "custody_source" in attention_module.ATTENTION_CATEGORIES
+    assert "custody_source" not in attention_module.DEFAULT_ATTENTION_CATEGORIES

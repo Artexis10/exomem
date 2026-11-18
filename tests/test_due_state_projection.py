@@ -1247,9 +1247,11 @@ def test_the_fallback_never_widens_to_every_audit_category(vault: Path) -> None:
     from exomem import audit as audit_module
 
     triageable = set(attention_module._TRIAGEABLE_CATEGORIES)
+    # `custody_source` is triageable (the projection can publish its ref) but stays out of
+    # the default union — it waits by choice.
     assert triageable == set(attention_module.DEFAULT_ATTENTION_CATEGORIES) | set(
         audit_module.EPISTEMIC_REVIEW_CATEGORIES
-    )
+    ) | {"custody_source"}
     assert triageable < set(audit_module.ALL_CATEGORIES) | set(audit_module.OPTIONAL_CATEGORIES)
     assert set(due_state_module.PROJECTION_CATEGORIES) <= triageable, (
         "every category the block can publish a ref for must be resolvable"

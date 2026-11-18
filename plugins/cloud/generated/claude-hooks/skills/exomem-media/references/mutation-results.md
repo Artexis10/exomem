@@ -40,6 +40,8 @@ carry the codes and reasons. A result whose status is
 that took the write, such as `Saved -> <title> (personal Exomem)`; the `read_instructions` reply's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
+When a `save_source` call passed `options.custody_only` and stored a new Source, the sentence adds
+` (kept for custody only)` and the Source's frontmatter records `custody_only: true`.
 A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what
 your next call can take: the `title` and short `id` of each page written (`pages` when
 several), the hashes a guarded write takes, any

@@ -11,6 +11,9 @@ Checks (all read-only; no writes ever):
   anywhere in `Knowledge Base/`
 - `unprocessed_source`: `type: source` page that no live note compiles: no page
   its `ingested_into:` names is live and cites it in its own `sources:`
+- `custody_source`: the same uncompiled condition on a Source whose frontmatter
+  records `custody_only: true`; the quiet count, always `info`, never in the
+  default attention set
 - `source_identity_conflict`: captured PDF Source whose `identity_check` found only DOIs other than the
   one its `url` names, and that no correction has replaced; the fix is the metadata-only correction call
 - `uncompiled_episode` (optional): conversation recap whose live revision has a
@@ -168,6 +171,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "forward_reference",
     "orphan_entity",
     "unprocessed_source",
+    "custody_source",
     "unresolved_source_citation",
     "index_drift",
     "tag_inconsistency",
@@ -688,11 +692,15 @@ def audit(
         # One snapshot, built on first use, for both backlog checks.
         return find_module.writer_resolver_snapshot(vault_root)
 
-    with stage('unprocessed_source') as run:
+    backlog_families = selected & {"unprocessed_source", "custody_source"}
+    with stage(backlog_families) as run:
         if run:
             findings.extend(
                 _check_unprocessed_sources(
-                    vault_root, pages, today=today, source_context=source_context, resolver=backlog_resolver
+                    vault_root, pages, today=today, source_context=source_context,
+                    resolver=backlog_resolver,
+                    # One pass emits both backlog families; an unfiltered audit gets both.
+                    custody="custody_source" in backlog_families,
                 )
             )
     with stage(review_state_module.EPISODE_BACKLOG) as run:
@@ -3177,6 +3185,7 @@ def _check_unprocessed_sources(
     status_basis: lifecycle_statuses.Basis | None = None,
     resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
     source_context: bool = True,
+    custody: bool = True,
 ) -> list[AuditFinding]:
     """Flag Sources that no live page compiles, aged + triaged oldest-first.
 
@@ -3192,6 +3201,11 @@ def _check_unprocessed_sources(
     stale (>90d), bump severity to `warn` once stale, sort oldest-first, and
     surface age in `meta` so a client can `propose_compilation` the worst rot
     first.
+
+    A Source whose frontmatter records `custody_only: true` is kept for
+    safekeeping, not for compilation: it leaves this family and lands in
+    `custody_source` instead, in the same pass — always `info`, never aged
+    into a warning. `custody=False` emits only this family's rows.
     """
     today = today or dt.date.today()
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -3264,6 +3278,32 @@ def _check_unprocessed_sources(
             bucket = "unknown"
             severity = "info"
             age_phrase = " (capture date unknown)"
+
+        if page.frontmatter.get("custody_only") is True:
+            # Kept for safekeeping on purpose: it never waits as `unprocessed_source`, and
+            # lands in `custody_source` only when that family was selected.
+            if custody:
+                rows.append(
+                    (
+                        age_days if age_days is not None else -1,
+                        AuditFinding(
+                            category="custody_source",
+                            # `info` whatever the age: a custody Source waits by choice.
+                            severity="info",
+                            path=page.rel_path,
+                            detail=(
+                                "Source kept for custody only — no note compiles it"
+                                + (f" ({age_days}d old)" if age_days is not None else "")
+                            ),
+                            proposed_fix=(
+                                "Compile a note that cites it (the citation clears the mark), "
+                                "or remove `custody_only` if it should be processed."
+                            ),
+                            meta=meta,
+                        ),
+                    )
+                )
+            continue
 
         failing = coverage.failing
         if failing:

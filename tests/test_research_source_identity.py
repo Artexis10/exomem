@@ -495,3 +495,65 @@ def test_a_corrected_source_never_counts_as_unprocessed_while_a_live_note_cites_
 
     assert saved["page"] not in flagged
     assert successor["page"] not in flagged
+
+
+# --- custody: a Source kept only for safekeeping ------------------------------------------------------
+
+
+def test_a_custody_only_capture_marks_the_source_and_says_so(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "kept.pdf", ["A handed screenshot."]))
+    reply = _save_pdf(vault, source_schema, url=CLAIM, custody_only=True)
+    row = reply["files"][0]
+    assert _frontmatter(vault, row["page"])["custody_only"] is True
+    assert "(kept for custody only)" in reply["user_summary"]
+
+
+def test_a_custody_only_text_capture_adds_the_clause_after_text_only(vault, source_schema, owner_scope) -> None:
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Call notes", source_kind="session",
+        content="A transcript's pasted text.", custody_only=True)
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+    assert "(text only; no original file stored) (kept for custody only)" in reply["user_summary"]
+
+
+def test_a_plain_capture_says_nothing_about_custody(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    reply = _save_pdf(vault, source_schema)
+    assert "custody" not in reply["user_summary"]
+
+
+def test_custody_only_accepts_only_a_boolean(vault, source_schema, owner_scope) -> None:
+    with pytest.raises(ValueError, match="custody_only"):
+        commands.op_capture_source(
+            vault, source_schema, title="Call notes", source_kind="session",
+            content="A transcript's pasted text.", custody_only="yes")
+
+
+def test_a_correction_carries_the_custody_mark(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    saved_row = _save_pdf(vault, source_schema, url=CLAIM, custody_only=True)["files"][0]
+    successor = _save_pdf(
+        vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa",
+        correction=_correction(vault, saved_row),
+    )["files"][0]
+    assert _frontmatter(vault, successor["page"])["custody_only"] is True
+
+
+def test_a_correction_that_sets_custody_off_leaves_the_successor_unmarked(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    saved_row = _save_pdf(vault, source_schema, url=CLAIM, custody_only=True)["files"][0]
+    successor = _save_pdf(
+        vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", custody_only=False,
+        correction=_correction(vault, saved_row),
+    )["files"][0]
+    assert "custody_only" not in _frontmatter(vault, successor["page"])
