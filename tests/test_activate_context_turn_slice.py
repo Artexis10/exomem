@@ -649,9 +649,11 @@ def test_a_budget_too_small_for_one_slice_line_holds_none_of_it_back(vault: Path
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
     _cold()
     alone = _activate(vault, turn=SLED_TURN, max_chars=500)
-    assert alone["map"].get("overflow")  # the control: the map has more than it can list, so a smaller budget lists less
+    # The task share is half the budget, so at the smallest size what it leaves cannot
+    # list a map line either; the slice still compiles into exactly what the map gets.
     assert sliced["turn_slice"]["state"] == "skipped" and sliced["turn_slice"]["items"] == []
     assert sliced["map"] == alone["map"]
+    assert sliced["budget"]["used_chars"] <= sliced["budget"]["limit_chars"]
 
 
 @pytest.mark.parametrize("max_chars", [500, 1000, 2000, 4000])

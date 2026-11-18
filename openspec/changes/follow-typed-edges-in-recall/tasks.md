@@ -10,7 +10,7 @@
 - [x] 2.2 Render the connection line with its why and the read-when-relevant instruction in `item_line` and the hook renderer; one line in the scaffold skill text. Check: hook tests, scaffold leak test, schema byte budgets unchanged or raised with a recorded reason.
 - [x] 2.3 Record each offered connection's relation, target ref and tier in `served_context`. Check: the record test lists both connections of a two-connection lead.
 
-- [ ] 2.4 Set `context_views.TURN_SLICE_SHARE` to 0.5 and the default packet size to 6,000 characters in `working_set.DEFAULT_BUDGET_CHARS`, the hook's `_WORKING_SET_MAX_CHARS`, the public tool schema and generated contracts, and the docs that state 4,000. Check: the default request reports `limit_chars` 6,000; the map keeps its items at 6,000; maintained producers regenerate contract stamps; schema byte budgets pass.
+- [x] 2.4 Set `context_views.TURN_SLICE_SHARE` to 0.5 and the default packet size to 6,000 characters in `working_set.DEFAULT_BUDGET_CHARS`, the hook's `_WORKING_SET_MAX_CHARS`, the public tool schema and generated contracts, and the docs that state 4,000. Check: the default request reports `limit_chars` 6,000; the map keeps its items at 6,000; maintained producers regenerate contract stamps; schema byte budgets pass.
 
 ## 3. Anchors and profile
 

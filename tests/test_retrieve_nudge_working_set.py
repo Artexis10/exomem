@@ -414,10 +414,10 @@ def test_an_empty_packet_never_injects_a_bare_header() -> None:
     assert hook._format_working_set_block(empty, 4000) == ""
 
 
-def test_the_render_ceiling_defaults_to_four_thousand_with_an_override(
+def test_the_render_ceiling_defaults_to_six_thousand_with_an_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert hook._working_set_max_chars() == 4000
+    assert hook._working_set_max_chars() == 6000
 
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "900")
     assert hook._working_set_max_chars() == 900

@@ -134,7 +134,7 @@ MAP_KIND_SHARES: dict[str, float] = {
 #: The map then always compiles into what is left, so it is the same on every turn. The slice is on
 #: by default (design D13), and `EXOMEM_ACTIVATION_TURN_SLICE=off` is the rollback. A budget whose
 #: share cannot hold one line holds back nothing (`_slice_reserve`).
-TURN_SLICE_SHARE = 0.25
+TURN_SLICE_SHARE = 0.5
 
 #: The key a turn slice's record is kept under. It names no view and is never served.
 SLICE_REF = "exomem://turn-slice"

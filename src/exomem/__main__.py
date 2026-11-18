@@ -3777,7 +3777,7 @@ def _activate_main(argv: list[str]) -> int:
         "--max-chars",
         type=int,
         default=None,
-        help="character ceiling for the packet (default 4000, clamped to 500..8000)",
+        help="character ceiling for the packet (default 6000, clamped to 500..8000)",
     )
     parser.add_argument("--purpose", default=None, help="declared purpose for this request")
     parser.add_argument(

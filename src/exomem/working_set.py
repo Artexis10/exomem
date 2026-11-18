@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BUDGET_CHARS = 4000
+DEFAULT_BUDGET_CHARS = 6000
 MIN_BUDGET_CHARS = 500
 MAX_BUDGET_CHARS = 8000
 #: The size a unit is designed to fit, and the ceiling past which it is not

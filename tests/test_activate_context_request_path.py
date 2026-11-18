@@ -470,7 +470,7 @@ def test_activation_returns_promptly_on_an_already_expired_budget(
     assert packet["request_budget"]["skipped"] == ["working_set.freshness"]
     assert packet["request_budget"]["applied"] is True
     # Nothing was retrieved; the live capture policy, owed to a first request, is all the packet spends.
-    assert packet["budget"] == {"limit_chars": 4000, "used_chars": capture_carrier.size(packet["capture_policy"])}
+    assert packet["budget"] == {"limit_chars": 6000, "used_chars": capture_carrier.size(packet["capture_policy"])}
 
 
 @pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default

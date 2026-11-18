@@ -13,10 +13,19 @@ from pathlib import Path
 
 import pytest
 import yaml
+from test_activate_context_maps import _activate
 from test_context_catalogue import INSIGHTS, _built, _page
 from test_task_context_links import _discover, _discover_packet, _lead, _linked
 
-from exomem import context_roles, epistemic_graph, find, served_context, working_set
+from exomem import (
+    context_roles,
+    context_views,
+    epistemic_graph,
+    find,
+    lexstore,
+    served_context,
+    working_set,
+)
 from exomem import vault as vault_module
 from exomem.governance import egress
 
@@ -132,7 +141,7 @@ def test_a_lead_admitted_alone_counts_the_connections_it_lost(vault: Path, monke
     ))
     # A second lead takes just enough room that the first's link cannot join it.
     _page(vault, "alignment-workshop", body="The optical alignment workshop is on Friday, before the visit.\n")
-    packet = _discover_packet(vault, monkeypatch, max_chars=1250)
+    packet = _discover_packet(vault, monkeypatch, max_chars=700)
     task = packet["task_context"]
     item = _lead(task, lead)
     assert "links" not in item and item["links_omitted"] == 3
@@ -265,7 +274,7 @@ def test_each_served_lead_keeps_its_first_connection_until_room_runs_out(vault: 
             f"{LEAD_BODY}\n- [technique] Inspect the optical alignment. ^step{index}\n"
             f"- [[{target.removesuffix('.md')}]]\n"
         ))
-    packet = _discover_packet(vault, monkeypatch, max_chars=1700)
+    packet = _discover_packet(vault, monkeypatch, max_chars=1000)
     task = packet["task_context"]
     served = task["candidates"]
     assert 0 < len(served) < 3
@@ -273,3 +282,16 @@ def test_each_served_lead_keeps_its_first_connection_until_room_runs_out(vault: 
     assert len(task["methods"]["items"]) == len(served)
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+
+
+def test_the_default_recall_budget_is_six_thousand_with_a_half_turn_slice(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A default request reports a 6,000-char limit; with map and task context populated the slice holds back half."""
+    _page(vault, "alignment-visit", body=LEAD_BODY)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "on")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    packet = _activate(vault, turn=TURN)
+    assert packet["budget"]["limit_chars"] == 6000
+    assert packet["map"]["items"] and packet["task_context"]["candidates"]
+    assert context_views._slice_reserve(6000) == int(6000 * context_views.TURN_SLICE_SHARE) == 3000

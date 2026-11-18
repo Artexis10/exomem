@@ -2740,6 +2740,10 @@ def test_possessive_body_contact_requires_each_rich_units_subject_and_category(
 ) -> None:
     # Catches sibling leakage separately in categorical and material projection;
     # the material case also needs the authored category's accepted alias.
+    # The material carry lens needs the last role slot: narrowing the shipped
+    # connections role off this fixture's anchors keeps it free.
+    _write(carry_vault / "Knowledge Base/_Schema/context-roles.yaml",
+        "roles:\n  connections:\n    anchor_defaults: []\n")
     _write(carry_vault / "Knowledge Base/_Schema/semantic-language-registry.yaml",
         "schema_version: 1\ncategories:\n  calibration_record:\n"
         "    description: Calibration records\n    aliases: [calibration]\n")
