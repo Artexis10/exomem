@@ -1070,6 +1070,7 @@ def register_self_write_and_close(
                 vault_root,
                 observation,
                 timeout_seconds=_IN_BOUNDARY_PUBLICATION_WAIT_SECONDS,
+                complete_retry_seconds=10.0,
             )
 
     _self_write_publish_queue().put(

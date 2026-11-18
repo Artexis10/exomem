@@ -2582,11 +2582,6 @@ def commit_prepared_notes(
     commit_ms = (time.perf_counter() - started) * 1000.0 / len(prepared)
     results: list[NoteResult | Exception] = []
     for index, (item, finish, outcome) in enumerate(zip(prepared, finishes, outcomes, strict=True)):
-        if isinstance(outcome, relation_review.AuxiliaryGuardMoved):
-            # A server-planned shared write moved mid-batch: the lease's
-            # absorbed retry re-plans the whole batch, it is not one item's
-            # failure.
-            raise outcome
         if isinstance(outcome, (semantic_writes.SemanticWriteError, relation_review.RelationReviewError)):
             results.append(_note_error(outcome))
             continue

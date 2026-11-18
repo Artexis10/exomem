@@ -406,12 +406,16 @@ def finish_observation(
     observation: _Observation | None,
     *,
     timeout_seconds: float | None = None,
+    complete_retry_seconds: float = 0.0,
 ) -> None:
     """Stage a contiguous association; prove bytes after the outer writer releases.
 
     ``timeout_seconds`` lets a handoff worker that holds no boundary take the
     guard for a bounded wait; the default try-hold keeps the inline caller's
-    never-wait behaviour.
+    never-wait behaviour. ``complete_retry_seconds`` bounds how long the
+    deferred proof retries a contended try-hold — it runs as after-release
+    work on whichever thread releases the boundary, so only a worker that
+    owns nothing else should set it nonzero.
     """
     if observation is None:
         return
@@ -498,13 +502,16 @@ def finish_observation(
                     )
                     _states[root] = pending
                     current.coordinator.defer_optional_after_release(
-                        (finish_observation, root), lambda: _complete_observation(root, pending),
+                        (finish_observation, root),
+                        lambda: _complete_observation(
+                            root, pending, max_seconds=complete_retry_seconds
+                        ),
                     )
     except Exception:  # noqa: BLE001 - optional association failure cannot fail publication
         return
 
 
-def _complete_observation(root: Path, pending: _State, *, max_seconds: float = 10.0) -> None:
+def _complete_observation(root: Path, pending: _State, *, max_seconds: float = 0.0) -> None:
     """Hash the pending endpoint union without either mutation guard, then compare and swap."""
     from . import vault
 
