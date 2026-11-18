@@ -16,8 +16,17 @@ import yaml
 from test_context_catalogue import INSIGHTS, _built, _page
 from test_task_context_links import _discover, _discover_packet, _lead, _linked
 
-from exomem import context_roles, epistemic_graph, served_context, working_set
+from exomem import context_roles, epistemic_graph, find, served_context, working_set
+from exomem import vault as vault_module
 from exomem.governance import egress
+
+
+def _warm_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the why path the borrowed resolver a warm deployment already has."""
+    monkeypatch.setattr(
+        find, "borrow_query_resolver",
+        lambda root, visible=None, **kwargs: find._get_query_resolver(root),
+    )
 
 TURN = "Inspect the optical alignment before the workshop"
 LEAD_BODY = "Optical alignment workshop: the calibration appointment remains undecided.\n"
@@ -52,6 +61,7 @@ def test_an_inbound_replaces_edge_ranks_before_the_pages_own_links(vault: Path, 
         vault, "alignment-visit-revised",
         body=f"The revised visit report.\n\n- supersedes [[{lead.removesuffix('.md')}]] after the review board\n",
     )
+    _warm_resolver(monkeypatch)
     task = _discover(vault, monkeypatch)
     first = _lead(task, lead)["links"][0]
     assert first["relation"] == "supersedes"
@@ -208,11 +218,30 @@ def test_a_quoted_line_names_every_link_it_carries(vault: Path, monkeypatch: pyt
     lead = _page(vault, "alignment-visit", body=(
         f"{LEAD_BODY}\nBoth [[{first.removesuffix('.md')}]] and [[{second.removesuffix('.md')}]] apply here.\n"
     ))
+    _warm_resolver(monkeypatch)
     task = _discover(vault, monkeypatch)
     links = _lead(task, lead)["links"]
     assert {link["target_ref"] for link in links} == {first, second}
     for link in links:
         assert link["why"] == "links_to (outbound): Both calibration-report and site-notes apply here."
+        assert "calibration-report" in link["why"] and "site-notes" in link["why"]
+
+
+def test_a_missing_resolver_never_builds_one_for_a_why(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a resolver miss the why falls back to the lede or bare relation; no resolver is built."""
+    target = _linked(vault, "calibration-report")
+    lead = _page(vault, "alignment-visit", body=(
+        f"{LEAD_BODY}\nSee [[{target.removesuffix('.md')}]] for details.\n"
+    ))
+    monkeypatch.setattr(find, "borrow_query_resolver", lambda *args, **kwargs: None)
+
+    def _refuse(self, *args, **kwargs):
+        raise AssertionError("activation built a WikilinkResolver")
+
+    monkeypatch.setattr(vault_module.WikilinkResolver, "__init__", _refuse)
+    task = _discover(vault, monkeypatch)
+    # The quoted line is unreachable without a resolver, so the target's lede stands.
+    assert _lead(task, lead)["links"][0]["why"] == f"links_to (outbound): {UNRELATED.strip()}"
 
 
 def test_a_spent_connection_budget_still_names_the_relation(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

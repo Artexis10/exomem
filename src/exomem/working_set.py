@@ -1796,16 +1796,27 @@ def _connection_context(
     A line that also links a page the caller may not see returns None: its
     prose could name that page, so the connection takes the target's lede.
     `seen` is the caller's catalogue view — the same one `by_path` gates with.
+    `resolver` must be borrowed, never None: a None resolver builds a full-vault
+    one per call, which is how the activation path used to take minutes.
     """
+    if resolver is None:
+        return None
     from . import vault as vault_module
+
+    resolved: dict[str, Any] = {}
+
+    def _resolve(inner: str) -> Any:
+        if inner not in resolved:
+            _norm, _warning, resolved[inner] = vault_module._normalize_wikilink(
+                inner, vault_root, resolver=resolver, strict=False
+            )
+        return resolved[inner]
 
     for match in vault_module.iter_body_wikilinks(body):
         line = _link_line(body, match)
         hit, withheld = False, False
         for inner in vault_module.iter_body_wikilinks(line):
-            _norm, _warning, candidate = vault_module._normalize_wikilink(
-                inner.group(1), vault_root, resolver=resolver, strict=False
-            )
+            candidate = _resolve(inner.group(1))
             if candidate is None:
                 # An unresolved link may name a page the caller's resolver never sees;
                 # the line is not provably free of withheld names, so it is not quoted.
@@ -1823,7 +1834,10 @@ def _connection_context(
 def _link_display_prose(vault_root: Path, text: str, *, resolver: Any) -> str:
     """`text` with each wikilink shown as the name a reader sees: the alias, else the resolved
     title, else the target's last path segment. Callers quote a line only once every link on
-    it resolves to a page the caller may see, so each rendered name is visible."""
+    it resolves to a page the caller may see, so each rendered name is visible.
+    `resolver` must be borrowed, never None (see `_connection_context`)."""
+    if resolver is None:
+        return text
     from . import vault as vault_module
 
     pieces: list[str] = []

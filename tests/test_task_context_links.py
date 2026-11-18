@@ -12,7 +12,7 @@ import pytest
 from test_activate_context_maps import _activate
 from test_context_catalogue import _built, _page
 
-from exomem import epistemic_graph, lexstore
+from exomem import epistemic_graph, find, lexstore
 from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import egress
 
@@ -53,6 +53,11 @@ def test_a_lead_lists_typed_links_first_and_adds_no_neighbour_as_a_lead(vault: P
     ))
     # Inbound edges are connections too: the other page's link is served relative to the lead.
     _page(vault, "inbound-note", body=f"{UNRELATED}\nSee [[{lead.removesuffix('.md')}]].\n")
+    # The quoted-line reasons need the borrowed resolver a warm deployment already holds.
+    monkeypatch.setattr(
+        find, "borrow_query_resolver",
+        lambda root, visible=None, **kwargs: find._get_query_resolver(root),
+    )
     task = _discover(vault, monkeypatch)
     links = _lead(task, lead)["links"]
     assert [
