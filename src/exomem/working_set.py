@@ -34,6 +34,7 @@ from collections.abc import Set as AbstractSet
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
@@ -1712,8 +1713,18 @@ def attach_task_links(
     Links are read only for the leads that projection kept, and only with the time that projection left: a lead
     without its links still serves the turn, but a link lookup that ran first could spend the deadline that
     projection needed and drop every lead. No neighbour page becomes a candidate by itself.
+
+    A link carries `build_why`, not a `why`: the reason reads pages and the allowance serves about one link per
+    lead, so the caller builds a link's reason only when it first tries the link (see `context_task._reasoned`).
     """
     from . import find_types
+
+    def timed(build: Callable[[], str]) -> Callable[[], str]:
+        def run() -> str:
+            with find_types.timing_span(timings, "working_set.task_context_reasons"):
+                return build()
+
+        return run
 
     if not candidates or not link_targets:
         return []
@@ -1724,6 +1735,7 @@ def attach_task_links(
             links = read_connections(
                 vault_root, [c["source_ref"] for c in candidates],
                 by_path=link_targets, visible=caller.visible, per_seed=TASK_LINKS_PER_CANDIDATE,
+                defer_why=True,
             )
     except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
         log.debug("task-context links unavailable", exc_info=True)
@@ -1737,7 +1749,7 @@ def attach_task_links(
                 {
                     "relation": connection.relation, "direction": connection.direction,
                     "target_ref": connection.target_ref, "title": connection.title,
-                    "tier": connection.tier, "why": connection.why,
+                    "tier": connection.tier, "build_why": timed(connection.build_why),
                 }
                 for connection in listed
             ]
@@ -1762,6 +1774,8 @@ class Connection:
     title: str
     tier: int
     why: str
+    #: Builds `why` on demand when `read_connections` defers it; `why` is then "".
+    build_why: Callable[[], str] | None = field(default=None, compare=False, repr=False)
 
 
 def _connection_tier(registry: Any, relation: str, *, generic: bool, typed: bool, direction: str) -> int:
@@ -1908,18 +1922,26 @@ def _connection_why(
                     for mark in ".,;:!?":
                         prose = prose.replace(f" {mark}", mark)
                     context = egress.prose_for_caller(vault_root, prose, owner_path=authoring_rel)
+                    # As for the lede below: a code-span link keeps its raw name through the display pass,
+                    # so the line is not quoted and the lede stands in.
+                    if "[[" in context:
+                        context = ""
     if not context and target_body:
         context = working_set_index.lede(
             egress.prose_for_caller(vault_root, target_body, owner_path=target_rel)
         )
         # A lede link is shown by its display name only when it names a page the caller sees;
         # otherwise the bare relation stands, so no path or withheld name reaches the reason.
-        if context and context != egress.without_wikilinks(context):
+        # The wikilink opener is a fixed syntax token: the display pass renders only the links the
+        # body grammar reads, so a code-span link, or one the lede's cut left open, still holds it.
+        if "[[" in context:
             context = (
                 " ".join(_link_display_prose(vault_root, context, resolver=resolver).split())
                 if _links_released(vault_root, context, resolver=resolver, seen=seen)
                 else ""
             )
+            if "[[" in context:
+                context = ""
     if not context:
         return f"{relation} ({direction})"
     prefix = f"{relation} ({direction}): "
@@ -1937,6 +1959,7 @@ def read_connections(
     by_path: Mapping[str, Any],
     visible: Callable[[str], bool] | None,
     per_seed: int,
+    defer_why: bool = False,
 ) -> dict[str, tuple[list[Connection], int]] | None:
     """Each seed's ranked connections, `{seed: (served[:per_seed], omitted count)}`; None while the graph cannot answer.
 
@@ -1948,6 +1971,9 @@ def read_connections(
     re-resolves each edge in the caller's view. Ranking reads closed registry
     attributes (`behaviours`, `generic`) and the open planning class, never a
     relation key or family name; within a rank the owner API's order stands.
+    The `why` reads pages. A caller that serves fewer connections than it reads sets
+    `defer_why`, and each connection then carries `build_why` instead, to call once
+    for a connection it is about to serve.
     """
     from . import epistemic_graph, find, find_corpus, planning_values, relation_registry
     from .governance import egress
@@ -2009,32 +2035,32 @@ def read_connections(
         page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
         return None if page is None else str(page.body or "")
 
+    def _reason(seed: str, connection: Connection) -> str:
+        bare = f"{connection.relation} ({connection.direction})"
+        if budget_exhausted("working_set.connection_why"):
+            # The connection still serves; only the context clause goes unfilled.
+            return bare
+        authoring_rel = seed if connection.direction == "outbound" else connection.target_path
+        target_rel = connection.target_path if connection.direction == "outbound" else seed
+        try:
+            return _connection_why(
+                Path(vault_root), relation=connection.relation, direction=connection.direction,
+                authoring_rel=authoring_rel, target_rel=target_rel,
+                authoring_body=_body(authoring_rel), target_body=_body(connection.target_path),
+                resolver=resolver, seen=_seen,
+            )
+        except egress.ReaderViewUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 - a failed context read never costs the connection
+            return bare
+
     def _serve(seed: str, ordered: list[tuple[int, int, int, Connection]]) -> list[Connection]:
         out: list[Connection] = []
         for _tier, _open_flag, _position, connection in ordered:
-            if budget_exhausted("working_set.connection_why"):
-                # The connections still serve; only the context clause goes unfilled.
-                out.append(
-                    replace(
-                        connection,
-                        why=f"{connection.relation} ({connection.direction})",
-                    )
-                )
-                continue
-            authoring_rel = seed if connection.direction == "outbound" else connection.target_path
-            target_rel = connection.target_path if connection.direction == "outbound" else seed
-            try:
-                why = _connection_why(
-                    Path(vault_root), relation=connection.relation, direction=connection.direction,
-                    authoring_rel=authoring_rel, target_rel=target_rel,
-                    authoring_body=_body(authoring_rel), target_body=_body(connection.target_path),
-                    resolver=resolver, seen=_seen,
-                )
-            except egress.ReaderViewUnavailable:
-                raise
-            except Exception:  # noqa: BLE001 - a failed context read never costs the connection
-                why = f"{connection.relation} ({connection.direction})"
-            out.append(replace(connection, why=why))
+            if defer_why:
+                out.append(replace(connection, build_why=partial(_reason, seed, connection)))
+            else:
+                out.append(replace(connection, why=_reason(seed, connection)))
         return out
 
     result: dict[str, tuple[list[Connection], int]] = {}
