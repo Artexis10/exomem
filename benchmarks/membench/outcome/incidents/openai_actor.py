@@ -19,6 +19,7 @@ import importlib.util
 import json
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..isolation import mcp_server
@@ -205,6 +206,7 @@ def play(
     model: str,
     max_turns: int,
     timeout: float,
+    arm_env: Mapping[str, str] | None = None,
 ) -> dict:
     """Run one session on the seeded vault; returns it as ``__main__.play_claude`` documents.
 
@@ -226,7 +228,12 @@ def play(
         result = asyncio.run(
             asyncio.wait_for(
                 converse(
-                    mcp_server(root, arm), instructions, case["prompt"], model, max_turns, record
+                    mcp_server(root, arm, arm_env),
+                    instructions,
+                    case["prompt"],
+                    model,
+                    max_turns,
+                    record,
                 ),
                 timeout,
             )
