@@ -100,7 +100,8 @@ def metadata(packet: dict[str, Any]) -> dict[str, Any]:
         recorded = routes(items)
         for route, item in zip(recorded, items, strict=True):
             if item.get("links"):
-                route["links"] = [{"relation": link.get("relation"), "target_ref": link.get("target_ref")}
+                route["links"] = [{"relation": link.get("relation"), "target_ref": link.get("target_ref"),
+                                   "tier": link.get("tier")}
                                   for link in item["links"]]
             if item.get("links_omitted"):
                 route["links_omitted"] = item["links_omitted"]

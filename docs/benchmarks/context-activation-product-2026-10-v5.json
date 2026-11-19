@@ -1742,7 +1742,7 @@
         "capacity ceiling"
       ],
       "observed_status": "resolved",
-      "packet_chars": 452,
+      "packet_chars": 498,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -1995,7 +1995,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "resolved",
-      "packet_chars": 154,
+      "packet_chars": 200,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -2141,7 +2141,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "resolved",
-      "packet_chars": 481,
+      "packet_chars": 527,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -2189,7 +2189,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "resolved",
-      "packet_chars": 277,
+      "packet_chars": 323,
       "passed": true,
       "poison": {
         "hit": 0,
@@ -2327,7 +2327,7 @@
       "must_exclude_present": [],
       "must_include_missing": [],
       "observed_status": "resolved",
-      "packet_chars": 332,
+      "packet_chars": 378,
       "passed": true,
       "poison": {
         "hit": 0,

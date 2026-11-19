@@ -12,7 +12,7 @@ service refuses those fields, the hook SHALL retry once without them within the 
 budget, so attribution never costs the packet.
 The rendered block SHALL carry current state first, then units, then pointers, each
 with its provenance ref, SHALL keep whole items only, and SHALL never exceed the
-render ceiling (`EXOMEM_RETRIEVE_INJECT_MAX_CHARS`, default 4,000 characters), dropping
+render ceiling (`EXOMEM_RETRIEVE_INJECT_MAX_CHARS`, default 6,000 characters), dropping
 trailing items rather than cutting one. A recent-context entry for an episode recap
 SHALL render like one for a session capture, labelled `session`, so the agent reads it
 with `read_memory`. A packet abstained as `ambiguous` SHALL inject
