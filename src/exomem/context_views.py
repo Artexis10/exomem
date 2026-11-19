@@ -841,10 +841,13 @@ def _compile_profile(prepared: _Prepared) -> View:
     visible = egress.reader_view(root, purpose=caller.purpose, unit_identity_only=True)
     anchors = _profile_anchors(root, anchor_rows, caller)
     analysis = working_set_resolve.analyze_turn("", vocabulary=conventions.conventions.referential)
-    # A profile serves its declared members, so it reads through the lenses and runs no graph lane.
-    roles = tuple(context_roles.lenses(
-        context_roles.select_roles(registry, anchor_kinds=[row.kind for row in anchors], analysis=analysis)
-    ))
+    # A profile serves its declared members, so it runs no graph lane. `lane` is a closed registry
+    # attribute, so this drops every graph role, not only the one that `lenses` sets aside.
+    roles = tuple(
+        role
+        for role in context_roles.select_roles(registry, anchor_kinds=[row.kind for row in anchors], analysis=analysis)
+        if role.get("lane") != "graph"
+    )
     if prepared.target.kind == PROFILE_TOPIC and not anchors:
         # Declared notes have no anchor kind; the existing page selector uses their visible categories.
         by_page = working_set._unit_categories(root, tuple(neighbourhood or ()), visible)
